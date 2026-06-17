@@ -138,7 +138,7 @@ pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
 pub use recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
-    RecallOrigin, RecallPlan, RecallScoreVector, RecallUnionProfile, RecallWeights,
+    RecallOrigin, RecallPlan, RecallScoreVector, RecallShape, RecallUnionProfile, RecallWeights,
 };
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,

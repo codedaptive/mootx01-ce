@@ -52,8 +52,13 @@ public extension GeniusLocusKit {
 
         // Compute the execution plan. frontierK bounds candidate retrieval:
         // min(max(limit * 4, 64), 256) ensures we pull enough candidates
-        // for scoring without retrieving unbounded rows.
-        let frontierK = min(max(request.limit * 4, 64), 256)
+        // for scoring without retrieving unbounded rows. A RecallShape may
+        // override this pool depth (6b-modifiers); the override is clamped to the
+        // SAME [64, 256] envelope so a shape cannot request an unbounded scan, and
+        // a nil shape (or nil override) leaves the computed default unchanged.
+        let computedFrontierK = min(max(request.limit * 4, 64), 256)
+        let frontierK = request.recallShape?.effectiveFrontierK(engineDefault: computedFrontierK)
+            ?? computedFrontierK
         let plan = RecallPlan(
             effectiveMode: request.mode,
             frontierK: frontierK,
@@ -396,7 +401,12 @@ public extension GeniusLocusKit {
                 )
                 degradedStages.append("corpusOnly.matrixAware")
             }
-            fused = rrfFuse(bm25List, vectorList, k: 60, limit: request.limit)
+            // Signed-weight fusion (6b-modifiers). Lane order [bm25, hamming] is
+            // fixed; the weight array is empty when no shape is set, so rrfFuseN
+            // takes its all-1.0 fast path — unweighted two-lane RRF.
+            let weights = laneWeights(
+                for: request.recallShape, laneKeys: ["bm25", "hamming"])
+            fused = rrfFuseN([bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
         }
 
         // Hydrate fused hits from the estate, applying the recall frame's filter
@@ -522,7 +532,7 @@ public extension GeniusLocusKit {
         //
         // .rrf  — three-way RRF fusion of locus, BM25, and vector; default
         //         and most accurate combiner for the hybrid lane.
-        // .raw  — skip rrfFuseThree; merge all three lists in order
+        // .raw  — skip RRF fusion; merge all three lists in order
         //         (locus → BM25 → vector), dedup by ID, apply limit.
         //         No rank math; the ordering reflects lane priority, not
         //         inter-lane rank fusion.
@@ -535,7 +545,7 @@ public extension GeniusLocusKit {
         let fused: [(id: String, score: Float)]
         switch request.scoring {
         case .raw:
-            // .raw skips rrfFuseThree; merge locus → BM25 → vector in order.
+            // .raw skips RRF fusion; merge locus → BM25 → vector in order.
             var seen: Set<String> = []
             var merged: [(id: String, score: Float)] = []
             for item in locusList {
@@ -563,7 +573,13 @@ public extension GeniusLocusKit {
                 )
                 degradedStages.append("hybrid.matrixAware")
             }
-            fused = rrfFuseThree(locusList, bm25List, vectorList, k: 60, limit: request.limit)
+            // Signed-weight fusion (6b-modifiers). Lane order [locus, bm25, hamming]
+            // is fixed; the weight array is empty when no shape is set, so rrfFuseN
+            // takes its all-1.0 fast path — unweighted three-lane RRF.
+            let weights = laneWeights(
+                for: request.recallShape, laneKeys: ["locus", "bm25", "hamming"])
+            fused = rrfFuseN(
+                [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
         }
 
         // Hydrate fused hits from the estate. Locus rows are already in memory
@@ -759,27 +775,61 @@ public extension GeniusLocusKit {
     /// consensus property). Tie-break: drawerID string ascending (deterministic,
     /// matching `VectorStore.findNearest`).
     ///
-    /// This is the N-way generalisation that `rrfFuse` (2-list) and `rrfFuseThree`
-    /// (3-list) now delegate to, so the RRF math has exactly one implementation.
+    /// This is the single N-way RRF primitive the corpusOnly (2-list) and hybrid
+    /// (3-list) lanes call directly, so the RRF math has exactly one implementation.
     /// At N=1 (one input list) the result is that list's ids re-sorted by their
     /// reciprocal-rank score — order-preserving for a list already in rank order,
     /// which keeps the single-signal/single-lane path identical to before.
+    ///
+    /// ## Signed per-list weights (6b-modifiers)
+    ///
+    /// Each input list `L` carries a signed weight `w_L` so a `RecallShape` can
+    /// steer fusion: `fused(id) = Σ_L w_L · 1/(k + rank_L(id) + 1)`.
+    ///
+    ///   - `w == 1.0` — neutral. The list votes at full strength. When EVERY list
+    ///     weight is `1.0` the per-id sum equals the unweighted formula EXACTLY, so
+    ///     a nil/absent shape is byte-identical to the pre-6b-modifiers fusion (the
+    ///     back-compat contract; proven by test).
+    ///   - `w == 0`   — EXCLUDE. The list contributes nothing to the per-id sum;
+    ///     its votes are dropped as if it had not run. An id surfaced ONLY by an
+    ///     excluded list accrues zero mass and so does not survive (no other list
+    ///     ranks it) — exclusion drops a lane's votes.
+    ///   - `w < 0`    — SUPPRESS. The list's reciprocal-rank mass is SUBTRACTED, so
+    ///     a candidate this list ranks HIGH (large `1/(k+rank+1)`) is DEMOTED by a
+    ///     correspondingly large negative term. A candidate also surfaced by a
+    ///     positive-weight list nets the two; one surfaced ONLY by a suppressing
+    ///     list ends with negative mass and sinks below every positively-fused id.
+    ///
+    /// `weights.count` must equal `lists.count`; a list whose weight is omitted
+    /// (when `weights` is the default empty array) is treated as `1.0`. The score
+    /// accumulator stays `Double` for the same numerical path as before; the only
+    /// change at all-1.0 is multiplying each term by exactly `1.0`.
     ///
     /// - Parameters:
     ///   - lists: The ranked lists to fuse, each `(id, score)` already sorted
     ///            descending. Empty lists are skipped. The per-list `score` is
     ///            NOT read — RRF is rank-based — only the position matters.
+    ///   - weights: Signed per-list weights, aligned by index to `lists`. Empty
+    ///            (the default) means every list weighs `1.0` — the unweighted
+    ///            formula. A non-empty array MUST match `lists.count`.
     ///   - k: RRF smoothing constant. 60 is the Robertson et al. recommendation.
     ///   - limit: Maximum results to return.
     private func rrfFuseN(
         _ lists: [[(id: String, score: Float)]],
+        weights: [Float] = [],
         k: Int,
         limit: Int
     ) -> [(id: String, score: Float)] {
         var rrf: [String: Double] = [:]
-        for list in lists {
+        for (listIndex, list) in lists.enumerated() {
+            // A missing weight (default empty array) is the neutral 1.0 — so the
+            // all-1.0 path multiplies every term by exactly 1.0 and reduces to the
+            // unweighted sum (back-compat). A signed weight scales the list's whole
+            // contribution: 0 drops it, <0 subtracts its rank mass (demotion).
+            let w = listIndex < weights.count ? Double(weights[listIndex]) : 1.0
+            if w == 0 { continue }  // exclusion: this list votes for nothing
             for (rank, item) in list.enumerated() {
-                rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
+                rrf[item.id, default: 0] += w * (1.0 / Double(k + rank + 1))
             }
         }
         var ranked = rrf.map { (id: $0.key, score: Float($0.value)) }
@@ -790,32 +840,23 @@ public extension GeniusLocusKit {
         return Array(ranked.prefix(limit))
     }
 
-    /// Reciprocal Rank Fusion for two ranked lists (BM25 + vector, corpusOnly lane).
+    /// Resolve the per-list signed weight array for a fixed-lane fusion, in the
+    /// SAME order the `lists` are passed to `rrfFuseN`.
     ///
-    /// Thin wrapper over `rrfFuseN([a, b])` — no duplicate RRF math. Output is
-    /// byte-identical to the prior dedicated two-list implementation (same `k`,
-    /// same id-ascending tie-break).
-    private func rrfFuse(
-        _ a: [(id: String, score: Float)],
-        _ b: [(id: String, score: Float)],
-        k: Int,
-        limit: Int
-    ) -> [(id: String, score: Float)] {
-        rrfFuseN([a, b], k: k, limit: limit)
-    }
-
-    /// RRF fusion for three ranked lists (locus + BM25 + vector, hybrid lane).
+    /// `laneKeys` names each list's stable lane identifier (see `RecallShape`).
+    /// When `shape` is nil every weight is `1.0` (the empty array, which `rrfFuseN`
+    /// reads as all-neutral) — so the nil-shape path is byte-identical to today.
+    /// When a shape is present, each lane's weight is looked up by its key, with a
+    /// missing key defaulting to `1.0`.
     ///
-    /// Thin wrapper over `rrfFuseN([a, b, c])` — no duplicate RRF math. Output is
-    /// byte-identical to the prior dedicated three-list implementation.
-    private func rrfFuseThree(
-        _ a: [(id: String, score: Float)],
-        _ b: [(id: String, score: Float)],
-        _ c: [(id: String, score: Float)],
-        k: Int,
-        limit: Int
-    ) -> [(id: String, score: Float)] {
-        rrfFuseN([a, b, c], k: k, limit: limit)
+    /// - Parameters:
+    ///   - shape: the optional `RecallShape` carrying signed per-lane weights.
+    ///   - laneKeys: the stable lane id for each fusion list, in list order.
+    /// - Returns: a weight per lane (empty when `shape` is nil, so `rrfFuseN`
+    ///   takes its all-1.0 fast path).
+    private func laneWeights(for shape: RecallShape?, laneKeys: [String]) -> [Float] {
+        guard let shape else { return [] }
+        return laneKeys.map { shape.weight(for: $0) }
     }
 
     // MARK: - unionBest lane

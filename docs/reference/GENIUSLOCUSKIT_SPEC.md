@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1465,6 +1465,32 @@ path served the query. `unionBest` + `matrixAware` never records a fallback
 even on an estate with no corpus/vector — the weighted pipeline runs with zero
 matrix columns, a real path, not a degrade.
 
+#### Signed-weight fusion steering (RecallShape — 6b-modifiers)
+
+`GLKRecallRequest.recallShape` (optional `RecallShape`) makes the RRF fusion
+STEERABLE without changing the fusion algorithm. The fused score becomes
+`fused(id) = Σ_L w_L · 1/(k + rank_L(id) + 1)` with `k = 60`, where each lane
+`L` carries a SIGNED weight `w_L` from `RecallShape.laneWeights` keyed by a
+stable lane identifier (`locus`, `bm25`, `hamming`, and `dense:<modelID>` for
+each held dense signal). A lane whose key is absent defaults to `1.0`.
+
+| Weight | Name | Effect |
+|---|---|---|
+| `w > 0` | FORWARD | the lane votes; larger `w` amplifies its rank mass (`1.0` neutral) |
+| `w == 0` | EXCLUDE | the lane contributes nothing; an id whose only source is the excluded lane is dropped |
+| `w < 0` | SUPPRESS | the lane's rank mass is SUBTRACTED, demoting a candidate it ranks high |
+
+EXCLUSION (`w==0`) and SUPPRESSION (`w<0`) are DISTINCT operations and are
+conformance-tested as such; neither is anti-similarity retrieval (which would
+change which candidates the store returns — deferred to `6b-modifiers-antisim`).
+Steering applies to the lanes that route through the weighted RRF combiner —
+`hybrid` (locus/bm25/hamming) and `corpusOnly` (bm25/hamming); `unionBest`
+(buffer/MMR) remains unweighted in this revision. A `nil` shape — or an all-1.0
+shape — is BYTE-IDENTICAL to the prior uniform fusion (the back-compat contract,
+proven by conformance on both ports). `RecallShape` may also override the
+candidate-pool depth via `frontierK`, clamped to the engine's `[64, 256]`
+envelope. Both ports implement the identical signed formula and clamp.
+
 ### Telemetry counters
 
 Each degraded stage emits a `glk.recall.<stage>_degraded` counter tagged
@@ -1527,6 +1553,17 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Additive (6b-modifiers-core): documented the signed-weight fusion steering
+contract (`RecallShape`). The RRF combiner gains a per-lane signed weight
+(`fused(id) = Σ_L w_L · 1/(k + rank_L(id) + 1)`): `w>0` forward, `w==0` exclude,
+`w<0` suppress/demote — exclusion and suppression are distinct and conformance-
+tested. Steering applies to the `hybrid` and `corpusOnly` RRF lanes; `unionBest`
+stays unweighted this revision. A nil/all-1.0 shape is byte-identical to the
+prior uniform fusion. `RecallShape` also carries a clamped `frontierK` pool-depth
+override `[64, 256]`. Anti-similarity (true farthest-K) is deferred to
+`6b-modifiers-antisim`.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -3018,8 +3018,16 @@ impl EstateCoordinator {
 
         // Frontier-K bounds candidate retrieval: min(max(limit * 4, 64), 256).
         // Mirrors Swift RecallDirector's frontierK computation — enough candidates
-        // for inter-lane deduplication without unbounded row retrieval.
-        let frontier_k = (request.limit * 4).max(64).min(256);
+        // for inter-lane deduplication without unbounded row retrieval. A
+        // RecallShape may override this pool depth (6b-modifiers), clamped to the
+        // SAME [64, 256] envelope so a shape cannot request an unbounded scan; a
+        // None shape (or None override) leaves the computed default unchanged.
+        let computed_frontier_k = (request.limit * 4).max(64).min(256);
+        let frontier_k = request
+            .recall_shape
+            .as_ref()
+            .map(|s| s.effective_frontier_k(computed_frontier_k))
+            .unwrap_or(computed_frontier_k);
 
         let plan = RecallPlan {
             effective_mode: request.mode,
@@ -3924,9 +3932,31 @@ impl EstateCoordinator {
             }
 
             let k = 60_f32;
+            // Signed per-lane weights (6b-modifiers). Parity surface: Swift routes
+            // ONLY the Hybrid and CorpusOnly lanes through the weighted `rrfFuseN`
+            // (locus/bm25/hamming); its UnionBest lane uses the buffer/MMR path,
+            // which 6b-modifiers leaves unweighted. So weights apply here ONLY for
+            // Hybrid/CorpusOnly and ONLY on the RRF branch (Swift's .raw branch
+            // merges lists in order, also unweighted). The dense lane is empty in
+            // Hybrid/CorpusOnly (include_dense is UnionBest-only), so no dense
+            // weight key is consulted. A None shape yields 1.0 for every lane —
+            // multiplying each term by exactly 1.0 — so the unweighted formula is
+            // recovered byte-for-byte (the back-compat contract).
+            let weights_active = matches!(
+                request.mode,
+                GLKRecallMode::Hybrid | GLKRecallMode::CorpusOnly
+            ) && request.recall_shape.is_some();
+            let (w_locus, w_bm25, w_hamming) = match (&request.recall_shape, weights_active) {
+                (Some(shape), true) => (
+                    shape.weight("locus"),
+                    shape.weight("bm25"),
+                    shape.weight("hamming"),
+                ),
+                _ => (1.0, 1.0, 1.0),
+            };
             let mut scored: Vec<(String, f32, f32, f32, f32, f32, f32, f32, f32)> = all_ids
                 .iter()
-                .map(|id| {
+                .filter_map(|id| {
                     let (locus_rank, locus_raw) = locus_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (bm25_rank, bm25_raw)   = bm25_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (vec_rank, vec_raw)      = vector_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
@@ -3941,20 +3971,50 @@ impl EstateCoordinator {
                         GLKRecallScoring::Raw => locus_raw + bm25_raw + vec_raw + dense_raw + dense_boost,
                         GLKRecallScoring::Rrf | GLKRecallScoring::MatrixAware => {
                             // MatrixAware falls back to RRF for Hybrid/CorpusOnly.
+                            // Each lane's reciprocal-rank term is scaled by its signed
+                            // weight: w=1.0 neutral, w=0 EXCLUDES (the lane is skipped
+                            // entirely — an id whose ONLY source is an excluded lane
+                            // receives no term and is DROPPED below, matching Swift
+                            // rrfFuseN's `continue`), w<0 SUBTRACTS the lane's rank
+                            // mass (demotion). For UnionBest, weights are 1.0
+                            // (unweighted, per Swift's buffer/MMR path).
                             let mut rrf = 0.0_f32;
-                            if locus_rank < usize::MAX { rrf += 1.0 / (k + locus_rank as f32 + 1.0); }
-                            if bm25_rank  < usize::MAX { rrf += 1.0 / (k + bm25_rank  as f32 + 1.0); }
-                            if vec_rank   < usize::MAX { rrf += 1.0 / (k + vec_rank   as f32 + 1.0); }
-                            if dense_rank < usize::MAX { rrf += 1.0 / (k + dense_rank as f32 + 1.0); }
+                            // `contributed` mirrors Swift rrfFuseN's "did this id enter
+                            // the rrf map": true once any non-excluded lane that ranks
+                            // the id adds a term. An id with no contributing lane is
+                            // absent from Swift's output, so it is dropped here too.
+                            let mut contributed = false;
+                            if locus_rank < usize::MAX && w_locus != 0.0 {
+                                rrf += w_locus * (1.0 / (k + locus_rank as f32 + 1.0));
+                                contributed = true;
+                            }
+                            if bm25_rank < usize::MAX && w_bm25 != 0.0 {
+                                rrf += w_bm25 * (1.0 / (k + bm25_rank as f32 + 1.0));
+                                contributed = true;
+                            }
+                            if vec_rank < usize::MAX && w_hamming != 0.0 {
+                                rrf += w_hamming * (1.0 / (k + vec_rank as f32 + 1.0));
+                                contributed = true;
+                            }
+                            if dense_rank < usize::MAX {
+                                // Dense lane is unweighted in this fusion path (it is
+                                // empty for Hybrid/CorpusOnly; weights apply only to
+                                // those modes), so its term always contributes.
+                                rrf += 1.0 / (k + dense_rank as f32 + 1.0);
+                                contributed = true;
+                            }
                             // Per-signal dense consensus: the extra-voter RRF mass is
                             // additive on top of the single consensus dense_rank term,
                             // so each held dense signal is an independent voter. Zero
                             // at N=1 — identical to the pre-6b single-signal RRF.
+                            if dense_boost != 0.0 { contributed = true; }
                             rrf += dense_boost;
+                            // Drop ids no surviving lane voted for (exclusion parity).
+                            if !contributed { return None; }
                             rrf
                         }
                     };
-                    (id.clone(), final_score, locus_raw, bm25_raw, vec_raw, dense_raw, 0.0_f32, 0.0_f32, 0.0_f32)
+                    Some((id.clone(), final_score, locus_raw, bm25_raw, vec_raw, dense_raw, 0.0_f32, 0.0_f32, 0.0_f32))
                 })
                 .collect();
 

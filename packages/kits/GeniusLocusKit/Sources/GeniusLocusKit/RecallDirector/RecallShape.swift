@@ -1,0 +1,109 @@
+/// A SIGNED, per-lane steering vector for the RecallDirector's RRF fusion.
+///
+/// `RecallShape` makes the otherwise-uniform reciprocal-rank fusion (introduced
+/// in 6b-core) STEERABLE without changing the fusion algorithm itself. It carries
+/// a signed weight per fusion lane: a lane's reciprocal-rank mass is multiplied by
+/// its weight before the per-id sum, so a recipe can forward, exclude, or suppress
+/// individual signals. It is the ENGINE-level knob; named presets (the "shapes" a
+/// recipe selects by name) are a separate layer (6b-modifiers-recipes) built ON TOP
+/// of this type.
+///
+/// ## Lane-key scheme
+///
+/// Weights are keyed by a STABLE lane identifier string:
+///
+///   - `"locus"`   — the LocusKit bitmap lane.
+///   - `"bm25"`    — the CorpusKit BM25 keyword lane.
+///   - `"hamming"` — the 256-bit SimHash-Hamming vector lane.
+///   - `"dense:<modelID>"` — a per-signal DENSE float lane, one key per held
+///     embedding provider (e.g. `"dense:minilm-v6"`, `"dense:mpnet-base-v2"`).
+///     The `<modelID>` suffix mirrors the per-signal fan-out from 6b-core so a
+///     multi-provider corpus can weight each distributional signal independently.
+///
+/// A lane whose key is ABSENT from `laneWeights` uses the default weight `1.0`
+/// (forward at full strength) — so an empty map reproduces today's uniform fusion
+/// exactly. This is the back-compat contract: `nil` shape ⇒ all-1.0 ⇒ byte-identical
+/// to the pre-6b-modifiers fusion.
+///
+/// ## Signed-weight semantics
+///
+/// For lane `L` with weight `w_L`, the fused score is
+/// `fused(id) = Σ_L w_L · 1/(k + rank_L(id) + 1)`:
+///
+///   - `w > 0` — FORWARD. The lane votes; larger `w` amplifies its rank mass.
+///     `w == 1.0` is the neutral default (unchanged from uniform fusion).
+///   - `w == 0` — EXCLUDE. The lane contributes nothing; its votes are dropped
+///     as if the lane had not run. (Distinct from the lane being dark: the lane
+///     still runs and its candidates still appear if ANOTHER lane surfaces them.)
+///   - `w < 0`  — SUPPRESS. The lane SUBTRACTS its rank mass: a candidate the lane
+///     ranks HIGH is DEMOTED. This is demotion of an existing-lane signal, NOT
+///     anti-similarity retrieval (which changes which candidates the store
+///     returns). The two are deliberately distinct.
+///
+/// ## frontierK override
+///
+/// `frontierK` optionally widens or narrows the candidate pool depth each lane
+/// retrieves before fusion (the RecallDirector's default is
+/// `min(max(limit * 4, 64), 256)`). `nil` keeps the computed default. A larger
+/// pool lets suppression/exclusion reshape a deeper frontier; a smaller pool
+/// tightens the candidate set. The override is clamped to the same `[64, 256]`
+/// envelope so a recipe cannot request an unbounded scan.
+public struct RecallShape: Sendable, Codable, Equatable {
+    /// Signed per-lane weights keyed by the stable lane identifier (see the
+    /// lane-key scheme above). A missing key defaults to `1.0`. `0` excludes a
+    /// lane; a negative value suppresses (demotes) the lane's high-ranked
+    /// candidates.
+    public let laneWeights: [String: Float]
+
+    /// Optional candidate-pool depth override. `nil` keeps the RecallDirector's
+    /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
+    /// clamped to the same `[64, 256]` envelope (see `effectiveFrontierK`).
+    public let frontierK: Int?
+
+    /// The inclusive lower bound for any `frontierK` override. Mirrors the
+    /// RecallDirector's `frontierK` floor so a shape cannot request a pool
+    /// narrower than the engine's own minimum.
+    public static let frontierKFloor = 64
+    /// The inclusive upper bound for any `frontierK` override. Mirrors the
+    /// RecallDirector's `frontierK` ceiling so a shape cannot request an
+    /// unbounded scan.
+    public static let frontierKCeiling = 256
+
+    /// Create a recall shape.
+    ///
+    /// - Parameters:
+    ///   - laneWeights: signed per-lane weights keyed by stable lane id. Defaults
+    ///     to empty (every lane at weight `1.0` — uniform, today's behaviour).
+    ///   - frontierK: optional candidate-pool depth override, clamped to
+    ///     `[frontierKFloor, frontierKCeiling]` when read via `effectiveFrontierK`.
+    ///     Defaults to `nil` (the engine's computed default).
+    public init(laneWeights: [String: Float] = [:], frontierK: Int? = nil) {
+        self.laneWeights = laneWeights
+        self.frontierK = frontierK
+    }
+
+    /// The signed weight for a lane key. Returns `1.0` for any key absent from
+    /// `laneWeights` — the neutral default that keeps unweighted lanes voting at
+    /// full strength.
+    ///
+    /// - Parameter laneKey: the stable lane identifier (`"locus"`, `"bm25"`,
+    ///   `"hamming"`, or `"dense:<modelID>"`).
+    /// - Returns: the configured weight, or `1.0` when the lane is not in the map.
+    public func weight(for laneKey: String) -> Float {
+        laneWeights[laneKey] ?? 1.0
+    }
+
+    /// Resolve the effective candidate-pool depth for a computed engine default.
+    ///
+    /// When `frontierK` is `nil` the engine default is returned unchanged. When
+    /// set, the override is clamped to `[frontierKFloor, frontierKCeiling]` so a
+    /// recipe cannot widen the pool past the engine ceiling or narrow it below the
+    /// engine floor.
+    ///
+    /// - Parameter engineDefault: the RecallDirector's computed `frontierK`.
+    /// - Returns: the clamped override, or `engineDefault` when no override is set.
+    public func effectiveFrontierK(engineDefault: Int) -> Int {
+        guard let override = frontierK else { return engineDefault }
+        return min(Self.frontierKCeiling, max(Self.frontierKFloor, override))
+    }
+}

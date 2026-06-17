@@ -14,6 +14,7 @@
 //   RecallPlan            → RecallPlan (RecallWeights.swift)
 //   RecallHit             → RecallHit
 //   GLKRecallRequest      → GLKRecallRequest
+//   RecallShape           → RecallShape (RecallShape.swift)
 //   GLKRecallResult       → GLKRecallResult
 //   RecallUnionProfile    → RecallUnionProfile
 //   RecallLane            (utility enum — not a separate Swift file;
@@ -30,6 +31,8 @@
 // async runtime). Conformance compares edge OUTPUT, not call shape. This
 // mirrors the NeuronKit policy-store precedent where value-level results agree
 // across both ports despite different async shapes.
+
+use std::collections::HashMap;
 
 use locus_kit::drawer::Drawer;
 use locus_kit::filter::RecallFrame;
@@ -476,6 +479,78 @@ impl Default for RecallOrigin {
 /// `coordinator.recall(handle, frame, now)` method, which returns a plain
 /// `Vec<Drawer>`. This type is the richer scored path.
 ///
+/// A SIGNED, per-lane steering vector for the RRF fusion (6b-modifiers).
+///
+/// Mirrors Swift `RecallShape` (RecallShape.swift). Makes the RecallDirector's
+/// reciprocal-rank fusion STEERABLE without changing the fusion algorithm: a
+/// lane's rank mass is multiplied by its signed weight before the per-id sum, so
+/// a recipe can forward, exclude, or suppress individual signals. This is the
+/// ENGINE knob; named presets are a separate layer built on top.
+///
+/// ## Lane-key scheme
+///
+/// Weights are keyed by a STABLE lane identifier string:
+///   - `"locus"`           — the LocusKit bitmap lane.
+///   - `"bm25"`            — the CorpusKit BM25 keyword lane.
+///   - `"hamming"`         — the 256-bit SimHash-Hamming vector lane.
+///   - `"dense:<modelID>"` — a per-signal DENSE float lane, one key per held
+///     embedding provider, mirroring the 6b-core per-signal fan-out.
+///
+/// A lane whose key is ABSENT uses the default weight `1.0`; an empty map
+/// reproduces the uniform fusion exactly (the back-compat contract — a `None`
+/// shape is byte-identical to the pre-6b-modifiers fusion).
+///
+/// ## Signed-weight semantics
+///
+/// `fused(id) = Σ_L w_L · 1/(k + rank_L(id) + 1)`:
+///   - `w > 0` — FORWARD; larger `w` amplifies the lane's rank mass (`1.0` neutral).
+///   - `w == 0` — EXCLUDE; the lane contributes nothing (votes dropped).
+///   - `w < 0`  — SUPPRESS; the lane SUBTRACTS its rank mass, DEMOTING a candidate
+///     it ranks high. Distinct from anti-similarity retrieval (which changes which
+///     candidates the store returns).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallShape {
+    /// Signed per-lane weights keyed by the stable lane identifier. A missing key
+    /// defaults to `1.0`. `0` excludes a lane; a negative value suppresses
+    /// (demotes) the lane's high-ranked candidates.
+    pub lane_weights: HashMap<String, f32>,
+    /// Optional candidate-pool depth override. `None` keeps the coordinator's
+    /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
+    /// clamped to `[FRONTIER_K_FLOOR, FRONTIER_K_CEILING]`.
+    pub frontier_k: Option<usize>,
+}
+
+impl RecallShape {
+    /// Inclusive lower bound for any `frontier_k` override (mirrors the
+    /// coordinator's `frontier_k` floor).
+    pub const FRONTIER_K_FLOOR: usize = 64;
+    /// Inclusive upper bound for any `frontier_k` override (mirrors the
+    /// coordinator's `frontier_k` ceiling).
+    pub const FRONTIER_K_CEILING: usize = 256;
+
+    /// Construct a shape from a signed lane-weight map and optional pool override.
+    pub fn new(lane_weights: HashMap<String, f32>, frontier_k: Option<usize>) -> Self {
+        Self { lane_weights, frontier_k }
+    }
+
+    /// The signed weight for a lane key. Returns `1.0` for any key absent from
+    /// `lane_weights` — the neutral default that keeps unweighted lanes voting at
+    /// full strength.
+    pub fn weight(&self, lane_key: &str) -> f32 {
+        self.lane_weights.get(lane_key).copied().unwrap_or(1.0)
+    }
+
+    /// Resolve the effective candidate-pool depth for a computed engine default.
+    /// `None` override returns the default unchanged; a set override is clamped to
+    /// `[FRONTIER_K_FLOOR, FRONTIER_K_CEILING]`.
+    pub fn effective_frontier_k(&self, engine_default: usize) -> usize {
+        match self.frontier_k {
+            None => engine_default,
+            Some(o) => o.clamp(Self::FRONTIER_K_FLOOR, Self::FRONTIER_K_CEILING),
+        }
+    }
+}
+
 /// Mirrors Swift `GLKRecallRequest` (GLKRecallRequest.swift).
 #[derive(Debug, Clone)]
 pub struct GLKRecallRequest {
@@ -509,6 +584,17 @@ pub struct GLKRecallRequest {
     /// LocusKit `RecallFrame` ONLY when `origin == External`. Internal reads
     /// must not write recall-trace rows. Defaults to `Internal`.
     pub origin: RecallOrigin,
+    /// Optional SIGNED per-lane steering for the RRF fusion (6b-modifiers).
+    ///
+    /// When non-None, the coordinator multiplies each fusion lane's reciprocal-rank
+    /// mass by that lane's signed weight from the shape before the per-id sum:
+    /// `w > 0` forwards, `w == 0` excludes, `w < 0` suppresses (demotes the lane's
+    /// high-ranked candidates). It may also override the candidate-pool depth
+    /// (`frontier_k`). See `RecallShape` for the lane-key scheme and semantics.
+    ///
+    /// When None (the default), fusion uses uniform positive weights — every lane
+    /// at weight `1.0` — BYTE-IDENTICAL to the pre-6b-modifiers behaviour.
+    pub recall_shape: Option<RecallShape>,
 }
 
 impl GLKRecallRequest {
@@ -526,6 +612,7 @@ impl GLKRecallRequest {
             query_text: None,
             trace_limit: None,
             origin: RecallOrigin::Internal,
+            recall_shape: None,
         }
     }
 
@@ -574,6 +661,15 @@ impl GLKRecallRequest {
     /// Only the ARIA_MCP boundary should call this method (B-10a enforcement).
     pub fn external(mut self) -> Self {
         self.origin = RecallOrigin::External;
+        self
+    }
+
+    /// Builder: set the signed per-lane fusion steering (6b-modifiers).
+    ///
+    /// `None`-equivalent (an empty-map shape) leaves fusion uniform; a populated
+    /// shape forwards/excludes/suppresses lanes per `RecallShape`.
+    pub fn with_recall_shape(mut self, shape: RecallShape) -> Self {
+        self.recall_shape = Some(shape);
         self
     }
 }
