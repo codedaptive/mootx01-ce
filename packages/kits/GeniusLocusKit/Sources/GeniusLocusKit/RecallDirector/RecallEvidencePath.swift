@@ -11,13 +11,21 @@ public enum RecallEvidencePath: String, Sendable, Codable, CaseIterable {
     /// Dense float-embedding cosine match (Lane D) — the TRUE float vector
     /// lane, distinct from the 256-bit SimHash-Hamming `vectorHamming` lane.
     case vectorDense
-    /// Matrix field-presence signal. Reserved for a future mission.
+    /// Matrix field-presence signal. The F-based correlation score for the query
+    /// candidate's bitmap fields against the estate's field-frequency table.
+    /// Populated by RecallDirector step 5.6 when scoring is `.matrixAware` and
+    /// a MatrixTier is registered. Contributes to the `fieldFit` buffer column.
     case matrixFieldPresence
-    /// Matrix co-occurrence signal. Reserved for a future mission.
+    /// Matrix correlation signal (field-presence correlation, C = F / liveRowCount).
+    /// Used as the F-normalised field-fit score in the matrixAware weighted pipeline.
     case matrixCorrelation
-    /// Matrix co-occurrence count. Reserved for a future mission.
+    /// Matrix co-occurrence count. The O[query, candidate] score summed over all
+    /// (queryCoord, candidateCoord) pairs and normalised by liveRowCount.
+    /// Populated by RecallDirector step 5.6 into the `coOccurrence` buffer column.
     case matrixCoOccurrence
-    /// Matrix temporal decay signal. Reserved for a future mission.
+    /// Matrix temporal decay signal. The T[source, target, lag] score summed over
+    /// active lag buckets and normalised by liveRowCount. Populated by
+    /// RecallDirector step 5.6 into the `temporal` buffer column.
     case matrixTemporal
     /// Graph coherence across the association graph.
     case graphCoherence

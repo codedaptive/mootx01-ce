@@ -9,7 +9,8 @@ public enum RecallLane: String, Sendable, Equatable {
     case corpus
     /// The standalone vector similarity lane.
     case vector
-    /// The matrix co-occurrence / temporal signal lane. Reserved for a future mission.
+    /// The matrix co-occurrence / temporal signal lane. Used by the `.matrixAware`
+    /// scoring pipeline's step 5.6 (RecallDirector) and requires a registered MatrixTier.
     case matrix
 }
 
@@ -94,7 +95,8 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     ///
     /// Raised when a lane is requested before its required kit is registered
     /// (e.g. `corpusOnly` with no corpus registered and `failClosed`). The
-    /// `matrix` lane is reserved for a future mission.
+    /// `matrix` lane requires a registered MatrixTier; absence raises this error
+    /// when the caller requests matrix-dependent scoring with `failClosed`.
     case recallLaneUnavailable(RecallLane)
 
     /// A verb was called on an estate whose mount state is `.quiesced` or

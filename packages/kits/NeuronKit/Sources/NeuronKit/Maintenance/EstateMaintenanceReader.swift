@@ -19,11 +19,11 @@ import LocusKit
 /// here.
 ///
 /// ── Bounded scan strategy ────────────────────────────────────────────
-/// Active and tombstoned drawer reads delegate to `GeniusLocusKit.allDrawers(in:)`,
-/// which is a full-corpus snapshot. A bounded variant (`allDrawersBounded(in:limit:)`)
-/// is a follow-on optimisation once GLK exposes a limit parameter; for now
-/// the full snapshot is filtered in process. B-10a: all reads are internal
-/// (no trace_limit set, no recall-trace rows written).
+/// Active and tombstoned drawer reads delegate to
+/// `GeniusLocusKit.allDrawers(in:limit:)` with a cap of `maintenanceScanCap`
+/// (512) rows. The limit is applied at the storage tier so the I/O cost is
+/// O(cap), not O(estate). B-10a: all reads are internal (no trace_limit set,
+/// no recall-trace rows written).
 ///
 /// ── Reference drift (real reads) ─────────────────────────────────────
 /// `learnedReferences()` now reads all non-tombstoned `LearnedReference`
