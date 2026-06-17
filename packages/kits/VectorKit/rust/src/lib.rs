@@ -3,9 +3,16 @@
 //!
 //! Refactored 2026-05-19 (Rust mission 6) per
 //! DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md section 4.6:
-//! - Storage moved from direct rusqlite to `persistence-kit`. Backends
-//!   (InMemory today; SQLite + PostgreSQL in follow-on R-missions)
-//!   slot in additively.
+//! - Storage flows through `persistence-kit`, not direct rusqlite. The
+//!   `VectorStore` is backend-agnostic: it holds an `Arc<dyn Storage>` and
+//!   never names a backend. The application selects the backend. The
+//!   InMemory and the on-disk SQLite (`persistence_kit::SqliteStorage`)
+//!   backends both ship and are both exercised by VectorKit's tests; over
+//!   the SQLite backend the resident binary array and float lane survive a
+//!   process restart (rebuilt from the durable `vectors` table — or from the
+//!   `.vec` sidecar when one is supplied — on the next open). PostgreSQL is
+//!   the remote-backed v1.1 path (ships with federation) and is not present
+//!   here. See VECTORKIT_SPEC §cross-restart persistence.
 //! - `FloatSimHashEmbeddingProvider` is the only provider shipped
 //!   today. It accepts a host-supplied inference closure that
 //!   returns a `Vec<f32>`, then projects through

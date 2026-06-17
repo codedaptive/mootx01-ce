@@ -208,3 +208,66 @@ fn farthest_rank_fixture_rust_order() {
     let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
     assert_eq!(ids, RANK_EXPECTED_FARTHEST_ORDER.to_vec());
 }
+
+// ---------------------------------------------------------------------------
+// Cross-restart conformance for the float lane (A-11). Parallel to the Swift
+// `floatIndexSurvivesReopenSQLite` (Tests/VectorKitTests/FloatLaneStoreTests).
+// ---------------------------------------------------------------------------
+// The float lane has no sidecar yet, so after a drop-and-reopen over a real
+// on-disk SQLite file the resident float index must rebuild from the durable
+// `vectors` table on first search. Both find_nearest_float and
+// find_farthest_float must produce the identical ranking they produced before
+// the close — which requires the float32 rows to decode correctly from the
+// SQLite read-back primitives.
+
+#[test]
+fn float_index_survives_reopen_sqlite() {
+    use std::path::PathBuf;
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+
+    let dir = std::env::temp_dir();
+    let db_path: PathBuf = dir.join(format!("vk_float_reopen_{}.db", Uuid::new_v4()));
+    let path_str = db_path.to_string_lossy().to_string();
+
+    let make_storage = || -> Arc<dyn Storage> {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path_str.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        Arc::new(SqliteStorage::new(cfg).expect("open SQLite"))
+    };
+
+    // Session 1: write float rows over a real SQLite estate, then drop the
+    // store so the resident float index is gone.
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for write");
+        add_float(&store, "near", &[1.0, 0.0, 0.0], "m");
+        add_float(&store, "far", &[0.0, 0.0, 1.0], "m");
+    }
+
+    // Session 2: a brand-new store on the same file rebuilds the float index
+    // from the table (the source of truth) on first search.
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for read");
+
+        // Nearest: probe aligned with `near`. near (cos 1.0) ranks above far
+        // (cos 0.0).
+        let nearest = store
+            .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2)
+            .expect("find_nearest_float reopen");
+        let near_ids: Vec<&str> = nearest.iter().map(|m| m.item_id.as_str()).collect();
+        assert_eq!(near_ids, vec!["near", "far"]);
+
+        // Farthest: the most dissimilar first — the exact reverse, no ties.
+        let farthest = store
+            .find_farthest_float(&[1.0, 0.0, 0.0], "m", 2)
+            .expect("find_farthest_float reopen");
+        let far_ids: Vec<&str> = farthest.iter().map(|m| m.item_id.as_str()).collect();
+        assert_eq!(far_ids, vec!["far", "near"]);
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}

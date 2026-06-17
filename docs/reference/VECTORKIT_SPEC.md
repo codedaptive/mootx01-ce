@@ -1,6 +1,6 @@
 ---
 title: VectorKit Specification
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
@@ -516,6 +516,40 @@ if they disagree the sidecar is discarded and the array is rebuilt from the
 table. The rebuild is paid once per process start in the stale path; on the
 happy path (sidecar current) the array is loaded with one OS read (mmap).
 
+### Cross-restart persistence (both ports) — conformance requirement
+
+Both ports persist vector state across a process restart over the on-disk
+SQLite backend, with no full rebuild required on the happy path. A
+`VectorStore` constructed over the PersistenceKit SQLite backend
+(`SQLiteStorage` / `SqliteStorage`) — a backend the kit holds behind
+`any Storage` / `Arc<dyn Storage>` and never names — writes every vector to
+the durable `vectors` table. After the writing store is dropped, a NEW
+`VectorStore` opened on the SAME file MUST reconstruct the resident state so
+that:
+
+- `findNearest` / `find_nearest` (binary Hamming lane) returns the persisted
+  vectors with bit-identical Hamming distances — the identical probe ranks at
+  distance 0. This is the four-way bit-identical lane (I-7).
+- `findNearestFloat` / `find_nearest_float` and `findFarthestFloat` /
+  `find_farthest_float` (Lane D float lane) return the identical RANK order
+  produced before the close (reproducible-within-config, arch spec §6).
+- When a `.vec` sidecar is supplied and is current (`live_count` matches the
+  table), the binary array loads from the sidecar with no table rebuild
+  (`sidecarRebuildCount` / `sidecar_rebuild_count` stays 0); the reopened
+  top-k equals the pre-close top-k.
+
+This requirement is gated in both ports: Swift
+`findNearestSurvivesReopenSQLite` / `floatIndexSurvivesReopenSQLite`
+(VectorKitTests) and Rust `find_nearest_survives_reopen_sqlite`,
+`find_nearest_survives_reopen_sqlite_with_sidecar`,
+`float_index_survives_reopen_sqlite`. The row decoders MUST tolerate the
+primitives the SQLite backend returns on read-back (`id` as TEXT, `filed_at`
+as INTEGER); decoding only the in-memory backend's native `Uuid` / `Timestamp`
+would silently drop every persisted row on reopen and blank the recall lane.
+
+PostgreSQL persistence is the remote-backed v1.1 path (ships with federation)
+and is out of scope here.
+
 ### `sidecarWriteCount` / `sidecar_write_count` (test instrumentation)
 
 `ResidentArrayStore.sidecarWriteCount` / `sidecar_write_count()` is
@@ -548,6 +582,20 @@ provisioned estate.
 
 ### 1.2.0 -- 2026-06-17
 Added invariant I-8 (the `ext` forward-compat slot, ADR-012): the `vectors` table carries one nullable `.json` `ext` column at schema v3, inert in 1.0. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
+
+### 1.3.0 -- 2026-06-17
+Added the "Cross-restart persistence (both ports)" conformance requirement
+under the crash-safety section: a `VectorStore` over the on-disk SQLite
+backend reconstructs resident state (binary Hamming lane + Lane D float lane)
+across a process restart, with no table rebuild on the happy sidecar path, so
+`findNearest`/`findNearestFloat`/`findFarthestFloat` reproduce their pre-close
+results on reopen. Gated in both ports (Swift `findNearestSurvivesReopenSQLite`
+/ `floatIndexSurvivesReopenSQLite`; Rust `find_nearest_survives_reopen_sqlite`,
+`find_nearest_survives_reopen_sqlite_with_sidecar`,
+`float_index_survives_reopen_sqlite`). No public symbol change — the SQLite
+backend ships in PersistenceKit and the store is already backend-agnostic;
+this records the contract and closes the Rust conformance-coverage gap.
+PostgreSQL persistence remains v1.1 (federation). Additive (MINOR).
 
 ### 1.1.0 -- 2026-06-17
 Added B-13a — the Lane D float FARTHEST (anti-similarity) retrieval contract
