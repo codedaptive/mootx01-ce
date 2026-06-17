@@ -180,6 +180,24 @@ pub enum EmbeddingModelConfig {
     /// See ADR-010 Decision B and `NmfProvider` in `corpus-kit-providers`.
     Nmf { provider: Box<dyn EmbeddingProvider> },
 
+    /// FDC (Frame Decimal Classification) co-classification provider.
+    ///
+    /// The caller constructs an `FDCProvider` from `corpus-kit-providers` and
+    /// passes it here as a `Box<dyn EmbeddingProvider>`. The provider is
+    /// stateless — no training step is required. It encodes text to a
+    /// deterministic float vector derived from the text's FDC classification
+    /// code, such that codes sharing a longer prefix (more common ancestors in
+    /// the FDC taxonomy) have higher cosine similarity.
+    ///
+    /// Unlike the distributional providers (RI/PPMI/LSA/NMF), FDCProvider
+    /// requires no corpus training — it is ready to use immediately. The float
+    /// lane is dark (returns `vec![]`) for texts the FDC engine cannot classify
+    /// (UNRESOLVED). This is the expected opt-out, not an error.
+    ///
+    /// See ADR-010 Decision B (FDC lattice co-classification) and `FDCProvider`
+    /// in `corpus-kit-providers` for the encoding details.
+    Fdc { provider: Box<dyn EmbeddingProvider> },
+
     /// MiniLM v6 text embedding (384-dim pooled output). The kit
     /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
     /// through FloatSimHash with the canonical MiniLM seed; the host
@@ -328,6 +346,10 @@ impl Corpus {
             // (TF matrix + NMF factorization via SubstrateML, tolerance=0 for
             // fixed iteration count / bit-identical output). Pass through unchanged.
             EmbeddingModelConfig::Nmf { provider } => provider,
+            // Fdc: the caller constructed an FDCProvider externally. FDCProvider is
+            // stateless (no training required) — the caller just passes it through
+            // to register it as the fusion voter. Pass through unchanged.
+            EmbeddingModelConfig::Fdc { provider } => provider,
             EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
                 "minilm-v6",
                 "1.0.0",
