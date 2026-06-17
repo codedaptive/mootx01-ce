@@ -39,6 +39,12 @@ let package = Package(
         .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/EideticLib"),
+        // LatticeLib: FDC runtime (FDC.encode) and FDCFrame parent/ancestor
+        // derivation consumed by FDCProvider in CorpusKitProviders.
+        // Transitive dependency of EideticLib; declared explicitly here so
+        // CorpusKitProviders can import LatticeLib directly.
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        .package(path: "../../libs/LatticeLib"),
         // IntellectusLib: zero-dependency telemetry leaf. Added for P2
         // self-report coverage (cp-corpuskit-report). When monitoring is
         // disabled (default), the report call is a single Atomic<Bool> load.
@@ -77,6 +83,12 @@ let package = Package(
                 "SubstrateML",
                 "EngramLib",
                 "VectorKit",
+                // FDCProvider: text → FDC code via LatticeLib's FDC runtime
+                // (FDC.encode). Ancestor chain via FDC.ancestors(of:), the
+                // runtime façade over FDCFrame.ancestors(of:). FDC math lives
+                // in LatticeLib — not reimplemented in CorpusKitProviders.
+                // Authority: ADR-010 Decision B (FDC co-classification signal).
+                .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Sources/CorpusKitProviders"
         ),
@@ -100,6 +112,10 @@ let package = Package(
                 // IntellectusLib is required by CorpusKitTelemetryTests, which
                 // install capturing sinks and toggle the enabled flag.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
+                // LatticeLib is required by FdcProviderTests, which test
+                // FDC.ancestors(of:) — the runtime façade used by FDCProvider
+                // for the ancestor chain (Gate 2 compliance verification).
+                .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Tests/CorpusKitTests",
             resources: [

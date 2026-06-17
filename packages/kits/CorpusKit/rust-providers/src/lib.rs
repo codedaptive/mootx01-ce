@@ -43,6 +43,12 @@ pub mod nmf_provider;
 pub mod ppmi;
 pub mod random_indexing;
 pub mod text_providers;
+// ADR-010 Decision B: FDC lattice co-classification provider.
+// Reuses lattice_lib::Fdc::encode (text→FDC code) and
+// lattice_lib::Fdc::ancestors (the runtime façade over FdcFrame::ancestors).
+// The decimal hierarchy math lives in LatticeLib — not reimplemented here.
+// Stateless — no training required.
+pub mod fdc_provider;
 
 pub use deterministic_tokenizer::DeterministicTokenizer;
 pub use term_document_counts::TermDocumentCounts;
@@ -59,3 +65,7 @@ pub use random_indexing::{
     ri_index_vector,
 };
 pub use text_providers::{EmbeddingGemmaProvider, MPNetTextProvider, MiniLMTextProvider};
+pub use fdc_provider::{
+    FDCProvider, FDC_DIMENSION, FDC_PROJECTION_SEED,
+    fdc_node_vector, fdc_embedding_vector,
+};
