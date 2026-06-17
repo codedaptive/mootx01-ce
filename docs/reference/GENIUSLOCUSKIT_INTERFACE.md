@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.1.0
+version: 1.1.1
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -914,7 +914,7 @@ the crate root. The Swift originals are in
 | `RecallPlan` | `RecallPlan` | `recall::RecallPlan` | `effectiveMode` → `effective_mode`; `frontierK` → `frontier_k` |
 | `RecallHit` | `RecallHit` | `recall::RecallHit` | `drawer: Drawer?` → `drawer: Option<Drawer>`; `sources: Set<RecallEvidencePath>` → `sources: Vec<RecallEvidencePath>` |
 | `GLKRecallRequest` | `GLKRecallRequest` | `recall::GLKRecallRequest` | Builder API; defaults match Swift. Optional `recallShape`/`recall_shape` field (defaults `nil`/`None`) carries the signed per-lane fusion steering (6b-modifiers) |
-| `RecallShape` | `RecallShape` | `recall::RecallShape` | Signed per-lane fusion weights (`laneWeights`/`lane_weights`, keys `locus`/`bm25`/`hamming`/`dense:<modelID>`; missing key ⇒ 1.0) + optional clamped `frontierK`/`frontier_k`. `w>0` forward, `w==0` exclude, `w<0` suppress (demote). nil/absent ⇒ uniform fusion (byte-identical to pre-6b-modifiers). Anti-similarity selector deferred to 6b-modifiers-antisim |
+| `RecallShape` | `RecallShape` | `recall::RecallShape` | Signed per-lane fusion weights (`laneWeights`/`lane_weights`, keys `locus`/`bm25`/`hamming`/`dense:<modelID>` and the aggregate `dense`; missing key ⇒ 1.0) + optional clamped `frontierK`/`frontier_k`. `w>0` forward, `w==0` exclude, `w<0` suppress (demote). Steers the Hybrid + CorpusOnly RRF lanes AND the UnionBest lane (per-signal `dense:<modelID>` weights steer the dense consensus fold; `locus`/`bm25`/`hamming`/`dense` steer the UnionBest weighted columns). nil/absent ⇒ uniform fusion (byte-identical to pre-6b-modifiers). Anti-similarity selector deferred to 6b-modifiers-antisim |
 | `GLKRecallResult` | `GLKRecallResult` | `recall::GLKRecallResult` | `.drawers()` convenience accessor; `degradedStages`/`degraded_stages` carries named stage failures, incl. the four `locus.*` recall internal-read stages merged from `RecallStream` (SPEC § degradedStages) |
 | `RecallUnionProfile` | `RecallUnionProfile` | `recall::RecallUnionProfile` | 6 fields; `ZERO` constant |
 | (implicit) `RecallLane` | `RecallLane` | `recall::RecallLane` | Not a separate Swift file; distilled from `RecallCandidateBuffer` source-bit constants |
@@ -1726,6 +1726,21 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.1.1 -- 2026-06-17
+Clarification (6b-modifiers-core-2): `RecallShape` now steers the **UnionBest**
+lane too — the only lane where the per-signal dense float signals fuse. The
+per-signal `dense:<modelID>` weights scale each signal's reciprocal-rank term in
+the dense consensus fold (`w==0` excludes the signal — leave-one-out, withholding
+both its rank mass AND its cosine from the aggregate `dense` column; `w<0`
+subtracts its rank mass — demotion; only forwarding `w>0` signals raise the
+aggregate cosine). The fixed lanes `locus`/`bm25`/`hamming` and the aggregate
+`dense` key scale their columns in the UnionBest weighted-column score. An excluded
+signal no longer claims per-hit `denseSignals:` provenance; a suppressed signal
+still does (it contributed subtracted mass). A nil/all-ones shape is byte-identical
+to the pre-steer UnionBest output. No public API change — `RecallShape` and the
+`recallShape`/`recall_shape` field are unchanged; this revision wires the already-
+public dense weights that 6b-modifiers-core left inert in UnionBest.
 
 ### 1.1.0 -- 2026-06-17
 Additive (6b-modifiers-core): new public `RecallShape` type (both ports) carrying

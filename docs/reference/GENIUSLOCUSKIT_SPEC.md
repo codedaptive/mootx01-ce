@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.1.0
+version: 1.1.1
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1484,12 +1484,30 @@ EXCLUSION (`w==0`) and SUPPRESSION (`w<0`) are DISTINCT operations and are
 conformance-tested as such; neither is anti-similarity retrieval (which would
 change which candidates the store returns — deferred to `6b-modifiers-antisim`).
 Steering applies to the lanes that route through the weighted RRF combiner —
-`hybrid` (locus/bm25/hamming) and `corpusOnly` (bm25/hamming); `unionBest`
-(buffer/MMR) remains unweighted in this revision. A `nil` shape — or an all-1.0
-shape — is BYTE-IDENTICAL to the prior uniform fusion (the back-compat contract,
-proven by conformance on both ports). `RecallShape` may also override the
-candidate-pool depth via `frontierK`, clamped to the engine's `[64, 256]`
-envelope. Both ports implement the identical signed formula and clamp.
+`hybrid` (locus/bm25/hamming) and `corpusOnly` (bm25/hamming) — AND to the
+`unionBest` lane (6b-modifiers-core-2), which is the only lane where the
+per-signal dense float signals fuse:
+
+- **UnionBest dense consensus fold.** Each per-signal dense list, tagged by its
+  `modelID`, is scaled by `w = weight("dense:<modelID>")`. `w==0` excludes the
+  signal entirely (leave-one-out: no reciprocal-rank term, and its cosine is
+  withheld from the aggregate `dense` column); `w<0` subtracts the signal's rank
+  mass (demotion); only forwarding `w>0` signals raise the aggregate `dense`
+  cosine. The consensus boost `max(0, total − best)` is computed over the SIGNED
+  weighted terms; at all-1.0 it reduces exactly to the unweighted fold. An
+  excluded signal no longer claims per-hit `denseSignals:` provenance; a
+  suppressed signal still does (it contributed subtracted mass).
+- **UnionBest weighted-column score.** The fixed lanes `locus`/`bm25`/`hamming`
+  and the aggregate `dense` key additionally scale their column contributions on
+  top of `RecallWeights.adaptive`: `w==0` zeroes a lane's column, `w<0` subtracts
+  it. Matrix/graph/preference columns are NOT shape-steerable (RecallShape
+  addresses the retrieval lanes only).
+
+A `nil` shape — or an all-1.0 shape — is BYTE-IDENTICAL to the prior uniform
+fusion in EVERY lane including `unionBest` (the back-compat contract, proven by
+conformance on both ports). `RecallShape` may also override the candidate-pool
+depth via `frontierK`, clamped to the engine's `[64, 256]` envelope. Both ports
+implement the identical signed formula and clamp.
 
 ### Telemetry counters
 
@@ -1553,6 +1571,19 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.1.1 -- 2026-06-17
+Clarification (6b-modifiers-core-2): the signed-weight steering now applies to the
+`unionBest` lane too — the only lane where the per-signal dense float signals fuse.
+The per-signal `dense:<modelID>` weights scale each signal's reciprocal-rank term
+in the dense consensus fold (`w==0` excludes the signal — leave-one-out, also
+withholding its cosine from the aggregate `dense` column; `w<0` subtracts its rank
+mass; only forwarding `w>0` signals raise the aggregate cosine), and the fixed
+`locus`/`bm25`/`hamming`/`dense` keys scale the unionBest weighted columns. An
+excluded signal no longer claims per-hit `denseSignals:` provenance; a suppressed
+signal still does. A nil/all-1.0 shape stays byte-identical to the pre-steer
+unionBest output. No public API change — wires the already-public dense weights
+that 6b-modifiers-core left inert in unionBest.
 
 ### 1.1.0 -- 2026-06-17
 Additive (6b-modifiers-core): documented the signed-weight fusion steering
