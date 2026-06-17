@@ -3,7 +3,7 @@ status: decided
 question: Should RecallShape's lane-key surface steer ONLY the retrieval lanes, or ALL recall scoring columns (retrieval + matrix/graph/preference)?
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.1.0
+version: 1.2.0
 relates_to:
   - docs/reference/GENIUSLOCUSKIT_SPEC.md
   - docs/reference/GENIUSLOCUSKIT_INTERFACE.md
@@ -120,11 +120,26 @@ weight 0 (`RecallShapeMatrixSteerTests.swift` /
 `recall_shape_matrix_steer_parity.rs`). This closes the parity violation D-4
 previously documented (Rust columns hardcoded `0.0`).
 
-PRODUCER boundary (still open, both ports): the production code that POPULATES
-these caches — the dreaming-cycle graph-centrality computation and Bradley-Terry
-preference training — is absent in BOTH ports today (no non-test code conforms to
-the protocols/traits or calls the register methods). The recall-CONSUMPTION
-surface is now at parity; building the producers is a separate future mission.
+PRODUCER boundary — the GRAPH producer now EXISTS on both ports
+(mission BRAIN-GRAPH-PRODUCER, 2026-06-17). The graph-centrality producer is a
+cadence-driven AutonomicGovernor duty (Swift `AutonomicGovernor.graphCentralityScan`
+/ Rust `graph_centrality_duty`) that reads the estate structure graph (drawers +
+tunnels + kg_facts), computes per-drawer eigenvalue centrality via the existing
+conformance-gated NeuronKit `keystones` oracle (no math reinvented — I-17), wraps
+the scores in a `GraphCache`, and registers it on the kit/coordinator. After it
+runs, the `unionBest` / `matrixAware` recall `graph` column is LIVE on both ports
+(non-zero for structurally-central drawers, identical Swift↔Rust for the same
+graph). The producer lives in the AutonomicGovernor (not the standing-signal
+scheduler) because that is the ONLY cadence-driver that can register a cache at
+parity: the Swift scheduler `emit` closure CAN capture the kit, but the Rust
+scheduler emission model (`Propose | Associate | MutateCandidate | Diagnostic`)
+cannot register a cache and the synchronous `Fn(&SignalContext)` closure has no
+`&mut EstateCoordinator`. The governor already holds the kit/coordinator and runs
+estate-reading duties on a cadence, making it the faithful cross-port home.
+
+The PREFERENCE producer (Bradley-Terry / RecallTrace preference training) remains
+absent on both ports — a separate follow-up mission. The `PreferenceStore`
+consumption surface stays at parity; nothing yet populates it.
 
 ## Consequences
 
@@ -146,10 +161,22 @@ Decided. Implemented in mission 6b-modifiers-matrix-steer (Swift
 `RecallShapeMatrixSteerTests.swift` / `recall_shape_matrix_steer_parity.rs`).
 The Rust `GraphCache` / `PreferenceStore` consumption surface (D-4) was wired in
 mission glk-recall-graphpref-rust (2026-06-17), bringing Rust to parity with the
-Swift recall-side surface.
+Swift recall-side surface. The GRAPH-centrality PRODUCER (D-4 producer boundary)
+was built on both ports in mission BRAIN-GRAPH-PRODUCER (2026-06-17) as an
+AutonomicGovernor duty over the NeuronKit `keystones` oracle; the `graph` column
+is now live in production on both ports. The PREFERENCE producer remains open.
 
 ## Changelog
 
+- 1.2.0 (2026-06-17) — D-4 producer boundary updated: the GRAPH-centrality
+  PRODUCER now exists on BOTH ports (mission BRAIN-GRAPH-PRODUCER). A
+  cadence-driven AutonomicGovernor duty (Swift `graphCentralityScan` / Rust
+  `graph_centrality_duty`) computes per-drawer eigenvalue centrality via the
+  NeuronKit `keystones` oracle and registers a `GraphCache`, taking the recall
+  `graph` column from dark to live in production on both ports. Conformance:
+  `GraphCentralityProducerTests.swift` / `graph_centrality_parity.rs`
+  (faithful-wrapper, hub-outranks-spokes, kg_facts bond, C-16 totality, cadence,
+  end-to-end dark→live). The PREFERENCE producer remains a separate open mission.
 - 1.1.0 (2026-06-17) — D-4 updated: the Rust port now wires the `GraphCache` /
   `PreferenceStore` recall-consumption surface (traits, registration, per-
   candidate `col_graph`/`col_preference` lookups, live `RecallScoreVector`

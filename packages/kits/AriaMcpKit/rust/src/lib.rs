@@ -43,6 +43,7 @@ pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod estate_registry;
+pub mod graph_centrality;
 pub mod http_server;
 pub mod interface_tools;
 pub mod jsonrpc;

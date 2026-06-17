@@ -158,6 +158,11 @@ const DEFAULT_TICK_MS: u64 = 5_000;
 /// Override with `MOOTX01_TOPOLOGY_CADENCE_SECONDS` env var.
 const DEFAULT_TOPOLOGY_CADENCE_MS: u64 = 300_000;
 
+/// Default graph-centrality producer cadence in milliseconds (600 000 =
+/// 10 minutes). Matches the Swift `graphCentralityIntervalMs` default — both
+/// ports ride the estate structure graph on the same cadence.
+const DEFAULT_GRAPH_CENTRALITY_CADENCE_MS: u64 = 600_000;
+
 /// Default minimum spacing between pool-reduce passes, in milliseconds. 0 =
 /// NEAR-REALTIME: the reducer is considered every tick, gated by its own
 /// no-op-safe scan, then live-swaps the running tagger on a non-noop merge. When
@@ -221,6 +226,14 @@ pub struct GovernorReport {
     /// a benign skip exactly as Swift's `schedulerNotStarted` → `signalsTicked
     /// == false`.
     pub signals_ticked: bool,
+    /// Graph-centrality producer duty fired this tick. True when the cadence
+    /// elapsed: the duty read the estate structure graph, computed per-drawer
+    /// eigenvalue centrality via the keystones oracle, and registered the
+    /// `GraphCache` the recall `graph` column reads. Mirrors Swift
+    /// `GovernorReport.graphCentralityFired`. The flag reflects the cadence gate;
+    /// the registration happens whenever the gate fires (an empty estate
+    /// registers an empty cache — every score 0.0, which is correct).
+    pub graph_centrality_fired: bool,
     /// Topology snapshot duty fired this tick. True when the cadence elapsed
     /// and `stats_store` is Some (or cadence elapsed and store is None — the
     /// field reflects cadence gate only, not store presence, matching Swift).
@@ -296,6 +309,17 @@ pub struct AutonomicGovernor {
     topology_cadence_ms: u64,
     /// Epoch-seconds of the last topology snapshot fire. None = never fired.
     last_topology_snapshot_secs: Option<f64>,
+    /// Graph-centrality producer cadence in milliseconds (default 600 000 =
+    /// 10 min, mirroring Swift `graphCentralityIntervalMs`). The producer reads
+    /// the estate structure graph, computes per-drawer eigenvalue centrality via
+    /// the keystones oracle, and registers the `GraphCache` the recall `graph`
+    /// column reads.
+    graph_centrality_cadence_ms: u64,
+    /// Epoch-seconds of the last graph-centrality producer fire. None = never
+    /// fired, so the first tick produces immediately (the `graph` column is live
+    /// from startup rather than dark for one cadence). Mirrors Swift
+    /// `lastGraphCentralityFired`.
+    last_graph_centrality_secs: Option<f64>,
     /// Process-local dirty token of the most recent COMPUTED topology snapshot
     /// inputs. A matching token at the next due cadence skips the math/encode/
     /// write — the stored snapshot is still current. In-memory only: None at
@@ -513,6 +537,12 @@ impl AutonomicGovernor {
             topology_cadence_ms,
             last_topology_snapshot_secs: None,
             last_topology_inputs_token: None,
+            // Graph-centrality producer cadence — fixed at the Swift default
+            // (600 s). Not env-tunable today (no Swift env knob either); the
+            // cadence field exists so tests can drive it via the per-tick gate
+            // exactly like topology. First fire is immediate (None).
+            graph_centrality_cadence_ms: DEFAULT_GRAPH_CENTRALITY_CADENCE_MS,
+            last_graph_centrality_secs: None,
             pool_reduce_cadence_ms,
             last_pool_reduce_secs: None,
             pool_dir,
@@ -528,6 +558,16 @@ impl AutonomicGovernor {
     /// Stop the loop. Safe to call from any thread; idempotent.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Override the graph-centrality producer cadence (milliseconds). Mirrors
+    /// the Swift `graphCentralityIntervalMs` init parameter; `0` fires the
+    /// producer on every tick. Test-only knob — production uses the 10-minute
+    /// default. Resets the last-fired marker so the next tick fires immediately
+    /// under the new cadence.
+    pub fn set_graph_centrality_cadence_ms(&mut self, cadence_ms: u64) {
+        self.graph_centrality_cadence_ms = cadence_ms;
+        self.last_graph_centrality_secs = None;
     }
 
     // MARK: - Standing-signal registration seam
@@ -902,6 +942,44 @@ impl AutonomicGovernor {
             }
         }
 
+        // ── Graph-centrality producer ──────────────────────────────────────
+        //
+        // The PRODUCER for the recall `graph` score column. Cadence gating
+        // mirrors Swift: fire when elapsed >= cadence_ms or never fired
+        // (last_graph_centrality_secs == None → immediate first fire). On fire,
+        // the duty reads the estate structure graph (drawers + tunnels +
+        // kg_facts) through the SAME coordinator the HTTP transport uses,
+        // computes per-drawer eigenvalue centrality via the keystones oracle,
+        // and registers the resulting `GraphCache` on the coordinator. This is
+        // what takes the `unionBest`/`matrixAware` recall `graph` column from
+        // dark to live (the consumption surface — `register_graph_cache` and the
+        // `graph` scoring column — already shipped; nothing was computing scores
+        // to register).
+        //
+        // Determinism: no `SystemTime::now()` here — `now_epoch_secs` is the
+        // injected tick clock. The duty owns no math (eigenvalue centrality is
+        // the conformance-gated SubstrateML primitive surfaced by
+        // `neuron_kit::keystones`); it only shapes the graph and caches the
+        // scores. Errors are logged and the loop continues — the producer must
+        // never crash the daemon. An empty estate registers an empty cache
+        // (every score 0.0 — correct, identical to "no cache registered").
+        let graph_centrality_elapsed_ms = self
+            .last_graph_centrality_secs
+            .map(|last| ((now_epoch_secs - last) * 1000.0) as u64);
+        let graph_centrality_fired = match graph_centrality_elapsed_ms {
+            None => true,                                        // never fired
+            Some(ms) => ms >= self.graph_centrality_cadence_ms, // cadence elapsed
+        };
+        if graph_centrality_fired {
+            self.last_graph_centrality_secs = Some(now_epoch_secs);
+            if let Err(e) = graph_centrality_duty(&self.coord, &self.handle) {
+                eprintln!(
+                    "AutonomicGovernor: graph-centrality producer error for estate {:?}: {e}",
+                    Uuid::from_bytes(self.handle.estate_uuid)
+                );
+            }
+        }
+
         // ── Pool reducer (novel-token merge-back) + LIVE TAGGER SWAP ───────
         //
         // The in-session learning loop. NEAR-REALTIME: considered every tick
@@ -972,6 +1050,7 @@ impl AutonomicGovernor {
             dreaming_fired,
             maintenance_fired,
             signals_ticked,
+            graph_centrality_fired,
             topology_snapshot_fired,
             encode_drain_fired,
             pool_reduce_fired,
@@ -994,6 +1073,63 @@ fn system_time_to_nanos(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+// ── Graph-centrality producer duty ──────────────────────────────────────────────
+
+/// Compute per-drawer eigenvalue centrality for the whole estate and register it
+/// as a `GraphCache`, taking the `unionBest` / `matrixAware` recall `graph` score
+/// column from dark to live.
+///
+/// The Rust mirror of Swift `AutonomicGovernor.graphCentralityScan`. It reads the
+/// estate structure graph (drawers + tunnels + kg_facts) through the coordinator,
+/// shapes it into the (node_ids, edges) the `neuron_kit::keystones` oracle
+/// consumes (identical shape to the Swift port), runs that oracle over ALL drawers
+/// (`top_k = node count`), and installs the per-drawer scores on the coordinator.
+///
+/// Math ownership (I-17): owns NO math. Eigenvalue centrality is the
+/// conformance-gated SubstrateML primitive surfaced by `neuron_kit::keystones`;
+/// this duty only shapes the graph and caches the scores. A faithful cadence
+/// wrapper of a direct `keystones` call on the same graph.
+///
+/// Determinism: no clock read — the registration is a pure function of the estate
+/// state. The only side effect is the cache registration (idempotent
+/// re-registration replaces the prior snapshot). An empty estate registers an
+/// empty cache (every `graph_score` 0.0 — correct, C-16).
+///
+/// Locking: takes the coordinator `Mutex` briefly — three reads + one register.
+/// Returns the lock-poison or read error as a string for the caller to log; the
+/// governor loop continues on error (never crashes the daemon).
+fn graph_centrality_duty(
+    coord: &Arc<Mutex<EstateCoordinator>>,
+    handle: &EstateHandle,
+) -> Result<(), String> {
+    use crate::graph_centrality::{
+        build_centrality_graph, compute_centrality_scores, GraphCentralityCache,
+    };
+
+    let mut coord = coord
+        .lock()
+        .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+
+    // Reads through the coordinator verb surface (same active-only KGFact
+    // filter the Swift `recallKGFacts` applies, so both ports score the same
+    // fact set).
+    let drawers = coord
+        .all_drawers(handle)
+        .map_err(|e| format!("all_drawers failed: {e:?}"))?;
+    let tunnels = coord
+        .all_tunnels(handle)
+        .map_err(|e| format!("all_tunnels failed: {e:?}"))?;
+    let facts = coord
+        .recall_kg_facts(handle)
+        .map_err(|e| format!("recall_kg_facts failed: {e:?}"))?;
+
+    let graph = build_centrality_graph(&drawers, &tunnels, &facts);
+    let scores = compute_centrality_scores(&graph);
+
+    coord.register_graph_cache(handle, Arc::new(GraphCentralityCache::new(scores)));
+    Ok(())
 }
 
 // ── Topology snapshot duty ────────────────────────────────────────────────────
