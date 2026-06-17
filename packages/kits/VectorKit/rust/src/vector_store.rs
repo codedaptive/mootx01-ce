@@ -186,21 +186,31 @@ struct HotState {
     /// on the first `find_nearest` or write call.
     index_built: bool,
 
-    /// Lane D: the in-house exact float index over the float32 rows in the
-    /// `vectors` table. Production exact path per Bob's storage amendment
-    /// (2026-06-12): floats live in resident float arrays scanned by
-    /// `FloatBruteForceIndex` — no external engine. Built lazily and updated
-    /// incrementally as float payloads are written.
+    /// Lane D: the in-house exact float indices, ONE PER modelID, over the
+    /// float32 rows in the `vectors` table. Production exact path per Bob's
+    /// storage amendment (2026-06-12): floats live in resident float arrays
+    /// scanned by `FloatBruteForceIndex` — no external engine.
     ///
-    /// The float lane is reproducible-within-config, NOT four-way
-    /// bit-identical (arch spec §6), so it is kept on its own index,
-    /// separate from the binary `brute_force_index`/`mih_index` (I-7).
-    float_index: FloatBruteForceIndex,
-
-    /// True once the float index has been populated from the table. Set by
-    /// `ensure_float_index_built_locked` on the first float write or
-    /// `find_nearest_float` call.
-    float_index_built: bool,
+    /// ## Why per-modelID (mission 6a-iii-core)
+    ///
+    /// `FloatBruteForceIndex` requires a SINGLE stride (one dimension) per index
+    /// and `search` errors when the probe dimension does not match the array
+    /// stride. Different models emit different float dimensions, and an
+    /// N-provider corpus holds several models' float rows in one `vectors`
+    /// table, so a SINGLE shared index built from the first record's stride
+    /// would be corrupt for every other model and error on query. Spec I-4 keeps
+    /// models on disjoint partitions and forbids cross-model comparison, so the
+    /// correct structure is one index per modelID, built from that model's rows
+    /// only (uniform stride). For a single-model corpus the map holds exactly
+    /// one entry — byte-identical behaviour to the prior single shared index.
+    /// Mirrors Swift `VectorStore.floatIndices`.
+    ///
+    /// The float lane is reproducible-within-config, NOT four-way bit-identical
+    /// (arch spec §6), so it is kept on its own indices, separate from the
+    /// binary `brute_force_index`/`mih_index` (I-7). Built lazily per modelID on
+    /// the first `find_nearest_float` for that model; the entry's presence in
+    /// the map is the per-model "built" flag.
+    float_indices: std::collections::HashMap<String, FloatBruteForceIndex>,
 
     /// Number of times the sidecar was detected as stale and rebuilt from
     /// the `vectors` table in the lifetime of this `VectorStore` instance.
@@ -322,8 +332,9 @@ impl VectorStore {
                 mih_threshold,
                 is_mih_active: false,
                 index_built: false,
-                float_index: FloatBruteForceIndex::new(),
-                float_index_built: false,
+                // Float indices are built lazily per modelID on first
+                // find_nearest_float; the map starts empty.
+                float_indices: std::collections::HashMap::new(),
                 sidecar_rebuild_count: 0,
             }),
         }
@@ -516,15 +527,16 @@ impl VectorStore {
             }
             Self::select_index(&mut state);
         } else if payload.kind == VectorKind::Float32 {
-            // Mirror float32 payloads into the Lane D float index so
-            // find_nearest_float sees this write without a full table
-            // rescan. Only when the float index is already built — otherwise
-            // the table write is authoritative and the row is picked up when
-            // ensure_float_index_built_locked next runs (lazy first-use build).
+            // Mirror float32 payloads into the Lane D float index for THIS
+            // modelID so find_nearest_float sees this write without a full table
+            // rescan. Only when this model's float index is already built (its
+            // presence in `float_indices` is the built flag) — otherwise the
+            // table write is authoritative and the row is picked up when
+            // find_nearest_float lazily builds this model's index on first use.
             let mut state = self.state.lock().map_err(|_| {
                 VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
             })?;
-            if state.float_index_built {
+            if let Some(model_index) = state.float_indices.get_mut(model_id) {
                 let key = VectorRecordKey::new(
                     item_id.to_string(),
                     vector_index,
@@ -535,8 +547,8 @@ impl VectorStore {
                 // the prior float slot for this key before appending the new
                 // one, mirroring the table's ON CONFLICT UPDATE so a stale
                 // float vector cannot survive in the scan.
-                state.float_index.remove(&key)?;
-                state.float_index.add(key, payload.clone())?;
+                model_index.remove(&key)?;
+                model_index.add(key, payload.clone())?;
             }
         }
 
@@ -649,7 +661,14 @@ impl VectorStore {
             })
             .collect();
 
-        let has_float = batch.iter().any(|i| i.payload.kind == VectorKind::Float32);
+        // Collect the distinct modelIDs that have a float row in the batch so
+        // each affected model's Lane D index can be invalidated below (per-model
+        // index, mission 6a-iii-core).
+        let float_model_ids: std::collections::HashSet<String> = batch
+            .iter()
+            .filter(|i| i.payload.kind == VectorKind::Float32)
+            .map(|i| i.model_id.clone())
+            .collect();
 
         {
             let mut state = self.state.lock().map_err(|_| {
@@ -711,10 +730,13 @@ impl VectorStore {
                 Self::select_index(&mut state);
             }
 
-            // 3. Float lane: invalidate Lane D so the next find_nearest_float
-            //    rebuilds it once from the table (cheaper than N float adds).
-            if has_float {
-                state.float_index_built = false;
+            // 3. Float lane: invalidate the Lane D index for every modelID that
+            //    has a float row in the batch so the next find_nearest_float
+            //    rebuilds that model's index once from the table (cheaper than N
+            //    float adds). Dropping the map entry is the invalidation; other
+            //    models' indices are untouched.
+            for model_id in &float_model_ids {
+                state.float_indices.remove(model_id);
             }
         }
 
@@ -1025,9 +1047,18 @@ impl VectorStore {
         let mut state = self.state.lock().map_err(|_| {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
-        self.ensure_float_index_built_locked(&mut state)?;
+        // Build (once, lazily) the Lane D index for THIS modelID from its float
+        // rows only — uniform stride, so the search dimension guard is satisfied
+        // even when the table holds several models' float rows of differing
+        // dimension (mission 6a-iii-core). Returns false when the model has no
+        // float rows (no float lane for it).
+        if !self.ensure_float_index_built_locked(&mut state, model_id)? {
+            return Ok(Vec::new());
+        }
 
         let probe_payload = VectorPayload::from_f32(probe);
+        // The index already holds only this model's rows, but keep the modelID
+        // metadata filter for defence-in-depth.
         let filter = MetadataFilter {
             model_id: Some(model_id.to_string()),
             model_version: None,
@@ -1035,7 +1066,12 @@ impl VectorStore {
 
         // FloatBruteForceIndex computes cosine distance and applies the
         // (distance ASC, item_id ASC) tie-break (retrieval algorithms ref §0.3).
-        let hits = state.float_index.search(
+        // The per-model index is guaranteed present here (ensure returned true).
+        let model_index = state
+            .float_indices
+            .get(model_id)
+            .expect("ensure_float_index_built_locked returned true → index present");
+        let hits = model_index.search(
             &probe_payload,
             DenseMetric::Float(crate::engine::metric::FloatMetric::Cosine),
             k,
@@ -1143,10 +1179,11 @@ impl VectorStore {
         state.live_binary_count = 0;
         state.is_mih_active = false;
         state.index_built = true;
-        // Reset the Lane D float index to empty — every float row was just
-        // deleted, so the resident float array must be cleared.
-        state.float_index.build(&[], &[])?;
-        state.float_index_built = true;
+        // Reset the Lane D float indices — every float row was just deleted, so
+        // every per-modelID resident float array must be cleared. Dropping all
+        // map entries clears every model's index; each rebuilds lazily (and
+        // empty) on the next find_nearest_float for that model.
+        state.float_indices.clear();
         Ok(())
     }
 
@@ -1193,11 +1230,12 @@ impl VectorStore {
         let mut state = self.state.lock().map_err(|_| {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
-        // The deletion may have removed float32 rows. Invalidate the Lane D
-        // index so the next find_nearest_float rebuilds from the table (the
-        // authoritative source). The delete carries no kind, so a lazy
-        // rebuild is the correct coherence path for the float lane.
-        state.float_index_built = false;
+        // The deletion may have removed float32 rows for this modelID.
+        // Invalidate THIS model's Lane D index so the next find_nearest_float
+        // rebuilds from the table (the authoritative source). The delete carries
+        // no kind, so a lazy rebuild is the correct coherence path for the float
+        // lane. Other models' indices are untouched.
+        state.float_indices.remove(model_id);
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
         }
@@ -1305,45 +1343,66 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Ensure the Lane D float index is populated. Idempotent — no-op once built.
+    /// Ensure the Lane D float index for ONE modelID is populated. Idempotent —
+    /// no-op once that model's index is built.
     ///
-    /// Must be called with the state mutex already locked. Builds the
-    /// `FloatBruteForceIndex` from the float32 rows in the `vectors` table
-    /// (one query, paid once per process lifetime in the normal path).
-    /// Unlike the binary lane there is no sidecar for the float lane yet —
-    /// the float resident array is rebuilt from the table on first use.
+    /// Must be called with the state mutex already locked. Builds a
+    /// `FloatBruteForceIndex` from THIS model's float32 rows only (uniform
+    /// stride, so the search dimension guard holds even when the table mixes
+    /// models of differing float dimension — mission 6a-iii-core). Returns
+    /// `true` when this model now has an index, `false` when the model has no
+    /// float rows (no float lane for it; the caller returns no matches). The
+    /// map entry's presence is the per-model "built" flag. Unlike the binary
+    /// lane there is no sidecar for the float lane yet — the float resident
+    /// array is rebuilt from the table on first use.
     fn ensure_float_index_built_locked(
         &self,
         state: &mut HotState,
-    ) -> Result<(), VectorKitError> {
-        if state.float_index_built {
-            return Ok(());
+        model_id: &str,
+    ) -> Result<bool, VectorKitError> {
+        if state.float_indices.contains_key(model_id) {
+            return Ok(true);
         }
-        let records = self.fetch_all_float_records()?;
+        let records = self.fetch_float_records(model_id)?;
+        if records.is_empty() {
+            // No float rows for this model — do NOT cache an empty index: a
+            // later ingest of this model's first float row must be able to build
+            // a real index on the next search.
+            return Ok(false);
+        }
         let payloads: Vec<VectorPayload> = records.iter().map(|(_, p)| p.clone()).collect();
         let keys: Vec<VectorRecordKey> = records.into_iter().map(|(k, _)| k).collect();
-        // FloatBruteForceIndex::build accepts an empty slice (it parks an
-        // empty Float32 array and every search returns no matches).
-        state.float_index.build(&payloads, &keys)?;
-        state.float_index_built = true;
-        Ok(())
+        let mut index = FloatBruteForceIndex::new();
+        index.build(&payloads, &keys)?;
+        state.float_indices.insert(model_id.to_string(), index);
+        Ok(true)
     }
 
-    /// Fetch all float32 rows from the `vectors` table, sorted by
-    /// VectorRecordKey natural order (arch spec §4.2: deterministic
-    /// partition index, so the cross-language scan order matches).
-    fn fetch_all_float_records(
+    /// Fetch the float32 rows for ONE modelID from the `vectors` table, sorted
+    /// by VectorRecordKey natural order (arch spec §4.2: deterministic partition
+    /// index, so the cross-language scan order matches). Scoping the fetch to a
+    /// single modelID guarantees a uniform stride (one dimension per model), so
+    /// the resulting FloatBruteForceIndex never mixes dimensions across models
+    /// (mission 6a-iii-core).
+    fn fetch_float_records(
         &self,
+        model_id: &str,
     ) -> Result<Vec<(VectorRecordKey, VectorPayload)>, VectorKitError> {
         let rows = self
             .storage
             .row_store()
             .query(
                 "vectors",
-                Some(&StoragePredicate::Eq(
-                    Column::new("vectors", "kind"),
-                    TypedValue::Int(VectorKind::Float32.raw()),
-                )),
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "kind"),
+                        TypedValue::Int(VectorKind::Float32.raw()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "model_id"),
+                        TypedValue::Text(model_id.to_string()),
+                    ),
+                ])),
                 &[],
                 None,
                 None,
@@ -1503,9 +1562,10 @@ impl VectorStore {
         let mut state = self.state.lock().map_err(|_| {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
-        // The deleted row may have been a float32 vector. Invalidate the
-        // Lane D index so the next find_nearest_float rebuilds from the table.
-        state.float_index_built = false;
+        // The deleted row may have been a float32 vector for this modelID.
+        // Invalidate THIS model's Lane D index so the next find_nearest_float
+        // rebuilds from the table. Other models' indices are untouched.
+        state.float_indices.remove(model_id);
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
         }

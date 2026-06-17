@@ -302,8 +302,8 @@ public enum EmbeddingModel: Sendable {
 
 /// Unified RAG entry point for CorpusKit.
 ///
-/// Corpus composes BundleStore, BM25Index, VectorStore, and an
-/// EmbeddingProvider internally. The public surface exposes only
+/// Corpus composes BundleStore, BM25Index, VectorStore, and one OR MORE
+/// EmbeddingProviders internally. The public surface exposes only
 /// `ingest`, `recall`, `remove`, and `count`. No VectorKit type
 /// appears in any public signature — the sealed-vector principle is
 /// enforced here, not by the caller.
@@ -313,37 +313,73 @@ public enum EmbeddingModel: Sendable {
 /// `init`), then call `ingest` to add documents and `recall` to query.
 /// The BundleStore is append-only; `remove(sourceID:)` clears the
 /// recall index (BM25 + vectors) without deleting content rows.
+///
+/// ## N-provider capability (mission 6a-iii-core)
+///
+/// Corpus holds an ORDERED collection of provider slots, one per held
+/// `EmbeddingModel`, each keyed by its `modelID`. The single-provider
+/// `init(storage:model:)` is the N=1 special case: it builds a one-slot
+/// corpus that behaves byte-identically to the pre-6a-iii single-provider
+/// implementation. Multi-provider `init(storage:models:)` fans every
+/// operation (ingest embed, reindex train, remove, destroy) across all slots,
+/// each under its own `modelID`, so the VectorStore/BasisStore — already keyed
+/// by (modelID, modelVersion) — hold the N providers' rows side by side with
+/// no schema change.
+///
+/// The single-signal entry points (`recall`, `floatNearest`, `embed`,
+/// `embedFloat`, `modelID`, `supportsFloat`) delegate to the DEFAULT signal —
+/// the first held slot — so existing callers are unaffected. The per-signal
+/// fan-out for recall is exposed additively via `floatNearestPerSignal`, the
+/// 6b RRF-fusion seam (this mission builds the seam, NOT the fusion).
 public actor Corpus {
+
+    /// One held embedding provider plus its fresh-basis blob.
+    ///
+    /// A slot is the per-provider unit the N-provider corpus fans operations
+    /// over. `provider` is the serving provider (replaced in place by training
+    /// or by load-on-open reconstruction — hence `var`); `freshBasisBlob` is
+    /// the EMPTY (untrained) serialized basis captured ONLY for a fresh
+    /// trainable provider with no persisted basis (see the field doc below).
+    /// For N=1 the corpus holds exactly one slot, and every fan-out loop runs
+    /// once — byte-identical to the pre-6a-iii single-provider path.
+    private struct ProviderSlot {
+        /// The serving provider for this signal. `var` because the load-on-open
+        /// path and each training pass install a replacement. Never exposed on
+        /// the public surface (sealed-vector principle).
+        var provider: any EmbeddingProvider
+        /// The serialized basis of a FRESH (untrained) trainable provider,
+        /// captured ONLY when this slot was built from a fresh trainable
+        /// provider (RI/PPMI/LSA/NMF) with no persisted basis — NOT when the
+        /// provider was restored from a persisted basis on open.
+        ///
+        /// Each training pass (`reindex` and the first-ingest auto-train)
+        /// reconstructs a FRESH provider from this empty-basis blob, trains it
+        /// on the full corpus, and installs it as `provider`. This is the only
+        /// correct retrain semantics: `trainOnCorpus` is ADDITIVE (it
+        /// accumulates over calls), so retraining an already-trained provider
+        /// would double-count the first-ingest corpus. Reconstructing from the
+        /// empty blob guarantees every train starts from scratch, so reindex is
+        /// idempotent and produces the canonical from-scratch basis (the
+        /// cross-port conformance contract).
+        ///
+        /// When the provider was restored from a persisted basis on open, this
+        /// is nil: a reopened corpus is already trained and serving; `reindex`
+        /// then re-embeds under the loaded basis without retraining. This
+        /// deliberately mirrors the Rust port, where the seam's
+        /// `reconstruct_basis` yields a non-trainable boxed provider, so a
+        /// reopened-from-blob corpus is not retrained-in-place on either port.
+        let freshBasisBlob: Data?
+    }
 
     private let bundleStore: BundleStore
     private let bm25: BM25Index
     private let vectorStore: VectorStore
     private let basisStore: BasisStore
-    /// `var` (not `let`) because the load-on-open path replaces the fresh
-    /// provider with one reconstructed from a persisted basis. The provider is
-    /// never exposed on the public surface (sealed-vector principle).
-    private var provider: any EmbeddingProvider
-    /// The serialized basis of a FRESH (untrained) trainable provider, captured
-    /// ONLY when the corpus was built from a fresh trainable provider
-    /// (RI/PPMI/LSA/NMF) with no persisted basis — NOT when the provider was
-    /// restored from a persisted basis on open.
-    ///
-    /// Each training pass (`reindex` and the first-ingest auto-train)
-    /// reconstructs a FRESH provider from this empty-basis blob, trains it on the
-    /// full corpus, and installs it as `provider`. This is the only correct
-    /// retrain semantics: `trainOnCorpus` is ADDITIVE (it accumulates over
-    /// calls), so retraining an already-trained provider would double-count the
-    /// first-ingest corpus. Reconstructing from the empty blob guarantees every
-    /// train starts from scratch, so reindex is idempotent and produces the
-    /// canonical from-scratch basis (the cross-port conformance contract).
-    ///
-    /// When the provider was restored from a persisted basis on open, this is
-    /// nil: a reopened corpus is already trained and serving; `reindex` then
-    /// re-embeds under the loaded basis without retraining. This deliberately
-    /// mirrors the Rust port, where the seam's `reconstruct_basis` yields a
-    /// non-trainable boxed provider, so a reopened-from-blob corpus is not
-    /// retrained-in-place on either port.
-    private let freshBasisBlob: Data?
+    /// The ordered per-provider slots, one per held `EmbeddingModel`, in
+    /// construction order. `slots[0]` is the DEFAULT signal that the
+    /// single-signal entry points delegate to. Never empty: every init builds
+    /// at least one slot. For N=1 this holds exactly one slot.
+    private var slots: [ProviderSlot]
     private var hlcGenerator: HLCGenerator
     /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join.
     ///
@@ -359,11 +395,15 @@ public actor Corpus {
     /// this property for production logic.
     var _forcedFloatError: Error? = nil
 
-    /// Construct a Corpus against a PersistenceKit Storage.
+    /// Construct a single-provider Corpus against a PersistenceKit Storage.
     ///
-    /// Opens the BundleStore and VectorStore schema declarations on the
-    /// supplied storage before constructing internal components. The
-    /// caller owns the Storage lifecycle; Corpus does not close it.
+    /// This is the N=1 entry point. It delegates to `init(storage:models:)`
+    /// with a one-element model set, so a single-provider corpus is just the
+    /// degenerate case of the N-provider corpus — ONE code path, not two — and
+    /// behaves byte-identically to the pre-6a-iii single-provider
+    /// implementation. The production default remains a single provider; this
+    /// init's signature is PRESERVED so every existing call site compiles
+    /// unchanged (mission 6a-iii-core back-compat mandate).
     ///
     /// - Parameters:
     ///   - storage: A PersistenceKit Storage instance. Both the
@@ -373,6 +413,36 @@ public actor Corpus {
     ///   - model: Embedding model selection. Defaults to `.deterministic`
     ///     (no CoreML required).
     public init(storage: any Storage, model: EmbeddingModel = .default) async throws {
+        try await self.init(storage: storage, models: [model])
+    }
+
+    /// Construct an N-provider Corpus against a PersistenceKit Storage.
+    ///
+    /// Builds one ordered provider slot per element of `models`, each keyed by
+    /// its `modelID`. `models[0]` becomes the DEFAULT signal that the
+    /// single-signal entry points (`recall`, `floatNearest`, `embed`,
+    /// `embedFloat`, `modelID`, `supportsFloat`) delegate to. Every fan-out
+    /// operation (ingest embed, reindex train, remove, destroy) runs across all
+    /// slots, each under its own modelID — the VectorStore/BasisStore are
+    /// already keyed by (modelID, modelVersion), so N providers' rows coexist
+    /// with no schema change.
+    ///
+    /// For each slot: build the fresh provider, then — if it is a trainable
+    /// distributional provider AND a basis was previously persisted for its
+    /// (modelID, modelVersion) — reconstruct the trained provider from that
+    /// blob so the dense lane is trained-ready immediately after restart,
+    /// without re-running training on every open. A non-trainable provider, or
+    /// a trainable provider with no persisted basis yet, keeps the fresh one.
+    ///
+    /// - Parameters:
+    ///   - storage: A PersistenceKit Storage instance (schemas applied here).
+    ///   - models: One or more embedding model selections, in priority order.
+    ///     Must be non-empty; `models[0]` is the default signal. Distinct
+    ///     `modelID`s are expected — two slots with the same modelID would key
+    ///     the same vector/basis rows and is a caller error.
+    public init(storage: any Storage, models: [EmbeddingModel]) async throws {
+        precondition(!models.isEmpty, "Corpus requires at least one embedding model")
+
         // Apply both schema declarations. `open(schema:)` is version-gated
         // (skips if the schema version is already current). Since both
         // BundleStore and VectorStore are version 1, the second `open` would
@@ -395,20 +465,23 @@ public actor Corpus {
         self.vectorStore = VectorStore(storage: storage)
         self.basisStore = BasisStore(storage: storage)
 
-        // Build the fresh provider, then — if it is a trainable distributional
-        // provider AND a basis was previously persisted for its (modelID,
-        // modelVersion) — reconstruct the trained provider from that blob so
-        // the dense lane is trained-ready immediately after restart, without
-        // re-running training on every open. A non-trainable provider, or a
-        // trainable provider with no persisted basis yet, keeps the fresh one.
-        let freshProvider = model.makeProvider()
-        let resolved = try await Self.resolveProvider(
-            freshProvider: freshProvider,
-            isTrainable: model.isTrainable,
-            basisStore: basisStore
-        )
-        self.provider = resolved.provider
-        self.freshBasisBlob = resolved.freshBasisBlob
+        // Build one slot per model, resolving each against any persisted basis.
+        // The resolution per slot is exactly the single-provider resolve, so a
+        // one-element `models` produces the byte-identical single-slot state.
+        var built: [ProviderSlot] = []
+        built.reserveCapacity(models.count)
+        for model in models {
+            let freshProvider = model.makeProvider()
+            let resolved = try await Self.resolveProvider(
+                freshProvider: freshProvider,
+                isTrainable: model.isTrainable,
+                basisStore: basisStore
+            )
+            built.append(ProviderSlot(
+                provider: resolved.provider,
+                freshBasisBlob: resolved.freshBasisBlob))
+        }
+        self.slots = built
         // nodeID 1: Corpus is a standalone actor; HLC ordering is for
         // chunk sequencing within one store, not cross-replica ordering.
         self.hlcGenerator = HLCGenerator(nodeID: 1)
@@ -427,6 +500,17 @@ public actor Corpus {
                 chunkSourceMap[chunk.id] = chunk.sourceID
             }
         }
+    }
+
+    /// The default signal's serving provider — `slots[0].provider`.
+    ///
+    /// The single-signal entry points read through this accessor so existing
+    /// callers see exactly the first held provider, identical to the
+    /// pre-6a-iii single-provider behaviour. `slots` is never empty (every init
+    /// builds at least one slot), so the force-unwrap of `first` cannot trap.
+    private var defaultProvider: any EmbeddingProvider {
+        // swiftlint:disable:next force_unwrapping — slots is never empty (init invariant)
+        slots.first!.provider
     }
 
     /// Resolve the serving provider and the fresh-empty-basis blob on open.
@@ -502,14 +586,16 @@ public actor Corpus {
         // `as? any TrainableEmbeddingBasis`, then the same resolveProvider path
         // the production init uses applies: load-on-open reconstructs from a
         // persisted basis (capturing no trainable handle), else the fresh
-        // trainable handle is captured for first-ingest/reindex.
+        // trainable handle is captured for first-ingest/reindex. The injected
+        // provider becomes the corpus's single (default) slot — N=1.
         let resolved = try await Self.resolveProvider(
             freshProvider: provider,
             isTrainable: provider is any TrainableEmbeddingBasis,
             basisStore: basisStore
         )
-        self.provider = resolved.provider
-        self.freshBasisBlob = resolved.freshBasisBlob
+        self.slots = [ProviderSlot(
+            provider: resolved.provider,
+            freshBasisBlob: resolved.freshBasisBlob)]
         self.hlcGenerator = HLCGenerator(nodeID: 1)
 
         let existing = try await bundleStore.allChunks()
@@ -557,75 +643,98 @@ public actor Corpus {
         try await bundleStore.insert(chunks)
         await bm25.index(chunks)
         // Update chunkSourceMap so bm25TopKBySource can resolve these chunks.
+        // BM25 and the source map are provider-INDEPENDENT (one keyword index
+        // per corpus), so they are maintained once, outside the per-provider
+        // fan-out below.
         for chunk in chunks { chunkSourceMap[chunk.id] = chunk.sourceID }
 
-        // First-ingest auto-train (mission 6a-ii-β): when a fresh-basis blob is
-        // present (trainable provider) AND no basis has been persisted yet, train
-        // a fresh basis on the CURRENT corpus snapshot (which now includes the
-        // just-inserted chunks) and re-embed every chunk under the trained basis.
-        // This is the ONLY implicit train trigger. Subsequent ingests (once a
-        // basis exists) take the fold-in path below: `embedFloat` projects new
-        // chunks onto the FROZEN basis without retraining — LSA/NMF cannot
-        // incrementally refactor a basis, so a per-ingest retrain would be both
-        // wrong and wasteful. Explicit `reindex(now:)` retrains on growth. A
-        // reopened-from-blob corpus has no fresh-basis blob, so it always takes
-        // the fold-in path here (already trained on open).
-        if freshBasisBlob != nil {
-            let hasBasis = try await basisStore.load(
-                modelID: provider.modelID,
-                modelVersion: provider.modelVersion
-            ) != nil
-            if !hasBasis {
-                let allChunks = try await bundleStore.allChunks()
-                try await trainAndPersistBasis(chunks: allChunks, now: now)
-                // Re-embed the whole corpus under the freshly-trained basis so
-                // the chunks ingested before this first-ingest train (if any)
-                // are embedded on the same basis as the new ones. reembedChunks
-                // is delete-first, so no duplicate rows.
-                try await reembedChunks(allChunks, now: now)
-                return
+        // Fan out the embedding work across every held provider slot. For N=1
+        // this loop runs once over the default slot — byte-identical to the
+        // pre-6a-iii single-provider ingest. Each slot embeds independently
+        // under its own modelID; the VectorStore/BasisStore keys keep the N
+        // providers' rows apart. `allChunks` is loaded lazily and shared across
+        // slots that take the first-ingest train path (the corpus snapshot is
+        // the same for every provider).
+        var cachedAllChunks: [Chunk]?
+        for index in slots.indices {
+            // First-ingest auto-train (mission 6a-ii-β): when this slot has a
+            // fresh-basis blob (trainable provider) AND no basis has been
+            // persisted yet, train a fresh basis on the CURRENT corpus snapshot
+            // (which now includes the just-inserted chunks) and re-embed every
+            // chunk under the trained basis. This is the ONLY implicit train
+            // trigger. Subsequent ingests (once a basis exists) take the fold-in
+            // path below: `embedFloat` projects new chunks onto the FROZEN basis
+            // without retraining — LSA/NMF cannot incrementally refactor a basis,
+            // so a per-ingest retrain would be both wrong and wasteful. Explicit
+            // `reindex(now:)` retrains on growth. A reopened-from-blob corpus has
+            // no fresh-basis blob, so it always takes the fold-in path here
+            // (already trained on open).
+            if slots[index].freshBasisBlob != nil {
+                let slotProvider = slots[index].provider
+                let hasBasis = try await basisStore.load(
+                    modelID: slotProvider.modelID,
+                    modelVersion: slotProvider.modelVersion
+                ) != nil
+                if !hasBasis {
+                    let allChunks: [Chunk]
+                    if let cached = cachedAllChunks {
+                        allChunks = cached
+                    } else {
+                        allChunks = try await bundleStore.allChunks()
+                        cachedAllChunks = allChunks
+                    }
+                    try await trainAndPersistBasis(slotIndex: index, chunks: allChunks, now: now)
+                    // Re-embed the whole corpus under the freshly-trained basis
+                    // so the chunks ingested before this first-ingest train (if
+                    // any) are embedded on the same basis as the new ones.
+                    // reembedChunks is delete-first, so no duplicate rows.
+                    try await reembedChunks(slotIndex: index, allChunks, now: now)
+                    continue
+                }
             }
-        }
 
-        // Fold-in path: a basis already exists (or the provider is not
-        // trainable). Embed only the NEW chunks; for a trainable provider
-        // `embedFloat` projects them onto the frozen basis (no retrain).
-        //
-        // Fan-out: embed each chunk and store the vector. The
-        // chunk.id.uuidString == vector.item_id join is maintained here;
-        // the caller never sees it (sealed-vector principle). The column
-        // was renamed drawer_id → item_id in Lane F (arch spec §4.1).
-        for chunk in chunks {
-            let engram = try await provider.embed(chunk.text)
-            try await vectorStore.addVector(
-                itemID: chunk.id.uuidString,
-                engram: engram,
-                modelID: provider.modelID,
-                modelVersion: provider.modelVersion,
-                filedAt: now
-            )
-
-            // Float lane (Lane D): RETAIN, don't recompute. The provider's
-            // float vector is the SAME pooled embedding `embed` already ran
-            // through `FloatSimHash.project` for the binary engram — one
-            // inference pass, two stored rows. The float row is a SECOND row
-            // per chunk under the same item_id, distinguished by `kind=float32`
-            // and `vector_index=1` (the binary engram is vector_index=0). It is
-            // written only when the provider supports `embedFloat`; the default
-            // provider opts out by throwing, so a non-float provider stores the
-            // binary lane only and the dense float lane stays dark for it.
-            // Cosine over this true embedding ranks an answer above a near-
-            // duplicate of the question, which the 256-bit SimHash projection
-            // cannot (it loses the magnitude signal).
-            if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
-                try await vectorStore.addPayload(
+            // Fold-in path: a basis already exists (or the provider is not
+            // trainable). Embed only the NEW chunks; for a trainable provider
+            // `embedFloat` projects them onto the frozen basis (no retrain).
+            //
+            // Fan-out: embed each chunk and store the vector. The
+            // chunk.id.uuidString == vector.item_id join is maintained here;
+            // the caller never sees it (sealed-vector principle). The column
+            // was renamed drawer_id → item_id in Lane F (arch spec §4.1).
+            let provider = slots[index].provider
+            for chunk in chunks {
+                let engram = try await provider.embed(chunk.text)
+                try await vectorStore.addVector(
                     itemID: chunk.id.uuidString,
-                    vectorIndex: 1,
-                    payload: VectorPayload(floats: floats),
+                    engram: engram,
                     modelID: provider.modelID,
                     modelVersion: provider.modelVersion,
                     filedAt: now
                 )
+
+                // Float lane (Lane D): RETAIN, don't recompute. The provider's
+                // float vector is the SAME pooled embedding `embed` already ran
+                // through `FloatSimHash.project` for the binary engram — one
+                // inference pass, two stored rows. The float row is a SECOND row
+                // per chunk under the same item_id, distinguished by
+                // `kind=float32` and `vector_index=1` (the binary engram is
+                // vector_index=0). It is written only when the provider supports
+                // `embedFloat`; the default provider opts out by throwing, so a
+                // non-float provider stores the binary lane only and the dense
+                // float lane stays dark for it. Cosine over this true embedding
+                // ranks an answer above a near-duplicate of the question, which
+                // the 256-bit SimHash projection cannot (it loses the magnitude
+                // signal).
+                if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
+                    try await vectorStore.addPayload(
+                        itemID: chunk.id.uuidString,
+                        vectorIndex: 1,
+                        payload: VectorPayload(floats: floats),
+                        modelID: provider.modelID,
+                        modelVersion: provider.modelVersion,
+                        filedAt: now
+                    )
+                }
             }
         }
     }
@@ -667,43 +776,50 @@ public actor Corpus {
     public func reindex(now: Date) async throws {
         let chunks = try await bundleStore.allChunks()
 
-        if freshBasisBlob != nil {
-            // Train a FRESH basis on the full corpus snapshot through the seam,
-            // install the trained provider, and persist the basis. Reconstructing
-            // fresh (rather than retraining the live provider in place) is
-            // required because trainOnCorpus is additive — see freshBasisBlob.
-            try await trainAndPersistBasis(chunks: chunks, now: now)
-        }
+        // Fan out: refresh every held provider slot. For N=1 this loops once
+        // over the default slot — byte-identical to the pre-6a-iii reindex.
+        for index in slots.indices {
+            if slots[index].freshBasisBlob != nil {
+                // Train a FRESH basis on the full corpus snapshot through the
+                // seam, install the trained provider for this slot, and persist
+                // the basis. Reconstructing fresh (rather than retraining the
+                // live provider in place) is required because trainOnCorpus is
+                // additive — see ProviderSlot.freshBasisBlob.
+                try await trainAndPersistBasis(slotIndex: index, chunks: chunks, now: now)
+            }
 
-        // Re-embed every chunk under the (now possibly retrained) provider,
-        // replacing stale vectors. Done whether or not a retrain occurred: for a
-        // non-trainable provider — or a reopened-from-blob corpus with no
-        // fresh-basis blob — reindex is a vector refresh under the current basis,
-        // with no basis row written.
-        try await reembedChunks(chunks, now: now)
+            // Re-embed every chunk under this slot's (now possibly retrained)
+            // provider, replacing stale vectors. Done whether or not a retrain
+            // occurred: for a non-trainable provider — or a reopened-from-blob
+            // slot with no fresh-basis blob — reindex is a vector refresh under
+            // the current basis, with no basis row written.
+            try await reembedChunks(slotIndex: index, chunks, now: now)
+        }
     }
 
     /// Train a FRESH provider on the given chunks' texts and persist the
-    /// serialized basis. Shared by `reindex` and the first-ingest auto-train.
+    /// serialized basis FOR THE GIVEN SLOT. Shared by `reindex` and the
+    /// first-ingest auto-train.
     ///
-    /// Reconstructs a fresh (untrained) provider from `freshBasisBlob`, trains it
-    /// on the chunk texts through the seam, installs it as `provider`, and
-    /// UPSERTs the resulting basis keyed by (modelID, modelVersion).
-    /// `trainedChunkCount` is the count the basis was trained on (the staleness
-    /// anchor). Training fresh — not in place — guarantees the additive
-    /// `trainOnCorpus` starts from scratch, so the basis is the canonical
-    /// from-scratch one and reindex is idempotent. Precondition:
-    /// `freshBasisBlob != nil` (the caller checks this).
-    private func trainAndPersistBasis(chunks: [Chunk], now: Date) async throws {
-        guard let freshBlob = freshBasisBlob,
-              let fresh = provider as? any TrainableEmbeddingBasis else {
-            // Defensive: trainAndPersistBasis is only invoked when freshBasisBlob
-            // is non-nil and the provider is trainable. If neither holds there is
-            // nothing to train; return without persisting a basis.
+    /// Reconstructs a fresh (untrained) provider from the slot's
+    /// `freshBasisBlob`, trains it on the chunk texts through the seam, installs
+    /// it as the slot's `provider`, and UPSERTs the resulting basis keyed by
+    /// (modelID, modelVersion). `trainedChunkCount` is the count the basis was
+    /// trained on (the staleness anchor). Training fresh — not in place —
+    /// guarantees the additive `trainOnCorpus` starts from scratch, so the basis
+    /// is the canonical from-scratch one and reindex is idempotent.
+    /// Precondition: `slots[slotIndex].freshBasisBlob != nil` (the caller checks
+    /// this).
+    private func trainAndPersistBasis(slotIndex: Int, chunks: [Chunk], now: Date) async throws {
+        guard let freshBlob = slots[slotIndex].freshBasisBlob,
+              let fresh = slots[slotIndex].provider as? any TrainableEmbeddingBasis else {
+            // Defensive: trainAndPersistBasis is only invoked when this slot's
+            // freshBasisBlob is non-nil and its provider is trainable. If neither
+            // holds there is nothing to train; return without persisting a basis.
             return
         }
         // Reconstruct a fresh untrained provider from the empty-basis blob, train
-        // it from scratch on the corpus, then install it as the live provider.
+        // it from scratch on the corpus, then install it as the slot's provider.
         let trainedProvider = try fresh.reconstructBasis(from: freshBlob)
         guard let trainable = trainedProvider as? any TrainableEmbeddingBasis else {
             // The reconstructed provider must itself be trainable (it is the same
@@ -715,7 +831,7 @@ public actor Corpus {
         // `trainable` and `trainedProvider` are the SAME reference object;
         // training via the trainable view mutates the provider we install.
         trainable.trainOnCorpus(texts: chunks.map(\.text))
-        self.provider = trainedProvider
+        slots[slotIndex].provider = trainedProvider
         try await basisStore.upsert(PersistedBasis(
             modelID: trainedProvider.modelID,
             modelVersion: trainedProvider.modelVersion,
@@ -725,19 +841,23 @@ public actor Corpus {
         ))
     }
 
-    /// Re-embed every chunk (binary v0 + float v1) under the current provider,
-    /// replacing any stale vectors so no duplicate rows accumulate.
+    /// Re-embed every chunk (binary v0 + float v1) under the GIVEN SLOT's
+    /// provider, replacing any stale vectors so no duplicate rows accumulate.
     ///
     /// For each chunk the prior vectors (all vector_index rows under that
-    /// item_id for the provider's modelID) are deleted, then the binary engram
-    /// and — when the provider supports it — the float vector are re-added. This
-    /// is the same store-side shape as `ingest`'s fan-out, but delete-first so a
-    /// retrain under a changed basis overwrites rather than duplicates.
-    private func reembedChunks(_ chunks: [Chunk], now: Date) async throws {
+    /// item_id for the slot provider's modelID) are deleted, then the binary
+    /// engram and — when the provider supports it — the float vector are
+    /// re-added. This is the same store-side shape as `ingest`'s fan-out, but
+    /// delete-first so a retrain under a changed basis overwrites rather than
+    /// duplicates. Other slots' rows (keyed by a different modelID) are
+    /// untouched.
+    private func reembedChunks(slotIndex: Int, _ chunks: [Chunk], now: Date) async throws {
+        let provider = slots[slotIndex].provider
         for chunk in chunks {
             // Delete-all before re-adding so a chunk that already had vectors
             // under a previous basis ends up with exactly the new vectors, not
-            // a mix. deleteAllVectors clears both lanes (v0 binary + v1 float).
+            // a mix. deleteAllVectors clears both lanes (v0 binary + v1 float)
+            // for THIS slot's modelID only.
             try await vectorStore.deleteAllVectors(
                 itemID: chunk.id.uuidString,
                 modelID: provider.modelID
@@ -779,6 +899,11 @@ public actor Corpus {
     ///     with ingest and determinism discipline).
     /// - Returns: Scored chunks ranked by fused relevance, descending.
     public func recall(_ query: String, limit: Int = 10, now: Date) async throws -> [ScoredChunk] {
+        // Single-signal entry point: recall runs on the DEFAULT signal (the
+        // first held provider). Per-signal fan-out is exposed additively via
+        // `floatNearestPerSignal` (the 6b RRF seam); this method is unchanged
+        // for existing callers.
+        let provider = defaultProvider
         let probe = try await provider.embed(query)
         return try await HybridRecall.recall(
             probe: probe,
@@ -802,18 +927,26 @@ public actor Corpus {
     ///   `ingest`.
     public func remove(sourceID: String) async throws {
         let chunks = try await bundleStore.chunksForSource(sourceID)
+        // Vector deletion fans out across every held provider's modelID so no
+        // slot leaves orphan rows for a removed source. For N=1 this inner loop
+        // runs once. The modelIDs are gathered once up front (stable for the
+        // corpus lifetime) so the per-chunk loop does not re-read `slots`.
+        let modelIDs = slots.map { $0.provider.modelID }
         for chunk in chunks {
             await bm25.remove(chunk.id)
             chunkSourceMap.removeValue(forKey: chunk.id)
-            // Delete ALL vector_index rows for this chunk, not just the binary
-            // engram at vector_index=0: the float lane (Lane D) stores a second
-            // row at vector_index=1 under the same item_id. deleteAllVectors
-            // removes both and invalidates the float index so a removed source
-            // cannot resurface through the dense float lane.
-            try await vectorStore.deleteAllVectors(
-                itemID: chunk.id.uuidString,
-                modelID: provider.modelID
-            )
+            // Delete ALL vector_index rows for this chunk under EVERY held
+            // modelID, not just the binary engram at vector_index=0: the float
+            // lane (Lane D) stores a second row at vector_index=1 under the same
+            // item_id. deleteAllVectors removes both and invalidates the float
+            // index so a removed source cannot resurface through any signal's
+            // dense float lane.
+            for modelID in modelIDs {
+                try await vectorStore.deleteAllVectors(
+                    itemID: chunk.id.uuidString,
+                    modelID: modelID
+                )
+            }
         }
     }
 
@@ -846,14 +979,18 @@ public actor Corpus {
 
         // 2. Delete all vector rows from the VectorStore.
         //    VectorStore.destroyAllVectors() deletes every row in the vectors
-        //    table. Vectors are not append-only so deletion is permitted.
+        //    table regardless of modelID, so it clears ALL held signals' rows
+        //    in one call (no per-slot fan-out needed). Vectors are not
+        //    append-only so deletion is permitted.
         try await vectorStore.destroyAllVectors()
 
         // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
-        //    corpus must leave no orphaned basis row: the next open would
-        //    otherwise reconstruct a trained provider whose basis no longer
-        //    matches any stored vectors. The basis table is not append-only,
-        //    so deletion is permitted.
+        //    corpus must leave no orphaned basis row FOR ANY held modelID: the
+        //    next open would otherwise reconstruct a trained provider whose
+        //    basis no longer matches any stored vectors. basisStore.deleteAll()
+        //    clears every row regardless of modelID, so all held signals' bases
+        //    are wiped in one call. The basis table is not append-only, so
+        //    deletion is permitted.
         try await basisStore.deleteAll()
     }
 
@@ -916,16 +1053,19 @@ public actor Corpus {
     /// - Parameter text: Text to embed. Should be the query string.
     /// - Returns: A 256-bit `Engram` encoding the text's semantic fingerprint.
     public func embed(_ text: String) async throws -> Engram {
-        try await provider.embed(text)
+        // Single-signal entry point: embeds on the DEFAULT signal.
+        try await defaultProvider.embed(text)
     }
 
-    /// The embedding model identifier this corpus was configured with.
+    /// The embedding model identifier of this corpus's DEFAULT signal.
     ///
     /// Exposed for GeniusLocusKit's RecallDirector vector lane so it can pass
     /// the correct `modelID` to `VectorStore.findNearest`. Must match the
-    /// `modelID` used during `ingest` — vectors stored under a different model
-    /// ID are not comparable per spec I-4.
-    public var modelID: String { provider.modelID }
+    /// `modelID` used during `ingest` for the default signal — vectors stored
+    /// under a different model ID are not comparable per spec I-4. For an
+    /// N-provider corpus this is the first held provider's modelID; the other
+    /// signals' modelIDs are reachable through `floatNearestPerSignal`.
+    public var modelID: String { defaultProvider.modelID }
 
     /// Embed the query text into the pooled dense float vector (Lane D) — the
     /// probe for the dense float recall lane.
@@ -943,7 +1083,8 @@ public actor Corpus {
     /// - Returns: the pooled float vector, or `[]` for empty input.
     /// - Throws: `VectorKitError.embeddingFailed` when the provider opts out.
     public func embedFloat(_ text: String) async throws -> [Float] {
-        try await provider.embedFloat(text)
+        // Single-signal entry point: embeds on the DEFAULT signal.
+        try await defaultProvider.embedFloat(text)
     }
 
     /// Dense float nearest-neighbour recall (Lane D): embed `query` to its
@@ -982,6 +1123,8 @@ public actor Corpus {
         // Test-only hook: if a forced error is installed, consume it and return
         // .storeError immediately. This exercises the observable store-error code
         // path without requiring production modifications to the vector store.
+        // The hook is checked on the single-signal entry point only; the
+        // per-signal fan-out does not consult it.
         if let forced = _forcedFloatError {
             _forcedFloatError = nil
             corpusLog.error("floatNearest: findNearestFloat failed — \(forced, privacy: .public)")
@@ -994,6 +1137,28 @@ public actor Corpus {
             return .storeError(forced)
         }
 
+        // Single-signal entry point: run the dense float lane on the DEFAULT
+        // signal. The per-provider mechanics live in `floatNearest(provider:…)`
+        // so `floatNearestPerSignal` can reuse them unchanged.
+        return await floatNearest(provider: defaultProvider, query: query, limit: limit)
+    }
+
+    /// Dense float nearest-neighbour recall for ONE provider — the per-signal
+    /// mechanics shared by `floatNearest` (default signal) and
+    /// `floatNearestPerSignal` (every held signal).
+    ///
+    /// Embeds `query` via `provider.embedFloat`, ranks stored chunks for that
+    /// provider's modelID by cosine over the in-house `FloatBruteForceIndex`,
+    /// aggregates chunk hits to source (drawer) level, and returns an observable
+    /// `FloatLaneOutcome`. The telemetry counters and the degradation contract
+    /// are identical to the original single-provider `floatNearest`; the only
+    /// change is that the provider is a parameter rather than the sole field, so
+    /// for N=1 (default signal) the behaviour is byte-identical.
+    private func floatNearest(
+        provider: any EmbeddingProvider,
+        query: String,
+        limit: Int
+    ) async -> FloatLaneOutcome {
         // Attempt to embed the query text via the float lane. A throw here
         // means the provider has no float lane (expected opt-out). This is NOT
         // a store error — no log, no store_error counter. Emit the dark_provider
@@ -1105,14 +1270,60 @@ public actor Corpus {
         return .hits(result)
     }
 
-    /// Whether this corpus's embedding provider supports the dense float lane
+    /// Per-signal dense float nearest-neighbour recall (the 6b RRF-fusion seam).
+    ///
+    /// Runs the dense float lane independently for EVERY held provider slot,
+    /// each queried against its own modelID float index, and returns one ranked
+    /// `FloatLaneOutcome` per signal tagged by that signal's `modelID`. The
+    /// outcome ordering follows slot (construction) order, so `[0]` is always
+    /// the default signal.
+    ///
+    /// This is the seam the 6b mission's RRF/consensus fusion consumes: each
+    /// signal's per-source similarity ranking is exposed separately, preserving
+    /// the `FloatLaneOutcome` dark-lane observability per signal (a signal whose
+    /// provider opted out reports `.unavailableProviderOptOut`; one with no rows
+    /// reports `.unavailableNoFloatRows`; and so on). NO fusion happens here —
+    /// the caller (6b) decides how to combine the per-signal lists.
+    ///
+    /// For N=1 this returns a single-element array whose only outcome equals what
+    /// `floatNearest(query:limit:)` would return — same default-signal mechanics.
+    ///
+    /// - Parameters:
+    ///   - query: the query text.
+    ///   - limit: maximum number of matches per signal.
+    /// - Returns: `(modelID, outcome)` pairs, one per held signal, in slot order.
+    ///   An empty query or zero limit returns one `.emptyQuery` outcome per
+    ///   signal (no store access), mirroring the single-signal no-op guard.
+    public func floatNearestPerSignal(
+        query: String,
+        limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
+        // No-op guard mirrors floatNearest: an empty query / zero limit yields a
+        // per-signal .emptyQuery without touching the store. Returning one entry
+        // per signal keeps the result shape stable (the caller can still see
+        // every signal's modelID).
+        guard limit > 0, !query.isEmpty else {
+            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
+        }
+
+        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
+        results.reserveCapacity(slots.count)
+        for slot in slots {
+            let provider = slot.provider
+            let outcome = await floatNearest(provider: provider, query: query, limit: limit)
+            results.append((modelID: provider.modelID, outcome: outcome))
+        }
+        return results
+    }
+
+    /// Whether this corpus's DEFAULT signal supports the dense float lane
     /// (Lane D). True when `embedFloat` returns a vector rather than throwing
     /// the opt-out error. Probes with a single non-empty token so the answer
     /// reflects provider capability, not input. The GLK dense lane checks this
     /// (via a non-empty `floatNearest`) before fusing the dense column.
     public var supportsFloat: Bool {
         get async {
-            ((try? await provider.embedFloat("x")) ?? []).isEmpty == false
+            ((try? await defaultProvider.embedFloat("x")) ?? []).isEmpty == false
         }
     }
 

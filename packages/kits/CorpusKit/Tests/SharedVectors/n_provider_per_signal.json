@@ -1,0 +1,61 @@
+{
+  "limit" : 5,
+  "probe" : "car engine",
+  "signals" : [
+    {
+      "kind" : "hits",
+      "modelID" : "random-indexing-v1",
+      "rankedItemIDs" : [
+        "doc-2",
+        "doc-0",
+        "doc-1",
+        "doc-3",
+        "doc-4"
+      ]
+    },
+    {
+      "kind" : "hits",
+      "modelID" : "ppmi-v1",
+      "rankedItemIDs" : [
+        "doc-2",
+        "doc-0",
+        "doc-1",
+        "doc-4",
+        "doc-3"
+      ]
+    },
+    {
+      "kind" : "hits",
+      "modelID" : "lsa-v1",
+      "rankedItemIDs" : [
+        "doc-0",
+        "doc-2",
+        "doc-3",
+        "doc-4",
+        "doc-1"
+      ]
+    },
+    {
+      "kind" : "hits",
+      "modelID" : "nmf-v1",
+      "rankedItemIDs" : [
+        "doc-2",
+        "doc-0",
+        "doc-1",
+        "doc-3",
+        "doc-4"
+      ]
+    },
+    {
+      "kind" : "hits",
+      "modelID" : "fdc-v1",
+      "rankedItemIDs" : [
+        "doc-0",
+        "doc-2",
+        "doc-1",
+        "doc-3",
+        "doc-4"
+      ]
+    }
+  ]
+}

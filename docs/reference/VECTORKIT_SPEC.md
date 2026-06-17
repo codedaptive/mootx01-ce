@@ -1,8 +1,8 @@
 ---
 title: VectorKit Specification
-version: 1.0.0
+version: 1.0.1
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -310,9 +310,15 @@ limit:)` scans only the float32 rows tagged with `modelID`, scores each by
 COSINE distance to the probe through the in-house `FloatBruteForceIndex`, and
 returns up to `limit` matches sorted by cosine distance ascending, ties by
 item id ascending. `VectorMatch.distance` is the cosine distance ×10_000 (the
-integer scale both ports share). The float index is built lazily on first call
-from the table and updated incrementally on float writes. `limit <= 0` / `k ==
-0`, an empty probe, or no float rows → empty. The float lane is
+integer scale both ports share). Lane D maintains ONE `FloatBruteForceIndex` PER
+modelID, each built lazily on the first `findNearestFloat` for that model from
+that model's float rows only (uniform stride) and updated incrementally on float
+writes for that model. This is required because different models emit different
+float dimensions and `FloatBruteForceIndex` requires a single stride per index;
+spec I-4 keeps models on disjoint partitions, so a per-model index is the only
+correct structure when one `vectors` table holds several models' float rows
+(e.g. an N-provider corpus). `limit <= 0` / `k == 0`, an empty probe, or no
+float rows for the model → empty. The float lane is
 reproducible-within-config, NOT four-way bit-identical (arch spec §6): rank
 order is stable across languages on shared fixtures; raw cosine values are not
 asserted bit-identical.
@@ -519,6 +525,20 @@ provisioned estate.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.0.1 -- 2026-06-17
+Lane D float nearest (B-13) now maintains ONE `FloatBruteForceIndex` per modelID
+instead of a single shared index. The single shared index built from the first
+record's stride was correct only while one model's float rows occupied the
+`vectors` table; with several models' float rows present (an N-provider corpus,
+mission 6a-iii-core) it corrupted every other model's dimension and errored on
+query. The per-model index honors the long-stated B-13 contract ("scans only the
+float32 rows tagged with `modelID`") and spec I-4's disjoint-partition rule.
+Public surface unchanged (`findNearestFloat(probe:modelID:limit:)` /
+`find_nearest_float` signatures preserved); behavior fix only, both ports. Float
+writes invalidate/update only the affected model's index; `destroyAllVectors`
+clears all per-model indices; `deleteAllVectors`/`delete*` clear the affected
+model's index.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
