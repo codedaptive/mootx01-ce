@@ -18,7 +18,8 @@
 // NeuronKit (layering — GLK is the composition layer, above NeuronKit's
 // siblings). Both kits already depend on SubstrateML, which sits below
 // both, so the math has a single correct home here. One implementation
-// per substrate atomic; kits delegate (the rewire is a follow-up).
+// per substrate atomic; both kits' similarity wrappers delegate to it
+// (rewire complete — no duplicated math remains in GLK or NeuronKit).
 //
 // DETERMINISM AND CONFORMANCE. The math is a pure function of the two
 // input strings — no locale-sensitive transforms, no stemming, no
