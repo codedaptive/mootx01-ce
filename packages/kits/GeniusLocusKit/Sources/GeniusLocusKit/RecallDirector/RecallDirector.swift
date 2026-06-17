@@ -748,28 +748,39 @@ public extension GeniusLocusKit {
 
     // MARK: - RRF fusion helpers
 
-    /// Reciprocal Rank Fusion for two ranked lists.
+    /// Reciprocal Rank Fusion over N ranked lists — the single fusion primitive.
     ///
-    /// Formula: `rrfScore(id) = Σ_L 1 / (k + rank_of_id_in_L)` where ranks are
-    /// 1-based. Tie-break: drawerID string ascending (deterministic).
+    /// Formula: `rrfScore(id) = Σ_L 1 / (k + rank_of_id_in_L)` where rank is the
+    /// 0-based position of `id` in list `L` (so the `+ 1` in the denominator makes
+    /// the first position 1-based). A list that does not contain `id` contributes
+    /// nothing for that id. Each input list is an INDEPENDENT VOTER: an id present
+    /// in more lists accrues more reciprocal-rank mass, so a candidate surfaced by
+    /// multiple signals ranks at or above one surfaced by a single signal (the
+    /// consensus property). Tie-break: drawerID string ascending (deterministic,
+    /// matching `VectorStore.findNearest`).
+    ///
+    /// This is the N-way generalisation that `rrfFuse` (2-list) and `rrfFuseThree`
+    /// (3-list) now delegate to, so the RRF math has exactly one implementation.
+    /// At N=1 (one input list) the result is that list's ids re-sorted by their
+    /// reciprocal-rank score — order-preserving for a list already in rank order,
+    /// which keeps the single-signal/single-lane path identical to before.
     ///
     /// - Parameters:
-    ///   - a: First ranked list (id, score), already sorted descending.
-    ///   - b: Second ranked list (id, score), already sorted descending.
+    ///   - lists: The ranked lists to fuse, each `(id, score)` already sorted
+    ///            descending. Empty lists are skipped. The per-list `score` is
+    ///            NOT read — RRF is rank-based — only the position matters.
     ///   - k: RRF smoothing constant. 60 is the Robertson et al. recommendation.
     ///   - limit: Maximum results to return.
-    private func rrfFuse(
-        _ a: [(id: String, score: Float)],
-        _ b: [(id: String, score: Float)],
+    private func rrfFuseN(
+        _ lists: [[(id: String, score: Float)]],
         k: Int,
         limit: Int
     ) -> [(id: String, score: Float)] {
         var rrf: [String: Double] = [:]
-        for (rank, item) in a.enumerated() {
-            rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
-        }
-        for (rank, item) in b.enumerated() {
-            rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
+        for list in lists {
+            for (rank, item) in list.enumerated() {
+                rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
+            }
         }
         var ranked = rrf.map { (id: $0.key, score: Float($0.value)) }
         ranked.sort { x, y in
@@ -779,7 +790,24 @@ public extension GeniusLocusKit {
         return Array(ranked.prefix(limit))
     }
 
-    /// RRF fusion for three ranked lists (locus + BM25 + vector).
+    /// Reciprocal Rank Fusion for two ranked lists (BM25 + vector, corpusOnly lane).
+    ///
+    /// Thin wrapper over `rrfFuseN([a, b])` — no duplicate RRF math. Output is
+    /// byte-identical to the prior dedicated two-list implementation (same `k`,
+    /// same id-ascending tie-break).
+    private func rrfFuse(
+        _ a: [(id: String, score: Float)],
+        _ b: [(id: String, score: Float)],
+        k: Int,
+        limit: Int
+    ) -> [(id: String, score: Float)] {
+        rrfFuseN([a, b], k: k, limit: limit)
+    }
+
+    /// RRF fusion for three ranked lists (locus + BM25 + vector, hybrid lane).
+    ///
+    /// Thin wrapper over `rrfFuseN([a, b, c])` — no duplicate RRF math. Output is
+    /// byte-identical to the prior dedicated three-list implementation.
     private func rrfFuseThree(
         _ a: [(id: String, score: Float)],
         _ b: [(id: String, score: Float)],
@@ -787,22 +815,7 @@ public extension GeniusLocusKit {
         k: Int,
         limit: Int
     ) -> [(id: String, score: Float)] {
-        var rrf: [String: Double] = [:]
-        for (rank, item) in a.enumerated() {
-            rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
-        }
-        for (rank, item) in b.enumerated() {
-            rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
-        }
-        for (rank, item) in c.enumerated() {
-            rrf[item.id, default: 0] += 1.0 / Double(k + rank + 1)
-        }
-        var ranked = rrf.map { (id: $0.key, score: Float($0.value)) }
-        ranked.sort { x, y in
-            if x.score != y.score { return x.score > y.score }
-            return x.id < y.id
-        }
-        return Array(ranked.prefix(limit))
+        rrfFuseN([a, b, c], k: k, limit: limit)
     }
 
     // MARK: - unionBest lane
@@ -947,81 +960,163 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Step 4.5 — DENSE FLOAT lane (Lane D). The TRUE float-embedding lane:
-        // cosine over the retained pooled vector, NOT the lossy 256-bit
+        // Step 4.5 — DENSE FLOAT lane (Lane D), PER-SIGNAL. The TRUE float-embedding
+        // lane: cosine over the retained pooled vector, NOT the lossy 256-bit
         // SimHash-Hamming projection. Fires independently of the Hamming lane —
-        // both can contribute. Runs only when a corpus with a float-capable
-        // provider is registered and the query text is non-empty. The corpus
-        // owns the embed + float-index search; GLK never reaches the store
-        // directly. B-10a: this lane writes NO trace rows — it adds candidates
-        // to the in-memory buffer only, exactly like the Hamming lane.
+        // both can contribute. Runs only when a corpus with at least one held
+        // provider is registered and the query text is non-empty. The corpus owns
+        // the embed + float-index search; GLK never reaches the store directly.
+        // B-10a: this lane writes NO trace rows — it adds candidates to the
+        // in-memory buffer only, exactly like the Hamming lane.
         //
-        // FloatLaneOutcome makes every dark-lane state observable. GLK reads the
-        // outcome and adds an explainer marker when the lane is dark so per-query
-        // results say why the dense lane did not run. A storeError is already
-        // logged + counted inside CorpusKit (OSLog + corpus.float_lane.store_error
-        // counter); GLK adds a glk.recall.dense_lane_dark counter for estate-level
-        // observability.
+        // FloatLaneOutcome makes every dark-lane state observable PER SIGNAL. GLK
+        // reads each held signal's outcome and emits a glk.recall.dense_lane_dark
+        // counter (tagged with that signal's modelID) when a signal is dark, so
+        // estate dashboards surface which signals did not run. A storeError is
+        // already logged + counted inside CorpusKit (OSLog + corpus.float_lane.
+        // store_error counter) for the affected signal.
+        // PER-SIGNAL FAN-OUT (6b-core): the dense lane queries EVERY held provider
+        // slot via `floatNearestPerSignal`, not just the default signal. Each
+        // returned (modelID, outcome) is its OWN ranked dense candidate list — a
+        // per-signal dense lane. A signal that is dark (providerOptOut / noFloatRows
+        // / storeError / emptyQuery) emits its denseLaneDark marker tagged with its
+        // modelID and contributes no candidates, while the other signals still vote.
+        //
+        // CONSENSUS: each per-signal `.hits` list is an independent RRF voter (same
+        // reciprocal-rank formula as `rrfFuseN`, accumulated inline below so the
+        // per-id best-term can also be tracked). A drawer surfaced by MULTIPLE dense
+        // signals accrues more reciprocal-rank mass than one surfaced by a single
+        // signal. That consensus mass is folded into the dense candidate's `final`
+        // as a boost on top of the (max-across-signals) normalized cosine. The boost
+        // is the RRF mass from the EXTRA voters beyond the single best-ranked one, so
+        // a single-signal candidate gets zero boost — making the N=1 path byte-
+        // identical to the pre-6b single-`floatNearest` behaviour (one signal → one
+        // list → no extra voters → `final == dense`, exactly as before).
+        //
+        // `denseLaneStatus` (the aggregate result marker) reports the DEFAULT
+        // signal's dark reason, matching pre-6b semantics: at N=1 the default signal
+        // is the only signal, so the marker is unchanged; at N>1 the per-signal
+        // counters carry each signal's modelID for fine-grained observability.
+        // `denseSignalsByID` is hoisted to method scope so step 11 can append the
+        // per-signal dense provenance (`vectorDense:<modelID>`) to each selected
+        // hit's explanation — the buffer/MMR pass does not carry explanation text,
+        // so the modelIDs that voted are threaded through this map instead.
+        var denseSignalsByID: [String: [String]] = [:]
         var denseHits: [RecallHit] = []
         var denseLaneExplainerTag: String? = nil
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
-            let outcome = await corpus.floatNearest(query: text, limit: plan.frontierK)
-            switch outcome {
-            case .hits(let matches):
-                // Happy path — lane contributed results.
-                denseHits = matches.map { m in
-                    // Normalize cosine similarity (∈ [−1, 1]) to [0, 1] as
-                    // (sim + 1) / 2 so the dense column matches every other
-                    // [0, 1] column's convention (1.0 = identical direction).
-                    // RRF fusion (below) is rank-based and ignores this magnitude;
-                    // the column feeds the explainer/optimizer and the weighted path.
-                    let dense = max(0, min(1, (m.similarity + 1) / 2))
-                    let sv = RecallScoreVector(
-                        locus: 0, bm25: 0, vector: 0,
-                        fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
-                        redundancyPenalty: 0, final: dense, dense: dense)
-                    return RecallHit(id: m.itemID, drawer: nil, sources: [.vectorDense],
-                                     score: sv, explanation: ["vectorDense"])
+            let perSignal = await corpus.floatNearestPerSignal(query: text, limit: plan.frontierK)
+
+            // Per-signal ranked id lists feed the N-way RRF voter set. `denseCosineByID`
+            // keeps the MAX normalized cosine across signals for the buffer `dense`
+            // column (N=1 → the single cosine, unchanged). `denseSignalsByID` records
+            // which modelIDs voted, for per-hit provenance. `denseOrder` is the
+            // deterministic first-seen id order.
+            var perSignalLists: [[(id: String, score: Float)]] = []
+            var denseCosineByID: [String: Float] = [:]
+            var denseOrder: [String] = []
+
+            for (idx, entry) in perSignal.enumerated() {
+                let modelID = entry.modelID
+                switch entry.outcome {
+                case .hits(let matches):
+                    var rankedList: [(id: String, score: Float)] = []
+                    rankedList.reserveCapacity(matches.count)
+                    for m in matches {
+                        // Normalize cosine similarity (∈ [−1, 1]) to [0, 1] as
+                        // (sim + 1) / 2 so the dense column matches every other
+                        // [0, 1] column's convention (1.0 = identical direction).
+                        let dense = max(0, min(1, (m.similarity + 1) / 2))
+                        rankedList.append((id: m.itemID, score: dense))
+                        if denseCosineByID[m.itemID] == nil { denseOrder.append(m.itemID) }
+                        denseCosineByID[m.itemID] = max(denseCosineByID[m.itemID] ?? 0, dense)
+                        denseSignalsByID[m.itemID, default: []].append(modelID)
+                    }
+                    perSignalLists.append(rankedList)
+
+                case .unavailableProviderOptOut:
+                    // This signal has no float lane — dark, tagged with its modelID.
+                    // The default signal (idx 0) sets the aggregate denseLaneStatus
+                    // to preserve pre-6b single-signal semantics.
+                    if idx == 0 { denseLaneExplainerTag = "dark:providerOptOut" }
+                    glkEmit(
+                        name: GLKMetricName.denseLaneDark,
+                        value: 1.0,
+                        tags: ["estate_id": handle.estateUUID.uuidString,
+                               "reason": "providerOptOut", "model_id": modelID],
+                        now: Date()
+                    )
+
+                case .unavailableNoFloatRows:
+                    // This signal has no stored float rows — dark, tagged by modelID.
+                    if idx == 0 { denseLaneExplainerTag = "dark:noFloatRows" }
+                    glkEmit(
+                        name: GLKMetricName.denseLaneDark,
+                        value: 1.0,
+                        tags: ["estate_id": handle.estateUUID.uuidString,
+                               "reason": "noFloatRows", "model_id": modelID],
+                        now: Date()
+                    )
+
+                case .emptyQuery:
+                    // Guard above (text.isEmpty) prevents this in practice; handle
+                    // defensively so the enum switch is exhaustive without a `default`.
+                    if idx == 0 { denseLaneExplainerTag = "dark:emptyQuery" }
+
+                case .storeError:
+                    // Unexpected store failure for this signal. CorpusKit already
+                    // logged via OSLog and emitted corpus.float_lane.store_error.
+                    if idx == 0 { denseLaneExplainerTag = "dark:storeError" }
+                    glkEmit(
+                        name: GLKMetricName.denseLaneDark,
+                        value: 1.0,
+                        tags: ["estate_id": handle.estateUUID.uuidString,
+                               "reason": "storeError", "model_id": modelID],
+                        now: Date()
+                    )
                 }
+            }
 
-            case .unavailableProviderOptOut:
-                // Expected — provider has no float lane. Record for explainer;
-                // emit the GLK-level dark-lane counter.
-                denseLaneExplainerTag = "dark:providerOptOut"
-                glkEmit(
-                    name: GLKMetricName.denseLaneDark,
-                    value: 1.0,
-                    tags: ["estate_id": handle.estateUUID.uuidString, "reason": "providerOptOut"],
-                    now: Date()
-                )
+            // N-way consensus over the per-signal dense lists. For each id, accumulate
+            // the total reciprocal-rank mass across signals and the single largest
+            // per-signal term (the drawer's best rank in any one signal). The boost
+            // is `total − best`: the RRF mass from EVERY voter beyond the single
+            // best-ranked one. At N=1 (one list) total == best for every id → boost
+            // 0 → final == dense (identity with the pre-6b single-`floatNearest`
+            // path). At N>1 a drawer ranked highly by multiple signals accrues extra
+            // rank-aware mass — the consensus property. k=60 matches every other RRF
+            // fusion in this file.
+            let consensusK = 60
+            var denseTotalRRF: [String: Float] = [:]
+            var denseBestTerm: [String: Float] = [:]
+            for list in perSignalLists {
+                for (rank, item) in list.enumerated() {
+                    let term = Float(1.0 / Double(consensusK + rank + 1))
+                    denseTotalRRF[item.id, default: 0] += term
+                    if term > (denseBestTerm[item.id] ?? 0) { denseBestTerm[item.id] = term }
+                }
+            }
 
-            case .unavailableNoFloatRows:
-                // Expected — corpus was ingested with a non-float provider or no
-                // documents have been ingested yet. Record for explainer; count.
-                denseLaneExplainerTag = "dark:noFloatRows"
-                glkEmit(
-                    name: GLKMetricName.denseLaneDark,
-                    value: 1.0,
-                    tags: ["estate_id": handle.estateUUID.uuidString, "reason": "noFloatRows"],
-                    now: Date()
-                )
-
-            case .emptyQuery:
-                // Guard above (text.isEmpty) prevents this in practice; handle
-                // defensively so the enum switch is exhaustive without a `default`.
-                denseLaneExplainerTag = "dark:emptyQuery"
-
-            case .storeError:
-                // Unexpected store failure. CorpusKit already logged via OSLog and
-                // emitted corpus.float_lane.store_error. GLK adds the estate-level
-                // dark counter so estate dashboards surface the failure.
-                denseLaneExplainerTag = "dark:storeError"
-                glkEmit(
-                    name: GLKMetricName.denseLaneDark,
-                    value: 1.0,
-                    tags: ["estate_id": handle.estateUUID.uuidString, "reason": "storeError"],
-                    now: Date()
-                )
+            // Build one dense hit per distinct id (deterministic first-seen order).
+            // `dense` column = max normalized cosine across signals (N=1 → the single
+            // cosine, unchanged). `final` = that cosine PLUS the consensus boost.
+            denseHits.reserveCapacity(denseOrder.count)
+            for id in denseOrder {
+                let dense = denseCosineByID[id] ?? 0
+                let total = denseTotalRRF[id] ?? 0
+                let best = denseBestTerm[id] ?? 0
+                let boost = max(0, total - best)
+                let finalScore = dense + boost
+                // The dense hit's own explanation is the lane token; the per-signal
+                // modelID provenance is threaded via `denseSignalsByID` and appended
+                // to the SELECTED hit's explanation at step 11 (the buffer/MMR merge
+                // does not carry explanation text, so it cannot be set here).
+                let sv = RecallScoreVector(
+                    locus: 0, bm25: 0, vector: 0,
+                    fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+                    redundancyPenalty: 0, final: finalScore, dense: dense)
+                denseHits.append(RecallHit(id: id, drawer: nil, sources: [.vectorDense],
+                                           score: sv, explanation: ["vectorDense"]))
             }
         }
 
@@ -1471,8 +1566,18 @@ public extension GeniusLocusKit {
             // initialised empty; the real explanation is set below).
             let bareHit = RecallHit(id: id, drawer: drawer, sources: sources,
                                     score: sv, explanation: [])
-            let explanationLines = explainer.explain(hit: bareHit, sketch: sketch,
+            var explanationLines = explainer.explain(hit: bareHit, sketch: sketch,
                                                      plan: plan, scoring: request.scoring)
+            // PER-SIGNAL DENSE PROVENANCE (6b-core): when this hit was surfaced by
+            // the dense lane, append the modelIDs of the signals that voted, in
+            // slot order. The line is honest — it names exactly the signals whose
+            // float index ranked this drawer; a signal that did not vote for this
+            // id is absent. Additive: the existing source/score/mode/why lines are
+            // unchanged, so the N=1 explainer output gains only this one line.
+            if let voters = denseSignalsByID[id], !voters.isEmpty {
+                explanationLines.append(
+                    "denseSignals: " + voters.map { "vectorDense:\($0)" }.joined(separator: ", "))
+            }
             hits.append(RecallHit(id: id, drawer: drawer, sources: sources,
                                   score: sv, explanation: explanationLines))
         }

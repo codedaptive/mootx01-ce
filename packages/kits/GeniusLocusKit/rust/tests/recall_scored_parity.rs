@@ -1989,3 +1989,161 @@ fn f5_genuine_empty_records_no_locus_stage() {
         result.degraded_stages
     );
 }
+
+// ---------------------------------------------------------------------------
+// GROUP H — dense lane PER-SIGNAL fan-out + N-way RRF consensus (6b-core)
+// ---------------------------------------------------------------------------
+//
+// The dense lane consumes Corpus::float_nearest_per_signal so every held
+// distributional signal is an independent RRF voter alongside locus / BM25 /
+// Hamming. These tests mirror the Swift DenseLanePerSignalFusionTests:
+//   H-1  N=1 single provider (production default): dense lane runs and surfaces
+//        a VectorDense source — the pre-6b single-float_nearest path, unchanged.
+//   H-2  N>1 consensus: a two-provider corpus contributes both dense signals,
+//        the fused hit records per-signal dense provenance for both model_ids,
+//        and a strong-cross-signal-agreement drawer ranks at/above a
+//        weak-agreement drawer.
+//
+// `RecallEvidencePath` is already imported at the top of this crate (GROUP A).
+
+/// A float-capable MiniLM provider config whose 384-d embedding is keyed off the
+/// first token so distinct content embeds distinctly. CorpusKit applies its own
+/// FloatSimHash projection over the returned vector.
+fn minilm_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::MiniLM {
+        inference: Box::new(|tokens: &[i32]| {
+            let lead = tokens.first().copied().unwrap_or(0);
+            let mut v = vec![0.0_f32; 384];
+            let axis = (lead.unsigned_abs() as usize) % 384;
+            v[axis] = 1.0;
+            v[0] += 0.5; // shared component pulls everything toward the query
+            Ok(v)
+        }),
+    }
+}
+
+/// A float-capable MPNet provider config (768-d). The "alpha"/consensus lead
+/// token maps to axis 1; other lead tokens route to a distant axis so only the
+/// consensus doc aligns with the query under mpnet.
+fn mpnet_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::MPNet {
+        inference: Box::new(|tokens: &[i32]| {
+            let lead = tokens.first().copied().unwrap_or(0);
+            let mut v = vec![0.0_f32; 768];
+            let axis = if (lead.unsigned_abs() as usize) % 2 == 0 { 1 } else { 400 };
+            v[axis] = 1.0;
+            Ok(v)
+        }),
+    }
+}
+
+fn corpus_with_models(models: Vec<EmbeddingModelConfig>) -> Arc<Corpus> {
+    let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
+    Arc::new(Corpus::open_many(storage, models).expect("Corpus::open_many"))
+}
+
+// H-1: single-provider (production default) dense lane runs and surfaces a
+// VectorDense source — the pre-6b single-float_nearest path.
+#[test]
+fn h1_single_provider_dense_lane_runs_unchanged() {
+    let (mut coord, h) = open_one();
+    let content = "photosynthesis converts light into chemical energy in plants";
+    let drawer = coord
+        .capture(&h, cap_frame(content, "biology"), NOW)
+        .expect("capture");
+
+    let corpus = corpus_with_models(vec![minilm_config()]);
+    corpus.ingest(content, &drawer.id, NOW).expect("ingest");
+    coord.register_corpus(&h, corpus);
+
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+        .with_mode(GLKRecallMode::UnionBest)
+        .with_scoring(GLKRecallScoring::Rrf)
+        .with_query_text(content)
+        .with_limit(10);
+    let result = coord.recall_scored(&h, req, NOW + 1).expect("recall_scored");
+
+    // Dense lane produced hits → no dark marker (pre-6b semantics).
+    assert!(
+        result.dense_lane_status.is_none(),
+        "single-provider dense lane that produced hits must carry None dense_lane_status; got {:?}",
+        result.dense_lane_status
+    );
+    let dense_hit = result.hits.iter().find(|hh| hh.id == drawer.id)
+        .expect("the ingested drawer must surface in unionBest recall");
+    assert!(
+        dense_hit.sources.contains(&RecallEvidencePath::VectorDense),
+        "the dense-lane hit must carry VectorDense evidence; sources: {:?}",
+        dense_hit.sources
+    );
+}
+
+// H-2: two-provider consensus — both dense signals vote, the fused hit records
+// per-signal provenance for both model_ids, and the strong-agreement drawer
+// ranks at/above the weak-agreement drawer.
+#[test]
+fn h2_two_provider_dense_consensus_records_provenance_and_outranks() {
+    let (mut coord, h) = open_one();
+    // Single doc captured FIRST, consensus doc LAST so the locus lane
+    // (byCaptureTimeDesc) and the dense consensus agree on ordering.
+    let single_content = "zeta unrelated divergent wording only one signal aligns here";
+    let consensus_content = "alpha consensus topic shared across both embedding signals";
+    let single = coord
+        .capture(&h, cap_frame(single_content, "room"), NOW)
+        .expect("capture single");
+    let consensus = coord
+        .capture(&h, cap_frame(consensus_content, "room"), NOW + 1)
+        .expect("capture consensus");
+
+    let corpus = corpus_with_models(vec![minilm_config(), mpnet_config()]);
+    corpus.ingest(consensus_content, &consensus.id, NOW).expect("ingest consensus");
+    corpus.ingest(single_content, &single.id, NOW).expect("ingest single");
+    coord.register_corpus(&h, corpus);
+
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+        .with_mode(GLKRecallMode::UnionBest)
+        .with_scoring(GLKRecallScoring::Rrf)
+        .with_query_text(consensus_content)
+        .with_limit(10);
+    let result = coord.recall_scored(&h, req, NOW + 2).expect("recall_scored");
+
+    let consensus_hit = result.hits.iter().find(|hh| hh.id == consensus.id)
+        .expect("consensus drawer must surface in the fused result");
+
+    // Per-signal dense provenance: the consensus hit's explanation must name BOTH
+    // dense signals (minilm-v6 and mpnet-base-v2) — direct proof both held signals
+    // voted (the dense lane fanned out across both).
+    let consensus_expl = consensus_hit.explanation.join(" | ");
+    assert!(
+        consensus_expl.contains("vectorDense:minilm-v6"),
+        "consensus hit explanation must record the miniLM dense signal; got: {consensus_expl}"
+    );
+    assert!(
+        consensus_expl.contains("vectorDense:mpnet-base-v2"),
+        "consensus hit explanation must record the mpnet dense signal; got: {consensus_expl}"
+    );
+    assert!(
+        consensus_hit.score.dense > 0.0,
+        "consensus drawer must carry a positive dense cosine column; got {}",
+        consensus_hit.score.dense
+    );
+
+    // Consensus property: the strong-agreement drawer ranks at/above the
+    // weak-agreement drawer, with a fused final at least as large.
+    if let (Some(c_idx), Some(s_idx)) = (
+        result.hits.iter().position(|hh| hh.id == consensus.id),
+        result.hits.iter().position(|hh| hh.id == single.id),
+    ) {
+        assert!(
+            c_idx <= s_idx,
+            "consensus drawer (rank {c_idx}) must rank at/above the weak-agreement drawer (rank {s_idx})"
+        );
+        let single_final = result.hits[s_idx].score.final_score;
+        assert!(
+            consensus_hit.score.final_score >= single_final,
+            "consensus final {} must be >= weak-agreement final {}",
+            consensus_hit.score.final_score, single_final
+        );
+    }
+}

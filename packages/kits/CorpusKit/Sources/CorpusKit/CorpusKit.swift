@@ -1123,8 +1123,9 @@ public actor Corpus {
         // Test-only hook: if a forced error is installed, consume it and return
         // .storeError immediately. This exercises the observable store-error code
         // path without requiring production modifications to the vector store.
-        // The hook is checked on the single-signal entry point only; the
-        // per-signal fan-out does not consult it.
+        // Both entry points consult the hook: this single-signal path, and the
+        // per-signal `floatNearestPerSignal` for its DEFAULT slot (slot 0), so the
+        // store-error dark contract is observable through whichever path GLK uses.
         if let forced = _forcedFloatError {
             _forcedFloatError = nil
             corpusLog.error("floatNearest: findNearestFloat failed — \(forced, privacy: .public)")
@@ -1306,11 +1307,37 @@ public actor Corpus {
             return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
         }
 
+        // Test-only hook: a forced store error is consumed for the DEFAULT slot
+        // (slot 0), mirroring the single-signal `floatNearest(query:limit:)`
+        // contract. GLK's dense lane consumes this method, so the store-error dark
+        // contract must remain observable through the per-signal path: the default
+        // signal reports `.storeError`, other slots run normally. The seam is
+        // single-use and consumed here exactly as the single-signal entry does.
+        var forcedDefaultStoreError: FloatLaneOutcome? = nil
+        if let forced = _forcedFloatError {
+            _forcedFloatError = nil
+            corpusLog.error("floatNearestPerSignal: findNearestFloat failed (default signal) — \(forced, privacy: .public)")
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.store_error",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            forcedDefaultStoreError = .storeError(forced)
+        }
+
         var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
         results.reserveCapacity(slots.count)
-        for slot in slots {
+        for (index, slot) in slots.enumerated() {
             let provider = slot.provider
-            let outcome = await floatNearest(provider: provider, query: query, limit: limit)
+            // Slot 0 (default signal) honours the forced-error seam if installed;
+            // all other slots — and slot 0 when no seam is set — run the real lane.
+            let outcome: FloatLaneOutcome
+            if index == 0, let forced = forcedDefaultStoreError {
+                outcome = forced
+            } else {
+                outcome = await floatNearest(provider: provider, query: query, limit: limit)
+            }
             results.append((modelID: provider.modelID, outcome: outcome))
         }
         return results
