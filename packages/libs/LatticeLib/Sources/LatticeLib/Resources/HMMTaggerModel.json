@@ -1,0 +1,77 @@
+{
+  "corpus_sha256": "ef1c97151e15701155dee18b04433b2ade1c22aeea04542983b34d894858a492",
+  "emission_weights": [
+    [
+      -2954,
+      -3606,
+      -5526,
+      -6132,
+      -5978,
+      -3103,
+      -4746,
+      -4260,
+      -3898,
+      -2867,
+      -5621,
+      -270
+    ],
+    [
+      -4525,
+      -1473,
+      -1011,
+      -4445,
+      -3609,
+      -6317,
+      -7010,
+      -6317,
+      -7010,
+      -4708,
+      -6317,
+      -1075
+    ],
+    [
+      -1125,
+      -3874,
+      -2898,
+      -7241,
+      -4843,
+      -6548,
+      -7241,
+      -7241,
+      -5162,
+      -3528,
+      -2160,
+      -826
+    ]
+  ],
+  "generated_date": "2026-06-17",
+  "hmm_viterbi_version": "hmm-viterbi-3",
+  "initial_weights": [
+    -643,
+    -1562,
+    -1329
+  ],
+  "license": "CC BY 3.0 US",
+  "obs_alphabet": [
+    "nonAlpha",
+    "ing",
+    "ed",
+    "ize/ise",
+    "ate",
+    "tion/sion",
+    "ness",
+    "ment",
+    "ity/ty",
+    "er/or/ar",
+    "ly",
+    "plain"
+  ],
+  "schema_version": "1",
+  "source": "MASC 3.0.0 Penn Treebank constituency (ANC)",
+  "states": [
+    "noun",
+    "verb",
+    "other"
+  ],
+  "token_count": 5230
+}

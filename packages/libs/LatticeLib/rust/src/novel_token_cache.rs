@@ -44,9 +44,9 @@ pub const POOL_SUBMIT_THRESHOLD: usize = 50;
 
 /// The non-Apple HMM/Viterbi model version stamped on pool submissions.
 /// Mirrors `WordClassTagger.currentTaggerVersion` `#else` branch in Swift
-/// (value: `"hmm-viterbi-1"`). Bump both here and in Swift when the
+/// (value: `"hmm-viterbi-3"`). Bump both here and in Swift when the
 /// `HMMTagger` model tables change.
-pub const HMM_VITERBI_VERSION: &str = "hmm-viterbi-1";
+pub const HMM_VITERBI_VERSION: &str = "hmm-viterbi-3";
 
 // ─── Wire-format types ────────────────────────────────────────────────────────
 
@@ -136,7 +136,7 @@ impl NovelTokenCache {
     /// The `submitter` is invoked with the drained submission when the cache
     /// reaches the threshold. Defaults to a no-op until the pool endpoint is
     /// wired (cookbook §2.2). On non-Apple platforms the tagger version is
-    /// `HMM_VITERBI_VERSION` (`"hmm-viterbi-1"`), mirroring Swift's
+    /// `HMM_VITERBI_VERSION` (`"hmm-viterbi-3"`), mirroring Swift's
     /// `currentTaggerVersion` `#else` branch.
     pub fn new(
         table_version: impl Into<String>,
@@ -215,7 +215,7 @@ impl NovelTokenCache {
 /// Mirrors `LatticeLib.sharedNovelCache` (Swift static `let`) in
 /// `WordClassTagger.swift`. On non-Apple platforms (the only Rust target):
 /// - platform = `"other"` (mirrors Swift `currentPlatform` `#else` branch)
-/// - tagger_version = `HMM_VITERBI_VERSION` (`"hmm-viterbi-1"`) — mirrors
+/// - tagger_version = `HMM_VITERBI_VERSION` (`"hmm-viterbi-3"`) — mirrors
 ///   Swift `currentTaggerVersion` `#else` branch (`WordClassTagger.swift`)
 pub static SHARED_NOVEL_CACHE: OnceLock<NovelTokenCache> = OnceLock::new();
 

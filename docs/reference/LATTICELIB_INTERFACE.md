@@ -1,6 +1,6 @@
 ---
 title: LatticeLib Interface
-version: 1.2.0
+version: 1.2.1
 description: Public API surface for LatticeLib in both the Swift and Rust ports.
 status: active
 spec_type: kit
@@ -177,7 +177,7 @@ the life of the process. The two ports are byte-identical: same edges, same BFS,
 same numeric sort, same exclusion.
 
 The bundled `QIDClosureEdges.json` is a **pinned Wikidata snapshot** of direct
-P31/P279 edges, built offline by `scripts/build_qid_closure.py` and checked in
+P31/P279 edges, built offline by the Q-ID closure ETL (EE build tooling) and checked in
 alongside the FDC artifacts. **The runtime never re-queries Wikidata** — the
 transitive closure is computed locally in the loader. This keeps `ancestors`
 pure, deterministic, and conformance-stable. Consumed by LocusKit's
@@ -778,13 +778,32 @@ non-Apple `.other` stub and records into `SHARED_NOVEL_CACHE`.
 
 ## Changelog
 
+### 1.2.1 -- 2026-06-17
+Replaced the hand-specified HMM priors in `HMMTagger` / `hmm_tag` with weights
+trained on the MASC 3.0.0 Penn Treebank constituency corpus (CC BY 3.0 US, ANC).
+Because the HMM only ever tags NOVEL (out-of-vocabulary) tokens at runtime —
+known/closed-class words are served by the fast-path `WordClassTable` — the
+model is estimated only from the corpus's RARE words (hapax legomena, ~5,230
+tokens), the standard unknown-word proxy. This yields the correct content-noun-
+dominant prior (a no-suffix unknown such as "religion" tags as noun); estimating
+from the full corpus instead lets frequent function words wrongly dominate the
+no-suffix bucket. The weights are frozen as a checked-in resource
+`Resources/HMMTaggerModel.json`, produced by the HMM-training ETL (EE build
+tooling; Laplace add-1 smoothing, integer log-weight scale 1000). Both ports read
+the SAME JSON artifact — Swift via `Bundle.module`, Rust via `include_bytes!` —
+ensuring byte-identity. `HMM_VITERBI_VERSION` / `currentTaggerVersion` bumped to
+`hmm-viterbi-3`. The shared conformance fixtures `tag_conformance.json` and
+`fdc_conformance.json` regenerated to the trained-model output. Attribution:
+`Resources/HMMTaggerModel.NOTICE.md`. API shape unchanged; the public
+`HMMTagger.tag` / `hmm_tag` signatures are identical. No new public symbols added.
+
 ### 1.2.0 -- 2026-06-17
 Added the `QIDClosure` / `qid_closure` surface (mission #7b): a process-global
 static lookup over the pinned `QIDClosureEdges.json` direct-edge graph exposing
 `ancestors(of:)` — the transitive P31/P279 ancestor closure of a Wikidata Q-ID
 (BFS over the pinned edges, excluding the queried qid, sorted numerically),
 plus `isAvailable` / `dataVersion`. The artifact is a pinned offline Wikidata
-snapshot (38,761 nodes) built by `scripts/build_qid_closure.py`; the runtime
+snapshot (38,761 nodes) built by the Q-ID closure ETL (EE build tooling); the runtime
 never re-queries Wikidata — the closure is computed locally. Byte-identical
 across the Swift and Rust ports (same edges, BFS, numeric sort). Consumed by
 LocusKit's `DrawerFingerprint` to fill the lattice-block `qidClosureHash` slot.

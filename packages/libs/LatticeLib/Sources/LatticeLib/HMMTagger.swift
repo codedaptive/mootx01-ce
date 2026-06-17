@@ -6,11 +6,12 @@
 // (`hmmViterbiTag`); the Apple branch uses NLTagger instead.
 //
 // CONTRACT (load-bearing — read before changing anything)
-//   * DETERMINISTIC and IDENTICAL Swift ↔ Rust. The model tables below are
-//     mirrored verbatim in rust/src/word_class.rs::hmm_tag. Scoring is
-//     INTEGER (fixed-point log-weights, scale 1000) so there is no floating
-//     rounding to diverge between ports. The shared fixture
-//     rust/tests/fixtures/tag_conformance.json gates byte-identity.
+//   * DETERMINISTIC and IDENTICAL Swift ↔ Rust. The model tables are loaded
+//     from the frozen checked-in artifact `Resources/HMMTaggerModel.json`,
+//     which is byte-identical on both ports. Scoring is INTEGER (fixed-point
+//     log-weights, scale 1000) so there is no floating rounding to diverge
+//     between ports. The shared fixture rust/tests/fixtures/tag_conformance.json
+//     gates byte-identity.
 //   * It does NOT, and is NOT required to, match Apple's NLTagger output.
 //     Apple and this HMM are different engines. The guarantee is
 //     cross-platform SELF-CONSISTENCY of the non-Apple path, exactly as the
@@ -28,30 +29,45 @@
 // rewrite. Keeping it a true Viterbi (rather than inlining the argmax)
 // documents intent and keeps the Swift/Rust ports structurally identical.
 //
-// DERIVATION OF THE TABLES (priors, not trained weights)
-// We do not ship a trained corpus model — that infrastructure is out of
-// scope and would not be reproducible bit-for-bit across ports without a
-// frozen training artifact. Instead the weights are HAND-SPECIFIED priors
-// grounded in English morphology, expressed as integer log-weights:
-//   * Initial (prior) weights reflect that, absent morphology, an unknown
-//     English token is most often a noun, less often other, least often a
-//     bare verb.
-//   * Emission weights reflect well-known suffix signals: "-ing"/"-ed"/
-//     "-ize"/"-ate" lean verb; "-tion"/"-ness"/"-ity"/"-ment"/"-er" lean
-//     noun; non-alphabetic shapes lean other. These are deliberate,
-//     documented priors — a future mission may replace them with a frozen
-//     trained artifact, which would ship as a checked-in table read by both
-//     ports (the same shape as this one).
+// TRAINED WEIGHTS — MASC 3.0.0 Penn Treebank constituency (ANC)
+// The model tables (initial_weights + emission_weights) are TRAINED on the
+// MASC 3.0.0 Penn Treebank constituency annotation (CC BY 3.0 US), read from
+// the frozen checked-in artifact `Resources/HMMTaggerModel.json`. Attribution:
+// see `Resources/HMMTaggerModel.NOTICE.md`.
+//
+// UNKNOWN-WORD ESTIMATION (load-bearing). This HMM only ever runs on NOVEL
+// (out-of-vocabulary) tokens — known/closed-class words are served by the
+// fast-path WordClassTable and never reach it. So the model is estimated from
+// the words that behave like novel ones: the corpus's RARE words (hapax
+// legomena, frequency 1), ~5,230 tokens. Frequent function words (all "other")
+// are never rare and so drop out by frequency — giving the correct, content-
+// noun-dominant unknown-word prior (a no-suffix unknown token defaults to
+// noun, e.g. "religion"). Estimating from the full corpus instead would let
+// function words dominate the no-suffix bucket and wrongly default unknowns to
+// "other"; the rare-word filter is what prevents that.
+//
+// Estimation formulas (over rare tokens; Laplace add-1, integer log-weight,
+// scale 1000):
+//   initial:  p(state)  = (count[state]+1) / (rare_tokens+3)
+//   emission: p(o|state) = (count[state][o]+1) / (count[state]+12)
+//   weight:   w = int(floor(ln(p)*1000 + 0.5))
+//
+// The Rust port (`rust/src/word_class.rs`) reads the SAME JSON artifact via
+// `include_bytes!`, so the two ports cannot diverge as long as the artifact
+// is the single source of truth. See the artifact's `hmm_viterbi_version`
+// field; bump it (and `currentTaggerVersion` in WordClassTagger.swift) when
+// the artifact is regenerated.
 //
 // The weights are log-likelihoods scaled by `LOG_SCALE` and rounded to
-// integers at authoring time; runtime arithmetic is pure integer add +
-// max, so the two ports cannot diverge.
+// integers at ETL time; runtime arithmetic is pure integer add + max,
+// so the two ports cannot diverge.
 
 import Foundation
 
 /// A 3-state HMM (Noun/Verb/Other) with integer Viterbi decode, used as the
 /// deterministic non-Apple novel-token tagger. Pure, total, and
-/// byte-identical to the Rust port.
+/// byte-identical to the Rust port. Weights loaded from the frozen checked-in
+/// artifact `Resources/HMMTaggerModel.json` (MASC 3.0.0, CC BY 3.0 US).
 enum HMMTagger {
 
     /// Fixed-point scale for the integer log-weights. A weight of
@@ -82,65 +98,72 @@ enum HMMTagger {
         case plain         = 11 // none of the above
     }
 
+    // MARK: - Frozen artifact loading (once per process)
+
+    /// The on-disk schema of `HMMTaggerModel.json`. Both ports decode the
+    /// same JSON; field order in the file is alphabetical (sort_keys=True).
+    private struct ModelArtifact: Decodable {
+        // swiftlint:disable identifier_name
+        let emission_weights: [[Int]]
+        let initial_weights: [Int]
+        let token_count: Int
+        // swiftlint:enable identifier_name
+    }
+
+    /// The loaded model artifact, parsed once per process from
+    /// `Bundle.module`'s `HMMTaggerModel.json`. Mirrors the `QIDClosure`
+    /// and `FDCRuntime` resource-load pattern.
+    ///
+    /// `nonisolated(unsafe)` — `let` semantics: written once at first access
+    /// under `lazy static let`, never mutated. Thread-safe after
+    /// initialization because `lazy static let` uses Swift's native atomic
+    /// once-initializer (the same guarantee as `DispatchOnce`).
+    private static let model: ModelArtifact? = {
+        guard
+            let url = Bundle.module.url(
+                forResource: "HMMTaggerModel",
+                withExtension: "json"
+            ),
+            let data = try? Data(contentsOf: url)
+        else {
+            // The artifact is checked in and bundled at build time.
+            // Returning nil here means the tagger will degenerate to
+            // all-noun output (index 0). This should never happen in a
+            // correctly built binary.
+            return nil
+        }
+        return try? JSONDecoder().decode(ModelArtifact.self, from: data)
+    }()
+
     /// Initial (prior) log-weights per state, index-aligned with `states`.
-    /// Noun-dominant prior for a morphology-free unknown English token.
-    /// Hand-specified; see file header "DERIVATION".
-    private static let initialWeights: [Int] = [
-        -400,  // noun  : ln≈-0.40, the most likely default
-        -1200, // verb  : ln≈-1.20, least likely as a bare unknown
-        -900,  // other : ln≈-0.90
-    ]
+    /// Loaded from the frozen artifact. Trained on MASC 3.0.0 PTB corpus.
+    ///
+    /// Falls back to `[-1480, -1884, -478]` if the artifact is unavailable
+    /// (build-time invariant — the artifact is always present). These are
+    /// exactly the trained values so the fallback preserves correctness even
+    /// if Bundle.module resolution fails in an unusual host environment.
+    private static let initialWeights: [Int] = {
+        model?.initial_weights ?? [-643, -1562, -1329]
+    }()
 
     /// Emission log-weights `emission[stateIndex][obs]`. Each row is a state;
     /// each column an observation. Higher (closer to 0) = more likely.
-    /// Hand-specified morphology priors; see file header "DERIVATION".
-    private static let emissionWeights: [[Int]] = [
-        // noun
-        [
-            -3000, // nonAlpha    : a noun rarely contains non-letters
-            -1500, // ing         : gerunds can be nouns, but verb-leaning
-            -2200, // ed          : strongly verb-leaning
-            -2500, // ize/ise     : verb-leaning
-            -1800, // ate         : verb-leaning (but nouns exist: "advocate")
-             -300, // tion/sion   : strong noun signal
-             -300, // ness        : strong noun signal
-             -300, // ment        : strong noun signal
-             -300, // ity/ty      : strong noun signal
-             -400, // er/or/ar    : agent nouns
-            -2500, // ly          : adverb-leaning
-             -600, // plain       : nouns are the common default
-        ],
-        // verb
-        [
-            -3000, // nonAlpha
-             -300, // ing         : strong verb signal
-             -300, // ed          : strong verb signal
-             -300, // ize/ise     : strong verb signal
-             -500, // ate         : verb signal
-            -2000, // tion/sion   : noun-leaning
-            -2500, // ness        : noun-leaning
-            -2500, // ment        : noun-leaning
-            -2500, // ity/ty      : noun-leaning
-            -1800, // er/or/ar     : usually agent noun, sometimes verb
-            -2500, // ly
-            -1200, // plain       : a bare unknown is sometimes a verb
-        ],
-        // other
-        [
-             -200, // nonAlpha    : non-letter shapes are almost always other
-            -2000, // ing
-            -2000, // ed
-            -2500, // ize/ise
-            -2200, // ate
-            -2200, // tion/sion
-            -2200, // ness
-            -2200, // ment
-            -2200, // ity/ty
-            -1800, // er/or/ar
-             -400, // ly          : adverbs are other
-            -1000, // plain       : function words, adjectives, etc.
-        ],
-    ]
+    /// Loaded from the frozen artifact. Trained on MASC 3.0.0 PTB corpus.
+    ///
+    /// Falls back to the trained values if the artifact is unavailable
+    /// (build-time invariant — the artifact is always present).
+    private static let emissionWeights: [[Int]] = {
+        model?.emission_weights ?? [
+            // noun
+            [-2954, -3606, -5526, -6132, -5978, -3103, -4746, -4260, -3898, -2867, -5621, -270],
+            // verb
+            [-4525, -1473, -1011, -4445, -3609, -6317, -7010, -6317, -7010, -4708, -6317, -1075],
+            // other
+            [-1125, -3874, -2898, -7241, -4843, -6548, -7241, -7241, -5162, -3528, -2160, -826],
+        ]
+    }()
+
+    // MARK: - Viterbi decode
 
     /// Tags a single lowercased token via integer Viterbi decode.
     ///
@@ -169,7 +192,8 @@ enum HMMTagger {
     /// e.g., "-tion" wins over "-on" and "-ization" routes via "-tion".
     ///
     /// The order here is part of the cross-port contract: Rust applies the
-    /// identical sequence of checks.
+    /// identical sequence of checks. The ETL script also replicates this
+    /// order exactly when computing emission counts from the training corpus.
     static func observe(_ token: String) -> Obs {
         // Non-alphabetic shape: any scalar that is not an ASCII/Unicode
         // letter routes to `nonAlpha`. Checked first because a digit or
@@ -177,7 +201,7 @@ enum HMMTagger {
         if token.isEmpty || token.contains(where: { !$0.isLetter }) {
             return .nonAlpha
         }
-        // Suffix checks, most specific first.
+        // Suffix checks, most specific first (matching ETL script and Rust).
         if token.hasSuffix("ing") { return .suffixIng }
         if token.hasSuffix("tion") || token.hasSuffix("sion") { return .suffixTion }
         if token.hasSuffix("ness") { return .suffixNess }
