@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -655,6 +655,13 @@ cited file.
   `ContainerFingerprintStore` (per-container OR aggregate, recall pruning,
   SPEC B-7), `EstateFingerprintFamilies` (per-drawer fingerprint via SubstrateLib
   `HyperplaneFamily`) — `ContainerFingerprintStore.swift`, `DrawerFingerprint.swift`.
+  The lattice block's `qidClosureHash` facet is now live (mission #7b): when a
+  drawer's `wikidataQID` has P31/P279 ancestors in LatticeLib's pinned Q-ID
+  closure snapshot, the block hashes `FNV.hash16` of the sorted-numeric,
+  `"|"`-joined transitive ancestor list (`LatticeLib.QIDClosure.ancestors(of:)`);
+  no QID or no ancestors → the deterministic null 0. This adds a
+  LocusKit → LatticeLib dependency (downstream → upstream, no cycle; authority
+  DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
 - **Bundle materialisation:** `BundleMaterializer`, `NodeBundleStore`,
   `NodeBundleStore.BundleKind` (count-vector roll-ups over rooms/wings) —
   `BundleMaterializer.swift`, `NodeBundleStore.swift`.
@@ -1164,6 +1171,19 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+`DrawerFingerprint`'s lattice-block `qidClosureHash` facet is now live in both
+ports (mission #7b). When a drawer's `wikidataQID` has P31/P279 ancestors in
+LatticeLib's pinned Q-ID closure snapshot, the block hashes `FNV.hash16` of the
+sorted-numeric, `"|"`-joined transitive ancestor list
+(`LatticeLib.QIDClosure.ancestors(of:)`); no QID or no ancestors → the
+deterministic null 0 (preserving the prior behaviour for those rows). Adds a
+`LocusKit → LatticeLib` package dependency (downstream → upstream, no cycle;
+authority DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28, required by the #7
+feature). Removed the stale "Q-ID closure cache deferred (I-17)" comments. The
+fingerprint output changes only for drawers whose `wikidataQID` has ancestors;
+cross-port conformance preserved.
 
 ### 1.2.0 -- 2026-06-17
 `KGFact` now exposes all four adjective-bitmap axes in both ports. Added the `state` (bits 0–5), `adjectiveSensitivity` (bits 6–11), and `exportability` (bits 12–17) computed accessors alongside the existing `trust` (bits 18–23), matching the `Drawer` adjective layout and fail-closed defaults exactly (`.active` / `.normal` / `.private_` / `.verbatim`). Rust: `state()`, `adjective_sensitivity()`, `exportability()`. Additive surface; a fact can now be filtered by the same retrieval-layer predicates as its source drawer. Cross-port conformance added (shared-bitmap coexistence vector). Removed the stale "future sub-mission" comments that claimed these accessors were deferred.
