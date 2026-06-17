@@ -26,10 +26,16 @@
 //
 // Cross-noun compatibility (invariant I-17): a drawer does not carry
 // the AmbientSample-specific facets (defer pattern, completion bucket,
-// behavioral recency, stream-source bitset) nor, until the Q-ID closure
-// cache lands, the taxonomic closure. Those sub-fields take the
+// behavioral recency, stream-source bitset). Those sub-fields take the
 // deterministic null value zero, which keeps Hamming distance
 // well-defined across noun types.
+//
+// The lattice block's taxonomic-closure facet (qidClosureHash) IS now
+// populated (mission #7b): when a drawer carries a wikidataQID with
+// P31/P279 ancestors in the pinned Q-ID closure snapshot, the block
+// hashes the FNV.hash16 of the sorted-numeric, "|"-joined ancestor list.
+// A drawer with no QID or no ancestors falls back to the deterministic
+// null zero, identical to the cross-noun null above.
 
 import Foundation
 // ─────────────────────────────────────────────────────────────────
@@ -47,6 +53,9 @@ import Foundation
 // ─────────────────────────────────────────────────────────────────
 import SubstrateLib
 import SubstrateTypes
+// LatticeLib.QIDClosure supplies the pinned transitive P31/P279 ancestor
+// closure of a drawer's wikidataQID for the lattice-block qidClosureHash.
+import LatticeLib
 
 // MARK: - FNV-1a (consumed from SubstrateLib)
 //
@@ -102,10 +111,24 @@ extension EstateFingerprintFamilies {
             operational: UInt64(bitPattern: drawer.operationalBitmap),
             provenance:  UInt64(bitPattern: drawer.provenance))
 
+        // qidClosureHash: FNV.hash16 over the drawer's transitive P31/P279
+        // ancestor closure (LatticeLib.QIDClosure, the pinned Wikidata
+        // snapshot), sorted-numeric and "|"-joined — the same substrate
+        // primitive `qidDirectHash` uses (mission #7b). The block-1 closure
+        // slot is 32 bits wide (cookbook §3.3, bits 32–63); the 16-bit fold is
+        // zero-extended into it via UInt32(...). The representation is defined
+        // identically in the Rust port (drawer_fingerprint.rs): same closure,
+        // same "|"-join, same FNV.hash16, same zero-extension. A drawer with no
+        // QID or no ancestors → empty closure → null hash 0, preserving the
+        // deterministic cross-noun null for those rows.
+        let qidClosureAncestors = QIDClosure.ancestors(of: drawer.wikidataQID ?? "")
+        let qidClosureHash: UInt32 = qidClosureAncestors.isEmpty
+            ? 0
+            : UInt32(FNV.hash16(qidClosureAncestors.joined(separator: "|")))
         let latticeInput = SimHashInput.lattice(
             udcPrefixHash: Self.udcPrefixHash(drawer.udcCode),
             qidDirectHash: FNV.hash16(drawer.wikidataQID ?? ""),
-            qidClosureHash: 0)        // Q-ID closure cache deferred; null (I-17)
+            qidClosureHash: qidClosureHash)
 
         let lineageTemporalInput = SimHashInput.lineageTemporal(
             lineageHash: FNV.hash16(drawer.lineageID.uuidString),

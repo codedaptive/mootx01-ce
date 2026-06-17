@@ -121,6 +121,41 @@ struct DrawerFingerprintTests {
                 != fam.fingerprint(of: drawer(provenance: 0x0000_0000_0000_0123)))
     }
 
+    // MARK: - Q-ID closure facet (mission #7b)
+
+    @Test("A QID with taxonomic ancestors moves the fingerprint vs a no-ancestor QID")
+    func qidClosureMovesFingerprint() {
+        let fam = EstateFingerprintFamilies(estateUUID: estateA)
+        // Q146 has 518 P31/P279 ancestors in the pinned snapshot → nonzero
+        // qidClosureHash. Q42 is absent → empty closure → qidClosureHash 0. The
+        // `drawer` helper pins lineage/udc/etc., so the only moving facet is the
+        // QID (direct + closure). The fingerprints must differ — an end-to-end
+        // proof that the QID facet is routed into block 1. The closure-only
+        // isolation (sorted "|"-joined closure → stable nonzero hash) is pinned
+        // by the QIDClosure golden tests in LatticeLib.
+        let withAncestors = drawer(qid: "Q146")
+        let withoutAncestors = drawer(qid: "Q42")
+        #expect(fam.fingerprint(of: withAncestors)
+                != fam.fingerprint(of: withoutAncestors))
+    }
+
+    @Test("Two drawers with the same QID produce the same fingerprint (closure deterministic)")
+    func sameQidSameFingerprint() {
+        let fam = EstateFingerprintFamilies(estateUUID: estateA)
+        #expect(fam.fingerprint(of: drawer(qid: "Q146"))
+                == fam.fingerprint(of: drawer(qid: "Q146")))
+    }
+
+    @Test("A no-ancestor QID is stable and leaves the closure facet null (hash 0)")
+    func noAncestorQidIsStable() {
+        // Q42 is absent from the pinned snapshot → empty closure →
+        // qidClosureHash 0 (the deterministic cross-noun null). Two such drawers
+        // agree, confirming the no-ancestor path is deterministic.
+        let fam = EstateFingerprintFamilies(estateUUID: estateA)
+        #expect(fam.fingerprint(of: drawer(qid: "Q42"))
+                == fam.fingerprint(of: drawer(qid: "Q42")))
+    }
+
     // MARK: - I-17 null handling (absent facets do not crash, stay deterministic)
 
     @Test("Empty optional fields stay deterministic and nonzero")

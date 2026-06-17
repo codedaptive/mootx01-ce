@@ -48,6 +48,13 @@ let package = Package(
         // Off-path cost: one Atomic<Bool> load + branch (~1 ns). No lock on the
         // off-path. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
+        // LatticeLib supplies QIDClosure: the pinned Q-ID taxonomic-closure
+        // surface DrawerFingerprint hashes into the lattice-block
+        // `qidClosureHash` slot (mission #7b). LatticeLib is a libs/ library
+        // that imports no substrate kit — the edge is strictly downstream→
+        // upstream (kit → lib), no cycle. Authority:
+        // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (the #7 feature requires it).
+        .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
     ],
     targets: [
         .target(
@@ -59,6 +66,7 @@ let package = Package(
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 "IntellectusLib",
+                .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Sources/LocusKit"
         ),

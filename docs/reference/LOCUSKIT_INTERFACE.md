@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -655,6 +655,13 @@ cited file.
   `ContainerFingerprintStore` (per-container OR aggregate, recall pruning,
   SPEC B-7), `EstateFingerprintFamilies` (per-drawer fingerprint via SubstrateLib
   `HyperplaneFamily`) — `ContainerFingerprintStore.swift`, `DrawerFingerprint.swift`.
+  The lattice block's `qidClosureHash` facet is now live (mission #7b): when a
+  drawer's `wikidataQID` has P31/P279 ancestors in LatticeLib's pinned Q-ID
+  closure snapshot, the block hashes `FNV.hash16` of the sorted-numeric,
+  `"|"`-joined transitive ancestor list (`LatticeLib.QIDClosure.ancestors(of:)`);
+  no QID or no ancestors → the deterministic null 0. This adds a
+  LocusKit → LatticeLib dependency (downstream → upstream, no cycle; authority
+  DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
 - **Bundle materialisation:** `BundleMaterializer`, `NodeBundleStore`,
   `NodeBundleStore.BundleKind` (count-vector roll-ups over rooms/wings) —
   `BundleMaterializer.swift`, `NodeBundleStore.swift`.
@@ -1164,6 +1171,19 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-06-17
+`DrawerFingerprint`'s lattice-block `qidClosureHash` facet is now live in both
+ports (mission #7b). When a drawer's `wikidataQID` has P31/P279 ancestors in
+LatticeLib's pinned Q-ID closure snapshot, the block hashes `FNV.hash16` of the
+sorted-numeric, `"|"`-joined transitive ancestor list
+(`LatticeLib.QIDClosure.ancestors(of:)`); no QID or no ancestors → the
+deterministic null 0 (preserving the prior behaviour for those rows). Adds a
+`LocusKit → LatticeLib` package dependency (downstream → upstream, no cycle;
+authority DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28, required by the #7
+feature). Removed the stale "Q-ID closure cache deferred (I-17)" comments. The
+fingerprint output changes only for drawers whose `wikidataQID` has ancestors;
+cross-port conformance preserved.
 
 ### 1.3.0 -- 2026-06-17
 `ProposeFrame` now carries the three proposal provenance axes in both ports: `confirmation` (`ProposalConfirmationSource`, default `.human`), `generatedBy` (`ProposalGeneratedByClass`, default `.dreamingDaemon`), and `confidence` (`ProposalConfidenceBucket`, default `.null`). The `propose` verb wires all three into the proposal operational bitmap at bits 12–17 / 18–23 / 24–29 — the exact windows the `confirmationSource` / `generatedByClass` / `confidenceBucket` read accessors (cookbook §2.4) decode — replacing the previous behaviour where those windows were hard-zeroed regardless of producer. Additive and behaviour-preserving: the three defaults reproduce the pre-wire bitmap byte-for-byte, so existing callers (NeuronKit daemon sinks, GLK boundary, scheduler) are unaffected. Daemon-emitted proposals may now set their true producer class so provenance reflects reality rather than the zero fallback. Cross-port round-trip + default-byte-identity conformance added (`ProposeProvenanceTests.swift` ↔ `estate_verbs.rs` propose-provenance tests). Removed the stale "a later sub-mission wires them through the Brain layer ProposalFrame" deferral comment in both ports.

@@ -24,10 +24,16 @@
 //!
 //! Cross-noun compatibility (invariant I-17): a drawer does not carry
 //! the AmbientSample-specific facets (defer pattern, completion bucket,
-//! behavioral recency, stream-source bitset) nor, until the Q-ID
-//! closure cache lands, the taxonomic closure. Those sub-fields take
-//! the deterministic null value zero, which keeps Hamming distance
+//! behavioral recency, stream-source bitset). Those sub-fields take the
+//! deterministic null value zero, which keeps Hamming distance
 //! well-defined across noun types.
+//!
+//! The lattice block's taxonomic-closure facet (`qid_closure_hash`) IS
+//! now populated (mission #7b): when a drawer carries a `wikidata_qid`
+//! with P31/P279 ancestors in the pinned Q-ID closure snapshot, the
+//! block hashes the `fnv::hash16` of the sorted-numeric, `"|"`-joined
+//! ancestor list. A drawer with no QID or no ancestors falls back to the
+//! deterministic null zero, identical to the cross-noun null above.
 
 use crate::drawer::Drawer;
 // ─────────────────────────────────────────────────────────────────
@@ -115,11 +121,27 @@ impl EstateFingerprintFamilies {
             drawer.provenance as u64,
         );
 
+        // qid_closure_hash: fnv::hash16 over the drawer's transitive P31/P279
+        // ancestor closure (lattice_lib::qid_closure, the pinned Wikidata
+        // snapshot), sorted-numeric and "|"-joined — the same substrate
+        // primitive qid_direct_hash uses (mission #7b). The block-1 closure slot
+        // is 32 bits wide (cookbook §3.3, bits 32–63); the 16-bit fold is
+        // zero-extended into it via `as u32`. The representation is defined
+        // identically in the Swift port (DrawerFingerprint.swift): same closure,
+        // same "|"-join, same fnv::hash16, same zero-extension. A drawer with no
+        // QID or no ancestors → empty closure → null hash 0, preserving the
+        // deterministic cross-noun null for those rows.
+        let qid_closure_ancestors =
+            lattice_lib::qid_closure::ancestors(drawer.wikidata_qid.as_deref().unwrap_or(""));
+        let qid_closure_hash: u32 = if qid_closure_ancestors.is_empty() {
+            0
+        } else {
+            substrate_types::fnv::hash16(&qid_closure_ancestors.join("|")) as u32
+        };
         let lattice_input = simhash::lattice_input(
             udc_prefix_hash(&drawer.udc_code),
             substrate_types::fnv::hash16(drawer.wikidata_qid.as_deref().unwrap_or("")),
-            // Q-ID closure cache deferred; null per I-17 (cross-noun).
-            0,
+            qid_closure_hash,
         );
 
         let lineage_temporal_input = simhash::lineage_temporal_input(
@@ -404,5 +426,55 @@ mod tests {
             fam.estate_uuid_byte(),
             substrate_types::fnv::hash64(UUID_A) as u8
         );
+    }
+
+    // --- Q-ID closure facet (mission #7b) ---
+
+    /// A QID with taxonomic ancestors moves the fingerprint vs a no-ancestor
+    /// QID. Q146 has P31/P279 ancestors in the pinned snapshot → nonzero
+    /// qid_closure_hash; Q42 is absent → empty closure → 0. With lineage and
+    /// every other facet pinned identical, the fingerprints must differ. This
+    /// is an end-to-end proof that the QID facet (direct + closure) is routed
+    /// into block 1; the closure-only isolation (that the sorted "|"-joined
+    /// closure hashes to a stable nonzero value) is pinned by the QIDClosure
+    /// golden tests in LatticeLib. Mirrors the Swift `qidClosureMovesFingerprint`.
+    #[test]
+    fn qid_closure_moves_fingerprint() {
+        if !lattice_lib::qid_closure::is_available() {
+            return; // pinned artifact unavailable
+        }
+        let fam = EstateFingerprintFamilies::new(UUID_A);
+        // Pin lineage_id on both so the ONLY moving facet is the QID (direct +
+        // closure). Without this, the random per-`new` lineage_id would differ
+        // and the test would pass for the wrong reason.
+        let lineage = uuid::Uuid::parse_str(UUID_A).unwrap();
+        let mut with_ancestors = sample("547");
+        with_ancestors.lineage_id = lineage;
+        with_ancestors.wikidata_qid = Some("Q146".to_string());
+        let mut without_ancestors = sample("547");
+        without_ancestors.lineage_id = lineage;
+        without_ancestors.wikidata_qid = Some("Q42".to_string());
+        assert_ne!(
+            fam.fingerprint(&with_ancestors),
+            fam.fingerprint(&without_ancestors)
+        );
+    }
+
+    /// Two drawers with the same QID produce the same fingerprint (the closure
+    /// lookup is deterministic). Mirrors the Swift `sameQidSameFingerprint`.
+    #[test]
+    fn same_qid_same_fingerprint() {
+        let fam = EstateFingerprintFamilies::new(UUID_A);
+        // `Drawer::new` assigns a random `lineage_id`; pin both to the same
+        // value so the lineage facet (block 2) is identical and the only thing
+        // under test is that the Q146 closure resolves identically.
+        let lineage = uuid::Uuid::parse_str(UUID_A).unwrap();
+        let mut a = sample("547");
+        a.lineage_id = lineage;
+        a.wikidata_qid = Some("Q146".to_string());
+        let mut b = sample("547");
+        b.lineage_id = lineage;
+        b.wikidata_qid = Some("Q146".to_string());
+        assert_eq!(fam.fingerprint(&a), fam.fingerprint(&b));
     }
 }
