@@ -331,15 +331,33 @@ pub struct ProposeFrame {
     pub kind: crate::proposal_operational::ProposalKind,
     /// Optional free-text justification.
     pub justification: Option<String>,
+    /// Who or what confirms this proposal (cookbook §2.4 bits 12–17). Defaults
+    /// to `Human` (raw 0) — the value the operational bitmap held implicitly
+    /// before this slot existed, so frames that omit it stay byte-identical.
+    pub confirmation: crate::proposal_operational::ProposalConfirmationSource,
+    /// What class of producer generated this proposal (cookbook §2.4 bits
+    /// 18–23). Defaults to `DreamingDaemon` (raw 0) — the implicit pre-slot
+    /// value. Daemon-emitted proposals should set their true producer class so
+    /// provenance reflects reality rather than the zero fallback.
+    pub generated_by: crate::proposal_operational::ProposalGeneratedByClass,
+    /// Coarse confidence bucket for this proposal (cookbook §2.4 bits 24–29).
+    /// Defaults to `Null` (raw 0) — the implicit pre-slot value.
+    pub confidence: crate::proposal_operational::ProposalConfidenceBucket,
 }
 
 impl ProposeFrame {
-    /// Create a `ProposeFrame` with a target and kind; justification defaults to None.
+    /// Create a `ProposeFrame` with a target and kind. `justification` defaults
+    /// to `None`; the three provenance axes default to their raw-0 values
+    /// (`Human` / `DreamingDaemon` / `Null`), reproducing the exact operational
+    /// bitmap the propose verb wrote before these slots were wired.
     pub fn new(target: impl Into<String>, kind: crate::proposal_operational::ProposalKind) -> Self {
         Self {
             target: target.into(),
             kind,
             justification: None,
+            confirmation: crate::proposal_operational::ProposalConfirmationSource::Human,
+            generated_by: crate::proposal_operational::ProposalGeneratedByClass::DreamingDaemon,
+            confidence: crate::proposal_operational::ProposalConfidenceBucket::Null,
         }
     }
 }

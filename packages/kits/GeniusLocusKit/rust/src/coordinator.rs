@@ -1607,10 +1607,18 @@ impl EstateCoordinator {
     ) -> Result<locus_kit::proposal::Proposal, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         let locus_kind = map_brain_kind_to_substrate(&frame.kind);
+        // The GLK Brain-layer ProposeFrame is a distinct type that carries a
+        // String routing kind, not the substrate's three provenance axes, so this
+        // boundary stamps their established defaults (Human / DreamingDaemon /
+        // Null) — the raw-0 values the LocusKit propose verb applies for an unset
+        // frame — keeping the operational bitmap byte-identical at the boundary.
         let locus_frame = LocusProposeFrame {
             target: frame.target,
             kind: locus_kind,
             justification: frame.justification,
+            confirmation: locus_kit::proposal_operational::ProposalConfirmationSource::Human,
+            generated_by: locus_kit::proposal_operational::ProposalGeneratedByClass::DreamingDaemon,
+            confidence: locus_kit::proposal_operational::ProposalConfidenceBucket::Null,
         };
         estate.propose(locus_frame, now).map_err(|e| remap("propose", &uuid_to_str(&handle.estate_uuid), e).into())
     }
