@@ -29,6 +29,7 @@
 //! - engine: Lane F, Lane D, and Lane E engine types
 //!   (inverted index, WAND/BMW, BM25 weighting, generalized RRF fusion)
 
+pub mod basis_store;
 pub mod bm25_index;
 pub mod bundle_store;
 pub mod chunk;
@@ -45,6 +46,7 @@ pub mod tokenizer;
 // Sources/CorpusKit/TrainableEmbeddingBasis.swift.
 pub mod trainable_embedding_basis;
 
+pub use basis_store::{BasisStore, PersistedBasis};
 pub use bm25_index::*;
 pub use bundle_store::*;
 pub use chunk::*;

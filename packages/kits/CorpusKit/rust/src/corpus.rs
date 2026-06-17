@@ -21,9 +21,10 @@
 //! FloatSimHash projection on both ports; for any shared (text -> pooled
 //! vector) the engram is bit-identical Swift/Rust (SPEC § 8.2).
 
+use crate::basis_store::{BasisStore, PersistedBasis};
 use crate::bm25_index::BM25Index;
 use crate::bundle_store::BundleStore;
-use crate::chunk::ScoredChunk;
+use crate::chunk::{Chunk, ScoredChunk};
 use crate::chunker::{chunk_with_default_hlc, ChunkerConfiguration};
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::hybrid_recall::{recall as hybrid_recall, HybridRecallConfiguration};
@@ -328,6 +329,57 @@ fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
     )
 }
 
+// MARK: - ProviderHandle
+
+/// The corpus's embedding provider, retaining its trainability capability.
+///
+/// ## Why this enum exists (the load-bearing cross-port design)
+///
+/// Swift's `Corpus` holds `any EmbeddingProvider` and probes trainability at
+/// runtime with `as? any TrainableEmbeddingBasis`. Rust has no runtime
+/// cross-cast between unrelated trait objects, AND a `Box<dyn EmbeddingProvider>`
+/// upcast from a `Box<dyn TrainableEmbeddingBasis>` (as the α `open` did) has
+/// PERMANENTLY LOST the trainable capability — there is no way to recover the
+/// `train_on_corpus`/`serialize_basis` methods from the upcast box. `reindex`
+/// and first-ingest auto-train need to retrain the live provider, so the corpus
+/// must RETAIN the `Box<dyn TrainableEmbeddingBasis>` rather than upcast it
+/// away. This enum is that retention: `Trainable` keeps the full trainable box;
+/// `Plain` holds a non-trainable provider. `provider()` upcasts a reference to
+/// `&dyn EmbeddingProvider` for the embed surface (stable trait upcasting),
+/// `trainable_mut()` hands back the trainable box for an in-place retrain.
+enum ProviderHandle {
+    /// A trainable distributional provider (RI/PPMI/LSA/NMF). Retains the
+    /// `TrainableEmbeddingBasis` capability so the corpus can retrain it.
+    Trainable(Box<dyn TrainableEmbeddingBasis>),
+    /// A non-trainable provider (deterministic / named-model / FDC). Carries
+    /// only the embed surface; never retrained.
+    Plain(Box<dyn EmbeddingProvider>),
+}
+
+impl ProviderHandle {
+    /// Borrow the embed surface. For `Trainable`, upcasts the trainable box to
+    /// `&dyn EmbeddingProvider` (the Rust mirror of Swift's type-erased carried
+    /// provider) since `EmbeddingProvider` is a supertrait of
+    /// `TrainableEmbeddingBasis`.
+    fn provider(&self) -> &dyn EmbeddingProvider {
+        match self {
+            ProviderHandle::Trainable(b) => b.as_ref() as &dyn EmbeddingProvider,
+            ProviderHandle::Plain(b) => b.as_ref(),
+        }
+    }
+
+    /// Borrow the trainable box (to call `serialize_basis` /
+    /// `reconstruct_trainable_basis`), or `None` when the provider is not
+    /// trainable. Mirrors Swift's `provider as? any TrainableEmbeddingBasis`
+    /// capability probe.
+    fn as_trainable(&self) -> Option<&dyn TrainableEmbeddingBasis> {
+        match self {
+            ProviderHandle::Trainable(b) => Some(b.as_ref()),
+            ProviderHandle::Plain(_) => None,
+        }
+    }
+}
+
 // MARK: - Corpus
 
 /// Unified RAG entry point for corpus-kit.
@@ -355,7 +407,33 @@ pub struct Corpus {
     /// Mirrors Swift's `chunkSourceMap: [UUID: String]` on the Corpus actor.
     chunk_source_map: Mutex<std::collections::HashMap<uuid::Uuid, String>>,
     vector_store: VectorStore,
-    provider: Box<dyn EmbeddingProvider>,
+    basis_store: BasisStore,
+    /// Cached provider modelID. Stable for the corpus's lifetime — training
+    /// mutates the basis, not the identity, and a reopened-from-blob provider is
+    /// keyed by the same modelID. Caching it lets `model_id()` return `&str`
+    /// without locking the provider Mutex (a Mutex-guarded `&str` cannot outlive
+    /// the guard), preserving the existing `-> &str` signature and its callers.
+    /// (modelVersion is read inside locked sections from the provider directly,
+    /// so it is not cached.)
+    model_id: String,
+    /// The embedding provider, behind a `Mutex` so `reindex`/first-ingest can
+    /// swap in a freshly-trained provider through a shared `&self` (the Rust
+    /// mirror of Swift's actor serialization — `reindex` mutates the provider but
+    /// the corpus is owned as `Arc<Corpus>` and cannot give `&mut self`). The
+    /// `bm25` field already uses the same `Mutex` discipline for the same reason.
+    /// A `ProviderHandle`, not a bare box, so the trainable capability survives
+    /// (see `ProviderHandle`).
+    provider: Mutex<ProviderHandle>,
+    /// The serialized basis of a FRESH (untrained) trainable provider, captured
+    /// ONLY when the corpus was built from a fresh trainable provider with no
+    /// persisted basis. Each training pass (`reindex` / first-ingest)
+    /// reconstructs a FRESH trainable provider from this empty-basis blob
+    /// (`reconstruct_trainable_basis`), trains it from scratch, and installs it.
+    /// Required because `train_on_corpus` is ADDITIVE — retraining an
+    /// already-trained provider would double-count. `None` for non-trainable
+    /// providers and for a reopened-from-basis corpus (already trained; not
+    /// retrained). Mirrors Swift's `freshBasisBlob`.
+    fresh_basis_blob: Option<Vec<u8>>,
     /// Test-only seam: when `Some`, `float_nearest` returns `StoreError(this)` on the
     /// next call, consuming the value. Never set in production code.
     ///
@@ -390,78 +468,151 @@ impl Corpus {
         storage
             .migrate(&VectorStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+        // Additive basis-persistence table (mission 6a-ii-β). Applied via
+        // migrate so the table is created regardless of the other schemas'
+        // version gates, exactly like the BundleStore/VectorStore pair above.
+        storage
+            .migrate(&BasisStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
 
         let bundle_store = BundleStore::new(Arc::clone(&storage));
         // No sidecar path for the CorpusKit Rust path — memory-only resident array.
         // The SQLite table remains the durable source of truth; the resident array
         // is rebuilt from the table on first find_nearest call.
         let vector_store = VectorStore::new(Arc::clone(&storage), None);
+        let basis_store = BasisStore::new(Arc::clone(&storage));
 
         let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
-        let provider: Box<dyn EmbeddingProvider> = match model {
-            EmbeddingModelConfig::Deterministic => Box::new(make_deterministic_provider()),
+        // Build the ProviderHandle. The trainable distributional cases are kept
+        // as `Trainable(Box<dyn TrainableEmbeddingBasis>)` — NOT upcast to a
+        // plain box — so `reindex`/first-ingest can retrain them in place. The
+        // non-trainable cases become `Plain`. Load-on-open (below) may replace a
+        // trainable handle with a reconstructed-from-basis one.
+        let handle: ProviderHandle = match model {
+            EmbeddingModelConfig::Deterministic => {
+                ProviderHandle::Plain(Box::new(make_deterministic_provider()))
+            }
             // RandomIndexing: the caller built and trained the provider externally.
-            // It arrives as a Box<dyn EmbeddingProvider> — no further construction
-            // needed here. This differs from the named model cases (which carry a
-            // host inference closure) because the RI provider is self-contained.
-            // The distributional cases carry a Box<dyn TrainableEmbeddingBasis>
-            // (mission 6a-ii-α). Upcast to Box<dyn EmbeddingProvider> for the
-            // embed surface — a trained provider IS an embedding provider via
-            // the supertrait. No re-construction needed; the trained state is
-            // already built by the caller.
+            // Retain the trainable box (the distributional cases carry a
+            // Box<dyn TrainableEmbeddingBasis>, mission 6a-ii-α) so the trainable
+            // capability survives for reindex/first-ingest retrain.
             EmbeddingModelConfig::RandomIndexing { provider } => {
-                provider as Box<dyn EmbeddingProvider>
+                ProviderHandle::Trainable(provider)
             }
             // Ppmi: the caller built, trained, and finalized the PpmiProvider
-            // externally. The finalization step (count → PPMI vectors) must
-            // already have happened before this Corpus is used for recall.
-            EmbeddingModelConfig::Ppmi { provider } => provider as Box<dyn EmbeddingProvider>,
+            // externally. Retain the trainable box.
+            EmbeddingModelConfig::Ppmi { provider } => ProviderHandle::Trainable(provider),
             // Lsa: the caller built and trained the LsaProvider externally (term-
-            // document matrix + Jacobi SVD). Upcast through.
-            EmbeddingModelConfig::Lsa { provider } => provider as Box<dyn EmbeddingProvider>,
+            // document matrix + Jacobi SVD). Retain the trainable box.
+            EmbeddingModelConfig::Lsa { provider } => ProviderHandle::Trainable(provider),
             // Nmf: the caller built, trained, and finalized the NmfProvider externally
             // (TF matrix + NMF factorization via SubstrateML, tolerance=0 for
-            // fixed iteration count / bit-identical output). Upcast through.
-            EmbeddingModelConfig::Nmf { provider } => provider as Box<dyn EmbeddingProvider>,
+            // fixed iteration count / bit-identical output). Retain the trainable box.
+            EmbeddingModelConfig::Nmf { provider } => ProviderHandle::Trainable(provider),
             // Fdc: the caller constructed an FDCProvider externally. FDCProvider is
-            // stateless (no training required) — the caller just passes it through
-            // to register it as the fusion voter. Pass through unchanged.
-            EmbeddingModelConfig::Fdc { provider } => provider,
-            EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
-                "minilm-v6",
-                "1.0.0",
-                MINILM_SEED,
-                30522,
-                128,
-                inference,
-            )),
-            EmbeddingModelConfig::MPNet { inference } => Box::new(CorpusTextProvider::new(
-                "mpnet-base-v2",
-                "1.0.0",
-                MPNET_SEED,
-                30522,
-                128,
-                inference,
-            )),
-            EmbeddingModelConfig::EmbeddingGemma { inference } => Box::new(CorpusTextProvider::new(
-                "embedding-gemma-300m",
-                "1.0.0",
-                EMBEDDING_GEMMA_SEED,
-                256_000,
-                2048,
-                inference,
-            )),
+            // stateless (no training required) — not trainable.
+            EmbeddingModelConfig::Fdc { provider } => ProviderHandle::Plain(provider),
+            EmbeddingModelConfig::MiniLM { inference } => {
+                ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
+                    "minilm-v6",
+                    "1.0.0",
+                    MINILM_SEED,
+                    30522,
+                    128,
+                    inference,
+                )))
+            }
+            EmbeddingModelConfig::MPNet { inference } => {
+                ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
+                    "mpnet-base-v2",
+                    "1.0.0",
+                    MPNET_SEED,
+                    30522,
+                    128,
+                    inference,
+                )))
+            }
+            EmbeddingModelConfig::EmbeddingGemma { inference } => {
+                ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
+                    "embedding-gemma-300m",
+                    "1.0.0",
+                    EMBEDDING_GEMMA_SEED,
+                    256_000,
+                    2048,
+                    inference,
+                )))
+            }
         };
+
+        // Load-on-open: if the provider is trainable AND a basis was previously
+        // persisted for its (model_id, model_version), reconstruct the trained
+        // provider from that blob so the dense lane is trained-ready immediately
+        // after restart, without re-running training on every open. A
+        // non-trainable provider, or a trainable provider with no persisted
+        // basis, keeps the freshly-built handle. Mirrors Swift's
+        // `loadTrainedProviderIfAvailable`.
+        let handle = Self::load_trained_provider_if_available(handle, &basis_store)?;
+
+        // Cache the (stable) provider modelID for `model_id()` without locking.
+        let model_id = handle.provider().model_id().to_string();
+
+        // Capture the FRESH (untrained) basis blob when the handle is still
+        // Trainable — i.e. no persisted basis was loaded (load makes it Plain).
+        // reindex/first-ingest reconstruct a fresh trainable provider from this
+        // blob and train from scratch (train_on_corpus is additive). A loaded /
+        // non-trainable handle has no fresh-basis blob.
+        let fresh_basis_blob = handle.as_trainable().map(|t| t.serialize_basis());
 
         Ok(Corpus {
             bundle_store,
             bm25: Mutex::new(bm25),
             chunk_source_map: Mutex::new(std::collections::HashMap::new()),
             vector_store,
-            provider,
+            basis_store,
+            model_id,
+            provider: Mutex::new(handle),
+            fresh_basis_blob,
             #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
         })
+    }
+
+    /// Reconstruct a trained provider from a persisted basis on open, or return
+    /// the handle unchanged. Used by both constructors.
+    ///
+    /// The basis is loaded only when the handle is trainable AND a row exists
+    /// for its provider's (model_id, model_version). Reconstruction routes
+    /// through the `TrainableEmbeddingBasis::reconstruct_basis` witness on the
+    /// trainable box — core never names the concrete provider type, so layering
+    /// (providers → core) is preserved. The reconstructed provider is a plain
+    /// `Box<dyn EmbeddingProvider>` (a trait object cannot return `Self`), so it
+    /// is held as `Plain`: it is fully trained and serves the dense lane, but a
+    /// subsequent `reindex` will rebuild from a freshly-constructed trainable
+    /// provider rather than mutating this restored one. (A restored-from-blob
+    /// provider that needs retraining is reconstructed fresh by the caller; the
+    /// β scope retrain triggers are first-ingest — which only fires when NO
+    /// basis exists — and explicit `reindex`, which trains whatever trainable
+    /// handle is present at open. See the reindex note for the follow-up knob.)
+    fn load_trained_provider_if_available(
+        handle: ProviderHandle,
+        basis_store: &BasisStore,
+    ) -> CorpusKitResult<ProviderHandle> {
+        let trainable = match &handle {
+            ProviderHandle::Trainable(b) => b,
+            ProviderHandle::Plain(_) => return Ok(handle),
+        };
+        let model_id = trainable.model_id().to_string();
+        let model_version = trainable.model_version().to_string();
+        match basis_store.load(&model_id, &model_version)? {
+            Some(persisted) => {
+                // A basis exists — reconstruct it through the seam witness.
+                // reconstruct_basis errors on a corrupt/version-mismatched blob;
+                // propagate rather than silently serving an untrained provider.
+                let restored = trainable.reconstruct_basis(&persisted.basis)?;
+                Ok(ProviderHandle::Plain(restored))
+            }
+            None => Ok(handle),
+        }
     }
 
     // MARK: - Test seams (not part of the production surface)
@@ -483,17 +634,31 @@ impl Corpus {
         storage
             .migrate(&VectorStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+        storage
+            .migrate(&BasisStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
 
         let bundle_store = BundleStore::new(Arc::clone(&storage));
         let vector_store = VectorStore::new(Arc::clone(&storage), None);
+        let basis_store = BasisStore::new(Arc::clone(&storage));
         let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
+
+        // The test seam receives a plain Box<dyn EmbeddingProvider>; Rust has no
+        // runtime downcast to a trait object, so an injected provider is always
+        // held as Plain (non-trainable). Load-on-open does not apply here. Cache
+        // the provider modelID for `model_id()`.
+        let model_id = provider.model_id().to_string();
 
         Ok(Corpus {
             bundle_store,
             bm25: Mutex::new(bm25),
             chunk_source_map: Mutex::new(std::collections::HashMap::new()),
             vector_store,
-            provider,
+            basis_store,
+            model_id,
+            provider: Mutex::new(ProviderHandle::Plain(provider)),
+            // The injected test provider is Plain (non-trainable) — no fresh blob.
+            fresh_basis_blob: None,
             #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
         })
@@ -537,23 +702,55 @@ impl Corpus {
             }
         }
 
+        let filed_at_secs = now_millis / 1000;
+
+        // First-ingest auto-train (mission 6a-ii-β): when a fresh-basis blob is
+        // present (trainable provider) AND no basis has been persisted yet, train
+        // a fresh basis on the CURRENT corpus snapshot (which now includes the
+        // just-inserted chunks) and re-embed every chunk under the trained basis.
+        // This is the ONLY implicit train trigger. Subsequent ingests (once a
+        // basis exists) take the fold-in path below: `embed_float` projects new
+        // chunks onto the FROZEN basis without retraining — LSA/NMF cannot
+        // incrementally refactor a basis, so a per-ingest retrain would be both
+        // wrong and wasteful. Explicit `reindex` retrains on growth. A
+        // reopened-from-blob corpus has no fresh-basis blob, so it always takes
+        // the fold-in path here (already trained on open). Mirrors Swift's
+        // first-ingest branch.
+        if self.fresh_basis_blob.is_some() {
+            let has_basis = self.basis_store.load(&self.model_id, &self.model_version()?)?.is_some();
+            if !has_basis {
+                let all_chunks = self.bundle_store.all_chunks()?;
+                // Train a fresh basis + persist, then re-embed the whole corpus
+                // under the freshly-trained basis so chunks ingested before this
+                // first-ingest train share the same basis.
+                self.train_and_persist_basis(&all_chunks, filed_at_secs)?;
+                self.reembed_chunks(&all_chunks, filed_at_secs)?;
+                return Ok(());
+            }
+        }
+
+        // Fold-in path: a basis already exists (or the provider is not
+        // trainable). Embed only the NEW chunks; for a trainable provider
+        // `embed_float` projects them onto the frozen basis (no retrain).
+        //
         // Fan-out: embed each chunk and store the vector. The
         // chunk.id == vector.drawer_id join is maintained here;
         // the caller never sees it (sealed-vector principle).
-        //
-        // `filed_at` is in Unix seconds; convert from millis.
-        let filed_at_secs = now_millis / 1000;
+        let guard = self
+            .provider
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+        let provider = guard.provider();
         for chunk in &chunks {
-            let engram = self
-                .provider
+            let engram = provider
                 .embed(&chunk.text)
                 .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?;
             self.vector_store
                 .add_vector(
                     &chunk.id.to_string(),
                     &engram,
-                    self.provider.model_id(),
-                    self.provider.model_version(),
+                    provider.model_id(),
+                    provider.model_version(),
                     filed_at_secs,
                 )
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
@@ -569,15 +766,164 @@ impl Corpus {
             // and the dense float lane stays dark for it. Cosine over this true
             // embedding ranks an answer above a near-duplicate of the question,
             // which the 256-bit SimHash projection cannot.
-            if let Ok(floats) = self.provider.embed_float(&chunk.text) {
+            if let Ok(floats) = provider.embed_float(&chunk.text) {
                 if !floats.is_empty() {
                     self.vector_store
                         .add_payload(
                             &chunk.id.to_string(),
                             1,
                             &VectorPayload::from_f32(&floats),
-                            self.provider.model_id(),
-                            self.provider.model_version(),
+                            provider.model_id(),
+                            provider.model_version(),
+                            filed_at_secs,
+                        )
+                        .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Retrain the embedding basis on the full corpus and re-embed every chunk.
+    ///
+    /// Rust mirror of Swift `Corpus.reindex(now:)`. When the provider is
+    /// trainable (RI/PPMI/LSA/NMF):
+    ///   1. gathers ALL chunk texts from the BundleStore,
+    ///   2. trains the basis through the `TrainableEmbeddingBasis` seam
+    ///      (`train_on_corpus`, which runs the provider's own train+finalize),
+    ///   3. persists the serialized basis blob (UPSERT, one row per provider
+    ///      key) with `now_millis` and the trained chunk count, and
+    ///   4. re-embeds every chunk (binary lane v0 + float lane v1), REPLACING
+    ///      stale vectors in place (delete-all then re-add — no duplicate rows).
+    ///
+    /// When the provider is NOT trainable, or the corpus was reopened from a
+    /// persisted basis (Plain handle), no basis is persisted; the chunks are
+    /// simply (re)embedded so the call is a well-defined vector refresh.
+    ///
+    /// Deterministic: `now_millis` is the only clock source — never reads the
+    /// system clock. Training is a pure function of the corpus texts and the
+    /// provider's fixed seeds (the seam contract).
+    ///
+    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger
+    /// is the first-ingest auto-train in `ingest`. A growth-threshold
+    /// auto-retrain (retraining once the live chunk count grows materially past
+    /// `trained_chunk_count`) is a DOCUMENTED FOLLOW-UP KNOB, NOT wired here:
+    /// LSA/NMF cannot incrementally refactor a frozen basis, so an automatic
+    /// mid-stream retrain policy needs its own decision. The staleness anchor
+    /// (`trained_chunk_count`) is persisted so future policy can compute the delta.
+    ///
+    /// `now_millis`: Unix epoch in milliseconds for the basis `trained_at` stamp
+    /// (converted to seconds) and the re-embedded vectors' filing timestamps.
+    pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
+        let chunks = self.bundle_store.all_chunks()?;
+        let filed_at_secs = now_millis / 1000;
+
+        if self.fresh_basis_blob.is_some() {
+            // Train a FRESH basis on the full corpus snapshot and install the
+            // trained provider. Training fresh (not in place) is required because
+            // train_on_corpus is additive — see fresh_basis_blob.
+            self.train_and_persist_basis(&chunks, filed_at_secs)?;
+        }
+
+        // Re-embed every chunk under the (now possibly retrained) provider,
+        // replacing stale vectors. Done whether or not a retrain occurred: for a
+        // non-trainable provider — or a reopened-from-blob corpus with no
+        // fresh-basis blob — reindex is a vector refresh under the current basis.
+        self.reembed_chunks(&chunks, filed_at_secs)?;
+        Ok(())
+    }
+
+    /// Train a FRESH provider on the given chunks' texts and persist the
+    /// serialized basis. Shared by `reindex` and the first-ingest auto-train.
+    ///
+    /// Reconstructs a fresh (untrained) trainable provider from `fresh_basis_blob`
+    /// via the seam's `reconstruct_trainable_basis`, trains it from scratch on the
+    /// chunk texts, installs it as the live provider, and UPSERTs the resulting
+    /// basis keyed by (model_id, model_version). Training fresh — not in place —
+    /// guarantees the additive `train_on_corpus` starts from scratch, so the
+    /// basis is the canonical from-scratch one and reindex is idempotent
+    /// (byte-for-byte parity with the Swift port). Precondition:
+    /// `fresh_basis_blob` is `Some` (the caller checks this).
+    fn train_and_persist_basis(&self, chunks: &[Chunk], now_secs: i64) -> CorpusKitResult<()> {
+        let Some(fresh_blob) = self.fresh_basis_blob.as_ref() else {
+            // Defensive: only invoked when fresh_basis_blob is Some. Nothing to
+            // train otherwise.
+            return Ok(());
+        };
+        // Reconstruct a fresh trainable provider from the empty-basis blob, train
+        // it from scratch, then install it as the live serving provider.
+        let mut trained = {
+            let guard = self
+                .provider
+                .lock()
+                .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+            let trainable = guard.as_trainable().ok_or_else(|| {
+                CorpusKitError::NotTrainable(
+                    "provider is not trainable — basis seam invariant violated".into(),
+                )
+            })?;
+            trainable.reconstruct_trainable_basis(fresh_blob)?
+        };
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        trained.train_on_corpus(&texts);
+        let blob = trained.serialize_basis();
+        let model_id = trained.model_id().to_string();
+        let model_version = trained.model_version().to_string();
+        // Install the trained provider as the live serving provider.
+        {
+            let mut guard = self
+                .provider
+                .lock()
+                .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+            *guard = ProviderHandle::Trainable(trained);
+        }
+        self.basis_store.upsert(&PersistedBasis {
+            model_id,
+            model_version,
+            basis: blob,
+            trained_at_secs: now_secs,
+            trained_chunk_count: chunks.len(),
+        })
+    }
+
+    /// Re-embed every chunk (binary v0 + float v1) under the current provider,
+    /// replacing any stale vectors so no duplicate rows accumulate. Mirrors
+    /// Swift `Corpus.reembedChunks`. Re-acquires the provider lock internally.
+    fn reembed_chunks(&self, chunks: &[Chunk], filed_at_secs: i64) -> CorpusKitResult<()> {
+        let guard = self
+            .provider
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+        let provider = guard.provider();
+        let model_id = provider.model_id().to_string();
+        for chunk in chunks {
+            // Delete-all before re-adding so a chunk that already had vectors
+            // under a previous basis ends up with exactly the new vectors, not a
+            // mix. delete_all_vectors clears both lanes (v0 binary + v1 float).
+            self.vector_store
+                .delete_all_vectors(&chunk.id.to_string(), &model_id)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+            let engram = provider
+                .embed(&chunk.text)
+                .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?;
+            self.vector_store
+                .add_vector(
+                    &chunk.id.to_string(),
+                    &engram,
+                    provider.model_id(),
+                    provider.model_version(),
+                    filed_at_secs,
+                )
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+            if let Ok(floats) = provider.embed_float(&chunk.text) {
+                if !floats.is_empty() {
+                    self.vector_store
+                        .add_payload(
+                            &chunk.id.to_string(),
+                            1,
+                            &VectorPayload::from_f32(&floats),
+                            provider.model_id(),
+                            provider.model_version(),
                             filed_at_secs,
                         )
                         .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
@@ -601,10 +947,16 @@ impl Corpus {
         limit: usize,
         _now_millis: i64,
     ) -> CorpusKitResult<Vec<ScoredChunk>> {
-        let probe = self
-            .provider
-            .embed(query)
-            .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?;
+        let probe = {
+            let guard = self
+                .provider
+                .lock()
+                .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+            guard
+                .provider()
+                .embed(query)
+                .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?
+        };
 
         let bm25 = self
             .bm25
@@ -614,7 +966,7 @@ impl Corpus {
         hybrid_recall(
             &probe,
             query,
-            self.provider.model_id(),
+            &self.model_id,
             limit,
             &self.vector_store,
             &bm25,
@@ -632,7 +984,12 @@ impl Corpus {
     /// Returns an error when the embedding provider fails (e.g. empty input
     /// routed to a model that requires non-empty text).
     pub fn embed(&self, text: &str) -> CorpusKitResult<engram_lib::Engram> {
-        self.provider
+        let guard = self
+            .provider
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+        guard
+            .provider()
             .embed(text)
             .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))
     }
@@ -643,7 +1000,20 @@ impl Corpus {
     /// model so cross-model Hamming comparisons cannot occur.
     /// Mirrors Swift `Corpus.modelID`.
     pub fn model_id(&self) -> &str {
-        self.provider.model_id()
+        // Returns the cached identity (stable for the corpus lifetime) so the
+        // signature stays `-> &str` without locking the provider Mutex.
+        &self.model_id
+    }
+
+    /// The provider's modelVersion, read under the provider lock. Used to key
+    /// the basis row (model_id, model_version). Stable for the corpus lifetime;
+    /// not cached because it is only needed on the basis-store paths.
+    fn model_version(&self) -> CorpusKitResult<String> {
+        let guard = self
+            .provider
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+        Ok(guard.provider().model_version().to_string())
     }
 
     /// Embed the query text into the pooled dense float vector (Lane D) — the
@@ -653,7 +1023,12 @@ impl Corpus {
     /// than failing the whole recall. Empty input returns `[]`. Mirrors Swift
     /// `Corpus.embedFloat(_:)`.
     pub fn embed_float(&self, text: &str) -> CorpusKitResult<Vec<f32>> {
-        self.provider
+        let guard = self
+            .provider
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
+        guard
+            .provider()
             .embed_float(text)
             .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))
     }
@@ -713,7 +1088,16 @@ impl Corpus {
         // Attempt to embed the query via the float lane. A provider without a
         // float lane will error here — this is the expected opt-out path (not a
         // store error). Emit the dark_provider counter so callers can observe it.
-        let probe = match self.provider.embed_float(query) {
+        // float_nearest returns a FloatLaneOutcome (no Result), so the provider
+        // Mutex is locked with a poison-tolerant fallback rather than `?`.
+        let probe_result = {
+            let guard = self
+                .provider
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard.provider().embed_float(query)
+        };
+        let probe = match probe_result {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
                 // Provider returned an empty vector — treat as opt-out.
@@ -752,7 +1136,7 @@ impl Corpus {
         // we still have at least `limit` sources — mirrors bm25_top_k_by_source.
         let matches = match self.vector_store.find_nearest_float(
             &probe,
-            self.provider.model_id(),
+            &self.model_id,
             limit.saturating_mul(4),
         ) {
             Ok(m) => m,
@@ -869,7 +1253,11 @@ impl Corpus {
     /// Probes with a single non-empty token so the answer reflects provider
     /// capability, not input. Mirrors Swift `Corpus.supportsFloat`.
     pub fn supports_float(&self) -> bool {
-        matches!(self.provider.embed_float("x"), Ok(v) if !v.is_empty())
+        let guard = match self.provider.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        matches!(guard.provider().embed_float("x"), Ok(v) if !v.is_empty())
     }
 
     /// BM25 keyword top-k by source (drawer) ID.
@@ -974,6 +1362,13 @@ impl Corpus {
             .destroy_all_vectors()
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("destroy_recall_index vector teardown failed: {:?}", e)))?;
 
+        // Step 4: Wipe the persisted trained basis (mission 6a-ii-β). A
+        // destroyed corpus must leave no orphaned basis row: the next open would
+        // otherwise reconstruct a trained provider whose basis no longer matches
+        // any stored vectors. The basis table is not append-only, so deletion is
+        // permitted. Mirrors Swift `Corpus.destroyRecallIndex` step 3.
+        self.basis_store.delete_all()?;
+
         Ok(())
     }
 
@@ -996,7 +1391,7 @@ impl Corpus {
             // removes both and invalidates the float index so a removed source
             // cannot resurface through the dense float lane.
             self.vector_store
-                .delete_all_vectors(&chunk.id.to_string(), self.provider.model_id())
+                .delete_all_vectors(&chunk.id.to_string(), &self.model_id)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
         }
         // Remove chunk entries from the reverse map so bm25_top_k_by_source

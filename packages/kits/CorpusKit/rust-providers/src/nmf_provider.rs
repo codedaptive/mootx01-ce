@@ -511,6 +511,19 @@ impl TrainableEmbeddingBasis for NmfProvider {
             .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
         Ok(Box::new(provider))
     }
+
+    /// Reconstruct a fresh NMF provider from a basis blob, boxed as TRAINABLE so
+    /// `Corpus` can rebuild a from-scratch trainable provider for `reindex` /
+    /// first-ingest (train_on_corpus is additive — see the trait doc). Same
+    /// `from_serialized_basis` constructor as `reconstruct_basis`.
+    fn reconstruct_trainable_basis(
+        &self,
+        basis: &[u8],
+    ) -> Result<Box<dyn TrainableEmbeddingBasis>, CorpusKitError> {
+        let provider = NmfProvider::from_serialized_basis(basis)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
+        Ok(Box::new(provider))
+    }
 }
 
 // ---------------------------------------------------------------------------
