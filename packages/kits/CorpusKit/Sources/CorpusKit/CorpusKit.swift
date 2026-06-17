@@ -187,6 +187,15 @@ public enum EmbeddingModel: Sendable {
     /// in `CorpusKitProviders` for the full training API.
     case ppmi(provider: any EmbeddingProvider & Sendable)
 
+    /// LSA (Latent Semantic Analysis) distributional-semantics provider.
+    ///
+    /// The caller constructs and trains an `LsaProvider` (term-document matrix +
+    /// deterministic Jacobi SVD truncated to k dimensions) and passes it here.
+    ///
+    /// See ADR-010 Decision B for the rationale and `LsaProvider` in
+    /// `CorpusKitProviders` for the full training API.
+    case lsa(provider: any EmbeddingProvider & Sendable)
+
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 }
@@ -779,6 +788,11 @@ extension EmbeddingModel {
             // externally. Pass through unchanged — no further construction
             // needed here. The finalization step (count → PPMI vectors) must
             // already have happened before this Corpus is used for recall.
+            return provider
+
+        case .lsa(let provider):
+            // The caller built and trained the LsaProvider externally (term-
+            // document matrix + SVD). Pass through unchanged.
             return provider
 
         case .deterministic:

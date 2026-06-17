@@ -29,11 +29,15 @@
 //! `CorpusKit` and `CorpusKitProviders`.
 
 pub mod deterministic_tokenizer;
+// ADR-010 Decision B signal #1: LSA/SVD distributional-semantics provider.
+// Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
+pub mod lsa;
 pub mod ppmi;
 pub mod random_indexing;
 pub mod text_providers;
 
 pub use deterministic_tokenizer::DeterministicTokenizer;
+pub use lsa::{LsaProvider, LSA_DEFAULT_RANK, LSA_PROJECTION_SEED};
 pub use ppmi::{
     PpmiProvider, PPMI_DIMENSION, PPMI_NONZEROS, PPMI_PROJECTION_SEED, PPMI_WINDOW,
 };
