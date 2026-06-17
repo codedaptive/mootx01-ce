@@ -23,9 +23,9 @@ fn novel_token_tagger_choice_default_is_hmm() {
 }
 
 // (b) word_class_with_tagger(.Hmm) on a novel -tion token classifies as Noun.
-// "xylophonation" is not in the bundled table; HMM -tion emission:
-//   noun -300, verb -2000. With noun-prior -400 vs verb-prior -1200:
-//   noun total -700, verb total -3200. Noun wins.
+// "xylophonation" is not in the bundled table; trained model -tion emission:
+//   noun -3091, verb -7466. With noun-prior -1480 vs verb-prior -1884:
+//   noun total -4571, verb total -9350, other total -10853. Noun wins.
 #[test]
 fn hmm_choice_novel_tion_token_is_noun() {
     let table = global_table();

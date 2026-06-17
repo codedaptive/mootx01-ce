@@ -13,7 +13,7 @@
 //
 //   { "edges": { "<qid>": ["<sorted direct parent qids>", ...] }, ... }
 //
-// produced by `scripts/build_qid_closure.py` and checked in like the FDC
+// produced by the Q-ID closure ETL (EE build tooling) and checked in like the FDC
 // artifacts. The runtime NEVER re-queries Wikidata — the closure is computed
 // locally by BFS over these pinned edges. This keeps `ancestors` pure,
 // deterministic, and byte-identical to the Swift port (`QIDClosure.swift`).
