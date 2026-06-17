@@ -523,19 +523,19 @@ impl EstateAdmin {
     /// `InMemoryStorage` as an `InMemoryDrawerStore` and hands the raw `Storage`
     /// clone through — the construction shape the Rust GLK `provision` expects.
     ///
-    /// - InMemory: an `InMemoryStorage` built with the resolved cache config →
-    ///   `InMemoryStorage::row_store` wraps `CachingRowStore` when enabled. Full
-    ///   parity with the Swift InMemory path. This is the backend the DEBT proof
-    ///   uses (mirroring the Swift `inMemoryLiveEstateIsCaching` test).
-    /// - SQLite: a file at `<estates_directory>/<uuid>.sqlite`. The LocusKit Rust
-    ///   `SqliteDrawerStore::from_path` builds its own `EstateConfiguration`
-    ///   internally and exposes no cache-accepting constructor to external crates,
-    ///   so the host cannot thread a cache-on config through the SQLite DrawerStore
-    ///   today — a documented primitive-layer gap (see the module's parity-debt
-    ///   note and the mission report's out-of-scope section), NOT a host concern.
-    ///   The SQLite estate is still provisioned-with-corpus (DEBT-2 holds for it);
-    ///   only the cache-wrap (DEBT-1) is unavailable on the SQLite leg until a
-    ///   future LocusKit primitive mission lands a cache-accepting constructor.
+    /// Both backends apply identical caching semantics: the resolved `cache_config`
+    /// is threaded into their `EstateConfiguration`, and `Storage::row_store()`
+    /// wraps the backing store in a `CachingRowStore` LRU hot tier when
+    /// `cache_config.enabled` is true. The predicate is the same for InMemory and
+    /// SQLite (`inmemory.rs` / `sqlite.rs`, same branch on `cache_config.enabled`).
+    ///
+    /// - InMemory: `InMemoryStorage::new(config)` with the resolved cache config.
+    ///   `InMemoryDrawerStore::with_storage` opens the LocusKit schema over it.
+    /// - SQLite: a file at `<estates_directory>/<uuid>.sqlite`. The cache-configured
+    ///   `EstateConfiguration` is passed to `SqliteDrawerStore::from_path_with_config`,
+    ///   which threads it through to `SqliteStorage`. A second `SqliteStorage` handle
+    ///   over the same file is retained for Corpus sub-store wiring and the
+    ///   cache-introspection seam — both handles carry the resolved cache config.
     fn make_storage(
         &self,
         backend: EstateBackendKind,
@@ -583,17 +583,18 @@ impl EstateAdmin {
                     self.estates_directory.trim_end_matches('/'),
                     estate_id
                 );
-                // Build the SQLite DrawerStore through the LocusKit newtype. It
-                // constructs its own (cache-disabled) EstateConfiguration — the
-                // documented primitive-layer gap above. We build a SEPARATE
-                // cache-configured SqliteStorage handle for the Corpus sub-store
-                // wiring + the cache-introspection seam, so the corpus path and the
-                // host's resolved cache config are still threaded for the backend.
-                let drawer_store =
-                    SqliteDrawerStore::from_path(&path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
-                        .map_err(|e| AdminError::EngineFailure {
-                            reason: format!("SqliteDrawerStore::from_path failed: {e:?}"),
-                        })?;
+                // Build a cache-configured EstateConfiguration and hand it to
+                // SqliteDrawerStore::from_path_with_config. SqliteStorage::row_store
+                // wraps the backing store in a CachingRowStore LRU hot tier when
+                // config.cache_config.enabled is true — the same predicate the InMemory
+                // path applies (InMemoryStorage::row_store, same branch). Both paths
+                // now have identical caching semantics; the parity gap is closed.
+                //
+                // The same config is used for both the DrawerStore AND the raw Storage
+                // handle retained for the Corpus sub-store wiring + the cache-
+                // introspection seam (backing_storage_is_caching). Both open over the
+                // same SQLite file and see the same cache config, so `row_store()`
+                // wraps identically in both handles.
                 let mut config = EstateConfiguration::new(
                     estate_id,
                     BackendConfiguration::Sqlite {
@@ -602,6 +603,17 @@ impl EstateAdmin {
                     },
                 );
                 config.cache_config = self.cache_config.clone();
+                let drawer_store =
+                    SqliteDrawerStore::from_path_with_config(config.clone(), INIT_NOW, None)
+                        .map_err(|e| AdminError::EngineFailure {
+                            reason: format!(
+                                "SqliteDrawerStore::from_path_with_config failed: {e:?}"
+                            ),
+                        })?;
+                // A second SqliteStorage handle over the same file for the Corpus
+                // sub-store wiring and the cache-introspection seam. Both handles share
+                // the WAL log; the single-write-connection-per-estate model serialises
+                // writes through SQLite's own WAL locking.
                 let storage = persistence_kit::SqliteStorage::new(config).map_err(|e| {
                     AdminError::EngineFailure {
                         reason: format!("SqliteStorage::new failed: {e:?}"),
