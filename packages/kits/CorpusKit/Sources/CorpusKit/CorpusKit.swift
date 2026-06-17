@@ -232,6 +232,70 @@ public enum EmbeddingModel: Sendable {
 
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
+
+    // MARK: - Trainable-basis seam (mission 6a-ii-α)
+
+    /// The provider this model carries, if the case carries one.
+    ///
+    /// The distributional and FDC cases carry an externally-built provider;
+    /// the deterministic and named-model cases carry an inference closure (or
+    /// nothing) and construct their provider lazily in `makeProvider()`. This
+    /// accessor is the join point for the trainable-basis seam: it returns the
+    /// carried provider so `reconstruct(from:)` and `isTrainable` can probe its
+    /// `TrainableEmbeddingBasis` conformance without re-running construction.
+    private var carriedProvider: (any EmbeddingProvider & Sendable)? {
+        switch self {
+        case .randomIndexing(let p), .ppmi(let p), .lsa(let p), .nmf(let p), .fdc(let p):
+            return p
+        case .deterministic, .miniLM, .mpNet, .embeddingGemma:
+            return nil
+        }
+    }
+
+    /// Whether this model's provider can be trained on a corpus and
+    /// reconstructed from a serialized basis.
+    ///
+    /// True only when the carried provider conforms to
+    /// `TrainableEmbeddingBasis` (the RI/PPMI/LSA/NMF distributional
+    /// providers). FDC carries a provider but is stateless and does NOT
+    /// conform, so it reports `false`. The deterministic and named-model
+    /// cases carry no provider and report `false`.
+    ///
+    /// This is the capability-detection helper `Corpus` will use (β mission)
+    /// before attempting to drive training/serialization through the seam. It
+    /// changes no runtime behaviour on its own.
+    public var isTrainable: Bool {
+        carriedProvider is TrainableEmbeddingBasis
+    }
+
+    /// Reconstruct the provider for this model from a serialized basis blob.
+    ///
+    /// Dispatched by the enum case, which knows whether its carried provider
+    /// is a `TrainableEmbeddingBasis`. A type-erased value cannot reconstruct
+    /// itself into its concrete type, so reconstruction is routed through the
+    /// `TrainableEmbeddingBasis.reconstructBasis(from:)` witness on the carried
+    /// provider — which IS the right concrete type and delegates to that
+    /// type's `init(deserializing:)`. CorpusKit core never names the concrete
+    /// provider type, so layering (providers → core) is preserved.
+    ///
+    /// The deterministic and named-model cases, and the stateless FDC case,
+    /// have no trained basis to restore and throw `CorpusKitError.notTrainable`
+    /// rather than crashing or returning a wrong provider.
+    ///
+    /// - Parameter basis: the serialized basis blob (from `serializeBasis()`).
+    /// - Returns: a reconstructed provider, type-erased.
+    /// - Throws: `CorpusKitError.notTrainable` when the model is not a
+    ///   trainable-basis conformer; `CorpusKitError.decodingFailure` when the
+    ///   blob is truncated, the format version is unknown, or the provider
+    ///   magic does not match the carried provider's type.
+    public func reconstruct(from basis: Data) throws -> any EmbeddingProvider & Sendable {
+        guard let trainable = carriedProvider as? TrainableEmbeddingBasis else {
+            throw CorpusKitError.notTrainable(
+                "embedding model is not a trainable-basis provider; reconstruction "
+                + "from a serialized basis is only supported for RI/PPMI/LSA/NMF")
+        }
+        return try trainable.reconstructBasis(from: basis)
+    }
 }
 
 // MARK: - Corpus

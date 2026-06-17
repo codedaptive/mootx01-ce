@@ -39,6 +39,11 @@ pub mod error;
 pub mod hybrid_recall;
 pub mod sync_manifest;
 pub mod tokenizer;
+// Mission 6a-ii-α: the trainable-basis type-erasure seam. Declared here in
+// core so the providers crate (corpus-kit-providers) can implement it without
+// core depending on it (layering: providers → core). Swift port:
+// Sources/CorpusKit/TrainableEmbeddingBasis.swift.
+pub mod trainable_embedding_basis;
 
 pub use bm25_index::*;
 pub use bundle_store::*;
@@ -61,3 +66,4 @@ pub use error::*;
 pub use hybrid_recall::*;
 pub use sync_manifest::*;
 pub use tokenizer::*;
+pub use trainable_embedding_basis::TrainableEmbeddingBasis;

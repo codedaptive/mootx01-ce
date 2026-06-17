@@ -498,3 +498,32 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         }
     }
 }
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+extension NmfProvider: TrainableEmbeddingBasis {
+
+    /// Train the NMF basis on a corpus of raw document texts.
+    ///
+    /// NMF's training API consumes a raw document per call (`train(document:)`
+    /// tokenizes internally via the shared `TermDocumentCounts` builder, which
+    /// uses `defaultKeywordTokens`), so each text is passed through unchanged —
+    /// one document column per text. The `finalize()` pass then builds the
+    /// TF matrix and runs the SubstrateML NMF factorization (tolerance=0, fixed
+    /// iterations, deterministic). This reproduces the exact trained+finalized
+    /// state of per-document `train` + `finalize`, so a basis serialized after
+    /// `trainOnCorpus` is byte-identical to the 6a-i fixture trained on the
+    /// same texts.
+    public func trainOnCorpus(texts: [String]) {
+        for text in texts {
+            train(document: text)
+        }
+        finalize()
+    }
+
+    /// Reconstruct a fresh `NmfProvider` from a serialized basis, type-erased.
+    /// Delegates to `init(deserializing:)` (6a-i).
+    public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
+        try NmfProvider(deserializing: basis)
+    }
+}

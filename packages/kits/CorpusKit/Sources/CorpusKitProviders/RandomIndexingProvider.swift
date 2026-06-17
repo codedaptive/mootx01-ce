@@ -343,3 +343,30 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
         self.vocab = vocab
     }
 }
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+extension RandomIndexingProvider: TrainableEmbeddingBasis {
+
+    /// Train the RI basis on a corpus of raw document texts.
+    ///
+    /// RI's training API consumes a term sequence per document, so each text
+    /// is tokenized with the canonical `defaultKeywordTokens` — the SAME
+    /// tokenizer `embedFloat` uses — and fed to `train(terms:window:)` at the
+    /// canonical `riWindow`. RI has no finalization pass: the context vectors
+    /// are complete once every document has been windowed. This reproduces the
+    /// exact trained state of `train(terms:)` driven directly from token
+    /// arrays, so a basis serialized after `trainOnCorpus` is byte-identical to
+    /// the 6a-i fixture whose corpus is the same texts tokenized.
+    public func trainOnCorpus(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: riWindow)
+        }
+    }
+
+    /// Reconstruct a fresh `RandomIndexingProvider` from a serialized basis,
+    /// type-erased. Delegates to `init(deserializing:)` (6a-i).
+    public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
+        try RandomIndexingProvider(deserializing: basis)
+    }
+}

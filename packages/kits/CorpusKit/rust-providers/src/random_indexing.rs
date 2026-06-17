@@ -65,6 +65,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
+use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use engram_lib::Engram;
 use std::collections::HashMap;
 use substrate_kernel::float_vec_ops;
@@ -359,6 +360,44 @@ impl EmbeddingProvider for RandomIndexingProvider {
     /// an empty `Vec<f32>` (EmbeddingProvider.embed_float contract).
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         Ok(self.context_vector(text).unwrap_or_default())
+    }
+}
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+impl TrainableEmbeddingBasis for RandomIndexingProvider {
+    /// Train the RI basis on a corpus of raw document texts.
+    ///
+    /// RI's `train` consumes a term slice per document, so each text is
+    /// tokenized with the canonical `corpus_kit::default_keyword_tokens` — the
+    /// SAME tokenizer `embed_float` uses — and fed to `train` at `RI_WINDOW`.
+    /// RI has no finalization pass. This reproduces the exact trained state of
+    /// `train` driven directly from token slices, so a basis serialized after
+    /// `train_on_corpus` is byte-identical to the 6a-i fixture whose corpus is
+    /// the same texts tokenized.
+    fn train_on_corpus(&mut self, texts: &[&str]) {
+        for text in texts {
+            let terms = corpus_kit::default_keyword_tokens(text);
+            let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+            self.train(&term_refs, RI_WINDOW);
+        }
+    }
+
+    /// Serialize the trained RI basis (6a-i codec), surfaced through the seam.
+    fn serialize_basis(&self) -> Vec<u8> {
+        RandomIndexingProvider::serialize_basis(self)
+    }
+
+    /// Reconstruct a fresh `RandomIndexingProvider` from a basis blob, boxed.
+    /// Delegates to `from_serialized_basis` (6a-i); a codec error maps to
+    /// `CorpusKitError::DecodingFailure` (parity with Swift's `decodingFailure`).
+    fn reconstruct_basis(
+        &self,
+        basis: &[u8],
+    ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError> {
+        let provider = RandomIndexingProvider::from_serialized_basis(basis)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
+        Ok(Box::new(provider))
     }
 }
 
