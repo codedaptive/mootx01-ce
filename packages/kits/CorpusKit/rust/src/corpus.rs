@@ -148,6 +148,20 @@ pub enum EmbeddingModelConfig {
     /// in `corpus-kit-providers` for the full training API.
     RandomIndexing { provider: Box<dyn EmbeddingProvider> },
 
+    /// PPMI distributional-semantics provider.
+    ///
+    /// The caller constructs, trains, and finalizes a `PpmiProvider` from
+    /// `corpus-kit-providers`, then wraps it in a `Box<dyn EmbeddingProvider>`
+    /// and passes it here.  Unlike RI, PPMI requires a two-phase training:
+    /// `train` accumulates counts, `finalize` computes PPMI weights.
+    ///
+    /// PPMI differs from RI: each context term's contribution is weighted by
+    /// `max(0, log(P(t,c)/(P(t)·P(c))))`.  Stopword-like co-occurrences are
+    /// down-weighted toward zero; genuinely informative associations dominate.
+    ///
+    /// See ADR-010 Decision B and `PpmiProvider` in `corpus-kit-providers`.
+    Ppmi { provider: Box<dyn EmbeddingProvider> },
+
     /// MiniLM v6 text embedding (384-dim pooled output). The kit
     /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
     /// through FloatSimHash with the canonical MiniLM seed; the host
@@ -284,6 +298,11 @@ impl Corpus {
             // needed here. This differs from the named model cases (which carry a
             // host inference closure) because the RI provider is self-contained.
             EmbeddingModelConfig::RandomIndexing { provider } => provider,
+            // Ppmi: the caller built, trained, and finalized the PpmiProvider
+            // externally. It arrives as a Box<dyn EmbeddingProvider> — no further
+            // construction needed here. The finalization step (count → PPMI vectors)
+            // must already have happened before this Corpus is used for recall.
+            EmbeddingModelConfig::Ppmi { provider } => provider,
             EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
                 "minilm-v6",
                 "1.0.0",

@@ -170,6 +170,23 @@ public enum EmbeddingModel: Sendable {
     /// in `CorpusKitProviders` for the full training API.
     case randomIndexing(provider: any EmbeddingProvider & Sendable)
 
+    /// PPMI distributional-semantics provider.
+    ///
+    /// The caller constructs, trains, and finalizes a `PpmiProvider` from
+    /// `CorpusKitProviders`, then passes it here.  Unlike RI, PPMI accumulates
+    /// co-occurrence counts in a first pass and then computes PPMI-weighted
+    /// context sums in a second pass (via `PpmiProvider.finalize()`).
+    ///
+    /// PPMI differs from RI in that each context term's contribution is
+    /// weighted by its PPMI score (max(0, log(P(t,c)/(P(t)·P(c))))).
+    /// Stopword-like co-occurrences are down-weighted toward zero; genuinely
+    /// informative associations dominate.  The distinction is real: it is not
+    /// an alias for `.randomIndexing`.
+    ///
+    /// See ADR-010 Decision B for the rationale and `PpmiProvider`
+    /// in `CorpusKitProviders` for the full training API.
+    case ppmi(provider: any EmbeddingProvider & Sendable)
+
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 }
@@ -755,6 +772,13 @@ extension EmbeddingModel {
         case .randomIndexing(let provider):
             // The caller built and trained the provider externally. Pass it
             // through unchanged — no further construction needed here.
+            return provider
+
+        case .ppmi(let provider):
+            // The caller built, trained, and finalized the PpmiProvider
+            // externally. Pass through unchanged — no further construction
+            // needed here. The finalization step (count → PPMI vectors) must
+            // already have happened before this Corpus is used for recall.
             return provider
 
         case .deterministic:

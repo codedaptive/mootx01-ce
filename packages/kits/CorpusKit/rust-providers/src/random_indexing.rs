@@ -242,7 +242,11 @@ impl RandomIndexingProvider {
         if text.is_empty() {
             return None;
         }
-        let terms = keyword_tokenize(text);
+        // corpus_kit::default_keyword_tokens is the single canonical keyword
+        // tokenizer shared by all distributional providers (RI, PPMI, and
+        // future LSA/NMF). It is byte-identical to Swift's
+        // distributionalKeywordTokenize in DistributionalBase.swift.
+        let terms = corpus_kit::default_keyword_tokens(text);
         if terms.is_empty() {
             return None;
         }
@@ -306,28 +310,6 @@ impl EmbeddingProvider for RandomIndexingProvider {
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         Ok(self.context_vector(text).unwrap_or_default())
     }
-}
-
-// MARK: - Helpers
-
-/// Split text into keyword tokens: lowercase and split on word boundaries.
-/// Mirrors the Swift `keywordTokenize` private helper in
-/// `RandomIndexingProvider` so RI tokenization is consistent on both ports.
-/// The shared logic splits on non-alphanumeric code points and lowercases.
-fn keyword_tokenize(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut current = String::new();
-    for c in text.to_lowercase().chars() {
-        if c.is_alphanumeric() {
-            current.push(c);
-        } else if !current.is_empty() {
-            out.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
 }
 
 // MARK: - Unit tests

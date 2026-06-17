@@ -257,10 +257,11 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
     /// all terms are OOV (out-of-vocabulary).
     private func contextVector(for text: String) async -> [Float] {
         guard !text.isEmpty else { return [] }
-        // Tokenize into keyword tokens (lowercase, alpha/digit split).
-        // Reuse Tokenizer.keywordTokens behaviour directly; RI operates
-        // on surface terms before any model vocabulary.
-        let terms = keywordTokenize(text)
+        // Tokenize into keyword tokens (lowercase, alpha/digit split) via the
+        // single canonical CorpusKit tokenizer — shared by BM25 and every
+        // distributional provider (RI/PPMI/LSA/NMF), and parity with the Rust
+        // port's corpus_kit::default_keyword_tokens.
+        let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return [] }
 
         var sum = [Float](repeating: 0, count: riDimension)
@@ -280,28 +281,6 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
         // port; using it here guarantees bit-identical output without
         // maintaining a separate inline implementation.
         return FloatVecOps.l2Normalize(sum)
-    }
-
-    /// Split text into keyword tokens: lowercase and split on word
-    /// boundaries. Mirrors `Tokenizer.keywordTokens` default so RI
-    /// tokenization is consistent with BM25 tokenization. The shared
-    /// logic is reproduced here (rather than taken through the Tokenizer
-    /// protocol) so the provider has no Tokenizer dependency — RI
-    /// vocabulary is built from surface terms, not model token IDs.
-    private func keywordTokenize(_ text: String) -> [String] {
-        var out: [String] = []
-        var current = ""
-        for scalar in text.lowercased().unicodeScalars {
-            if scalar.properties.isAlphabetic ||
-               (scalar.value >= 0x30 && scalar.value <= 0x39) {
-                current.unicodeScalars.append(scalar)
-            } else if !current.isEmpty {
-                out.append(current)
-                current = ""
-            }
-        }
-        if !current.isEmpty { out.append(current) }
-        return out
     }
 
     // MARK: Vocabulary access (for conformance tests)

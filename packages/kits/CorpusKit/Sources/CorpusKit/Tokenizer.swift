@@ -34,22 +34,33 @@ public protocol Tokenizer: Sendable {
     func keywordTokens(_ text: String) -> [String]
 }
 
-public extension Tokenizer {
-    /// Default keyword tokenization: lowercase and split on
-    /// Unicode word boundaries. Suitable for tokenizers that
-    /// don't define a separate BM25 path.
-    func keywordTokens(_ text: String) -> [String] {
-        var out: [String] = []
-        var current = ""
-        for scalar in text.lowercased().unicodeScalars {
-            if scalar.properties.isAlphabetic || scalar.value >= 0x30 && scalar.value <= 0x39 {
-                current.unicodeScalars.append(scalar)
-            } else if !current.isEmpty {
-                out.append(current)
-                current = ""
-            }
+/// The single canonical keyword tokenizer for CorpusKit: lowercase, keep runs
+/// of Unicode-alphabetic + ASCII-digit scalars, split on everything else.
+///
+/// Used by BM25 (via the `Tokenizer.keywordTokens` default below) AND by every
+/// distributional embedding provider (RI/PPMI/LSA/NMF) so the lexical and dense
+/// lanes can never tokenize differently. Parity with the Rust port's public
+/// `corpus_kit::default_keyword_tokens`. Changing this invalidates the
+/// providers' committed conformance vectors (regenerate on both ports).
+public func defaultKeywordTokens(_ text: String) -> [String] {
+    var out: [String] = []
+    var current = ""
+    for scalar in text.lowercased().unicodeScalars {
+        if scalar.properties.isAlphabetic || scalar.value >= 0x30 && scalar.value <= 0x39 {
+            current.unicodeScalars.append(scalar)
+        } else if !current.isEmpty {
+            out.append(current)
+            current = ""
         }
-        if !current.isEmpty { out.append(current) }
-        return out
+    }
+    if !current.isEmpty { out.append(current) }
+    return out
+}
+
+public extension Tokenizer {
+    /// Default keyword tokenization — delegates to `defaultKeywordTokens` so
+    /// there is exactly one tokenizer definition in the module.
+    func keywordTokens(_ text: String) -> [String] {
+        defaultKeywordTokens(text)
     }
 }
