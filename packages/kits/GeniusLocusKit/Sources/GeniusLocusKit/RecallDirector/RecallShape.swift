@@ -10,15 +10,32 @@
 ///
 /// ## Lane-key scheme
 ///
-/// Weights are keyed by a STABLE lane identifier string:
+/// Weights are keyed by a STABLE lane identifier string. This is the COMPLETE
+/// steerable surface — the keys the optimizer and the preset roster target.
+/// It spans the retrieval lanes AND (since 6b-modifiers-matrix-steer) the
+/// matrix/graph/preference scoring columns:
 ///
+///   Retrieval lanes (steer the RRF fusion in hybrid/corpusOnly AND the
+///   weighted columns in unionBest):
 ///   - `"locus"`   — the LocusKit bitmap lane.
 ///   - `"bm25"`    — the CorpusKit BM25 keyword lane.
 ///   - `"hamming"` — the 256-bit SimHash-Hamming vector lane.
+///   - `"dense"`   — the aggregate dense float column in the unionBest weighted
+///     score (the per-signal `dense:<modelID>` keys below steer the dense
+///     consensus fold that BUILDS that column).
 ///   - `"dense:<modelID>"` — a per-signal DENSE float lane, one key per held
 ///     embedding provider (e.g. `"dense:minilm-v6"`, `"dense:mpnet-base-v2"`).
 ///     The `<modelID>` suffix mirrors the per-signal fan-out from 6b-core so a
 ///     multi-provider corpus can weight each distributional signal independently.
+///
+///   Matrix/graph/preference columns (steer ONLY the unionBest `.matrixAware`
+///   weighted score — the matrix columns are inactive under `.raw`/`.rrf`, so
+///   these keys are a no-op there):
+///   - `"fieldFit"`     — the FDC field-fit column.
+///   - `"coOccurrence"` — the MatrixTier co-occurrence column.
+///   - `"temporal"`     — the MatrixTier temporal-relevance column.
+///   - `"graph"`        — the connection-graph column.
+///   - `"preference"`   — the learned-preference column.
 ///
 /// A lane whose key is ABSENT from `laneWeights` uses the default weight `1.0`
 /// (forward at full strength) — so an empty map reproduces today's uniform fusion
@@ -133,8 +150,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// `laneWeights` — the neutral default that keeps unweighted lanes voting at
     /// full strength.
     ///
-    /// - Parameter laneKey: the stable lane identifier (`"locus"`, `"bm25"`,
-    ///   `"hamming"`, or `"dense:<modelID>"`).
+    /// - Parameter laneKey: a stable lane identifier — a retrieval lane
+    ///   (`"locus"`, `"bm25"`, `"hamming"`, `"dense"`, `"dense:<modelID>"`) or a
+    ///   matrix/graph/preference column (`"fieldFit"`, `"coOccurrence"`,
+    ///   `"temporal"`, `"graph"`, `"preference"`). See the lane-key scheme above.
     /// - Returns: the configured weight, or `1.0` when the lane is not in the map.
     public func weight(for laneKey: String) -> Float {
         laneWeights[laneKey] ?? 1.0
