@@ -1,7 +1,5 @@
 # MOOTx01
 
-# MOOTx01
-
 **Long-term memory for AI.**
 
 *Observe · Remember · Dream · Convene*
