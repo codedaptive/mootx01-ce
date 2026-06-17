@@ -32,15 +32,25 @@ struct RecallCandidateBuffer {
     var bm25: [Float]
     /// Vector similarity score for each slot.
     var vector: [Float]
-    /// Matrix field-presence score for each slot (populated in a future mission).
+    /// Matrix field-presence score for each slot. Populated by RecallDirector
+    /// step 5.6 when scoring is `.matrixAware` and a MatrixTier is registered.
+    /// 0.0 when scoring is `.raw` / `.rrf`, or no MatrixTier is registered.
     var fieldFit: [Float]
-    /// Matrix co-occurrence score for each slot (populated in a future mission).
+    /// Matrix co-occurrence score for each slot. Populated by RecallDirector
+    /// step 5.6: O[queryCoord, candidateCoord] summed and normalised by liveRowCount.
+    /// 0.0 when scoring is `.raw` / `.rrf`, or no MatrixTier is registered.
     var coOccurrence: [Float]
-    /// Matrix temporal-decay score for each slot (populated in a future mission).
+    /// Matrix temporal-decay score for each slot. Populated by RecallDirector
+    /// step 5.6: T[source, target, lag] summed over active lag buckets and
+    /// normalised by liveRowCount. 0.0 without a MatrixTier or under `.raw`/`.rrf`.
     var temporal: [Float]
-    /// Graph coherence score for each slot (populated in a future mission).
+    /// Graph coherence score for each slot. Populated by RecallDirector step 5.7
+    /// via `GraphCache.graphScore(for:)`. 0.0 when no GraphCache is registered for
+    /// the estate (correct for a fresh estate with no priors).
     var graph: [Float]
-    /// Learned-preference score for each slot (populated in a future mission).
+    /// Learned-preference score for each slot. Populated by RecallDirector step 5.7
+    /// via `PreferenceStore.preferenceScore(for:)`. 0.0 when no PreferenceStore is
+    /// registered for the estate (correct for a fresh estate with no priors).
     var preference: [Float]
     /// Dense-float cosine-similarity score for each slot (Lane D), in [0, 1].
     /// Populated by the dense float lane; 0 for slots it did not contribute.
