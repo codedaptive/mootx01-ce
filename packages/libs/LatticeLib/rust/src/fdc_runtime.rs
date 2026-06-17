@@ -157,6 +157,28 @@ impl Fdc {
         "1.0.0"
     }
 
+    /// Ancestor chain (root first, excluding `code` itself) for an FDC code,
+    /// walked over the bundled frame's decimal hierarchy. Returns an empty
+    /// `Vec` when the artifacts are unavailable or when `code` is the root
+    /// "000". Mirrors Swift `FDC.ancestors(of:)` in FDCRuntime.swift.
+    ///
+    /// Delegates to `FdcFrame::ancestors` (already public on `FdcFrame`) —
+    /// the math lives in LatticeLib, not in consumers. This façade allows
+    /// consumers such as `corpus-kit-providers` to use the FDC ancestor chain
+    /// without reaching past the runtime bundle into `FdcFrame` directly.
+    ///
+    /// # Arguments
+    /// * `code` — An FDC decimal code, e.g. `"547.7"`.
+    ///
+    /// # Returns
+    /// The ancestor chain root-first, e.g. `["000", "500", "540", "547"]`.
+    pub fn ancestors(code: &str) -> Vec<String> {
+        match get_bundle() {
+            Some(b) => b.frame.ancestors(code),
+            None => Vec::new(),
+        }
+    }
+
     /// Return the human-readable heading for an FDC code, or None when
     /// the code is absent from the frame or the artifacts are unavailable.
     ///
