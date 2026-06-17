@@ -13,6 +13,7 @@
 // a configuration written by the Swift port is read back by Rust.
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// The word class of a single token under FDC encoder Step 1.
 /// `.other` is the discard bucket: any token the encoder will not carry forward.
@@ -28,9 +29,13 @@ pub enum WordClass {
 // ---------------------------------------------------------------------------
 // Deterministic HMM/Viterbi novel-token tagger (non-Apple path)
 //
-// Port of HMMTagger.swift. Swift LEADS; the model tables here are mirrored
-// VERBATIM from HMMTagger.swift. See that file's header for the full contract
-// and the derivation of the weights.
+// Port of HMMTagger.swift. Model weights are loaded from the SAME frozen
+// checked-in artifact both ports read:
+//   ../../Sources/LatticeLib/Resources/HMMTaggerModel.json
+// The JSON is embedded at compile time via `include_bytes!`, identical to
+// the `qid_closure.rs` pattern. See HMMTagger.swift for the full contract
+// and the training methodology (MASC 3.0.0 Penn Treebank, CC BY 3.0 US,
+// the HMM-training ETL (EE build tooling)).
 //
 // CONTRACT (load-bearing): byte-identical to the Swift `HMMTagger.tag`.
 // Scoring is INTEGER (fixed-point log-weights, scale 1000): pure add + max,
@@ -63,38 +68,70 @@ enum Obs {
 /// Mirrors `HMMTagger.states` in Swift.
 const STATES: [WordClass; 3] = [WordClass::Noun, WordClass::Verb, WordClass::Other];
 
-/// Initial (prior) log-weights per state. Mirrors `HMMTagger.initialWeights`.
-const INITIAL_WEIGHTS: [i32; 3] = [-400, -1200, -900];
+// ---------------------------------------------------------------------------
+// Frozen model loading — include_bytes! at compile time, parsed once
+// per process via OnceLock. Same pattern as qid_closure.rs.
+//
+// Artifact path is relative to this source file (the macro resolves relative
+// to the source file location, not the crate root). The JSON lives at:
+//   ../../Sources/LatticeLib/Resources/HMMTaggerModel.json
+// which is correct for the position of this file at
+//   packages/libs/LatticeLib/rust/src/word_class.rs
+// ---------------------------------------------------------------------------
 
-/// Emission log-weights `[state][obs]`. Mirrors `HMMTagger.emissionWeights`.
-const EMISSION_WEIGHTS: [[i32; 12]; 3] = [
-    // noun
-    [
-        -3000, -1500, -2200, -2500, -1800, -300, -300, -300, -300, -400, -2500,
-        -600,
-    ],
-    // verb
-    [
-        -3000, -300, -300, -300, -500, -2000, -2500, -2500, -2500, -1800, -2500,
-        -1200,
-    ],
-    // other
-    [
-        -200, -2000, -2000, -2500, -2200, -2200, -2200, -2200, -2200, -1800, -400,
-        -1000,
-    ],
-];
+/// The on-disk schema of HMMTaggerModel.json. Snake_case matches the JSON
+/// keys produced by the ETL script (sort_keys=True, Python snake_case).
+#[derive(Deserialize)]
+struct ModelArtifact {
+    initial_weights: Vec<i32>,
+    emission_weights: Vec<Vec<i32>>,
+}
+
+/// The embedded JSON bytes of HMMTaggerModel.json. Embedded at compile time;
+/// the artifact is pinned in the repository alongside the Rust source.
+static MODEL_BYTES: &[u8] =
+    include_bytes!("../../Sources/LatticeLib/Resources/HMMTaggerModel.json");
+
+/// The parsed model, initialized once per process. Falls back to the known
+/// trained values if JSON parsing fails (build-time invariant — the artifact
+/// is always present and correctly formed).
+static MODEL: OnceLock<ModelArtifact> = OnceLock::new();
+
+fn model() -> &'static ModelArtifact {
+    MODEL.get_or_init(|| {
+        serde_json::from_slice::<ModelArtifact>(MODEL_BYTES).unwrap_or_else(|_| {
+            // Fallback: the trained values the artifact encodes (MASC 3.0.0,
+            // hapax/rare-word estimated — see HMMTaggerModel.json). This path
+            // should never be reached in a correctly built binary; it must
+            // stay byte-identical to the JSON so a load failure cannot diverge
+            // the ports.
+            ModelArtifact {
+                initial_weights: vec![-643, -1562, -1329],
+                emission_weights: vec![
+                    // noun
+                    vec![-2954, -3606, -5526, -6132, -5978, -3103, -4746, -4260, -3898, -2867, -5621, -270],
+                    // verb
+                    vec![-4525, -1473, -1011, -4445, -3609, -6317, -7010, -6317, -7010, -4708, -6317, -1075],
+                    // other
+                    vec![-1125, -3874, -2898, -7241, -4843, -6548, -7241, -7241, -5162, -3528, -2160, -826],
+                ],
+            }
+        })
+    })
+}
 
 /// Tags a single lowercased token via integer Viterbi decode.
 /// For one token this reduces to argmax over (initial + emission); ties
 /// resolve to the lowest state index (strict `>` on the running best).
-/// Byte-identical to `HMMTagger.tag` in Swift.
+/// Byte-identical to `HMMTagger.tag` in Swift. Weights loaded from the
+/// frozen checked-in artifact `HMMTaggerModel.json` via `MODEL`.
 pub fn hmm_tag(lowered: &str) -> WordClass {
+    let m = model();
     let obs = observe(lowered) as usize;
     let mut best_state = 0usize;
-    let mut best_score = INITIAL_WEIGHTS[0] + EMISSION_WEIGHTS[0][obs];
+    let mut best_score = m.initial_weights[0] + m.emission_weights[0][obs];
     for i in 1..STATES.len() {
-        let score = INITIAL_WEIGHTS[i] + EMISSION_WEIGHTS[i][obs];
+        let score = m.initial_weights[i] + m.emission_weights[i][obs];
         if score > best_score {
             best_score = score;
             best_state = i;
@@ -105,7 +142,8 @@ pub fn hmm_tag(lowered: &str) -> WordClass {
 
 /// Maps a token to its single morphological observation, in the same fixed
 /// priority order as `HMMTagger.observe` in Swift: non-alphabetic shape
-/// first, then most-specific suffix to least.
+/// first, then most-specific suffix to least. The ETL script replicates this
+/// order exactly when computing emission counts from the training corpus.
 fn observe(token: &str) -> Obs {
     if token.is_empty() || token.chars().any(|c| !c.is_alphabetic()) {
         return Obs::NonAlpha;

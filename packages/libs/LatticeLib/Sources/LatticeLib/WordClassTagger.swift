@@ -140,8 +140,10 @@ public extension LatticeLib {
         return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
         #else
         // The non-Apple HMM/Viterbi model version. Mirrors the Rust port's
-        // HMM_VITERBI_VERSION. Bump when the HMMTagger model tables change.
-        return "hmm-viterbi-1"
+        // HMM_VITERBI_VERSION. hmm-viterbi-3: trained on MASC 3.0.0 Penn
+        // Treebank constituency data, estimated from rare (hapax) words so the
+        // unknown-word prior is content-noun-dominant (A-15).
+        return "hmm-viterbi-3"
         #endif
     }
 
@@ -276,10 +278,12 @@ public extension LatticeLib {
     ///
     /// Delegates to `HMMTagger.tag`: a deterministic 3-state HMM
     /// (noun/verb/other) decoded with integer Viterbi over a small
-    /// morphological observation alphabet, with hand-specified integer
-    /// log-weight priors (cookbook §2.2). The model tables are mirrored
-    /// verbatim in the Rust port, so the result is byte-identical
-    /// Swift↔Rust; it is NOT required to match Apple's NLTagger output.
+    /// morphological observation alphabet. Weights are trained on MASC 3.0.0
+    /// Penn Treebank constituency data and loaded from the frozen checked-in
+    /// artifact `Resources/HMMTaggerModel.json` (hmm-viterbi-3, CC BY 3.0 US,
+    /// the HMM-training ETL (EE build tooling)). Both ports read the SAME JSON
+    /// artifact, so the result is byte-identical Swift↔Rust; it is NOT
+    /// required to match Apple's NLTagger output.
     ///
     /// Available on ALL platforms (not gated by `canImport(NaturalLanguage)`):
     /// it is the cross-port baseline, the default tagger for `.hmm` estates,

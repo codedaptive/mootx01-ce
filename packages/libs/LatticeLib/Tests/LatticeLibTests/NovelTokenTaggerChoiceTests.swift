@@ -24,7 +24,8 @@ struct NovelTokenTaggerChoiceTests {
     @Test(".hmm choice classifies novel -tion token as noun via HMM")
     func hmmChoiceNounSuffix() {
         // "xylophonation" — not a real word; novel token, strong noun suffix.
-        // HMM emission for "-tion" suffix: noun weight -300, verb weight -2000.
+        // Trained model emission for "-tion" suffix: noun -3091, verb -7466.
+        // With trained priors noun -1480, verb -1884: totals noun -4571, verb -9350.
         // Expected: .noun
         let result = LatticeLib.wordClass("xylophonation", tagger: .hmm)
         #expect(result == .noun)
@@ -33,7 +34,8 @@ struct NovelTokenTaggerChoiceTests {
     @Test(".hmm choice classifies novel -ing token as verb via HMM")
     func hmmChoiceVerbSuffix() {
         // "zorbifying" — novel token, strong verb suffix "-ing".
-        // HMM: noun -1500, verb -300. Expected: .verb
+        // Trained model: noun -3504, verb -2317. With priors: noun -4984, verb -4201.
+        // Expected: .verb
         let result = LatticeLib.wordClass("zorbifying", tagger: .hmm)
         #expect(result == .verb)
     }
@@ -82,7 +84,9 @@ struct NovelTokenTaggerChoiceTests {
 
     @Test("tagNovelToken with .hmm uses HMM — -ness suffix is noun")
     func tagNovelTokenHMMNess() {
-        // "xylophoneness" — novel, "-ness" suffix. HMM: noun -300, verb -2500.
+        // "xylophoneness" — novel, "-ness" suffix.
+        // Trained model: noun -5804, verb -9663. Priors: noun -1480, verb -1884.
+        // Totals: noun -7284, verb -11547. Noun wins.
         let result = LatticeLib.tagNovelToken("xylophoneness", tagger: .hmm)
         #expect(result == .noun)
     }
