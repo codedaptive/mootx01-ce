@@ -130,6 +130,77 @@ public actor FloatBruteForceIndex: DenseIndex {
                 "FloatBruteForceIndex.search: array stride=\(arr.stride) does not match probe dim×4=\(expectedByteCount)")
         }
 
+        // Nearest = smaller cosine distance first (the DenseIndex contract).
+        let scored = try scan(probe: probe, metric: distanceMetric, arr: arr, filter: filter)
+        return rank(scored, k: k, metric: metric, direction: .nearest)
+    }
+
+    /// k-FARTHEST neighbours by a float metric — the most DISSIMILAR
+    /// vectors first (anti-similarity retrieval, mission 6b-modifiers-antisim).
+    ///
+    /// Reuses the exact same linear scan and the same cosine distance as
+    /// `search`; the ONLY difference is the sort: distance DESCENDING (the
+    /// largest cosine distance = the smallest cosine similarity = the most
+    /// dissimilar) instead of ascending. No new distance math (mission
+    /// guardrail: "farthest reuses the same cosine, just bottom-K ordering").
+    ///
+    /// "Bottom-K by cosine similarity" cannot be faked by negating a
+    /// nearest-list: the farthest items are not in the nearest top-K at
+    /// all, so the index must rank by the opposite end. That is exactly
+    /// what this method does.
+    ///
+    /// Tie-break stays itemID ASCENDING (identical to `search`) so two
+    /// items at the same distance order the same in both directions — the
+    /// determinism contract holds regardless of direction.
+    ///
+    /// Throws the same `VectorKitError.invalidPayload` cases as `search`.
+    public func searchFarthest(
+        probe: VectorPayload,
+        metric: DenseMetric,
+        k: Int,
+        filter: MetadataFilter?
+    ) async throws -> [DenseHit] {
+        guard probe.kind == .float32 else {
+            throw VectorKitError.invalidPayload(
+                "FloatBruteForceIndex.searchFarthest: probe.kind=\(probe.kind); expected .float32")
+        }
+        guard case .float(let distanceMetric) = metric else {
+            throw VectorKitError.invalidPayload(
+                "FloatBruteForceIndex.searchFarthest: metric=\(metric) is not a float metric; use the binary lane for binary metrics")
+        }
+        guard let arr = array else {
+            return []
+        }
+        guard arr.kind == .float32 else {
+            throw VectorKitError.invalidPayload(
+                "FloatBruteForceIndex.searchFarthest: resident array kind=\(arr.kind); expected .float32")
+        }
+        let expectedByteCount = Int(probe.dim) * 4
+        guard probe.bytes.count == expectedByteCount else {
+            throw VectorKitError.invalidPayload(
+                "FloatBruteForceIndex.searchFarthest: probe has \(probe.bytes.count) bytes; expected \(expectedByteCount) for dim=\(probe.dim)")
+        }
+        guard Int(arr.stride) == expectedByteCount else {
+            throw VectorKitError.invalidPayload(
+                "FloatBruteForceIndex.searchFarthest: array stride=\(arr.stride) does not match probe dim×4=\(expectedByteCount)")
+        }
+
+        let scored = try scan(probe: probe, metric: distanceMetric, arr: arr, filter: filter)
+        return rank(scored, k: k, metric: metric, direction: .farthest)
+    }
+
+    // MARK: - Scan + rank (shared by nearest and farthest)
+
+    /// Linear scan: compute the float distance for every live, filter-passing
+    /// slot. Shared verbatim by `search` (nearest) and `searchFarthest` so the
+    /// distance arithmetic — the cosine itself — is identical for both
+    /// directions; only the subsequent ordering differs.
+    private func scan(
+        probe: VectorPayload,
+        metric: FloatMetric,
+        arr: ResidentVectorArray,
+        filter: MetadataFilter?
+    ) throws -> [(distance: Float, key: VectorRecordKey)] {
         let probeFloats = try probe.asFloats()
         let dim = Int(probe.dim)
 
@@ -146,20 +217,42 @@ public actor FloatBruteForceIndex: DenseIndex {
             let slotBytes = arr.vector_bytesUnchecked(at: i, stride: Int(arr.stride))
             let slotFloats = floatSlice(from: slotBytes, count: dim)
 
-            let dist = floatDistance(probe: probeFloats, candidate: slotFloats, metric: distanceMetric)
+            let dist = floatDistance(probe: probeFloats, candidate: slotFloats, metric: metric)
             scored.append((distance: dist, key: key))
         }
+        return scored
+    }
 
-        // Sort: distance ascending, then key ascending (tie-break rule §0.3).
-        scored.sort { lhs, rhs in
-            if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
+    /// Order the scored candidates and take the top `k`.
+    ///
+    /// `.nearest`  — distance ASCENDING (smallest cosine distance first).
+    /// `.farthest` — distance DESCENDING (largest cosine distance first =
+    ///               most dissimilar first, anti-similarity).
+    ///
+    /// In BOTH directions the tie-break is itemID ASCENDING (§0.3), so the
+    /// nearest path is byte-identical to the pre-antisim implementation.
+    private func rank(
+        _ scored: [(distance: Float, key: VectorRecordKey)],
+        k: Int,
+        metric: DenseMetric,
+        direction: SearchDirection
+    ) -> [DenseHit] {
+        var ordered = scored
+        ordered.sort { lhs, rhs in
+            if lhs.distance != rhs.distance {
+                switch direction {
+                case .nearest:  return lhs.distance < rhs.distance
+                case .farthest: return lhs.distance > rhs.distance
+                }
+            }
+            // Tie-break is identical in both directions: itemID ascending.
             return lhs.key < rhs.key
         }
 
         // Take top k and convert to DenseHit.
         // rawDistance stores the Float bit pattern as Int32.
         // floatDistance accessor on DenseHit reconstructs it.
-        let topK = scored.prefix(max(0, k))
+        let topK = ordered.prefix(max(0, k))
         return topK.map { entry in
             let bits = entry.distance.bitPattern      // UInt32 IEEE-754
             let raw  = Int32(bitPattern: bits)        // same bit pattern, reinterpreted

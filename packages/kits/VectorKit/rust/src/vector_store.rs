@@ -1095,6 +1095,71 @@ impl VectorStore {
         Ok(result)
     }
 
+    /// k-FARTHEST neighbours over the float32 (Lane D) vectors by cosine —
+    /// the most DISSIMILAR rows first (anti-similarity retrieval, mission
+    /// 6b-modifiers-antisim). Parallel to Swift `VectorStore.findFarthestFloat`.
+    ///
+    /// Identical to `find_nearest_float` in every respect — same lazy per-model
+    /// index build, same model_id partition scope (spec I-4), same cosine
+    /// metric, same VectorMatch quantisation — EXCEPT it ranks by FARTHEST
+    /// (bottom-K by cosine similarity = largest cosine distance first) via
+    /// `FloatBruteForceIndex::search_farthest`. It is NOT a negated
+    /// nearest-list: the farthest rows are not in the nearest top-K, so the
+    /// index orders by the opposite end. No new distance math.
+    ///
+    /// Determinism: like `find_nearest_float`, the float lane is reproducible-
+    /// within-config, NOT four-way bit-identical (arch spec §6).
+    ///
+    /// Returns up to `k` matches, FARTHEST (most dissimilar) first. Empty if
+    /// `k` is 0, the probe is empty, or no float rows exist for the model.
+    pub fn find_farthest_float(
+        &self,
+        probe: &[f32],
+        model_id: &str,
+        k: usize,
+    ) -> Result<Vec<VectorMatch>, VectorKitError> {
+        if k == 0 || probe.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        // Same lazy per-model build as find_nearest_float.
+        if !self.ensure_float_index_built_locked(&mut state, model_id)? {
+            return Ok(Vec::new());
+        }
+
+        let probe_payload = VectorPayload::from_f32(probe);
+        let filter = MetadataFilter {
+            model_id: Some(model_id.to_string()),
+            model_version: None,
+        };
+
+        let model_index = state
+            .float_indices
+            .get(model_id)
+            .expect("ensure_float_index_built_locked returned true → index present");
+        // search_farthest applies the SAME cosine, the (item_id ASC) tie-break,
+        // ordered by distance DESCENDING.
+        let hits = model_index.search_farthest(
+            &probe_payload,
+            DenseMetric::Float(crate::engine::metric::FloatMetric::Cosine),
+            k,
+            Some(&filter),
+        )?;
+
+        let result: Vec<VectorMatch> = hits
+            .into_iter()
+            .map(|h| VectorMatch {
+                item_id: h.key.item_id.clone(),
+                distance: h.raw_distance,
+                model_id: model_id.to_string(),
+            })
+            .collect();
+
+        Ok(result)
+    }
+
     /// Coarse keyword pre-filter: returns distinct item IDs whose
     /// `item_id` contains the query as a substring. Full BM25 lives in
     /// CorpusKit.

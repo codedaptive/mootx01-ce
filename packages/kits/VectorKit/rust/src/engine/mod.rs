@@ -42,7 +42,7 @@ pub use key::VectorRecordKey;
 pub use metric::{BinaryMetric, DenseMetric, FloatMetric};
 pub use payload::{VectorKind, VectorPayload};
 pub use resident::{ModelPartitionEntry, ResidentVectorArray};
-pub use seam::{DenseIndex, IndexKind, MetadataFilter};
+pub use seam::{DenseIndex, IndexKind, MetadataFilter, SearchDirection};
 // Lane A re-exports
 pub use brute_force::BruteForceIndex;
 pub use resident_store::ResidentArrayStore;

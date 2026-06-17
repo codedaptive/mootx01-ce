@@ -34,8 +34,8 @@ pub use embedding_provider::EmbeddingProvider;
 pub use engine::{
     // Lane F shared foundation types.
     BinaryMetric, DenseHit, DenseIndex, DenseMetric, FloatMetric, IndexKind, LaneTag,
-    MetadataFilter, ModelPartitionEntry, ResidentVectorArray, VectorKind, VectorPayload,
-    VectorRecordKey,
+    MetadataFilter, ModelPartitionEntry, ResidentVectorArray, SearchDirection, VectorKind,
+    VectorPayload, VectorRecordKey,
     // Lane A binary oracle + persistence.
     BruteForceIndex, ResidentArrayStore,
     // Lane C float implementations.

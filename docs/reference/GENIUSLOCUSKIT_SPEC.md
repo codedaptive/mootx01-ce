@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1515,6 +1515,29 @@ conformance on both ports). `RecallShape` may also override the candidate-pool
 depth via `frontierK`, clamped to the engine's `[64, 256]` envelope. Both ports
 implement the identical signed formula and clamp.
 
+#### Anti-similarity steering (`antiSimilarLanes` — 6b-modifiers-antisim)
+
+`RecallShape.antiSimilarLanes` (Swift) / `anti_similar_lanes` (Rust) is a set of
+DENSE lane keys (`dense:<modelID>`) whose OBJECTIVE flips from nearest to
+FARTHEST. In the `unionBest` dense lane, a lane in this set queries CorpusKit's
+`floatFarthestPerSignal` instead of `floatNearestPerSignal`: it surfaces the
+most DISSIMILAR sources ("find things UNLIKE this") and forwards them as that
+signal's voters in the SAME N-way RRF/consensus fold. This is DISTINCT from a
+negative weight:
+
+- **Anti-similarity** changes WHICH candidates the store returns (the farthest),
+  then forwards them — a drawer the lane never retrieved under nearest can now
+  carry dense provenance.
+- **A negative weight** keeps the NEAREST candidates and SUBTRACTS their rank
+  mass (demotes the similar) — it never retrieves a far drawer.
+
+The two compose: a lane can be anti-similar AND signed (forward the dissimilar at
+any strength, or suppress the dissimilar). An EMPTY set — or a `nil` shape — keeps
+every lane nearest and is BYTE-IDENTICAL to the pre-antisim fusion (back-compat,
+proven on both ports). Only `dense:<modelID>` keys are honoured (the fixed lanes
+have no farthest variant). The distinctness invariant — anti-similar+positive ≠
+nearest+negative — is conformance-gated on both ports.
+
 ### Telemetry counters
 
 Each degraded stage emits a `glk.recall.<stage>_degraded` counter tagged
@@ -1577,6 +1600,16 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Added the anti-similarity steering contract (mission 6b-modifiers-antisim):
+`RecallShape.antiSimilarLanes` / `anti_similar_lanes` flips a dense lane's
+objective to FARTHEST in the `unionBest` lane, querying CorpusKit
+`floatFarthestPerSignal` and forwarding the most DISSIMILAR sources into the
+RRF/consensus fold. DISTINCT from a negative weight (which demotes the nearest);
+the two compose. Empty/nil ⇒ every lane nearest ⇒ byte-identical to the
+pre-antisim fusion. The distinctness invariant is conformance-gated on both
+ports. ADDITIVE (MINOR).
 
 ### 1.2.0 -- 2026-06-17
 Changed (6a-iii-wire): the production default recall ensemble is now the five

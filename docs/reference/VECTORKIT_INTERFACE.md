@@ -1,7 +1,7 @@
 ---
 title: VectorKit Interface
 status: active
-version: 1.0.2
+version: 1.1.0
 date: 2026-06-17
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
@@ -602,6 +602,48 @@ pub fn find_nearest_float(&self, probe: &[f32], model_id: &str, k: usize)
     -> Result<Vec<VectorMatch>, VectorKitError>;
 ```
 
+### `VectorStore.findFarthestFloat` / `find_farthest_float`
+
+k-FARTHEST over the float32 (Lane D) vectors by COSINE — the most DISSIMILAR
+rows first (anti-similarity retrieval, the "find things UNLIKE this"
+objective; mission 6b-modifiers-antisim). Identical to `findNearestFloat` in
+every respect — same lazy per-model index build, same `modelID` partition
+scope (I-4), same cosine metric, same `VectorMatch` ×10_000 quantisation —
+EXCEPT it ranks by FARTHEST: the bottom-K by cosine similarity (largest cosine
+distance first), via `FloatBruteForceIndex.searchFarthest` /
+`FloatBruteForceIndex::search_farthest`. It is NOT a negated nearest-list: the
+farthest rows are not in the nearest top-K, so the index scans and orders by
+the opposite end. No new distance math — the same cosine, the opposite sort.
+The tie-break stays item-id ASC (identical to nearest, both directions). The
+ranking direction is named by the `SearchDirection` enum
+(`.nearest`/`.farthest` / `Nearest`/`Farthest`). Reproducible-within-config,
+NOT four-way bit-identical (arch spec §6). Empty when `limit ≤ 0`, the probe is
+empty, or no float rows exist.
+
+**Swift:**
+
+```swift
+public enum SearchDirection: String, Sendable, Equatable { case nearest, farthest }
+
+public func findFarthestFloat(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch]
+
+// On the engine seam (FloatBruteForceIndex):
+public func searchFarthest(probe: VectorPayload, metric: DenseMetric, k: Int, filter: MetadataFilter?) async throws -> [DenseHit]
+```
+
+**Rust:**
+
+```rust
+pub enum SearchDirection { Nearest, Farthest }
+
+pub fn find_farthest_float(&self, probe: &[f32], model_id: &str, k: usize)
+    -> Result<Vec<VectorMatch>, VectorKitError>;
+
+// On the engine seam (FloatBruteForceIndex):
+pub fn search_farthest(&self, probe: &VectorPayload, metric: DenseMetric, k: usize, filter: Option<&MetadataFilter>)
+    -> Result<Vec<DenseHit>, VectorKitError>;
+```
+
 ### `VectorStore.findByKeyword` / `find_by_keyword`
 
 Coarse substring pre-filter over `item_id`; returns distinct item ids up
@@ -844,6 +886,17 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Added the float-lane FARTHEST (anti-similarity) retrieval surface
+(mission 6b-modifiers-antisim): the `SearchDirection` enum
+(`.nearest`/`.farthest`), `VectorStore.findFarthestFloat` /
+`find_farthest_float`, and the `FloatBruteForceIndex.searchFarthest` /
+`search_farthest` engine method. Farthest ranks the bottom-K by cosine
+similarity (largest cosine distance first) — the "find things UNLIKE this"
+objective — reusing the SAME cosine and the same item-id-ascending tie-break,
+only the sort order inverted. The nearest path (`findNearestFloat`,
+`search`) is byte-identical and unchanged. Additive surface (MINOR).
 
 ### 1.0.2 -- 2026-06-17
 Clarified the Lane D float lane behavior under `addPayloads` and across the

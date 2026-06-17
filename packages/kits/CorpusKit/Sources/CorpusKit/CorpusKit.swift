@@ -1144,21 +1144,32 @@ public actor Corpus {
         return await floatNearest(provider: defaultProvider, query: query, limit: limit)
     }
 
-    /// Dense float nearest-neighbour recall for ONE provider — the per-signal
-    /// mechanics shared by `floatNearest` (default signal) and
-    /// `floatNearestPerSignal` (every held signal).
+    /// Dense float recall for ONE provider — the per-signal mechanics shared by
+    /// `floatNearest`/`floatNearestPerSignal` (nearest) and
+    /// `floatFarthestPerSignal` (farthest, anti-similarity).
     ///
     /// Embeds `query` via `provider.embedFloat`, ranks stored chunks for that
     /// provider's modelID by cosine over the in-house `FloatBruteForceIndex`,
     /// aggregates chunk hits to source (drawer) level, and returns an observable
     /// `FloatLaneOutcome`. The telemetry counters and the degradation contract
-    /// are identical to the original single-provider `floatNearest`; the only
-    /// change is that the provider is a parameter rather than the sole field, so
-    /// for N=1 (default signal) the behaviour is byte-identical.
+    /// are identical regardless of direction.
+    ///
+    /// `direction` selects the objective (mission 6b-modifiers-antisim):
+    ///   - `.nearest`  — surface the most SIMILAR sources. The store returns the
+    ///     nearest chunks (`findNearestFloat`); a source's similarity is its
+    ///     BEST (max) chunk cosine; sources rank similarity DESCENDING. This is
+    ///     byte-identical to the pre-antisim behaviour (default).
+    ///   - `.farthest` — surface the most DISSIMILAR sources ("find things
+    ///     UNLIKE this"). The store returns the farthest chunks
+    ///     (`findFarthestFloat`); a source's dissimilarity is its WORST (min)
+    ///     chunk cosine; sources rank similarity ASCENDING. The max→min
+    ///     inversion is required: a source's anti-similarity is governed by its
+    ///     LEAST-similar chunk, the mirror of nearest's best-chunk rule.
     private func floatNearest(
         provider: any EmbeddingProvider,
         query: String,
-        limit: Int
+        limit: Int,
+        direction: SearchDirection = .nearest
     ) async -> FloatLaneOutcome {
         // Attempt to embed the query text via the float lane. A throw here
         // means the provider has no float lane (expected opt-out). This is NOT
@@ -1197,8 +1208,18 @@ public actor Corpus {
         // chunk.id (the vector item_id); we aggregate to sourceID below.
         let matches: [VectorMatch]
         do {
-            matches = try await vectorStore.findNearestFloat(
-                probe: probe, modelID: provider.modelID, limit: limit * 4)
+            // Direction selects which end of the cosine ranking the store
+            // returns. Farthest is NOT a reordering of nearest results — the
+            // dissimilar chunks are not in the nearest top-K, so the store must
+            // run the farthest scan (mission 6b-modifiers-antisim).
+            switch direction {
+            case .nearest:
+                matches = try await vectorStore.findNearestFloat(
+                    probe: probe, modelID: provider.modelID, limit: limit * 4)
+            case .farthest:
+                matches = try await vectorStore.findFarthestFloat(
+                    probe: probe, modelID: provider.modelID, limit: limit * 4)
+            }
         } catch {
             // Store threw — this is NOT expected. Log it via OSLog so it is
             // never silent, then emit the store_error counter for telemetry
@@ -1228,7 +1249,13 @@ public actor Corpus {
         // item_id is the chunk uuid string; chunkSourceMap resolves it to the
         // sourceID the caller ingested under (the drawer id in the GLK context),
         // exactly as bm25TopKBySource does, so float hits hydrate back to the
-        // real Drawer row. A source's similarity is its best (max) chunk cosine.
+        // real Drawer row.
+        //   .nearest  — a source's similarity is its BEST (max) chunk cosine.
+        //   .farthest — a source's anti-similarity is governed by its WORST
+        //               (min) chunk cosine: a source is "unlike the query" only
+        //               if even its closest chunk is far. Picking max here would
+        //               surface sources that happen to have one near chunk, the
+        //               opposite of the anti-similarity objective.
         // VectorMatch.distance is the cosine DISTANCE (1 − sim) quantised
         // ×10_000 (FloatBruteForceIndex convention); recover sim = 1 − dist/1e4.
         var bySource: [String: Float] = [:]
@@ -1236,7 +1263,12 @@ public actor Corpus {
             guard let chunkUUID = UUID(uuidString: m.itemID),
                   let sourceID = chunkSourceMap[chunkUUID] else { continue }
             let similarity = 1.0 - Float(m.distance) / 10_000.0
-            bySource[sourceID] = max(bySource[sourceID] ?? -Float.greatestFiniteMagnitude, similarity)
+            switch direction {
+            case .nearest:
+                bySource[sourceID] = max(bySource[sourceID] ?? -Float.greatestFiniteMagnitude, similarity)
+            case .farthest:
+                bySource[sourceID] = min(bySource[sourceID] ?? Float.greatestFiniteMagnitude, similarity)
+            }
         }
 
         // After source aggregation, no results means no chunks are in the
@@ -1251,11 +1283,19 @@ public actor Corpus {
             return .unavailableNoFloatRows
         }
 
-        // Sort by similarity descending, sourceID ascending on tie (the
-        // universal deterministic tie-break), and return the top `limit`.
+        // Sort by similarity, sourceID ascending on tie (the universal
+        // deterministic tie-break), and return the top `limit`.
+        //   .nearest  — similarity DESCENDING (most similar first).
+        //   .farthest — similarity ASCENDING (most dissimilar first).
+        // The tie-break (sourceID ascending) is identical in both directions.
         var ranked = bySource.map { (itemID: $0.key, similarity: $0.value) }
         ranked.sort { a, b in
-            if a.similarity != b.similarity { return a.similarity > b.similarity }
+            if a.similarity != b.similarity {
+                switch direction {
+                case .nearest:  return a.similarity > b.similarity
+                case .farthest: return a.similarity < b.similarity
+                }
+            }
             return a.itemID < b.itemID
         }
         let result = Array(ranked.prefix(limit))
@@ -1338,6 +1378,51 @@ public actor Corpus {
             } else {
                 outcome = await floatNearest(provider: provider, query: query, limit: limit)
             }
+            results.append((modelID: provider.modelID, outcome: outcome))
+        }
+        return results
+    }
+
+    /// Per-signal dense float FARTHEST recall — the anti-similarity sibling of
+    /// `floatNearestPerSignal` (mission 6b-modifiers-antisim).
+    ///
+    /// Runs the dense float lane in the FARTHEST direction independently for
+    /// EVERY held provider slot: each signal surfaces the most DISSIMILAR
+    /// sources for its modelID ("find things UNLIKE this"), ranked least-similar
+    /// first. The outcome shape, dark-lane observability, telemetry counters,
+    /// and slot ordering are identical to `floatNearestPerSignal`; only the
+    /// ranking objective differs (the store returns the farthest chunks, and a
+    /// source's score is its WORST chunk cosine — see `floatNearest(provider:…)`).
+    ///
+    /// This is the seam GLK's RecallShape `antiSimilarLanes` consumes: a dense
+    /// lane marked anti-similar queries THIS method for its per-signal list
+    /// instead of `floatNearestPerSignal`, so the dissimilar candidates flow
+    /// into the same RRF/consensus fold.
+    ///
+    /// The forced-error test seam is NOT consulted here — it is nearest-path
+    /// test infrastructure (`floatNearest`/`floatNearestPerSignal` only), so the
+    /// farthest path always runs the real lane.
+    ///
+    /// - Parameters:
+    ///   - query: the query text.
+    ///   - limit: maximum number of matches per signal.
+    /// - Returns: `(modelID, outcome)` pairs, one per held signal, in slot
+    ///   order. An empty query or zero limit returns one `.emptyQuery` outcome
+    ///   per signal (no store access), mirroring the nearest no-op guard.
+    public func floatFarthestPerSignal(
+        query: String,
+        limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
+        guard limit > 0, !query.isEmpty else {
+            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
+        }
+
+        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
+        results.reserveCapacity(slots.count)
+        for slot in slots {
+            let provider = slot.provider
+            let outcome = await floatNearest(
+                provider: provider, query: query, limit: limit, direction: .farthest)
             results.append((modelID: provider.modelID, outcome: outcome))
         }
         return results

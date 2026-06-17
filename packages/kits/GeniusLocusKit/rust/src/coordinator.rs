@@ -3556,11 +3556,50 @@ impl EstateCoordinator {
                 if !query_str.is_empty() {
                     use corpus_kit::FloatLaneOutcome;
                     let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
-                    for (idx, (model_id, outcome)) in
-                        c.float_nearest_per_signal(&query_str, plan.frontier_k)
-                            .into_iter()
-                            .enumerate()
+                    // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
+                    // `dense:<model_id>` key is in `shape.anti_similar_lanes`
+                    // inverts its OBJECTIVE — it surfaces the FARTHEST (most
+                    // dissimilar) sources via `float_farthest_per_signal` instead
+                    // of the nearest. Distinct from a negative weight (which keeps
+                    // the nearest and subtracts their mass). When any dense lane is
+                    // anti-similar we fetch BOTH passes and pick, per signal, by
+                    // model_id; with none (the default) only the nearest pass runs
+                    // — byte-identical to the pre-antisim behaviour. Mirrors Swift
+                    // RecallDirector's unionBest dense lane.
+                    let anti_similar_lanes: std::collections::HashSet<String> = request
+                        .recall_shape
+                        .as_ref()
+                        .map(|s| s.anti_similar_lanes.clone())
+                        .unwrap_or_default();
+                    let nearest_per_signal =
+                        c.float_nearest_per_signal(&query_str, plan.frontier_k);
+                    let per_signal: Vec<(String, FloatLaneOutcome)> = if anti_similar_lanes
+                        .is_empty()
                     {
+                        nearest_per_signal
+                    } else {
+                        let farthest_per_signal =
+                            c.float_farthest_per_signal(&query_str, plan.frontier_k);
+                        let mut farthest_by_model: HashMap<String, FloatLaneOutcome> =
+                            HashMap::new();
+                        for (m, o) in farthest_per_signal {
+                            farthest_by_model.insert(m, o);
+                        }
+                        nearest_per_signal
+                            .into_iter()
+                            .map(|(model_id, outcome)| {
+                                // An anti-similar lane forwards its FARTHEST
+                                // candidates; other lanes keep their nearest list.
+                                if anti_similar_lanes.contains(&format!("dense:{model_id}")) {
+                                    if let Some(f) = farthest_by_model.remove(&model_id) {
+                                        return (model_id, f);
+                                    }
+                                }
+                                (model_id, outcome)
+                            })
+                            .collect()
+                    };
+                    for (idx, (model_id, outcome)) in per_signal.into_iter().enumerate() {
                         match outcome {
                             FloatLaneOutcome::Hits(matches) => {
                                 // This signal contributed a ranked dense list. A signal

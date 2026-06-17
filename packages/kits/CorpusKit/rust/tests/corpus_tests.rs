@@ -632,6 +632,90 @@ fn named_minilm_float_lane_is_available() {
     );
 }
 
+// ── Farthest (anti-similarity, mission 6b-modifiers-antisim) ─────────────────
+
+/// A direction-discriminating inference: each text gets a ONE-HOT 384-d
+/// direction chosen by the sum of its FNV-1a token ids mod 384, so distinct
+/// texts get distinct, mostly-orthogonal directions. Mirrors the Swift
+/// `makeDirectionalCorpus` so both ports steer the float lane identically.
+fn directional_inference() -> corpus_kit::NamedInferenceFn {
+    Box::new(move |tokens: &[i32]| {
+        let mut v = vec![0.0_f32; 384];
+        let sum: i32 = tokens.iter().fold(0i32, |a, t| a.wrapping_add(*t));
+        let slot = ((sum % 384 + 384) % 384) as usize;
+        v[slot] = 1.0;
+        Ok(v)
+    })
+}
+
+fn make_directional_corpus() -> Corpus {
+    let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
+    Corpus::open(
+        storage,
+        EmbeddingModelConfig::MiniLM { inference: directional_inference() },
+    )
+    .expect("Corpus::open must succeed with MiniLM config")
+}
+
+fn ids_of(outcome: &FloatLaneOutcome) -> Vec<String> {
+    match outcome {
+        FloatLaneOutcome::Hits(v) => v.iter().map(|(id, _)| id.clone()).collect(),
+        _ => vec![],
+    }
+}
+
+#[test]
+fn float_farthest_per_signal_ranks_dissimilar_first() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let corpus = make_directional_corpus();
+    corpus.ingest("alpha alpha alpha", "src-alpha", NOW_MILLIS).expect("ingest");
+    corpus
+        .ingest("omega omega omega different words", "src-omega", NOW_MILLIS)
+        .expect("ingest");
+
+    let nearest = corpus.float_nearest_per_signal("alpha alpha alpha", 5);
+    let farthest = corpus.float_farthest_per_signal("alpha alpha alpha", 5);
+
+    let near_ids = ids_of(&nearest[0].1);
+    let far_ids = ids_of(&farthest[0].1);
+    assert_eq!(near_ids.len(), 2, "nearest must surface both sources");
+    assert_eq!(far_ids.len(), 2, "farthest must surface both sources");
+    // The query direction matches src-alpha → nearest first; farthest must
+    // place src-alpha LAST and the dissimilar src-omega FIRST.
+    assert_eq!(near_ids.first().map(|s| s.as_str()), Some("src-alpha"));
+    assert_eq!(far_ids.first().map(|s| s.as_str()), Some("src-omega"));
+    assert_eq!(far_ids.last().map(|s| s.as_str()), Some("src-alpha"));
+}
+
+#[test]
+fn float_farthest_per_signal_empty_query_yields_empty_per_signal() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let corpus = make_directional_corpus();
+    let zero = corpus.float_farthest_per_signal("x", 0);
+    let empty = corpus.float_farthest_per_signal("", 5);
+    assert!(zero.iter().all(|(_, o)| matches!(o, FloatLaneOutcome::EmptyQuery)));
+    assert!(empty.iter().all(|(_, o)| matches!(o, FloatLaneOutcome::EmptyQuery)));
+}
+
+#[test]
+fn float_nearest_per_signal_unchanged_by_interleaved_farthest() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let corpus = make_directional_corpus();
+    corpus.ingest("alpha alpha alpha", "src-alpha", NOW_MILLIS).expect("ingest");
+    corpus
+        .ingest("omega omega omega different", "src-omega", NOW_MILLIS)
+        .expect("ingest");
+
+    let near1 = corpus.float_nearest_per_signal("alpha alpha alpha", 5);
+    let _ = corpus.float_farthest_per_signal("alpha alpha alpha", 5);
+    let near2 = corpus.float_nearest_per_signal("alpha alpha alpha", 5);
+    assert_eq!(ids_of(&near1[0].1), ids_of(&near2[0].1));
+}
+
 #[test]
 fn named_providers_construct_for_all_three_models() {
     let _guard = global_lock();

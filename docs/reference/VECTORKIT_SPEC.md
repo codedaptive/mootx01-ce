@@ -1,6 +1,6 @@
 ---
 title: VectorKit Specification
-version: 1.0.1
+version: 1.1.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
@@ -323,6 +323,20 @@ reproducible-within-config, NOT four-way bit-identical (arch spec §6): rank
 order is stable across languages on shared fixtures; raw cosine values are not
 asserted bit-identical.
 
+**B-13a (float farthest — anti-similarity):** `findFarthestFloat(probe:
+modelID:limit:)` is the FARTHEST sibling of B-13 (mission
+6b-modifiers-antisim): same per-model `FloatBruteForceIndex`, same cosine,
+same `modelID` partition scope (I-4), same `VectorMatch` ×10_000 quantisation,
+but it returns the bottom-K by cosine similarity — the most DISSIMILAR rows
+first (largest cosine distance first) — for the "find things UNLIKE this"
+objective. It is NOT a negated nearest-list: the farthest rows are not in the
+nearest top-K, so the index orders by the opposite end (no new distance math).
+The ranking direction is named by the `SearchDirection` enum
+(`nearest`/`farthest`); the tie-break stays item-id ascending in BOTH
+directions, so the nearest path is byte-identical. Same emptiness conditions
+and the same reproducible-within-config (not four-way bit-identical) boundary
+as B-13.
+
 ## § 6 — Error model (conceptual)
 
 VectorKit surfaces all failures through `VectorKitError` (per the
@@ -525,6 +539,14 @@ provisioned estate.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Added B-13a — the Lane D float FARTHEST (anti-similarity) retrieval contract
+(mission 6b-modifiers-antisim): `findFarthestFloat` / `find_farthest_float`
+returns the bottom-K by cosine similarity (most dissimilar first), the "find
+things UNLIKE this" objective, reusing the same cosine and item-id tie-break
+with the sort order inverted. Names the `SearchDirection` enum. The nearest
+contract (B-13) is unchanged. Additive (MINOR).
 
 ### 1.0.1 -- 2026-06-17
 Lane D float nearest (B-13) now maintains ONE `FloatBruteForceIndex` per modelID

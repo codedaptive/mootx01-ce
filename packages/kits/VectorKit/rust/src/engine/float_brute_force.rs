@@ -28,7 +28,7 @@ use crate::engine::key::VectorRecordKey;
 use crate::engine::metric::{DenseMetric, FloatMetric};
 use crate::engine::payload::{VectorKind, VectorPayload};
 use crate::engine::resident::ResidentVectorArray;
-use crate::engine::seam::{DenseIndex, IndexKind, MetadataFilter};
+use crate::engine::seam::{DenseIndex, IndexKind, MetadataFilter, SearchDirection};
 use crate::error::VectorKitError;
 
 // MARK: - FloatBruteForceIndex
@@ -55,6 +55,138 @@ impl FloatBruteForceIndex {
     /// Construct an empty index.
     pub fn new() -> Self {
         FloatBruteForceIndex { array: None }
+    }
+
+    /// k-FARTHEST neighbours by a float metric — the most DISSIMILAR
+    /// vectors first (anti-similarity retrieval, mission 6b-modifiers-antisim).
+    /// Parallel to Swift `FloatBruteForceIndex.searchFarthest`.
+    ///
+    /// Reuses the exact same linear scan and cosine distance as `search`;
+    /// the ONLY difference is the sort: distance DESCENDING (largest cosine
+    /// distance = smallest cosine similarity = most dissimilar) instead of
+    /// ascending. No new distance math (mission guardrail). Tie-break stays
+    /// `item_id` ASCENDING, identical to `search`, so the determinism
+    /// contract holds in both directions.
+    ///
+    /// Errors are the same `InvalidPayload` cases as `search`.
+    pub fn search_farthest(
+        &self,
+        probe: &VectorPayload,
+        metric: DenseMetric,
+        k: usize,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<Vec<DenseHit>, VectorKitError> {
+        self.search_directed(probe, metric, k, filter, SearchDirection::Farthest)
+    }
+
+    /// Shared scan-and-rank for both directions. `search` (the trait method)
+    /// calls this with `Nearest`; `search_farthest` calls it with `Farthest`.
+    /// The validation, scan, and cosine arithmetic are identical for both —
+    /// only the ordering differs.
+    fn search_directed(
+        &self,
+        probe: &VectorPayload,
+        metric: DenseMetric,
+        k: usize,
+        filter: Option<&MetadataFilter>,
+        direction: SearchDirection,
+    ) -> Result<Vec<DenseHit>, VectorKitError> {
+        if probe.kind != VectorKind::Float32 {
+            return Err(VectorKitError::InvalidPayload(format!(
+                "FloatBruteForceIndex.search: probe.kind={:?}; expected Float32",
+                probe.kind
+            )));
+        }
+        let float_metric = match metric {
+            DenseMetric::Float(fm) => fm,
+            _ => {
+                return Err(VectorKitError::InvalidPayload(format!(
+                    "FloatBruteForceIndex.search: metric={:?} is not a float metric; use the binary lane for binary metrics",
+                    metric
+                )));
+            }
+        };
+
+        let arr = match &self.array {
+            None => return Ok(vec![]),
+            Some(a) => a,
+        };
+        if arr.kind != VectorKind::Float32 {
+            return Err(VectorKitError::InvalidPayload(format!(
+                "FloatBruteForceIndex.search: resident array kind={:?}; expected Float32",
+                arr.kind
+            )));
+        }
+        if arr.stride == 0 {
+            return Ok(vec![]);
+        }
+        let dim = arr.stride / 4;
+        if probe.bytes.len() != arr.stride {
+            return Err(VectorKitError::InvalidPayload(format!(
+                "FloatBruteForceIndex.search: probe byte count {} does not match array stride {}",
+                probe.bytes.len(),
+                arr.stride
+            )));
+        }
+
+        let probe_floats = decode_f32_le(&probe.bytes);
+
+        // Collect scored candidates (shared scan — same cosine for both directions).
+        let mut scored: Vec<(f32, &VectorRecordKey)> = Vec::with_capacity(arr.count);
+        for i in 0..arr.count {
+            if arr.is_tombstoned(i) {
+                continue;
+            }
+            if i >= arr.keys.len() {
+                continue;
+            }
+            let key = &arr.keys[i];
+            if let Some(f) = filter {
+                if !f.accepts(key) {
+                    continue;
+                }
+            }
+            let slot_bytes = arr.vector_bytes(i);
+            let slot_floats = decode_f32_le(slot_bytes);
+            let candidate: Vec<f32> = if slot_floats.len() == dim {
+                slot_floats
+            } else {
+                let mut v = slot_floats;
+                v.resize(dim, 0.0);
+                v
+            };
+            let dist = float_distance(&probe_floats, &candidate, float_metric);
+            scored.push((dist, key));
+        }
+
+        // Sort by direction; tie-break is key ascending in BOTH directions.
+        //   Nearest  → distance ascending  (smallest cosine distance first).
+        //   Farthest → distance descending (largest cosine distance first =
+        //              most dissimilar first, anti-similarity).
+        scored.sort_by(|a, b| {
+            let primary = match direction {
+                SearchDirection::Nearest => a.0.partial_cmp(&b.0),
+                SearchDirection::Farthest => b.0.partial_cmp(&a.0),
+            }
+            .unwrap_or(std::cmp::Ordering::Equal);
+            primary.then(a.1.cmp(b.1))
+        });
+
+        // Take top k and convert to DenseHit.
+        let results: Vec<DenseHit> = scored
+            .iter()
+            .take(k)
+            .map(|(dist, key)| {
+                let raw = float_to_raw(*dist);
+                DenseHit {
+                    key: (*key).clone(),
+                    raw_distance: raw,
+                    metric,
+                }
+            })
+            .collect();
+
+        Ok(results)
     }
 }
 
@@ -122,98 +254,10 @@ impl DenseIndex for FloatBruteForceIndex {
         k: usize,
         filter: Option<&MetadataFilter>,
     ) -> Result<Vec<DenseHit>, VectorKitError> {
-        if probe.kind != VectorKind::Float32 {
-            return Err(VectorKitError::InvalidPayload(format!(
-                "FloatBruteForceIndex.search: probe.kind={:?}; expected Float32",
-                probe.kind
-            )));
-        }
-        let float_metric = match metric {
-            DenseMetric::Float(fm) => fm,
-            _ => {
-                return Err(VectorKitError::InvalidPayload(format!(
-                    "FloatBruteForceIndex.search: metric={:?} is not a float metric; use the binary lane for binary metrics",
-                    metric
-                )));
-            }
-        };
-
-        let arr = match &self.array {
-            None => return Ok(vec![]),
-            Some(a) => a,
-        };
-        if arr.kind != VectorKind::Float32 {
-            return Err(VectorKitError::InvalidPayload(format!(
-                "FloatBruteForceIndex.search: resident array kind={:?}; expected Float32",
-                arr.kind
-            )));
-        }
-        if arr.stride == 0 {
-            return Ok(vec![]);
-        }
-        let dim = arr.stride / 4;
-        if probe.bytes.len() != arr.stride {
-            return Err(VectorKitError::InvalidPayload(format!(
-                "FloatBruteForceIndex.search: probe byte count {} does not match array stride {}",
-                probe.bytes.len(),
-                arr.stride
-            )));
-        }
-
-        let probe_floats = decode_f32_le(&probe.bytes);
-
-        // Collect scored candidates.
-        let mut scored: Vec<(f32, &VectorRecordKey)> = Vec::with_capacity(arr.count);
-        for i in 0..arr.count {
-            if arr.is_tombstoned(i) {
-                continue;
-            }
-            if i >= arr.keys.len() {
-                continue;
-            }
-            let key = &arr.keys[i];
-            if let Some(f) = filter {
-                if !f.accepts(key) {
-                    continue;
-                }
-            }
-            let slot_bytes = arr.vector_bytes(i);
-            let slot_floats = decode_f32_le(slot_bytes);
-            // Pad or truncate to dim (defensive; should always match).
-            let candidate: Vec<f32> = if slot_floats.len() == dim {
-                slot_floats
-            } else {
-                let mut v = slot_floats;
-                v.resize(dim, 0.0);
-                v
-            };
-            let dist = float_distance(&probe_floats, &candidate, float_metric);
-            scored.push((dist, key));
-        }
-
-        // Sort: distance ascending, then key ascending (tie-break).
-        scored.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(b.1))
-        });
-
-        // Take top k and convert to DenseHit.
-        // raw_distance stores float × 10_000 truncated to i32 (Rust DenseHit convention).
-        let results: Vec<DenseHit> = scored
-            .iter()
-            .take(k)
-            .map(|(dist, key)| {
-                let raw = float_to_raw(*dist);
-                DenseHit {
-                    key: (*key).clone(),
-                    raw_distance: raw,
-                    metric,
-                }
-            })
-            .collect();
-
-        Ok(results)
+        // Nearest = smaller cosine distance first (the DenseIndex contract).
+        // The shared scan-and-rank lives in `search_directed`; `search_farthest`
+        // (the anti-similarity sibling) calls it with the opposite direction.
+        self.search_directed(probe, metric, k, filter, SearchDirection::Nearest)
     }
 
     /// Add a single float32 vector record to the index.
@@ -565,6 +609,93 @@ mod tests {
         assert_eq!(results[0].key.item_id, "aaa");
         assert_eq!(results[1].key.item_id, "mmm");
         assert_eq!(results[2].key.item_id, "zzz");
+    }
+
+    // MARK: - Farthest (anti-similarity, mission 6b-modifiers-antisim)
+
+    #[test]
+    fn farthest_returns_most_dissimilar_first() {
+        let mut idx = FloatBruteForceIndex::new();
+        idx.build(
+            &[fp(&[1.0_f32, 0.0]), fp(&[1.0, 1.0]), fp(&[-1.0, 0.0])],
+            &[key("a"), key("b"), key("c")],
+        )
+        .unwrap();
+        let results = idx
+            .search_farthest(&fp(&[1.0, 0.0]), DenseMetric::COSINE, 3, None)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].key.item_id, "c"); // most dissimilar first
+        assert_eq!(results[1].key.item_id, "b");
+        assert_eq!(results[2].key.item_id, "a"); // most similar last
+    }
+
+    #[test]
+    fn farthest_is_reverse_of_nearest_on_distinct_distances() {
+        let mut idx = FloatBruteForceIndex::new();
+        idx.build(
+            &[fp(&[1.0_f32, 0.0]), fp(&[1.0, 1.0]), fp(&[-1.0, 0.0])],
+            &[key("near"), key("mid"), key("far")],
+        )
+        .unwrap();
+        let probe = fp(&[1.0, 0.0]);
+        let nearest = idx.search(&probe, DenseMetric::COSINE, 3, None).unwrap();
+        let farthest = idx
+            .search_farthest(&probe, DenseMetric::COSINE, 3, None)
+            .unwrap();
+        let n: Vec<&str> = nearest.iter().map(|h| h.key.item_id.as_str()).collect();
+        let f: Vec<&str> = farthest.iter().map(|h| h.key.item_id.as_str()).collect();
+        assert_eq!(n, vec!["near", "mid", "far"]);
+        assert_eq!(f, vec!["far", "mid", "near"]);
+    }
+
+    #[test]
+    fn farthest_tie_break_by_item_id_ascending() {
+        let mut idx = FloatBruteForceIndex::new();
+        let v = vec![1.0_f32, 0.0];
+        // Three identical vectors → identical distance; tie-break must be
+        // item_id ASCENDING in BOTH directions (the determinism contract).
+        idx.build(
+            &[fp(&v), fp(&v), fp(&v)],
+            &[key("zzz"), key("aaa"), key("mmm")],
+        )
+        .unwrap();
+        let results = idx
+            .search_farthest(&fp(&v), DenseMetric::COSINE, 3, None)
+            .unwrap();
+        let ids: Vec<&str> = results.iter().map(|h| h.key.item_id.as_str()).collect();
+        assert_eq!(ids, vec!["aaa", "mmm", "zzz"]);
+    }
+
+    #[test]
+    fn farthest_respects_filter() {
+        let mut idx = FloatBruteForceIndex::new();
+        let ka = VectorRecordKey::new("a", 0, "model-a", "1");
+        let kb = VectorRecordKey::new("b", 0, "model-a", "1");
+        let kz = VectorRecordKey::new("z", 0, "model-b", "1");
+        idx.build(
+            &[fp(&[1.0_f32, 0.0]), fp(&[-1.0, 0.0]), fp(&[-1.0, 0.0])],
+            &[ka, kb, kz],
+        )
+        .unwrap();
+        let filter = MetadataFilter {
+            model_id: Some("model-a".to_string()),
+            model_version: None,
+        };
+        let results = idx
+            .search_farthest(&fp(&[1.0, 0.0]), DenseMetric::COSINE, 1, Some(&filter))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key.item_id, "b"); // dissimilar model-a row
+    }
+
+    #[test]
+    fn farthest_rejects_binary_metric() {
+        let mut idx = FloatBruteForceIndex::new();
+        idx.build(&[fp(&[1.0_f32, 0.0])], &[key("a")]).unwrap();
+        assert!(idx
+            .search_farthest(&fp(&[1.0, 0.0]), DenseMetric::HAMMING, 1, None)
+            .is_err());
     }
 
     #[test]
