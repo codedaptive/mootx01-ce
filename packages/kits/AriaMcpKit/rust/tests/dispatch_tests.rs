@@ -1752,15 +1752,17 @@ fn federated_search_exhausted_budget_is_refused_as_error_result_no_content_leak(
 //   - `moot_vault_reconcile` after editing a note → "1 modified".
 
 /// Make a unique temporary directory for one vault test.
+///
+/// Uses a UUID, NOT `SystemTime::now()`: on macOS the realtime clock has ~1µs
+/// resolution, so under `cargo test`'s high thread-parallelism multiple
+/// `vault_reconcile_*` tests starting in the same microsecond produced
+/// IDENTICAL nanosecond stamps and collided on one directory — one test's
+/// writes contaminated another's assertions, and a fast test's `remove_dir_all`
+/// destroyed a directory a sibling was still using. `Uuid::new_v4()` is
+/// guaranteed unique per call (the same pattern the SQLite test helpers use).
 fn temp_vault_dir() -> std::path::PathBuf {
     let base = std::env::temp_dir();
-    let dir = base.join(format!(
-        "aria-rust-vault-test-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let dir = base.join(format!("aria-rust-vault-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("temp vault dir create");
     dir
 }
