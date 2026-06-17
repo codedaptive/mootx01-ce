@@ -117,3 +117,25 @@ required-features = ["test-seams"]
 [[test]]
 name = "encode_intake_parity"
 required-features = ["test-seams"]
+
+# These integration-test binaries use the test-only `NoopDispatcher` scheduler
+# stub (re-exported as `SchedulerNoopDispatcher`). It is gated behind
+# `#[cfg(any(test, feature = "test-seams"))]` so it is compiled out of the
+# production binary (kept off the public API). For an integration test the
+# library's own `test` cfg does NOT apply, so declare required-features so the
+# stub is reachable when these binaries are built.
+[[test]]
+name = "scheduler_parity"
+required-features = ["test-seams"]
+
+[[test]]
+name = "standing_signals_parity"
+required-features = ["test-seams"]
+
+[[test]]
+name = "rag_wiring_parity"
+required-features = ["test-seams"]
+
+[[test]]
+name = "coordinator_dispatcher_tests"
+required-features = ["test-seams"]

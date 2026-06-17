@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.6.0
+version: 1.6.1
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1330,6 +1330,14 @@ by `handle`. Uses the DrawerStore lazy-cache pattern established by
 `fingerprintStores[handle]`. Returns `[Fingerprint256]` in HLC-ascending
 order within the window. Throws `.estateNotOpen` for a stale handle.
 
+The Rust port mirrors this as `EstateCoordinator::glk_fingerprints_captured(
+handle, start_epoch, end_epoch)`, which forwards through
+`Estate::fingerprints_captured_in` to `DrawerStore::fingerprints_captured_in`
+(windows are `(start, end)` epoch-seconds pairs rather than `ClosedRange<Date>`).
+The Moment lens (CognitionKit) reads both its primary and comparison windows
+through this surface in both ports — neither aria-mcp nor NeuronKit touches the
+LocusKit store directly (B-1).
+
 **glkFingerprintBitSeries(in:bit:bucketSeconds:bucketCount:endingAt:)**
 
 Forwards to `DrawerStore.fingerprintBitSeries(bit:bucketSeconds:bucketCount:
@@ -1663,6 +1671,15 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.6.1 -- 2026-06-17
+Clarification (parity-sweep-batch #12): noted that the Rust port now mirrors the
+`glkFingerprintsCaptured(in:window:)` method contract as
+`EstateCoordinator::glk_fingerprints_captured(handle, start_epoch, end_epoch)`
+(forwarding through `Estate::fingerprints_captured_in`), so the Moment lens reads
+its windows through the GLK surface in both ports (B-1). No behavioural change to
+the contract — the per-window fingerprint read was already specified; this records
+the Rust surface that realises it.
 
 ### 1.6.0 -- 2026-06-17
 Additive (GLK-RECALL-SHAPE-PRESETS): documented the NAMED PRESET ROSTER on

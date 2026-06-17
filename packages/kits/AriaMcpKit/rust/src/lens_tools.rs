@@ -36,7 +36,6 @@ use substrate_ml::apriori_mining::AprioriThresholds;
 use substrate_ml::association_rule_mining::MiningThresholds;
 use substrate_ml::formal_concept_analysis::BoundedConceptMiner;
 use substrate_ml::temporal_causality_fold::TemporalFieldCoord;
-use substrate_types::fingerprint256::Fingerprint256;
 
 use crate::dispatch::{
     error_result, opt_float, opt_integer, optional_string, recall_frame, require_string,
@@ -422,21 +421,17 @@ pub fn dispatch(
         }
 
         "moot_lens_moment" => {
-            // Fetch primary window fingerprints from the store.
+            // Primary window as an (start, end) epoch-seconds pair. The recipe
+            // reads the fingerprints through the GLK surface
+            // (coord.glk_fingerprints_captured) — aria-mcp no longer reaches
+            // estate.store directly (B-1 layer discipline), matching the Swift
+            // Moment.run flow over GeniusLocusKit.glkFingerprintsCaptured.
             let start_epoch = require_iso8601(args, "windowStart")?;
             let end_epoch = require_iso8601(args, "windowEnd")?;
-            let window_fps: Vec<Fingerprint256> = estate
-                .store
-                .fingerprints_captured_in(start_epoch, end_epoch)
-                .map_err(|e| {
-                    JSONRPCError::new(
-                        JSONRPCErrorCode::INTERNAL_ERROR,
-                        format!("fingerprints_captured_in failed: {e:?}"),
-                    )
-                })?;
+            let window = (start_epoch, end_epoch);
 
             // Parse optional comparisonWindows array of {windowStart, windowEnd} objects.
-            let comparison_fps: Vec<Vec<Fingerprint256>> =
+            let comparison_windows: Vec<(i64, i64)> =
                 if let Some(arr) = args.get("comparisonWindows").and_then(|v| v.as_array()) {
                     let mut result = Vec::with_capacity(arr.len());
                     for entry in arr {
@@ -466,23 +461,15 @@ pub fn dispatch(
                                     "comparisonWindows entry missing valid windowEnd",
                                 )
                             })?;
-                        let fps = estate
-                            .store
-                            .fingerprints_captured_in(ws, we)
-                            .map_err(|e| {
-                                JSONRPCError::new(
-                                    JSONRPCErrorCode::INTERNAL_ERROR,
-                                    format!("fingerprints_captured_in failed: {e:?}"),
-                                )
-                            })?;
-                        result.push(fps);
+                        result.push((ws, we));
                     }
                     result
                 } else {
                     vec![]
                 };
 
-            let out = run_moment(&window_fps, &comparison_fps);
+            let out = run_moment(&coord, &estate.handle, window, &comparison_windows, now)
+                .map_err(lens_error)?;
             let mut lines = vec![format!(
                 "moment: window={} fingerprint(s), {} comparison(s) ranked",
                 out.window_count,

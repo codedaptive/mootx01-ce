@@ -334,6 +334,29 @@ impl AutonomicGovernor {
         Self::build(coord, handle, store, stop_flag, None)
     }
 
+    /// Construct with a caller-supplied stop flag AND an explicit base tick.
+    /// Passes `base_tick_ms` directly instead of reading
+    /// `MOOTX01_BRAIN_TICK_MS`, so a test that wants a fast run-loop tick does
+    /// NOT set a process-global env var that races sibling tests constructing
+    /// governors in parallel. Mirrors the `topology_cadence_ms` override on
+    /// `new_for_testing`. Test-only; production uses `with_stop_flag` / `new`.
+    pub fn with_stop_flag_and_tick(
+        coord: Arc<Mutex<EstateCoordinator>>,
+        handle: EstateHandle,
+        store: Arc<dyn DrawerStore>,
+        stop_flag: Arc<AtomicBool>,
+        base_tick_ms: u64,
+    ) -> Self {
+        // Production cadences for everything except the base tick, which the
+        // caller supplies directly (no env read).
+        Self::build_inner(
+            coord, handle, store, stop_flag, None,
+            base_tick_ms, parse_topology_cadence_ms(),
+            parse_pool_reduce_cadence_ms(), lattice_lib::default_pool_dir(),
+            lattice_lib::default_table_artifact(),
+        )
+    }
+
     /// Internal canonical constructor. All public constructors call this.
     /// `topology_cadence_ms_override`: when `Some`, skips env-var parsing and
     /// uses the provided value directly. Used by tests to avoid env-var

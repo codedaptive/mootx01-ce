@@ -1892,6 +1892,31 @@ impl EstateCoordinator {
             .map_err(|e| remap("all_drawers_bounded", "", e).into())
     }
 
+    // MARK: - glk_fingerprints_captured
+
+    /// Fingerprints of every non-tombstoned drawer captured in the closed
+    /// epoch-seconds window `[start_epoch, end_epoch]`, in HLC-ascending order
+    /// within the window.
+    ///
+    /// The Moment lens (CognitionKit) folds these into an OR-reduced window
+    /// signature and ranks comparison windows by Hamming proximity. Delegates
+    /// to `Estate::fingerprints_captured_in`, which forwards to the backing
+    /// `DrawerStore` — so aria-mcp and NeuronKit reach the per-window read
+    /// through the GLK surface rather than touching the store directly
+    /// (B-1 compliance). Mirrors the Swift
+    /// `GeniusLocusKit.glkFingerprintsCaptured(in:window:)`.
+    pub fn glk_fingerprints_captured(
+        &self,
+        handle: &EstateHandle,
+        start_epoch: i64,
+        end_epoch: i64,
+    ) -> Result<Vec<substrate_types::fingerprint256::Fingerprint256>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .fingerprints_captured_in(start_epoch, end_epoch)
+            .map_err(|e| remap("glk_fingerprints_captured", "", e).into())
+    }
+
     // MARK: - room_level_fingerprints
 
     /// Every room-level container fingerprint (room non-empty) with its

@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.6.0
+version: 1.7.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -1709,6 +1709,22 @@ public func registerMatrixPersistence(
 ### Rust interface
 
 ```rust
+// Per-window fingerprint read — mirror of glkFingerprintsCaptured.
+// Forwards EstateCoordinator → Estate::fingerprints_captured_in →
+// DrawerStore::fingerprints_captured_in. Returns the fingerprints of every
+// non-tombstoned drawer captured in the closed epoch-seconds window
+// [start_epoch, end_epoch], HLC-ascending. The Moment lens (CognitionKit)
+// reads both its windows through this surface so aria-mcp/NeuronKit never
+// touch the LocusKit store directly (B-1).
+impl EstateCoordinator {
+    pub fn glk_fingerprints_captured(
+        &self,
+        handle: &EstateHandle,
+        start_epoch: i64,
+        end_epoch: i64,
+    ) -> Result<Vec<Fingerprint256>, VerbDispatchError>;
+}
+
 // Pure function mirroring glkEventLagPairs (brain/event_lag_pairs.rs).
 // Caller supplies a pre-sorted (ordered_entries()) slice and ms window bounds.
 pub fn event_lag_pairs(
@@ -1762,6 +1778,7 @@ section above.
 | Recall origin tag | `RecallOrigin` (`RecallDirector/GLKRecallRequest.swift`) | `RecallOrigin` (`rust/src/recall.rs`) | public enum / pub enum | identical 2-case enum (local/Local, crossEstate/CrossEstate) | `RecallDirectorTests.swift` / `recall_tests` | Confirmed |
 | Recall fusion steering | `RecallShape` (`RecallDirector/RecallShape.swift`) | `RecallShape` (`rust/src/recall.rs`) | public struct / pub struct | signed `laneWeights`/`lane_weights` (retrieval keys `locus`/`bm25`/`hamming`/`dense`/`dense:<modelID>` + matrix/graph/preference keys `fieldFit`/`coOccurrence`/`temporal`/`graph`/`preference`, missing ⇒ 1.0) + `antiSimilarLanes`/`anti_similar_lanes` (FARTHEST dense lanes) + optional clamped `frontierK`/`frontier_k`; `weight(for:)`/`weight()`, `isAntiSimilar(_:)`/`is_anti_similar()`, and `effectiveFrontierK`/`effective_frontier_k` accessors; `[64,256]` frontier envelope | `RecallShapeSignedWeightTests.swift` + `RecallShapeAntiSimilarTests.swift` + `RecallShapeMatrixSteerTests.swift` / `recall_shape_signed_weight_parity` + `recall_shape_anti_similar_parity` + `recall_shape_matrix_steer_parity` | Confirmed |
 | Serial-lane dispatcher | — | `CoordinatorDispatcher` (`rust/src/brain/scheduler/serial_lane.rs`) | — / pub struct | Rust-only internal dispatcher for the serial scheduling lane; no Swift parity (Brain scheduling is async actor lanes in Swift) | `scheduler_tests` | Confirmed (Rust-only) |
+| Serial-lane noop dispatcher | — | `NoopDispatcher` (`rust/src/brain/scheduler/serial_lane.rs`) | — / test-only | Rust test stub gated `#[cfg(any(test, feature = "test-seams"))]` — compiled OUT of the production binary (not a shipped public symbol). Integration tests reach it via the `test-seams` feature. No Swift equivalent | scheduler/standing-signals/rag-wiring/coordinator-dispatcher parity tests | Confirmed (test-only) |
 | Grant-store error | — | `GrantStoreError` (`rust/src/grants/grant_store.rs`) | — / pub enum | Rust-only error enum for the grants persistence layer; Swift errors bubble as `GeniusLocusKitError` (no distinct grant-store type) | grant tests | Confirmed (Rust-only) |
 | Sync-engine entry | — | `SyncEngineEntry` (`rust/src/coordinator.rs`) | — / pub struct | Rust-only coordinator state record for the sync engine; no Swift parallel (sync lifecycle managed via actor state) | coordinator tests | Confirmed (Rust-only) |
 
@@ -1770,6 +1787,24 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.7.0 -- 2026-06-17
+Additive + surface-narrowing (parity-sweep-batch):
+- Additive (#12 Moment GLK read): the Rust port gains
+  `EstateCoordinator::glk_fingerprints_captured(handle, start_epoch, end_epoch)
+  -> Result<Vec<Fingerprint256>, VerbDispatchError>`, the mirror of Swift
+  `GeniusLocusKit.glkFingerprintsCaptured(in:window:)`. It forwards through the
+  new `Estate::fingerprints_captured_in` pass-through to
+  `DrawerStore::fingerprints_captured_in`. The Rust `Moment` recipe
+  (`moment_recipe::run_moment`) now reads its primary and comparison windows
+  through this surface (dropping the pre-fetched-fingerprint workaround), and
+  aria-mcp's `moot_lens_moment` no longer reaches `estate.store` directly —
+  both ports now share the Swift flow over the GLK surface (B-1).
+- Surface-narrowing (#9): the Rust scheduler test stub `NoopDispatcher`
+  (re-exported `SchedulerNoopDispatcher`) is gated
+  `#[cfg(any(test, feature = "test-seams"))]` and is no longer part of the
+  shipped public API. Integration tests reach it via the `test-seams` feature.
+  Swift has no public noop equivalent. See the concordance row above.
 
 ### 1.6.0 -- 2026-06-17
 Additive (GLK-RECALL-SHAPE-PRESETS): `RecallShape` gains a NAMED PRESET ROSTER.

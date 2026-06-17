@@ -219,8 +219,9 @@ pub struct FormalConcept {
 /// sorted attribute universe, stored as bitsets in both directions
 /// (rows-per-attribute and attributes-per-row) so the two derivation
 /// operators are plain word-wise intersections. Rows are addressed
-/// by a context-local 0-based index; the deferred estate wrapper
-/// maps estate row identifiers to these indices.
+/// by a context-local 0-based index; the estate wrapper
+/// (CognitionKit `formal_concepts_recipe` / `FormalConcepts.swift`)
+/// maps estate row identifiers (drawer IDs) to these indices.
 pub struct FormalContext {
     /// The deduplicated attribute universe, ascending. Index in this
     /// vector is the attribute's bit position in row bitsets.
