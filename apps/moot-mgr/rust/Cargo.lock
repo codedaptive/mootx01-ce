@@ -766,6 +766,7 @@ name = "locus-kit"
 version = "0.1.0"
 dependencies = [
  "intellectus-lib",
+ "lattice-lib",
  "persistence-kit",
  "substrate-kernel",
  "substrate-lib",

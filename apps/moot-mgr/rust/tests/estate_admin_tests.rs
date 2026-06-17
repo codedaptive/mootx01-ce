@@ -57,10 +57,45 @@ fn in_memory_live_estate_is_caching() {
         .provision(&req("CacheScratch", "GLK", "InMemory", "cache-tests"), NOW)
         .expect("provision must succeed");
     let uuid = result.estate_uuid.expect("provision returns a uuid");
-    // The previously-dark CachingRowStore path is now lit for the live estate:
-    // its backing storage was constructed with the cache-on config that makes
-    // its row_store a CachingRowStore.
+    // The CachingRowStore hot tier is wired for the InMemory estate: its backing
+    // storage was constructed with the cache-on config that makes row_store() a
+    // CachingRowStore.
     assert_eq!(admin.backing_storage_is_caching(&uuid), Some(true));
+}
+
+#[test]
+fn sqlite_live_estate_is_caching() {
+    // Behavior-parity test for the SQLite backend — mirrors `in_memory_live_estate_is_caching`.
+    // SqliteDrawerStore::from_path_with_config threads the cache-on EstateConfiguration
+    // into SqliteStorage, so SqliteStorage::row_store() wraps the backing SqliteRowStore
+    // in a CachingRowStore LRU hot tier — identical to the InMemory path. This test
+    // asserts that the SQLite estate's backing storage is caching when the host's
+    // resolved cache config has enabled=true.
+    let mut admin = EstateAdmin::with_cache_config(
+        scratch_estates_dir(),
+        EstateCacheConfig::new(true, 8 * 1024 * 1024, 2),
+    );
+    let result = admin
+        .provision(&req("SQLiteCacheScratch", "GLK", "SQLite", "cache-tests"), NOW)
+        .expect("provision must succeed");
+    let uuid = result.estate_uuid.expect("provision returns a uuid");
+    // The CachingRowStore hot tier is now wired for the SQLite estate as well:
+    // its backing storage was constructed via from_path_with_config with the
+    // cache-on config, closing the InMemory/SQLite caching parity gap.
+    assert_eq!(admin.backing_storage_is_caching(&uuid), Some(true));
+}
+
+#[test]
+fn sqlite_cache_disabled_reverts_to_bare_store() {
+    // Complement of sqlite_live_estate_is_caching: when cache is disabled the
+    // SQLite estate's backing storage must NOT wrap in CachingRowStore.
+    let mut admin =
+        EstateAdmin::with_cache_config(scratch_estates_dir(), EstateCacheConfig::disabled());
+    let result = admin
+        .provision(&req("SQLiteBareScratch", "GLK", "SQLite", "cache-tests"), NOW)
+        .expect("provision must succeed");
+    let uuid = result.estate_uuid.expect("provision returns a uuid");
+    assert_eq!(admin.backing_storage_is_caching(&uuid), Some(false));
 }
 
 #[test]
