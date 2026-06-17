@@ -70,6 +70,19 @@ public struct GLKRecallRequest: Sendable {
     /// is safe unless explicitly overridden. The ARIA_MCP boundary is the
     /// ONLY place that sets `.external`.
     public let origin: RecallOrigin
+    /// Optional SIGNED per-lane steering for the RRF fusion (6b-modifiers).
+    ///
+    /// When non-nil, the RecallDirector multiplies each fusion lane's
+    /// reciprocal-rank mass by that lane's signed weight from the shape before the
+    /// per-id sum: `w > 0` forwards, `w == 0` excludes, `w < 0` suppresses
+    /// (demotes the lane's high-ranked candidates). It may also override the
+    /// candidate-pool depth (`frontierK`). See `RecallShape` for the lane-key
+    /// scheme and the exact signed-weight semantics.
+    ///
+    /// When nil (the default), fusion uses uniform positive weights — every lane
+    /// at weight `1.0` — which is BYTE-IDENTICAL to the pre-6b-modifiers behaviour.
+    /// This is the back-compat contract: an absent shape changes nothing.
+    public let recallShape: RecallShape?
 
     /// Create a recall request with explicit lane, scoring, and policy.
     ///
@@ -87,6 +100,9 @@ public struct GLKRecallRequest: Sendable {
     ///   - origin: Whether the request originates externally (ARIA boundary) or
     ///     internally (system process). Defaults to `.internal`. Only the ARIA_MCP
     ///     boundary passes `.external` (B-10a enforcement).
+    ///   - recallShape: Optional signed per-lane fusion steering. Defaults to `nil`
+    ///     (uniform positive weights — byte-identical to today's fusion). See
+    ///     `RecallShape` for the signed-weight semantics and lane-key scheme.
     public init(
         frame: LocusKit.RecallFrame,
         mode: GLKRecallMode = .hybrid,
@@ -95,7 +111,8 @@ public struct GLKRecallRequest: Sendable {
         fallback: RecallFallbackPolicy = .failClosed,
         queryText: String? = nil,
         traceLimit: Int? = nil,
-        origin: RecallOrigin = .internal
+        origin: RecallOrigin = .internal,
+        recallShape: RecallShape? = nil
     ) {
         self.frame = frame
         self.mode = mode
@@ -105,5 +122,6 @@ public struct GLKRecallRequest: Sendable {
         self.queryText = queryText
         self.traceLimit = traceLimit
         self.origin = origin
+        self.recallShape = recallShape
     }
 }
