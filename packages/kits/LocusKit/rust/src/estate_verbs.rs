@@ -938,6 +938,21 @@ impl Estate {
         self.store.all_drawers_bounded(limit)
     }
 
+    /// Fingerprints of every non-tombstoned drawer captured in the closed
+    /// epoch-seconds window `[start_epoch, end_epoch]`, in HLC-ascending
+    /// order within the window. Estate-level pass-through over
+    /// `DrawerStore::fingerprints_captured_in`. Used by GLK to expose the
+    /// per-window fingerprint read the Moment lens needs without NeuronKit
+    /// (or aria-mcp) reaching the store directly (B-1 compliance — mirrors
+    /// the Swift `GeniusLocusKit.glkFingerprintsCaptured(in:window:)` flow).
+    pub fn fingerprints_captured_in(
+        &self,
+        start_epoch: i64,
+        end_epoch: i64,
+    ) -> Result<Vec<substrate_types::fingerprint256::Fingerprint256>, LocusKitError> {
+        self.store.fingerprints_captured_in(start_epoch, end_epoch)
+    }
+
     /// Every room-level container fingerprint (room non-empty) with its
     /// bitwise-OR aggregate. Estate-level pass-through over
     /// `DrawerStore::room_level_fingerprints`. The maintenance daemon's

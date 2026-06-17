@@ -15,9 +15,11 @@
 //! (`{rowID, source, handle, mode, three bitmaps}`), with two
 //! reconciliations (documented in the Swift port and the completion
 //! report):
-//! - `source: SourceCatalogEntry` → `source_catalog_id: String` (the
-//!   catalog-entry type is spec-only / unimplemented; stored as an
-//!   identifier, like `KGFact.source_drawer_id`).
+//! - `source: SourceCatalogEntry` → `source_catalog_id: String`: the noun
+//!   stores the catalog entry's stable identifier, not an embedded value.
+//!   The `SourceCatalogEntry` type is implemented (`source_catalog_entry.rs`,
+//!   mirroring `SourceCatalogEntry.swift`); each reference references it by id
+//!   (like `KGFact.source_drawer_id`) and inherits the source's lattice anchor.
 //! - `mode: LearnMode` lives in the operational bitmap (bit 12) per
 //!   cookbook v1.0 § 2.4, not as a struct field — matching every other
 //!   LocusKit noun's operational axes.

@@ -102,13 +102,16 @@ fn make_governor() -> (AutonomicGovernor, EstateRegistry) {
     (governor, registry)
 }
 
-/// Build a governor with a caller-supplied stop flag (for the run_loop test).
-fn make_governor_with_flag(flag: Arc<AtomicBool>) -> AutonomicGovernor {
+/// Build a governor with a caller-supplied stop flag and an explicit base tick
+/// (for the run_loop test). The tick is passed directly rather than via
+/// `MOOTX01_BRAIN_TICK_MS`, so this helper never sets a process-global env var
+/// that would race sibling tests constructing governors in parallel.
+fn make_governor_with_flag(flag: Arc<AtomicBool>, base_tick_ms: u64) -> AutonomicGovernor {
     let registry = EstateRegistry::new_inmemory();
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    AutonomicGovernor::with_stop_flag(coord, handle, store, flag)
+    AutonomicGovernor::with_stop_flag_and_tick(coord, handle, store, flag, base_tick_ms)
 }
 
 // MARK: - §1 Cadence
@@ -233,10 +236,11 @@ fn ag7_stop_flag_exits_run_loop() {
     let flag_clone = Arc::clone(&stop_flag);
 
     // Use a 1 ms tick so the loop spins fast enough to see the stop flag
-    // without a meaningful wall-clock delay in CI.
-    std::env::set_var("MOOTX01_BRAIN_TICK_MS", "1");
-    let mut governor = make_governor_with_flag(Arc::clone(&stop_flag));
-    std::env::remove_var("MOOTX01_BRAIN_TICK_MS");
+    // without a meaningful wall-clock delay in CI. The tick is passed directly
+    // (no process-global MOOTX01_BRAIN_TICK_MS env var) so this test cannot
+    // leak a 1 ms tick into sibling governor-construction tests running in
+    // parallel (ag16-19).
+    let mut governor = make_governor_with_flag(Arc::clone(&stop_flag), 1);
 
     let handle = std::thread::spawn(move || {
         governor.run_loop();

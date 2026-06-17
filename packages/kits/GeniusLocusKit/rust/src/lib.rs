@@ -83,7 +83,7 @@ pub use brain::scheduler::{
     ConditionPredicate as SchedulerConditionPredicate,
     CoordinatorDispatcher as SchedulerCoordinatorDispatcher,
     DiagnosticReport as SchedulerDiagnosticReport, Dispatcher as SchedulerDispatcher,
-    MutationKind as SchedulerMutationKind, NoopDispatcher as SchedulerNoopDispatcher,
+    MutationKind as SchedulerMutationKind,
     ProposalFrame as SchedulerProposalFrame, ProposalKind as SchedulerProposalKind,
     ResourceCostEstimate as SchedulerResourceCostEstimate, SchedulerError, SerialLaneScheduler,
     SignalContext as SchedulerSignalContext, SignalEmission as SchedulerSignalEmission,
@@ -92,6 +92,10 @@ pub use brain::scheduler::{
     SignalState as SchedulerSignalState, SignalTrigger as SchedulerSignalTrigger,
     SubscriptionID as SchedulerSubscriptionID, EMISSION_CLASS_TAGS,
 };
+// Test-only stub dispatcher — compiled out of production (see serial_lane.rs).
+// Reachable from integration tests via the `test-seams` feature.
+#[cfg(any(test, feature = "test-seams"))]
+pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
     DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,

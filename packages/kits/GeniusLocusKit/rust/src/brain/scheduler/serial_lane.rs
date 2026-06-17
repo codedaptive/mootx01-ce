@@ -74,8 +74,17 @@ pub trait Dispatcher: Send + Sync {
 /// (routes emissions to real coordinator verbs), and the Rust resident
 /// runs no standing-signal scheduler at all — its autonomic governor loop
 /// is the only scheduler (see packages/kits/AriaMcpKit/rust/src/autonomic_governor.rs).
+///
+/// Compiled out of the production binary: gated behind
+/// `#[cfg(any(test, feature = "test-seams"))]` so it leaves the public API in
+/// shipped builds. Integration tests reach it via the `test-seams` feature
+/// (declared `required-features` on their `[[test]]` targets) — the same
+/// technique the recall/encode degradation seams use. Swift has no public noop
+/// equivalent (Brain scheduling is async actor lanes there).
+#[cfg(any(test, feature = "test-seams"))]
 pub struct NoopDispatcher;
 
+#[cfg(any(test, feature = "test-seams"))]
 impl Dispatcher for NoopDispatcher {
     fn dispatch_propose(
         &self,

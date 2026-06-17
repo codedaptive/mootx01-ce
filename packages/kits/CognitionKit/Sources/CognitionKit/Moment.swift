@@ -35,10 +35,11 @@ public struct MomentOutput: Sendable, Equatable {
 /// (`glkFingerprintsCaptured`) + NeuronKit `momentSignature`. Read-only
 /// (B-6, I-6). No write verb, now passed in, deterministic.
 ///
-/// Rust peer: `run_moment` in `moment_recipe.rs`. The Rust version accepts
-/// pre-fetched fingerprints because the Rust `EstateCoordinator` does not yet
-/// expose the dormant fingerprint surface; the GLK-read step is elided there
-/// and the tests shape input identically.
+/// Rust peer: `run_moment` in `moment_recipe.rs`. Same flow: it reads both the
+/// primary and comparison windows through the GLK surface
+/// (`EstateCoordinator::glk_fingerprints_captured`, the Rust mirror of
+/// `glkFingerprintsCaptured`) and feeds the MomentSignature lens. Windows are
+/// `(start, end)` epoch-seconds pairs there where Swift uses `ClosedRange<Date>`.
 public enum Moment {
 
     /// Read the primary window's fingerprints, OR-reduce each comparison

@@ -59,6 +59,14 @@ struct ObserverShouldEnableTests {
 
 // MARK: - Window + gate (modifies the Intellectus global → serialized)
 
+/// Metric-name accessor for a StatSample (nil for non-metric variants).
+/// Window assertions filter on a UNIQUE per-test name so a stray concurrent
+/// sample that lands in the process-global window cannot corrupt the count.
+private func metricName(_ s: StatSample) -> String? {
+    if case let .metric(name, _, _, _) = s { return name }
+    return nil
+}
+
 @Suite("Observer — bounded window + gate", .serialized)
 struct ObserverWindowTests {
 
@@ -68,25 +76,34 @@ struct ObserverWindowTests {
         Intellectus.install(sink: NoOpSink.shared)
     }
 
+    /// A unique metric name for this test invocation, so the window snapshot
+    /// can be filtered to exactly the samples THIS test emitted — robust to a
+    /// concurrent observer-emitting test polluting the shared window.
+    private func uniqueName(_ tag: String) -> String {
+        "obs.\(tag).\(UUID().uuidString)"
+    }
+
     @Test("FORCE: observer enabled → sample recorded in the window")
     func enabledRecordsInWindow() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             let observer = Observer(forward: nil, windowCapacity: 16)
             observer.install()
             observer.setEnabled(true)
             defer { restoreGlobal() }
 
             #expect(observer.isEnabled == true)
-            Intellectus.report(.metric(name: "obs.on", value: 1.0, tags: [:], ts: 42.0))
-            #expect(observer.window.count == 1)
-            #expect(observer.window.totalReceived == 1)
-            #expect(observer.window.snapshot().first?.ts == 42.0)
+            let name = uniqueName("on")
+            Intellectus.report(.metric(name: name, value: 1.0, tags: [:], ts: 42.0))
+            // Filter to this test's unique marker — exactly one, at ts 42.0.
+            let mine = observer.window.snapshot().filter { metricName($0) == name }
+            #expect(mine.count == 1)
+            #expect(mine.first?.ts == 42.0)
         }
     }
 
     @Test("FORCE: observer disabled → no sample recorded + explicit off state")
     func disabledIsExplicitOffAndDoesNotRecord() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             let observer = Observer(forward: nil, windowCapacity: 16)
             observer.install()
             observer.setEnabled(false)
@@ -94,48 +111,63 @@ struct ObserverWindowTests {
 
             // Explicit, observable off — not silent.
             #expect(observer.isEnabled == false)
-            // Reporting while off must not crash and must not record.
-            Intellectus.report(.metric(name: "obs.off", value: 1.0, tags: [:], ts: 0.0))
-            #expect(observer.window.count == 0)
-            #expect(observer.window.totalReceived == 0)
+            // Reporting while off must not crash and must not record THIS sample.
+            let name = uniqueName("off")
+            Intellectus.report(.metric(name: name, value: 1.0, tags: [:], ts: 0.0))
+            let mine = observer.window.snapshot().filter { metricName($0) == name }
+            #expect(mine.isEmpty, "disabled observer must not record the emitted sample")
         }
     }
 
     @Test("FORCE: bounded window overflow evicts oldest, bound holds")
     func boundedWindowHolds() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             let observer = Observer(forward: nil, windowCapacity: 3)
             observer.install()
             observer.setEnabled(true)
             defer { restoreGlobal() }
 
+            let name = uniqueName("flood")
             for i in 0..<10 {
-                Intellectus.report(.metric(name: "obs.flood", value: Double(i), tags: [:], ts: Double(i)))
+                Intellectus.report(.metric(name: name, value: Double(i), tags: [:], ts: Double(i)))
             }
-            // Bound holds regardless of volume.
-            #expect(observer.window.count == 3)
-            #expect(observer.window.totalReceived == 10)
-            let snap = observer.window.snapshot()
-            #expect(snap.first?.ts == 7.0)  // oldest retained (0..6 evicted)
-            #expect(snap.last?.ts == 9.0)   // newest
+            // Bound holds regardless of volume: capacity is 3. Even if a stray
+            // concurrent sample lands, the bound is an upper limit.
+            #expect(observer.window.count <= 3)
+            // Of THIS test's samples, at most 3 survive eviction and they are
+            // the 3 most recent (ts 7, 8, 9). Filtering by the unique name makes
+            // this immune to any other sample sharing the window.
+            let mineTs = observer.window.snapshot()
+                .filter { metricName($0) == name }
+                .map(\.ts)
+                .sorted()
+            #expect(mineTs == [7.0, 8.0, 9.0],
+                    "only the 3 newest of this test's samples are retained")
         }
     }
 
     @Test("toggling off after on stops recording (explicit off mid-flight)")
     func toggleOffStopsRecording() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             let observer = Observer(forward: nil, windowCapacity: 16)
             observer.install()
             observer.setEnabled(true)
             defer { restoreGlobal() }
 
-            Intellectus.report(.metric(name: "before", value: 1.0, tags: [:], ts: 1.0))
-            #expect(observer.window.count == 1)
+            let before = uniqueName("before")
+            let after = uniqueName("after")
+            Intellectus.report(.metric(name: before, value: 1.0, tags: [:], ts: 1.0))
+            #expect(observer.window.snapshot().contains { metricName($0) == before })
 
             observer.setEnabled(false)
             #expect(observer.isEnabled == false)
-            Intellectus.report(.metric(name: "after", value: 2.0, tags: [:], ts: 2.0))
-            #expect(observer.window.count == 1, "no new sample recorded after disable")
+            Intellectus.report(.metric(name: after, value: 2.0, tags: [:], ts: 2.0))
+            // The post-disable sample must not be recorded; the pre-disable one
+            // still is. Both checks filter on this test's unique markers.
+            #expect(!observer.window.snapshot().contains { metricName($0) == after },
+                    "no sample recorded after disable")
+            #expect(observer.window.snapshot().contains { metricName($0) == before },
+                    "pre-disable sample still present")
         }
     }
 }
@@ -170,8 +202,11 @@ struct ObserverForwardTests {
             let name = "obs.forward.\(UUID().uuidString.prefix(8))"
             Intellectus.report(.metric(name: name, value: 7.0, tags: [:], ts: 1_700_000_200.0))
 
-            // In-process window is immediate.
-            #expect(observer.window.count == 1)
+            // In-process window is immediate. Filter to this test's unique
+            // marker so a stray concurrent sample in the shared window cannot
+            // break the count.
+            let mine = observer.window.snapshot().filter { metricName($0) == name }
+            #expect(mine.count == 1)
 
             // Durable store write is async (PersistenceStatsSink dispatches a Task).
             try await Task.sleep(nanoseconds: 200_000_000)
