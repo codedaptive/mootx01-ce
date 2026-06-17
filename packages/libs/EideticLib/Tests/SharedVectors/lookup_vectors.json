@@ -122,7 +122,7 @@
     {
       "id": "religion_single_token",
       "input": "religion",
-      "expected_code": "",
+      "expected_code": "297",
       "expected_qid": null
     },
     {
