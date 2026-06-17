@@ -154,6 +154,28 @@ pub fn run(banner: &str) {
             let mut governor = AutonomicGovernor::new_with_stats_store(
                 gov_coord, gov_handle, gov_store, gov_stats_store,
             );
+            // Bootstrap the architecture-spec §11.2 default standing signals
+            // before the loop starts, mirroring the Swift resident's
+            // `kit.registerDefaultStandingSignals(...)` step. Best-effort: a
+            // missing VectorStore (or any registration error) logs and the
+            // governor still runs — `signal_tick` benign-skips exactly as
+            // before activation. The signals' VectorStore is read from the live
+            // coordinator inside `register_default_standing_signals`, so no
+            // throwaway store is fabricated when none is registered. The model
+            // id matches the Swift resident default ("minilm-v6").
+            match governor.register_default_standing_signals("minilm-v6", SystemTime::now()) {
+                Ok(registered) => {
+                    eprintln!(
+                        "AriaResident standing signals registered ({} defaults)",
+                        registered.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "AriaResident standing signals NOT registered (governor signal_tick will benign-skip): {e}"
+                    );
+                }
+            }
             governor.run_loop();
         });
 

@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.8.0
+version: 1.9.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -246,6 +246,12 @@ public actor GeniusLocusKit {
     public func signalSubscribe(_ signalID: SignalID, in handle: EstateHandle, callback: @escaping @Sendable (SignalEmission) -> Void) async throws -> SubscriptionID
     public func signalUnsubscribe(_ signalID: SignalID, subscription: SubscriptionID, in handle: EstateHandle) async throws
     public var openSchedulerCount: Int { get }
+    // Read back a registered VectorStore. Swift: actor accessor (public).
+    // Rust mirror: `EstateCoordinator::vector_store_for(&handle) -> Option<Arc<VectorStore>>`
+    // is `pub` — the AriaMcpKit autonomic governor reads it to build the default
+    // standing-signal specs at registration (mirrors the Swift resident's
+    // `kit.registeredVectorStore(for:)` bootstrap; see ARIA_MCP_INTERFACE §2).
+    public func registeredVectorStore(for handle: EstateHandle) -> VectorStore?
 
     // Hydration (EstateHydration.swift):
     // Open an in-memory estate hydrated from a durable (SQLite) backend.
@@ -1790,6 +1796,17 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.9.0 -- 2026-06-17
+Additive (#8 Track 1 — Brain harness, Rust side). `EstateCoordinator::vector_store_for(&handle)
+-> Option<Arc<VectorStore>>` promoted from `pub(crate)` to `pub`, mirroring the
+already-public Swift `GeniusLocusKit.registeredVectorStore(for:)`. The AriaMcpKit
+autonomic governor reads it to build the architecture-spec §11.2 default
+standing-signal specs at registration time (the producer-seam bootstrap; the GLK
+`SerialLaneScheduler` + `CoordinatorDispatcher` engine and the six v1 signals
+were already ported — see `genius_locus_kit/tests/scheduler_parity.rs`). No
+signature, body, or semantics change; no Swift change. See ARIA_MCP_INTERFACE
+§2 (Rust governor — standing-signal harness) for the consumer surface.
 
 ### 1.8.0 -- 2026-06-17
 ADR-012 `ext` forward-compat slot: the `grants` table gained a nullable `.json` `ext` column (the #11 custody-payload slot, inert in 1.0), both ports. Composite schema version 3 → 7 = LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 — now DERIVED from the live component declarations in both ports (Swift sums the component `.version` fields; Rust sums `lk/vk/ck.version`), guarded by a new conformance test on each port. Corrected the composite-schema concordance row (previously read "version 3 / 1+1+1", already stale vs VectorKit v2). Also corrected the misleading GRT-01 custody comment: mode-3 (decay-derived) is no-vault BY DESIGN — the issuer retains nothing, so not persisting threshold/totalShares/driftRate is correct, not a defect.

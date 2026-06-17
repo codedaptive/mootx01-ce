@@ -56,14 +56,27 @@
 //! (dreaming 30 s, maintenance 5 min). P3 swaps these for the manifest store
 //! so an operator's policy survives restarts; the seam is unchanged.
 //!
-//! # Standing signals (Rust gap)
+//! # Standing signals
 //!
-//! The Rust GLK has no standing-signal scheduler (no `signal_tick`). The Swift
-//! AutonomicGovernor ticks signals each iteration (benign no-op until a signal
-//! is registered). The Rust governor drives dreaming + maintenance ONLY. Rust
-//! standing signals are a separate GLK-rust feature tracked in the backlog —
-//! this omission is intentional and documented here so future implementers know
-//! exactly what is missing.
+//! The governor owns this estate's standing-signal scheduler (a
+//! `SerialLaneScheduler<CoordinatorDispatcher>` from GLK) and ticks it each
+//! iteration, mirroring the Swift governor's `kit.signalTick(in:handle:now:)`.
+//! Until signals are registered the scheduler is absent and the tick
+//! benign-skips (`signals_ticked == false`) — the Swift `schedulerNotStarted`
+//! benign-skip. The resident bootstrap (runtime.rs, resident HTTP path) calls
+//! `register_default_standing_signals` once at startup so the live path ticks
+//! the architecture-spec §11.2 signals through real propose/associate verbs.
+//!
+//! The scheduler lives in the governor rather than the GLK coordinator because
+//! the production dispatcher (`CoordinatorDispatcher`) holds an
+//! `Arc<Mutex<EstateCoordinator>>`; a coordinator-owned scheduler would close a
+//! reference cycle. The governor already holds `coord`/`handle`/`store`, the
+//! exact inputs `CoordinatorDispatcher::new` needs. The registration methods
+//! (`register_default_standing_signals` / `register_standing_signal`) are the
+//! producer SEAM: Track 2 (graph-centrality) and Track 3 (Bradley-Terry)
+//! register their signal specs here and write outputs to GLK
+//! `recall::{GraphCache, PreferenceStore}` — the producers themselves are NOT
+//! part of this harness.
 //!
 //! # Graph analytics (Rust gap)
 //!
@@ -119,7 +132,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use genius_locus_kit::{EstateCoordinator, EstateHandle};
+use genius_locus_kit::{
+    default_standing_signal_specs, EstateCoordinator, EstateHandle,
+    SchedulerCoordinatorDispatcher, SchedulerError, SchedulerSignalID, SchedulerSignalReport,
+    SchedulerSignalSpec, SerialLaneScheduler,
+};
 use intellectus_lib::{report, EventKind, StatSample};
 use uuid::Uuid;
 use locus_kit::drawer_store::DrawerStore;
@@ -195,6 +212,15 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 pub struct GovernorReport {
     pub dreaming_fired: bool,
     pub maintenance_fired: bool,
+    /// Standing-signal scheduler ticked this tick. Mirrors Swift
+    /// `GovernorReport.signalsTicked`. True when a scheduler is registered and
+    /// its `tick` ran; false on the benign no-scheduler skip (no standing
+    /// signals registered yet — the governor advances the scheduler only when
+    /// one has been minted via `register_default_standing_signals` /
+    /// `register_standing_signal`). Never an error: an unregistered scheduler is
+    /// a benign skip exactly as Swift's `schedulerNotStarted` → `signalsTicked
+    /// == false`.
+    pub signals_ticked: bool,
     /// Topology snapshot duty fired this tick. True when the cadence elapsed
     /// and `stats_store` is Some (or cadence elapsed and store is None — the
     /// field reflects cadence gate only, not store presence, matching Swift).
@@ -290,6 +316,32 @@ pub struct AutonomicGovernor {
     /// Writable WordClassTable artifact the reducer merges into (sibling of the
     /// pool directory). Resolved once at construction.
     pool_table_artifact: PathBuf,
+    /// Standing-signal scheduler for this estate. `None` until signals are
+    /// registered via `register_default_standing_signals` (production bootstrap)
+    /// or `register_standing_signal` (custom signals / tests). When `None`, the
+    /// governor tick benign-skips `signal_tick` and reports `signals_ticked ==
+    /// false` — the same behaviour as the Swift governor's `schedulerNotStarted`
+    /// benign skip before any signal is registered.
+    ///
+    /// # Why the scheduler lives in the governor, not the coordinator
+    ///
+    /// Swift puts the per-estate scheduler registry on the `GeniusLocusKit`
+    /// actor (`schedulers: [EstateHandle: StandingSignalScheduler]`) and the
+    /// governor calls `kit.signalTick`. The Rust port cannot mirror that: the
+    /// production dispatcher `CoordinatorDispatcher` holds an
+    /// `Arc<Mutex<EstateCoordinator>>`, so a scheduler owned by the coordinator
+    /// would close a reference cycle (coordinator → scheduler → dispatcher →
+    /// coordinator). The governor already holds `coord`, `handle`, and `store`
+    /// — exactly the inputs `CoordinatorDispatcher::new(coord, handle)` needs —
+    /// so the governor is the natural owner. The single-serial-lane guarantee is
+    /// unchanged: one scheduler per estate, one drainer, FIFO application.
+    ///
+    /// This is the producer SEAM for Track 2 (graph-centrality) and Track 3
+    /// (Bradley-Terry): those producers register their signal specs through the
+    /// `register_standing_signal` / `register_default_standing_signals` methods
+    /// and write their outputs to GLK `recall::{GraphCache, PreferenceStore}`
+    /// (already ported). Track 1 builds the seam only — no producer logic.
+    scheduler: Option<SerialLaneScheduler<SchedulerCoordinatorDispatcher>>,
 }
 
 impl AutonomicGovernor {
@@ -465,12 +517,146 @@ impl AutonomicGovernor {
             last_pool_reduce_secs: None,
             pool_dir,
             pool_table_artifact,
+            // No standing-signal scheduler until one is registered. The
+            // production bootstrap (runtime.rs, resident HTTP path) calls
+            // `register_default_standing_signals` after construction; tests
+            // call `register_standing_signal`. Until then the tick benign-skips.
+            scheduler: None,
         }
     }
 
     /// Stop the loop. Safe to call from any thread; idempotent.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    // MARK: - Standing-signal registration seam
+
+    /// Ensure a scheduler exists for this estate, lazily minting it on first
+    /// call. Mirrors Swift `GeniusLocusKit.ensureScheduler(for:)`: one scheduler
+    /// per estate, reused on subsequent registrations.
+    ///
+    /// The scheduler is wired to the live estate through a
+    /// `CoordinatorDispatcher` over the SAME `Arc<Mutex<EstateCoordinator>>` the
+    /// HTTP transport and the daemon pumps use, so scheduler-driven `propose` /
+    /// `associate` emissions hit the real estate (single ownership, no duplicate
+    /// state). The scheduler's `EstateHandleID` is the estate UUID string, which
+    /// `CoordinatorDispatcher` validates on every dispatch.
+    fn ensure_scheduler(&mut self) -> &mut SerialLaneScheduler<SchedulerCoordinatorDispatcher> {
+        if self.scheduler.is_none() {
+            let handle_id = Uuid::from_bytes(self.handle.estate_uuid).to_string();
+            let dispatcher =
+                SchedulerCoordinatorDispatcher::new(Arc::clone(&self.coord), self.handle);
+            self.scheduler = Some(SerialLaneScheduler::new(handle_id, dispatcher));
+        }
+        self.scheduler
+            .as_mut()
+            .expect("scheduler just minted above")
+    }
+
+    /// Register one custom standing signal against this estate's scheduler.
+    /// Lazily mints the scheduler on first call. Returns the `SignalID` the
+    /// caller uses for `signal_status` / subscribe. Mirrors Swift
+    /// `GeniusLocusKit.registerStandingSignal(_:in:now:)`.
+    ///
+    /// `now` is the deterministic clock the governor threads everywhere — never
+    /// `SystemTime::now()` inside the engine. The scheduler stamps interval
+    /// triggers' first-due window relative to this instant.
+    pub fn register_standing_signal(
+        &mut self,
+        spec: SchedulerSignalSpec,
+        now: SystemTime,
+    ) -> SchedulerSignalID {
+        let now_nanos = system_time_to_nanos(now);
+        self.ensure_scheduler().register(spec, now_nanos)
+    }
+
+    /// Register the six v1 standing signals (architecture spec §11.2) against
+    /// this estate's scheduler. Mirrors Swift
+    /// `GeniusLocusKit.registerDefaultStandingSignals(in:vectorStore:now:)` and
+    /// the resident-daemon bootstrap that calls it.
+    ///
+    /// Requires a `VectorStore` registered for this estate (the
+    /// `VectorSimilaritySignal` queries real row embeddings on each fire). Reads
+    /// it from the live coordinator via `EstateCoordinator::vector_store_for`,
+    /// the same accessor the Swift resident uses
+    /// (`kit.registeredVectorStore(for:)`). When no store is registered, returns
+    /// `SchedulerError::SignalNotRegistered`-free `Ok(vec![])` is NOT used —
+    /// instead the bootstrap caller (runtime.rs) checks store presence first and
+    /// skips, exactly as the Swift resident does ("no VectorStore → governor
+    /// benign-skips signalTick"). This method therefore returns an error only if
+    /// no store is present, so the caller can log-and-skip without fabricating a
+    /// throwaway store.
+    ///
+    /// Returns the registered `(name, SignalID)` pairs in registration order.
+    /// `model_id` defaults to the Swift default `"minilm-v6"` at the call site.
+    pub fn register_default_standing_signals(
+        &mut self,
+        model_id: impl Into<String>,
+        now: SystemTime,
+    ) -> Result<Vec<(String, SchedulerSignalID)>, String> {
+        // Read the live VectorStore the same way the Swift resident does. No
+        // fabricated fallback store — a missing store means "skip registration",
+        // surfaced to the caller as an error string to log.
+        let vector_store = {
+            let coord = self
+                .coord
+                .lock()
+                .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+            coord.vector_store_for(&self.handle)
+        };
+        let Some(vector_store) = vector_store else {
+            return Err(format!(
+                "no VectorStore registered for estate {} — standing signals not registered",
+                Uuid::from_bytes(self.handle.estate_uuid)
+            ));
+        };
+
+        let model_id = model_id.into();
+        let specs = default_standing_signal_specs(vector_store, model_id);
+        let now_nanos = system_time_to_nanos(now);
+        let scheduler = self.ensure_scheduler();
+        let mut registered = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let name = spec.name.clone();
+            let id = scheduler.register(spec, now_nanos);
+            registered.push((name, id));
+        }
+        Ok(registered)
+    }
+
+    /// Snapshot of every registered signal's status. Mirrors Swift
+    /// `GeniusLocusKit.signalStatus(in:)`. Returns an empty Vec when no
+    /// scheduler has been minted (no signals registered) — the benign
+    /// no-scheduler state, not an error.
+    pub fn signal_status(&self) -> Vec<SchedulerSignalReport> {
+        self.scheduler
+            .as_ref()
+            .map(|s| s.report())
+            .unwrap_or_default()
+    }
+
+    /// Number of standing signals registered against this estate's scheduler.
+    /// Zero when no scheduler has been minted. Diagnostic accessor mirroring the
+    /// Swift `openSchedulerCount` shape at the per-estate grain (the Rust
+    /// governor owns exactly one estate's scheduler).
+    pub fn open_signal_count(&self) -> usize {
+        self.scheduler.as_ref().map(|s| s.open_signal_count()).unwrap_or(0)
+    }
+
+    /// Fire an event/condition-trigger signal explicitly. Mirrors Swift
+    /// `GeniusLocusKit.signalRequestFire(_:in:now:)`. Errors when no scheduler
+    /// is registered or the signal is unknown.
+    pub fn signal_request_fire(
+        &mut self,
+        id: &SchedulerSignalID,
+        now: SystemTime,
+    ) -> Result<(), SchedulerError> {
+        let now_nanos = system_time_to_nanos(now);
+        match self.scheduler.as_mut() {
+            Some(scheduler) => scheduler.request_fire(id, now_nanos),
+            None => Err(SchedulerError::SignalNotRegistered(id.clone())),
+        }
     }
 
     /// Run the governor loop until `stop()` is called.
@@ -514,6 +700,11 @@ impl AutonomicGovernor {
             .as_secs_f64();
         let now_i64 = now_epoch_secs as i64;
         let now_str = epoch_secs_to_iso8601(now_i64);
+        // Nanosecond form for the standing-signal scheduler (integer time, the
+        // conformance scale shared with the Swift port's parity vectors). Daemon
+        // pumps below use epoch-seconds (`now_i64` / `now_epoch_secs`); the
+        // scheduler uses nanos.
+        let now_nanos = system_time_to_nanos(now);
 
         // ── Snapshot readers (coordinator lock held briefly) ───────────────
         //
@@ -647,6 +838,35 @@ impl AutonomicGovernor {
             (dreaming_fired, maintenance_fired, encode_drain_fired)
         };
 
+        // ── Standing signals ───────────────────────────────────────────────
+        //
+        // Advance this estate's standing-signal scheduler at the injected `now`.
+        // Mirrors the Swift governor's `kit.signalTick(in:handle:now:)` call,
+        // which runs after dreaming + maintenance each iteration.
+        //
+        // Benign no-scheduler skip: when no signals have been registered the
+        // scheduler is `None` and `signals_ticked` is false — exactly the Swift
+        // governor's behaviour when `signalTick` throws `schedulerNotStarted`
+        // (treated as a benign skip, never logged-per-tick, never an error). The
+        // resident bootstrap (runtime.rs) registers the default signals once at
+        // startup, so on the live HTTP path the scheduler is present and ticks
+        // real propose/associate emissions through the CoordinatorDispatcher.
+        //
+        // Determinism: the scheduler engine takes `now` (as nanoseconds) — never
+        // reads its own clock — so the same input sequence drains the same
+        // emission order regardless of wall-clock (the conformance contract).
+        // Feed the scheduler nanoseconds derived from the SAME `now` the
+        // registration seam uses (`system_time_to_nanos`), so the registration
+        // stamp and the tick stamp share one time scale exactly — no sub-second
+        // drift between `register`'s `last_run_at` and `tick`'s due comparison.
+        let signals_ticked = match self.scheduler.as_mut() {
+            Some(scheduler) => {
+                scheduler.tick(now_nanos);
+                true
+            }
+            None => false,
+        };
+
         // ── Topology snapshot ──────────────────────────────────────────────
         //
         // Cadence gating mirrors Swift: fire when elapsed >= cadence_ms or never
@@ -751,6 +971,7 @@ impl AutonomicGovernor {
         GovernorReport {
             dreaming_fired,
             maintenance_fired,
+            signals_ticked,
             topology_snapshot_fired,
             encode_drain_fired,
             pool_reduce_fired,
@@ -758,6 +979,21 @@ impl AutonomicGovernor {
             table_version: lattice_lib::table_version(),
         }
     }
+}
+
+/// Convert a `SystemTime` to nanoseconds since the Unix epoch (`i64`).
+///
+/// The standing-signal scheduler engine uses nanosecond integer time so its
+/// conformance vectors are integer-comparable across the Swift and Rust ports
+/// (the Swift `StandingSignalScheduler` takes `Date`; the parity gate scales by
+/// 1e9). The governor's own daemon path uses epoch-SECONDS (`now_i64`); the
+/// scheduler tick is fed `now_i64 * 1e9` inline. This helper exists for the
+/// registration-seam methods, which receive `SystemTime` directly. Pre-epoch
+/// instants clamp to 0 (the scheduler never sees negative time in practice).
+fn system_time_to_nanos(t: SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 // ── Topology snapshot duty ────────────────────────────────────────────────────
