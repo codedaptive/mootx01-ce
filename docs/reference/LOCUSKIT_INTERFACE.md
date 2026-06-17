@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -938,7 +938,7 @@ Recurring sanctioned shapes:
 | Recall frame | `RecallFrame` (Frames.swift:197) | `RecallFrame` (filter.rs:194) | public / pub | identical (different source file per port) | `RecallPaginationTests.swift` ↔ `lp0_vectors.rs::lp0_recall_stream` | Confirmed |
 | Mutation kind | `MutationKind` (Frames.swift:236) | `MutationKind` (frames.rs:213) | public / pub | identical | `MutateMutationKindTests.swift` | Confirmed |
 | Learn frame | `LearnFrame` (Frames.swift:267) | `LearnFrame` (frames.rs:244) | public / pub | identical | `FrameTests.swift` | Confirmed |
-| Propose frame | `ProposeFrame` (Frames.swift:285) | `ProposeFrame` (frames.rs:265) | public / pub | identical | `FrameTests.swift` | Confirmed |
+| Propose frame | `ProposeFrame` (Frames.swift:352) | `ProposeFrame` (frames.rs:326) | public / pub | identical | `FrameTests.swift`, `ProposeProvenanceTests.swift` ↔ `estate_verbs.rs::propose_*_provenance*` | Confirmed | carries `target`, `kind`, `justification`, plus three provenance axes `confirmation` (default `.human`), `generatedBy` (default `.dreamingDaemon`), `confidence` (default `.null`) wired into the proposal operational bitmap at bits 12–17 / 18–23 / 24–29; defaults reproduce the pre-wire bitmap byte-for-byte |
 | Associate frame | `AssociateFrame` (Frames.swift:306) | `AssociateFrame` (frames.rs:290) | public / pub | identical | `FrameTests.swift` | Confirmed |
 | Hydration level | `HydrationLevel` (Frames.swift:325) | `HydrationLevel` (filter.rs:56) | public / pub | identical (different source file per port) | `FrameTests.swift` | Confirmed |
 | Ordering | `Ordering` (Frames.swift:337) | `Ordering` (filter.rs:69) | public / pub | identical (different source file per port): 3 cases — byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc. byRelevanceDesc removed (no in-kit scoring signal; relevance ordering lives at GLK RecallDirector). | `RecallPaginationTests.swift` | Confirmed |
@@ -1164,6 +1164,9 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+`ProposeFrame` now carries the three proposal provenance axes in both ports: `confirmation` (`ProposalConfirmationSource`, default `.human`), `generatedBy` (`ProposalGeneratedByClass`, default `.dreamingDaemon`), and `confidence` (`ProposalConfidenceBucket`, default `.null`). The `propose` verb wires all three into the proposal operational bitmap at bits 12–17 / 18–23 / 24–29 — the exact windows the `confirmationSource` / `generatedByClass` / `confidenceBucket` read accessors (cookbook §2.4) decode — replacing the previous behaviour where those windows were hard-zeroed regardless of producer. Additive and behaviour-preserving: the three defaults reproduce the pre-wire bitmap byte-for-byte, so existing callers (NeuronKit daemon sinks, GLK boundary, scheduler) are unaffected. Daemon-emitted proposals may now set their true producer class so provenance reflects reality rather than the zero fallback. Cross-port round-trip + default-byte-identity conformance added (`ProposeProvenanceTests.swift` ↔ `estate_verbs.rs` propose-provenance tests). Removed the stale "a later sub-mission wires them through the Brain layer ProposalFrame" deferral comment in both ports.
 
 ### 1.2.0 -- 2026-06-17
 `KGFact` now exposes all four adjective-bitmap axes in both ports. Added the `state` (bits 0–5), `adjectiveSensitivity` (bits 6–11), and `exportability` (bits 12–17) computed accessors alongside the existing `trust` (bits 18–23), matching the `Drawer` adjective layout and fail-closed defaults exactly (`.active` / `.normal` / `.private_` / `.verbatim`). Rust: `state()`, `adjective_sensitivity()`, `exportability()`. Additive surface; a fact can now be filtered by the same retrieval-layer predicates as its source drawer. Cross-port conformance added (shared-bitmap coexistence vector). Removed the stale "future sub-mission" comments that claimed these accessors were deferred.

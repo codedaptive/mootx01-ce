@@ -1649,10 +1649,12 @@ impl Estate {
     /// Create a proposal targeting a row in the estate. Mirrors `Estate.propose` in Swift.
     ///
     /// Validates that the target drawer exists, assembles `operational_bitmap`
-    /// from the `ProposeFrame.kind` (bits 0–5) and `ProposalTargetObjectType::Drawer`
-    /// (bits 6–11, raw 0), sets `adjective_bitmap` state to `State::Pending` (raw 1)
+    /// from `ProposeFrame.kind` (bits 0–5), `ProposalTargetObjectType::Drawer`
+    /// (bits 6–11, raw 0), and the three provenance axes `frame.confirmation`
+    /// (bits 12–17), `frame.generated_by` (bits 18–23), and `frame.confidence`
+    /// (bits 24–29), sets `adjective_bitmap` state to `State::Pending` (raw 1)
     /// at bits 0–5, derives `candidate_state` and `lattice_anchor` from the target
-    /// drawer, then calls `DrawerStore::add_proposal`. Per cookbook §10.7.
+    /// drawer, then calls `DrawerStore::add_proposal`. Per cookbook §§2.4, 10.7.
     ///
     /// - `frame.target` must be non-empty and identify an existing drawer;
     ///   returns `LocusKitError::DrawerNotFound` otherwise.
@@ -1672,17 +1674,29 @@ impl Estate {
             .get_drawer(&frame.target)?
             .ok_or_else(|| LocusKitError::DrawerNotFound { id: frame.target.clone() })?;
 
-        // Operational bitmap: ProposalKind at bits 0–5, ProposalTargetObjectType
-        // (.drawer = 0) at bits 6–11. Remaining axes default to 0 (confirmation
-        // .human, generated-by .dreamingDaemon, confidence .null).
+        // Operational bitmap, five typed axes per cookbook §2.4, each packed into
+        // its own 6-bit window via the conformance-gated bit_field::write_field:
+        //   bits 0–5   ProposalKind             = frame.kind
+        //   bits 6–11  ProposalTargetObjectType = Drawer (propose targets a drawer)
+        //   bits 12–17 ProposalConfirmationSource = frame.confirmation
+        //   bits 18–23 ProposalGeneratedByClass   = frame.generated_by
+        //   bits 24–29 ProposalConfidenceBucket   = frame.confidence
+        // The three provenance axes default (Human / DreamingDaemon / Null) to
+        // their raw-0 values, so a frame that leaves them unset yields the same
+        // bitmap as before the slots were wired. The read accessors in
+        // proposal_operational.rs (confirmation_source / generated_by_class /
+        // confidence_bucket) decode these exact positions.
         // bit_field::write_field(value, into_bitmap, shift, width).
-        let kind_in_op = bit_field::write_field(frame.kind as i64, 0i64, 0, 6);
-        let op_bitmap = bit_field::write_field(
-            0i64, // ProposalTargetObjectType::Drawer raw value = 0
-            kind_in_op,
+        let mut op_bitmap = bit_field::write_field(frame.kind.raw_value(), 0i64, 0, 6);
+        op_bitmap = bit_field::write_field(
+            crate::proposal_operational::ProposalTargetObjectType::Drawer.raw_value(),
+            op_bitmap,
             6,
             6,
         );
+        op_bitmap = bit_field::write_field(frame.confirmation.raw_value(), op_bitmap, 12, 6);
+        op_bitmap = bit_field::write_field(frame.generated_by.raw_value(), op_bitmap, 18, 6);
+        op_bitmap = bit_field::write_field(frame.confidence.raw_value(), op_bitmap, 24, 6);
 
         // Adjective bitmap: state .pending at bits 0–5, raw value 1.
         // bit_field::write_field(value, into_bitmap, shift, width).
@@ -3084,6 +3098,128 @@ mod tests {
         assert_eq!(proposal.target_row_id, drawer.id);
         // Adjective bitmap: state .pending (raw 1) at bits 0–5.
         assert_ne!(proposal.adjective_bitmap, 0);
+    }
+
+    // A-3: the propose verb wires the three provenance operational axes
+    // (confirmation 12–17, generated-by 18–23, confidence 24–29) from the frame
+    // into the proposal's operational bitmap, at the exact positions the read
+    // accessors in proposal_operational.rs decode. Mirrors the Swift
+    // ProposeProvenanceTests suite.
+
+    #[test]
+    fn propose_non_default_provenance_round_trips_through_store() {
+        use crate::proposal_operational::{
+            ProposalConfidenceBucket, ProposalConfirmationSource, ProposalGeneratedByClass,
+            ProposalKind, ProposalTargetObjectType,
+        };
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "content", "room-a");
+
+        // Distinct non-zero value on each provenance axis so a cross-wired shift
+        // would surface as a mismatched read.
+        let mut frame = crate::frames::ProposeFrame::new(&drawer.id, ProposalKind::MutateDrawer);
+        frame.confirmation = ProposalConfirmationSource::Agent; // raw 1, bits 12–17
+        frame.generated_by = ProposalGeneratedByClass::Manual; // raw 3, bits 18–23
+        frame.confidence = ProposalConfidenceBucket::High; // raw 32, bits 24–29
+
+        let returned = estate.propose(frame, 1_700_000_000).expect("propose");
+
+        // 1) the returned value carries the axes.
+        assert_eq!(returned.proposal_kind(), ProposalKind::MutateDrawer);
+        assert_eq!(returned.target_object_type(), ProposalTargetObjectType::Drawer);
+        assert_eq!(returned.confirmation_source(), ProposalConfirmationSource::Agent);
+        assert_eq!(returned.generated_by_class(), ProposalGeneratedByClass::Manual);
+        assert_eq!(returned.confidence_bucket(), ProposalConfidenceBucket::High);
+
+        // 2) the same values survive a store round-trip.
+        let reloaded = estate
+            .store
+            .get_proposal(&returned.id)
+            .expect("get_proposal")
+            .expect("proposal present after round-trip");
+        assert_eq!(reloaded.operational_bitmap, returned.operational_bitmap);
+        assert_eq!(reloaded.confirmation_source(), ProposalConfirmationSource::Agent);
+        assert_eq!(reloaded.generated_by_class(), ProposalGeneratedByClass::Manual);
+        assert_eq!(reloaded.confidence_bucket(), ProposalConfidenceBucket::High);
+    }
+
+    #[test]
+    fn propose_each_provenance_value_writes_to_own_window() {
+        use crate::proposal_operational::{
+            ProposalConfidenceBucket, ProposalConfirmationSource, ProposalGeneratedByClass,
+            ProposalKind, ProposalTargetObjectType,
+        };
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "content", "room-a");
+
+        // Exhaustively walk every confirmation × generated-by × confidence value
+        // so any width/shift error on one axis surfaces on that axis without
+        // disturbing the other two.
+        let confirmations = [
+            ProposalConfirmationSource::Human,
+            ProposalConfirmationSource::Agent,
+            ProposalConfirmationSource::AutomatedThreshold,
+            ProposalConfirmationSource::Actuator,
+        ];
+        let generators = [
+            ProposalGeneratedByClass::DreamingDaemon,
+            ProposalGeneratedByClass::McpAgent,
+            ProposalGeneratedByClass::FederationSync,
+            ProposalGeneratedByClass::Manual,
+            ProposalGeneratedByClass::TierAggregator,
+        ];
+        let confidences = [
+            ProposalConfidenceBucket::Null,
+            ProposalConfidenceBucket::Low,
+            ProposalConfidenceBucket::Medium,
+            ProposalConfidenceBucket::High,
+            ProposalConfidenceBucket::Verified,
+        ];
+
+        for &c in &confirmations {
+            for &g in &generators {
+                for &conf in &confidences {
+                    let mut frame =
+                        crate::frames::ProposeFrame::new(&drawer.id, ProposalKind::NewKGFact);
+                    frame.confirmation = c;
+                    frame.generated_by = g;
+                    frame.confidence = conf;
+                    let p = estate.propose(frame, 1_700_000_000).expect("propose");
+                    assert_eq!(p.proposal_kind(), ProposalKind::NewKGFact);
+                    assert_eq!(p.target_object_type(), ProposalTargetObjectType::Drawer);
+                    assert_eq!(p.confirmation_source(), c);
+                    assert_eq!(p.generated_by_class(), g);
+                    assert_eq!(p.confidence_bucket(), conf);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn propose_default_frame_is_byte_identical_to_pre_wire_bitmap() {
+        use crate::proposal_operational::{
+            ProposalConfidenceBucket, ProposalConfirmationSource, ProposalGeneratedByClass,
+            ProposalKind, ProposalTargetObjectType,
+        };
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "content", "room-a");
+
+        // The pre-A-3 propose verb wrote ONLY kind (bits 0–5) and target object
+        // type Drawer=0 (bits 6–11); the provenance windows were zeroed.
+        // Reconstruct that exact value independently.
+        let mut expected = bit_field::write_field(ProposalKind::MutateDrawer.raw_value(), 0i64, 0, 6);
+        expected =
+            bit_field::write_field(ProposalTargetObjectType::Drawer.raw_value(), expected, 6, 6);
+
+        // A frame built via `new` takes the provenance defaults
+        // (Human / DreamingDaemon / Null), all raw 0.
+        let frame = crate::frames::ProposeFrame::new(&drawer.id, ProposalKind::MutateDrawer);
+        let p = estate.propose(frame, 1_700_000_000).expect("propose");
+
+        assert_eq!(p.operational_bitmap, expected);
+        assert_eq!(p.confirmation_source(), ProposalConfirmationSource::Human);
+        assert_eq!(p.generated_by_class(), ProposalGeneratedByClass::DreamingDaemon);
+        assert_eq!(p.confidence_bucket(), ProposalConfidenceBucket::Null);
     }
 
     #[test]

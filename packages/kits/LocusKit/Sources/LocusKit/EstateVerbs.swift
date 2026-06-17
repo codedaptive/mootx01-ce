@@ -1210,10 +1210,12 @@ public extension Estate {
     /// Create a proposal targeting a row in the estate.
     ///
     /// Validates that the target drawer exists, assembles the `operationalBitmap`
-    /// from the supplied `ProposeFrame.kind` (bits 0–5) and a `.drawer` target
-    /// object type (bits 6–11), sets `adjectiveBitmap` state to `.pending`,
-    /// derives `candidateState` and `latticeAnchor` from the target drawer, then
-    /// calls `DrawerStore.addProposal`. Per cookbook §10.7.
+    /// from `ProposeFrame.kind` (bits 0–5), a `.drawer` target object type
+    /// (bits 6–11), and the three provenance axes `frame.confirmation`
+    /// (bits 12–17), `frame.generatedBy` (bits 18–23), and `frame.confidence`
+    /// (bits 24–29), sets `adjectiveBitmap` state to `.pending`, derives
+    /// `candidateState` and `latticeAnchor` from the target drawer, then calls
+    /// `DrawerStore.addProposal`. Per cookbook §§2.4, 10.7.
     ///
     /// - Parameters:
     ///   - frame: propose slots. `frame.target` must be non-empty and identify an
@@ -1230,17 +1232,23 @@ public extension Estate {
             throw LocusKitError.drawerNotFound(id: frame.target)
         }
 
-        // Operational bitmap: ProposalKind at bits 0–5, ProposalTargetObjectType
-        // (.drawer = 0) at bits 6–11. The remaining axes default to 0 (confirmation
-        // .human, generated-by .dreamingDaemon, confidence .null) — the propose verb
-        // does not yet carry those slots (a later sub-mission wires them through the
-        // Brain layer ProposalFrame).
-        let opBitmap = BitField.writeField(
-            Int64(ProposalTargetObjectType.drawer.rawValue),
-            into: BitField.writeField(Int64(frame.kind.rawValue), into: 0, shift: 0, width: 6),
-            shift: 6,
-            width: 6
-        )
+        // Operational bitmap, five typed axes per cookbook §2.4, each packed into
+        // its own 6-bit window via the conformance-gated BitField.writeField:
+        //   bits 0–5   ProposalKind             = frame.kind
+        //   bits 6–11  ProposalTargetObjectType = .drawer (propose targets a drawer)
+        //   bits 12–17 ProposalConfirmationSource = frame.confirmation
+        //   bits 18–23 ProposalGeneratedByClass   = frame.generatedBy
+        //   bits 24–29 ProposalConfidenceBucket   = frame.confidence
+        // The three provenance axes default (.human / .dreamingDaemon / .null) to
+        // their raw-0 values, so a frame that leaves them unset yields the same
+        // bitmap as before the slots were wired. The read accessors in
+        // ProposalOperational.swift (confirmationSource / generatedByClass /
+        // confidenceBucket) decode these exact positions.
+        var opBitmap = BitField.writeField(Int64(frame.kind.rawValue), into: 0, shift: 0, width: 6)
+        opBitmap = BitField.writeField(Int64(ProposalTargetObjectType.drawer.rawValue), into: opBitmap, shift: 6, width: 6)
+        opBitmap = BitField.writeField(Int64(frame.confirmation.rawValue), into: opBitmap, shift: 12, width: 6)
+        opBitmap = BitField.writeField(Int64(frame.generatedBy.rawValue), into: opBitmap, shift: 18, width: 6)
+        opBitmap = BitField.writeField(Int64(frame.confidence.rawValue), into: opBitmap, shift: 24, width: 6)
 
         // Adjective bitmap: set state to .pending (bits 0–5, raw value 1).
         let adjBitmap = BitField.writeField(

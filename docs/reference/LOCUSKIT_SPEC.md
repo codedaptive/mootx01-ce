@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -600,6 +600,21 @@ one is `true` for every variant. Cite: ADR-007 Decision 2.
 - `propose` / `associate` are realised through the `Proposal` and
   `Association` noun stores and the tunnel/KG-fact paths, not as dedicated
   `Estate` verb methods.
+- `propose` stamps genuine provenance: `Estate.propose(_:now:)` writes all
+  five proposal operational axes (cookbook §2.4) into the proposal's
+  `operationalBitmap` — `ProposalKind` (bits 0–5) and `ProposalTargetObjectType`
+  `.drawer` (bits 6–11) from the verb, plus the three provenance axes
+  `ProposalConfirmationSource` (bits 12–17), `ProposalGeneratedByClass`
+  (bits 18–23), and `ProposalConfidenceBucket` (bits 24–29) supplied through
+  `ProposeFrame.confirmation` / `.generatedBy` / `.confidence`. These windows
+  are no longer hard-zeroed: a daemon-emitted proposal can record its true
+  producer class and confidence rather than inheriting the raw-0 fallback
+  (`.human` / `.dreamingDaemon` / `.null`). Those raw-0 values remain the
+  frame defaults, so a frame that leaves the provenance slots unset produces
+  a byte-identical operational bitmap to the pre-wiring behaviour. The bit
+  windows match the `confirmationSource` / `generatedByClass` /
+  `confidenceBucket` read accessors exactly (round-trip + default-byte-identity
+  conformance-gated, both ports).
 - A verb applied to a noun outside its accepted set is rejected by the
   acceptance check before any storage call.
 
@@ -821,6 +836,9 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Documented that the `propose` verb now stamps genuine proposal provenance. `Estate.propose(_:now:)` wires the three previously hard-zeroed operational axes — `ProposalConfirmationSource` (bits 12–17), `ProposalGeneratedByClass` (bits 18–23), and `ProposalConfidenceBucket` (bits 24–29) — from the new `ProposeFrame.confirmation` / `.generatedBy` / `.confidence` slots into the proposal operational bitmap, alongside the existing kind (0–5) and target-object-type (6–11) axes (cookbook §2.4). The bit windows match the read accessors exactly; the three frame defaults (`.human` / `.dreamingDaemon` / `.null`, all raw 0) reproduce the pre-wiring bitmap byte-for-byte. Additive and behaviour-preserving; round-trip + default-byte-identity conformance-gated in both ports. Added the "propose stamps genuine provenance" contract bullet to § 9.
 
 ### 1.2.0 -- 2026-06-17
 Documented `KGFact` full adjective-axis parity with `Drawer`: `KGFact` now exposes `state`, `adjectiveSensitivity` (`adjective_sensitivity` in Rust), `exportability`, and `trust` accessors over the shared four-axis adjective bitmap (cookbook §2.3 / §5.5), each with the Drawer-matching fail-closed fallback. Added the "KG-fact adjective axes — full Drawer parity" contract paragraph and its shared-bitmap conformance requirement. Additive accessor surface; no schema change, no new invariant.

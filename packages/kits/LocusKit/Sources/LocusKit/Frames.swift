@@ -357,11 +357,44 @@ public struct ProposeFrame: Sendable {
     public var kind: ProposalKind
     /// Optional free-text justification.
     public var justification: String?
+    /// Who or what confirms this proposal (cookbook §2.4 bits 12–17). Defaults
+    /// to `.human` — the same value the operational bitmap held implicitly
+    /// before this slot existed, so callers that omit it stay byte-identical.
+    public var confirmation: ProposalConfirmationSource
+    /// What class of producer generated this proposal (cookbook §2.4 bits
+    /// 18–23). Defaults to `.dreamingDaemon` (raw 0) — the implicit pre-slot
+    /// value. Daemon-emitted proposals should set this to their true producer
+    /// class so provenance reflects reality rather than the zero fallback.
+    public var generatedBy: ProposalGeneratedByClass
+    /// Coarse confidence bucket for this proposal (cookbook §2.4 bits 24–29).
+    /// Defaults to `.null` (raw 0) — the implicit pre-slot value.
+    public var confidence: ProposalConfidenceBucket
 
-    public init(target: RowID, kind: ProposalKind, justification: String? = nil) {
+    /// - Parameters:
+    ///   - target: the row this proposal is about.
+    ///   - kind: substrate-axis proposal kind.
+    ///   - justification: optional free-text justification.
+    ///   - confirmation: confirmation source (default `.human`).
+    ///   - generatedBy: producer class (default `.dreamingDaemon`).
+    ///   - confidence: confidence bucket (default `.null`).
+    ///
+    /// The three provenance defaults reproduce the exact zero values the
+    /// propose verb wrote implicitly before these slots were wired, so any
+    /// caller that omits them produces a byte-identical operational bitmap.
+    public init(
+        target: RowID,
+        kind: ProposalKind,
+        justification: String? = nil,
+        confirmation: ProposalConfirmationSource = .human,
+        generatedBy: ProposalGeneratedByClass = .dreamingDaemon,
+        confidence: ProposalConfidenceBucket = .null
+    ) {
         self.target = target
         self.kind = kind
         self.justification = justification
+        self.confirmation = confirmation
+        self.generatedBy = generatedBy
+        self.confidence = confidence
     }
 }
 
