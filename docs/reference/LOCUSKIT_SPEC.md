@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.1.1
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -510,6 +510,19 @@ the same contract with different host shapes:
   remain visible through `allKGFactsIncludingRetired` / the
   `moot_fact_timeline` path.
 
+- **KG-fact adjective axes — full Drawer parity.** `KGFact` shares the
+  four-axis adjective-bitmap encoding with `Drawer` (cookbook §2.3 / §5.5)
+  and exposes all four axes as computed accessors in both ports: `state`
+  (bits 0–5), `adjectiveSensitivity` / `adjective_sensitivity` (bits 6–11),
+  `exportability` (bits 12–17), and `trust` (bits 18–23). Each decodes a
+  6-bit field with the same fail-closed fallback as the corresponding
+  `Drawer` accessor (`.active` / `.normal` / `.private_` / `.verbatim` for
+  unrecognised raws), so a fact and its source drawer answer the same
+  retrieval-layer adjective predicates identically. Conformance: a
+  shared-bitmap vector setting a distinct non-default value on each axis
+  asserts every accessor reads only its own field (no mask/shift cross-talk),
+  pinned in both `kg_fact.rs` and `KGFactTests.swift`.
+
 These are *shape* differences; the value-level results that C-7 gates are
 required to agree.
 
@@ -808,6 +821,9 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Documented `KGFact` full adjective-axis parity with `Drawer`: `KGFact` now exposes `state`, `adjectiveSensitivity` (`adjective_sensitivity` in Rust), `exportability`, and `trust` accessors over the shared four-axis adjective bitmap (cookbook §2.3 / §5.5), each with the Drawer-matching fail-closed fallback. Added the "KG-fact adjective axes — full Drawer parity" contract paragraph and its shared-bitmap conformance requirement. Additive accessor surface; no schema change, no new invariant.
 
 ### 1.1.1 -- 2026-06-17
 Clarified the store-backend posture: `all_drawers` and `room_level_fingerprints` are now compile-required `DrawerStore` reads (no trait default) on the Rust leg, matching the Swift surface; the rest of the read surface retains the fail-loud `DatabaseUnavailable` default. Updated the newtype-forwarding-contract paragraph accordingly. No behaviour change; no new invariant.
