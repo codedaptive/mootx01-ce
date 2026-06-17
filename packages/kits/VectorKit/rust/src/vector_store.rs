@@ -12,7 +12,8 @@
 //!     dim            INTEGER NOT NULL,     -- number of logical elements
 //!     payload        BLOB NOT NULL,        -- raw bytes (Engram wire form for Binary)
 //!     scale          REAL,                 -- dequantisation scale for Int8; NULL otherwise
-//!     filed_at       TIMESTAMP NOT NULL
+//!     filed_at       TIMESTAMP NOT NULL,
+//!     ext            JSON                  -- forward-compat slot (ADR-012, v3); nullable, NULL in 1.0
 //!   )
 //!   UNIQUE(item_id, vector_index, model_id)
 //!
@@ -242,10 +243,13 @@ pub struct VectorStore {
 impl VectorStore {
     /// Schema declaration consumed by `Storage::open`. Lane F
     /// multi-vector schema: UNIQUE(item_id, vector_index, model_id).
+    ///
+    /// v3 adds the nullable `.json` `ext` forward-compat slot (ADR-012);
+    /// 1.0 writes NULL and never reads it.
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "VectorKit",
-            2,
+            3,
             vec![TableDeclaration::new(
                 "vectors",
                 vec![
@@ -267,6 +271,11 @@ impl VectorStore {
                     // scale: dequantisation multiplier for Int8; NULL for Binary/Float32.
                     ColumnDeclaration::float("scale").nullable(),
                     ColumnDeclaration::timestamp("filed_at"),
+                    // ext: ADR-012 forward-compat slot (v3). Nullable JSON;
+                    // future per-vector typed metadata (quantisation provenance,
+                    // embedding-run tags) serializes here migration-free. 1.0
+                    // writes NULL and never reads it.
+                    ColumnDeclaration::json("ext").nullable(),
                 ],
                 vec!["id".to_string()],
             )

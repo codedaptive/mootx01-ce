@@ -24,10 +24,14 @@
 // it here avoids drift between what is opened and what is replicated.
 //
 // Kit ID and version: the composite uses "GeniusLocusKit" as the kit
-// identifier and the sum of the three component versions (1+1+1 = 3) as
-// the composite version. The schema gate in the replication primitive
-// checks this version on both the source and destination; both must be
-// opened with this same declaration before a flush or hydrate.
+// identifier and the sum of the three GLK-composed component versions as
+// the composite version. After the ADR-012 `ext` pre-provisioning bumps,
+// that sum is LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 = 7.
+// (BasisStore is a separate kit-ID schema, "CorpusKitBasis", not part of
+// this composite, so its version is not summed here.) The schema gate in
+// the replication primitive checks this version on both the source and
+// destination; both must be opened with this same declaration before a
+// flush or hydrate.
 //
 // Reference: REPLICATION_GROUND_TRUTH.md §SchemaDeclaration tables enumeration.
 
@@ -45,16 +49,26 @@ public enum GeniusLocusKitSchema {
     /// a single-kit open against the same database.
     public static let kitID = "GeniusLocusKit"
 
-    /// Composite schema version. Defined as the sum of the component versions
-    /// (LocusKit v1 + VectorKit v1 + CorpusKit v1 = 3). Advancing any
-    /// component schema forces a version bump here, which causes the schema
-    /// gate to reject a source/destination mismatch automatically.
-    public static let version = 3
+    /// Composite schema version. Defined as the sum of the three GLK-composed
+    /// component versions: LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore)
+    /// v2 = 7 (the ADR-012 `ext` pre-provisioning bumped all three). Derived
+    /// from the live component declarations, not a literal, so a future
+    /// component bump self-corrects this composite without a hand-edited
+    /// constant — and any drift between components and composite is impossible
+    /// by construction. Advancing any component schema therefore forces a
+    /// version bump here automatically, which causes the schema gate to reject
+    /// a source/destination mismatch. (BasisStore is the separate
+    /// "CorpusKitBasis" kit-ID schema, not part of this composite, so it is not
+    /// summed.)
+    public static let version =
+        LocusKitSchema.version
+        + VectorStore.schemaDeclaration.version
+        + BundleStore.schemaDeclaration.version
 
     /// The complete 14-table schema declaration for a GeniusLocus estate.
     ///
     /// Compose the component kit tables and indices into a single declaration
-    /// under the "GeniusLocusKit" kit ID and version 3. The caller passes this
+    /// under the "GeniusLocusKit" kit ID and version 7. The caller passes this
     /// to:
     ///   - `Storage.open(schema:)` — creates all 14 tables, indices, and
     ///     generated-column triggers in the target backend.

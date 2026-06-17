@@ -40,11 +40,49 @@ import Testing
 import Foundation
 import SubstrateTypes
 import LocusKit
+import VectorKit
+import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import PersistenceKitReplication
 @testable import GeniusLocusKit
+
+// MARK: - Composite schema-version conformance (ADR-012 ext-slot coupling)
+
+@Suite("GLK composite schema version == sum of component versions (ADR-012)")
+struct CompositeSchemaVersionTests {
+
+    /// The composite version is the SUM of the three GLK-composed component
+    /// versions. After the ADR-012 `ext` pre-provisioning that sum is
+    /// LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7. This guards
+    /// the version coupling the Rust replication gate (global-MAX) depends on:
+    /// a drift between composite and components would let a fresh estate open
+    /// at a version the gate rejects.
+    @Test("composite version equals component sum and equals 7")
+    func compositeVersionEqualsComponentSum() {
+        let sum =
+            LocusKitSchema.version
+            + VectorStore.schemaDeclaration.version
+            + BundleStore.schemaDeclaration.version
+        #expect(GeniusLocusKitSchema.version == sum)
+        #expect(GeniusLocusKitSchema.version == 7)
+        // The declaration the gate actually consumes carries the same version.
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 7)
+    }
+
+    /// A fresh in-memory estate opens with the composite schema and registers
+    /// the composite version under the "GeniusLocusKit" kit ID — the value the
+    /// replication schema gate checks. This is the explicit
+    /// fresh-estate-opens-at-new-version check for the ADR-012 bumps.
+    @Test("fresh estate opens and registers composite version 7")
+    func freshEstateOpensAtCompositeVersion() async throws {
+        let storage = makeInMemoryStorage()
+        try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+        let registered = try await storage.currentSchemaVersion(for: GeniusLocusKitSchema.kitID)
+        #expect(registered == 7)
+    }
+}
 
 // MARK: - Helpers
 

@@ -1,6 +1,6 @@
 ---
 title: VectorKit Specification
-version: 1.1.0
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
@@ -189,6 +189,12 @@ its own. `findNearest` delegates the batch bitcount to EngramLib, which
 routes to the substrate kernel (BNNS / NEON accelerated where
 available). VectorKit therefore inherits EngramLib's and SubstrateLib's
 scalar-reference and cross-port parity guarantees.
+
+**I-8 (`ext` forward-compat slot, ADR-012):** the `vectors` table carries one
+nullable `.json` column named `ext` (schema v3), reserving migration-free space
+for future per-vector typed metadata. In 1.0 `ext` is inert — written NULL /
+omitted on insert and never read; it carries no behavior. Provisioned during the
+1.0.0 free-migration window. See ADR-012.
 
 ## § 5 — Behavioral contracts
 
@@ -539,6 +545,9 @@ provisioned estate.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Added invariant I-8 (the `ext` forward-compat slot, ADR-012): the `vectors` table carries one nullable `.json` `ext` column at schema v3, inert in 1.0. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.1.0 -- 2026-06-17
 Added B-13a — the Lane D float FARTHEST (anti-similarity) retrieval contract

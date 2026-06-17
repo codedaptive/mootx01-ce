@@ -63,9 +63,18 @@ public actor BundleStore {
 
     let storage: any Storage
 
+    /// Schema declaration consumed by Storage.open(schema:).
+    ///
+    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012),
+    /// distinct from the existing per-chunk `metadata` column: `ext`
+    /// reserves the slot for unforeseeable future typed attributes
+    /// (e.g. federation/encryption per-chunk metadata) without a
+    /// migration. 1.0 writes NULL / omits it on insert and never reads it.
+    /// The `chunks` table is append-only; a nullable column with no read
+    /// path is inert under that constraint.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKit",
-        version: 1,
+        version: 2,
         tables: [
             TableDeclaration(
                 name: "chunks",
@@ -77,7 +86,11 @@ public actor BundleStore {
                     .text("text", nullable: false),
                     ColumnDeclaration(name: "hlc", type: .hlc, nullable: false),
                     .json("metadata", nullable: false),
-                    .timestamp("created_at", nullable: false)
+                    .timestamp("created_at", nullable: false),
+                    // ADR-012 forward-compat slot. Nullable `.json`, present
+                    // from schema v2. Distinct from `metadata`: reserves the
+                    // slot, not a shape. 1.0 omits it on insert and never reads it.
+                    .json("ext", nullable: true)
                 ],
                 primaryKey: ["id"],
                 appendOnly: true

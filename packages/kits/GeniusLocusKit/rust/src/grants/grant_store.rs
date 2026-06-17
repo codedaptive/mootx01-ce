@@ -130,6 +130,12 @@ impl GrantStore {
                 ColumnDeclaration::int("decay_half_life").nullable(),
                 ColumnDeclaration::timestamp("decay_started_at").nullable(),
                 ColumnDeclaration::int("decay_floor").nullable(),
+                // ADR-012 forward-compat slot — the #11 custody-payload slot.
+                // Nullable JSON; reserves space for future custody metadata
+                // (the federation/encryption track — e.g. mode-3 share-policy
+                // descriptors) without a migration. 1.0 omits it on insert and
+                // never reads it.
+                ColumnDeclaration::json("ext").nullable(),
             ],
             vec!["id".to_string()],
         )
@@ -150,9 +156,13 @@ impl GrantStore {
     ///
     /// Returns `GrantStoreError::StorageFailure` on open failure.
     pub fn new(storage: Arc<dyn Storage>) -> Result<Self, GrantStoreError> {
+        // Version tracks LocusKit base + 1, mirroring Swift's
+        // `base.version + 1`, so a LocusKit schema bump (e.g. the ADR-012
+        // `ext` slot, v1 → v2) advances the grants version in lockstep across
+        // both ports without a hand-edited literal.
         let schema = SchemaDeclaration::new(
             "GeniusLocusKit.grants",
-            1,
+            locus_kit::schema::SCHEMA_VERSION + 1,
             vec![Self::grants_table()],
         );
         storage.open(&schema)?;
@@ -664,11 +674,19 @@ impl GrantStore {
 
     /// Reconstruct the custody mode from its persisted discriminant token.
     ///
-    /// Mode 3 decodes with placeholder associated values exactly as in the
-    /// Swift port (`threshold=0`, `total_shares=0`, `DriftRate::Slow`,
-    /// `experimental_ip_clearance_confirmed=true`). The placeholder values
-    /// are NOT round-tripped; callers must not treat decoded mode-3 grants
-    /// as authoritative for the associated value fields.
+    /// Mode 3 (decay-derived) is no-vault BY DESIGN (Appendix B.3 no-vault
+    /// posture): the issuer derives the scope key, returns it to the caller,
+    /// and retains NOTHING — the caller holds the K-of-N shares. The issuer
+    /// therefore correctly does NOT persist threshold/total_shares/drift_rate;
+    /// there is no issuer-side custody record to round-trip. Mode 3 decodes with
+    /// placeholder associated values (`threshold=0`, `total_shares=0`,
+    /// `DriftRate::Slow`, `experimental_ip_clearance_confirmed=true`) precisely
+    /// because the authoritative copy lives with the caller, not the store —
+    /// this is the intended posture, NOT a schema defect. Callers must not treat
+    /// decoded mode-3 grants as authoritative for the associated value fields.
+    /// Any future custody metadata the federation/encryption track needs to
+    /// retain has a migration-free home in the `ext` forward-compat slot
+    /// (ADR-012) rather than new typed columns. Mirror of the Swift port.
     ///
     /// Mode 4 (`TimeAging`) round-trips its decay policy through the dedicated
     /// `decay_half_life`, `decay_started_at`, and `decay_floor` columns
