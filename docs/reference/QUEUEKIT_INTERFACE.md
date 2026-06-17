@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-15
-version: 1.0.1
+date: 2026-06-17
+version: 1.0.2
 description: Public API surface for QueueKit in both the Swift and Rust ports.
 spec_type: kit
 package: QueueKit
@@ -440,7 +440,10 @@ pub trait QueueBackend: Send + Sync {
                 artifacts: Vec<ArtifactRef>) -> Result<(), QueueError>;
     fn in_flight(&self) -> Result<Vec<Job>, QueueError>;
     fn completed(&self, stream_id: Option<&StreamId>) -> Result<Vec<Job>, QueueError>;
-    // Default impl returns BackendUnavailable; conforming backends override.
+    // Required, no default: a backend that forgets pending_count / watch must
+    // fail to COMPILE, not at runtime (SDK compile-enforcement ruling). Mirrors
+    // the Swift protocol, where both are bare requirements.
+    fn pending_count(&self) -> Result<usize, QueueError>;
     fn watch<F>(&self, handler: F) -> Result<(), QueueError>
     where F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync;
 }
@@ -699,6 +702,9 @@ These types are present in the Swift port only. They are legitimately one-langua
 *End of QueueKit Interface.*
 
 ## Changelog
+
+### 1.0.2 -- 2026-06-17
+Rust `QueueBackend` brought to Swift parity on compile-enforcement: `pending_count` and `watch` are now required trait methods with NO default (a backend that forgets either fails to COMPILE, not at runtime). Replaced the stale "Default impl returns BackendUnavailable" trait-excerpt comment and listed `pending_count` in the excerpt. No behaviour change for either production backend (FilesystemBackend, PersistenceKitBackend already implement both); no signature change.
 
 ### 1.0.1 -- 2026-06-15
 Completed Swift/Rust concordance table: added rows for `Job`, `SignalFile`, `ArtifactRef`, `CodableValue`, `FilesystemBackend`; documented `MissionContext`, `WireFormat`, and `QueueLatencyWindow` as Swift-only with justification.

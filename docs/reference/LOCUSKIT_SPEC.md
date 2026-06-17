@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.1.0
+version: 1.1.1
 status: active
 date: 2026-06-17
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -471,13 +471,21 @@ the same contract with different host shapes:
   (mirroring the Swift `withdrawKGFact` present on the actor); the
   trait default returns `DatabaseUnavailable` so existing implementations are
   not broken — only `DrawerStoreCore` carries the live bitmap update logic.
-  Every empty-success read defaults fail-loud
-  (`DatabaseUnavailable`). Because the durable newtypes
+  Most empty-success reads default fail-loud
+  (`DatabaseUnavailable`). Two reads — `all_drawers` and
+  `room_level_fingerprints` — instead carry NO default at all: per the SDK
+  compile-enforcement ruling, a backend that forgets a corpus-scan /
+  container-fingerprint read must fail to COMPILE rather than fail loud at
+  runtime, matching the Swift surface where both are bare actor members.
+  Because the durable newtypes
   (`SqliteDrawerStore`, `PostgresDrawerStore`) hand-forward each method to
   their inner `DrawerStoreCore` with no `Deref`, every such method MUST be
-  explicitly forwarded; an omitted forward inherits the fail-loud default and
-  hard-errors on a real estate. The newtype-forwarding contract is therefore
-  an invariant: no durable-backend read method may inherit a trait default.
+  explicitly forwarded; for the fail-loud-default reads an omitted forward
+  inherits the default and hard-errors on a real estate, and for the two
+  compile-required reads an omitted implementation is a build error. The
+  newtype-forwarding contract is therefore an invariant: no durable-backend
+  read method may inherit a trait default (and the two compile-required reads
+  have no default to inherit).
   The Swift leg has no trait-default mechanism (`DrawerStore` is one concrete
   actor implementing every method directly), so this fail-loud-default posture
   is structurally Rust-only; Swift reaches the same durable behaviour by
@@ -800,6 +808,9 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.1.1 -- 2026-06-17
+Clarified the store-backend posture: `all_drawers` and `room_level_fingerprints` are now compile-required `DrawerStore` reads (no trait default) on the Rust leg, matching the Swift surface; the rest of the read surface retains the fail-loud `DatabaseUnavailable` default. Updated the newtype-forwarding-contract paragraph accordingly. No behaviour change; no new invariant.
 
 ### 1.1.0 -- 2026-06-17
 Added invariant I-12 (the `ext` forward-compat slot, ADR-012): every persistent entity table carries one nullable `.json` `ext` column, inert in 1.0; `keys` gained it at schema v2. Pre-ship pre-provisioning during the 1.0.0 free-migration window.

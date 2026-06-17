@@ -371,6 +371,8 @@ impl Estate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container_fingerprint_store::RoomLevelEntry;
+    use crate::drawer::Drawer;
     use crate::error::LocusKitError;
     use crate::estate_types::RowID;
     use std::sync::Mutex;
@@ -446,6 +448,18 @@ mod tests {
         fn drawer_ids(&self) -> Result<Vec<RowID>, LocusKitError> {
             Ok(Vec::new())
         }
+
+        // `all_drawers` and `room_level_fingerprints` carry NO trait default
+        // (compile-enforced per Bob's SDK ruling), so every store — including
+        // this minimal manifest-only fake — must implement them. The fake holds
+        // no drawers and no container aggregate, so both return empty.
+        fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
+            Ok(Vec::new())
+        }
+
+        fn room_level_fingerprints(&self) -> Result<Vec<RoomLevelEntry>, LocusKitError> {
+            Ok(Vec::new())
+        }
     }
 
     /// Force-test: a minimal store that does NOT override
@@ -453,9 +467,10 @@ mod tests {
     /// error rather than a silent empty-vec. This guards the math-provenance
     /// gate (FINDING-3): a missing impl must fail loud, not hide silently.
     ///
-    /// `FakeStore` overrides only `read_manifest`, `set_meta`, and
-    /// `drawer_ids` — it intentionally does NOT override
-    /// `all_kg_facts_including_retired`, so it exercises the trait default.
+    /// `FakeStore` overrides `read_manifest`, `set_meta`, `drawer_ids`, and the
+    /// two compile-required reads (`all_drawers`, `room_level_fingerprints`) —
+    /// it intentionally does NOT override `all_kg_facts_including_retired`, so it
+    /// exercises that method's trait default.
     #[test]
     fn all_kg_facts_including_retired_default_fails_loud_on_non_overriding_store() {
         let store = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
@@ -477,9 +492,10 @@ mod tests {
     // Force-tests: every newly-gated read method must return
     // DatabaseUnavailable on a non-overriding store.
     //
-    // FakeStore overrides only `read_manifest`, `set_meta`, and
-    // `drawer_ids`; it intentionally does NOT override any of the
-    // methods below so each test exercises the trait default in isolation.
+    // FakeStore overrides `read_manifest`, `set_meta`, `drawer_ids`, and the
+    // two compile-required reads (`all_drawers`, `room_level_fingerprints`);
+    // it intentionally does NOT override any of the methods below so each test
+    // exercises the trait default in isolation.
     // Concrete stores (InMemory/SQLite/Postgres) all override every method
     // and are covered by their own integration tests.
     // -----------------------------------------------------------------
@@ -561,11 +577,10 @@ mod tests {
         assert_fail_loud(s.drawers_by_source("file.txt"), "drawers_by_source");
     }
 
-    #[test]
-    fn all_drawers_default_fails_loud() {
-        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
-        assert_fail_loud(s.all_drawers(), "all_drawers");
-    }
+    // `all_drawers` is now a REQUIRED trait method with no default (Bob's SDK
+    // ruling: a backend that forgets it fails to COMPILE). There is no default
+    // to exercise, so the former `all_drawers_default_fails_loud` test was
+    // removed — the compiler now enforces the invariant it used to assert.
 
     #[test]
     fn get_tunnel_default_fails_loud() {
@@ -792,11 +807,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn room_level_fingerprints_default_fails_loud() {
-        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
-        assert_fail_loud(s.room_level_fingerprints(), "room_level_fingerprints");
-    }
+    // `room_level_fingerprints` is now a REQUIRED trait method with no default
+    // (Bob's SDK ruling: a backend that forgets it fails to COMPILE). There is
+    // no default to exercise, so the former
+    // `room_level_fingerprints_default_fails_loud` test was removed — the
+    // compiler now enforces the invariant it used to assert.
 
     // -----------------------------------------------------------------
     // Regression guard: concrete InMemoryDrawerStore (wrapping DrawerStoreCore)
