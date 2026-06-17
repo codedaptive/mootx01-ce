@@ -185,11 +185,22 @@ public final class AppModel {
         do {
             switch verb {
             case "capture":
-                _ = try await CaptureDrawerIntent(
-                    content: "Captured via the CaptureDrawerIntent at \(timestamp()).",
-                    location: "apple-surfaces"
-                ).perform()
-                intentRunLog.insert("capture: CaptureDrawerIntent.perform() ran — drawer filed into the live estate.", at: 0)
+                // Route through the bridge directly (same path CaptureDrawerIntent
+                // uses internally) so the tool-response text is available here to
+                // extract the drawer id. The response first line is always
+                // "filed memory <UUID>" (ToolDispatch.runFileMemory), which lets
+                // subsequent structural verbs (reanchor/mutate/withdraw/expunge)
+                // resolve the id via lastLoggedID() without a sentinel fall-back.
+                guard let b = bridge else { throw IntentToolError.substrateRefused("no bridge attached") }
+                let captureResult = await b.callTool("moot_file_memory", arguments: [
+                    "content": .string("Captured via the CaptureDrawerIntent at \(timestamp())."),
+                    "location": .string("apple-surfaces"),
+                ])
+                if captureResult.isError { throw IntentToolError.substrateRefused(captureResult.text) }
+                // Log the first line of the result ("filed memory <UUID>") verbatim
+                // so lastLoggedID() can extract the UUID via a standard UUID pattern.
+                let resultFirstLine = captureResult.text.components(separatedBy: "\n").first ?? captureResult.text
+                intentRunLog.insert("capture: \(resultFirstLine) — filed into the live estate.", at: 0)
 
             case "recall":
                 _ = try await RecallDrawerIntent(query: "apple-surfaces").perform()
@@ -237,12 +248,24 @@ public final class AppModel {
     }
 
     /// Extract the most recently captured drawer id from the run log, if any.
-    /// The log lines written by runIntent contain the id when the substrate
-    /// confirms filing. Returns nil when no id is available.
+    ///
+    /// The capture log line written by `runIntent("capture")` includes the
+    /// substrate's response first line verbatim, which is always in the form
+    /// `"filed memory <UUID>"` (see `ToolDispatch.runFileMemory`). This method
+    /// scans `intentRunLog` newest-first (index 0 is newest, inserted at 0)
+    /// for a UUID pattern adjacent to that prefix and returns the first match.
+    /// Returns nil when no capture has been logged yet.
     private func lastLoggedID() -> String? {
-        // A capture log line mentions the id when extract is wired; for now
-        // the log is free-form text. Return nil so callers fall back to the sentinel.
-        nil
+        // The UUID pattern per RFC 4122: eight-four-four-four-twelve hex digits.
+        let uuidPattern = #"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"#
+        guard let regex = try? Regex(uuidPattern) else { return nil }
+        for line in intentRunLog {
+            guard line.hasPrefix("capture:") else { continue }
+            if let match = line.firstMatch(of: regex) {
+                return String(line[match.range])
+            }
+        }
+        return nil
     }
 
     private func timestamp() -> String {

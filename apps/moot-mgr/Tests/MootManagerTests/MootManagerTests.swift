@@ -216,6 +216,56 @@ struct MootManagerMonitoringTests {
     }
 }
 
+// MARK: - Retention override persistence (A-10)
+
+struct MootManagerRetentionPersistenceTests {
+
+    @Test("setRetention persists the override so a restarted manager recovers it")
+    func retentionOverrideSurvivesRestart() async throws {
+        // Use a named temp dir so both manager instances share the same store path.
+        let storeURL = makeTempStoreURL()
+        let config = ManagerConfig(storeURL: storeURL,
+                                   retentionWindow: ManagerConfig.defaultRetentionWindow)
+
+        // First manager: set a custom window.
+        let first = MootManager(config: config)
+        try await first.start()
+        let customWindow: TimeInterval = 42 * 60 // 42 minutes
+        try await first.setRetention(window: customWindow)
+        let firstWindow = await first.effectiveRetentionWindow
+        #expect(firstWindow == customWindow)
+        await first.stop()
+
+        // Second manager at the same path: the override must be loaded from the sidecar.
+        let second = MootManager(config: config)
+        try await second.start()
+        defer { Task { await second.stop() } }
+        let secondWindow = await second.effectiveRetentionWindow
+        #expect(secondWindow == customWindow,
+                "retention override must survive restart via persisted sidecar")
+    }
+
+    @Test("setRetention with a non-positive window throws and does not corrupt the sidecar")
+    func invalidRetentionIsRejected() async throws {
+        let manager = try await makeStartedManager()
+        defer { Task { await manager.stop() } }
+
+        // Set a valid override first.
+        let validWindow: TimeInterval = 3600
+        try await manager.setRetention(window: validWindow)
+        let windowAfterValid = await manager.effectiveRetentionWindow
+        #expect(windowAfterValid == validWindow)
+
+        // Reject non-positive: the in-memory override must not change.
+        await #expect(throws: ManagerError.invalidRetention) {
+            try await manager.setRetention(window: 0)
+        }
+        let windowAfterReject = await manager.effectiveRetentionWindow
+        #expect(windowAfterReject == validWindow,
+                "failed setRetention must leave the existing override intact")
+    }
+}
+
 // MARK: - Retention
 
 struct MootManagerRetentionTests {
