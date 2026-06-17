@@ -3251,6 +3251,49 @@ impl EstateCoordinator {
         }
     }
 
+    /// N-way per-signal dense consensus boost (6b-core).
+    ///
+    /// Each per-signal dense list is an INDEPENDENT RRF voter: an id accrues
+    /// `Σ_L 1/(k + rank_in_L + 1)` over the per-signal lists `L` that contain it
+    /// (`total_rrf`). The returned boost is the RRF mass from EVERY voter BEYOND
+    /// the single best-ranked one — i.e. `total_rrf − best_single_term`, where
+    /// `best_single_term` is the largest per-signal reciprocal-rank term (the
+    /// drawer's best rank across signals). Therefore:
+    ///   - a drawer ranked by a SINGLE dense signal has `total_rrf == best_single
+    ///     _term` → boost 0, which keeps N=1 byte-identical to the pre-6b single
+    ///     `float_nearest` behaviour (one signal → one term → no extra mass);
+    ///   - a drawer ranked highly by MULTIPLE signals accrues extra rank-aware
+    ///     mass, so it ranks at/above a drawer ranked highly by one signal only
+    ///     (the rank-faithful consensus property — better cross-signal agreement
+    ///     yields a larger boost, not merely the presence of extra votes).
+    ///
+    /// Mirrors Swift RecallDirector's `rrfFuseN` consensus fold over the per-signal
+    /// dense lists.
+    fn dense_consensus_boost(
+        per_signal_lists: &[Vec<(String, f32)>],
+        k: f32,
+    ) -> HashMap<String, f32> {
+        // Per-id: total reciprocal-rank mass across signals, and the single largest
+        // per-signal term (the best rank the drawer achieved in any one signal).
+        let mut total_rrf: HashMap<String, f32> = HashMap::new();
+        let mut best_term: HashMap<String, f32> = HashMap::new();
+        for list in per_signal_lists {
+            for (rank, (id, _)) in list.iter().enumerate() {
+                let term = 1.0 / (k + rank as f32 + 1.0);
+                *total_rrf.entry(id.clone()).or_insert(0.0) += term;
+                let b = best_term.entry(id.clone()).or_insert(0.0);
+                if term > *b { *b = term; }
+            }
+        }
+        let mut boost: HashMap<String, f32> = HashMap::with_capacity(total_rrf.len());
+        for (id, mass) in total_rrf {
+            let best = best_term.get(&id).copied().unwrap_or(0.0);
+            // Extra-voter mass beyond the single best rank. 0 for a single voter.
+            boost.insert(id, (mass - best).max(0.0));
+        }
+        boost
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn recall_scored_multi_lane(
         estate: &locus_kit::estate::Estate,
@@ -3436,99 +3479,137 @@ impl EstateCoordinator {
             Vec::new()
         };
 
-        // --- Lane 4: Dense float (Lane D) — UnionBest mode only ---
-        // Cosine over the pooled float vector via Corpus.float_nearest, NOT the
-        // lossy 256-bit SimHash-Hamming projection. Fires independently of the
-        // Hamming lane; both can contribute. Active ONLY in UnionBest mode — this
-        // matches Swift where only `recallUnionBest` runs the dense lane while
-        // `recallHybrid` and `recallCorpusOnly` carry `denseLaneStatus: nil`.
-        // The similarity (∈ [-1, 1]) is normalized to a [0, 1] score as
-        // (sim + 1) / 2 (1.0 = identical direction). B-10a: adds candidates to
-        // the in-memory fusion only — no trace rows.
+        // --- Lane 4: Dense float (Lane D), PER-SIGNAL — UnionBest mode only ---
+        // Cosine over the pooled float vector via Corpus.float_nearest_per_signal,
+        // NOT the lossy 256-bit SimHash-Hamming projection. Fires independently of
+        // the Hamming lane; both can contribute. Active ONLY in UnionBest mode —
+        // this matches Swift where only `recallUnionBest` runs the dense lane while
+        // `recallHybrid` and `recallCorpusOnly` carry `dense_lane_status: None`.
         //
-        // FloatLaneOutcome makes every dark-lane state observable. GLK reads
-        // the outcome and emits a glk.recall.dense_lane_dark counter when the
-        // lane is dark so estate dashboards surface the failure. CorpusKit
-        // already logs and counts store errors; GLK adds the estate-level
-        // counter for cross-estate observability.
+        // PER-SIGNAL FAN-OUT (6b-core): every held provider slot is queried; each
+        // returned (model_id, outcome) is its OWN ranked dense list — an independent
+        // RRF voter. `per_signal_dense_lists` holds those voter lists. `dense_list`
+        // is the deduped consensus list (id → MAX normalized cosine across signals)
+        // used for the candidate set, the matrixAware `col_dense` column, and the
+        // Raw scoring path — at N=1 it equals the single `float_nearest` list, so
+        // the production-default path is byte-identical. The similarity (∈ [-1, 1])
+        // is normalized to (sim + 1) / 2 (1.0 = identical direction). B-10a: adds
+        // candidates to the in-memory fusion only — no trace rows.
         //
-        // dense_lane_status is set to "dark:<reason>" for all non-Hits outcomes
-        // when a corpus is registered and mode == UnionBest; None otherwise
-        // (lane not attempted). Populated into GLKRecallResult so callers can
-        // detect misconfigured estates where the dense lane is expected but dark.
-        // Mirrors Swift GLKRecallResult.denseLaneStatus.
+        // FloatLaneOutcome makes every dark-lane state observable PER SIGNAL: each
+        // dark signal emits a glk.recall.dense_lane_dark counter tagged with its
+        // model_id, while other signals still vote. dense_lane_status (the aggregate
+        // marker) reports the DEFAULT signal's (slot 0) dark reason, preserving
+        // pre-6b single-signal semantics — at N=1 the default is the only signal.
         let include_dense = matches!(request.mode, GLKRecallMode::UnionBest);
         let mut dense_lane_status: Option<String> = None;
-        let dense_list: Vec<(String, f32)> = if include_dense {
+        // RRF voter lists (one per signal that produced hits).
+        let mut per_signal_dense_lists: Vec<Vec<(String, f32)>> = Vec::new();
+        // model_ids that voted for each id, in slot order, for per-hit provenance.
+        let mut dense_signals_by_id: HashMap<String, Vec<String>> = HashMap::new();
+        // Consensus deduped list: id → MAX normalized cosine across signals, in
+        // first-seen order (deterministic).
+        let mut dense_cosine_by_id: HashMap<String, f32> = HashMap::new();
+        let mut dense_order: Vec<String> = Vec::new();
+        if include_dense {
             if let Some(ref c) = corpus {
                 if !query_str.is_empty() {
                     use corpus_kit::FloatLaneOutcome;
-                    match c.float_nearest(&query_str, plan.frontier_k) {
-                        FloatLaneOutcome::Hits(matches) => {
-                            // Lane ran and produced hits — no dark status marker.
-                            matches
-                                .into_iter()
-                                .map(|(id, sim)| (id, ((sim + 1.0) / 2.0).clamp(0.0, 1.0)))
-                                .collect()
-                        }
-                        FloatLaneOutcome::UnavailableProviderOptOut => {
-                            // Expected — provider has no float lane.
-                            dense_lane_status = Some("dark:providerOptOut".to_string());
-                            let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
-                            glk_emit!(
-                                crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                1.0,
-                                [("estate_id".to_string(), estate_tag),
-                                 ("reason".to_string(), "providerOptOut".to_string())]
-                                    .into_iter().collect::<std::collections::HashMap<_, _>>()
-                            );
-                            Vec::new()
-                        }
-                        FloatLaneOutcome::UnavailableNoFloatRows => {
-                            // Expected — corpus has no stored float rows.
-                            dense_lane_status = Some("dark:noFloatRows".to_string());
-                            let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
-                            glk_emit!(
-                                crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                1.0,
-                                [("estate_id".to_string(), estate_tag),
-                                 ("reason".to_string(), "noFloatRows".to_string())]
-                                    .into_iter().collect::<std::collections::HashMap<_, _>>()
-                            );
-                            Vec::new()
-                        }
-                        FloatLaneOutcome::EmptyQuery => {
-                            // Guard above (query_str.is_empty()) prevents this;
-                            // handle defensively for exhaustive match. The query was
-                            // empty before the lane was attempted.
-                            dense_lane_status = Some("dark:emptyQuery".to_string());
-                            Vec::new()
-                        }
-                        FloatLaneOutcome::StoreError(_) => {
-                            // CorpusKit already printed the error and emitted
-                            // corpus.float_lane.store_error. GLK adds the
-                            // estate-level dark counter for estate dashboards.
-                            dense_lane_status = Some("dark:storeError".to_string());
-                            let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
-                            glk_emit!(
-                                crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                1.0,
-                                [("estate_id".to_string(), estate_tag),
-                                 ("reason".to_string(), "storeError".to_string())]
-                                    .into_iter().collect::<std::collections::HashMap<_, _>>()
-                            );
-                            Vec::new()
+                    let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
+                    for (idx, (model_id, outcome)) in
+                        c.float_nearest_per_signal(&query_str, plan.frontier_k)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        match outcome {
+                            FloatLaneOutcome::Hits(matches) => {
+                                // This signal contributed a ranked dense list.
+                                let mut ranked: Vec<(String, f32)> =
+                                    Vec::with_capacity(matches.len());
+                                for (id, sim) in matches {
+                                    let dense = ((sim + 1.0) / 2.0).clamp(0.0, 1.0);
+                                    ranked.push((id.clone(), dense));
+                                    if !dense_cosine_by_id.contains_key(&id) {
+                                        dense_order.push(id.clone());
+                                    }
+                                    let entry = dense_cosine_by_id.entry(id.clone()).or_insert(0.0);
+                                    if dense > *entry { *entry = dense; }
+                                    dense_signals_by_id
+                                        .entry(id)
+                                        .or_default()
+                                        .push(model_id.clone());
+                                }
+                                per_signal_dense_lists.push(ranked);
+                            }
+                            FloatLaneOutcome::UnavailableProviderOptOut => {
+                                // This signal has no float lane — dark, tagged by model_id.
+                                if idx == 0 {
+                                    dense_lane_status = Some("dark:providerOptOut".to_string());
+                                }
+                                glk_emit!(
+                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                    1.0,
+                                    [("estate_id".to_string(), estate_tag.clone()),
+                                     ("reason".to_string(), "providerOptOut".to_string()),
+                                     ("model_id".to_string(), model_id.clone())]
+                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                );
+                            }
+                            FloatLaneOutcome::UnavailableNoFloatRows => {
+                                // This signal has no stored float rows — dark, tagged by model_id.
+                                if idx == 0 {
+                                    dense_lane_status = Some("dark:noFloatRows".to_string());
+                                }
+                                glk_emit!(
+                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                    1.0,
+                                    [("estate_id".to_string(), estate_tag.clone()),
+                                     ("reason".to_string(), "noFloatRows".to_string()),
+                                     ("model_id".to_string(), model_id.clone())]
+                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                );
+                            }
+                            FloatLaneOutcome::EmptyQuery => {
+                                // Guard above (query_str.is_empty()) prevents this;
+                                // handle defensively for exhaustive match.
+                                if idx == 0 {
+                                    dense_lane_status = Some("dark:emptyQuery".to_string());
+                                }
+                            }
+                            FloatLaneOutcome::StoreError(_) => {
+                                // CorpusKit already printed the error and emitted
+                                // corpus.float_lane.store_error for this signal. GLK
+                                // adds the estate-level dark counter, tagged by model_id.
+                                if idx == 0 {
+                                    dense_lane_status = Some("dark:storeError".to_string());
+                                }
+                                glk_emit!(
+                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                    1.0,
+                                    [("estate_id".to_string(), estate_tag.clone()),
+                                     ("reason".to_string(), "storeError".to_string()),
+                                     ("model_id".to_string(), model_id.clone())]
+                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                );
+                            }
                         }
                     }
-                } else {
-                    Vec::new()
                 }
-            } else {
-                Vec::new()
             }
-        } else {
-            Vec::new()
-        };
+        }
+        // Consensus deduped dense list (id → max normalized cosine), first-seen order.
+        // Equals the single `float_nearest` list at N=1.
+        let dense_list: Vec<(String, f32)> = dense_order
+            .iter()
+            .map(|id| (id.clone(), dense_cosine_by_id[id]))
+            .collect();
+        // N-way consensus RRF over the per-signal dense lists. The boost folded into
+        // a candidate's final score (Raw/Rrf paths below) is the RRF mass from the
+        // EXTRA voters beyond the first, so a single-signal candidate gets 0 boost —
+        // making N=1 byte-identical, while a multi-signal candidate ranks at/above
+        // an equal-cosine single-signal candidate (the consensus property).
+        let dense_consensus_boost: HashMap<String, f32> =
+            Self::dense_consensus_boost(&per_signal_dense_lists, 60.0);
 
         // --- Candidate set: collect unique IDs from all populated lanes ---
         let mut all_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3850,9 +3931,14 @@ impl EstateCoordinator {
                     let (bm25_rank, bm25_raw)   = bm25_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (vec_rank, vec_raw)      = vector_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (dense_rank, dense_raw)  = dense_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
+                    // Consensus boost from the EXTRA dense voters beyond the first
+                    // (0 when an id was surfaced by a single dense signal, so N=1 is
+                    // byte-identical). Folded into final_score so a multi-signal
+                    // candidate ranks at/above an equal-cosine single-signal one.
+                    let dense_boost = dense_consensus_boost.get(id).copied().unwrap_or(0.0);
 
                     let final_score = match request.scoring {
-                        GLKRecallScoring::Raw => locus_raw + bm25_raw + vec_raw + dense_raw,
+                        GLKRecallScoring::Raw => locus_raw + bm25_raw + vec_raw + dense_raw + dense_boost,
                         GLKRecallScoring::Rrf | GLKRecallScoring::MatrixAware => {
                             // MatrixAware falls back to RRF for Hybrid/CorpusOnly.
                             let mut rrf = 0.0_f32;
@@ -3860,6 +3946,11 @@ impl EstateCoordinator {
                             if bm25_rank  < usize::MAX { rrf += 1.0 / (k + bm25_rank  as f32 + 1.0); }
                             if vec_rank   < usize::MAX { rrf += 1.0 / (k + vec_rank   as f32 + 1.0); }
                             if dense_rank < usize::MAX { rrf += 1.0 / (k + dense_rank as f32 + 1.0); }
+                            // Per-signal dense consensus: the extra-voter RRF mass is
+                            // additive on top of the single consensus dense_rank term,
+                            // so each held dense signal is an independent voter. Zero
+                            // at N=1 — identical to the pre-6b single-signal RRF.
+                            rrf += dense_boost;
                             rrf
                         }
                     };
@@ -3941,6 +4032,17 @@ impl EstateCoordinator {
                 if co_s    > 0.0 { explanation.push("matrixCoOccurrence".to_string()); }
                 if t_s     > 0.0 { explanation.push("matrixTemporal".to_string()); }
                 if explanation.is_empty() { explanation.push("locusBitmap".to_string()); }
+                // PER-SIGNAL DENSE PROVENANCE (6b-core): name the dense signals that
+                // voted for this id, in slot order. Mirrors Swift's step-11
+                // "denseSignals: vectorDense:<modelID>, ..." line. Additive — only
+                // present when the dense lane surfaced this id.
+                if let Some(voters) = dense_signals_by_id.get(&id) {
+                    if !voters.is_empty() {
+                        let names: Vec<String> =
+                            voters.iter().map(|m| format!("vectorDense:{m}")).collect();
+                        explanation.push(format!("denseSignals: {}", names.join(", ")));
+                    }
+                }
                 RecallHit { id, drawer, sources, score, explanation }
             })
             .collect();

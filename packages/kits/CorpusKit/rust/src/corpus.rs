@@ -1441,13 +1441,54 @@ impl Corpus {
                 .collect();
         }
 
-        self.slots
-            .iter()
-            .map(|slot| {
-                let outcome = self.float_nearest_for_slot(slot, query, limit);
-                (slot.model_id.clone(), outcome)
-            })
-            .collect()
+        // Test-only hook: a forced store error is consumed for the DEFAULT slot
+        // (slot 0), mirroring the single-signal `float_nearest` contract and the
+        // Swift `floatNearestPerSignal` seam. GLK's dense lane consumes this method,
+        // so the store-error dark contract must remain observable through the
+        // per-signal path: the default signal reports StoreError, other slots run
+        // normally. Single-use; consumed here exactly as the single-signal entry.
+        // `FloatLaneOutcome` is not `Clone`, so the forced error description is held
+        // as a `String` and a fresh `StoreError` is constructed for slot 0 below.
+        #[cfg(any(test, feature = "test-seams"))]
+        let forced_default_store_error: Option<String> = {
+            let mut guard = self.forced_float_error.lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(err_str) = guard.take() {
+                drop(guard);
+                eprintln!("corpus.float_nearest_per_signal: find_nearest_float failed (default signal, forced) — {}", err_str);
+                report!(StatSample::metric(
+                    "corpus.float_lane.store_error".to_string(),
+                    1.0,
+                    [("kit".to_string(), "CorpusKit".to_string())]
+                        .into_iter().collect(),
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now().duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                    },
+                ));
+                Some(err_str)
+            } else {
+                None
+            }
+        };
+
+        let mut results: Vec<(String, FloatLaneOutcome)> = Vec::with_capacity(self.slots.len());
+        for (_index, slot) in self.slots.iter().enumerate() {
+            // Slot 0 honours the forced-error seam if installed; all other slots —
+            // and slot 0 when no seam is set — run the real lane.
+            #[cfg(any(test, feature = "test-seams"))]
+            if _index == 0 {
+                if let Some(ref err_str) = forced_default_store_error {
+                    results.push((slot.model_id.clone(),
+                                  FloatLaneOutcome::StoreError(err_str.clone())));
+                    continue;
+                }
+            }
+            let outcome = self.float_nearest_for_slot(slot, query, limit);
+            results.push((slot.model_id.clone(), outcome));
+        }
+        results
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane
