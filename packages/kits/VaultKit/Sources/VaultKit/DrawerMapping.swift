@@ -409,7 +409,14 @@ public struct DrawerMapping: Sendable {
             frame.sensitivity = existingTier
         }
 
-        let drawer = try await kit.capture(handle, frame)
+        // mode: .regular — enqueues an EncodeJob onto the estate's encode queue
+        // so the drain worker ingests the drawer into the Corpus (BM25 + vector).
+        // The legacy no-mode overload stored the drawer row only, leaving the
+        // BM25/vector semantic lanes dark for all imported content (the bug proven
+        // on the real estate: 2354 drawers, node_bundles=0). Using .regular here
+        // is the correct choice for bulk import: capture returns immediately and
+        // encoding is handled in the background, so large imports don't block.
+        let drawer = try await kit.capture(handle, frame, mode: .regular)
 
         // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER
         // resolution: facts must land as substrate KG facts, not report-only).

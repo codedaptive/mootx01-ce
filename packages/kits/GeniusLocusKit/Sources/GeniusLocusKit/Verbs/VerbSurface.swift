@@ -959,11 +959,14 @@ public extension GeniusLocusKit {
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
         }
-        let parentEstate = try estate(for: handle)
+        // Validate the handle before the E-2 guard: estate(for:) throws
+        // .estateNotOpen for a stale handle, surfacing the error before the
+        // promotion-target check. The estate itself is not used directly here
+        // because capture routes through the GLK mode-aware verb (not estate.capture).
+        _ = try estate(for: handle)
         // E-2 guard: the destination must be the branch's parent estate, so
         // promotion cannot silently move content across an estate (and key)
-        // boundary. Runs after estate(for:) so a stale handle still surfaces
-        // as .estateNotOpen first.
+        // boundary.
         try await assertPromotionTarget(concreteBranch, into: handle)
 
         // Recall all current branch rows and identify those added after
@@ -984,6 +987,9 @@ public extension GeniusLocusKit {
         // minted for each because CaptureFrame has no id field and
         // Estate.store is internal to LocusKit. Content fidelity is
         // preserved; ID correlation is done by content string in tests.
+        // mode: .regular routes through the GLK encode pipeline so promoted
+        // drawers become BM25/vector searchable via the drain worker — a
+        // direct parentEstate.capture() bypass the Corpus feed entirely.
         for row in newRows {
             let captureFrame = CaptureFrame(
                 content: row.content,
@@ -1000,7 +1006,7 @@ public extension GeniusLocusKit {
                 sensitivity: row.adjectiveSensitivity,
                 kind: row.contentKind
             )
-            _ = try await parentEstate.capture(captureFrame)
+            _ = try await capture(handle, captureFrame, mode: .regular)
         }
 
         // Transition the branch to .won.
@@ -1035,10 +1041,13 @@ public extension GeniusLocusKit {
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
         }
-        let parentEstate = try estate(for: handle)
+        // Validate the handle before the E-2 guard: estate(for:) throws
+        // .estateNotOpen for a stale handle, surfacing the error before the
+        // promotion-target check. The estate itself is not used directly here
+        // because capture routes through the GLK mode-aware verb (not estate.capture).
+        _ = try estate(for: handle)
         // E-2 guard: cherry-pick merge must target the branch's parent estate,
-        // not an arbitrary one. Runs after estate(for:) so a stale handle still
-        // surfaces as .estateNotOpen first.
+        // not an arbitrary one.
         try await assertPromotionTarget(concreteBranch, into: handle)
 
         // Recall all branch rows to find the requested ones. `.full` hydration
@@ -1063,6 +1072,9 @@ public extension GeniusLocusKit {
                 skipped.append(id)
                 continue
             }
+            // mode: .regular routes through the GLK encode pipeline so merged
+            // drawers become BM25/vector searchable via the drain worker — a
+            // direct parentEstate.capture() would bypass the Corpus feed entirely.
             let captureFrame = CaptureFrame(
                 content: row.content,
                 channel: row.captureChannel,
@@ -1078,7 +1090,7 @@ public extension GeniusLocusKit {
                 sensitivity: row.adjectiveSensitivity,
                 kind: row.contentKind
             )
-            _ = try await parentEstate.capture(captureFrame)
+            _ = try await capture(handle, captureFrame, mode: .regular)
             merged.append(id)
         }
 

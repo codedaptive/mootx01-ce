@@ -22,13 +22,14 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 53.
-    /// 19 interface + 1 federation + 7 recipe + 21 lens + 5 vault.
-    /// The 7th recipe tool is moot_dream (matrix rebuild + dreaming cycle).
+    /// Hard contract gate: the total tool count must be exactly 54.
+    /// 19 interface + 1 federation + 7 recipe + 21 lens + 5 vault + 1 maintenance.
+    /// The 7th recipe tool is moot_dream (matrix rebuild + dreaming cycle);
+    /// the maintenance tool is moot_reindex (corpus/vector backfill).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools().count == 53,
-                "tools() must return exactly 53 tools; got \(ToolProjection.tools().count)")
+        #expect(ToolProjection.tools().count == 54,
+                "tools() must return exactly 54 tools; got \(ToolProjection.tools().count)")
     }
 
     /// All 19 interface tools must be present.

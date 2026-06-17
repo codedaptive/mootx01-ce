@@ -66,7 +66,7 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_53() {
+fn tools_list_count_is_54() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12):
@@ -77,16 +77,18 @@ fn tools_list_count_is_53() {
     //   21  lens tools (moot_lens_* prefix)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
-    //   53  total (matches Swift surface exactly)
+    //    1  maintenance tool (moot_reindex — backfill the corpus/vector index)
+    //   54  total (matches Swift surface exactly)
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 53, "expected 53 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 54, "expected 54 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_53_names() {
+fn tools_list_name_set_matches_expected_54_names() {
     // Gate: all 53 expected tool names are present, no more and no less.
-    // The 53rd tool is moot_vault_job (Bob's ruling 2026-06-12: tool-surface
+    // The 54th tool is moot_reindex (corpus/vector backfill maintenance tool).
+    // moot_vault_job is the 53rd (Bob's ruling 2026-06-12: tool-surface
     // parity matters even when the Rust backend is synchronous).
     let expected: std::collections::HashSet<&str> = [
         // Tier 1 — Core memory (7)
@@ -124,6 +126,7 @@ fn tools_list_name_set_matches_expected_53_names() {
         "moot_confirm_migration",
         "moot_recall_precise",
         "moot_dream",
+        "moot_reindex",
         // Lens tools (21) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
         "moot_lens_constellation",

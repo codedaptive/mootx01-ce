@@ -849,6 +849,14 @@ impl Corpus {
     pub fn count(&self) -> CorpusKitResult<usize> {
         self.bundle_store.count()
     }
+
+    /// Return the set of drawer IDs that have at least one chunk in the store —
+    /// i.e. every source_id that has been ingested. Used by `reindex_missing`
+    /// to identify already-indexed drawers and skip them in the backfill.
+    /// Mirrors Swift `CorpusKit.indexedSourceIDs()`.
+    pub fn indexed_source_ids(&self) -> CorpusKitResult<std::collections::HashSet<String>> {
+        self.bundle_store.all_source_ids()
+    }
 }
 
 // MARK: - BM25 tokenizer

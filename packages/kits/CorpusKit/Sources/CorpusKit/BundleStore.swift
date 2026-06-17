@@ -221,6 +221,30 @@ public actor BundleStore {
         return rows.compactMap(Self.decodeChunk)
     }
 
+    /// Return the set of all distinct `source_id` values currently in the
+    /// chunks table.
+    ///
+    /// Used by `reindexMissing` to identify which drawers already have at least
+    /// one chunk and therefore do not need to be enqueued for re-encoding.
+    /// The query is a full-table scan over the source_id index, but it is only
+    /// called in maintenance/admin contexts (not on hot paths).
+    public func allSourceIDs() async throws -> Set<String> {
+        let rows = try await storage.rowStore.query(
+            table: "chunks",
+            where: nil,
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        var ids = Set<String>()
+        for row in rows {
+            if case let .text(sourceID) = row["source_id"] ?? .null {
+                ids.insert(sourceID)
+            }
+        }
+        return ids
+    }
+
     public func count() async throws -> Int {
         try await storage.rowStore.count(table: "chunks", where: nil)
     }

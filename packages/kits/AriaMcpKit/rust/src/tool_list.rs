@@ -2,21 +2,20 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition. Produces exactly
-//! 53 tools in this order:
+//! 54 tools in this order:
 //!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
+//!   Maintenance (1) — moot_reindex
 //!   Federation (1) — moot_federated_search
 //!   Recipe (7)  — list_lenses, list_recipes, synthesize, run_migration, confirm_migration, recall_precise, dream
 //!   Lens (21)   — moot_lens_keystones … moot_lens_complexity
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Tool count 53 = 52 (prior surface) + 1 (moot_vault_job, Bob's ruling 2026-06-12).
-//! moot_vault_job was present in Swift (53 tools) but absent in Rust (52 tools).
-//! Tool-surface parity requires 53/53 even though the Rust backend is synchronous:
-//! the tool returns completed-job records from the in-process VaultJobLedger.
+//! Tool count 54 = 53 (prior surface) + 1 (moot_reindex, dual-path intake backfill
+//! maintenance tool, parity with Swift ToolProjection.estateTools() Maintenance addition).
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -28,9 +27,9 @@ use serde_json::json;
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Build the full 53-tool surface for `tools/list`.
+/// Build the full 54-tool surface for `tools/list`.
 pub fn build_tool_list() -> serde_json::Value {
-    let mut tools: Vec<serde_json::Value> = Vec::with_capacity(53);
+    let mut tools: Vec<serde_json::Value> = Vec::with_capacity(54);
 
     // Tier 1 — Core memory (7)
     tools.push(file_memory_tool());
@@ -60,6 +59,9 @@ pub fn build_tool_list() -> serde_json::Value {
     tools.push(estate_status_tool());
     tools.push(estate_map_tool());
     tools.push(estate_ping_tool());
+
+    // Maintenance (1) — dual-path intake backfill
+    tools.push(reindex_tool());
 
     // Federation (1)
     tools.push(federated_search_tool());
@@ -374,6 +376,22 @@ fn estate_ping_tool() -> serde_json::Value {
     json!({
         "name": "moot_estate_ping",
         "description": "Verify the estate connection is alive. Returns pong immediately.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+/// moot_reindex — backfill BM25/vector indexes for drawers captured before the
+/// dual-path intake fix. Idempotent: already-indexed drawers are skipped.
+/// Returns the count of drawers enqueued for encoding. Mirrors Swift
+/// `ToolProjection.estateTools()` Maintenance section.
+fn reindex_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_reindex",
+        "description": "Backfill BM25/vector semantic indexes for drawers captured before encode-on-capture was enabled. Idempotent — already-indexed drawers are skipped. Returns the count of drawers enqueued.",
         "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
     })
 }

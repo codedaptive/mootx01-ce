@@ -81,10 +81,13 @@ fn structured_note() -> NoteIR {
 }
 
 /// Import the structured note via DrawerMapping and return the outcome.
+///
+/// `coord` is `&mut` because `import_note` routes through `capture_with_mode`
+/// (dual-path intake fix, G7) which requires mutable coordinator access.
 fn import_structured(
     mapping: &DrawerMapping,
     note: &NoteIR,
-    coord: &EstateCoordinator,
+    coord: &mut EstateCoordinator,
     handle: &EstateHandle,
 ) -> vault_kit::ImportOutcome {
     let mut existing_lineage_ids: HashSet<uuid::Uuid> = HashSet::new();
@@ -112,11 +115,11 @@ fn import_structured(
 /// Mirrors Swift `structuredImportFactsLandAsKGFacts`.
 #[test]
 fn structured_import_facts_land_as_kg_facts() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let note = structured_note();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
-    let outcome = import_structured(&mapping, &note, &coord, &handle);
+    let outcome = import_structured(&mapping, &note, &mut coord, &handle);
     assert!(
         matches!(outcome, vault_kit::ImportOutcome::Written { .. }),
         "expected Written outcome, got {outcome:?}"
@@ -149,11 +152,11 @@ fn structured_import_facts_land_as_kg_facts() {
 /// correct object values. Mirrors Swift `structuredImportScopeEntriesAsKGFacts`.
 #[test]
 fn structured_import_scope_entries_as_kg_facts() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let note = structured_note();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let kg_facts = coord.recall_kg_facts(&handle).expect("recall_kg_facts");
     let scope_facts: Vec<_> = kg_facts.iter().filter(|f| f.subject.starts_with("scope:")).collect();
@@ -178,11 +181,11 @@ fn structured_import_scope_entries_as_kg_facts() {
 /// Mirrors Swift `structuredImportHierarchyAsFullRoomPath`.
 #[test]
 fn structured_import_hierarchy_as_full_room_path() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let note = structured_note();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     // The note has path_components = ["projects", "alpha"] and no frontmatter room.
     // The drawer room must be "projects/alpha", not just "alpha".
@@ -215,7 +218,7 @@ fn structured_import_hierarchy_as_full_room_path() {
 fn structured_import_facts_and_scope_not_in_fields_dropped() {
     use vault_kit::{ObsidianAdapter, VaultAdapter, VaultBridge};
 
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
     // Exercise import_note directly and confirm the outcome is Written with
@@ -223,7 +226,7 @@ fn structured_import_facts_and_scope_not_in_fields_dropped() {
     // is covered by the exchange_adapter tests. Here we verify the core
     // DrawerMapping path produces correct semantics for the report.
     let note = structured_note();
-    let outcome = import_structured(&mapping, &note, &coord, &handle);
+    let outcome = import_structured(&mapping, &note, &mut coord, &handle);
     assert!(
         matches!(outcome, vault_kit::ImportOutcome::Written { .. }),
         "expected Written; got {outcome:?}"
@@ -241,13 +244,13 @@ fn structured_import_facts_and_scope_not_in_fields_dropped() {
 /// (round-trip identity). Mirrors the Swift room-resolution priority.
 #[test]
 fn frontmatter_room_wins_over_path_components() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mut note = structured_note();
     // Insert an explicit room frontmatter key.
     note.frontmatter.insert("room".to_string(), "explicit-room".to_string());
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let drawers = coord
         .recall(
@@ -274,12 +277,12 @@ fn frontmatter_room_wins_over_path_components() {
 /// (same as the old leaf-only behavior — no regression).
 #[test]
 fn single_component_path_uses_leaf_as_room() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mut note = structured_note();
     note.path_components = vec!["inbox".to_string()]; // single component
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let drawers = coord
         .recall(
@@ -310,7 +313,7 @@ fn single_component_path_uses_leaf_as_room() {
 /// Mirrors Swift `VaultBridgeTests.tagsImportAsKGFacts`.
 #[test]
 fn tags_import_as_kg_facts() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
     let note = NoteIR::new(
@@ -324,7 +327,7 @@ fn tags_import_as_kg_facts() {
         None,
     );
 
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let kg_facts = coord.recall_kg_facts(&handle).expect("recall_kg_facts");
     let tag_facts: Vec<_> = kg_facts
@@ -350,7 +353,7 @@ fn tags_import_as_kg_facts() {
 /// Mirrors Swift `VaultBridgeTests.tagsRoundTrip`.
 #[test]
 fn tags_round_trip_import_export() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
     let note = NoteIR::new(
@@ -363,7 +366,7 @@ fn tags_round_trip_import_export() {
         None,
         None,
     );
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let projection = mapping
         .export(&coord, &handle, NOW, vault_kit::VaultExportScope::Believed)
@@ -386,7 +389,7 @@ fn tags_round_trip_import_export() {
 /// Mirrors Swift `VaultBridgeTests.kindFactLandsAsKGFact`.
 #[test]
 fn kind_fact_lands_as_kg_fact() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
     let mut note = NoteIR::new(
@@ -400,7 +403,7 @@ fn kind_fact_lands_as_kg_fact() {
         None,
     );
     note.kind = "fact".to_string();
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let kg_facts = coord.recall_kg_facts(&handle).expect("recall_kg_facts");
     let kind_fact = kg_facts
@@ -414,7 +417,7 @@ fn kind_fact_lands_as_kg_fact() {
 /// Mirrors Swift `VaultBridgeTests.kindJournalRoundTrips`.
 #[test]
 fn kind_journal_round_trips() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
     let mut note = NoteIR::new(
@@ -428,7 +431,7 @@ fn kind_journal_round_trips() {
         None,
     );
     note.kind = "journal".to_string();
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let projection = mapping
         .export(&coord, &handle, NOW, vault_kit::VaultExportScope::Believed)
@@ -444,7 +447,7 @@ fn kind_journal_round_trips() {
 /// Mirrors Swift `VaultBridgeTests.kindNoteProducesNoKGFact`.
 #[test]
 fn kind_note_produces_no_kg_fact() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
     let note = NoteIR::new(
@@ -458,7 +461,7 @@ fn kind_note_produces_no_kg_fact() {
         None,
     );
     // kind defaults to "note" — no kind KG fact must be filed.
-    import_structured(&mapping, &note, &coord, &handle);
+    import_structured(&mapping, &note, &mut coord, &handle);
 
     let kg_facts = coord.recall_kg_facts(&handle).expect("recall_kg_facts");
     let kind_fact = kg_facts.iter().find(|f| f.subject == "record:kind");
@@ -474,9 +477,11 @@ fn kind_note_produces_no_kg_fact() {
 fn fields_dropped_empty_for_fully_structured_note() {
     use vault_kit::{ExchangeAdapter, VaultAdapter, VaultBridge};
 
-    let (coord, handle) = open_one();
+    // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake
+    // fix — import_notes routes through capture_with_mode, G7).
+    let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
-    let bridge = VaultBridge::new(&coord, Box::new(ExchangeAdapter::new()), mapping);
+    let mut bridge = VaultBridge::new(&mut coord, Box::new(ExchangeAdapter::new()), mapping);
 
     // The golden fixture has tags + non-"note" kind in drawer-001 and drawer-003.
     // All fields now land in substrate — fields_dropped must be empty.

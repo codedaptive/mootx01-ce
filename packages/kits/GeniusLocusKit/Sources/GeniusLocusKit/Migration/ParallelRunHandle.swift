@@ -92,6 +92,12 @@ public actor ParallelRunHandle {
     /// concurrently via `async let`. The target's result is returned;
     /// if the source capture fails, the error is surfaced (both writes
     /// must succeed in mirror mode).
+    ///
+    /// mode: .regular — all migration captures enqueue an EncodeJob so the
+    /// migrated content is indexed in the Corpus. Using the legacy no-mode
+    /// overload here would leave all migrated drawers dark for BM25/vector
+    /// recall even after migration completes (same root cause as the import
+    /// path bug: the row lands, but the semantic lane is never fed).
     public func capture(_ frame: CaptureFrame) async throws -> Drawer {
         guard !stopped else {
             throw MigrationError.parallelRunStopped
@@ -100,21 +106,21 @@ public actor ParallelRunHandle {
         case .writeToTarget:
             // Captures go only to the target. Source is kept open for
             // reads but receives no writes during this mode.
-            return try await kit.capture(target, frame)
+            return try await kit.capture(target, frame, mode: .regular)
 
         case .readFromSource:
             // Reads come from source, new writes go to target.
             // The capture here writes to target; callers that need
             // source-fallback reads issue recalls directly on the source
             // handle via the kit's `recall` verb.
-            return try await kit.capture(target, frame)
+            return try await kit.capture(target, frame, mode: .regular)
 
         case .mirrorBoth:
             // Concurrent writes to both estates. Both must succeed.
             // Target's result is returned; source write failure surfaces
             // to the caller.
-            async let targetDrawer = kit.capture(target, frame)
-            async let sourceDrawer = kit.capture(source, frame)
+            async let targetDrawer = kit.capture(target, frame, mode: .regular)
+            async let sourceDrawer = kit.capture(source, frame, mode: .regular)
             _ = try await sourceDrawer   // surface any source failure
             return try await targetDrawer
         }

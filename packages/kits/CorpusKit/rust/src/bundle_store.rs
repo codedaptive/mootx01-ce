@@ -217,6 +217,28 @@ impl BundleStore {
         Ok(rows.iter().filter_map(decode_chunk).collect())
     }
 
+    /// Return the set of distinct `source_id` values present in the chunks table.
+    ///
+    /// Used by `reindex_missing` to identify which drawers are already BM25/vector-
+    /// indexed so the backfill only enqueues the un-indexed subset. Full-table scan
+    /// (no DISTINCT support through the PersistenceKit row abstraction); acceptable
+    /// for a maintenance/admin path, not a hot path. Mirrors Swift
+    /// `BundleStore.allSourceIDs()`.
+    pub fn all_source_ids(&self) -> CorpusKitResult<std::collections::HashSet<String>> {
+        let rows = self
+            .storage
+            .row_store()
+            .query("chunks", None, &[], None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        let mut ids = std::collections::HashSet::new();
+        for row in &rows {
+            if let Some(TypedValue::Text(source_id)) = row.get("source_id") {
+                ids.insert(source_id.clone());
+            }
+        }
+        Ok(ids)
+    }
+
     pub fn count(&self) -> CorpusKitResult<usize> {
         self.storage
             .row_store()

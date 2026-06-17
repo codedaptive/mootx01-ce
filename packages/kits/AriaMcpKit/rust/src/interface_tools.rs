@@ -63,8 +63,9 @@ const DEFAULT_LATTICE_CODE: &str = "000.000";
 // Tool surface declaration
 // ---------------------------------------------------------------------------
 
-/// The 19 interface tool names (Tier 1–5), in the order they appear in the
-/// tool list. Mirrors Swift `InterfaceTools` enum case order.
+/// The 19 interface tool names (Tier 1–5) plus the 1 Maintenance tool, in the
+/// order they appear in the tool list. Mirrors Swift `InterfaceTools` enum case
+/// order (19 tools) plus `moot_reindex` (Maintenance, 1 tool).
 pub const INTERFACE_TOOLS: &[&str] = &[
     // Tier 1 — Core memory (7)
     "moot_file_memory",
@@ -90,6 +91,8 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_estate_status",
     "moot_estate_map",
     "moot_estate_ping",
+    // Maintenance (1)
+    "moot_reindex",
 ];
 
 /// True when `name` is one of the 19 Tier 1–5 interface tools.
@@ -133,6 +136,8 @@ pub fn dispatch(
         "moot_estate_status" => run_estate_status(args, registry),
         "moot_estate_map" => run_estate_map(args, registry),
         "moot_estate_ping" => run_estate_ping(args, registry),
+        // Maintenance
+        "moot_reindex" => run_reindex(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown interface tool: {name}"),
@@ -1074,6 +1079,29 @@ fn run_estate_ping(
         "pong: estate {} [{}] is live",
         manifest.estate_name, manifest.estate_uuid
     )))
+}
+
+// ===========================================================================
+// Maintenance
+// ===========================================================================
+
+/// Enqueue encode jobs for every active drawer that is not yet BM25/vector-
+/// indexed in the estate. Returns the count enqueued. Idempotent. Mirrors
+/// Swift `ToolDispatch.runReindex`. Requires `&mut` coord because
+/// `reindex_missing` calls `enqueue_encode_job` → `mount_encode_queue`.
+fn run_reindex(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve(args, "estateID")?;
+    // mut: reindex_missing calls enqueue_encode_job which calls mount_encode_queue
+    // (&mut self). The standard pattern for write-path tools in this module.
+    let mut coord = estate.coord.lock().unwrap();
+    let now = wall_now();
+    match coord.reindex_missing(&estate.handle, now) {
+        Ok(enqueued) => Ok(text_result(&format!("reindex: enqueued {enqueued} drawers for encoding"))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
 }
 
 // ===========================================================================

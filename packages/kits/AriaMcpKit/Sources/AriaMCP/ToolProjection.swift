@@ -317,7 +317,7 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 5: Estate (3 tools)
+    // MARK: - Tier 5: Estate (3 tools) + Maintenance (1 tool)
 
     private static func estateTools() -> [ProjectedTool] {
         [
@@ -342,6 +342,21 @@ public enum ToolProjection {
             ProjectedTool(
                 name: "moot_estate_ping",
                 description: "Ping the estate to confirm the server process and estate handle are live. Returns immediately with no estate scan. Use to verify connectivity before a sequence of operations.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [:],
+                    required: []
+                )),
+                provenance: .interface
+            ),
+            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
+            // Backfills BM25/vector indexes for drawers captured before the dual-path
+            // intake wiring landed (or after an index loss). Enqueues encode jobs for
+            // all active drawers not already in the Corpus BundleStore; encoding runs
+            // asynchronously via the background drain worker. Idempotent: already-
+            // indexed drawers are skipped. Returns a count of drawers enqueued.
+            ProjectedTool(
+                name: "moot_reindex",
+                description: "Maintenance: enqueue encode jobs for all memories not yet in the BM25/vector index. Use after a fresh import or to recover from an index loss. Encoding is asynchronous — returns immediately with a count of memories enqueued. Idempotent: already-indexed memories are skipped.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [:],
                     required: []
