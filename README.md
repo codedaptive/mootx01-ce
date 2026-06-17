@@ -22,7 +22,21 @@ Your AI has a short memory. It only holds what fits in one conversation. Close t
 
 ## What it looks like
 
-Wire MOOTx01 into your AI client once. After that, your AI uses two short commands. One to store something. One to look it up.
+You wire MOOTx01 into your AI client by running:
+
+```
+mootx01 install
+```
+
+Restart your AI agent and it will teach itself MOOTx01's language as if they had been best friends for years. After a few minutes your AI agent will be fluently using MOOTx01.
+
+You can try things like:
+
+- "Ping Moot"
+- "Take Moot for a test drive"
+- "Explore Moot's ability"
+
+The full language is called ARIA. Nine verbs in total. Behind the scenes, your AI uses commands like these:
 
 ```jsonc
 // store
@@ -31,8 +45,6 @@ moot_file_memory { "content": "We ship the importer behind a flag.", "location":
 // retrieve
 moot_memory_search { "query": "what did we decide about the importer?" }
 ```
-
-The full language is called ARIA. Nine verbs in total.
 
 ## Where to go next
 
@@ -71,23 +83,12 @@ mootx01 install        # interactive — registers MOOTx01 with Claude, Claude C
 
 This also starts **`moot-mgr`**, the management console, as a background service (launchd · systemd-user · Task Scheduler). It opens a read-only dashboard at **http://127.0.0.1:4200** — health, per-estate state, the write pipeline, an activity log, and a live **Topology** view — plus a gated admin surface. Opt out with `--no-manager`.
 
-### 3 · Use it
-
-From your agent, the ARIA grammar is one verb on a noun:
-
-```jsonc
-// file a memory — captured verbatim into your MOOT
-moot_file_memory { "content": "We decided to ship the importer behind a flag.", "location": "project/alpha" }
-
-// recall — ranked, filtered, theme-aware signal (not raw chunks)
-moot_memory_search { "query": "what did we decide about the importer?" }
-```
-
-*Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
+### 3 · Prefer to build from source?
+ `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
 
 ## How it works
 
-MOOTx01 is a substrate of composable kits; **GeniusLocusKit** composes them into a working estate, the **Brain** layer makes it dream, and **ARIA** is the one interface in front of all of it.
+MOOTx01 is an SDK of composable kits; **GeniusLocusKit** composes them into a working estate, the **Brain** layer makes it dream, and **ARIA** is the one interface in front of all of it.
 
 ```
 Observe / Remember →  LocusKit (spatial memory + knowledge graph)
