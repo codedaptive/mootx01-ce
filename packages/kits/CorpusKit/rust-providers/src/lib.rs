@@ -29,7 +29,12 @@
 //! `CorpusKit` and `CorpusKitProviders`.
 
 pub mod deterministic_tokenizer;
+pub mod random_indexing;
 pub mod text_providers;
 
 pub use deterministic_tokenizer::DeterministicTokenizer;
+pub use random_indexing::{
+    RandomIndexingProvider, RI_DIMENSION, RI_NONZEROS, RI_PROJECTION_SEED, RI_WINDOW,
+    ri_index_vector,
+};
 pub use text_providers::{EmbeddingGemmaProvider, MPNetTextProvider, MiniLMTextProvider};

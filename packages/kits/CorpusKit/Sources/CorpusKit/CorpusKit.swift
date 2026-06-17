@@ -153,6 +153,23 @@ public enum EmbeddingModel: Sendable {
     ///   pooled 768-element float vector.
     case embeddingGemma(inference: @Sendable ([Int32]) async throws -> [Float])
 
+    /// Random Indexing distributional-semantics provider.
+    ///
+    /// The caller constructs and trains a `RandomIndexingProvider` from
+    /// `CorpusKitProviders`, then passes it here. The trained provider is
+    /// self-contained: it requires no CoreML model bundle, no host inference
+    /// closure, and captures co-occurrence semantics from the estate's own
+    /// content during training.
+    ///
+    /// Unlike the named model cases, `.randomIndexing` carries the fully-built
+    /// provider rather than an inference closure, because the provider state
+    /// (the trained vocabulary) is built externally by the caller before
+    /// constructing the Corpus.
+    ///
+    /// See ADR-010 Decision B for the rationale and `RandomIndexingProvider`
+    /// in `CorpusKitProviders` for the full training API.
+    case randomIndexing(provider: any EmbeddingProvider & Sendable)
+
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 }
@@ -735,6 +752,11 @@ extension EmbeddingModel {
     /// never exposed on the public API.
     fileprivate func makeProvider() -> any EmbeddingProvider {
         switch self {
+        case .randomIndexing(let provider):
+            // The caller built and trained the provider externally. Pass it
+            // through unchanged — no further construction needed here.
+            return provider
+
         case .deterministic:
             // FNV-1a 64-bit hash of the input text drives a 32-element
             // float vector. Each element is drawn from an LCG seeded by

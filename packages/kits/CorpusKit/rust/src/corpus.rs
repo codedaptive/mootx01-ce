@@ -118,6 +118,8 @@ pub type NamedInferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Sen
 /// crate is linked.
 ///
 /// Use `Deterministic` (the default) for tests and offline contexts.
+/// Use `RandomIndexing` for a self-contained distributional provider
+/// that captures co-occurrence semantics from the estate's own content.
 #[derive(Default)]
 pub enum EmbeddingModelConfig {
     /// Deterministic hash embedding — no model bundle required.
@@ -127,6 +129,24 @@ pub enum EmbeddingModelConfig {
     /// not semantically meaningful. Suitable for tests and offline use.
     #[default]
     Deterministic,
+
+    /// Random Indexing distributional-semantics provider.
+    ///
+    /// The caller constructs and trains a `RandomIndexingProvider` from
+    /// `corpus-kit-providers`, then wraps it in a `Box<dyn EmbeddingProvider>`
+    /// and passes it here. The trained provider is self-contained: it
+    /// requires no host inference seam, no CoreML model bundle, and no
+    /// ML-runtime crate. Distributional co-occurrence semantics are captured
+    /// from the estate's own content during training.
+    ///
+    /// Unlike the named model cases, `RandomIndexing` carries the fully-built
+    /// provider rather than a construction closure, because the provider state
+    /// (the trained vocabulary) is built externally by the caller before
+    /// opening the Corpus.
+    ///
+    /// See ADR-010 Decision B for the rationale and `RandomIndexingProvider`
+    /// in `corpus-kit-providers` for the full training API.
+    RandomIndexing { provider: Box<dyn EmbeddingProvider> },
 
     /// MiniLM v6 text embedding (384-dim pooled output). The kit
     /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
@@ -259,6 +279,11 @@ impl Corpus {
         let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
         let provider: Box<dyn EmbeddingProvider> = match model {
             EmbeddingModelConfig::Deterministic => Box::new(make_deterministic_provider()),
+            // RandomIndexing: the caller built and trained the provider externally.
+            // It arrives as a Box<dyn EmbeddingProvider> — no further construction
+            // needed here. This differs from the named model cases (which carry a
+            // host inference closure) because the RI provider is self-contained.
+            EmbeddingModelConfig::RandomIndexing { provider } => provider,
             EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
                 "minilm-v6",
                 "1.0.0",
