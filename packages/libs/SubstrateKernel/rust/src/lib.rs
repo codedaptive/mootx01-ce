@@ -31,6 +31,10 @@ pub mod sha256;
 // RFC 5869 HKDF-SHA256, built over sha256::hash. Added PAR-4-GL1 for the
 // grant scope-key derivation conformance gate (Swift↔Rust byte-identical).
 pub mod hkdf;
+// Scalar float-vector ops (L2 norm, L2 normalise, dot, cosine).
+// Swift mirror: FloatVecOps.swift. These are the canonical IEEE-754
+// scalar implementations — higher crates call these, never reimplements inline.
+pub mod float_vec_ops;
 
 pub use kernel::*;
 
