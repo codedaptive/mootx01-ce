@@ -164,18 +164,10 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
 
     // ── Training-phase state ──────────────────────────────────────────
 
-    /// Term-to-vocabulary-index mapping (populated during training).
-    private var vocab: [String: Int]
-
-    /// tf counts: tfCounts[docIdx][termIdx] = raw count.
-    private var tfCounts: [[Int: Int]]
-
-    /// Document frequency: dfCount[termIdx] = number of documents
-    /// that contain at least one occurrence of the term.
-    private var dfCount: [Int: Int]
-
-    /// Number of training documents added so far.
-    private var numDocs: Int
+    /// Shared term-document count builder.  Owns vocab construction,
+    /// encounter-order index assignment, TF counts, and DF counts.
+    /// LSA reads both TF and DF from this builder for TF-IDF weighting.
+    private var counts: TermDocumentCounts
 
     // ── Post-finalize state ───────────────────────────────────────────
 
@@ -199,10 +191,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         self.rank = max(1, rank)
         self.svdSweeps = max(0, svdSweeps)
         self.projectionSeed = projectionSeed
-        self.vocab = [:]
-        self.tfCounts = []
-        self.dfCount = [:]
-        self.numDocs = 0
+        self.counts = TermDocumentCounts()
         self.idfWeights = []
         self.svd = nil
     }
@@ -211,43 +200,19 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
 
     /// Add a training document to the term-document matrix.
     ///
-    /// Tokenizes `document` with the canonical CorpusKit tokenizer
-    /// (defaultKeywordTokens), accumulates raw term-frequency counts
-    /// and per-term document-frequency counts for this document.
+    /// Delegates tokenization, vocabulary construction (encounter-order
+    /// index assignment), TF count accumulation, and DF count accumulation
+    /// to the shared `TermDocumentCounts` builder.
     ///
     /// Training is additive across multiple `train` calls (each call
     /// adds one document column to the term-document matrix).
     ///
-    /// - Parameter document: Raw document text. Will be tokenized by
+    /// - Parameter document: Raw document text. Tokenized by
     ///   `defaultKeywordTokens` (lowercase, alpha/digit split).
     ///
     /// - Note: Does NOT call Date() — determinism invariant.
     public func train(document: String) {
-        let terms = defaultKeywordTokens(document)
-        guard !terms.isEmpty else { return }
-
-        // Map terms to vocabulary indices, assigning new positions in
-        // encounter order (deterministic for a fixed training sequence).
-        var docTF: [Int: Int] = [:]
-        for term in terms {
-            let idx: Int
-            if let existing = vocab[term] {
-                idx = existing
-            } else {
-                idx = vocab.count
-                vocab[term] = idx
-            }
-            docTF[idx, default: 0] += 1
-        }
-
-        // Accumulate document-frequency counts.
-        for termIdx in docTF.keys {
-            dfCount[termIdx, default: 0] += 1
-        }
-
-        // Append this document's TF counts.
-        tfCounts.append(docTF)
-        numDocs += 1
+        counts.addDocument(document)
     }
 
     // MARK: Finalization
@@ -278,26 +243,23 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// Natural log on both sides; add-1 smoothing in IDF denominator.
     public func finalize() {
-        guard numDocs > 0, !vocab.isEmpty else { return }
-
-        let N = numDocs
-        let vocabSize = vocab.count
+        let N = counts.documentCount
+        let vocabSize = counts.vocabularySize
+        guard N > 0, vocabSize > 0 else { return }
 
         // Compute IDF weights indexed by vocabulary position.
-        // idfWeights[j] = log((N+1) / (dfCount[j]+1))
+        // idfWeights[j] = log((N+1) / (dfCounts[j]+1))
         // Natural log: matches Rust's f32::ln().
         idfWeights = [Float](repeating: 0, count: vocabSize)
-        for (termIdx, df) in dfCount {
+        for (termIdx, df) in counts.dfCounts {
             let idf = log(Float(N + 1) / Float(df + 1))
-            idfWeights[termIdx] = max(0, idf)  // clamp to 0 (should always be ≥ 0 with add-1)
+            idfWeights[termIdx] = max(0, idf)  // clamp to 0 (always ≥ 0 with add-1 smoothing)
         }
-        // Terms with zero df (shouldn't occur but guard defensively):
-        // idf = log((N+1)/1) > 0; already handled above for all terms in dfCount.
 
         // Build the TF-IDF matrix M (numDocs × vocabSize, row-major).
         // M[i][j] = log(1 + tf[i][j]) * idfWeights[j]
         var M: [[Float]] = [[Float]](repeating: [Float](repeating: 0, count: vocabSize), count: N)
-        for (docIdx, docTF) in tfCounts.enumerated() {
+        for (docIdx, docTF) in counts.tfCounts.enumerated() {
             for (termIdx, count) in docTF {
                 let tf = log(1 + Float(count))
                 let tfidf = tf * idfWeights[termIdx]
@@ -384,7 +346,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         guard !terms.isEmpty else { return nil }
 
         let k = svdResult.rank
-        let vocabSize = vocab.count
+        let vocabSize = counts.vocabularySize
 
         // Compute the TF-IDF vector for the query text.
         // tf(t) = log(1 + raw_count(t)) * idf(t)
@@ -392,7 +354,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         var rawCounts: [Int: Int] = [:]
         var hasInVocab = false
         for term in terms {
-            if let idx = vocab[term] {
+            if let idx = counts.vocab[term] {
                 rawCounts[idx, default: 0] += 1
                 hasInVocab = true
             }
@@ -450,7 +412,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// - Returns: L2-normalised k-dim float vector, or nil if docIdx is
     ///   out of range or finalize() has not been called.
     public func documentEmbedding(at docIdx: Int) -> [Float]? {
-        guard let svdResult = svd, docIdx >= 0, docIdx < numDocs else { return nil }
+        guard let svdResult = svd, docIdx >= 0, docIdx < counts.documentCount else { return nil }
         let k = svdResult.rank
         // docVec[r] = U[docIdx][r] * sigma[r]
         var docVec = [Float](repeating: 0, count: k)
@@ -465,10 +427,10 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     // MARK: Vocabulary access (for conformance tests)
 
     /// Number of training documents added so far.
-    public var documentCount: Int { numDocs }
+    public var documentCount: Int { counts.documentCount }
 
     /// Size of the vocabulary built from training documents.
-    public var vocabularySize: Int { vocab.count }
+    public var vocabularySize: Int { counts.vocabularySize }
 
     /// True if finalize() has been called with at least one document.
     public var isFinalized: Bool { svd != nil }

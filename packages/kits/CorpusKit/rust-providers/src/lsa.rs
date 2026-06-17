@@ -43,6 +43,7 @@
 // These are conformance-gated substrate primitives.
 // ─────────────────────────────────────────────────────────────────
 
+use crate::term_document_counts::TermDocumentCounts;
 use corpus_kit::default_keyword_tokens;
 use engram_lib::Engram;
 use std::collections::HashMap;
@@ -89,17 +90,10 @@ pub struct LsaProvider {
 
     // ── Training-phase state ──────────────────────────────────────────
 
-    /// Term → vocabulary index mapping.
-    vocab: HashMap<String, usize>,
-
-    /// tf counts: tf_counts[docIdx][termIdx] = raw count.
-    tf_counts: Vec<HashMap<usize, usize>>,
-
-    /// Document frequency: df_count[termIdx] = number of docs containing term.
-    df_count: HashMap<usize, usize>,
-
-    /// Number of training documents added so far.
-    num_docs: usize,
+    /// Shared term-document count builder. Owns vocab construction
+    /// (encounter-order index assignment), TF counts, and DF counts.
+    /// LSA reads both TF and DF from this builder for TF-IDF weighting.
+    counts: TermDocumentCounts,
 
     // ── Post-finalize state ───────────────────────────────────────────
 
@@ -134,10 +128,7 @@ impl LsaProvider {
             rank: rank.max(1),
             svd_sweeps,
             projection_seed,
-            vocab: HashMap::new(),
-            tf_counts: Vec::new(),
-            df_count: HashMap::new(),
-            num_docs: 0,
+            counts: TermDocumentCounts::new(),
             idf_weights: Vec::new(),
             vt: Vec::new(),
             sigma: Vec::new(),
@@ -155,33 +146,11 @@ impl LsaProvider {
 
     /// Add one training document.
     ///
-    /// Tokenizes `document` with corpus_kit::default_keyword_tokens,
-    /// accumulates TF and DF statistics.
+    /// Delegates tokenization, vocabulary construction (encounter-order
+    /// index assignment), TF count accumulation, and DF count accumulation
+    /// to the shared `TermDocumentCounts` builder.
     pub fn train(&mut self, document: &str) {
-        let terms = default_keyword_tokens(document);
-        if terms.is_empty() {
-            return;
-        }
-
-        let mut doc_tf: HashMap<usize, usize> = HashMap::new();
-        for term in &terms {
-            let idx = if let Some(&existing) = self.vocab.get(term.as_str()) {
-                existing
-            } else {
-                let idx = self.vocab.len();
-                self.vocab.insert(term.clone(), idx);
-                idx
-            };
-            *doc_tf.entry(idx).or_insert(0) += 1;
-        }
-
-        // Document frequency counts.
-        for &term_idx in doc_tf.keys() {
-            *self.df_count.entry(term_idx).or_insert(0) += 1;
-        }
-
-        self.tf_counts.push(doc_tf);
-        self.num_docs += 1;
+        self.counts.add_document(document);
     }
 
     // MARK: Finalization
@@ -196,18 +165,17 @@ impl LsaProvider {
     ///   idf(t)     = ln((N + 1) / (df(t) + 1))
     ///   tfidf(t,d) = tf(t, d) * idf(t)
     pub fn finalize(&mut self) {
-        if self.num_docs == 0 || self.vocab.is_empty() {
+        let n = self.counts.document_count();
+        let vocab_size = self.counts.vocabulary_size();
+        if n == 0 || vocab_size == 0 {
             return;
         }
 
-        let n = self.num_docs;
-        let vocab_size = self.vocab.len();
-
         // Compute IDF weights.
-        // idf_weights[j] = ln((N+1) / (df[j]+1)), clamped to >= 0.
+        // idf_weights[j] = ln((N+1) / (df_counts[j]+1)), clamped to >= 0.
         // Using f32::ln — same transcendental as Swift's `log()` on f32.
         self.idf_weights = vec![0.0_f32; vocab_size];
-        for (&term_idx, &df) in &self.df_count {
+        for (&term_idx, &df) in &self.counts.df_counts {
             let idf = ((n + 1) as f32 / (df + 1) as f32).ln();
             self.idf_weights[term_idx] = idf.max(0.0);
         }
@@ -215,7 +183,7 @@ impl LsaProvider {
         // Build TF-IDF matrix M (numDocs × vocabSize, row-major).
         // M[i][j] = log(1 + tf[i][j]) * idf[j]
         let mut m: Vec<Vec<f32>> = vec![vec![0.0_f32; vocab_size]; n];
-        for (doc_idx, doc_tf) in self.tf_counts.iter().enumerate() {
+        for (doc_idx, doc_tf) in self.counts.tf_counts.iter().enumerate() {
             for (&term_idx, &count) in doc_tf {
                 let tf = (1.0 + count as f32).ln();
                 let tfidf = tf * self.idf_weights[term_idx];
@@ -279,12 +247,12 @@ impl LsaProvider {
 
     /// Number of training documents.
     pub fn document_count(&self) -> usize {
-        self.num_docs
+        self.counts.document_count()
     }
 
     /// Vocabulary size.
     pub fn vocabulary_size(&self) -> usize {
-        self.vocab.len()
+        self.counts.vocabulary_size()
     }
 
     /// True if `finalize()` has been called with at least one document.
@@ -308,14 +276,14 @@ impl LsaProvider {
             return None;
         }
 
-        let vocab_size = self.vocab.len();
+        let vocab_size = self.counts.vocabulary_size();
         let k = self.effective_rank;
 
         // Build sparse TF-IDF query vector.
         let mut raw_counts: HashMap<usize, usize> = HashMap::new();
         let mut has_in_vocab = false;
         for term in &terms {
-            if let Some(&idx) = self.vocab.get(term.as_str()) {
+            if let Some(&idx) = self.counts.vocab.get(term.as_str()) {
                 *raw_counts.entry(idx).or_insert(0) += 1;
                 has_in_vocab = true;
             }
@@ -374,7 +342,7 @@ impl LsaProvider {
     /// Return the pre-computed document embedding at `doc_idx`.
     /// Returns `None` if out of range or not finalized.
     pub fn document_embedding(&self, doc_idx: usize) -> Option<Vec<f32>> {
-        if !self.is_finalized() || doc_idx >= self.num_docs {
+        if !self.is_finalized() || doc_idx >= self.counts.document_count() {
             return None;
         }
         Some(self.doc_vecs[doc_idx].clone())

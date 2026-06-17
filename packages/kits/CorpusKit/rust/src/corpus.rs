@@ -170,6 +170,16 @@ pub enum EmbeddingModelConfig {
     /// See ADR-010 Decision B and `LsaProvider` in `corpus-kit-providers`.
     Lsa { provider: Box<dyn EmbeddingProvider> },
 
+    /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
+    ///
+    /// The caller constructs, trains, and finalizes an `NmfProvider` (TF-weighted
+    /// term-document matrix factorized via SubstrateML's NMFAlternatingLeastSquares
+    /// with tolerance=0 for fixed iteration count / bit-identical output) and
+    /// passes it here.
+    ///
+    /// See ADR-010 Decision B and `NmfProvider` in `corpus-kit-providers`.
+    Nmf { provider: Box<dyn EmbeddingProvider> },
+
     /// MiniLM v6 text embedding (384-dim pooled output). The kit
     /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
     /// through FloatSimHash with the canonical MiniLM seed; the host
@@ -314,6 +324,10 @@ impl Corpus {
             // Lsa: the caller built and trained the LsaProvider externally (term-
             // document matrix + Jacobi SVD). Pass through unchanged.
             EmbeddingModelConfig::Lsa { provider } => provider,
+            // Nmf: the caller built, trained, and finalized the NmfProvider externally
+            // (TF matrix + NMF factorization via SubstrateML, tolerance=0 for
+            // fixed iteration count / bit-identical output). Pass through unchanged.
+            EmbeddingModelConfig::Nmf { provider } => provider,
             EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
                 "minilm-v6",
                 "1.0.0",
