@@ -60,6 +60,69 @@ fn start_is_idempotent() {
 // ───────────────────────────── retention ───────────────────────────────────
 
 #[test]
+fn retention_override_survives_restart() {
+    // Two manager instances share one store path; the second must restore the
+    // window set by the first from the persisted sidecar. Mirrors the Swift
+    // test `retentionOverrideSurvivesRestart` in MootManagerRetentionPersistenceTests.
+    let store_path = scratch_store();
+    let custom_window: i64 = 42 * 60; // 42 minutes, arbitrary non-default
+
+    // First manager: set a custom window and stop.
+    {
+        let cfg = ManagerConfig::new(store_path.clone(), 7 * 24 * 60 * 60, 3600);
+        let mut m = MootManager::new(cfg);
+        m.start().expect("first start must succeed");
+        m.set_retention(custom_window)
+            .expect("set_retention must accept a positive window");
+        assert_eq!(
+            m.effective_retention_window_secs(),
+            custom_window,
+            "in-process override must apply immediately"
+        );
+        m.stop();
+    }
+
+    // Second manager at the same path: the override must be restored from the sidecar.
+    {
+        let cfg = ManagerConfig::new(store_path, 7 * 24 * 60 * 60, 3600);
+        let mut m = MootManager::new(cfg);
+        m.start().expect("second start must succeed");
+        assert_eq!(
+            m.effective_retention_window_secs(),
+            custom_window,
+            "retention override must survive restart via persisted sidecar"
+        );
+        m.stop();
+    }
+}
+
+#[test]
+fn invalid_retention_does_not_corrupt_sidecar() {
+    // A rejected set_retention call must not change the persisted or in-memory value.
+    // Mirrors the Swift test `invalidRetentionIsRejected`.
+    let cfg = ManagerConfig::new(scratch_store(), 7 * 24 * 60 * 60, 3600);
+    let mut m = MootManager::new(cfg);
+    m.start().expect("store must open");
+
+    let valid_window: i64 = 3600;
+    m.set_retention(valid_window).expect("valid window must be accepted");
+    assert_eq!(m.effective_retention_window_secs(), valid_window);
+
+    // Non-positive window must be rejected.
+    assert!(
+        matches!(m.set_retention(0), Err(ManagerError::InvalidRetention)),
+        "zero window must be rejected"
+    );
+    // In-memory override must be unchanged after the rejection.
+    assert_eq!(
+        m.effective_retention_window_secs(),
+        valid_window,
+        "failed set_retention must leave the existing override intact"
+    );
+    m.stop();
+}
+
+#[test]
 fn retention_window_override_takes_effect() {
     let mut m = started_manager();
     assert_eq!(m.effective_retention_window_secs(), 7 * 24 * 60 * 60);

@@ -79,10 +79,12 @@ pub struct MootManager {
     store: Option<StatsStore>,
     /// Runtime override of the retention window (set via the gated control
     /// channel `set retention`). `None` means "use config.retention_window_secs".
-    /// Held in-process (not persisted): the Phase-1 StatsStore exposes no generic
-    /// control upsert, so a custom window cannot be durably written without
-    /// editing ObserverSink (out of this crate's scope — same constraint the
-    /// Swift host documents). A restart falls back to the configured default.
+    ///
+    /// Persisted to a JSON sidecar file (`moot-mgr-prefs.json`) next to the
+    /// stats store so the override survives process restart. Loaded in `start()`
+    /// via `load_persisted_retention_override` and written in `set_retention`.
+    /// The manager owns that directory, so it owns the sidecar file.
+    /// Mirrors Swift `MootManager.retentionOverride`.
     retention_override_secs: Option<i64>,
     /// The cutoff (epoch seconds) the most-recent retention pass used, surfaced
     /// by /api/config. Held in-process (the store has no public reader for its
@@ -111,6 +113,11 @@ impl MootManager {
     /// Provision and open the stats store, applying the schema/migrations.
     /// Creates the store's parent directory if needed. Idempotent at the store
     /// level (`StatsStore::open` is forward-only). Mirrors Swift `MootManager.start()`.
+    ///
+    /// Restores any persisted retention override from the sidecar JSON file so
+    /// the custom window survives process restart. When the sidecar is absent
+    /// or unparseable, `retention_override_secs` stays `None` and the configured
+    /// default applies — the safe, expected behaviour on first start.
     pub fn start(&mut self) -> Result<(), ManagerError> {
         if let Some(parent) = std::path::Path::new(&self.config.store_path).parent() {
             std::fs::create_dir_all(parent).map_err(|e| ManagerError::Storage {
@@ -120,6 +127,8 @@ impl MootManager {
         let store = StatsStore::new(&self.config.store_path)?;
         store.open()?;
         self.store = Some(store);
+        // Restore any persisted retention override so the window survives restart.
+        self.retention_override_secs = self.load_persisted_retention_override();
         Ok(())
     }
 
@@ -164,11 +173,17 @@ impl MootManager {
 
     /// Set the retention window at runtime (the gated `set retention` verb). A
     /// non-positive window is rejected. Mirrors Swift `MootManager.setRetention(window:)`.
+    ///
+    /// The new window takes effect on the next `run_retention` call. The override
+    /// is persisted to the JSON sidecar file so it survives process restart. A
+    /// write failure is logged to stderr but does not surface as an error — the
+    /// in-process override applies immediately regardless of disk state.
     pub fn set_retention(&mut self, window_secs: i64) -> Result<(), ManagerError> {
         if window_secs <= 0 {
             return Err(ManagerError::InvalidRetention);
         }
         self.retention_override_secs = Some(window_secs);
+        self.persist_retention_override(window_secs);
         Ok(())
     }
 
@@ -688,6 +703,55 @@ impl MootManager {
     /// surface — matching Swift `MootManager.latticePayload()`.
     pub fn lattice_payload(&self) -> crate::api_payloads::LatticeSnapshotPayload {
         proxy_lattice_snapshot()
+    }
+
+    // MARK: - Retention override persistence
+
+    /// Filesystem path of the sidecar JSON file that persists the retention override.
+    ///
+    /// Placed alongside the stats store so the manager's data is self-contained —
+    /// the manager already creates/owns that directory. Format:
+    /// `<store-parent>/moot-mgr-prefs.json`. Mirrors Swift `MootManager.retentionPrefsURL`.
+    fn retention_prefs_path(&self) -> std::path::PathBuf {
+        std::path::Path::new(&self.config.store_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("moot-mgr-prefs.json")
+    }
+
+    /// Persist the retention override to the sidecar JSON file.
+    ///
+    /// Best-effort write: logs to stderr on failure but does not propagate the
+    /// error. The in-process value is authoritative for the current run;
+    /// persistence is for restart survival. Format: `{"retentionWindow": <secs>}`.
+    /// Mirrors Swift `MootManager.persistRetentionOverride(_:)`.
+    fn persist_retention_override(&self, window_secs: i64) {
+        let path = self.retention_prefs_path();
+        let json = format!("{{\"retentionWindow\":{}}}", window_secs);
+        if let Err(e) = std::fs::write(&path, json.as_bytes()) {
+            eprintln!("moot-mgr: failed to persist retention override to {path:?}: {e}");
+        }
+    }
+
+    /// Load the persisted retention override from the sidecar JSON file, if present.
+    ///
+    /// Returns `None` when the file is absent (first start, or removed), when
+    /// the value is non-positive (guards against a corrupted write), or when the
+    /// file cannot be decoded. Called once in `start()` after the store opens.
+    /// Mirrors Swift `MootManager.loadPersistedRetentionOverride()`.
+    fn load_persisted_retention_override(&self) -> Option<i64> {
+        let path = self.retention_prefs_path();
+        let data = std::fs::read(&path).ok()?;
+        // Minimal JSON parse: {"retentionWindow": <integer>}
+        // Using serde_json (already a transitive dependency via api_payloads) via
+        // a local anonymous struct avoids adding a top-level import.
+        let map: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_slice(&data).ok()?;
+        let window = map.get("retentionWindow")?.as_i64()?;
+        if window <= 0 {
+            return None;
+        }
+        Some(window)
     }
 
     // MARK: - Internals
