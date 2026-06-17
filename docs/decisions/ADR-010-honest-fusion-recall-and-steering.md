@@ -107,8 +107,30 @@ ablation/combination optimizer on the real corpus, not hand-fixed. New providers
   substrate already computes honest meaning signals (FDC, NMF); dark would
   needlessly discard real retrieval capability.
 
+## Addendum 2026-06-16 — Decision B (build the full fusion now) + encoder readiness
+
+Bob's ruling: build **all** of D-1's signals now — FDC, **Random Indexing**,
+**PPMI**, **NMF-for-retrieval**, and **LSA (SVD)** — not a thinned first slice.
+Random Indexing is the lightest *genuine* distributional method (seeded sparse
+index vectors, deterministic, incremental, no SVD) and ships in the first wave.
+LSA's SVD is the one heavyweight kernel: bit-identical Swift↔Rust conformance is
+a real challenge (platform LAPACK/Accelerate diverge), so it requires a
+**deterministic SVD** and its own conformance-vector mission — that is honest
+engineering granularity, NOT a deferral; LSA is in scope and gets built.
+
+**Encoder readiness (1.1):** the learned CoreML/MiniLM encoder (D-3, #2b) stays
+dark for now but the seam must be **flip-the-switch ready** — within days of
+starting 1.1 dev. Concretely: the fusion must accept a new voter generically
+(adding the encoder = registering a provider, no RecallDirector rewrite); the
+Apple CoreML inference closure is scaffolded so wiring a model bundle is the only
+remaining step; the provider selection (optimizer/config) can enable it without
+code change.
+
 ## Changelog
 
+- 2026-06-16 — v1.1.0 — Addendum: Decision B (build full fusion incl. LSA/SVD
+  now; deterministic-SVD conformance mission) + CoreML encoder flip-the-switch
+  readiness for 1.1.
 - 2026-06-16 — v1.0.0 — Initial decision (D-1…D-5). Implementation tracked as the
   recall-fusion follow-on; the capture→encode→index wiring it depends on is a
   separate prerequisite fix (VaultKit import → `capture(mode:.regular)` +
