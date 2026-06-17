@@ -714,6 +714,31 @@ impl AuditLog for InMemoryAuditLog {
         Ok(events)
     }
 
+    fn row_ids_with_audit_verbs(
+        &self,
+        row_ids: &[RowKey],
+        verbs: &[&str],
+    ) -> StorageResult<std::collections::HashSet<RowKey>> {
+        if row_ids.is_empty() || verbs.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        // Build look-up sets for O(1) membership tests inside the scan loop.
+        let id_set: std::collections::HashSet<RowKey> = row_ids.iter().copied().collect();
+        let verb_set: std::collections::HashSet<&str> = verbs.iter().copied().collect();
+        let state = self.state.lock().unwrap();
+        // Scan the event vec once: collect row_ids that are in the requested
+        // set AND have a matching verb. This is the InMemory equivalent of:
+        //   SELECT DISTINCT row_id FROM _storagekit_audit
+        //   WHERE row_id IN (...) AND verb IN (...)
+        let covered: std::collections::HashSet<RowKey> = state
+            .audit_events
+            .iter()
+            .filter(|e| id_set.contains(&e.row_id) && verb_set.contains(e.verb.as_str()))
+            .map(|e| e.row_id)
+            .collect();
+        Ok(covered)
+    }
+
     fn count(&self) -> StorageResult<usize> {
         Ok(self.state.lock().unwrap().audit_events.len())
     }

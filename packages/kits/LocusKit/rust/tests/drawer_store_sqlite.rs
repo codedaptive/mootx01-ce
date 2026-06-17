@@ -1239,3 +1239,124 @@ fn estate_all_tunnels_b1_path_works_on_sqlite_backend() {
         .expect("B-1 reader path must work on a SQLite-backed estate, not DatabaseUnavailable");
     assert_eq!(all.len(), 1, "the single estate tunnel must surface via the B-1 path");
 }
+
+// ---------------------------------------------------------------------------
+// § N — tombstoned_rows_without_expunge_audit SQL LEFT JOIN conformance
+//
+// Verifies that the SQLite-backed DrawerStore returns exactly the set of
+// tombstoned drawers that have NO corresponding "tombstone" or
+// "expungeOrphan" audit event — the crash-window orphan set.
+//
+// The implementation uses two SQL queries that together are semantically
+// equivalent to a LEFT JOIN (see drawer_store_sqlite.rs comment). This
+// test confirms the result is identical to the InMemory scan reference,
+// which is the correctness criterion for the optimisation.
+// ---------------------------------------------------------------------------
+
+/// Three drawers in various expunge states:
+///
+///   A: expunge_gated(seal_audit: true)  → tombstoned + audit sealed
+///   B: expunge_gated(seal_audit: false) → tombstoned, NO audit (orphan)
+///   C: not expunged at all              → live, not tombstoned
+///
+/// Expected: tombstoned_rows_without_expunge_audit returns exactly [B].
+#[test]
+fn tombstoned_rows_without_expunge_audit_sql_join_returns_only_orphans() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    // Drawer A — will be tombstoned with the audit event sealed immediately.
+    let id_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let da = sample_drawer(id_a, "w", "k", "content-a");
+    store.add_drawer(&da, NOW).unwrap();
+
+    // Drawer B — will be tombstoned but audit NOT sealed (crash-window orphan).
+    let id_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let db_ = sample_drawer(id_b, "w", "k", "content-b");
+    store.add_drawer(&db_, NOW).unwrap();
+
+    // Drawer C — never expunged; stays live.
+    let id_c = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let dc = sample_drawer(id_c, "w", "k", "content-c");
+    store.add_drawer(&dc, NOW).unwrap();
+
+    // Expunge A with audit sealed (normal expunge path — not an orphan).
+    store
+        .expunge_gated(id_a, "alice", None, NOW + 10, true)
+        .unwrap();
+
+    // Expunge B with audit NOT sealed (crash-window simulation — is an orphan).
+    store
+        .expunge_gated(id_b, "alice", None, NOW + 20, false)
+        .unwrap();
+
+    // tombstoned_rows_without_expunge_audit must return exactly [B].
+    let orphans = store
+        .tombstoned_rows_without_expunge_audit()
+        .expect("SQL LEFT JOIN path must succeed on a live SQLite estate");
+
+    assert_eq!(
+        orphans.len(),
+        1,
+        "exactly one orphan (drawer B) expected; got {:?}",
+        orphans.iter().map(|d| d.id.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        orphans[0].id, id_b,
+        "the orphan must be drawer B (tombstoned without audit seal)"
+    );
+
+    // Drawer A has an audit event — must NOT appear in the orphan set.
+    assert!(
+        orphans.iter().all(|d| d.id != id_a),
+        "drawer A has a sealed audit event and must not appear as an orphan"
+    );
+
+    // Drawer C is not tombstoned — must NOT appear.
+    assert!(
+        orphans.iter().all(|d| d.id != id_c),
+        "drawer C is not tombstoned and must not appear in the orphan set"
+    );
+}
+
+/// Empty estate: tombstoned_rows_without_expunge_audit returns an empty Vec,
+/// not DatabaseUnavailable. This guards the fail-loud trait default — the
+/// SQL backends must override it with a real implementation.
+#[test]
+fn tombstoned_rows_without_expunge_audit_empty_estate_returns_ok_empty() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let orphans = store
+        .tombstoned_rows_without_expunge_audit()
+        .expect("empty durable estate must return Ok(empty), not DatabaseUnavailable");
+    assert!(
+        orphans.is_empty(),
+        "fresh estate has no tombstoned rows and must return an empty orphan set"
+    );
+}
+
+/// All tombstoned rows have audit events: orphan set is empty.
+/// Confirms the LEFT JOIN correctly returns zero rows when the right-hand
+/// side matches every tombstoned drawer.
+#[test]
+fn tombstoned_rows_without_expunge_audit_all_sealed_returns_empty() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    let id_x = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    let id_y = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    store.add_drawer(&sample_drawer(id_x, "w", "k", "cx"), NOW).unwrap();
+    store.add_drawer(&sample_drawer(id_y, "w", "k", "cy"), NOW).unwrap();
+
+    // Both expunged with audit sealed — neither is an orphan.
+    store.expunge_gated(id_x, "alice", None, NOW + 1, true).unwrap();
+    store.expunge_gated(id_y, "alice", None, NOW + 2, true).unwrap();
+
+    let orphans = store
+        .tombstoned_rows_without_expunge_audit()
+        .expect("all-sealed tombstoned set must return Ok(empty), not error");
+    assert!(
+        orphans.is_empty(),
+        "all tombstoned rows have audit events; orphan set must be empty"
+    );
+}

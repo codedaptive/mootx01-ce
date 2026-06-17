@@ -2520,10 +2520,9 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
-        // Step 1: fetch all tombstoned drawers.
-        // The InMemory backend does not support a JOIN so we scan tombstoned
-        // rows and check each one's audit log individually. Tombstoned rows
-        // are rare in practice (each expunge removes one); this is bounded.
+        // Step 1: fetch all tombstoned drawers (tombstonedAt IS NOT NULL),
+        // ordered by tombstonedAt ascending so the result is deterministic.
+        // The idx_drawers_tombstoned index covers this predicate on SQL backends.
         let rows = self
             .storage
             .row_store()
@@ -2533,7 +2532,10 @@ impl DrawerStore for DrawerStoreCore {
                     T_DRAWERS,
                     "tombstonedAt",
                 ))),
-                &[],
+                &[OrderClause::new(
+                    Column::new(T_DRAWERS, "tombstonedAt"),
+                    OrderDirection::Ascending,
+                )],
                 None,
                 None,
             )
@@ -2543,19 +2545,45 @@ impl DrawerStore for DrawerStoreCore {
             .map(drawer_from_row)
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Step 2: for each tombstoned row, check the audit log for a
-        // "tombstone" or "expungeOrphan" event. Rows that have neither
-        // event are in the crash-window or double-failure set.
-        let mut orphans = Vec::new();
-        for drawer in tombstoned {
-            let events = self.audit_events_for_row(&drawer.id)?;
-            let has_expunge_audit = events
-                .iter()
-                .any(|e| e.verb == "tombstone" || e.verb == "expungeOrphan");
-            if !has_expunge_audit {
-                orphans.push(drawer);
-            }
+        if tombstoned.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // Step 2: parse drawer IDs as UUIDs — the audit log uses RowKey = Uuid.
+        // Every drawer ID stored in the database must be a valid UUID (the write
+        // gate validates this at insert time). An unparseable ID here means the
+        // row is corrupt; propagate as an error rather than silently skipping.
+        let row_keys: Vec<uuid::Uuid> = tombstoned
+            .iter()
+            .map(|d| require_uuid(&d.id, "drawerId"))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Step 3: batch query — which of these tombstoned row_ids already have
+        // a "tombstone" or "expungeOrphan" audit event?
+        //
+        // On SQL backends (SQLite, PostgreSQL) this resolves to a single
+        // indexed query equivalent to:
+        //   SELECT DISTINCT row_id FROM _storagekit_audit
+        //   WHERE row_id IN (...) AND verb IN ('tombstone', 'expungeOrphan')
+        //
+        // On the InMemory backend the AuditLog scans its event vec once.
+        // Either way: two total queries (drawers + audit batch) instead of
+        // N+1 (drawers + one events_for_row per tombstoned drawer).
+        let covered = self
+            .storage
+            .audit_log()
+            .row_ids_with_audit_verbs(&row_keys, &["tombstone", "expungeOrphan"])
+            .map_err(map_storage_err)?;
+
+        // Step 4: return only those tombstoned drawers whose UUID is absent
+        // from the covered set — these are the crash-window orphans.
+        let orphans = tombstoned
+            .into_iter()
+            .zip(row_keys.into_iter())
+            .filter(|(_, key)| !covered.contains(key))
+            .map(|(drawer, _)| drawer)
+            .collect();
+
         Ok(orphans)
     }
 
