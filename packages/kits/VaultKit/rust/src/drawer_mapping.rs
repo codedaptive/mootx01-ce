@@ -31,7 +31,7 @@
 use crate::error::VaultKitError;
 use crate::note_ir::{NoteIR, OccurredAt, WikiLink};
 use crate::vault_export_scope::VaultExportScope;
-use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
+use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, intake::WriteMode};
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
     drawer::Drawer,
@@ -437,10 +437,16 @@ impl DrawerMapping {
     /// duplicates). Mirrors Swift `DrawerMapping.importNote(_:kit:handle:...)`.
     ///
     /// `now` is passed by the caller so this function is deterministic.
+    ///
+    /// `coordinator` is `&mut` because `capture_with_mode` (WriteMode::Regular)
+    /// mounts and feeds the per-estate encode queue, which requires mutable access.
+    /// The dual-path intake bug fix: import now routes through `capture_with_mode`
+    /// so the drawer is enqueued for BM25/vector encoding — previously, the row-only
+    /// `capture` was called here, leaving the BM25/vector lanes dark for all imports.
     pub fn import_note(
         &self,
         note: &NoteIR,
-        coordinator: &EstateCoordinator,
+        coordinator: &mut EstateCoordinator,
         handle: &EstateHandle,
         existing_lineage_ids: &std::collections::HashSet<Uuid>,
         existing_sensitivity_by_lineage: &std::collections::HashMap<Uuid, AdjectiveSensitivity>,
@@ -472,8 +478,15 @@ impl DrawerMapping {
             }
         }
 
+        // Route through capture_with_mode(Regular) so the drawer is enqueued for
+        // BM25/vector encoding (dual-path intake, G7). The row-only `capture` left
+        // BM25/vector lanes dark for all imported content — this is the Rust side of
+        // the same bug fixed in Swift DrawerMapping.importNote. WriteMode::Regular
+        // is correct for batch import: the write returns immediately, the encode
+        // drain ingests asynchronously. The caller (VaultBridge.import_notes) drives
+        // `await_encode_drain` when a synchronous-encode guarantee is needed.
         let drawer = coordinator
-            .capture(handle, frame, now)
+            .capture_with_mode(handle, frame, now, WriteMode::Regular)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
 
         // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER

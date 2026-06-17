@@ -93,8 +93,15 @@ pub struct ExportReport {
 
 /// The public facade: bridges a MOOT estate and a Markdown vault in both
 /// directions. Mirrors Swift `VaultBridge`.
+///
+/// `coordinator` is `&mut` because `import_notes` routes through
+/// `capture_with_mode(WriteMode::Regular)`, which mounts and feeds the per-estate
+/// encode queue (dual-path intake fix, G7). Export methods only need an immutable
+/// borrow; holding `&mut` is compatible — Rust coerces `&mut T` to `&T` for read-only
+/// dispatch. Callers that only export may hold the coord mutably for the bridge
+/// lifetime with no behavioural change.
 pub struct VaultBridge<'a> {
-    coordinator: &'a EstateCoordinator,
+    coordinator: &'a mut EstateCoordinator,
     adapter: Box<dyn VaultAdapter>,
     mapping: DrawerMapping,
 }
@@ -108,12 +115,14 @@ impl<'a> VaultBridge<'a> {
     /// Construct a `VaultBridge`.
     ///
     /// - `coordinator`: the open `EstateCoordinator` whose estates this bridge
-    ///   reads and writes.
+    ///   reads and writes. `&mut` is required because import routes through the
+    ///   mode-aware capture verb (`capture_with_mode`), which mounts and feeds the
+    ///   per-estate encode queue.
     /// - `adapter`: the vault format adapter. Pass `Box::new(ObsidianAdapter::new())`
     ///   for the default Obsidian behaviour.
     /// - `mapping`: the substrate mapping policy.
     pub fn new(
-        coordinator: &'a EstateCoordinator,
+        coordinator: &'a mut EstateCoordinator,
         adapter: Box<dyn VaultAdapter>,
         mapping: DrawerMapping,
     ) -> Self {
@@ -176,7 +185,7 @@ impl<'a> VaultBridge<'a> {
     /// `now` is milliseconds-since-epoch, supplied by the caller and stamped
     /// on the audit receipt.
     pub fn import_vault(
-        &self,
+        &mut self,
         vault_path: &Path,
         handle: &EstateHandle,
         now: i64,
@@ -204,7 +213,7 @@ impl<'a> VaultBridge<'a> {
     ///
     /// Mirrors Swift `VaultBridge.importVault(at:includingPaths:into:now:)`.
     pub fn import_vault_filtered(
-        &self,
+        &mut self,
         vault_path: &Path,
         candidate_paths: &std::collections::HashSet<String>,
         handle: &EstateHandle,
@@ -238,7 +247,7 @@ impl<'a> VaultBridge<'a> {
     /// stamped on the audit receipt. `adapter` is parameterized so tests
     /// can point at fixture palaces with non-default collections.
     pub fn import_mem_palace(
-        &self,
+        &mut self,
         palace_root: &Path,
         handle: &EstateHandle,
         now: i64,
@@ -253,8 +262,11 @@ impl<'a> VaultBridge<'a> {
     /// in which adapter produced the notes; everything from the existing-
     /// state snapshot to the audit receipt is identical and lives here.
     /// Mirrors Swift `VaultBridge.importNotes(_:into:source:now:)`.
+    ///
+    /// `&mut self` is required because `import_note` calls `capture_with_mode`
+    /// (dual-path intake fix) which needs `&mut EstateCoordinator`.
     fn import_notes(
-        &self,
+        &mut self,
         notes: &[crate::note_ir::NoteIR],
         handle: &EstateHandle,
         source: &str,

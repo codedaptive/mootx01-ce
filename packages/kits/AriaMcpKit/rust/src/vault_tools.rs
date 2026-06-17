@@ -311,7 +311,10 @@ fn run_export(
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let open = registry.resolve(args, "estateID")?;
-    let coord = open.coord.lock().map_err(|_| {
+    // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake fix
+    // — import routes through capture_with_mode which needs mutable coord access).
+    // Export only reads the coordinator, but the bridge holds &mut for uniformity.
+    let mut coord = open.coord.lock().map_err(|_| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
             "vault_export: estate coordinator lock poisoned",
@@ -319,7 +322,7 @@ fn run_export(
     })?;
 
     let bridge = VaultBridge::new(
-        &coord,
+        &mut coord,
         Box::new(ObsidianAdapter::new()),
         DrawerMapping::default(),
     );
@@ -419,15 +422,17 @@ fn run_import(
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let open = registry.resolve(args, "estateID")?;
-    let coord = open.coord.lock().map_err(|_| {
+    // mut: VaultBridge::new requires &mut EstateCoordinator (import routes through
+    // capture_with_mode — dual-path intake fix, G7).
+    let mut coord = open.coord.lock().map_err(|_| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
             "vault_import: estate coordinator lock poisoned",
         )
     })?;
 
-    let bridge = VaultBridge::new(
-        &coord,
+    let mut bridge = VaultBridge::new(
+        &mut coord,
         Box::new(ObsidianAdapter::new()),
         DrawerMapping::default(),
     );
@@ -594,14 +599,16 @@ fn run_reconcile(
         // so drawers_updated reports M (candidates actioned), not N (vault size).
         // candidate_paths drives the path-scoped import_vault_filtered — non-
         // candidate notes never enter the capture loop.
-        let coord = open.coord.lock().map_err(|_| {
+        // mut: VaultBridge::new requires &mut EstateCoordinator (import routes
+        // through capture_with_mode — dual-path intake fix, G7).
+        let mut coord = open.coord.lock().map_err(|_| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INTERNAL_ERROR,
                 "vault_reconcile: estate coordinator lock poisoned",
             )
         })?;
-        let bridge = VaultBridge::new(
-            &coord,
+        let mut bridge = VaultBridge::new(
+            &mut coord,
             Box::new(ObsidianAdapter::new()),
             DrawerMapping::default(),
         );

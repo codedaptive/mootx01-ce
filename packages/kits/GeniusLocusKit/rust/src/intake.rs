@@ -474,6 +474,71 @@ impl EstateCoordinator {
             .map_err(|e| verb_fail(format!("await_encode_drain latch failed: {e:?}")))
     }
 
+    // MARK: - reindexMissing
+
+    /// Enqueue encode jobs for every active drawer that is not yet present in
+    /// the estate's Corpus (BM25/vector index). Returns the count of drawers
+    /// enqueued. Idempotent: drawers already indexed are skipped. Empty-content
+    /// drawers are skipped (nothing to encode). Tombstoned drawers are skipped.
+    ///
+    /// Used to backfill estates populated before the dual-path intake bug fix:
+    /// content captured via the row-only path (pre-G7 fix) never reached the
+    /// Corpus, so BM25/vector recall returned zero hits for that content. This
+    /// method surfaces the missing population and re-enqueues it as if the
+    /// content were freshly captured. Swift parity: `GeniusLocusKit.reindexMissing`.
+    ///
+    /// `now` is the enqueue instant in milliseconds since epoch (deterministic —
+    /// no wall-clock read inside the engine, matching the Swift convention).
+    ///
+    /// Returns 0 immediately when no Corpus is registered for the estate (e.g. a
+    /// LocusOnly estate), matching the Swift guard `guard let corpus = corpusKits[handle]`.
+    pub fn reindex_missing(
+        &mut self,
+        handle: &EstateHandle,
+        // `_now` is retained for Swift parity (Swift passes `now` for deterministic
+        // timestamps; Rust reuses drawer.filed_at inside enqueue_encode_job, which
+        // already carries the capture instant). The parameter is present so callers
+        // can be written symmetrically across both ports.
+        _now: i64,
+    ) -> Result<usize, VerbDispatchError> {
+        // Guard: only estates with a registered Corpus have a BM25/vector lane.
+        let corpus = match self.corpus_for(handle) {
+            Some(c) => c,
+            None => return Ok(0),
+        };
+
+        // Snapshot which drawer IDs are already indexed so we enqueue only the
+        // missing subset. indexed_source_ids() is a full-table scan on the chunks
+        // table — acceptable for a maintenance/admin path, not a hot path.
+        let indexed_ids = corpus
+            .indexed_source_ids()
+            .map_err(|e| verb_fail(format!("reindex_missing: indexed_source_ids failed: {e:?}")))?;
+
+        // Read all drawers (including tombstoned) so we can filter active ones.
+        let all_drawers = self.all_drawers(handle)?;
+
+        let mut enqueued = 0;
+        for drawer in all_drawers {
+            // Skip tombstoned drawers — they were intentionally removed.
+            if drawer.tombstoned_at.is_some() {
+                continue;
+            }
+            // Skip drawers with no content (nothing to encode).
+            if drawer.content.is_empty() {
+                continue;
+            }
+            // Skip drawers already present in the Corpus (idempotent).
+            if indexed_ids.contains(&drawer.id) {
+                continue;
+            }
+            // Enqueue via the same path as capture_with_mode(Regular) — G4:
+            // source_id = drawer.id so BM25/vector hits hydrate back to the Drawer row.
+            self.enqueue_encode_job(handle, &drawer)?;
+            enqueued += 1;
+        }
+        Ok(enqueued)
+    }
+
     // MARK: - Internals
 
     /// Enqueue an `EncodeJob` for a captured drawer (P3). Swift parity:

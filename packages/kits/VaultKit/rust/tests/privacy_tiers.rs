@@ -63,7 +63,10 @@ fn capture_tier_corpus(coord: &EstateCoordinator, handle: &EstateHandle) {
     }
 }
 
-fn bridge(coord: &EstateCoordinator) -> VaultBridge<'_> {
+// `&mut EstateCoordinator` required: VaultBridge::new takes &mut so that
+// import_notes can route through capture_with_mode (dual-path intake fix, G7).
+// Export-only tests still pass mut to bridge — export only reads the coord.
+fn bridge(coord: &mut EstateCoordinator) -> VaultBridge<'_> {
     VaultBridge::new(
         coord,
         Box::new(ObsidianAdapter::new()),
@@ -102,11 +105,11 @@ fn write_note(vault: &PathBuf, rel: &str, text: &str) {
 
 #[test]
 fn default_scope_enforces_tiers() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     capture_tier_corpus(&coord, &handle);
     let vault = temp_vault("default");
 
-    let report = bridge(&coord)
+    let report = bridge(&mut coord)
         .export(&handle, &vault, NOW, VaultExportScope::Believed)
         .expect("export");
 
@@ -128,11 +131,11 @@ fn default_scope_enforces_tiers() {
 
 #[test]
 fn explicit_scope_includes_private_tier_never_secret() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     capture_tier_corpus(&coord, &handle);
     let vault = temp_vault("private");
 
-    let report = bridge(&coord)
+    let report = bridge(&mut coord)
         .export(&handle, &vault, NOW, VaultExportScope::BelievedIncludingPrivate)
         .expect("export");
 
@@ -149,12 +152,12 @@ fn explicit_scope_includes_private_tier_never_secret() {
 
 #[test]
 fn secret_never_exports_under_any_scope() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     capture_tier_corpus(&coord, &handle);
 
     for scope in VaultExportScope::all_cases() {
         let vault = temp_vault(scope.as_str());
-        bridge(&coord)
+        bridge(&mut coord)
             .export(&handle, &vault, NOW, *scope)
             .expect("export");
         assert!(
@@ -170,7 +173,7 @@ fn secret_never_exports_under_any_scope() {
 
 #[test]
 fn import_preserves_sensitivity_from_frontmatter() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let vault = temp_vault("arrival");
     write_note(
         &vault,
@@ -178,7 +181,7 @@ fn import_preserves_sensitivity_from_frontmatter() {
         "---\nroom: tiers\nsensitivity: restricted\n---\nAn arriving private-tier note.\n",
     );
 
-    let report = bridge(&coord)
+    let report = bridge(&mut coord)
         .import_vault(&vault, &handle, NOW)
         .expect("import");
     assert_eq!(report.drawers_written, 1);
@@ -208,7 +211,7 @@ fn import_preserves_sensitivity_from_frontmatter() {
 
 #[test]
 fn sensitivity_round_trips_via_frontmatter() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mut frame = CaptureFrame::new(
         "elevated note",
         CaptureChannel::Typed,
@@ -221,14 +224,14 @@ fn sensitivity_round_trips_via_frontmatter() {
     coord.capture(&handle, frame, NOW).expect("capture");
 
     let vault = temp_vault("roundtrip");
-    bridge(&coord)
+    bridge(&mut coord)
         .export(&handle, &vault, NOW, VaultExportScope::Believed)
         .expect("export");
     assert!(all_markdown(&vault).contains("sensitivity: elevated"));
 
     // Re-import into a fresh estate; the tier must survive the trip.
-    let (coord_b, handle_b) = open_one();
-    bridge(&coord_b)
+    let (mut coord_b, handle_b) = open_one();
+    bridge(&mut coord_b)
         .import_vault(&vault, &handle_b, NOW)
         .expect("import");
     let recall_frame = RecallFrame {
@@ -256,7 +259,7 @@ fn sensitivity_round_trips_via_frontmatter() {
 
 #[test]
 fn reimport_cannot_downgrade_sensitivity() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     // A restricted (Private-tier) drawer is captured normally.
     let mut frame = CaptureFrame::new(
         "a restricted secret kept private",
@@ -281,7 +284,7 @@ fn reimport_cannot_downgrade_sensitivity() {
         ),
     );
 
-    bridge(&coord)
+    bridge(&mut coord)
         .import_vault(&vault, &handle, NOW)
         .expect("import");
 
@@ -315,7 +318,7 @@ fn reimport_cannot_downgrade_sensitivity() {
 
     // And it still does not ride a default bulk export.
     let export_vault = temp_vault("attack-export");
-    let report = bridge(&coord)
+    let report = bridge(&mut coord)
         .export(&handle, &export_vault, NOW, VaultExportScope::Believed)
         .expect("export");
     assert_eq!(report.excluded_private_tier, 1);
@@ -327,7 +330,7 @@ fn reimport_cannot_downgrade_sensitivity() {
 
 #[test]
 fn reimport_may_raise_sensitivity() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let mut frame = CaptureFrame::new(
         "started normal, becomes secret",
         CaptureChannel::Typed,
@@ -349,7 +352,7 @@ fn reimport_may_raise_sensitivity() {
         ),
     );
 
-    bridge(&coord)
+    bridge(&mut coord)
         .import_vault(&vault, &handle, NOW)
         .expect("import");
 
@@ -387,11 +390,11 @@ fn reimport_may_raise_sensitivity() {
 
 #[test]
 fn export_writes_exactly_one_receipt_with_counts_and_now() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     capture_tier_corpus(&coord, &handle);
     let vault = temp_vault("receipt-export");
 
-    bridge(&coord)
+    bridge(&mut coord)
         .export(&handle, &vault, NOW, VaultExportScope::Believed)
         .expect("export");
 
@@ -418,7 +421,7 @@ fn export_writes_exactly_one_receipt_with_counts_and_now() {
 
 #[test]
 fn import_writes_exactly_one_receipt_with_counts() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     let vault = temp_vault("receipt-import");
     write_note(
         &vault,
@@ -426,7 +429,7 @@ fn import_writes_exactly_one_receipt_with_counts() {
         "---\nroom: research\n---\nA note that arrives.\n",
     );
 
-    bridge(&coord)
+    bridge(&mut coord)
         .import_vault(&vault, &handle, NOW)
         .expect("import");
 
@@ -447,12 +450,12 @@ fn import_writes_exactly_one_receipt_with_counts() {
 
 #[test]
 fn receipts_accumulate_per_run() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     capture_tier_corpus(&coord, &handle);
 
     for i in 0..2 {
         let vault = temp_vault(&format!("accumulate-{i}"));
-        bridge(&coord)
+        bridge(&mut coord)
             .export(&handle, &vault, NOW, VaultExportScope::Believed)
             .expect("export");
         let _ = std::fs::remove_dir_all(&vault);
@@ -471,14 +474,15 @@ fn receipts_accumulate_per_run() {
 // what it is handed.
 #[test]
 fn bridge_export_through_exchange_write_side_enforces_tiers_and_writes_receipt() {
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     capture_tier_corpus(&coord, &handle);
     let out = std::env::temp_dir()
         .join(format!("vk-export-01-bridge-{}", uuid::Uuid::new_v4()))
         .join("estate.json");
 
+    // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake fix, G7).
     let bridge = VaultBridge::new(
-        &coord,
+        &mut coord,
         Box::new(vault_kit::ExchangeAdapter::new()),
         DrawerMapping::new("tier-tests", "test-v1", false),
     );

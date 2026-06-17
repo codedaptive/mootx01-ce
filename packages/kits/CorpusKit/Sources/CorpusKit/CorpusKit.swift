@@ -705,6 +705,17 @@ public actor Corpus {
     public func count() async throws -> Int {
         try await bundleStore.count()
     }
+
+    /// Return the set of all distinct source IDs (drawer IDs) currently in the
+    /// chunks table — i.e. every drawer that has been ingested into this Corpus.
+    ///
+    /// Used by `GeniusLocusKit.reindexMissing(handle:)` to identify which
+    /// drawers already have at least one chunk and can be skipped during
+    /// a backfill sweep. The query touches all chunk rows but is only used
+    /// in maintenance/admin contexts, never on hot paths.
+    public func indexedSourceIDs() async throws -> Set<String> {
+        try await bundleStore.allSourceIDs()
+    }
 }
 
 // MARK: - EmbeddingModel → provider construction

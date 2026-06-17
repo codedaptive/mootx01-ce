@@ -704,6 +704,8 @@ enum InterfaceTools {
         case "moot_estate_status":     return try await dispatcher.runEstateStatus(args)
         case "moot_estate_map":        return try await dispatcher.runEstateMap(args)
         case "moot_estate_ping":        return try await dispatcher.runEstatePing(args)
+        // Maintenance / admin
+        case "moot_reindex":           return try await dispatcher.runReindex(args)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -1389,6 +1391,29 @@ extension ToolDispatcher {
         return Self.textResult(
             "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live"
         )
+    }
+
+    /// `moot_reindex` — enqueue encode jobs for drawers not yet in the Corpus.
+    ///
+    /// This is a maintenance / admin tool, NOT one of the nine ARIA grammar
+    /// verbs. It is used to backfill existing content that was captured before
+    /// the dual-path intake wiring landed (or after an accidental data loss in
+    /// the BM25/vector indexes). All unindexed drawers are enqueued for
+    /// background encoding via the estate's encode queue (the same `.regular`
+    /// path as normal captures). Encoding is asynchronous — this call returns
+    /// as soon as the jobs are enqueued, not after they complete.
+    ///
+    /// Idempotent: drawers already in the Corpus BundleStore are skipped.
+    /// Callers can poll `moot_estate_status` for encode-queue depth or simply
+    /// wait for the background drain worker to settle.
+    ///
+    /// Returns a summary: how many drawers were enqueued and how many were
+    /// already indexed.
+    func runReindex(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let now = Date()
+        let enqueued = try await kit.reindexMissing(handle: handle, now: now)
+        return Self.textResult("reindex: enqueued \(enqueued) drawers for encoding")
     }
 }
 

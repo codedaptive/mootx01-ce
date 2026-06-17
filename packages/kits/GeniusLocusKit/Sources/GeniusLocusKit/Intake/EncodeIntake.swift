@@ -205,6 +205,68 @@ public extension GeniusLocusKit {
         try await queue.awaitDrain(timeout: timeout)
     }
 
+    // MARK: - reindexMissing (backfill for pre-wiring drawers)
+
+    /// Enqueue encode jobs for every active drawer in the estate that is NOT
+    /// already present in the Corpus BundleStore.
+    ///
+    /// Use this after deploying the dual-path intake fix to backfill the existing
+    /// drawers that were captured before the encode pipeline was wired. Each
+    /// missing drawer is enqueued as a `.regular` EncodeJob — the background drain
+    /// worker ingests them into the Corpus (BM25 + vector) asynchronously, so this
+    /// call returns quickly regardless of estate size.
+    ///
+    /// **Idempotent:** drawers already in the BundleStore (identified by
+    /// `Corpus.indexedSourceIDs()`) are skipped. Calling this multiple times is
+    /// safe — already-indexed drawers are never double-enqueued.
+    ///
+    /// **No Corpus, no-op:** if no Corpus is registered for the estate (e.g. a
+    /// `.locusOnly` estate), the call returns 0 immediately.
+    ///
+    /// - Parameters:
+    ///   - handle: The estate to reindex. Must be open.
+    ///   - now: The operation instant used as the capture timestamp for enqueued
+    ///     jobs. Pass the current date; the caller never reads the clock inside an
+    ///     engine (determinism rule).
+    /// - Returns: The number of drawers enqueued for re-encoding.
+    /// - Throws: An estate-not-open error if the handle is stale; a corpus query
+    ///   error if the indexed-source-IDs query fails; an estate recall error.
+    public func reindexMissing(
+        handle: EstateHandle,
+        now: Date
+    ) async throws -> Int {
+        // No Corpus → no semantic lane to feed. Return immediately.
+        guard let corpus = corpusKits[handle] else { return 0 }
+
+        // Fetch the set of source IDs already indexed in the BundleStore.
+        // These are the drawer IDs that already have chunks and can be skipped.
+        let indexedIDs = try await corpus.indexedSourceIDs()
+
+        // Recall all active (non-tombstoned) drawers from the estate.
+        // .full hydration is required because we need the drawer content to
+        // enqueue the EncodeJob payload. (.structured returns content = "")
+        let estate = try estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        let activeDrawers = allDrawers.filter { $0.tombstonedAt == nil }
+
+        var enqueued = 0
+        for drawer in activeDrawers {
+            // Skip drawers with empty content — nothing to encode (matches the
+            // guard in enqueueEncodeJob).
+            guard !drawer.content.isEmpty else { continue }
+            // Skip drawers already in the BundleStore — idempotence.
+            guard !indexedIDs.contains(drawer.id) else { continue }
+            // Enqueue using the existing P3 path. The drain worker picks it up
+            // near-realtime. The draw's filedAt is used as the capture instant
+            // so vector filing timestamps are deterministic (not now).
+            try await enqueueEncodeJob(handle: handle, drawer: drawer)
+            enqueued += 1
+        }
+        Self.intakeLog.info(
+            "reindexMissing: enqueued \(enqueued, privacy: .public) drawers for estate \(handle.estateUUID, privacy: .public) (\(activeDrawers.count, privacy: .public) active, \(indexedIDs.count, privacy: .public) already indexed)")
+        return enqueued
+    }
+
     // MARK: - Internals
 
     /// Enqueue an `EncodeJob` for a captured drawer (P3).

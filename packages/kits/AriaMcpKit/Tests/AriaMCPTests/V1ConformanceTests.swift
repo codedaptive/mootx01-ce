@@ -130,12 +130,12 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 52 tools.
+    /// VC-2: `tools/list` returns exactly 54 tools.
     ///
     /// The count is a snapshot of the v1.0 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
     /// and commit the reason with the change.
-    @Test func v1ToolsListReturns52Tools() async throws {
+    @Test func v1ToolsListReturns54Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -154,9 +154,9 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 53 = 19 core ARIA + 1 federation + 7 recipe + 21 lens + 5 vault tools.
-        // The 7th recipe tool is moot_dream (matrix rebuild + dreaming cycle).
-        #expect(tools.count == 53, "tools/list must return exactly 53 tools; got \(tools.count)")
+        // 54 = 19 core ARIA + 1 federation + 7 recipe + 21 lens + 5 vault + 1
+        // maintenance (moot_reindex). The 7th recipe tool is moot_dream.
+        #expect(tools.count == 54, "tools/list must return exactly 54 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

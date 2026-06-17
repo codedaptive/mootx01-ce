@@ -383,11 +383,13 @@ fn open_one() -> (EstateCoordinator, EstateHandle) {
 
 #[test]
 fn import_mem_palace_fixture_palace_lands_in_estate_idempotent_on_reimport() {
-    let (coord, handle) = open_one();
+    // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake
+    // fix — import_notes routes through capture_with_mode, G7).
+    let (mut coord, handle) = open_one();
     // The bridge's constructor adapter handles `import_vault`; the
     // MemPalace lane passes its adapter explicitly.
-    let bridge =
-        VaultBridge::new(&coord, Box::new(ObsidianAdapter::new()), DrawerMapping::default());
+    let mut bridge =
+        VaultBridge::new(&mut coord, Box::new(ObsidianAdapter::new()), DrawerMapping::default());
     let adapter = MemPalaceChromaAdapter::new();
 
     let first = bridge

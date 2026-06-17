@@ -187,6 +187,99 @@ struct EncodeIntakeTests {
 
     // MARK: - EncodeJob payload round-trips through QueueKit's Job
 
+    // MARK: - reindexMissing: backfill for pre-wiring drawers
+
+    /// `reindexMissing` enqueues an EncodeJob for every active drawer that is
+    /// NOT already in the Corpus BundleStore, so content captured before the
+    /// dual-path wiring (or after an index loss) becomes BM25/vector searchable.
+    ///
+    /// Sequence:
+    ///   1. Capture a drawer via the LEGACY no-mode overload (simulating pre-wiring
+    ///      content: the row lands but the Corpus is never fed).
+    ///   2. Assert the drawer is NOT findable via BM25 (semantic lane dark).
+    ///   3. Call `reindexMissing`. Assert the return value is 1.
+    ///   4. Drain the encode queue. Assert the drawer IS now findable via BM25.
+    @Test
+    func reindexMissingEnqueuesUnindexedDrawersAndTheyBecomeSearchable() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        let content = "palladium platinum catalyst oxidation chemical"
+
+        // 1. Capture via the legacy path (row-only, no Corpus feed). This simulates
+        //    content that landed before the dual-path intake wiring.
+        let drawer = try await kit.capture(handle, captureFrame(content))
+
+        // 2. Drain the queue and confirm the drawer is NOT in the Corpus yet.
+        //    (The legacy capture never enqueued a job, so the queue is empty and
+        //    the drawer's sourceID is absent from the BundleStore.)
+        try await kit.awaitEncodeDrain(for: handle)
+        let beforeResult = try await kit.recall(handle, hybridRequest(query: "palladium catalyst"))
+        let beforeHit = beforeResult.hits.first { $0.drawer?.id == drawer.id && $0.sources.contains(.corpusBM25) }
+        #expect(beforeHit == nil,
+            "legacy-captured drawer must NOT be found via BM25 before reindexMissing")
+
+        // 3. Call reindexMissing. It should enqueue exactly 1 job.
+        let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
+        #expect(enqueued == 1,
+            "reindexMissing must enqueue 1 job for the 1 un-indexed drawer; got \(enqueued)")
+
+        // 4. Drain and confirm the drawer IS now semantically searchable.
+        try await kit.awaitEncodeDrain(for: handle)
+        let afterResult = try await kit.recall(handle, hybridRequest(query: "palladium catalyst oxidation"))
+        let afterHit = afterResult.hits.first { $0.drawer?.id == drawer.id && $0.sources.contains(.corpusBM25) }
+        #expect(afterHit != nil,
+            "after reindexMissing + drain, the drawer must surface via .corpusBM25")
+    }
+
+    /// `reindexMissing` skips drawers that are already in the Corpus —
+    /// idempotence invariant.
+    @Test
+    func reindexMissingSkipsAlreadyIndexedDrawers() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Capture via the mode-aware path (indexed immediately via regular drain).
+        _ = try await kit.capture(handle, captureFrame("rhodium iridium rare metal group"), mode: .regular)
+        try await kit.awaitEncodeDrain(for: handle)
+
+        // reindexMissing should find 0 missing (the drawer is already indexed).
+        let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
+        #expect(enqueued == 0,
+            "reindexMissing must skip already-indexed drawers; expected 0, got \(enqueued)")
+    }
+
+    /// `reindexMissing` correctly handles a mix: some drawers indexed, some not.
+    @Test
+    func reindexMissingHandlesMixedIndexedAndUnindexed() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Capture 2 via mode-aware (will be indexed).
+        _ = try await kit.capture(handle, captureFrame("vanadium steel alloying element"), mode: .regular)
+        _ = try await kit.capture(handle, captureFrame("chromium stainless hardening"), mode: .regular)
+        try await kit.awaitEncodeDrain(for: handle)
+
+        // Capture 3 via legacy path (will NOT be indexed).
+        _ = try await kit.capture(handle, captureFrame("niobium tantalum columbite ore"))
+        _ = try await kit.capture(handle, captureFrame("molybdenum disulfide lubricant"))
+        _ = try await kit.capture(handle, captureFrame("tungsten carbide cutting insert"))
+
+        // reindexMissing must enqueue exactly 3 (the un-indexed ones).
+        let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
+        #expect(enqueued == 3,
+            "reindexMissing must enqueue 3 un-indexed drawers; got \(enqueued)")
+
+        // After draining, all 3 un-indexed drawers should be BM25-searchable.
+        try await kit.awaitEncodeDrain(for: handle)
+        let result = try await kit.recall(handle, hybridRequest(query: "niobium tungsten carbide"))
+        let corpusHits = result.hits.filter { $0.sources.contains(.corpusBM25) }
+        #expect(corpusHits.count >= 1,
+            "at least 1 reindexed drawer must surface via BM25 after drain; got \(corpusHits.count)")
+    }
+
+    // MARK: - EncodeJob round-trip
+
     /// The EncodeJob payload (P2) survives a Job encode/decode round-trip,
     /// preserving the drawer id, estate uuid, text, model id, and capture instant.
     @Test
