@@ -1,75 +1,120 @@
-# MOOTx01 Harness Support Kit
+# MOOTx01 Agent Adapters
 
-This directory contains starter implementations that teach AI harnesses to use
-MOOTx01 as an automatic memory and reasoning substrate.
+This directory teaches AI clients to use MOOTx01 as memory.
 
-The package is intentionally redundant across platforms. Each harness has its
-own native file layout, while `shared/` is the source-of-truth language to keep
-behavior consistent.
+Installing the MOOTx01 runtime gives an AI client the tools. Installing one of these adapters teaches the AI when to use those tools.
 
-## Design Goal
+That difference matters.
 
-Make the AI instinctively reach for MOOTx01 when memory, continuity, recall,
-grounded synthesis, contradiction checking, preference learning, or durable
-writeback matters.
+Without the adapter, the user may have to ask for memory every time. With the adapter, the AI should reach for MOOTx01 when memory, continuity, recall, contradiction checking, preference learning, or durable writeback matters.
+
+## What The Adapter Teaches
+
+The AI should use MOOTx01 to:
+
+- check what was decided before,
+- recall project context,
+- file durable memories,
+- link related memories,
+- keep facts and journal entries,
+- search before guessing,
+- synthesize from remembered context,
+- write back useful new knowledge.
 
 MOOTx01 is not a passive wiki. A wiki stores text for the model to reread.
-MOOTx01 stores memory as a substrate: memories, facts, links, journals, trust
-state, recall indexes, graph structure, reasoning lenses, and dream-built
-association signals. The agent should spend cheap substrate operations before
-spending expensive context-window tokens.
+
+MOOTx01 stores memory as mathematically cross-referenced collections of: memories, facts, links, journals, trust state, recall indexes, graph structure, reasoning lenses, and dream-built association signals.
+
+This ensures your agent can spend cheap memory operations before spending expensive context-window tokens.
+
+## Install Order
+
+Use this order:
+
+1. Install or expose MOOTx01 as an MCP server.
+2. Verify the client can see the MOOTx01 tools.
+3. Copy the matching adapter into the client config.
+4. Merge with existing instructions instead of replacing them.
+5. Test that the AI recalls, files, and links memory.
+
+Do not install the adapter before the runtime works.
 
 ## Contents
 
-- `shared/` - harness-neutral instructions and policy blocks.
-- `claude/` - Claude Code `CLAUDE.md`, rules, skill, and command stubs.
-- `codex/` - Codex `AGENTS.md`, Agent Skill, and hook notes.
-- `cursor/` - Cursor `.cursor/rules/*.mdc` and legacy `.cursorrules`.
-- `cline/` - Cline `.clinerules/*.md`.
-- `roo/` - Roo Code `.roo/rules/*.md` and `.roorules`.
-- `windsurf/` - Devin Desktop/Windsurf `.devin/rules`, `.windsurf/rules`, and legacy `.windsurfrules`.
-- `continue/` - Continue `.continue/rules/*.md`.
-- `openai-agents/` - prompt blocks for OpenAI Agents/Responses-style apps.
-- `generic/` - minimal fallback for any harness with only custom instructions.
+- `shared/` - source language used across adapters.
+- `claude/` - Claude Code files.
+- `codex/` - Codex files.
+- `cursor/` - Cursor rules.
+- `cline/` - Cline rules.
+- `roo/` - Roo Code rules.
+- `windsurf/` - Devin Desktop / Windsurf rules.
+- `continue/` - Continue rules.
+- `openai-agents/` - prompt blocks for OpenAI Agents or Responses-style apps.
+- `generic/` - fallback custom instructions.
 
-## Recommended Installation Pattern
+## Where Each Adapter Installs
 
-1. Install or expose MOOTx01 as an MCP server in the target harness.
-2. Copy the relevant platform folder contents into a project or user-level
-   configuration location.
-3. Keep the shared documents nearby as reference, but avoid loading all of them
-   into every model context if the platform supports smaller rule files.
-4. Test with three prompts:
-   - "What did we decide last time about the importer?"
-   - "Summarize what we know about this project from memory."
-   - "We decided X; remember that and link it to the earlier Y decision."
+Copy into a project root for one project, or into the client's user-level config location for all projects.
 
-## Where each adapter installs
-
-Each folder targets its client's native files. Copy into the **project root** for one project,
-or the client's **user-level** config directory for all projects (see the client's own docs for
-its user-level path).
-
-| Client | Destination files (relative to project root) |
+| Client | Destination files |
 |---|---|
 | `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md` |
 | `codex/` | `AGENTS.md`, `.agents/skills/mootx01-memory/{SKILL.md, agents/openai.yaml}`, `.codex/hooks.json` |
-| `cursor/` | `.cursor/rules/*.mdc` (or legacy `.cursorrules`) |
+| `cursor/` | `.cursor/rules/*.mdc` or legacy `.cursorrules` |
 | `cline/` | `.clinerules/*.md` |
-| `roo/` | `.roo/rules/*.md` (or legacy `.roorules`) |
-| `windsurf/` | `.windsurf/rules/*.md` / `.devin/rules/*.md` (or legacy `.windsurfrules`) |
+| `roo/` | `.roo/rules/*.md` or legacy `.roorules` |
+| `windsurf/` | `.windsurf/rules/*.md`, `.devin/rules/*.md`, or legacy `.windsurfrules` |
 | `continue/` | `.continue/rules/*.md` |
-| `openai-agents/` | paste `system-prompt.md` / `developer-message.md` / `tool-contract.md` into your app's prompt slots |
-| `generic/` | paste `custom-instructions.md` into the harness's custom-instructions field |
+| `openai-agents/` | paste prompt files into app prompt slots |
+| `generic/` | paste `custom-instructions.md` into custom instructions |
 
-## Installation rules (read before copying)
+## Safety Rules
 
-- **Merge, do not overwrite.** If a destination already exists (the user has their own
-  `CLAUDE.md`, `AGENTS.md`, rules, …), **append** the MOOTx01 block — never replace the file.
-- **Back up first.** Copy any existing instruction file aside before editing it.
-- **Get approval.** Do not change a user's existing instruction files without their explicit
-  approval. Brand-new files the user doesn't have yet may be added freely.
-- **Don't over-load context.** Prefer the client's small rule files; keep `shared/` as
+- Merge, do not overwrite existing instruction files.
+- Back up existing instruction files before editing.
+- Get user approval before changing an existing user config.
+- Prefer small native rule files over loading all shared docs into context.
+- Keep `shared/` nearby as reference, not as bulk prompt content.
+
+## Test Prompts
+
+After installing an adapter, test with:
+
+```text
+What did we decide last time about the importer?
+```
+
+```text
+Summarize what we know about this project from memory.
+```
+
+```text
+We decided X; remember that and link it to the earlier Y decision.
+```
+
+A working setup should show three behaviors:
+
+- recall old memory,
+- summarize from memory,
+- write a new linked memory.
+
+## Expected Tool Surface
+
+These adapters assume the MOOTx01 MCP surface exposes tools with these meanings:
+
+- estate health and status,
+- memory search and precise recall,
+- memory filing and updates,
+- memory confirmation, withdrawal, and erasure,
+- memory links and connection search,
+- fact filing and fact search,
+- journal read and write,
+- reasoning lenses and synthesis,
+- dream or background consolidation,
+- vault import, export, status, reconcile, and job checks,
+- federated search where available.
+
+If a harness namespaces MCP tools, use the matching namespaced tool.
   reference, not as bulk context.
 
 ## Tool Name Assumptions
