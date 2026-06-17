@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.1.0
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -427,11 +427,29 @@ it.
   `governor.register_default_standing_signals(model_id, now)` once before
   `run_loop`, reading the store via the now-`pub`
   `EstateCoordinator::vector_store_for`. The serial-lane single-drainer
-  guarantee is identical. The `register_default_standing_signals` /
-  `register_standing_signal` methods are the producer SEAM where the
-  graph-centrality and Bradley-Terry producers plug in (outputs land in GLK
-  `recall::{GraphCache, PreferenceStore}`); the producers are not part of the
-  governor harness itself.
+  guarantee is identical. The standing-signal scheduler drives
+  propose/associate/diagnostic emissions only; the recall-cache PRODUCERS are
+  governor DUTIES, not scheduler signals (see the graph-centrality producer
+  duty below).
+
+**Graph-centrality producer duty (Swift + Rust).** The PRODUCER for the recall
+`graph` score column. On its cadence (default 10 min; `graphCentralityScan` /
+`graph_centrality_duty`) the governor reads the estate structure graph (drawers +
+tunnels + kg_facts) through the shared coordinator, builds the unit-weight
+adjacency the NeuronKit `keystones` oracle consumes, computes per-drawer
+eigenvalue centrality over ALL drawers via that conformance-gated oracle (no math
+reinvented — I-17), wraps the scores in a `GraphCache`, and registers it on the
+kit/coordinator (`registerGraphCache` / `register_graph_cache`). After it runs the
+`unionBest` / `matrixAware` recall `graph` column is LIVE on both ports —
+structurally-central drawers score non-zero, identical Swift↔Rust for the same
+graph. `GovernorReport` exposes `graphCentralityFired` / `graph_centrality_fired`
+(true when the cadence gate fired). The producer is a governor duty rather than a
+standing signal because the governor is the only cadence-driver that can register
+a cache at parity: the Rust scheduler emission model cannot register a cache, and
+the synchronous emit closure has no `&mut EstateCoordinator`. Determinism: `now`
+is injected by the tick; no clock read inside the duty. An empty/edgeless estate
+registers an all-zero cache (correct — identical to no cache registered). The
+Bradley-Terry PREFERENCE producer remains a separate future duty.
 
 **Pool-reducer activation + LIVE tagger swap (Swift + Rust).** NEAR-REALTIME
 (`MOOTX01_POOL_REDUCE_CADENCE_SECONDS`, default 0 = considered every tick) the
@@ -643,6 +661,21 @@ On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Additive (mission BRAIN-GRAPH-PRODUCER — graph-centrality producer, both ports).
+Documents the new graph-centrality PRODUCER DUTY on the `AutonomicGovernor`: on a
+cadence (default 10 min) it reads the estate structure graph (drawers + tunnels +
+kg_facts), computes per-drawer eigenvalue centrality via the NeuronKit `keystones`
+oracle, and registers a `GraphCache` — taking the `unionBest`/`matrixAware` recall
+`graph` column from dark to live on BOTH ports. `GovernorReport` gains
+`graphCentralityFired` / `graph_centrality_fired`. Corrects the prior text that
+implied the recall-cache producers plug into the standing-signal registration
+seam: the producers are governor DUTIES (the scheduler emission model cannot
+register a cache, and its synchronous emit closure has no `&mut` coordinator). The
+Bradley-Terry preference producer remains a separate future duty. Swift + Rust at
+parity; conformance `GraphCentralityProducerTests.swift` /
+`graph_centrality_parity.rs`.
 
 ### 1.1.0 -- 2026-06-17
 Additive + correction (#8 Track 1 — Brain harness, Rust side). §17.1

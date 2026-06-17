@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -553,9 +553,15 @@ and ticks it each iteration, mirroring the Swift governor's
 `kit.signalTick(in:handle:now:)`. The scheduler lives in the governor (not the
 GLK coordinator) because the production dispatcher holds an
 `Arc<Mutex<EstateCoordinator>>`; a coordinator-owned scheduler would close a
-reference cycle. The registration methods are the producer SEAM where the
-graph-centrality and Bradley-Terry producers plug in (their outputs land in GLK
-`recall::{GraphCache, PreferenceStore}`):
+reference cycle. The scheduler drives propose/associate/diagnostic emissions
+only; the recall-cache PRODUCERS are governor DUTIES (the scheduler emission model
+cannot register a cache). The graph-centrality producer duty
+(`graph_centrality_duty`, fired on a cadence inside `tick`) reads the estate
+structure graph, computes per-drawer eigenvalue centrality via
+`neuron_kit::keystones`, and registers a `GraphCache` on the coordinator —
+`GovernorReport` gains `pub graph_centrality_fired: bool`. The Swift mirror is
+`AutonomicGovernor.graphCentralityScan` with `GovernorReport.graphCentralityFired`.
+The standing-signal registration methods remain the scheduler seam:
 
 ```rust
 impl AutonomicGovernor {
@@ -772,6 +778,22 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Additive (mission BRAIN-GRAPH-PRODUCER — graph-centrality producer, both ports).
+New `AutonomicGovernor` PRODUCER DUTY on both ports: Swift
+`AutonomicGovernor.graphCentralityScan(kit:handle:now:)` (a nonisolated static
+duty dispatched on the `graphCentralityIntervalMs` cadence, default 10 min) and
+Rust `graph_centrality_duty` (fired inside `tick` on the same cadence). The duty
+reads the estate structure graph, computes per-drawer eigenvalue centrality via
+the NeuronKit `keystones` oracle, and registers a `GraphCache`
+(`registerGraphCache` / `register_graph_cache`). `GovernorReport` /
+`GovernorReport` gains `graphCentralityFired` / `graph_centrality_fired`. Swift
+`AutonomicGovernor.init` gains a `graphCentralityIntervalMs` parameter; Rust adds
+the `set_graph_centrality_cadence_ms` test knob. This takes the
+`unionBest`/`matrixAware` recall `graph` column from dark to live in production on
+both ports. Corrects the prior text framing the recall-cache producers as
+standing-signal seam plug-ins: they are governor DUTIES.
 
 ### 1.2.0 -- 2026-06-17
 Additive (#8 Track 1 — Brain orchestration harness, Rust side). The Rust

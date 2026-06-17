@@ -86,6 +86,16 @@ public actor AutonomicGovernor {
     /// Wall-clock instant of the most recent graphAnalyticsScan dispatch.
     /// Nil on first tick so the scan fires immediately at startup.
     private var lastGraphAnalyticsFired: Date? = nil
+    /// How often the graph-centrality producer (graphCentralityScan) fires —
+    /// computes per-drawer eigenvalue centrality and registers the GraphCache
+    /// the recall `graph` column reads. Default 10 minutes (same cadence as
+    /// graph analytics — both ride the estate structure graph); pass 0 in
+    /// tests to fire on every tick.
+    private let graphCentralityIntervalMs: Int
+    /// Wall-clock instant of the most recent graphCentralityScan dispatch.
+    /// Nil on first tick so the producer fires immediately at startup (the
+    /// `graph` column is live from the first cadence, not after a delay).
+    private var lastGraphCentralityFired: Date? = nil
     /// Cadence for the topology snapshot duty in milliseconds.
     /// Configurable via MOOTX01_TOPOLOGY_CADENCE_SECONDS (default 300 s).
     /// Pass 0 in tests to fire on every tick.
@@ -136,6 +146,7 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         baseTickMs: Int = 5000,
         graphAnalyticsIntervalMs: Int = 600_000,
+        graphCentralityIntervalMs: Int = 600_000,
         topologyCadenceMs: Int = autonomicGovernorDefaultTopologyCadenceMs(),
         poolReduceCadenceMs: Int = autonomicGovernorDefaultPoolReduceCadenceMs(),
         topologyHandler: (@Sendable (String, Date, Data) async -> Void)? = nil,
@@ -150,6 +161,7 @@ public actor AutonomicGovernor {
         self.handle = handle
         self.baseTickMs = baseTickMs
         self.graphAnalyticsIntervalMs = graphAnalyticsIntervalMs
+        self.graphCentralityIntervalMs = graphCentralityIntervalMs
         self.topologyCadenceMs = topologyCadenceMs
         self.poolReduceCadenceMs = poolReduceCadenceMs
         self.poolDirectory = poolDirectory
@@ -179,6 +191,10 @@ public actor AutonomicGovernor {
         public let signalsTicked: Bool
         /// True when this tick dispatched a graph-analytics scan Task.
         public let graphAnalyticsFired: Bool
+        /// True when this tick dispatched a graph-centrality producer Task —
+        /// the duty that computes per-drawer eigenvalue centrality and
+        /// registers the GraphCache the recall `graph` column reads.
+        public let graphCentralityFired: Bool
         /// True when this tick dispatched a topology-snapshot duty Task.
         public let topologySnapshotFired: Bool
         /// True when this tick ran the PoolReducer (novel-token merge-back).
@@ -268,6 +284,27 @@ public actor AutonomicGovernor {
             Task { [kit, handle, now] in
                 do { try await AutonomicGovernor.graphAnalyticsScan(kit: kit, handle: handle, now: now) }
                 catch { Logging.stderr.log("AutonomicGovernor: graphAnalyticsScan error: \(error)") }
+            }
+        }
+
+        // Graph-centrality producer: compute per-drawer eigenvalue centrality
+        // and register the GraphCache the recall `graph` column reads. Same
+        // cadence shape as graph analytics (default 10 min, 0 = every tick).
+        // First tick fires immediately (lastGraphCentralityFired is nil) so the
+        // `graph` column is live from startup rather than dark for one cadence.
+        // The scan runs in an unstructured Task (graphCentralityScan is a
+        // nonisolated static func — the actor executor is released at its first
+        // await, so tick() returns without stalling). Errors are logged and
+        // never propagated to tick().
+        let graphCentralityElapsed = lastGraphCentralityFired.map {
+            now.timeIntervalSince($0) * 1000 >= Double(graphCentralityIntervalMs)
+        } ?? true
+
+        if graphCentralityElapsed {
+            lastGraphCentralityFired = now
+            Task { [kit, handle, now] in
+                do { try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: now) }
+                catch { Logging.stderr.log("AutonomicGovernor: graphCentralityScan error: \(error)") }
             }
         }
 
@@ -366,6 +403,7 @@ public actor AutonomicGovernor {
             maintenanceFired: maintenanceFired,
             signalsTicked: signalsTicked,
             graphAnalyticsFired: graphAnalyticsElapsed,
+            graphCentralityFired: graphCentralityElapsed,
             topologySnapshotFired: topologyElapsed,
             poolReduceFired: poolReduceFired,
             tableSwapped: tableSwapped,
@@ -400,6 +438,75 @@ public actor AutonomicGovernor {
             _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
             _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
         }
+    }
+
+    // MARK: - Graph-centrality producer duty
+
+    /// Compute per-drawer eigenvalue centrality for the whole estate and
+    /// register it as a `GraphCache`, taking the `unionBest` / `matrixAware`
+    /// recall `graph` score column from dark to live.
+    ///
+    /// This is the graph-centrality PRODUCER (the consumption surface —
+    /// `GeniusLocusKit.registerGraphCache` and the recall `graph` column —
+    /// already shipped; nothing was computing scores to register). It runs on
+    /// the governor's cadence, reads the estate structure graph once, shapes
+    /// it into the (nodeIDs, edges) the `NeuronKit.keystones` oracle consumes,
+    /// runs that oracle over ALL drawers (`topK = nodeIDs.count`), and installs
+    /// the resulting per-drawer scores.
+    ///
+    /// Math ownership (I-17): this duty owns NO math. Eigenvalue centrality is
+    /// the conformance-gated SubstrateML primitive surfaced by
+    /// `NeuronKit.keystones`; the duty only shapes the graph and caches the
+    /// scores. It is a faithful cadence wrapper of a direct `keystones` call
+    /// on the same graph — the cross-port conformance gate proves exactly that.
+    ///
+    /// Adjacency = drawers + tunnels + kg_facts, unit weight (the keystones
+    /// model). Built by `GraphCentralityAdjacency.build`, whose Rust twin
+    /// (`graph_centrality_adjacency`) produces the identical edge multiset, so
+    /// the two ports compute identical centralities for the same estate.
+    ///
+    /// Determinism: `now` is injected by the tick — never reads `Date()` here.
+    /// The duty's only side effect is the cache registration (idempotent
+    /// re-registration replaces the prior snapshot). An empty estate (no live
+    /// drawers, or no edges) registers an empty cache — every `graphScore` is
+    /// 0.0, identical to "no cache registered", which is correct (C-16).
+    ///
+    /// Reads go through the public GeniusLocusKit verb surface (`allDrawers`,
+    /// `allTunnels`, `recallKGFacts`) — no LocusKit reach-around (B-1).
+    ///
+    /// - Parameters:
+    ///   - kit:    The live GeniusLocusKit actor.
+    ///   - handle: The estate to score.
+    ///   - now:    Injected instant (determinism requirement).
+    static func graphCentralityScan(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async throws {
+        let drawers = try await kit.allDrawers(in: handle)
+        let tunnels = try await kit.allTunnels(in: handle)
+        let facts = try await kit.recallKGFacts(handle)
+
+        let graph = GraphCentralityAdjacency.build(
+            drawers: drawers, tunnels: tunnels, facts: facts)
+
+        // keystones over ALL nodes (topK = node count) gives every live
+        // drawer's centrality, not just the top ranks. Empty node set ⇒
+        // empty result ⇒ empty cache (C-16).
+        let ranked = NeuronKit.keystones(
+            nodeIDs: graph.nodeIDs,
+            edges: graph.edges,
+            topK: graph.nodeIDs.count)
+
+        var scores: [String: Float] = Dictionary(minimumCapacity: ranked.count)
+        for keystone in ranked {
+            // NeuronKit.Keystone.centrality is Double (the SubstrateML scalar);
+            // the GraphCache surface is Float. The narrowing is the documented
+            // float boundary the cross-port conformance gate compares at.
+            scores[keystone.id] = Float(keystone.centrality)
+        }
+
+        await kit.registerGraphCache(GraphCentralityCache(scores: scores), for: handle)
     }
 
     // MARK: - Topology snapshot duty
