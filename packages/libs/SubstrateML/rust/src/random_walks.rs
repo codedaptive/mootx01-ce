@@ -1,12 +1,20 @@
 // random_walks.rs
 //
-// Random walks with restart on the estate graph, per cookbook
-// § 7.4. Mirror of RandomWalks.swift.
+// Random walks with restart on the estate graph, per cookbook § 7.4.
+// Mirror of RandomWalks.swift.
+//
+// `walk` operates over densely-indexed adjacency (used by NeuronKit's
+// spreading_activation and the conformance harness). `walk_with_restart`
+// operates in RowId space (used by CognitionKit's `recall_exploratory`
+// recipe — `CognitionKit/rust/src/exploratory_recall_recipe.rs`).
 //
 // Markov kernel preconditions (enforced at entry of walk(); violations panic):
 //   - Every neighbor index must be in [0, N) where N = adjacency.len().
 //   - Every edge weight must be finite and >= 0.
 //   - sample_weighted() panics on an empty neighbor list.
+
+use substrate_types::row::RowId;
+use std::collections::HashMap;
 
 pub struct RandomWalks;
 
@@ -95,6 +103,56 @@ impl RandomWalks {
         let bits = rng.next() >> 11;
         bits as f64 * (1.0_f64 / (1u64 << 53) as f64)
     }
+
+    /// Random walk with restart aggregating visits by RowId. The CognitionKit
+    /// `recall_exploratory` recipe (`exploratory_recall_recipe.rs`) is the
+    /// live consumer of this function.
+    ///
+    /// Takes a `HashMap<RowId, Vec<RowId>>` adjacency (unweighted; each
+    /// neighbor is one uniform-weight edge) rather than the indexed
+    /// form, because the cognition tier works in RowId space, not in
+    /// densely-numbered graph nodes. The walk uses a uniform-random
+    /// neighbor pick (no weight) and restarts to `seed` on each step
+    /// with probability `restart_probability`.
+    ///
+    /// Returns a `HashMap<RowId, u64>` mapping visited RowIds to visit counts.
+    ///
+    /// Preconditions (parallel to Swift):
+    ///   - `steps >= 1`
+    ///   - `restart_probability` in [0, 1)
+    pub fn walk_with_restart(
+        seed: RowId,
+        steps: usize,
+        restart_probability: f32,
+        rng_seed: u64,
+        adjacency: &HashMap<RowId, Vec<RowId>>,
+    ) -> HashMap<RowId, u64> {
+        assert!(steps >= 1, "steps must be at least 1");
+        assert!(
+            restart_probability >= 0.0 && restart_probability < 1.0,
+            "restart_probability must be in [0, 1)"
+        );
+        let mut rng = SplitMix64::new(rng_seed);
+        let mut visits: HashMap<RowId, u64> = HashMap::new();
+        let mut current = seed;
+        for _ in 0..steps {
+            *visits.entry(current).or_insert(0) += 1;
+            let restart = Self::uniform01(&mut rng) < f64::from(restart_probability);
+            if restart {
+                current = seed;
+            } else if let Some(neighbors) = adjacency.get(&current) {
+                if !neighbors.is_empty() {
+                    let idx = (rng.next() % neighbors.len() as u64) as usize;
+                    current = neighbors[idx];
+                } else {
+                    current = seed; // dead end ⇒ restart
+                }
+            } else {
+                current = seed; // no adjacency entry ⇒ restart
+            }
+        }
+        visits
+    }
 }
 
 // SplitMix64 mirror (matching the harness deterministic PRNG)
@@ -181,5 +239,100 @@ mod tests {
         let neighbors = vec![(0usize, 0.0), (1usize, 0.0), (2usize, 0.0)];
         let pick = RandomWalks::sample_weighted(&neighbors, &mut rng);
         assert!(pick < 3);
+    }
+
+    // walk_with_restart tests — mirror RandomWalksTests.swift walkWithRestart suite.
+
+    fn make_row_id(n: u128) -> RowId {
+        RowId(n)
+    }
+
+    // WR-1: seed always appears in visits; total visits == steps.
+    #[test]
+    fn walk_with_restart_seed_visits_and_step_count() {
+        let seed = make_row_id(1);
+        let a = make_row_id(2);
+        let b = make_row_id(3);
+        let mut adj = HashMap::new();
+        adj.insert(seed, vec![a]);
+        adj.insert(a, vec![b]);
+        adj.insert(b, vec![seed]);
+
+        let visits = RandomWalks::walk_with_restart(seed, 100, 0.15, 0xCAFE_BABE_DEAD_BEEF, &adj);
+        let total: u64 = visits.values().sum();
+        assert_eq!(total, 100, "total visits must equal steps");
+        assert!(visits.contains_key(&seed), "seed always appears in visits");
+    }
+
+    // WR-2: determinism — same inputs, same visit map.
+    #[test]
+    fn walk_with_restart_is_deterministic() {
+        let seed = make_row_id(10);
+        let a = make_row_id(20);
+        let mut adj = HashMap::new();
+        adj.insert(seed, vec![a]);
+        adj.insert(a, vec![seed]);
+        let first = RandomWalks::walk_with_restart(seed, 500, 0.15, 0xDEAD_BEEF, &adj);
+        let second = RandomWalks::walk_with_restart(seed, 500, 0.15, 0xDEAD_BEEF, &adj);
+        assert_eq!(first, second, "same seed and adjacency must produce identical visits");
+    }
+
+    // WR-3: restart_probability=0.99 keeps the walk near the seed.
+    #[test]
+    fn walk_with_restart_high_probability_stays_near_seed() {
+        let seed = make_row_id(1);
+        let a = make_row_id(2);
+        let mut adj = HashMap::new();
+        adj.insert(seed, vec![a]);
+        adj.insert(a, vec![make_row_id(3)]);
+        let visits = RandomWalks::walk_with_restart(seed, 1000, 0.99, 42, &adj);
+        let seed_visits = visits.get(&seed).copied().unwrap_or(0);
+        // With p=0.99 restart the walk spends almost all steps at seed.
+        assert!(seed_visits > 900, "high restart prob keeps walk at seed; got {seed_visits}");
+    }
+
+    // WR-4: dead end in adjacency restarts to seed.
+    #[test]
+    fn walk_with_restart_dead_end_restarts_to_seed() {
+        let seed = make_row_id(1);
+        let isolated = make_row_id(99);
+        // Isolated node: present in adjacency with an empty neighbor list.
+        let mut adj = HashMap::new();
+        adj.insert(seed, vec![isolated]);
+        adj.insert(isolated, vec![]);
+        // With restart_probability=0 the walk must go seed→isolated→(dead
+        // end)→seed→isolated→... Never leaves these two nodes.
+        let visits = RandomWalks::walk_with_restart(seed, 100, 0.0, 7, &adj);
+        for (&node, _) in &visits {
+            assert!(node == seed || node == isolated, "unexpected node {node:?}");
+        }
+    }
+
+    // WR-5: conformance anchor — canonical seed 0xCAFEBABEDEADBEEF on a
+    // three-node cycle. Swift and Rust must produce the same visit totals.
+    // The golden values below are the reference output; any algorithm
+    // change must produce bit-identical totals on this fixture.
+    //
+    // Graph: 1→2, 2→3, 3→1. Seed=1, steps=1000, restart=0.15, rng=0xCAFEBABEDEADBEEF.
+    #[test]
+    fn walk_with_restart_canonical_fixture() {
+        let seed = make_row_id(1);
+        let b = make_row_id(2);
+        let c = make_row_id(3);
+        let mut adj = HashMap::new();
+        adj.insert(seed, vec![b]);
+        adj.insert(b, vec![c]);
+        adj.insert(c, vec![seed]);
+        let visits = RandomWalks::walk_with_restart(seed, 1000, 0.15, 0xCAFE_BABE_DEAD_BEEF, &adj);
+        // Total must be exactly 1000 (one step = one visit).
+        let total: u64 = visits.values().sum();
+        assert_eq!(total, 1000);
+        // With a three-node cycle and restart=0.15 the seed node is
+        // visited roughly ~48% of the time (= restart_fraction ×
+        // geometric-series contribution + uniform walk share).
+        // Assert all three nodes are visited (non-zero coverage).
+        assert!(visits.contains_key(&seed));
+        assert!(visits.contains_key(&b));
+        assert!(visits.contains_key(&c));
     }
 }

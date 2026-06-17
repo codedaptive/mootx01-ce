@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Specification
-version: 1.1.0
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
@@ -24,8 +24,10 @@ purpose: |
   eighteen reasoning-lens recipes — each a deliberate read that sequences
   one gated NeuronKit reasoning surface over the estate — and three
   analytics recipes (association_rules, apriori_rules, formal_concepts)
-  that mine structural patterns by delegating to SubstrateML engines. The
-  companion INTERFACE document carries the signatures.
+  that mine structural patterns by delegating to SubstrateML engines, and
+  the exploratory-recall recipe (recall_exploratory) that walks a wing's
+  tunnel graph with restart from a seed drawer. The companion INTERFACE
+  document carries the signatures.
 ---
 
 # CognitionKit Specification
@@ -71,6 +73,13 @@ It offers three recipe families:
   log by delegating to SubstrateML engines. Each declares a capability
   (`associationRuleMining` or `formalConceptAnalysis`) that gates
   execution before any estate touch.
+
+- **Exploratory-recall recipe (§ 4.4).** One walk-based recall recipe —
+  `recall_exploratory` — that runs a random walk with restart from a seed
+  drawer over a wing's tunnel graph, returning the most-visited drawers
+  ranked by visit frequency. Delegates entirely to
+  `SubstrateML.RandomWalks.walkWithRestart`; declares the
+  `exploratoryRecall` capability.
 
 - **The catalog (§ 8).** An enumerable registry of the recipes that have
   graduated to a product surface, with each recipe's descriptor (name,
@@ -344,6 +353,30 @@ estate through the passed handle and GeniusLocusKit surface. The analytics recip
 obey B-5 (capability gate before any estate touch), I-2 (no direct substrate kit
 access), and I-3 (complete capability declaration), parallel to the lens recipes.
 
+## § 4.4 — Exploratory-recall recipe (1)
+
+The exploratory-recall recipe walks a wing's tunnel graph with restart from a seed
+drawer, accumulating visit counts per RowId and returning the most-visited drawers
+(excluding the seed) ranked descending. It obeys B-1 (no math in the recipe — all
+walk math lives in `SubstrateML.RandomWalks.walkWithRestart`), B-5 (capability gate
+before any estate touch), B-6 (PRNG seed derived deterministically from the seed
+drawer id via FNV hash64 — no wall clock), I-1, I-2, I-3, and I-6.
+
+**Exploratory recall** (`recall_exploratory`). Reads the tunnel graph for a named
+wing via `GeniusLocusKit.recallTunnels`, builds a RowId-keyed adjacency from
+drawer-to-drawer tunnel edges (only edges whose source and target drawer ids are
+valid UUID strings), derives an FNV RNG seed from the seed drawer id string, and
+delegates to `RandomWalks.walkWithRestart`. Returns `ExploratoryResult` records
+(drawer UUID string, visit count) ranked by visit count descending with drawer id
+as a stable tie-break. A seed absent from the adjacency returns an empty result. A
+`k > 0` input truncates to the top-k results. Declares the `exploratoryRecall`
+capability.
+
+**RNG seed derivation.** The PRNG seed is `FNV.hash64(seedDrawerID)` in Swift and
+`substrate_types::fnv::hash64(seed_drawer_id)` in Rust — both produce the same
+64-bit value for the same UUID string, so the walk is reproducible and cross-version
+deterministic on the same input.
+
 **Association rules** (`association_rules`). Recalls a frame via the estate handle,
 projects each drawer's categorical facets (kind, channel, sensitivity, room) into a
 per-call sorted label vocabulary, builds a co-occurrence matrix using `MatrixO`, and
@@ -477,7 +510,7 @@ versions of the recipe land together, so the anchor never sees a recipe
 present in one version and absent from the other. A recipe registered in
 the catalog is registered in both versions or in neither. This applies to
 all recipe families: the two foundational recipes, the eighteen lens
-recipes, and the three analytics recipes.
+recipes, the three analytics recipes, and the exploratory-recall recipe.
 
 ## § 9 — Invariants
 
@@ -545,11 +578,11 @@ stable keys so a lens recipe's result is reproducible. (B-6, I-6.)
 
 **C-7 (full recipe surface on both versions):** both the Swift and Rust
 versions realise the complete recipe surface — the two foundational recipes,
-the eighteen lens recipes, and the three analytics recipes — with matching
-recipe names, descriptors, and result shapes, and bit-for-bit-equal numeric
-results on shared vectors where a recipe surfaces a deterministic reasoning
-result. A recipe present in one version and absent from the other is
-non-conformant.
+the eighteen lens recipes, the three analytics recipes, and the
+exploratory-recall recipe — with matching recipe names, descriptors, and
+result shapes, and bit-for-bit-equal numeric results on shared vectors where
+a recipe surfaces a deterministic reasoning result. A recipe present in one
+version and absent from the other is non-conformant.
 
 **C-8 (catalog parity anchor):** the catalog descriptors match across
 versions byte-for-byte; the catalog lists exactly the recipes present in
@@ -624,6 +657,14 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Additive (A-2 exploratory-recall): added § 4.4 (exploratory-recall recipe family,
+`recall_exploratory`) and the `exploratoryRecall` capability. The recipe delegates
+entirely to `SubstrateML.RandomWalks.walkWithRestart` (B-1); gates on the new
+capability (B-5); derives its RNG seed from the seed drawer id via FNV hash64
+(B-6/I-6). Registered in the catalog (count → 25). Updated § 1 purpose summary,
+§ 8 graduation roster, C-7, and C-8.
 
 ### 1.1.0 -- 2026-06-17
 Additive (GLK-RECALL-SHAPE-PRESETS): added the `shaped_recall` recipe — a single

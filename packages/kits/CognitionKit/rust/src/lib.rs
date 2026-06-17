@@ -23,9 +23,10 @@
 //!    Constellation, ThemeWeather, FeelsLike, TunnelSuccessor,
 //!    EstateDivergence, Anticipate, MindOverlap, Bias, FreeAssociation,
 //!    AssociationRules, AprioriRules, FormalConcepts, Moment, Rhythm,
-//!    Precedence, Complexity). Every lens recipe is paired with a Swift
-//!    version in `Sources/CognitionKit/` (SPEC C-7 satisfied) and registered
-//!    in BOTH versions' catalogs with byte-identical descriptors, per
+//!    Precedence, Complexity, ExploratoryRecall). Every lens recipe is
+//!    paired with a Swift version in `Sources/CognitionKit/` (SPEC C-7
+//!    satisfied) and registered in BOTH versions' catalogs with byte-
+//!    identical descriptors, per
 //!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`
 //!    (the catalog lists what ships in both versions).
 //!
@@ -37,6 +38,7 @@
 
 pub mod anticipate_recipe;
 pub mod association_rules_recipe;
+pub mod exploratory_recall_recipe;
 pub mod bias_recipe;
 pub mod capability;
 pub mod catalog;
@@ -80,6 +82,7 @@ pub use error::{AnchorNotInRecalledSetError, RecipeError, RecipeRunError, Substr
 pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
 pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
 pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};
+pub use exploratory_recall_recipe::{run_exploratory_recall, ExploratoryRecallOutput, ExploratoryResult};
 pub use free_association_recipe::{run_free_association, Association};
 pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
 pub use keystones_recipe::run_keystones;
