@@ -3,7 +3,7 @@ status: decided
 question: Should RecallShape's lane-key surface steer ONLY the retrieval lanes, or ALL recall scoring columns (retrieval + matrix/graph/preference)?
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.0.0
+version: 1.1.0
 relates_to:
   - docs/reference/GENIUSLOCUSKIT_SPEC.md
   - docs/reference/GENIUSLOCUSKIT_INTERFACE.md
@@ -99,14 +99,32 @@ boundary is documented honestly: a recipe steering `temporal` must request
 
 ### D-4 — Cross-port boundary for graph/preference
 
-The Swift port populates `graph` and `preference` from a registered
-`GraphCache` / `PreferenceStore` (the dreaming/training caches). The Rust port
-does not yet wire those caches, so its `graph`/`preference` columns are `0.0`;
-steering them multiplies `0.0` and is a no-op THERE. The steering SURFACE — the
-keys, their semantics, the composition with `RecallWeights` — is identical
-cross-port, so the contract is stable for when the Rust caches land. The
-conformance tests assert the surface in both ports (Swift moves the columns when
-the caches are registered; Rust asserts the no-op when the columns are dark).
+Both ports populate `graph` and `preference` from a registered `GraphCache` /
+`PreferenceStore` (the dreaming/training caches). The Swift port has done so
+since the original mission; the Rust port now wires the same consumption surface
+(mission glk-recall-graphpref-rust, 2026-06-17): Rust GLK defines the
+`GraphCache` / `PreferenceStore` traits, `EstateCoordinator.register_graph_cache`
+/ `register_preference_store`, per-candidate `col_graph` / `col_preference`
+lookups in the `matrixAware` score loop, and carries the live columns onto the
+`RecallScoreVector`. When no cache is registered the column reads `0.0` on both
+ports (the correct fresh-estate behaviour). With a registered cache the
+`graph` / `preference` keys steer the live columns identically cross-port — the
+keys, their semantics, the composition with `RecallWeights` (both columns share
+the `weights.graph` slice), and the resulting fused `final` all agree Swift↔Rust.
+
+The conformance tests assert the LIVE surface in both ports over a shared
+fixture: a constant `GraphCache`(0.8) / `PreferenceStore`(0.9) makes the columns
+measured-uniform, normalizing to exactly `0.5` on both ports; excluding a column
+(weight 0) changes a fused final and a negative weight subtracts strictly below
+weight 0 (`RecallShapeMatrixSteerTests.swift` /
+`recall_shape_matrix_steer_parity.rs`). This closes the parity violation D-4
+previously documented (Rust columns hardcoded `0.0`).
+
+PRODUCER boundary (still open, both ports): the production code that POPULATES
+these caches — the dreaming-cycle graph-centrality computation and Bradley-Terry
+preference training — is absent in BOTH ports today (no non-test code conforms to
+the protocols/traits or calls the register methods). The recall-CONSUMPTION
+surface is now at parity; building the producers is a separate future mission.
 
 ## Consequences
 
@@ -126,3 +144,17 @@ the caches are registered; Rust asserts the no-op when the columns are dark).
 Decided. Implemented in mission 6b-modifiers-matrix-steer (Swift
 `RecallDirector` + Rust `coordinator.rs`, conformance-gated by
 `RecallShapeMatrixSteerTests.swift` / `recall_shape_matrix_steer_parity.rs`).
+The Rust `GraphCache` / `PreferenceStore` consumption surface (D-4) was wired in
+mission glk-recall-graphpref-rust (2026-06-17), bringing Rust to parity with the
+Swift recall-side surface.
+
+## Changelog
+
+- 1.1.0 (2026-06-17) — D-4 updated: the Rust port now wires the `GraphCache` /
+  `PreferenceStore` recall-consumption surface (traits, registration, per-
+  candidate `col_graph`/`col_preference` lookups, live `RecallScoreVector`
+  columns). The columns are no longer hardcoded `0.0`; the conformance tests now
+  assert the LIVE path on both ports (constant cache → 0.5 cross-port). Records
+  the still-open producer boundary (cache producers absent on both ports).
+- 1.0.0 (2026-06-17) — Initial decision: RecallShape steers all recall scoring
+  columns (retrieval + matrix/graph/preference) in unionBest `.matrixAware`.

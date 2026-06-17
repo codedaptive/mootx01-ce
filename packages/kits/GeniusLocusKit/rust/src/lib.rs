@@ -137,6 +137,7 @@ pub use training::{
 pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
 pub use recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
+    GraphCache, PreferenceStore,
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
     RecallOrigin, RecallPlan, RecallScoreVector, RecallShape, RecallUnionProfile, RecallWeights,
 };

@@ -262,6 +262,15 @@ struct RecallShapeMatrixSteerTests {
                 "graph column must be byte-identical at all-ones; \(a.id)")
             #expect(a.score.preference == b.score.preference,
                 "preference column must be byte-identical at all-ones; \(a.id)")
+            // CROSS-PORT CONFORMANCE (ADR-011 D-4): the constant graph(0.8) /
+            // preference(0.9) caches give every candidate the same column value, so
+            // each is measured-uniform and normalizes to exactly 0.5 — the SAME value
+            // the Rust port pins in recall_shape_matrix_steer_parity. This is the
+            // shared-fixture proof the graph/preference columns now agree Swift↔Rust.
+            #expect(a.score.graph == 0.5,
+                "graph column must normalize to 0.5 (constant-uniform); \(a.id)")
+            #expect(a.score.preference == 0.5,
+                "preference column must normalize to 0.5 (constant-uniform); \(a.id)")
         }
         try await kit.close(handle)
     }

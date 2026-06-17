@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.4.0
+version: 1.5.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -1164,6 +1164,43 @@ The `node_topology_providers` map is a field parallel to
 to the Swift `recallTunnels(_:wing:)`. Synthetic containment tunnel `filed_at` uses
 `i64::MIN` (Rust parity of Swift `Date.distantPast`).
 
+### `registerGraphCache` / `registerPreferenceStore` — recall-scoring seam
+
+```swift
+// Swift (GeniusLocusKit actor extension)
+func registerGraphCache(_ cache: some GraphCache, for handle: EstateHandle)
+func registerPreferenceStore(_ store: some PreferenceStore, for handle: EstateHandle)
+
+protocol GraphCache: Sendable      { func graphScore(for drawerID: String) -> Float }
+protocol PreferenceStore: Sendable { func preferenceScore(for drawerID: String) -> Float }
+```
+
+```rust
+// Rust (EstateCoordinator + recall.rs traits)
+pub trait GraphCache: Send + Sync      { fn graph_score(&self, drawer_id: &str) -> f32; }
+pub trait PreferenceStore: Send + Sync { fn preference_score(&self, drawer_id: &str) -> f32; }
+
+pub fn register_graph_cache(
+    &mut self, handle: &EstateHandle, cache: Arc<dyn GraphCache>,
+)
+pub fn register_preference_store(
+    &mut self, handle: &EstateHandle, store: Arc<dyn PreferenceStore>,
+)
+// Stored in coordinator.graph_caches / preference_stores:
+//   HashMap<EstateHandle, Arc<dyn GraphCache | PreferenceStore>>.
+// Initialised empty in new(), dropped on close(). The unionBest .matrixAware
+// score loop reads them per candidate (col_graph[i] / col_preference[i]); both
+// columns share the weights.graph budget slice (Swift parity). Absent ⇒ 0.0.
+```
+
+**Rust parity status:** the recall-CONSUMPTION surface is wired in both ports
+(mission glk-recall-graphpref-rust, 2026-06-17, closing ADR-011 D-4). Trait,
+registration, per-candidate lookup, and live `RecallScoreVector` columns mirror
+Swift exactly. A constant cache (0.8 / 0.9) normalizes to `0.5` cross-port
+(`recall_shape_matrix_steer_parity.rs` / `RecallShapeMatrixSteerTests.swift`).
+The cache PRODUCERS (dreaming-cycle graph-centrality; Bradley-Terry preference
+training) are absent in BOTH ports — a separate future mission.
+
 ### `GLKRecallMode.nodeTreeNative` — 5th case
 
 | Swift raw value | Rust variant | Notes |
@@ -1733,6 +1770,17 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-06-17
+Additive (glk-recall-graphpref-rust): the Rust port now documents and ships the
+`GraphCache` / `PreferenceStore` recall-consumption surface, at parity with Swift.
+Adds the `registerGraphCache` / `registerPreferenceStore` registration seam
+subsection with the Rust trait definitions (`GraphCache` / `PreferenceStore`:
+`Send + Sync`, per-drawer score lookup), `EstateCoordinator.register_graph_cache`
+/ `register_preference_store`, and the per-candidate `col_graph` / `col_preference`
+lookup in the unionBest `.matrixAware` score loop (both columns share the
+`weights.graph` budget, Swift parity). Closes ADR-011 D-4 (Rust columns were
+hardcoded `0.0`). Cache producers remain absent in both ports (future mission).
 
 ### 1.4.0 -- 2026-06-17
 Additive (6b-modifiers-matrix-steer): `RecallShape`'s lane-key surface now spans
