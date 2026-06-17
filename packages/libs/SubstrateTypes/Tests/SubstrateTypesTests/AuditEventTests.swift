@@ -68,4 +68,59 @@ struct AuditEventTests {
         #expect(before.operational == 8)
         #expect(before.provenance == 7)
     }
+
+    // MARK: - reason field
+
+    @Test("reason defaults to nil when not supplied")
+    func reasonDefaultsNil() {
+        let e = makeEvent(before: nil)
+        #expect(e.reason == nil)
+    }
+
+    @Test("reason is preserved when supplied")
+    func reasonPreserved() {
+        let e = AuditEvent(
+            estateUuid: UUID(), rowId: UUID(),
+            hlc: HLC(physicalTime: 1000, logicalCount: 0, nodeID: 1),
+            verb: "expunge",
+            beforeBitmaps: nil,
+            afterBitmaps: (adjective: 1, operational: 2, provenance: 3),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: LatticeAnchor(udcCode: 42),
+            actor: "test_actor",
+            reason: "GDPR erasure request #42"
+        )
+        #expect(e.reason == "GDPR erasure request #42")
+    }
+
+    @Test("withReason produces a copy with the supplied reason; original is unchanged")
+    func withReasonCopy() {
+        let original = makeEvent(before: nil)
+        let annotated = original.withReason("audit reason text")
+        // The copy carries the new reason.
+        #expect(annotated.reason == "audit reason text")
+        // All other fields are identical.
+        #expect(annotated.eventID == original.eventID)
+        #expect(annotated.actor == original.actor)
+        // The original is unchanged.
+        #expect(original.reason == nil)
+    }
+
+    @Test("withReason(nil) clears the reason on the copy")
+    func withReasonNilClears() {
+        let e = AuditEvent(
+            estateUuid: UUID(), rowId: UUID(),
+            hlc: HLC(physicalTime: 1000, logicalCount: 0, nodeID: 1),
+            verb: "expunge",
+            beforeBitmaps: nil,
+            afterBitmaps: (adjective: 1, operational: 2, provenance: 3),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: LatticeAnchor(udcCode: 42),
+            actor: "test_actor",
+            reason: "original reason"
+        )
+        let cleared = e.withReason(nil)
+        #expect(cleared.reason == nil)
+        #expect(e.reason == "original reason")
+    }
 }

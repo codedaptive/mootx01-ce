@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Interface
-version: 1.0.1
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: Public API surface for SubstrateTypes in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -185,19 +185,28 @@ public struct AuditEvent: Sendable {
     public let beforeLatticeAnchor: LatticeAnchor?
     public let afterLatticeAnchor: LatticeAnchor
     public let actor: String
+    /// Human-readable reason for the mutation; nil when the caller supplied none.
+    /// Persisted as nullable TEXT in the `reason` column of `_storagekit_audit`.
+    public let reason: String?
     public init(eventID: UUID = UUID(),
                 estateUuid: UUID, rowId: UUID, hlc: HLC, verb: String,
                 beforeBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)?,
                 afterBitmaps: (adjective: Int64, operational: Int64, provenance: Int64),
                 beforeLatticeAnchor: LatticeAnchor?,
                 afterLatticeAnchor: LatticeAnchor,
-                actor: String)
+                actor: String,
+                reason: String? = nil)
+    /// Return a copy of this event with the given reason set (or cleared).
+    public func withReason(_ reason: String?) -> AuditEvent
 }
 ```
 
 The before/after bitmaps are carried inline as three-`Int64` tuples
 (adjective, operational, provenance); the compound key (`eventID`,
 `hlc`) gives append idempotence in PersistenceKit's AuditLog.
+The `reason` field is nil for the vast majority of mutations; it is
+non-nil only for expunge and explicit audit annotations where the
+verb call site passes a caller-supplied rationale.
 
 **Rust:**
 
@@ -213,6 +222,9 @@ pub struct AuditEvent {
     pub before_lattice_anchor: Option<LatticeAnchor>,
     pub after_lattice_anchor: LatticeAnchor,
     pub actor: String,
+    /// Human-readable reason for the mutation; None when the caller supplied none.
+    /// Persisted as nullable TEXT in the `reason` column of `_storagekit_audit`.
+    pub reason: Option<String>,
 }
 ```
 
@@ -1025,7 +1037,7 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Hybrid logical clock | `HLC` (`HLC.swift:37`) | `HLC` (`hlc.rs:41`) | both public | identical — `physicalTime`/`logicalCount`/`nodeID` ↔ snake_case; 16-byte LE wire format | `HLCTests.swift`; `hlc.rs` tests (6) | Confirmed |
 | HLC generator | `HLCGenerator` (`HLC.swift:125`) | `HLCGenerator` (`hlc.rs:178`) | both public | identical — `send`/`receive` mutating clock advance | `HLCTests.swift`; `hlc.rs` tests | Confirmed |
 | HLC error | `HLCError` (`HLC.swift:249`) | `HLCError` (`hlc.rs:151`) | both public | identical — `invalidWireLength(Int)` | `HLCTests.swift`; `hlc.rs` tests | Confirmed |
-| Audit event (wire row) | `AuditEvent` (`AuditEvent.swift:15`) | `AuditEvent` (`audit_event.rs:18`) | both public | identical concept — canonical wire/audit row; `eventID`/`estateUuid`/`rowId` ↔ `event_id`/`estate_uuid`/`row_id`; before/after bitmaps as three-`Int64`/`i64` tuples | `AuditEventTests.swift` | Confirmed |
+| Audit event (wire row) | `AuditEvent` (`AuditEvent.swift:15`) | `AuditEvent` (`audit_event.rs:18`) | both public | identical concept — canonical wire/audit row; `eventID`/`estateUuid`/`rowId` ↔ `event_id`/`estate_uuid`/`row_id`; before/after bitmaps as three-`Int64`/`i64` tuples; `reason: String?` / `reason: Option<String>` nullable annotation field; `withReason(_:)` copy helper (Swift only) | `AuditEventTests.swift` | Confirmed |
 | G-Set audit entry | `AuditEntry` (`GSetAuditLog.swift:35`) | `AuditEntry` (`gset.rs:86`) | both public | identical — 32-byte content id, HLC, verb, rowID, field path, before/after value; Swift `rowID: UUID` ↔ Rust `row_id: RowID (u128)` with UUID-string serde | `GSetAuditLogTests.swift`; `gset.rs` tests (5) | Confirmed |
 | Audit verb | `AuditVerb` (`GSetAuditLog.swift:62`) | `AuditVerb` (`gset.rs:35`) | both public | identical — same case set, Swift camelCase ↔ Rust PascalCase variants | `GSetAuditLogTests.swift`; `gset.rs` tests | Confirmed |
 | Audit value | `AuditValue` (`GSetAuditLog.swift:95`) | `AuditValue` (`gset.rs:67`) | both public | identical — `bitmap(UInt64)`/`string`/`fingerprint`/`integer(Int64)` ↔ `Bitmap(u64)`/`String`/`Fingerprint`/`Integer(i64)`; externally-tagged camelCase wire format | `GSetAuditLogTests.swift`; `gset.rs` tests | Confirmed |
@@ -1065,6 +1077,9 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | FNV-1a hash | `FNV` namespace (`FNV.swift:18`) | `fnv::hash64`/`hash32`/`hash16` free fns (`fnv.rs:18`,`:31`,`:45`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical FNV-1a output | `FNVTests.swift`; `fnv.rs` tests (6) | Confirmed |
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Added `reason: String?` / `reason: Option<String>` field to `AuditEvent` in both ports (A-8: audit reason persistence). The field is nil/None when no caller reason is supplied and is persisted as nullable TEXT in the `_storagekit_audit` table's `reason` column. Added `withReason(_:) -> AuditEvent` copy helper (Swift). Updated concordance table row and init signature accordingly.
 
 ### 1.0.1 -- 2026-06-14
 § 7 Concordance: corrected the stale `RowStateError` source-line citations (Swift `RowState.swift:65`→`:137`, Rust `row_state.rs:104`→`:185`) to the actual enum definition lines, and named the Rust variants (`IllegalTransition`/`ViolatesInvariant`). Variant names were already correct throughout (`illegalTransition`/`violatesInvariant`); no `forbiddenCombination` case exists in the source.

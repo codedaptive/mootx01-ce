@@ -577,6 +577,7 @@ impl DrawerStoreCore {
         column: audit_gate::Column,
         new_column_value: i64,
         changed_by: &str,
+        reason: Option<&str>,
         now: i64,
     ) -> Result<(), LocusKitError> {
         let row_uuid = require_uuid(drawer_id, "drawerId")?;
@@ -657,6 +658,12 @@ impl DrawerStoreCore {
                 ),
             )
             .map_err(map_storage_err)?;
+        // Thread the caller-supplied reason into the event so it is
+        // persisted in the audit table's `reason` column.
+        let event = substrate_lib::verbs::AuditEvent {
+            reason: reason.map(|s| s.to_string()),
+            ..event
+        };
         self.storage
             .audit_log()
             .append(pk_audit_event_from(&event))
@@ -1154,12 +1161,12 @@ impl DrawerStore for DrawerStoreCore {
     ) -> Result<(), LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
-        let _ = reason;
         self.gated_column_write(
             drawer_id,
             audit_gate::Column::Provenance,
             new_provenance,
             changed_by,
+            reason,
             now,
         )
     }
@@ -1174,7 +1181,6 @@ impl DrawerStore for DrawerStoreCore {
     ) -> Result<(), LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
-        let _ = reason;
         // I-22 (secret+exportable) is enforced inside the gate's basis
         // check now (SubstrateLib), so no separate validator is needed.
         self.gated_column_write(
@@ -1182,6 +1188,7 @@ impl DrawerStore for DrawerStoreCore {
             audit_gate::Column::Adjective,
             new_adjective,
             changed_by,
+            reason,
             now,
         )
     }
@@ -1196,12 +1203,12 @@ impl DrawerStore for DrawerStoreCore {
     ) -> Result<(), LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
-        let _ = reason;
         self.gated_column_write(
             drawer_id,
             audit_gate::Column::Operational,
             new_operational,
             changed_by,
+            reason,
             now,
         )
     }
@@ -1240,7 +1247,6 @@ impl DrawerStore for DrawerStoreCore {
             prior_provenance,
             prior_state,
             new_bitmap,
-            reason,
         );
 
         // Route through the substrate write gate (DECISION_CLOCK_TRIANGLE_
@@ -1305,6 +1311,12 @@ impl DrawerStore for DrawerStoreCore {
                 ),
             )
             .map_err(map_storage_err)?;
+        // Thread the caller-supplied reason into the event so it is
+        // persisted in the audit table's `reason` column.
+        let event = substrate_lib::verbs::AuditEvent {
+            reason: reason.map(|s| s.to_string()),
+            ..event
+        };
         self.storage
             .audit_log()
             .append(pk_audit_event_from(&event))
@@ -1423,11 +1435,12 @@ impl DrawerStore for DrawerStoreCore {
                 .map_err(map_storage_err)?;
         }
 
-        let _ = reason; // reason is captured in audit verb context;
-                        // no separate audit-row column today, but the
-                        // parameter is retained for future ProvFrame
-                        // composition (cookbook §10.5 names a `reason`
-                        // arg on the verb signature).
+        // Thread the caller-supplied reason into the event so it is
+        // persisted in the audit table's `reason` column.
+        let event = substrate_lib::verbs::AuditEvent {
+            reason: reason.map(|s| s.to_string()),
+            ..event
+        };
         Ok(event)
     }
 
@@ -1480,6 +1493,8 @@ impl DrawerStore for DrawerStoreCore {
             before_lattice_anchor: success_event.before_lattice_anchor.clone(),
             after_lattice_anchor: success_event.after_lattice_anchor.clone(),
             actor: changed_by.to_string(),
+            // orphan events have no caller-supplied reason.
+            reason: None,
         };
         self.storage
             .audit_log()
@@ -1530,6 +1545,8 @@ impl DrawerStore for DrawerStoreCore {
             before_lattice_anchor: None, // pre-tombstone anchor unavailable (sweep path)
             after_lattice_anchor: anchor,
             actor: changed_by.to_string(),
+            // sweep-path orphan events have no caller-supplied reason.
+            reason: None,
         };
         self.storage
             .audit_log()
@@ -1645,11 +1662,16 @@ impl DrawerStore for DrawerStoreCore {
                 )
                 .map_err(map_storage_err)?;
         }
+        // Thread the caller-supplied reason into the event before persisting.
+        let event = substrate_lib::verbs::AuditEvent {
+            reason: reason.map(|s| s.to_string()),
+            ..event
+        };
         self.storage
             .audit_log()
             .append(pk_audit_event_from(&event))
             .map_err(map_storage_err)?;
-        let _ = (reason, after_udc); // retained for future ProvFrame composition
+        let _ = after_udc; // after_udc is not persisted as a separate column
         Ok(())
     }
 
@@ -4382,7 +4404,7 @@ pub(crate) fn require_uuid(s: &str, label: &str) -> Result<Uuid, LocusKitError> 
 /// Bridge the substrate gate's AuditEvent to PersistenceKit's flattened
 /// AuditEvent for append. Swift PersistenceKit reuses SubstrateLib's type
 /// directly; the Rust leg has its own flat type, so the conversion lives
-/// here. Field-for-field, ids as u128 → Uuid.
+/// here. Field-for-field, ids as u128 → Uuid. reason is threaded through.
 fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
     PkAuditEvent {
         event_id: Uuid::from_u128(e.event_id),
@@ -4399,6 +4421,9 @@ fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
         before_lattice_anchor: e.before_lattice_anchor.map(|a| a.udc_code),
         after_lattice_anchor: e.after_lattice_anchor.udc_code,
         actor: e.actor.clone(),
+        // reason is threaded from the verb call site through the substrate
+        // AuditEvent and forwarded here to PersistenceKit's flat type.
+        reason: e.reason.clone(),
     }
 }
 
@@ -4430,6 +4455,8 @@ pub(crate) fn substrate_audit_event_from(e: &PkAuditEvent) -> substrate_lib::ver
             .map(|a| substrate_lib::verbs::LatticeAnchor::new(a, 0)),
         after_lattice_anchor: substrate_lib::verbs::LatticeAnchor::new(e.after_lattice_anchor, 0),
         actor: e.actor.clone(),
+        // reason is threaded back through the bridge for full round-trip fidelity.
+        reason: e.reason.clone(),
     }
 }
 

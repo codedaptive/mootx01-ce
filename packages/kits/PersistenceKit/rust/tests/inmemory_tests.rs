@@ -291,6 +291,7 @@ fn audit_log_idempotent_on_duplicate_event() {
         before_lattice_anchor: None,
         after_lattice_anchor: 0,
         actor: "test".into(),
+        reason: None,
     };
     log.append(event.clone()).unwrap();
     log.append(event.clone()).unwrap(); // duplicate, must be a no-op
@@ -324,6 +325,7 @@ fn audit_log_iterate_orders_by_hlc() {
             before_lattice_anchor: None,
             after_lattice_anchor: 0,
             actor: "test".into(),
+            reason: None,
         })
         .unwrap();
     }

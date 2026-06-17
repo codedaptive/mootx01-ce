@@ -598,6 +598,8 @@ impl Substrate {
             before_lattice_anchor: before_anchor,
             after_lattice_anchor: after_anchor,
             actor: actor.to_string(),
+            // reason is not available at the verbs-test harness layer; None.
+            reason: None,
         });
     }
 }

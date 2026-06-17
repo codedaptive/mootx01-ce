@@ -195,3 +195,80 @@ struct SQLiteAuditHLCRoundTripTests {
         await storage.close()
     }
 }
+
+// MARK: - SQLite audit-log reason round-trip
+
+/// Verify that the `reason` column persists and reads back with fidelity through
+/// the SQLite audit path. Two cases: a supplied reason (Some) and no reason (None).
+/// These tests catch any regression where reason is dropped at the INSERT or
+/// decode site in `SQLiteStorage.appendAuditEvent` / `decodeAuditRow`.
+@Suite("SQLite audit reason round-trip")
+struct SQLiteAuditReasonRoundTripTests {
+
+    func makeStorage() throws -> SQLiteStorage {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audit-reason-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        let dbURL = tmpDir.appendingPathComponent("audit-reason.sqlite")
+        return try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: dbURL, busyTimeout: 5.0)
+        ))
+    }
+
+    @Test("reason is persisted and read back when supplied")
+    func reasonRoundTripSome() async throws {
+        let storage = try makeStorage()
+        try await storage.open(schema: SchemaDeclaration(kitID: "ReasonTest", version: 1, tables: []))
+
+        let event = AuditEvent(
+            estateUuid: UUID(),
+            rowId: UUID(),
+            hlc: HLC(physicalTime: 1_000_000, logicalCount: 0, nodeID: 1),
+            verb: "expunge",
+            beforeBitmaps: nil,
+            afterBitmaps: (1, 2, 3),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: LatticeAnchor(udcCode: 0),
+            actor: "test-actor",
+            reason: "GDPR erasure request #42"
+        )
+        try await storage.auditLog.append(event)
+
+        let events = try await storage.auditLog.iterate(after: nil, rowID: nil, limit: 10)
+        #expect(events.count == 1)
+        // The reason must survive the INSERT → decodeAuditRow path unchanged.
+        #expect(events[0].reason == "GDPR erasure request #42",
+                "reason should round-trip through SQLite; got \(String(describing: events[0].reason))")
+
+        await storage.close()
+    }
+
+    @Test("reason reads back as nil when not supplied")
+    func reasonRoundTripNone() async throws {
+        let storage = try makeStorage()
+        try await storage.open(schema: SchemaDeclaration(kitID: "ReasonTest", version: 1, tables: []))
+
+        let event = AuditEvent(
+            estateUuid: UUID(),
+            rowId: UUID(),
+            hlc: HLC(physicalTime: 2_000_000, logicalCount: 0, nodeID: 1),
+            verb: "mutate",
+            beforeBitmaps: nil,
+            afterBitmaps: (4, 5, 6),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: LatticeAnchor(udcCode: 0),
+            actor: "test-actor"
+            // reason omitted; defaults to nil
+        )
+        try await storage.auditLog.append(event)
+
+        let events = try await storage.auditLog.iterate(after: nil, rowID: nil, limit: 10)
+        #expect(events.count == 1)
+        // A nil reason must be stored as NULL and read back as nil.
+        #expect(events[0].reason == nil,
+                "reason should be nil when not supplied; got \(String(describing: events[0].reason))")
+
+        await storage.close()
+    }
+}

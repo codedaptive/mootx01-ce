@@ -907,12 +907,12 @@ actor SQLiteBackend {
                "before_adj", "before_op", "before_pv",
                "after_adj", "after_op", "after_pv",
                "before_udc", "before_qid", "after_udc", "after_qid",
-               "actor")
+               "actor", "reason")
             VALUES (?, ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?)
+                    ?, ?)
             ON CONFLICT("event_id", "hlc") DO NOTHING
             """)
         defer { stmt.finalize() }
@@ -943,6 +943,12 @@ actor SQLiteBackend {
         try stmt.bind(.int(Int64(bitPattern: event.afterLatticeAnchor.udcCode)), at: 14)
         try stmt.bind(.int(Int64(bitPattern: event.afterLatticeAnchor.qidPointer)), at: 15)
         try stmt.bind(.text(event.actor), at: 16)
+        // reason is nullable TEXT; NULL when the caller supplied no reason.
+        if let reason = event.reason {
+            try stmt.bind(.text(reason), at: 17)
+        } else {
+            try stmt.bind(.null, at: 17)
+        }
         _ = try stmt.step()
     }
 
@@ -1057,6 +1063,9 @@ actor SQLiteBackend {
             qidPointer: UInt64(bitPattern: stmt.columnInt64(14))
         )
         let actor = stmt.columnText(15) ?? ""
+        // reason is nullable TEXT at column 16; nil when the event was recorded
+        // without a caller-supplied reason (the common case).
+        let reason: String? = stmt.columnType(16) == SQLITE_NULL ? nil : stmt.columnText(16)
 
         return AuditEvent(
             eventID: eventID,
@@ -1068,7 +1077,8 @@ actor SQLiteBackend {
             afterBitmaps: afterBitmaps,
             beforeLatticeAnchor: beforeLattice,
             afterLatticeAnchor: afterLattice,
-            actor: actor
+            actor: actor,
+            reason: reason
         )
     }
 }

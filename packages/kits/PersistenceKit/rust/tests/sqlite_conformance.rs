@@ -25,6 +25,95 @@ fn sqlite_conformance() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Audit-log reason round-trip tests for the SQLite backend.
+// These tests verify that the nullable `reason` column persists and
+// reads back through appendAuditEvent → decodeAuditRow with fidelity.
+// ─────────────────────────────────────────────────────────────────────
+
+use persistence_kit::{AuditEvent, Storage as _};
+use substrate_types::hlc::HLC;
+
+fn make_sqlite_audit_storage() -> SqliteStorage {
+    let path = std::env::temp_dir()
+        .join(format!("pk_audit_reason_{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage = SqliteStorage::new(config).expect("open sqlite storage");
+    let schema = persistence_kit::SchemaDeclaration::new("reason-test", 1, vec![]);
+    storage.open(&schema).expect("open schema");
+    storage
+}
+
+#[test]
+fn sqlite_audit_reason_some_round_trips() {
+    // A supplied reason must survive the INSERT → decodeAuditRow path unchanged.
+    let storage = make_sqlite_audit_storage();
+    let log = storage.audit_log();
+    let event = AuditEvent {
+        event_id: Uuid::new_v4(),
+        estate_uuid: Uuid::new_v4(),
+        row_id: Uuid::new_v4(),
+        hlc: HLC { physical_time: 1_000_000, logical_count: 0, node_id: 1 },
+        verb: "expunge".into(),
+        before_adjective: None,
+        before_operational: None,
+        before_provenance: None,
+        after_adjective: 1,
+        after_operational: 2,
+        after_provenance: 3,
+        before_lattice_anchor: None,
+        after_lattice_anchor: 0,
+        actor: "test-actor".into(),
+        reason: Some("GDPR erasure request #42".into()),
+    };
+    log.append(event).unwrap();
+    let events = log.iterate(None, None, 10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].reason.as_deref(),
+        Some("GDPR erasure request #42"),
+        "reason should round-trip through SQLite audit storage"
+    );
+}
+
+#[test]
+fn sqlite_audit_reason_none_round_trips() {
+    // A None reason must be stored as NULL and read back as None.
+    let storage = make_sqlite_audit_storage();
+    let log = storage.audit_log();
+    let event = AuditEvent {
+        event_id: Uuid::new_v4(),
+        estate_uuid: Uuid::new_v4(),
+        row_id: Uuid::new_v4(),
+        hlc: HLC { physical_time: 2_000_000, logical_count: 0, node_id: 1 },
+        verb: "mutate".into(),
+        before_adjective: None,
+        before_operational: None,
+        before_provenance: None,
+        after_adjective: 4,
+        after_operational: 5,
+        after_provenance: 6,
+        before_lattice_anchor: None,
+        after_lattice_anchor: 0,
+        actor: "test-actor".into(),
+        reason: None,
+    };
+    log.append(event).unwrap();
+    let events = log.iterate(None, None, 10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(
+        events[0].reason.is_none(),
+        "reason should be None when not supplied; got {:?}",
+        events[0].reason
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // StorageIntrospection tests for the SQLite backend.
 // ─────────────────────────────────────────────────────────────────────
 
