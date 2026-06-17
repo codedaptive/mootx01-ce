@@ -14,104 +14,204 @@
 
 ## What it is
 
-MOOTx01 gives your AI a memory that lasts. Every AI today forgets when a chat ends. You start over. You re-explain. You re-introduce yourself. MOOTx01 stores what was said so the next chat starts where the last one left off. It runs on your machine. Any AI that speaks the Model Context Protocol can read from it.
+MOOTx01 gives your AI a memory that lasts.
+
+Every AI today has the same basic problem: when the chat ends, the useful context often disappears with it. You start over. You re-explain the same project rules. You re-introduce old decisions. You switch from one AI tool to another and the memory does not come with you.
+
+MOOTx01 stores useful memory in a local estate your AI can read from later. It runs on your machine by default. Any AI client that speaks the Model Context Protocol can connect to it through ARIA, the MOOTx01 memory language.
+
+The model can change. Your memory stays yours.
 
 ## What it fixes
 
-Your AI has a short memory. It only holds what fits in one conversation. Close the chat and the memory is gone. Switch from Claude to ChatGPT and it is gone again. MOOTx01 stores what was said in a place your AI can read at any time. The memory belongs to you. You can take it from one AI to another and keep going.
+Your AI has a context window. That is what it can think with right now.
+
+MOOTx01 gives it a memory estate. That is what it can remember from later.
+
+Use MOOTx01 when you want your AI to:
+
+- remember project decisions,
+- recall prior conversations,
+- keep durable facts and notes,
+- link related ideas,
+- search across sessions,
+- stop asking you to rebuild the past every time.
+
+MOOTx01 is not just a vector database. It stores memory as a substrate: memories, facts, links, journals, trust state, recall indexes, graph structure, reasoning lenses, and background consolidation signals.
+
+In plain English: it keeps what happened, finds what matters, and helps your AI use that memory when it matters.
 
 ## What it looks like
 
-Wire MOOTx01 into your AI client once. After that, your AI uses two short commands. One to store something. One to look it up.
+Install MOOTx01, wire it into your AI client, restart the client, and verify that the tools are visible.
 
-```jsonc
-// store
-moot_file_memory { "content": "We ship the importer behind a flag.", "location": "project/alpha" }
-
-// retrieve
-moot_memory_search { "query": "what did we decide about the importer?" }
+```bash
+mootx01 install
 ```
 
-The full language is called ARIA. Nine verbs in total.
+Then ask your AI to try memory:
+
+```text
+Remember that this project ships the importer behind a flag.
+```
+
+```text
+Search my MOOT for what we decided about the importer.
+```
+
+```text
+Show me the current status of my MOOT estate.
+```
+
+Behind the scenes, the AI uses ARIA tools like these:
+
+```jsonc
+// store a memory
+moot_file_memory {
+  "content": "We ship the importer behind a flag.",
+  "location": "project/alpha"
+}
+
+// retrieve memory
+moot_memory_search {
+  "query": "what did we decide about the importer?"
+}
+```
 
 ## Where to go next
 
-- **Install it.** See [Quickstart](#quickstart-100-beta) below. One command on macOS, Linux, or Windows.
-- **Read the story.** [`ABOUT.md`](ABOUT.md) covers why MOOTx01 exists, what a moot is, and why memory belongs to you.
-- **See the architecture.** [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) is the readable map of the whole repository.
+- **Install it.** See [Quickstart](#quickstart-100-beta) below.
+- **Understand it fast.** Read [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md).
+- **Have an AI install it.** Give the AI [`AI_START_HERE.md`](AI_START_HERE.md).
+- **Read the story.** [`ABOUT.md`](ABOUT.md) explains why MOOTx01 exists and why memory belongs to you.
+- **Build on it.** [`docs/start-here/SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) shows the open → capture → recall loop.
+- **See the architecture.** [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) is the readable map of the repository.
 - **Visit the live site.** [mootx01.ai](https://mootx01.ai)
 
 ---
 
 ## Quickstart (1.0.0-beta)
 
-> **1.0.0-beta — early access.** Installable now, **not yet security-hardened**. The full security sweep (Roadmap §4) precedes the general-availability binary. For early adopters and builders.
+> **1.0.0-beta — early access.** Installable now, **not yet security-hardened**. The full security sweep precedes the general-availability binary. For early adopters and builders.
 
 ### 1 · Install the binary
 
 Prebuilt, no toolchain, no clone.
 
 **macOS / Linux**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
 ```
 
 **Windows** (PowerShell)
+
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
 ```
 
-Installs to `~/.mootx01/bin`. Re-run to upgrade.
+Installs to:
+
+```text
+~/.mootx01/bin
+```
+
+Re-run to upgrade.
 
 ### 2 · Wire it in
 
 ```bash
-mootx01 install        # interactive — registers MOOTx01 with Claude, Claude Code, or any MCP client
+mootx01 install
 ```
 
-This also starts **`moot-mgr`**, the management console, as a background service (launchd · systemd-user · Task Scheduler). It opens a read-only dashboard at **http://127.0.0.1:4200** — health, per-estate state, the write pipeline, an activity log, and a live **Topology** view — plus a gated admin surface. Opt out with `--no-manager`.
+The installer registers MOOTx01 with supported MCP clients and starts the local services when supported.
 
-### 3 · Use it
+By default:
 
-From your agent, the ARIA grammar is one verb on a noun:
+| Surface | Address |
+|---|---|
+| MOOTx01 resident daemon | `http://127.0.0.1:4242` |
+| `moot-mgr` dashboard | `http://127.0.0.1:4200` |
 
-```jsonc
-// file a memory — captured verbatim into your MOOT
-moot_file_memory { "content": "We decided to ship the importer behind a flag.", "location": "project/alpha" }
+Both are loopback addresses. They are meant for your own machine, not the public internet. For security they will reject connection from other devices.
 
-// recall — ranked, filtered, theme-aware signal (not raw chunks)
-moot_memory_search { "query": "what did we decide about the importer?" }
+### 3 · Verify it
+
+```bash
+mootx01 status
 ```
 
-*Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
+If the manager is installed:
+
+```bash
+moot-mgr status
+```
+
+Open the dashboard:
+
+```text
+http://127.0.0.1:4200
+```
+
+If your AI client supports MCP tool discovery, confirm it can see MOOTx01 tools such as:
+
+- `moot_estate_ping`
+- `moot_estate_status`
+- `moot_memory_search`
+- `moot_file_memory`
+
+### 4 · Make the AI use memory automatically
+
+Installing the runtime gives the AI tools. The next step is installing the matching MOOTx01 adapter for your AI client so it knows when to reach for memory.
+
+Adapters live in:
+
+```text
+apps/moot-agent-skills/
+```
+
+Start with:
+
+```text
+apps/moot-agent-skills/README.md
+```
 
 ## How it works
 
-MOOTx01 is a substrate of composable kits; **GeniusLocusKit** composes them into a working estate, the **Brain** layer makes it dream, and **ARIA** is the one interface in front of all of it.
+MOOTx01 is an SDK of composable kits. **GeniusLocusKit** composes them into a working estate, the **Brain** layer prepares memory, and **ARIA** is the one interface in front of all of it.
 
-```
-Observe / Remember →  LocusKit (spatial memory + knowledge graph)
+```text
+Observe / Remember -> LocusKit (spatial memory + knowledge graph)
                       VectorKit (on-device embeddings + ANN / hybrid search)
                       CorpusKit (content-plus-vector RAG bundles)
-Dream              →  NeuronKit (hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit)
-                      CognitionKit (named, composable behaviour recipes)
-Compose / Convene  →  GeniusLocusKit (N estates, the matrix layer, federation)
-Speak              →  ARIA (MCP server + native app surfaces) — one noun, nine verbs, four adjectives
+
+Dream             -> NeuronKit (hybrid recall, dreaming daemon, Bradley-Terry, SolverBandit)
+                     CognitionKit (named, composable behaviour recipes)
+
+Compose / Convene -> GeniusLocusKit (N estates, matrix layer, federation)
+
+Speak             -> ARIA (MCP server + native app surfaces)
 ```
 
 The readable map of the whole repository is [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md).
 
 ## For developers
 
-If you're building an application and you want it to have **temporal knowledge** — memory that survives sessions, links to AI, and participates in the user's life — you can embed MOOTx01 directly. Most apps don't have a memory substrate because writing one is hard: the math debt is steep and the speed optimization is harder. You don't have to. MOOTx01 ships as a **kit family**; your application gets its own first-person MOOT and shares whatever the user authorizes with the user's personal MOOT. You focus on what your application does — the substrate is already done.
+If you are building an application and you want it to have temporal knowledge — memory that survives sessions, links to AI, and participates in the user's life — you can embed MOOTx01 directly.
 
-The interface is **ARIA**: consistent across implementations, surfaces, and languages — the same vocabulary whether you embed as a library, query through an MCP server, or call a native API. In most cases you don't need to rewrite anything: if your app already speaks MCP, your AI can read from it through ARIA and bring what it learns into the user's MOOT. **The app isn't rebuilt — it gains a MOOT beside it.**
+Most apps do not have a memory substrate because writing one is hard. The math debt is steep. The speed optimization is harder. MOOTx01 ships as a kit family, so your application can gain memory without rebuilding the substrate from scratch.
 
----
+Your app can use MOOTx01 in three common ways:
+
+- **Sidecar:** the app keeps its own store, and a MOOT runs beside it.
+- **Embedded:** the app links the kits directly.
+- **MCP surface:** the app exposes or consumes memory through ARIA over MCP.
+
+The interface is ARIA: consistent across implementations, surfaces, and languages. The same vocabulary works whether you embed MOOTx01 as a library, query it through an MCP server, or call it through a native API.
 
 ## For builders: the kit stack
 
-```
+```text
 Behaviour:
     NeuronKit       AI algorithms: reasoning functions plus autonomic daemons
     CognitionKit    Behaviour layer: named, composable workflows
@@ -120,7 +220,7 @@ Composition:
     GeniusLocusKit  Unified substrate: LocusKit + CorpusKit + Brain layer; N estates
 
 Standalone substrate:
-    LocusKit        Spatial memory system plus knowledge graph (one estate)
+    LocusKit        Spatial memory system plus knowledge graph
     VectorKit       On-device embeddings plus nearest-neighbour search
     CorpusKit       Content-plus-vector RAG bundles
 
@@ -132,58 +232,52 @@ Typed math:
     EngramLib       Typed 256-bit Engram API
 
 Foundation:
-    SubstrateTypes  Pure substrate types (zero compute)
+    SubstrateTypes  Pure substrate types
     SubstrateKernel Hot-path bit ops, write gate, clock
     SubstrateML     Learning + graph algorithms
     SubstrateLib    Orchestration: verbs + row-state automaton
     PersistenceKit  Storage backends: SQLite, PostgreSQL, InMemory
     ConvergenceKit  Sync implementations: CloudKit, Federation, None
-    QueueKit        Fill-and-drain job queue: RAM and database backends
-    IntellectusLib  Zero-dependency telemetry floor (gated self-report faculty)
-    ObserverSink    Telemetry sink + SQLite stats store (the console's read source)
-    AriaLexiconLib  Reified ARIA grammar: verbs, nouns, adjectives (zero-dependency)
-    VaultKit        Encrypted, portable, file-based estate export/import
+    QueueKit        Fill-and-drain job queue
+    IntellectusLib  Telemetry floor
+    ObserverSink    Telemetry sink + SQLite stats store
+    AriaLexiconLib  Reified ARIA grammar
+    VaultKit        Encrypted, portable estate export/import
 ```
 
-**Access layer (ARIA):** `aria-mcp` (MCP server — expose any estate to Claude, Claude Code, or any MCP client) · `ARIA_MacOS` / `ARIA_iOS` / `ARIA_Rust` (demonstration apps) · **`moot-mgr`** (the management & monitoring console: a resident multi-estate host with estate provisioning + lifecycle, a self-report dashboard, and a live node-link Topology view — cross-platform web + macOS).
+## Build status
 
-### Build status
+Two dimensions are tracked:
 
-Two dimensions are tracked. **Build** = functional with tests green. **Security Review** = the security, quality-control, and hardening gate — **it has not run on any kit yet**, so Review is pending across the board. Build status reflects functionality only; nothing here has been hardened or audited.
+- **Build** means functional with tests green.
+- **Security Review** means the security, quality-control, and hardening gate.
+
+Security review has not run on any kit yet, so review is pending across the board. Build status reflects functionality only.
 
 | Kit | Build | Security Review |
-|-----|-------|--------|
-| AriaLexiconLib · CognitionKit · ConvergenceKit · CorpusKit · EideticLib · EngramLib · GeniusLocusKit · IntellectusLib · LatticeLib · LocusKit · NeuronKit · ObserverSink · PersistenceKit · QueueKit · SubstrateKernel · SubstrateLib · SubstrateML · SubstrateTypes · VaultKit · VectorKit | ✅ Built (Swift + Rust) | ⏳ Pending |
+|---|---|---|
+| AriaLexiconLib · CognitionKit · ConvergenceKit · CorpusKit · EideticLib · EngramLib · GeniusLocusKit · IntellectusLib · LatticeLib · LocusKit · NeuronKit · ObserverSink · PersistenceKit · QueueKit · SubstrateKernel · SubstrateLib · SubstrateML · SubstrateTypes · VaultKit · VectorKit | Built (Swift + Rust) | Pending |
 
-Per-kit detail (what each is *for*) lives in [`packages/PACKAGES.md`](packages/PACKAGES.md) and the per-kit specs under [`docs/reference/`](docs/reference/).
+Per-kit detail lives in [`packages/PACKAGES.md`](packages/PACKAGES.md) and the specs under [`docs/reference/`](docs/reference/).
 
 ## Implementations
 
-Every kit ships in two equal-status implementations, conformance-gated against shared test vectors — neither leads, both must agree bit for bit:
+Every kit ships in two equal-status implementations, conformance-gated against shared test vectors:
 
 - **Swift** — Apple Silicon, macOS 26+, iOS 26+
 - **Rust** — PC/Linux x86_64 and Linux aarch64
 
-Three further ports are on the major-release line:
-
-- **Python** — community edition at v1.0, auto-generated from the stable core. Standalone, single-machine **by design**: the Python build does not federate (federation is trust-critical) and is materially slower on the heavy linear-algebra paths. Right for single-machine use; contributions that exercise the standalone port are welcome.
-- **Go** — shortly after v1.0, Enterprise Edition only.
-- **C** — the "DOOM edition," v1.5/v2.0, Enterprise Edition only. Built for maximum portability: it runs on anything.
-
-The engineering cookbook lives in [`docs/engineering/`](docs/engineering/); the conformance harness in [`docs/validation/substrate_math_performance/test-harness/`](docs/validation/substrate_math_performance/test-harness/).
+Neither port leads. Both must agree bit for bit.
 
 ## Roadmap
 
-Intended sequence, not committed dates. Items 1–3 shipped in the 1.0.0-beta; 4–8 are ahead.
+Intended sequence, not committed dates.
 
-1. **Finish the Brain layer** — complete NeuronKit (hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit) and CognitionKit (the behaviour recipes). Everything below them is built. **✅ Shipped (1.0.0-beta).**
-2. **Ship the ARIA MCP reference server** — so anyone can compile it and use their MOOT from an agentic chat or coding harness. **✅ Shipped (1.0.0-beta).**
-3. **Ship the management & monitoring console (`moot-mgr`)** — the resident host that creates and manages multiple estates (stepped provisioning, per-estate backend, full lifecycle) with a flow-down self-report layer surfaced as a read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface. One cross-platform codebase: a loopback web dashboard plus a macOS menu-bar agent. **✅ Shipped (1.0.0-beta).**
-4. **Full security sweep** — a complete security, quality-control, and hardening pass across the substrate, the MCP server, and the console. No kit has cleared this gate yet.
-5. **Hardened GA binary** — the curl-installable binary ships at 1.0.0-beta for early adopters (see Quickstart); the *general-availability, security-hardened* binary of the MCP server and the console follows the full security sweep (§4) — the first artifact aimed at the wider, non-developer audience is the first one hardened.
-6. **Sidecar & embedded examples** — a reference set of apps showing the sidecar and embedding patterns.
-7. **Federation** — bounded cross-estate sharing: grant-scoped handshakes that share only what a grant names, with formally bounded noise on aggregate queries. Federation is an access-surface capability (ARIA), not a change to the substrate.
-8. **Apple Intelligence integration** — surface a MOOT through Apple's on-device intelligence and App Intents, so capture and recall work natively across the Apple ecosystem.
+1. **Full security sweep** — pending.
+2. **Hardened GA binary** — follows the security sweep.
+3. **Sidecar and embedded examples** — reference app patterns.
+4. **Federation** — bounded cross-estate sharing.
+6. **Apple Intelligence integration** — native capture and recall across Apple surfaces.
 
 ## Repository structure
 
