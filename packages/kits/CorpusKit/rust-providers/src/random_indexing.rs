@@ -64,6 +64,7 @@
 // canonical test vectors. Never reimplement inline.
 // ─────────────────────────────────────────────────────────────────
 
+use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 use engram_lib::Engram;
 use std::collections::HashMap;
 use substrate_kernel::float_vec_ops;
@@ -96,6 +97,12 @@ pub const RI_WINDOW: usize = 4;
 /// FloatSimHash projection seed for Random Indexing. Encodes "RI_V1_MX"
 /// in ASCII. MUST NOT drift from the Swift constant `riProjectionSeed`.
 pub const RI_PROJECTION_SEED: u64 = 0x5249_5F56_315F_4D58;
+
+/// 4-byte magic identifying a Random Indexing basis blob ("RIB1").
+/// Distinct per provider so a blob can never be deserialized by the wrong
+/// provider type — `from_serialized_basis` rejects a mismatch. Mirrors the
+/// Swift constant `RandomIndexingProvider.basisMagic`.
+pub const RI_BASIS_MAGIC: &[u8; 4] = b"RIB1";
 
 // MARK: - Index vector generation
 
@@ -231,6 +238,49 @@ impl RandomIndexingProvider {
     /// The current trained vocabulary size.
     pub fn vocabulary_size(&self) -> usize {
         self.vocab.len()
+    }
+
+    // MARK: - Basis serialization (mission 6a-i)
+
+    /// Serialize the trained RI basis to a versioned, little-endian blob.
+    ///
+    /// The RI basis is fully determined by the `vocab` map (term → context
+    /// vector); the model identity and projection seed are also captured so
+    /// the reconstructed provider keys to the same Engram bucket. Byte
+    /// layout mirrors Swift's `serializeBasis()` exactly — the same trained
+    /// state yields a byte-identical blob on both ports.
+    pub fn serialize_basis(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(RI_BASIS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u64(self.projection_seed);
+        w.write_string_f32_vector_map(&self.vocab);
+        w.into_bytes()
+    }
+
+    /// Reconstruct a provider from a serialized RI basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embed_float` output is identical
+    /// to the original trained provider's (round-trip law). Returns
+    /// `Err(BasisCodecError)` on a truncated blob, an unknown format version,
+    /// or a magic mismatch — never panics.
+    pub fn from_serialized_basis(bytes: &[u8]) -> Result<Self, BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(RI_BASIS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let model_id = r.read_string()?;
+        let model_version = r.read_string()?;
+        let projection_seed = r.read_u64()?;
+        let vocab = r.read_string_f32_vector_map()?;
+        let mut provider = RandomIndexingProvider::with_parameters(
+            model_id,
+            model_version,
+            projection_seed,
+        );
+        provider.vocab = vocab;
+        Ok(provider)
     }
 
     // MARK: - Private helpers

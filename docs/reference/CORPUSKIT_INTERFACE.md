@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-06-16
 spec_type: kit
-version: 1.0.0
+version: 1.1.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -481,6 +481,66 @@ impl EmbeddingProvider for EmbeddingGemmaProvider { /* embed, embed_float */ }
 > the kit owns only the tokenizer and projection; model weights remain
 > the host's concern on every platform.
 
+### Distributional-provider basis serialization (both ports)
+
+The four stateful distributional providers — `RandomIndexingProvider`,
+`PpmiProvider`, `LsaProvider`, `NmfProvider` — expose a versioned,
+little-endian **basis serialization** API. A trained provider serializes
+its basis to bytes and a deserializing initializer/constructor
+reconstructs a provider whose embeddings are bit-identical to the
+original. The same trained state produces a **byte-identical blob on both
+ports**; this is the cross-port conformance contract (FDC is stateless and
+has no basis — it carries no serialization API).
+
+**Byte format (the contract).** Each blob is framed as
+`MAGIC (4 ASCII bytes) | FORMAT_VERSION (1 byte) | payload`. Magic is
+per-provider (`RIB1`, `PPB1`, `LSB1`, `NMB1`). All integers and floats are
+**little-endian**; floats are IEEE-754 bit patterns (`Float.bitPattern` /
+`f32::to_le_bytes`); strings are UInt32-length-prefixed UTF-8; arrays/maps
+are UInt32-count-prefixed; map keys are emitted in ascending UTF-8 byte
+order so both ports produce identical bytes. The shared codec lives in
+`BasisCodec.swift` / `basis_codec.rs` (one definition per port). An unknown
+format version, a magic mismatch, or a truncated blob is rejected with a
+structured error — `CorpusKitError.decodingFailure` (Swift) /
+`BasisCodecError` (Rust) — never a crash or panic.
+
+**Swift:**
+
+```swift
+// On each of RandomIndexingProvider, PpmiProvider, LsaProvider, NmfProvider:
+public func serializeBasis() -> Data
+public convenience init(deserializing data: Data) throws  // throws CorpusKitError.decodingFailure
+
+// Shared codec (CorpusKitProviders):
+public let basisFormatVersion: UInt8  // current format version (1)
+public struct BasisWriter { /* writeU32/writeU64/writeF32/writeString/… */ }
+public struct BasisReader { /* readU32/…; throws on truncation/bad header */ }
+```
+
+**Rust:** the `corpus-kit-providers` crate exposes the mirror API.
+
+```rust
+// On each of RandomIndexingProvider, PpmiProvider, LsaProvider, NmfProvider:
+pub fn serialize_basis(&self) -> Vec<u8>;
+pub fn from_serialized_basis(bytes: &[u8]) -> Result<Self, BasisCodecError>;
+
+// Shared codec:
+pub const BASIS_FORMAT_VERSION: u8;        // 1
+pub struct BasisWriter { /* write_u32/write_u64/write_f32/write_string/… */ }
+pub struct BasisReader<'a> { /* read_u32/…; Err(Truncated) on short blob */ }
+pub enum BasisCodecError { Truncated(String), MagicMismatch(String),
+                           UnsupportedVersion(String), InvalidUtf8(String) }
+```
+
+> **Round-trip law.** For every provider and every text:
+> `train → serialize → deserialize → embed(text)` is bit-identical to
+> `train → embed(text)`. For LSA and NMF the serialized basis carries the
+> raw factors (LSA: U / σ / Vᵀ; NMF: W / H) plus the term-document support
+> (vocabulary + document count), so both query embeddings (fold-in) and
+> training-document embeddings reproduce exactly on each port. The
+> embed-irrelevant training scratch (PPMI co-occurrence counts; raw
+> per-document TF rows) is intentionally not serialized.
+
 ### `Chunker`, `HybridRecall`, `CorpusKitSync`
 
 Stateless namespaces (Swift `enum` / Rust free functions or unit
@@ -900,6 +960,16 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-16
+Added the distributional-provider basis serialization API (mission 6a-i):
+`serializeBasis()` / `init(deserializing:)` (Swift) and `serialize_basis()` /
+`from_serialized_basis()` (Rust) on `RandomIndexingProvider`, `PpmiProvider`,
+`LsaProvider`, and `NmfProvider`, plus the shared little-endian `BasisCodec`
+(Swift) / `basis_codec` (Rust) and the `BasisCodecError` Rust enum. Documented
+the versioned byte format (magic + format version + little-endian payload), the
+round-trip law, and the cross-port byte-identity contract. Purely additive; no
+existing API changed.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -57,6 +57,7 @@
 // These are conformance-gated substrate primitives.
 // ─────────────────────────────────────────────────────────────────
 
+use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 use crate::term_document_counts::TermDocumentCounts;
 use corpus_kit::default_keyword_tokens;
 use engram_lib::Engram;
@@ -85,6 +86,10 @@ pub const NMF_DEFAULT_ITERATIONS: usize = 100;
 /// SplitMix64 seed for NMF factor initialization.
 /// Identical to the Swift constant `nmfFactorizationSeed`.
 pub const NMF_FACTORIZATION_SEED: u64 = 0xDEADBEEFCAFEBABE;
+
+/// 4-byte magic identifying an NMF basis blob ("NMB1"). Mirrors the Swift
+/// constant `NmfProvider.basisMagic`.
+pub const NMF_BASIS_MAGIC: &[u8; 4] = b"NMB1";
 
 // MARK: - NmfProvider
 
@@ -128,6 +133,13 @@ pub struct NmfProvider {
     /// W factor (vocabSize × k). Populated at finalize(). Empty until then.
     w: Vec<Vec<f32>>,
 
+    /// H factor (k × numDocs). Populated at finalize(). Empty until then.
+    /// Retained (not just the derived `doc_embeddings`) because the basis
+    /// blob serializes the raw factors W/H — keeping H lets the Rust port
+    /// emit a blob byte-identical to Swift's (which keeps the full
+    /// NMFFactorization). Document embeddings are served from `doc_embeddings`.
+    h: Vec<Vec<f32>>,
+
     /// Pre-computed document embeddings: L2-normalised column d of H.
     /// doc_embeddings[d] has length effectiveRank.
     doc_embeddings: Vec<Vec<f32>>,
@@ -154,6 +166,7 @@ impl NmfProvider {
             projection_seed,
             counts: TermDocumentCounts::new(),
             w: Vec::new(),
+            h: Vec::new(),
             doc_embeddings: Vec::new(),
             effective_rank: 0,
         }
@@ -233,13 +246,15 @@ impl NmfProvider {
         self.effective_rank = result.rank;
         // Store W (vocabSize × k) for query fold-in.
         self.w = result.w;
-        let h = result.h;
+        // Retain H (k × numDocs) so `serialize_basis` can emit it byte-
+        // identically to the Swift port (which keeps the full NMFFactorization).
+        self.h = result.h;
 
         // Pre-compute document embeddings: column d of H = H[r][d] for r in 0..<k.
         // L2-normalise via the substrate's conformance-gated primitive.
         self.doc_embeddings = (0..num_docs)
             .map(|d| {
-                let col: Vec<f32> = (0..effective_rank).map(|r| h[r][d]).collect();
+                let col: Vec<f32> = (0..effective_rank).map(|r| self.h[r][d]).collect();
                 // l2_normalize takes Vec<f32> by value and returns Vec<f32>.
                 float_vec_ops::l2_normalize(col)
             })
@@ -266,6 +281,82 @@ impl NmfProvider {
     /// Effective NMF rank after `finalize()`.
     pub fn effective_rank(&self) -> usize {
         self.effective_rank
+    }
+
+    // MARK: Basis serialization (mission 6a-i)
+
+    /// Serialize the finalized NMF basis to a versioned, little-endian blob.
+    ///
+    /// Emits configuration (`rank`, `max_iterations`, `seed`,
+    /// `projection_seed`), the term-document support (vocab + document count),
+    /// and the raw factors W (vocabSize × k) and H (k × numDocs) plus
+    /// `effective_rank`. The factors are PORT-NEUTRAL, so the same trained
+    /// state yields a byte-identical blob on both ports. Byte layout mirrors
+    /// Swift's `serializeBasis()` exactly.
+    pub fn serialize_basis(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(NMF_BASIS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u32(self.rank as u32);
+        w.write_u32(self.max_iterations as u32);
+        w.write_u64(self.seed);
+        w.write_u64(self.projection_seed);
+        w.write_u32(self.counts.document_count() as u32);
+        w.write_u32(self.effective_rank as u32);
+        w.write_string_u32_map(&self.counts.vocab);
+        w.write_f32_matrix(&self.w);
+        w.write_f32_matrix(&self.h);
+        w.into_bytes()
+    }
+
+    /// Reconstruct a provider from a serialized NMF basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embed_float`/`document_embedding`
+    /// output is identical to the original finalized provider's. Returns
+    /// `Err(BasisCodecError)` on a truncated blob, an unknown format version,
+    /// or a magic mismatch — never panics.
+    pub fn from_serialized_basis(bytes: &[u8]) -> Result<Self, BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(NMF_BASIS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let model_id = r.read_string()?;
+        let model_version = r.read_string()?;
+        let rank = r.read_u32()? as usize;
+        let max_iterations = r.read_u32()? as usize;
+        let seed = r.read_u64()?;
+        let projection_seed = r.read_u64()?;
+        let document_count = r.read_u32()? as usize;
+        let effective_rank = r.read_u32()? as usize;
+        let vocab = r.read_string_u32_map()?;
+        let w_factor = r.read_f32_matrix()?;
+        let h_factor = r.read_f32_matrix()?;
+
+        // Re-derive per-document embeddings exactly as finalize() does:
+        // L2-normalised column d of H. An empty factor section (never-
+        // finalized source) yields empty doc_embeddings and an empty `w`,
+        // so `is_finalized()` stays false.
+        let doc_embeddings: Vec<Vec<f32>> = (0..document_count)
+            .map(|d| {
+                let col: Vec<f32> = (0..effective_rank).map(|rr| h_factor[rr][d]).collect();
+                float_vec_ops::l2_normalize(col)
+            })
+            .collect();
+
+        Ok(NmfProvider {
+            model_id,
+            model_version,
+            rank: rank.max(1),
+            max_iterations: max_iterations.max(1),
+            seed,
+            projection_seed,
+            counts: TermDocumentCounts::from_restored(vocab, document_count),
+            w: w_factor,
+            h: h_factor,
+            doc_embeddings,
+            effective_rank,
+        })
     }
 
     /// Return the k-dim NMF embedding for `text` via the fold-in formula.

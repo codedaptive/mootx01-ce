@@ -400,4 +400,52 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// The number of unique target terms seen during training (before
     /// PPMI filtering).  Useful for tests: `vocabularySize <= trainingVocabSize`.
     public var trainingVocabSize: Int { coCount.count }
+
+    // MARK: Basis serialization (mission 6a-i)
+
+    /// 4-byte magic identifying a PPMI basis blob ("PPB1").
+    static let basisMagic: [UInt8] = Array("PPB1".utf8)
+
+    /// Serialize the finalized PPMI basis to a versioned, little-endian blob.
+    ///
+    /// PPMI's `embed`/`embedFloat` output is fully determined by the
+    /// finalized `ppmiVectors` map plus the projection seed. The raw
+    /// co-occurrence count tables (`coCount`, `termCount`, totals) are
+    /// training-phase scratch and are NOT part of the embed-relevant basis,
+    /// so they are intentionally excluded — the round-trip law concerns
+    /// embedding identity, which depends only on `ppmiVectors`.
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | projectionSeed (u64)
+    ///   | ppmiVectors (String→[Float] map, sorted keys)
+    public func serializeBasis() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(PpmiProvider.basisMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU64(projectionSeed)
+        w.writeStringFloatVectorMap(ppmiVectors)
+        return w.data
+    }
+
+    /// Reconstruct a provider from a serialized PPMI basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embedFloat` output is identical
+    /// to the original finalized provider's. The count tables are left empty
+    /// (a deserialized provider is read-only for embedding; calling `train`
+    /// again then requires a fresh `finalize`). Throws
+    /// `CorpusKitError.decodingFailure` on a truncated blob, unknown version,
+    /// or magic mismatch — never crashes.
+    public convenience init(deserializing data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(PpmiProvider.basisMagic)
+        try r.expectVersion(basisFormatVersion)
+        let modelID = try r.readString()
+        let modelVersion = try r.readString()
+        let projectionSeed = try r.readU64()
+        let ppmiVectors = try r.readStringFloatVectorMap()
+        self.init(modelID: modelID, modelVersion: modelVersion, projectionSeed: projectionSeed)
+        self.ppmiVectors = ppmiVectors
+    }
 }
