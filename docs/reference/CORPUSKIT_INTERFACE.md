@@ -4,7 +4,7 @@ status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
 spec_type: kit
-version: 1.3.0
+version: 1.4.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -893,6 +893,19 @@ public actor Corpus {
     /// basis blob so the dense lane is trained-ready immediately after restart.
     public init(storage: any Storage, model: EmbeddingModel = .default) async throws
 
+    /// N-PROVIDER construction (mission 6a-iii-core). Builds one ordered provider
+    /// slot per model, each keyed by its modelID; models[0] is the DEFAULT signal
+    /// the single-signal entry points delegate to. Every fan-out operation
+    /// (ingest embed, reindex train, remove, destroy) runs across all slots, each
+    /// under its own modelID — the VectorStore/BasisStore (keyed by (modelID,
+    /// modelVersion)) hold the N providers' rows side by side with NO schema
+    /// change. `init(storage:model:)` is the N=1 special case: it delegates here
+    /// with a one-element set, so a single-provider corpus is byte-identical to
+    /// the pre-6a-iii behaviour. The production default remains a single provider;
+    /// passing all five models is a CAPABILITY the 6b RRF consumer activates.
+    /// Precondition: `models` is non-empty. Rust mirror: `Corpus::open_many`.
+    public init(storage: any Storage, models: [EmbeddingModel]) async throws
+
     /// Chunk, store, index, embed, and vector-store a document.
     /// Idempotent on content-addressed chunk ids (SPEC B-9, I-3).
     /// FIRST-INGEST AUTO-TRAIN: when the model is trainable and no basis has been
@@ -902,7 +915,25 @@ public actor Corpus {
     public func ingest(_ text: String, sourceID: String, now: Date) async throws
 
     /// Embed the query and return fused kNN + BM25 results (SPEC B-10).
+    /// Runs on the DEFAULT signal (models[0]).
     public func recall(_ query: String, limit: Int = 10, now: Date) async throws -> [ScoredChunk]
+
+    /// Dense float nearest-neighbour recall (Lane D) on the DEFAULT signal.
+    /// Returns an always-observable FloatLaneOutcome (dark lanes carry a typed
+    /// reason; store errors are logged + counted, never swallowed; never throws).
+    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome
+
+    /// PER-SIGNAL dense float nearest (mission 6a-iii-core; the 6b RRF seam).
+    /// Runs the dense float lane independently for EVERY held provider slot, each
+    /// queried against its own modelID float index, and returns one ranked
+    /// FloatLaneOutcome per signal tagged by its modelID, in slot order ([0] is
+    /// the default signal). Preserves the per-signal dark-lane observability. NO
+    /// fusion happens here — the 6b consumer decides how to combine the lists.
+    /// For N=1 returns a single-element array equal to floatNearest's outcome.
+    /// Empty query / zero limit returns one .emptyQuery per signal (no store
+    /// access). Rust mirror: `Corpus::float_nearest_per_signal`.
+    public func floatNearestPerSignal(query: String, limit: Int) async
+        -> [(modelID: String, outcome: FloatLaneOutcome)]
 
     /// Retrain the embedding basis on the full corpus and re-embed every chunk
     /// (mission 6a-ii-β). For a trainable provider: gathers all chunk texts,
@@ -1103,6 +1134,34 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-06-17
+Added the Corpus N-provider capability + per-signal nearest API (mission
+6a-iii-core), ADDITIVE and back-compatible. New public `Corpus.init(storage:
+models:)` (Swift) / `Corpus::open_many` (Rust) builds an ordered collection of
+provider slots, one per held model keyed by modelID; the existing
+`init(storage:model:)` / `Corpus::open` are PRESERVED and delegate to the N path
+with a one-element set (N=1 is byte-identical to the prior single-provider
+behaviour). Every fan-out operation (ingest embed, reindex train, remove,
+destroy) runs across all held slots, each under its own modelID; the
+VectorStore/BasisStore — already keyed by (modelID, modelVersion) — hold the N
+providers' rows side by side with NO schema change. New public
+`Corpus.floatNearestPerSignal(query:limit:)` (Swift) /
+`Corpus::float_nearest_per_signal` (Rust) returns one ranked `FloatLaneOutcome`
+per held signal tagged by its modelID (the 6b RRF-fusion seam; NO fusion here).
+The single-signal entry points (`recall`, `floatNearest`, `embed`, `embedFloat`,
+`modelID`, `supportsFloat`) delegate to the default signal (models[0]) — every
+existing call site compiles unchanged. The production default remains SINGLE
+provider; flipping to all-five is a later mission (6a-iii-wire, sequenced with
+6b). Cross-port conformance: an all-five corpus over a fixed corpus yields
+per-signal ranked lists with IDENTICAL rank order Swift↔Rust (the float lane is
+reproducible-within-config, not four-way bit-identical — raw cosine bits are not
+asserted), pinned by `Tests/SharedVectors/n_provider_per_signal.json`
+(`NProviderTests.swift` canonical; `rust/tests/corpus_n_provider_tests.rs`
+asserts). The 6a-ii-β single-provider fixture passes unchanged (N=1 proof).
+VectorKit's float lane (Lane D) was made per-modelID so an N-provider corpus's
+float rows of differing dimension are queried in isolation (no shared-stride
+corruption) — see VECTORKIT changelog.
 
 ### 1.3.0 -- 2026-06-17
 Added the basis-persistence table + Corpus training lifecycle (mission 6a-ii-β,

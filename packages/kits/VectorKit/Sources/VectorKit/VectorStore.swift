@@ -195,24 +195,34 @@ public actor VectorStore {
 
     // MARK: - Float lane (Lane D) resident scan
 
-    /// Lane D: the in-house exact float index (FloatBruteForceIndex) over
-    /// the float32 rows in the `vectors` table. Production exact path per
-    /// Bob's storage amendment (2026-06-12): floats live in resident float
-    /// arrays scanned by FloatBruteForceIndex — no external engine. Built
-    /// lazily and rebuilt incrementally as float payloads are written; nil
-    /// until the first float write or findNearestFloat call populates it.
+    /// Lane D: the in-house exact float indices (FloatBruteForceIndex), ONE PER
+    /// modelID, over the float32 rows in the `vectors` table. Production exact
+    /// path per Bob's storage amendment (2026-06-12): floats live in resident
+    /// float arrays scanned by FloatBruteForceIndex — no external engine.
     ///
-    /// The float lane is reproducible-within-config, NOT four-way
-    /// bit-identical (arch spec §6) — distinct from the binary Hamming
-    /// lane's four-way determinism. It is therefore kept on its own index,
-    /// separate from bruteForceIndex/mihIndex (which are binary-only, I-7).
-    private let floatIndex: FloatBruteForceIndex
-
-    /// True once the float index has been populated from the table.
+    /// ## Why per-modelID (mission 6a-iii-core)
     ///
-    /// Set by _ensureFloatIndexBuilt() on the first float write or
-    /// findNearestFloat call. Actor-serialised control state.
-    private var floatIndexBuilt: Bool = false
+    /// FloatBruteForceIndex requires a SINGLE stride (one dimension) per index,
+    /// and `search` throws `invalidPayload` when the probe dimension does not
+    /// match the array stride. Different models emit different float dimensions
+    /// (RI/PPMI high-dim, FDC its own dim, MiniLM 384, …). With an N-provider
+    /// corpus the `vectors` table holds float rows for several models at once,
+    /// so a SINGLE shared index built from the first record's stride would be
+    /// corrupt for every other model and throw on query. Spec I-4 already keeps
+    /// models on disjoint partitions and forbids cross-model comparison, so the
+    /// correct structure is one index per modelID: each is built from that
+    /// model's rows only (uniform stride) and scanned in isolation. For a
+    /// single-model corpus the map holds exactly one entry — byte-identical
+    /// behaviour to the prior single shared index.
+    ///
+    /// The float lane is reproducible-within-config, NOT four-way bit-identical
+    /// (arch spec §6) — distinct from the binary Hamming lane's four-way
+    /// determinism. It is therefore kept on its own indices, separate from
+    /// bruteForceIndex/mihIndex (which are binary-only, I-7).
+    ///
+    /// Built lazily per modelID on the first `findNearestFloat` for that model;
+    /// the entry's presence in the map is the "built" flag (no separate bool).
+    private var floatIndices: [String: FloatBruteForceIndex] = [:]
 
     /// True when MIHIndex is the active hot index; false when BruteForceIndex
     /// is active. Tracks the routing decision so _selectIndex can detect
@@ -337,7 +347,8 @@ public actor VectorStore {
         self.bruteForceIndex = bf
         self.mihIndex        = mih
         self.hotIndex        = bf   // starts in Lane A; promoted by _selectIndex
-        self.floatIndex      = FloatBruteForceIndex()
+        // Float indices are built lazily per modelID on first findNearestFloat;
+        // the map starts empty (no pre-built index).
     }
 
     // MARK: - Write
@@ -488,12 +499,13 @@ public actor VectorStore {
             }
             _selectIndex()
         } else if payload.kind == .float32 {
-            // Mirror float32 payloads into the Lane D float index so
-            // findNearestFloat sees this write without a full table rescan.
-            // Only when the float index is already built — otherwise the
+            // Mirror float32 payloads into the Lane D float index for THIS
+            // modelID so findNearestFloat sees this write without a full table
+            // rescan. Only when this model's float index is already built (its
+            // presence in `floatIndices` is the built flag) — otherwise the
             // table write is authoritative and the row is picked up when
-            // _ensureFloatIndexBuilt next runs (lazy first-use build).
-            if floatIndexBuilt {
+            // findNearestFloat lazily builds this model's index on first use.
+            if let modelIndex = floatIndices[modelID] {
                 let key = VectorRecordKey(
                     itemID: itemID,
                     vectorIndex: vectorIndex,
@@ -504,8 +516,8 @@ public actor VectorStore {
                 // float index tombstones the prior slot for this key before
                 // appending the new one, mirroring the table's ON CONFLICT
                 // UPDATE so a stale float vector cannot survive in the scan.
-                try await floatIndex.remove(key: key)
-                try await floatIndex.add(key: key, vector: payload)
+                try await modelIndex.remove(key: key)
+                try await modelIndex.add(key: key, vector: payload)
             }
         }
 
@@ -643,12 +655,14 @@ public actor VectorStore {
             _selectIndex()
         }
 
-        // 3. Float lane: if any float row is in the batch, invalidate the
-        //    Lane D index so the next findNearestFloat rebuilds it once from
-        //    the table. A lazy rebuild is cheaper than N incremental float
-        //    adds and matches the delete-path coherence policy.
-        if batch.contains(where: { $0.payload.kind == .float32 }) {
-            floatIndexBuilt = false
+        // 3. Float lane: invalidate the Lane D index for every modelID that has
+        //    a float row in the batch, so the next findNearestFloat rebuilds
+        //    that model's index once from the table. A lazy rebuild is cheaper
+        //    than N incremental float adds and matches the delete-path coherence
+        //    policy. Dropping the map entry is the invalidation (its presence is
+        //    the built flag); other models' indices are untouched.
+        for input in batch where input.payload.kind == .float32 {
+            floatIndices.removeValue(forKey: input.modelID)
         }
 
         let endTime = Date().timeIntervalSince1970
@@ -896,14 +910,24 @@ public actor VectorStore {
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
 
-        try await _ensureFloatIndexBuilt()
+        // Build (once, lazily) the Lane D index for THIS modelID from its float
+        // rows only — uniform stride, so the search dimension guard is satisfied
+        // even when the table holds several models' float rows of differing
+        // dimension (mission 6a-iii-core). Returns the model's index, or nil when
+        // the model has no float rows (no float lane for it).
+        guard let modelIndex = try await _ensureFloatIndexBuilt(modelID: modelID) else {
+            return []
+        }
 
         let probePayload = VectorPayload(floats: probe)
+        // The index already holds only this model's rows, but keep the modelID
+        // metadata filter for defence-in-depth (a future shared-build path would
+        // still be correctly scoped).
         let filter = MetadataFilter(modelID: modelID)
 
         // FloatBruteForceIndex computes cosine distance and applies the
         // (distance ASC, itemID ASC) tie-break (retrieval algorithms ref §0.3).
-        let hits = try await floatIndex.search(
+        let hits = try await modelIndex.search(
             probe: probePayload,
             metric: .float(.cosine),
             k: limit,
@@ -986,12 +1010,14 @@ public actor VectorStore {
                 .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
             ])
         )
-        // The deletion may have removed float32 rows. Invalidate the Lane D
-        // index so the next findNearestFloat rebuilds it from the table (the
-        // authoritative source) rather than scanning stale float slots. The
-        // delete call carries no kind, so we cannot tombstone selectively
-        // here; a lazy rebuild is correct and is paid once on next search.
-        floatIndexBuilt = false
+        // The deletion may have removed float32 rows for this modelID.
+        // Invalidate THIS model's Lane D index so the next findNearestFloat
+        // rebuilds it from the table (the authoritative source) rather than
+        // scanning stale float slots. The delete call carries no kind, so we
+        // cannot tombstone selectively here; a lazy rebuild is correct and is
+        // paid once on next search. Other models' indices are untouched
+        // (dropping the map entry is the invalidation).
+        floatIndices.removeValue(forKey: modelID)
         // Tombstone every resident slot for this (itemID, modelID) pair.
         // Only if the index has been built — if not, the delete is already
         // reflected in the table and will be absent on first build.
@@ -1049,10 +1075,11 @@ public actor VectorStore {
         isMIHActive = false
         // Mark built so future findNearest calls skip the (empty) table fetch.
         indexBuilt = true
-        // Reset the Lane D float index to empty as well — every float row
-        // was just deleted, so the resident float array must be cleared.
-        await floatIndex.build(from: ResidentVectorArray.empty(kind: .float32, stride: 0))
-        floatIndexBuilt = true
+        // Reset the Lane D float indices as well — every float row was just
+        // deleted, so every per-modelID resident float array must be cleared.
+        // Dropping all map entries clears every model's index; each rebuilds
+        // lazily (and empty) on the next findNearestFloat for that model.
+        floatIndices.removeAll()
         log.info("VectorStore.destroyAllVectors: all rows deleted, resident array reset")
     }
 
@@ -1140,23 +1167,38 @@ public actor VectorStore {
     /// index requires a single stride, so all float rows for the queried
     /// model share one dimension (spec I-4 keeps models on disjoint
     /// partitions, and one model emits one dimension).
-    private func _ensureFloatIndexBuilt() async throws {
-        guard !floatIndexBuilt else { return }
-        let records = try await _fetchAllFloatRecords()
-        if let arr = Self.buildFloatArray(from: records) {
-            await floatIndex.build(from: arr)
+    private func _ensureFloatIndexBuilt(modelID: String) async throws -> FloatBruteForceIndex? {
+        // The map entry's presence is the per-model "built" flag.
+        if let existing = floatIndices[modelID] { return existing }
+        let records = try await _fetchFloatRecords(modelID: modelID)
+        guard let arr = Self.buildFloatArray(from: records) else {
+            // No float rows for this model — no float lane for it. Do NOT cache
+            // an empty index: a later ingest of this model's first float row
+            // must be able to build a real index on the next search.
+            return nil
         }
-        floatIndexBuilt = true
+        let index = FloatBruteForceIndex()
+        await index.build(from: arr)
+        floatIndices[modelID] = index
+        return index
     }
 
-    /// Fetch all float32 rows from the `vectors` table, sorted by
-    /// VectorRecordKey natural order (arch spec §4.2: deterministic
-    /// partition index, so the cross-language scan order matches).
-    private func _fetchAllFloatRecords() async throws -> [(key: VectorRecordKey, payload: VectorPayload)] {
+    /// Fetch the float32 rows for ONE modelID from the `vectors` table, sorted
+    /// by VectorRecordKey natural order (arch spec §4.2: deterministic partition
+    /// index, so the cross-language scan order matches). Scoping the fetch to a
+    /// single modelID guarantees a uniform stride (one dimension per model), so
+    /// the resulting resident array — and the FloatBruteForceIndex built from it
+    /// — never mixes dimensions across models (mission 6a-iii-core).
+    private func _fetchFloatRecords(
+        modelID: String
+    ) async throws -> [(key: VectorRecordKey, payload: VectorPayload)] {
         let rows = try await storage.rowStore.query(
             table: "vectors",
-            where: .eq(Column(table: "vectors", name: "kind"),
-                       .int(Int64(VectorKind.float32.rawValue))),
+            where: .and([
+                .eq(Column(table: "vectors", name: "kind"),
+                    .int(Int64(VectorKind.float32.rawValue))),
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
+            ]),
             orderBy: [],
             limit: nil,
             offset: nil
@@ -1312,11 +1354,12 @@ public actor VectorStore {
                 .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
             ])
         )
-        // The deleted row may have been a float32 vector. Invalidate the
-        // Lane D index so the next findNearestFloat rebuilds from the table.
-        // (See deleteAllVectors: the delete carries no kind, so a lazy
-        // rebuild is the correct coherence path for the float lane.)
-        floatIndexBuilt = false
+        // The deleted row may have been a float32 vector for this modelID.
+        // Invalidate THIS model's Lane D index so the next findNearestFloat
+        // rebuilds from the table. (See deleteAllVectors: the delete carries no
+        // kind, so a lazy rebuild is the correct coherence path for the float
+        // lane.) Other models' indices are untouched.
+        floatIndices.removeValue(forKey: modelID)
         // Only touch the resident array if it has been built. If not, the
         // table delete is already authoritative and the entry will be absent
         // when the array is first built on the next findNearest call.

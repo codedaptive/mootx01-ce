@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
 status: active
-version: 1.0.1
-date: 2026-06-15
+version: 1.0.2
+date: 2026-06-17
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -442,9 +442,11 @@ For a batch of N items it performs:
   rebuild of both `BruteForceIndex` and `MIHIndex` from the final array.
   Cost is O(batches) sidecar writes and O(batches) index builds regardless
   of batch size.
-- Float32 lane: the Lane D float index is invalidated once for a lazy
-  rebuild on the next `findNearestFloat` call (cheaper than N incremental
-  float adds).
+- Float32 lane: the Lane D float index for each modelID present in the batch
+  is invalidated once for a lazy rebuild on the next `findNearestFloat` call
+  for that model (cheaper than N incremental float adds). Lane D keeps one
+  index per modelID (uniform stride per model); other models' indices are
+  untouched.
 - Empty batch is a no-op.
 Search output is identical to N sequential `addPayload` calls for the same
 inputs (the total order (distance ASC, itemID ASC) is applied at query
@@ -842,6 +844,15 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.0.2 -- 2026-06-17
+Clarified the Lane D float lane behavior under `addPayloads` and across the
+kit: Lane D keeps ONE `FloatBruteForceIndex` per modelID (uniform stride per
+model), built lazily per model from that model's float rows. A batch invalidates
+only the affected models' indices. This documents the behavior fix that lets an
+N-provider corpus (CorpusKit mission 6a-iii-core) query several models' float
+rows of differing dimension without shared-stride corruption. Public surface
+unchanged (`findNearestFloat`/`find_nearest_float` signatures preserved).
 
 ### 1.0.1 -- 2026-06-15
 Added `VectorPayload` row to the Swift/Rust Concordance — engine types table. Type exists in both ports; the audit regex missed it because the Swift declaration does not use a keyword the regex tracks (VectorPayload is a plain `public struct`; the gap was solely a missing concordance row).

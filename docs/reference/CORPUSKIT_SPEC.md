@@ -1,6 +1,6 @@
 ---
 title: CorpusKit Specification
-version: 1.1.0
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -453,6 +453,29 @@ from the Corpus's internal VectorStore in the `.glk` / separate-corpusStorage
 case).
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Added the N-provider capability + per-signal nearest contract (mission
+6a-iii-core), ADDITIVE and back-compatible. A Corpus MAY hold an ORDERED
+collection of embedding providers (one slot per model, keyed by modelID);
+`models[0]` is the DEFAULT signal that every single-signal operation (recall,
+floatNearest, embed, embedFloat, modelID, supportsFloat) delegates to. Every
+fan-out operation (ingest embed, reindex train, remove, destroy) runs across all
+held slots, each under its own modelID — the VectorStore/BasisStore are already
+keyed by (modelID, modelVersion), so N providers' rows coexist with NO schema
+change. The single-provider corpus is the N=1 special case and remains
+byte-identical to the 1.1.0 behaviour (the 6a-ii-β basis fixture passes
+unchanged). New per-signal nearest behavior: `floatNearestPerSignal` returns one
+ranked `FloatLaneOutcome` per held signal tagged by modelID, in slot order — the
+6b RRF-fusion seam (no fusion in this contract). Cross-port conformance is RANK
+IDENTITY: with all five distributional/co-classification models over a fixed
+corpus, the per-signal ranked itemID order is identical Swift↔Rust; raw cosine
+similarity is NOT asserted bit-identical (the float lane Lane D is
+reproducible-within-config, not four-way bit-identical — arch spec §6). VectorKit
+Lane D became per-modelID so float rows of differing dimension across models are
+queried in isolation. The production default stays SINGLE provider; the
+default-flip to all-five is a later mission (6a-iii-wire). No existing contract
+changed.
 
 ### 1.1.0 -- 2026-06-17
 Added the basis-persistence + training lifecycle contract (mission 6a-ii-β,
