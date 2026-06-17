@@ -10,7 +10,10 @@
 //! ordered (i, j) field pairs of a row INCLUDING i == j, so the
 //! diagonal is retained — `O[(f,v),(f,v)]` is single-item support and
 //! `O[(fi,vi),(fj,vj)]` is 2-itemset support. Enough for pairwise
-//! rules; NOT enough for k>2 itemsets (those need row-replay).
+//! {A}→{B} rules. For k>2 multi-antecedent patterns such as {A,B}→{C},
+//! use `mine_apriori_rules` in `apriori_mining.rs`, which implements
+//! standard Apriori over `RowAttributeView` row-replay data and supports
+//! configurable `max_k` up to any itemset depth.
 //!
 //! Contract points (verified against `substrate_types::matrix_o`):
 //! single-item support comes from the retained DIAGONAL (`O[A,A]`),
