@@ -63,7 +63,7 @@ struct ExpungeIntegritySweepTests {
         )
         let handle = try await kit.provision(
             storage: storage, owner: owner, params: params,
-            embeddingModel: .deterministic)
+            embeddingModels: [.deterministic])
         return (kit, handle)
     }
 

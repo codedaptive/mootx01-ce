@@ -23,9 +23,10 @@
 //! - `channel` = `CaptureChannel::ImportedFile`
 //! - `added_by` = `"aria-mcp-server"`
 //! - `lattice_anchor` = `LatticeAnchor::udc("000.000")`
-//! - `embedding_model_id` = `"default"` (selects `EmbeddingModelConfig::Deterministic` —
-//!   reproducible FNV-1a + FloatSimHash projection — the permanent, federation-grade
-//!   Lane D vector; NOT a learned distributional embedding)
+//! - `embedding_model_id` = `"default"` (selects the 1.0 default recall
+//!   ensemble — the five honest signals RI/PPMI/LSA/NMF/FDC fused in Lane D,
+//!   trained on-corpus and reproducible cross-port; NOT a learned model-weight
+//!   embedding)
 
 use std::collections::BTreeMap;
 

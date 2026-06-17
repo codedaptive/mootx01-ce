@@ -52,9 +52,12 @@ persistence-kit  = { path = "../../../packages/kits/PersistenceKit/rust" }
 # locus-kit: InMemoryDrawerStore (the DrawerStore the estate opens over) +
 # OwnerCredentials/CaptureFrame/RecallFrame/Filter/Drawer for the admin plane.
 locus-kit        = { path = "../../../packages/kits/LocusKit/rust" }
-# corpus-kit: EmbeddingModelConfig for Corpus::open inside provision (the
-# provision-with-corpus path that lights the BM25 lane — DEBT-2).
-corpus-kit       = { path = "../../../packages/kits/CorpusKit/rust" }
+# corpus-kit-providers: the five-signal ensemble (default_ensemble()) moot-mgr
+# threads into provision (the provision-with-corpus path that lights Lane D —
+# DEBT-2). moot-mgr is the production caller that owns the 1.0 recall default.
+# Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; recorded in the
+# 6a-iii-wire blast-radius report. Downstream of providers — no inversion.
+corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
 # genius-locus-kit: EstateCoordinator::provision (provision-with-corpus, DEBT-2)
 # + lifecycle (quiesce/drain/destroy) + capture_with_mode/recall_scored for the
 # BM25 proof. This is the composition surface the admin plane drives.

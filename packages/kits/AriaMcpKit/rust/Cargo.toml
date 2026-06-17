@@ -50,6 +50,11 @@ persistence-kit  = { path = "../../PersistenceKit/rust" }
 # DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dependency recorded in the
 # mcp-semantic-lanes mission blast-radius report.
 corpus-kit       = { path = "../../CorpusKit/rust" }
+# corpus-kit-providers: the concrete five-signal ensemble (default_ensemble())
+# the estate constructor wires into Lane D. Permitted per
+# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; recorded in the 6a-iii-wire
+# blast-radius report. Downstream of the providers crate — no layering inversion.
+corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
 vectorkit        = { path = "../../VectorKit/rust" }
 # intellectus-lib: required for Intellectus::install / set_enabled / report!()
 # in autonomic_governor.rs (Part 4) and autonomic_governor_tests.rs (Part 1).

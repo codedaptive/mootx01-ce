@@ -4,7 +4,7 @@ status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
 spec_type: kit
-version: 1.4.0
+version: 1.5.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -605,6 +605,37 @@ pub fn is_trainable(&self) -> bool;
 pub fn reconstruct(&self, basis: &[u8]) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError>;
 ```
 
+### `CorpusEnsemble.defaultEnsemble()` / `default_ensemble()` — the 1.0 default recall ensemble
+
+The single definition of the canonical 1.0 default recall ensemble: the five
+honest signals **RI / PPMI / LSA / NMF / FDC**, in that slot order (slot 0 =
+RandomIndexing is the default signal). It lives in **`CorpusKitProviders` /
+`corpus-kit-providers`** (layering: providers → core) because it NEWs the
+concrete provider types; core's `EmbeddingModel` / `EmbeddingModelConfig` never
+names a concrete provider.
+
+It is a **function, not a constant**: the four trainable signals carry mutable
+per-estate trained state, and the Rust `EmbeddingModelConfig` is not `Clone`, so
+the set is constructed fresh per call. Every production provision/open site
+threads this factory (GeniusLocusKit `provision` default, the ARIA_MCP estate
+constructors, `moot-mgr` / `aria-mcp-server`). The providers are returned
+UNTRAINED; the Corpus lifecycle trains and persists the trainable signals on
+first ingest/reindex under their own modelIDs.
+
+**Swift:**
+
+```swift
+public enum CorpusEnsemble {
+    public static func defaultEnsemble() -> [EmbeddingModel]
+}
+```
+
+**Rust:**
+
+```rust
+pub fn default_ensemble() -> Vec<EmbeddingModelConfig>;
+```
+
 ### `Chunker`, `HybridRecall`, `CorpusKitSync`
 
 Stateless namespaces (Swift `enum` / Rust free functions or unit
@@ -1134,6 +1165,15 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-06-17
+Added (6a-iii-wire) the public default-ensemble factory — the single definition
+of the 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Swift
+`CorpusEnsemble.defaultEnsemble() -> [EmbeddingModel]` in `CorpusKitProviders`;
+Rust `corpus_kit_providers::default_ensemble() -> Vec<EmbeddingModelConfig>`.
+Constructed fresh per call (per-estate trained state; Rust config not `Clone`).
+Threaded by every production provision/open site so the five honest signals are
+the live recall default. ADDITIVE — no existing CorpusKit signature changed.
 
 ### 1.4.0 -- 2026-06-17
 Added the Corpus N-provider capability + per-signal nearest API (mission

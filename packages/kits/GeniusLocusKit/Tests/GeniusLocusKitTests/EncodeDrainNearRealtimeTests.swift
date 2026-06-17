@@ -62,9 +62,14 @@ struct EncodeDrainNearRealtimeTests {
             frameworkProfile: "KnowledgeWork",
             syncMode: .none
         )
+        // INTENTIONAL single-provider (6a-iii-wire): this suite exercises the
+        // encode-drain near-realtime path, not recall content, so it pins the
+        // Corpus to the lightweight deterministic signal (no training cost). The
+        // five-signal default's recall payoff is proven in the dedicated
+        // ProvisionDefaultEnsembleTests / DefaultEnsembleRecallPayoffTests.
         let handle = try await kit.provision(
             storage: storage, owner: owner, params: params,
-            embeddingModel: .deterministic)
+            embeddingModels: [.deterministic])
         return (kit, handle)
     }
 

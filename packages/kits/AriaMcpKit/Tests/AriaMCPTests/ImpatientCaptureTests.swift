@@ -66,7 +66,7 @@ struct ImpatientCaptureTests {
         )
         let handle = try await kit.provision(
             storage: storage, owner: owner, params: params,
-            embeddingModel: .deterministic)
+            embeddingModels: [.deterministic])
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
         return (dispatcher, kit, handle)
     }

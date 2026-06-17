@@ -74,7 +74,7 @@ fn provision_glk_estate() -> (EstateCoordinator, EstateHandle) {
             None,
             OwnerCredentials::new("owner-encode-intake-tests"),
             params,
-            EmbeddingModelConfig::Deterministic,
+            vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision GLK estate");
     (coord, handle)
@@ -256,7 +256,7 @@ fn locus_only_degrades_both_modes_to_row_only() {
             None,
             OwnerCredentials::new("owner"),
             params,
-            EmbeddingModelConfig::Deterministic,
+            vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision LocusOnly");
 

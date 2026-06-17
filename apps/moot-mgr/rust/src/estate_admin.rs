@@ -38,7 +38,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::corpus::EmbeddingModelConfig;
+// The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
+// crate because it NEWs the concrete providers; moot-mgr is the production caller
+// that owns the default (Rust has no default arguments).
+use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::{
     EstateCoordinator, EstateKind, EstateMountState, EstateProvisionParams, GeniusLocusKitError,
@@ -282,12 +285,14 @@ impl EstateAdmin {
 
         // DEBT-2: provision-with-corpus. The coordinator creates → opens → wires
         // sub-stores (Corpus + VectorStore for GLK; Corpus for CorpusOnly) and
-        // registers the Corpus so the BM25 + deterministic vector recall lanes
-        // (Lane D) are lit. This is the construction the Rust host MUST use instead
-        // of `open` (which leaves the vector recall lanes dark).
-        // `EmbeddingModelConfig::Deterministic` needs no CoreML and is the parity
-        // default for headless construction. The learned distributional embedding
-        // provider is v1.1 (not wired here).
+        // registers the Corpus so the BM25 + dense vector recall lanes (Lane D)
+        // are lit. This is the construction the Rust host MUST use instead of
+        // `open` (which leaves the vector recall lanes dark).
+        // `default_ensemble()` is the canonical 1.0 five-signal recall default
+        // (RI/PPMI/LSA/NMF/FDC) — no CoreML, trained on-corpus and reproducible
+        // cross-port. moot-mgr is the production caller and owns the default,
+        // since Rust has no default arguments. The learned model-weight embedding
+        // providers are v1.1 (not wired here).
         let handle = self
             .coordinator
             .provision(
@@ -296,7 +301,7 @@ impl EstateAdmin {
                 None,
                 owner,
                 params,
-                EmbeddingModelConfig::Deterministic,
+                default_ensemble(),
             )
             .map_err(|e| AdminError::EngineFailure {
                 reason: glk_error_reason(&e),

@@ -106,13 +106,15 @@ fn new_sqlite_reopens_existing_database() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// `new_sqlite` on an invalid path (directory does not exist) returns Err,
-/// not a panic. The caller (`ServerConfig::from_env`) creates parent dirs
-/// before calling `new_sqlite`; this test verifies the error surface for
-/// callers that do NOT pre-create dirs (i.e., `register_sqlite`).
+/// `new_sqlite` on a path whose parent directories do not yet exist SUCCEEDS:
+/// PersistenceKit's `SqliteStorage::new` creates the parent dirs
+/// (`create_dir_all`) before opening, mirroring Swift `SQLiteConnection.init`'s
+/// `createDirectory(withIntermediateDirectories: true)` — intentional
+/// fresh-install robustness (e.g. the moot-mgr store on a clean Windows box).
+/// A deeply-nested fresh path is therefore provisioned, not rejected.
 #[test]
-fn new_sqlite_on_nonexistent_parent_returns_err() {
-    // A deeply nested path whose parents don't exist.
+fn new_sqlite_on_nonexistent_parent_creates_dirs_and_succeeds() {
+    // A deeply nested path whose parents don't exist yet.
     let path = std::env::temp_dir()
         .join(format!("aria_mcp_no_such_dir_{}", Uuid::new_v4()))
         .join("sub")
@@ -122,10 +124,15 @@ fn new_sqlite_on_nonexistent_parent_returns_err() {
 
     let result = EstateRegistry::new_sqlite(&path, "test-owner");
     assert!(
-        result.is_err(),
-        "new_sqlite on missing parent dir must return Err, not panic"
+        result.is_ok(),
+        "new_sqlite must create missing parent dirs and open the estate"
     );
-    // No cleanup needed — the file was never created.
+
+    // Clean up the file and the directories that were auto-created.
+    let _ = std::fs::remove_file(&path);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::remove_dir_all(parent);
+    }
 }
 
 // ---------------------------------------------------------------------------

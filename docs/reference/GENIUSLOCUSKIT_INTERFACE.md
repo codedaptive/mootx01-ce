@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.1.1
+version: 1.2.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -93,12 +93,19 @@ public actor GeniusLocusKit {
     // VectorStore) based on EstateKind. Idempotent re-provision raises .duplicateEstate.
     // quiesce/drain update EstateMountState; destroy closes the estate and tears down all
     // sub-stores (BM25 + vectors cleared; BundleStore chunks preserved — append-only invariant).
+    // embeddingModels defaults to the canonical 1.0 five-signal recall ensemble
+    // (CorpusEnsemble.defaultEnsemble(): RI/PPMI/LSA/NMF/FDC). Every provisioned
+    // estate gets the honest multi-signal default; the trainable signals train and
+    // persist on first ingest/reindex. Pass an explicit single-element list (e.g.
+    // [.deterministic]) only when one signal is specifically wanted. The Rust
+    // `provision` takes `embedding_models: Vec<EmbeddingModelConfig>` (no default
+    // arg in Rust — the app caller supplies `default_ensemble()`).
     public func provision(
         storage: any Storage,
         corpusStorage: (any Storage)? = nil,
         owner: OwnerCredentials,
         params: EstateProvisionParams,
-        embeddingModel: EmbeddingModel = .deterministic
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
     ) async throws -> EstateHandle
     public func mountState(for handle: EstateHandle) -> EstateMountState?
     public func quiesce(_ handle: EstateHandle) async throws
@@ -1726,6 +1733,17 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Changed (6a-iii-wire): `provision`'s embedding parameter is now the recall
+**ensemble**. Swift `embeddingModel: EmbeddingModel = .deterministic` →
+`embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()`; Rust
+`embedding_model: EmbeddingModelConfig` → `embedding_models: Vec<EmbeddingModelConfig>`
+(no default arg in Rust — the app caller threads `default_ensemble()`). The new
+default wires the five honest signals (RI/PPMI/LSA/NMF/FDC) at every production
+provision site, so recall is the multi-signal default rather than a single
+deterministic hash lane. The trainable signals train and persist on first
+ingest/reindex. Callers wanting one signal pass an explicit single-element list.
 
 ### 1.1.1 -- 2026-06-17
 Clarification (6b-modifiers-core-2): `RecallShape` now steers the **UnionBest**

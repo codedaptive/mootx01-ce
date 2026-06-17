@@ -40,7 +40,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
+use corpus_kit::corpus::Corpus;
+// The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
+// crate because it NEWs the concrete providers; this crate is downstream of it.
+use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_store::DrawerStore;
@@ -510,11 +513,12 @@ fn wire_inmemory_semantic_recall(
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
 
     // Corpus: applies BundleStore + VectorStore schema migrations (idempotent
-    // on InMemory, which always builds from empty). Deterministic embedding:
-    // reproducible across Swift/Rust ports, embedFloat returns a 32-element
-    // FNV-1a + FloatSimHash projection vector — Lane D (dense float recall) is live from the first capture.
-    let corpus = Corpus::open(Arc::clone(&storage), EmbeddingModelConfig::Deterministic)
-        .map_err(|e| format!("Corpus::open for in-memory semantic recall: {e:?}"))?;
+    // on InMemory, which always builds from empty). Five-signal honest ensemble
+    // (RI/PPMI/LSA/NMF/FDC via default_ensemble()): the trainable distributional
+    // signals train on-corpus and persist; FDC is stateless. Lane D (dense float
+    // recall) fuses all five and is live from the first capture.
+    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
+        .map_err(|e| format!("Corpus::open_many for in-memory semantic recall: {e:?}"))?;
 
     // VectorStore: standalone vector lane; schema migration is idempotent.
     let vector_store = VectorStore::open(Arc::clone(&storage))
@@ -541,7 +545,7 @@ fn wire_inmemory_semantic_recall(
 /// Pool defaults match the Swift ARIA_MCP leg and the DrawerStore's defaults
 /// (pool_size=10, connection_timeout=5.0s, idle_timeout=300.0s). The
 /// `PostgresStorage` handle uses a lazy pool — construction does not open a TCP
-/// connection. Schema migrations (`Corpus::open`, `VectorStore::open`) are
+/// connection. Schema migrations (`Corpus::open_many`, `VectorStore::open`) are
 /// idempotent: safe to call on an existing PG schema and on a fresh one.
 ///
 /// # Errors
@@ -571,9 +575,10 @@ fn wire_postgres_semantic_recall(
     );
 
     // Corpus: idempotent schema migration via migrate() — safe on an existing PG schema.
-    // Deterministic embedding: reproducible, embedFloat live, Lane D wired from first capture.
-    let corpus = Corpus::open(Arc::clone(&storage), EmbeddingModelConfig::Deterministic)
-        .map_err(|e| format!("Corpus::open for postgres semantic recall at {conn_str:?}: {e:?}"))?;
+    // Five-signal honest ensemble (default_ensemble()): trainable signals train
+    // on-corpus and persist; FDC stateless. Lane D fused and live from first capture.
+    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
+        .map_err(|e| format!("Corpus::open_many for postgres semantic recall at {conn_str:?}: {e:?}"))?;
 
     // VectorStore: idempotent schema migration.
     let vector_store = VectorStore::open(Arc::clone(&storage))
@@ -603,10 +608,10 @@ fn wire_postgres_semantic_recall(
 /// namespaces; SQLite WAL serialises all writes from both handles. This is the Rust
 /// equivalent of the Swift ARIA_MCP passing one `storage` instance to all sub-stores.
 ///
-/// Embedding model is `Deterministic` — reproducible across Swift/Rust ports and
-/// requires no CoreML. Matches `provision`'s default and the Swift
-/// `AriaMCPMain.swift` comment: "Embedding model: `.deterministic` — matches
-/// `provision`'s default and requires no CoreML".
+/// Recall ensemble is the five honest signals (`default_ensemble()`:
+/// RI/PPMI/LSA/NMF/FDC) — reproducible across Swift/Rust ports, no CoreML.
+/// Matches `provision`'s default and the Swift `AriaMCPMain.swift` Lane D wiring
+/// (`CorpusEnsemble.defaultEnsemble()`).
 fn wire_sqlite_semantic_recall(
     path: &str,
     handle: &EstateHandle,
@@ -629,8 +634,10 @@ fn wire_sqlite_semantic_recall(
 
     // Corpus: applies its own schema migration (BundleStore + VectorStore tables)
     // idempotently on construction — safe to call on an existing database.
-    let corpus = Corpus::open(Arc::clone(&storage), EmbeddingModelConfig::Deterministic)
-        .map_err(|e| format!("Corpus::open for {path:?}: {e:?}"))?;
+    // Five-signal honest ensemble (default_ensemble()): Lane D fused, live from
+    // first capture; trainable signals train on-corpus and persist their bases.
+    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
+        .map_err(|e| format!("Corpus::open_many for {path:?}: {e:?}"))?;
 
     // VectorStore: standalone vector lane; applies its own schema migration.
     let vector_store = VectorStore::open(Arc::clone(&storage))

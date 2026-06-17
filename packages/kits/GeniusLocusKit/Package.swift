@@ -87,6 +87,13 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "VectorKit", package: "VectorKit"),
                 .product(name: "CorpusKit", package: "CorpusKit"),
+                // CorpusKitProviders: the concrete embedding providers. GLK's
+                // provision path defaults the Corpus to CorpusEnsemble.defaultEnsemble()
+                // (the 1.0 five-signal default), which NEWs concrete providers — so
+                // the composition layer needs the providers product. Dependency per
+                // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; layering is
+                // upstream→downstream (CorpusKitProviders ← GeniusLocusKit), no inversion.
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // PersistenceKitReplication (§5 full-snapshot flush/hydrate).

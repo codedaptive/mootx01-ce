@@ -1,6 +1,7 @@
 import Foundation
 import AriaMCP
 import CorpusKit
+import CorpusKitProviders
 import GeniusLocusKit
 import LocusKit
 import PersistenceKit
@@ -78,17 +79,20 @@ struct AriaMCPMain {
         // LocusKit-native semantic recall (structural, BM25, matrix-tier).
         // CorpusKit + VectorStore own the dense float vector recall lane (Lane D).
         //
-        // Lane D uses EmbeddingModelConfig.deterministic — the PERMANENT,
-        // federation-grade vector lane present in every version (v1.0+). The
-        // deterministic provider (FNV-1a tokenization + FloatSimHash projection)
-        // is model-free and produces byte-identical vectors cross-device and
-        // cross-port; that reproducibility is what federation requires. It
-        // captures surface/lexical signal, not learned semantic meaning.
+        // Lane D uses CorpusEnsemble.defaultEnsemble() — the canonical 1.0
+        // five-signal recall ensemble (RI / PPMI / LSA / NMF / FDC). All five
+        // are model-free and self-contained: the trainable distributional /
+        // matrix signals (RI/PPMI/LSA/NMF) train on the estate's own corpus and
+        // persist their bases; FDC is a stateless lattice co-classification
+        // signal. Each signal embeds under its own modelID and the dense lane
+        // fuses them, so recall reflects honest distributional + taxonomic
+        // structure — not a single surface/lexical hash.
         //
         // The learned semantic vector (MiniLM/MPNet/Gemma model providers) is an
         // ADDITIVE v1.1 on-device lane for richer similarity — it does not replace
-        // the deterministic lane. Being model-dependent, it cannot serve as the
-        // federation vector (model weights differ across devices).
+        // this default ensemble. Being model-dependent, those learned providers
+        // cannot serve as a federation-reproducible vector (weights differ across
+        // devices); the five-signal ensemble is reproducible cross-port.
         //
         // The wiring step that happens after `open` below sets this to true;
         // each backend branch sets `wireSemanticRecall = true` unconditionally.
@@ -241,7 +245,7 @@ struct AriaMCPMain {
         //   Schema migrations are idempotent. The pool acquires connections on
         //   first use; wiring itself does not open a TCP connection.
         //
-        // Idempotent across restarts (SQLite + PostgreSQL): `Corpus(storage:model:)`
+        // Idempotent across restarts (SQLite + PostgreSQL): `Corpus(storage:models:)`
         // and `VectorStore(storage:)` apply their schema declarations via the
         // backend's idempotent `migrate`, and `registerCorpus`/`registerVectorStore`
         // are plain registry writes. Re-opening the same on-disk estate re-registers
@@ -254,15 +258,16 @@ struct AriaMCPMain {
         // gauntlet's impatient writes ingest into the Corpus inline. Registering
         // the Corpus + VectorStore is the only wiring this entry point owes.
         //
-        // Embedding model: `.deterministic` — the permanent federation-grade vector
-        // (FNV-1a tokenization + FloatSimHash projection, model-free, byte-identical
-        // cross-device and cross-port). FloatSimHashEmbeddingProvider implements
-        // embedFloat, so Lane D (dense float recall) is live from the first capture
-        // on every backend. This is NOT a temporary stand-in: it is the vector
-        // representation federation requires in every version.
+        // Embedding ensemble: `CorpusEnsemble.defaultEnsemble()` — the canonical
+        // 1.0 five-signal recall default (RI / PPMI / LSA / NMF / FDC). The
+        // trainable distributional signals train and persist on first ingest /
+        // reindex under their own modelIDs; FDC is stateless and live immediately.
+        // The dense float lane fuses all five honest signals, so recall is the
+        // multi-signal default — not pinned to a single hash lane — from the first
+        // capture on every backend.
         if wireSemanticRecall {
             do {
-                let corpus = try await Corpus(storage: storage, model: .deterministic)
+                let corpus = try await Corpus(storage: storage, models: CorpusEnsemble.defaultEnsemble())
                 await kit.registerCorpus(corpus, for: handle)
                 let vectorStore = VectorStore(storage: storage)
                 await kit.registerVectorStore(vectorStore, for: handle)
@@ -280,7 +285,7 @@ struct AriaMCPMain {
                 // correct from the first recall. Idempotent — rebuild from the same
                 // log is deterministic, and the dreaming cycle refreshes it later.
                 try await kit.rebuildDerivedAccelerators(for: handle)
-                Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/VectorKit vector recall (deterministic Lane D — permanent federation vector, FNV-1a + FloatSimHash) + matrix tier registered. Learned semantic embedding (MiniLM/MPNet/Gemma): additive v1.1 on-device lane, not wired here.")
+                Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/VectorKit vector recall (five-signal honest ensemble Lane D — RI/PPMI/LSA/NMF/FDC, trained on-corpus and fused) + matrix tier registered. Learned semantic embedding (MiniLM/MPNet/Gemma): additive v1.1 on-device lane, not wired here.")
             } catch {
                 fputs("ARIA_MCP fatal: cannot wire semantic recall: \(error)\n", stderr)
                 exit(1)

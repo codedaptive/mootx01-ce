@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.1.1
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -902,8 +902,14 @@ existence checking, not hybrid retrieval).
 
 **Corpus construction:** the caller constructs the `Corpus` actor
 from the same `Storage` backing the estate so chunk embeddings index
-the estate's content. The default embedding model is `.deterministic`
-(no CoreML required).
+the estate's content. The default recall ensemble is the canonical
+five honest signals (RI/PPMI/LSA/NMF/FDC) — `CorpusEnsemble.defaultEnsemble()`
+in Swift / `corpus_kit_providers::default_ensemble()` in Rust — wired at
+every production provision site (`provision`, the ARIA_MCP estate
+constructors, `EstateAdmin`). None require a model bundle: the trainable
+distributional/matrix signals train and persist on first ingest/reindex;
+FDC is stateless. A caller may pass an explicit single-element list (e.g.
+`[.deterministic]`) when one signal is specifically wanted.
 
 **Import domain:** `ExternalCorpus.swift` imports `CorpusKit`. RAG
 retrieval always routes through CorpusKit per the kit-roles doctrine.
@@ -1571,6 +1577,14 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Changed (6a-iii-wire): the production default recall ensemble is now the five
+honest signals (RI/PPMI/LSA/NMF/FDC) at every provision/open site, replacing the
+single deterministic hash lane. `provision` takes `embeddingModels: [EmbeddingModel]`
+(Swift, default `CorpusEnsemble.defaultEnsemble()`) / `embedding_models:
+Vec<EmbeddingModelConfig>` (Rust, app supplies `default_ensemble()`). Recall is the
+multi-signal default; the trainable signals train+persist on first ingest/reindex.
 
 ### 1.1.1 -- 2026-06-17
 Clarification (6b-modifiers-core-2): the signed-weight steering now applies to the
