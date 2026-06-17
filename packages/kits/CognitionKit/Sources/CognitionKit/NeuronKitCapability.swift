@@ -7,17 +7,18 @@
 // cannot be fully executed fails immediately at the capability check
 // (`RecipeError.missingCapability`), never mid-execution (spec B-5).
 //
-// Each case names a NeuronKit surface that is ACTUALLY SHIPPED in
-// `packages/kits/NeuronKit/Sources/NeuronKit/` (verified against source,
-// not the v0.8 spec body which reads as if some are deferred):
-//   - hybridRecall          → HybridRecall.swift (free function)
-//   - synthesize            → ContextSynthesizer.synthesize (enum static)
+// Each case names a shipped surface that is ACTUALLY PRESENT in the
+// in-tree kit or library:
+//   - hybridRecall          → HybridRecall.swift (NeuronKit free function)
+//   - synthesize            → ContextSynthesizer.synthesize (NeuronKit enum static)
 //   - deriveBranch          → BranchOps.swift (NeuronKit static)
 //   - promoteBranch         → BranchOps.swift (NeuronKit static)
 //   - benchmark             → BenchmarkAlgorithm.swift (NeuronKit static)
 //   - runTournament         → Tournament.swift (NeuronKit static)
-//   - associationRuleMining → AssociationRuleMining.swift (free function)
-//   - formalConceptAnalysis → FormalConceptAnalysis.swift (BoundedConceptMiner)
+//   - associationRuleMining → AssociationRuleMining.swift (SubstrateML free function)
+//   - formalConceptAnalysis → FormalConceptAnalysis.swift (SubstrateML BoundedConceptMiner)
+//   - exploratoryRecall     → RandomWalks.walkWithRestart (SubstrateML; consumed by
+//                             ExploratoryRecall.swift / exploratory_recall_recipe.rs)
 //
 // The enum is intentionally a closed set of *shipped* capabilities.
 // Capabilities that exist only in the stale v0.1 spec (elicitFraming,
@@ -75,17 +76,25 @@ public enum NeuronKitCapability: String, Sendable, Hashable, CaseIterable, Codab
     /// the recalled drawer set's field-value attributes (one row per drawer)
     /// and delegates all closure/dedup/ordering logic here.
     case formalConceptAnalysis
+
+    /// `RandomWalks.walkWithRestart(seed:steps:restartProbability:rngSeed:adjacency:)`
+    /// — estate-graph exploratory recall in RowId space, aggregating visits by
+    /// row. Consumed by the `recall_exploratory` recipe
+    /// (`ExploratoryRecall.swift`; Rust: `exploratory_recall_recipe.rs`).
+    case exploratoryRecall
 }
 
-/// The full set of NeuronKit capabilities shipped in the current
-/// in-tree NeuronKit. The default host capability set a recipe is
-/// checked against when the caller does not supply a narrower one.
+/// The full set of capabilities shipped in the current in-tree kits
+/// (NeuronKit + SubstrateML). The default host capability set a recipe
+/// is checked against when the caller does not supply a narrower one.
 ///
 /// This is `NeuronKitCapability.allCases` today because every declared
-/// capability maps to a shipped NeuronKit surface. The seam exists so a
-/// future host running against a reduced NeuronKit (e.g. a version that has
-/// not yet implemented branch ops) can pass a narrower set and have
+/// capability maps to a shipped surface. The seam exists so a future host
+/// running against a reduced kit version can pass a narrower set and have
 /// recipes that need the missing surface fail cleanly at the gate.
+/// Currently 9 capabilities: hybridRecall, synthesize, deriveBranch,
+/// promoteBranch, benchmark, runTournament, associationRuleMining,
+/// formalConceptAnalysis, exploratoryRecall.
 public let shippedNeuronKitCapabilities: Set<NeuronKitCapability> =
     Set(NeuronKitCapability.allCases)
 
