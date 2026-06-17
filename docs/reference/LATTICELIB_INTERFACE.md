@@ -1,11 +1,11 @@
 ---
 title: LatticeLib Interface
-version: 1.0.0
+version: 1.1.0
 description: Public API surface for LatticeLib in both the Swift and Rust ports.
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-06-16
 package: LatticeLib
 languages: [swift, rust]
 relates_to:
@@ -114,6 +114,7 @@ public enum FDC {
     public static let stopThreshold: Int                      // 1
     public static func encode(_ text: String) -> String?
     public static func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?)
+    public static func ancestors(of code: String) -> [String]
     public static func label(for code: String) -> String?
     public static var isAvailable: Bool
     public static var dataVersion: String
@@ -121,11 +122,20 @@ public enum FDC {
 ```
 ```rust
 pub struct Fdc;
-// encode / encode_anchor / is_available / data_version / label
+// encode / encode_anchor / ancestors / is_available / data_version / label
 impl Fdc {
+    pub fn ancestors(code: &str) -> Vec<String>;
     pub fn label(code: &str) -> Option<String>;
 }
 ```
+
+`ancestors(of:)` / `ancestors()` returns the ancestor chain for an FDC code
+(root first, excluding the code itself) by delegating to the bundled frame's
+`FDCFrame.ancestors(of:)` / `FdcFrame::ancestors`. Returns `[]`/`vec![]` when
+the artifacts are unavailable or the code is the root `"000"`. This is the
+façade accessor that consumers (e.g. `CorpusKitProviders/FDCProvider`) use to
+obtain the ancestor chain without reaching into `FDCFrame`/`FdcFrame` directly;
+the decimal hierarchy math lives in LatticeLib only.
 
 `label(for:)` / `label()` resolves a UDC/MDCC decimal code to its human-readable
 frame label. For integer codes (no `.`), the function performs a parent walk via
@@ -641,7 +651,8 @@ stated, not silently dropped.
 |---|---|---|---|---|---|---|
 | Module surface / version | `LatticeLib` (`LatticeLib.swift:12`) | (no namespace type; free fns in modules) | Swift public / Rust modules | Swift enum-namespace / Rust free-fn modules — idiom | N/A (structural) | Confirmed |
 | Word-class Step-1 entry | `LatticeLib.wordClass` (`WordClassTagger.swift:45`) | `WordClassTableCache::word_class` (`word_class_table.rs`) | both public | Swift method on `LatticeLib` ext / Rust method on cache; table fast path identical, novel-token path divergent (see Exempt row) | `FDCConformanceTests.swift::allConformanceVectorsMatch` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
-| Runtime encoder entry | `FDC` (`FDCRuntime.swift:15`) | `Fdc` (`fdc_runtime.rs:96`) | both public | Swift enum statics / Rust unit struct assoc fns — idiom (FDC/Fdc); `encode`/`encodeAnchor`/`isAvailable`/`dataVersion` identical | `FDCRuntimeTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
+| Runtime encoder entry | `FDC` (`FDCRuntime.swift:15`) | `Fdc` (`fdc_runtime.rs:96`) | both public | Swift enum statics / Rust unit struct assoc fns — idiom (FDC/Fdc); `encode`/`encodeAnchor`/`ancestors`/`isAvailable`/`dataVersion` identical | `FDCRuntimeTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
+| FDC ancestor façade | `FDC.ancestors(of:)` (`FDCRuntime.swift`) | `Fdc::ancestors` (`fdc_runtime.rs`) | both public | Swift static func / Rust associated fn on `Fdc` — idiom; delegates to `FDCFrame.ancestors(of:)` / `FdcFrame::ancestors`; returns `[]`/`vec![]` when artifacts unavailable; consumers use this façade — decimal hierarchy math lives only in `FDCFrame`/`FdcFrame` | `FdcProviderTests.swift::FdcAncestorsTests` (7 tests via `FDC.ancestors`) / `fdc_runtime.rs` (delegation to `FdcFrame::ancestors` already tested in `fdc_frame.rs::tests`) | **Confirmed** |
 | Frame label lookup | `FDC.label(for:)` (`FDCRuntime.swift`) | `Fdc::label` (`fdc_runtime.rs`) | both public | Swift static func / Rust associated fn on `Fdc` — idiom; returns the human-readable label for a UDC/MDCC code; integer codes walk to 3-digit parent before frame lookup; `nil`/`None` for empty or unknown input | `FDCRuntimeTests.swift::label*` / `fdc_runtime.rs::tests::label_*` (4 tests) | **Confirmed** |
 | Signature matcher | `FDCMatcher` (`FDCMatcher.swift:20`) | `FdcMatcher` (`fdc_matcher.rs:67`) | both public | Swift `init` / Rust `new`+`new_with_mode` — idiom; encode/encodeAnchor identical | `FDCMatcherTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
 | Score mode | `FDCMatcher.ScoreMode` (`FDCMatcher.swift:39`) | `ScoreMode` (`fdc_matcher.rs:53`) | both public | Swift nested `FDCMatcher.ScoreMode` / Rust flat `ScoreMode`; cases raw/idf/cosine/idfCosine identical | `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
@@ -682,6 +693,13 @@ stated, not silently dropped.
 There are no remaining runtime DRIFT rows. All public Swift runtime concepts now
 have a Rust counterpart.
 
+`FDC.ancestors(of:)` / `Fdc::ancestors` (ancestor chain façade delegating to
+`FDCFrame.ancestors` / `FdcFrame::ancestors`) is present in both ports and
+confirmed. Added as part of the ADR-010 Decision B FDC provider migration:
+consumers use the `FDC`/`Fdc` runtime façade rather than reaching into
+`FDCFrame`/`FdcFrame` directly, and the decimal hierarchy math lives only in
+LatticeLib (Gate 2).
+
 `FDC.label(for:)` / `Fdc::label` (frame label lookup by code, including
 integer-code parent walk) is present in both ports and test-bound.
 
@@ -718,6 +736,15 @@ non-Apple `.other` stub and records into `SHARED_NOVEL_CACHE`.
 *End of LatticeLib Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-16
+Added `FDC.ancestors(of:)` (Swift) and `Fdc::ancestors` (Rust) to the public
+FDC/Fdc runtime façade. Both delegate to the already-public
+`FDCFrame.ancestors(of:)` / `FdcFrame::ancestors`; the decimal hierarchy math
+lives in LatticeLib only. Added to support ADR-010 Decision B: the FDC provider
+in CorpusKitProviders now calls `FDC.ancestors(of:)` / `Fdc::ancestors` rather
+than reimplementing the ancestor walk inline (Gate 2 compliance). Added the new
+façade row to the concordance table. Drift summary updated.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

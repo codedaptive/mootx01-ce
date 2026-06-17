@@ -40,6 +40,22 @@ public enum FDC {
     /// produced an encode answer. Callers record it as provenance.
     public static var dataVersion: String { bundle?.version ?? "0.0.0-unavailable" }
 
+    /// Ancestor chain (root first, excluding `code` itself) for an FDC code,
+    /// walked over the bundled frame's decimal hierarchy. Empty if the artifacts
+    /// are unavailable or if `code` is the root "000". Mirrors Rust `Fdc::ancestors`
+    /// in fdc_runtime.rs.
+    ///
+    /// Delegates to `FDCFrame.ancestors(of:)` (already public) — the math lives
+    /// in LatticeLib, not in consumers. This façade accessor allows consumers such
+    /// as CorpusKitProviders to use the FDC ancestor chain without reaching past the
+    /// runtime bundle into `FDCFrame` directly.
+    ///
+    /// - Parameter code: An FDC decimal code, e.g. "547.7".
+    /// - Returns: The ancestor chain root-first, e.g. ["000", "500", "540", "547"].
+    public static func ancestors(of code: String) -> [String] {
+        bundle?.frame.ancestors(of: code) ?? []
+    }
+
     /// Return the human-readable heading label for a classification code, or
     /// `nil` if the code is not in the frame (UNRESOLVED, empty, or the
     /// artifacts are unavailable). Used by dashboard surfaces to display
