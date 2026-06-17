@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.1.0
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -545,6 +545,44 @@ public actor BrainPump {
 }
 ```
 
+#### Rust governor — standing-signal harness
+
+The Rust `AutonomicGovernor` (`rust/src/autonomic_governor.rs`) OWNS this
+estate's standing-signal scheduler (a GLK `SerialLaneScheduler<CoordinatorDispatcher>`)
+and ticks it each iteration, mirroring the Swift governor's
+`kit.signalTick(in:handle:now:)`. The scheduler lives in the governor (not the
+GLK coordinator) because the production dispatcher holds an
+`Arc<Mutex<EstateCoordinator>>`; a coordinator-owned scheduler would close a
+reference cycle. The registration methods are the producer SEAM where the
+graph-centrality and Bradley-Terry producers plug in (their outputs land in GLK
+`recall::{GraphCache, PreferenceStore}`):
+
+```rust
+impl AutonomicGovernor {
+    // Register the architecture-spec §11.2 default standing signals. Reads the
+    // live VectorStore via EstateCoordinator::vector_store_for; returns Err when
+    // none is registered so the caller log-and-skips (no fabricated store).
+    // model_id matches the Swift resident default ("minilm-v6").
+    pub fn register_default_standing_signals(
+        &mut self, model_id: impl Into<String>, now: SystemTime,
+    ) -> Result<Vec<(String, SchedulerSignalID)>, String>;
+    // Register one custom signal; lazily mints the scheduler on first call.
+    pub fn register_standing_signal(
+        &mut self, spec: SchedulerSignalSpec, now: SystemTime,
+    ) -> SchedulerSignalID;
+    pub fn signal_status(&self) -> Vec<SchedulerSignalReport>;   // empty when no scheduler
+    pub fn open_signal_count(&self) -> usize;                    // 0 when no scheduler
+    pub fn signal_request_fire(                                  // event/condition triggers
+        &mut self, id: &SchedulerSignalID, now: SystemTime,
+    ) -> Result<(), SchedulerError>;
+}
+// GovernorReport gains `pub signals_ticked: bool` — true once a scheduler is
+// registered and ticks; false on the benign no-scheduler skip (parity with the
+// Swift TickReport.signalsTicked). The resident HTTP bootstrap (rust/src/runtime.rs)
+// calls register_default_standing_signals once at startup; stdio mode does not.
+```
+```
+
 ### Logging
 
 ```swift
@@ -734,6 +772,29 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Additive (#8 Track 1 — Brain orchestration harness, Rust side). The Rust
+`AutonomicGovernor` now OWNS this estate's standing-signal scheduler (a GLK
+`SerialLaneScheduler<CoordinatorDispatcher>`) and ticks it each iteration,
+mirroring the Swift governor's `kit.signalTick(in:handle:now:)` — previously the
+Rust governor ticked dreaming + maintenance only and documented "no
+standing-signal scheduler". New public Rust surface on `AutonomicGovernor`:
+`register_default_standing_signals(model_id, now)` (the architecture-spec §11.2
+bootstrap, reading the live VectorStore via `EstateCoordinator::vector_store_for`,
+now `pub`), `register_standing_signal(spec, now)`, `signal_status()`,
+`open_signal_count()`, `signal_request_fire(id, now)`; `GovernorReport` gains
+`pub signals_ticked: bool` (parity with the Swift `TickReport.signalsTicked`).
+The scheduler lives in the governor (not the GLK coordinator) to avoid a
+dispatcher reference cycle. The registration methods are the producer SEAM where
+Track 2 (graph-centrality) and Track 3 (Bradley-Terry) plug in — their outputs
+land in GLK `recall::{GraphCache, PreferenceStore}`; the producers themselves are
+NOT part of this harness. The resident HTTP bootstrap (`rust/src/runtime.rs`)
+registers the defaults once at startup, best-effort (a missing VectorStore logs
+and the governor benign-skips, parity with the Swift resident). Conformance:
+`tests/governor_standing_signals.rs` (benign skip / registered-defaults fire /
+queryable emission / interval cadence) over the existing GLK
+`tests/scheduler_parity.rs` engine gate. Swift behavior unchanged.
 
 ### 1.1.0 -- 2026-06-17
 Additive (GLK-RECALL-SHAPE-PRESETS): new `moot_recall_shaped` recipe tool (both
