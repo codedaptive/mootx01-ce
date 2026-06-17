@@ -154,9 +154,9 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 54 = 19 core ARIA + 1 federation + 7 recipe + 21 lens + 5 vault + 1
-        // maintenance (moot_reindex). The 7th recipe tool is moot_dream.
-        #expect(tools.count == 54, "tools/list must return exactly 54 tools; got \(tools.count)")
+        // 55 = 19 core ARIA + 1 federation + 8 recipe + 21 lens + 5 vault + 1
+        // maintenance (moot_reindex). The 8th recipe tool is moot_recall_shaped.
+        #expect(tools.count == 55, "tools/list must return exactly 55 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

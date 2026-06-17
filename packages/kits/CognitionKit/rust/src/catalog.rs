@@ -234,6 +234,17 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
+        // Steerable-fusion recipe (GLK-RECALL-SHAPE-PRESETS): one parameterized
+        // recipe over the named RecallShape preset roster. Description matches the
+        // Swift `ShapedRecall.description` byte-for-byte (the conformance anchor).
+        RecipeDescriptor {
+            name: "shaped_recall".into(),
+            version: "1.0.0".into(),
+            description:
+                "Recall a query with a named signed-weight RecallShape preset applied — forward, exclude, suppress, or invert individual fusion lanes (and bound the candidate frontier) by selecting one of the roster presets, instead of the uniform balanced fusion."
+                    .into(),
+            required_capabilities: vec![],
+        },
     ]
 }
 
@@ -259,8 +270,8 @@ mod tests {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 14 reasoning lenses plus the 3 analytics lenses plus
-        // the 4 new temporal/entropy lenses (moment, rhythm, precedence,
-        // complexity) = 23 total.
+        // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
+        // plus the steerable-fusion recipe (shaped_recall) = 24 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -286,6 +297,7 @@ mod tests {
                 "partial_cue_recall",
                 "precedence",
                 "rhythm",
+                "shaped_recall",
                 "theme_weather",
                 "trust_grounded_synthesis",
                 "tunnel_successor",

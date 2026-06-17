@@ -66,30 +66,32 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_54() {
+fn tools_list_count_is_55() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
-    // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12):
+    // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
+    // moot_recall_shaped (named RecallShape preset surface):
     //   19  interface tools (Tier 1–5)
     //    1  federation tool (moot_federated_search)
-    //    7  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
-    //                     confirm_migration, recall_precise, dream)
+    //    8  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //                     confirm_migration, recall_precise, recall_shaped, dream)
     //   21  lens tools (moot_lens_* prefix)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
     //    1  maintenance tool (moot_reindex — backfill the corpus/vector index)
-    //   54  total (matches Swift surface exactly)
+    //   55  total (matches Swift surface exactly)
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 54, "expected 54 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 55, "expected 55 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_54_names() {
-    // Gate: all 53 expected tool names are present, no more and no less.
-    // The 54th tool is moot_reindex (corpus/vector backfill maintenance tool).
-    // moot_vault_job is the 53rd (Bob's ruling 2026-06-12: tool-surface
+fn tools_list_name_set_matches_expected_55_names() {
+    // Gate: all 55 expected tool names are present, no more and no less.
+    // moot_reindex is the maintenance tool (corpus/vector backfill).
+    // moot_vault_job is a vault tool (Bob's ruling 2026-06-12: tool-surface
     // parity matters even when the Rust backend is synchronous).
+    // moot_recall_shaped is the named RecallShape preset surface.
     let expected: std::collections::HashSet<&str> = [
         // Tier 1 — Core memory (7)
         "moot_file_memory",
@@ -117,14 +119,15 @@ fn tools_list_name_set_matches_expected_54_names() {
         "moot_estate_ping",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (7) — list_lenses + list_recipes + synthesize + run_migration
-        //              + confirm_migration + recall_precise + dream
+        // Recipe (8) — list_lenses + list_recipes + synthesize + run_migration
+        //              + confirm_migration + recall_precise + recall_shaped + dream
         "moot_list_lenses",
         "moot_list_recipes",
         "moot_synthesize",
         "moot_run_migration",
         "moot_confirm_migration",
         "moot_recall_precise",
+        "moot_recall_shaped",
         "moot_dream",
         "moot_reindex",
         // Lens tools (21) — names from lens_tools.rs LENS_TOOLS constant
@@ -2747,6 +2750,80 @@ fn recall_precise_missing_query_is_transport_fault() {
     let registry = EstateRegistry::new_inmemory();
     let err = dispatch_tool(
         "moot_recall_precise",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("missing required query must produce a transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+// ── moot_recall_shaped (named RecallShape preset surface) ────────────────────
+// Mirror the Swift RecipeToolsTests shaped-recall cases.
+
+#[test]
+fn recall_shaped_known_preset_returns_memory_shape() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the river flows north past the old mill", "history");
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "river mill", "preset" => "conceptual"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_recall_shaped with a known preset must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("found ") && text.contains("memory(s)"),
+        "shaped recall must emit the moot_memory_search shape; got: {text}"
+    );
+}
+
+#[test]
+fn recall_shaped_unknown_preset_fails_closed() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "any content", "history");
+    // The ARIA boundary validates the preset against the GLK roster and fails
+    // CLOSED on an unknown name (a tool error, not a silent degrade-to-balanced).
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "anything", "preset" => "no-such-preset"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch returns a result envelope");
+    assert!(
+        is_tool_error(&result),
+        "an unknown preset must return a tool error (fail closed)"
+    );
+    assert!(
+        content_text(&result).contains("unknown preset"),
+        "the error names the offending preset"
+    );
+}
+
+#[test]
+fn recall_shaped_absent_preset_uses_balanced() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the harbour lights flicker in the fog", "history");
+    // No preset arg at all — must succeed (the unsteered balanced default).
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "harbour"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("absent preset must use balanced and succeed");
+    assert!(is_success(&result));
+    assert!(content_text(&result).starts_with("found "));
+}
+
+#[test]
+fn recall_shaped_missing_query_is_transport_fault() {
+    let registry = EstateRegistry::new_inmemory();
+    let err = dispatch_tool(
+        "moot_recall_shaped",
         &args![],
         &registry,
         &SurfacedRecallLedger::new(),

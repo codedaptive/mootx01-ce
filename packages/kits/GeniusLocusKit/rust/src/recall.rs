@@ -653,6 +653,231 @@ impl RecallShape {
             Some(o) => o.clamp(Self::FRONTIER_K_FLOOR, Self::FRONTIER_K_CEILING),
         }
     }
+
+    // ----- Named preset roster (mirrors Swift `RecallShape.preset`) -----
+
+    /// The per-signal DENSE lane key for a held embedding provider, by its
+    /// `model_id`. These are the exact `model_id` strings the CorpusKit providers
+    /// ship (`dense:<model_id>`); the roster targets them by these constants so a
+    /// typo surfaces at compile time, not as a silent no-op. Mirrors Swift
+    /// `RecallShape.DenseSignal`.
+    pub const DENSE_RANDOM_INDEXING: &'static str = "dense:random-indexing-v1";
+    /// Positive-PMI distributional provider dense lane key.
+    pub const DENSE_PPMI: &'static str = "dense:ppmi-v1";
+    /// Latent-Semantic-Analysis provider dense lane key.
+    pub const DENSE_LSA: &'static str = "dense:lsa-v1";
+    /// Non-negative-Matrix-Factorisation provider dense lane key.
+    pub const DENSE_NMF: &'static str = "dense:nmf-v1";
+    /// Field-Distribution-Coding provider dense lane key.
+    pub const DENSE_FDC: &'static str = "dense:fdc-v1";
+
+    /// Every per-signal dense lane key the standard provider stack ships, in
+    /// stable order (RI, PPMI, LSA, NMF — fdc is forwarded separately by the
+    /// consensus preset). Mirrors Swift `RecallShape.DenseSignal.all`.
+    pub const DENSE_SIGNALS: [&'static str; 4] = [
+        Self::DENSE_RANDOM_INDEXING,
+        Self::DENSE_PPMI,
+        Self::DENSE_LSA,
+        Self::DENSE_NMF,
+    ];
+
+    /// The names of every preset in the roster, in stable declaration order — the
+    /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
+    /// Swift `RecallShape.presetNames` byte-for-byte.
+    pub const PRESET_NAMES: [&'static str; 19] = [
+        "balanced",
+        "precise",
+        "conceptual",
+        "broad",
+        "lexical",
+        "not_lexical",
+        "associative",
+        "consensus",
+        "ri_forward",
+        "ppmi_forward",
+        "lsa_forward",
+        "nmf_forward",
+        "fast",
+        "structural",
+        "temporal",
+        "connection",
+        "field",
+        "preference",
+        "anti_redundant",
+    ];
+
+    /// Resolve a named preset to its documented signed-weight shape. Mirrors
+    /// Swift `RecallShape.preset`.
+    ///
+    /// Returns the shape for a known preset name, or `None` when the name is not
+    /// in `PRESET_NAMES`. `"balanced"` deliberately resolves to `None` too — the
+    /// uniform, unsteered fusion is the absence of a shape, so a `None` return for
+    /// `"balanced"` and for an unknown name are the SAME thing at the call site
+    /// (run recall with no steering). Callers that must distinguish check
+    /// `PRESET_NAMES.contains(&name)` first.
+    ///
+    /// The weights are SENSIBLE, DEFENSIBLE starting points the optimizer tunes
+    /// later — NOT canon. A preset's contract is its DIRECTION (which lanes it
+    /// forwards/zeroes/suppresses/inverts and how it bounds the frontier), not
+    /// the literal float. Every key a preset sets is a key the coordinator reads,
+    /// so no preset is a silent no-op.
+    ///
+    /// Leave-one-out is reachable WITHOUT a dedicated preset: take a forward shape
+    /// and zero one `dense:<model_id>` lane to ablate that distributional signal.
+    pub fn preset(name: &str) -> Option<RecallShape> {
+        // Helper: build a shape from (key, weight) pairs + optional frontier.
+        fn shape(pairs: &[(&str, f32)], frontier_k: Option<usize>) -> RecallShape {
+            let mut weights = HashMap::new();
+            for (k, w) in pairs {
+                weights.insert((*k).to_string(), *w);
+            }
+            RecallShape::new(weights, frontier_k)
+        }
+
+        match name {
+            // Uniform fusion — the absence of steering. None ⇒ every lane at 1.0
+            // ⇒ byte-identical to today's behaviour.
+            "balanced" => None,
+
+            // Exactness: amplify keyword (bm25) + field-coding (fdc), forward the
+            // dense consensus, NARROW the frontier so suppression reshapes a tight
+            // high-precision pool. The "find the exact answer" shape.
+            "precise" => Some(shape(
+                &[("bm25", 1.5), (Self::DENSE_FDC, 1.5), ("dense", 1.2)],
+                Some(Self::FRONTIER_K_FLOOR),
+            )),
+
+            // Concepts over keywords: amplify the distributional dense lanes and
+            // damp the literal keyword lane.
+            "conceptual" => Some(shape(
+                &[
+                    (Self::DENSE_RANDOM_INDEXING, 1.5),
+                    (Self::DENSE_PPMI, 1.5),
+                    (Self::DENSE_LSA, 1.5),
+                    (Self::DENSE_NMF, 1.5),
+                    ("bm25", 0.5),
+                ],
+                None,
+            )),
+
+            // Cast wide: forward every retrieval lane above neutral and WIDEN the
+            // frontier to the ceiling. The "don't miss anything" shape.
+            "broad" => Some(shape(
+                &[
+                    ("locus", 1.3),
+                    ("bm25", 1.3),
+                    ("hamming", 1.3),
+                    ("dense", 1.3),
+                ],
+                Some(Self::FRONTIER_K_CEILING),
+            )),
+
+            // Keyword/field only: amplify bm25 + fdc, ZERO the vector lanes.
+            "lexical" => Some(shape(
+                &[
+                    ("bm25", 1.5),
+                    (Self::DENSE_FDC, 1.5),
+                    ("dense", 0.0),
+                    ("hamming", 0.0),
+                ],
+                None,
+            )),
+
+            // Suppress the literal lanes: ZERO bm25 + fdc. Complement of lexical.
+            "not_lexical" => Some(shape(&[("bm25", 0.0), (Self::DENSE_FDC, 0.0)], None)),
+
+            // Loose association: amplify RI + NMF and widen the frontier.
+            "associative" => Some(shape(
+                &[(Self::DENSE_RANDOM_INDEXING, 1.5), (Self::DENSE_NMF, 1.5)],
+                Some(Self::FRONTIER_K_CEILING),
+            )),
+
+            // Dense consensus: forward EVERY per-signal dense lane at full
+            // strength and narrow the frontier. "Where the embedding models agree."
+            "consensus" => {
+                let mut pairs: Vec<(&str, f32)> =
+                    Self::DENSE_SIGNALS.iter().map(|k| (*k, 1.0)).collect();
+                pairs.push((Self::DENSE_FDC, 1.0));
+                Some(shape(&pairs, Some(Self::FRONTIER_K_FLOOR)))
+            }
+
+            // Single-signal forwarding: amplify ONE dense lane, ZERO its siblings.
+            "ri_forward" => Some(single_dense_forward(Self::DENSE_RANDOM_INDEXING)),
+            "ppmi_forward" => Some(single_dense_forward(Self::DENSE_PPMI)),
+            "lsa_forward" => Some(single_dense_forward(Self::DENSE_LSA)),
+            "nmf_forward" => Some(single_dense_forward(Self::DENSE_NMF)),
+
+            // Cheapest vote: keep ONLY the 256-bit Hamming lane, ZERO float-dense.
+            "fast" => Some(shape(&[("hamming", 1.5), ("dense", 0.0)], None)),
+
+            // Structure-led: amplify the LocusKit bitmap lane.
+            "structural" => Some(shape(&[("locus", 1.5)], None)),
+
+            // Time-led: amplify the temporal column (matrixAware-only).
+            "temporal" => Some(shape(&[("temporal", 1.5)], None)),
+
+            // Connection-led: amplify the connection-graph column (matrixAware-only).
+            "connection" => Some(shape(&[("graph", 1.5)], None)),
+
+            // Field-led: amplify the co-occurrence column (matrixAware-only).
+            "field" => Some(shape(&[("coOccurrence", 1.5)], None)),
+
+            // Preference-led: amplify the learned-preference column (matrixAware-only).
+            "preference" => Some(shape(&[("preference", 1.5)], None)),
+
+            // Diversity: invert the FDC dense lane to FARTHEST (anti-similarity).
+            "anti_redundant" => {
+                let mut anti = HashSet::new();
+                anti.insert(Self::DENSE_FDC.to_string());
+                Some(RecallShape::new(HashMap::new(), None).with_anti_similar_lanes(anti))
+            }
+
+            _ => None,
+        }
+    }
+
+    /// A one-line, human-readable description of what a preset emphasises — the
+    /// text the ARIA tool surfaces when it lists the roster. Mirrors Swift
+    /// `RecallShape::preset_description` byte-for-byte. Returns `""` for an
+    /// unknown name (not in `PRESET_NAMES`).
+    pub fn preset_description(name: &str) -> &'static str {
+        match name {
+            "balanced" => "Uniform fusion — every lane votes equally. The unsteered default.",
+            "precise" => "Exactness — amplify keyword (bm25) + field-coding (fdc) + dense consensus over a narrow frontier.",
+            "conceptual" => "Concepts over keywords — amplify the distributional dense lanes (RI/PPMI/LSA/NMF), damp bm25.",
+            "broad" => "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling.",
+            "lexical" => "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes.",
+            "not_lexical" => "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide.",
+            "associative" => "Loose association — amplify the RI + NMF distributional lanes over a wide frontier.",
+            "consensus" => "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree.",
+            "ri_forward" => "Isolate Random-Indexing — amplify the RI dense lane, exclude the other distributional signals.",
+            "ppmi_forward" => "Isolate PPMI — amplify the PPMI dense lane, exclude the other distributional signals.",
+            "lsa_forward" => "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals.",
+            "nmf_forward" => "Isolate NMF — amplify the NMF dense lane, exclude the other distributional signals.",
+            "fast" => "Cheapest vote — keep only the 256-bit Hamming lane, skip the float-dense cosine pass.",
+            "structural" => "Structure-led — amplify the LocusKit bitmap lane so filed structure drives ranking.",
+            "temporal" => "Time-led — amplify the temporal-relevance column (matrixAware scoring only).",
+            "connection" => "Connection-led — amplify the connection-graph column (matrixAware scoring only).",
+            "field" => "Field-led — amplify the co-occurrence column (matrixAware scoring only).",
+            "preference" => "Preference-led — amplify the learned-preference column (matrixAware scoring only).",
+            "anti_redundant" => "Diversity — invert the FDC dense lane to farthest (anti-similarity) so the set avoids near-duplicates.",
+            _ => "",
+        }
+    }
+}
+
+/// A shape that forwards exactly one dense lane and zeroes the other three
+/// distributional siblings — the `*_forward` preset body. Mirrors Swift
+/// `RecallShape.singleDenseForward`.
+fn single_dense_forward(forward_key: &str) -> RecallShape {
+    let mut weights = HashMap::new();
+    for key in RecallShape::DENSE_SIGNALS {
+        weights.insert(
+            key.to_string(),
+            if key == forward_key { 1.5 } else { 0.0 },
+        );
+    }
+    RecallShape::new(weights, None)
 }
 
 /// Mirrors Swift `GLKRecallRequest` (GLKRecallRequest.swift).

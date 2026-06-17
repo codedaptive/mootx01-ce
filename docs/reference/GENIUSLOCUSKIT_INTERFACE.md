@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.5.0
+version: 1.6.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -1770,6 +1770,25 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-06-17
+Additive (GLK-RECALL-SHAPE-PRESETS): `RecallShape` gains a NAMED PRESET ROSTER.
+New static factory `RecallShape.preset(_:)` (Swift) / `RecallShape::preset` (Rust)
+resolves a roster name to its documented signed-weight shape; `presetNames` /
+`PRESET_NAMES` is the discoverable name list (19 entries) and `presetDescription`
+/ `preset_description` is the one-line emphasis text. `"balanced"` (and any
+unknown name) resolves to `nil`/`None` — the unsteered uniform fusion. The roster:
+balanced · precise · conceptual · broad · lexical · not_lexical · associative ·
+consensus · ri_forward · ppmi_forward · lsa_forward · nmf_forward · fast ·
+structural · temporal · connection · field · preference · anti_redundant. Each
+preset is a weight vector over the EXISTING fusion (no new engine math); every key
+a preset sets is a key the engine reads, so no preset is a silent no-op. The dense
+per-signal keys are surfaced as `RecallShape.DenseSignal.*` (Swift) /
+`RecallShape::DENSE_*` (Rust) constants (`dense:random-indexing-v1`, `dense:ppmi-v1`,
+`dense:lsa-v1`, `dense:nmf-v1`, `dense:fdc-v1`). Leave-one-out is reachable by
+zeroing one `dense:<modelID>` key (no dedicated preset). Conformance:
+`RecallShapePresetTests.swift` / `recall_shape_presets.rs`. No existing
+`RecallShape` field, init, or accessor changed.
 
 ### 1.5.0 -- 2026-06-17
 Additive (glk-recall-graphpref-rust): the Rust port now documents and ships the

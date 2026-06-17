@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Interface
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -621,6 +621,7 @@ every row, so it is stated once here rather than repeated:
 | Formal concepts output | `FormalConcepts.Output` (`FormalConcepts.swift:117`) | `FormalConceptsOutput` struct (`formal_concepts_recipe.rs:79`) | public both | Swift nested `Output` / Rust flat `FormalConceptsOutput`; same fields | `FormalConceptsTests.swift` + `formal_concepts_recipe.rs #[cfg(test)]` | Confirmed |
 | Precise-recall match | `PreciseMatch` (`PreciseRecall.swift:9`) | `PreciseMatch` (`precise_recall.rs:66`) | public both | identical 4-field struct: `id: String`, `room: String`, `content: String`, `score: Double`/`f64` — the ranked result of one precise-recall candidate. Swift camelCase / Rust snake_case fields — idiom. | `CognitionKitTests.swift` (precise-recall suite) / `precise_recall.rs #[cfg(test)]` | Confirmed |
 | Precise-recall runner | `PreciseRecall` (`PreciseRecall.swift:66`) | `run_precise_recall` free fn + `DEFAULT_POOL as PRECISE_DEFAULT_POOL` (`precise_recall.rs:82`) | Swift public caseless-enum namespace / Rust pub free fn | Swift caseless-enum namespace `PreciseRecall.run(kit:handle:query:filter:limit:pool:composition:)` (async throws) / Rust free `run_precise_recall(coord, query, filter, limit, pool, composition)` (sync Result) — sanctioned recipe idiom: Swift-type-namespace ↔ Rust-free-run_*-fn; async↔sync seam. `defaultPool`/`DEFAULT_POOL` = 30 on both ports. | `CognitionKitTests.swift` / `precise_recall.rs #[cfg(test)]` | **Confirmed (swift enum namespace / Rust free-fn idiom)** |
+| Shaped-recall recipe | `ShapedRecall` struct (`ShapedRecall.swift`) | `run_shaped_recall` free fn + `ShapedRecallOutput` struct (`shaped_recall.rs`) | public both | Swift `Recipe` struct (async) `ShapedRecall().run(input:estate:kit:)` with nested `Input` (query/preset/filter/limit) + `Output` (matches/appliedPreset) / Rust free `run_shaped_recall(coord, handle, query, preset, filter, limit, now)` (sync Result) returning `ShapedRecallOutput`. Resolves a named GLK `RecallShape.preset` and runs `.unionBest`/`.matrixAware` recall with it; `"balanced"`/unknown ⇒ unsteered. Reuses `PreciseMatch` for matches. Registered as `shaped_recall` in the catalog. | `ShapedRecallTests.swift` / `shaped_recall.rs #[cfg(test)]` | Confirmed |
 
 ### Shared-vector conformance artifact
 
@@ -698,6 +699,19 @@ disabled.
 *End of CognitionKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Additive (GLK-RECALL-SHAPE-PRESETS): new `ShapedRecall` recipe (both ports) — a
+single parameterized recall recipe driven by a named GLK `RecallShape` preset
+(`shaped_recall` in the catalog). Swift `ShapedRecall: Recipe` with nested
+`Input` (query/preset/filter/limit) and `Output` (matches/appliedPreset); Rust
+`run_shaped_recall` returning `ShapedRecallOutput`. Resolves the preset to its
+signed-weight shape via `RecallShape.preset` and runs `.unionBest`/`.matrixAware`
+recall with it; `"balanced"` (and any unknown name) runs unsteered, byte-identical
+to today's `.unionBest`. Reuses `PreciseMatch` as the per-match result. The catalog
+gains one entry (`shaped_recall`), shifting the count to 24. Conformance:
+`ShapedRecallTests.swift` / `shaped_recall.rs #[cfg(test)]` + the catalog parity
+tests.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.5.0
+version: 1.6.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1561,6 +1561,46 @@ proven on both ports). Only `dense:<modelID>` keys are honoured (the fixed lanes
 have no farthest variant). The distinctness invariant — anti-similar+positive ≠
 nearest+negative — is conformance-gated on both ports.
 
+#### Named preset roster (RecallShape.preset)
+
+`RecallShape.preset(_:)` (Swift) / `RecallShape::preset` (Rust) resolves a roster
+NAME to a documented signed-weight shape, so a recipe or an AI can pick a
+deterministic steering vector by name instead of constructing one. `presetNames` /
+`PRESET_NAMES` (19 entries) is the discoverable roster; `presetDescription` /
+`preset_description` is the one-line emphasis text the ARIA tool surfaces.
+
+A preset is a WEIGHT VECTOR over the existing fusion — it introduces NO new
+substrate math, and every key it sets is a key the fusion already reads (the
+signed-weight semantics above). `"balanced"` and any unknown name resolve to
+`nil`/`None` — the uniform, unsteered fusion — so the resolution of "balanced" and
+of an unknown name are deliberately the same (run with no steering). The roster:
+
+- `balanced` — uniform (nil).
+- `precise` — bm25 + fdc + dense up, narrow frontier.
+- `conceptual` — RI/PPMI/LSA/NMF up, bm25 down.
+- `broad` — all retrieval lanes up, frontier widened to the ceiling.
+- `lexical` — bm25 + fdc up, dense + hamming excluded.
+- `not_lexical` — bm25 + fdc excluded.
+- `associative` — RI + NMF up, frontier widened.
+- `consensus` — every per-signal dense lane up, narrow frontier.
+- `ri_forward` / `ppmi_forward` / `lsa_forward` / `nmf_forward` — one dense lane up,
+  the distributional siblings excluded.
+- `fast` — hamming only, dense excluded.
+- `structural` — locus up.
+- `temporal` / `connection` / `field` / `preference` — the matrix/graph/preference
+  column up (matrixAware scoring only).
+- `anti_redundant` — the FDC dense lane inverted to farthest (anti-similarity).
+
+The weights are SENSIBLE, DEFENSIBLE starting points the quality optimizer tunes
+later — they are NOT canon. A preset's contract is its DIRECTION (which lanes it
+forwards/excludes/suppresses/inverts and how it bounds the frontier), not the
+literal float. Leave-one-out ablation is reachable WITHOUT a dedicated preset:
+take any forward shape and zero one `dense:<modelID>` key. The dense per-signal
+keys are surfaced as `RecallShape.DenseSignal.*` / `RecallShape::DENSE_*`
+constants so a provider-id typo is a build error, not a silent no-op. Roster
+resolution is conformance-gated on both ports (`RecallShapePresetTests.swift` /
+`recall_shape_presets.rs`).
+
 ### Telemetry counters
 
 Each degraded stage emits a `glk.recall.<stage>_degraded` counter tagged
@@ -1623,6 +1663,18 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-06-17
+Additive (GLK-RECALL-SHAPE-PRESETS): documented the NAMED PRESET ROSTER on
+`RecallShape`. `RecallShape.preset(_:)` / `RecallShape::preset` resolves one of 19
+roster names to its documented signed-weight shape; `presetNames` / `PRESET_NAMES`
+and `presetDescription` / `preset_description` are the discoverable surface. Each
+preset is a weight vector over the EXISTING fusion (no new engine math); `balanced`
+and any unknown name resolve to the unsteered uniform fusion. Added the
+"Named preset roster" subsection under the signed-weight steering section. No
+behavioural change to the fusion engine — the roster only names weight vectors the
+engine already honours. Conformance: `RecallShapePresetTests.swift` /
+`recall_shape_presets.rs`.
 
 ### 1.5.0 -- 2026-06-17
 Brought the Rust port to parity on the `GraphCache` / `PreferenceStore` recall-

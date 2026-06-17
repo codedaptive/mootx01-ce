@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition. Produces exactly
-//! 54 tools in this order:
+//! 55 tools in this order:
 //!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
@@ -10,12 +10,12 @@
 //!   Tier 5 (3)  — estate: status, map, ping
 //!   Maintenance (1) — moot_reindex
 //!   Federation (1) — moot_federated_search
-//!   Recipe (7)  — list_lenses, list_recipes, synthesize, run_migration, confirm_migration, recall_precise, dream
+//!   Recipe (8)  — list_lenses, list_recipes, synthesize, run_migration, confirm_migration, recall_precise, recall_shaped, dream
 //!   Lens (21)   — moot_lens_keystones … moot_lens_complexity
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Tool count 54 = 53 (prior surface) + 1 (moot_reindex, dual-path intake backfill
-//! maintenance tool, parity with Swift ToolProjection.estateTools() Maintenance addition).
+//! Tool count 55 = 54 (prior surface) + 1 (moot_recall_shaped, the named
+//! RecallShape preset surface — GLK-RECALL-SHAPE-PRESETS).
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -27,9 +27,9 @@ use serde_json::json;
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Build the full 54-tool surface for `tools/list`.
+/// Build the full 55-tool surface for `tools/list`.
 pub fn build_tool_list() -> serde_json::Value {
-    let mut tools: Vec<serde_json::Value> = Vec::with_capacity(54);
+    let mut tools: Vec<serde_json::Value> = Vec::with_capacity(55);
 
     // Tier 1 — Core memory (7)
     tools.push(file_memory_tool());
@@ -73,6 +73,7 @@ pub fn build_tool_list() -> serde_json::Value {
     tools.push(run_migration_tool());
     tools.push(confirm_migration_tool());
     tools.push(recall_precise_tool());
+    tools.push(recall_shaped_tool());
     // moot_dream: matrix rebuild + dreaming cycle. Schema mirrors Swift
     // `RecipeTools.dreamTool()`. The tool runs one on-demand cycle (accepts a
     // `now` arg only) — by design, not omission. The .timer/.event/.hybrid
@@ -499,6 +500,45 @@ fn recall_precise_tool() -> serde_json::Value {
                 "limit": integer_schema("Max ranked matches to return. Default 20."),
                 "pool": integer_schema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit."),
                 "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, dense-fused, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
+                "filter": filter_schema()
+            }),
+            json!(["query"])
+        )))
+    })
+}
+
+/// The shaped-recall tool — one recall tool with a discoverable `preset` enum
+/// selecting a named RecallShape from the GLK roster. The full roster (name +
+/// one-line description) is embedded in the tool description so the AI lists it
+/// and picks a preset by intent. Mirrors Swift `RecipeTools.shapedRecallTool()`.
+/// The four ARIA filtering adjectives compose orthogonally: the preset RANKS,
+/// the `filter` arg FILTERS.
+fn recall_shaped_tool() -> serde_json::Value {
+    use genius_locus_kit::recall::RecallShape;
+    // The roster listing: one `name — description` line per preset, built from
+    // the GLK roster so a new preset is reflected automatically.
+    let roster: String = RecallShape::PRESET_NAMES
+        .iter()
+        .map(|name| format!("{name} — {}", RecallShape::preset_description(name)))
+        .collect::<Vec<_>>()
+        .join("; ");
+    // The discoverable enum: the exact roster the GLK ships.
+    let preset_enum: Vec<serde_json::Value> = RecallShape::PRESET_NAMES
+        .iter()
+        .map(|n| serde_json::Value::String((*n).to_string()))
+        .collect();
+    json!({
+        "name": "moot_recall_shaped",
+        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search."),
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The search query text — drives BM25 + vector recall."),
+                "preset": {
+                    "type": "string",
+                    "description": "The RecallShape preset to apply (how to steer the fusion). One of the roster names. balanced (or an omitted preset) is the unsteered default. Unknown names are rejected.",
+                    "enum": preset_enum
+                },
+                "limit": integer_schema("Max ranked matches to return. Default 20."),
                 "filter": filter_schema()
             }),
             json!(["query"])
