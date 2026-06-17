@@ -196,6 +196,19 @@ public enum EmbeddingModel: Sendable {
     /// `CorpusKitProviders` for the full training API.
     case lsa(provider: any EmbeddingProvider & Sendable)
 
+    /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
+    ///
+    /// The caller constructs, trains, and finalizes an `NmfProvider` (TF-weighted
+    /// term-document matrix factorized via SubstrateML's NMFAlternatingLeastSquares
+    /// with fixed iteration count for determinism) and passes it here.
+    ///
+    /// Document embeddings are the L2-normalised column vectors of the H factor;
+    /// query embeddings use the pseudo-inverse fold-in formula on W.
+    ///
+    /// See ADR-010 Decision B for the rationale and `NmfProvider` in
+    /// `CorpusKitProviders` for the full training API.
+    case nmf(provider: any EmbeddingProvider & Sendable)
+
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 }
@@ -793,6 +806,11 @@ extension EmbeddingModel {
         case .lsa(let provider):
             // The caller built and trained the LsaProvider externally (term-
             // document matrix + SVD). Pass through unchanged.
+            return provider
+
+        case .nmf(let provider):
+            // The caller built, trained, and finalized the NmfProvider externally
+            // (TF matrix + NMF factorization via SubstrateML). Pass through unchanged.
             return provider
 
         case .deterministic:

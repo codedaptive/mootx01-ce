@@ -29,15 +29,28 @@
 //! `CorpusKit` and `CorpusKitProviders`.
 
 pub mod deterministic_tokenizer;
+// Shared term-document count builder reused by LSA and NMF.
+// Owns vocab encounter-order construction, TF counts, and DF counts.
+// Swift port: Sources/CorpusKitProviders/TermDocumentCounts.swift.
+pub mod term_document_counts;
 // ADR-010 Decision B signal #1: LSA/SVD distributional-semantics provider.
 // Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
 pub mod lsa;
+// ADR-010 Decision B: NMF latent-factor provider.
+// Reuses substrate_ml::nmf::NMFAlternatingLeastSquares (Gate-2: no reimplementation).
+// tolerance=0 forces fixed iteration count for bit-identical cross-port output.
+pub mod nmf_provider;
 pub mod ppmi;
 pub mod random_indexing;
 pub mod text_providers;
 
 pub use deterministic_tokenizer::DeterministicTokenizer;
+pub use term_document_counts::TermDocumentCounts;
 pub use lsa::{LsaProvider, LSA_DEFAULT_RANK, LSA_PROJECTION_SEED};
+pub use nmf_provider::{
+    NmfProvider, NMF_DEFAULT_ITERATIONS, NMF_DEFAULT_RANK, NMF_FACTORIZATION_SEED,
+    NMF_PROJECTION_SEED,
+};
 pub use ppmi::{
     PpmiProvider, PPMI_DIMENSION, PPMI_NONZEROS, PPMI_PROJECTION_SEED, PPMI_WINDOW,
 };
