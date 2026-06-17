@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.4.0
+version: 1.5.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1004,6 +1004,16 @@ scores[i] += weights.graph * buffer.graph[i]
            + weights.graph * buffer.preference[i]
 ```
 
+**Rust parity.** The Rust port mirrors this surface exactly (mission
+glk-recall-graphpref-rust): `pub trait GraphCache: Send + Sync` /
+`pub trait PreferenceStore: Send + Sync` (per-drawer `graph_score` /
+`preference_score`), `EstateCoordinator.register_graph_cache` /
+`register_preference_store`, and the per-candidate `col_graph[i]` /
+`col_preference[i]` lookups in the unionBest `.matrixAware` score loop. Both
+columns share the `weights.graph` slice as in Swift, and read 0.0 when no cache
+is registered. The cache PRODUCERS (dreaming-cycle graph-centrality; Bradley-
+Terry preference training) are absent in both ports — a separate future mission.
+
 ### Post-hydration shingle MMR
 
 The MMR similarity proxy in step 10 is upgraded to post-hydration shingle
@@ -1515,11 +1525,12 @@ per-signal dense float signals fuse:
   neutral 1.0/1.0 path preserves the exact pre-steer combined expression, so a
   nil/all-ones shape is byte-identical. These five matrix keys are active ONLY in
   the `.matrixAware` weighted score — a NO-OP under `.raw`/`.rrf`, which read the
-  lane-normalised rank score directly and never run the weighted formula. (Per
-  port: the Swift `graph`/`preference` columns are populated from a registered
-  `GraphCache`/`PreferenceStore`; the Rust port's are 0.0 until those caches are
-  wired, so steering them is a no-op there — the steering surface is identical.)
-  See ADR-011 for the full lane-key surface.
+  lane-normalised rank score directly and never run the weighted formula. (Both
+  ports populate `graph`/`preference` from a registered `GraphCache` /
+  `PreferenceStore`; with a cache registered, steering those keys moves the live
+  columns identically cross-port. Absent a cache the columns read 0.0 on both
+  ports — the correct fresh-estate behaviour. The cache PRODUCERS remain absent
+  in both ports.) See ADR-011 D-4 for the full cross-port boundary.
 
 A `nil` shape — or an all-1.0 shape — is BYTE-IDENTICAL to the prior uniform
 fusion in EVERY lane including `unionBest` (the back-compat contract, proven by
@@ -1612,6 +1623,17 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-06-17
+Brought the Rust port to parity on the `GraphCache` / `PreferenceStore` recall-
+consumption surface (mission glk-recall-graphpref-rust, closing ADR-011 D-4). The
+`graph` / `preference` columns are no longer hardcoded `0.0` in Rust: the port now
+defines the two traits (`Send + Sync`, per-drawer score lookup),
+`register_graph_cache` / `register_preference_store`, and per-candidate
+`col_graph` / `col_preference` lookups in the unionBest `.matrixAware` score loop
+(both sharing the `weights.graph` slice, Swift parity). Corrected the per-port
+note that previously claimed the Rust columns were dark. Cache producers remain
+absent in both ports (future mission).
 
 ### 1.4.0 -- 2026-06-17
 Extended `RecallShape`'s steerable surface to the FULL set of recall scoring

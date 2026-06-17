@@ -517,6 +517,21 @@ pub struct EstateCoordinator {
     /// all matrix score columns read 0.0, correct for a fresh estate. Mirrors
     /// the Swift actor's `matrixTiers: [EstateHandle: MatrixTier]`.
     matrix_tiers: HashMap<EstateHandle, crate::matrix::MatrixTier>,
+    /// Per-estate graph-centrality caches. Registered by `register_graph_cache`
+    /// (called by the dreaming cycle once it has computed per-drawer graph
+    /// centrality), read by the `matrixAware` recall lane to populate the `graph`
+    /// score column. Absent ⇒ the `graph` column reads 0.0, correct for a fresh
+    /// estate with no graph priors. Mirrors the Swift actor's
+    /// `graphCaches: [EstateHandle: any GraphCache]`.
+    graph_caches: HashMap<EstateHandle, Arc<dyn crate::recall::GraphCache>>,
+    /// Per-estate learned-preference stores. Registered by
+    /// `register_preference_store` (called by the training daemon once Bradley-
+    /// Terry / RecallTrace weights are trained), read by the `matrixAware` recall
+    /// lane to populate the `preference` score column. Absent ⇒ the `preference`
+    /// column reads 0.0, correct for a fresh estate with no preference priors.
+    /// Mirrors the Swift actor's
+    /// `preferenceStores: [EstateHandle: any PreferenceStore]`.
+    preference_stores: HashMap<EstateHandle, Arc<dyn crate::recall::PreferenceStore>>,
     /// Per-estate host-tree topology providers for the `NodeTreeNative` recall
     /// mode and the structural lens path.
     ///
@@ -600,6 +615,8 @@ impl EstateCoordinator {
             encode_queues: HashMap::new(),
             audit_logs: HashMap::new(),
             matrix_tiers: HashMap::new(),
+            graph_caches: HashMap::new(),
+            preference_stores: HashMap::new(),
             node_topology_providers: HashMap::new(),
             sync_engines: HashMap::new(),
             // Test seams start clear; only `inject_*` methods set them.
@@ -765,6 +782,11 @@ impl EstateCoordinator {
         // must not resolve to a live log or a stale recall tier (GLK-03 parity).
         self.audit_logs.remove(handle);
         self.matrix_tiers.remove(handle);
+        // Drop the graph cache and preference store with the estate — a closed
+        // handle must not resolve to a stale recall accelerator. Parity of Swift
+        // `close` which drops `graphCaches[handle]` / `preferenceStores[handle]`.
+        self.graph_caches.remove(handle);
+        self.preference_stores.remove(handle);
         // Drop the node topology provider (w5-nodetree-native). A closed handle
         // must not resolve to a stale provider; parity of Swift `close` which
         // drops `nodeTopologyProviders[handle]`.
@@ -2009,6 +2031,63 @@ impl EstateCoordinator {
         self.matrix_tiers.get(handle)
     }
 
+    // MARK: - graph cache + preference store (recall-scoring accelerators)
+
+    /// Register a `GraphCache` for the given estate handle.
+    ///
+    /// The `matrixAware` recall lane reads this cache to populate the `graph`
+    /// score column during the `unionBest` scoring pass. The cache must hold
+    /// pre-built per-drawer graph centrality scores from the dreaming cycle; the
+    /// recall path performs candidate-frontier lookups only and never triggers
+    /// synchronous estate-wide graph traversal (spec §15).
+    ///
+    /// Re-registering replaces the existing entry. The `graph` column remains 0.0
+    /// when no cache is registered — correct, not an error. Mirrors the Swift
+    /// `GeniusLocusKit.registerGraphCache(_:for:)`.
+    pub fn register_graph_cache(
+        &mut self,
+        handle: &EstateHandle,
+        cache: Arc<dyn crate::recall::GraphCache>,
+    ) {
+        self.graph_caches.insert(*handle, cache);
+    }
+
+    /// The `GraphCache` registered for `handle`, if any. The `matrixAware` recall
+    /// path reads this to populate the `graph` score column. Mirrors the Swift
+    /// actor's `graphCaches[handle]` lookup.
+    pub fn graph_cache(&self, handle: &EstateHandle) -> Option<&Arc<dyn crate::recall::GraphCache>> {
+        self.graph_caches.get(handle)
+    }
+
+    /// Register a `PreferenceStore` for the given estate handle.
+    ///
+    /// The `matrixAware` recall lane reads this store to populate the
+    /// `preference` score column during the `unionBest` scoring pass. The store
+    /// must hold pre-trained per-drawer preference weights from the training
+    /// daemon; the recall path performs candidate-frontier lookups only and never
+    /// triggers synchronous preference model updates (spec §15).
+    ///
+    /// Re-registering replaces the existing entry. The `preference` column
+    /// remains 0.0 when no store is registered — correct for a fresh estate.
+    /// Mirrors the Swift `GeniusLocusKit.registerPreferenceStore(_:for:)`.
+    pub fn register_preference_store(
+        &mut self,
+        handle: &EstateHandle,
+        store: Arc<dyn crate::recall::PreferenceStore>,
+    ) {
+        self.preference_stores.insert(*handle, store);
+    }
+
+    /// The `PreferenceStore` registered for `handle`, if any. The `matrixAware`
+    /// recall path reads this to populate the `preference` score column. Mirrors
+    /// the Swift actor's `preferenceStores[handle]` lookup.
+    pub fn preference_store(
+        &self,
+        handle: &EstateHandle,
+    ) -> Option<&Arc<dyn crate::recall::PreferenceStore>> {
+        self.preference_stores.get(handle)
+    }
+
     /// Feed the unified audit log, rebuild the recall-scoring `MatrixTier`
     /// from it (both passes: F/O/C + T), and register the tier for `handle`.
     ///
@@ -3079,9 +3158,17 @@ impl EstateCoordinator {
                 // acceptable for the scored-recall call path which already does multiple
                 // HashMap lookups per candidate).
                 let matrix_tier = self.matrix_tiers.get(handle).cloned();
+                // Pass the registered GraphCache / PreferenceStore (if any) for the
+                // `matrixAware` graph / preference score columns. `Arc::clone` is a
+                // reference-count bump only — the trait object lives behind the Arc, so
+                // the static fn reads it without &self access, mirroring how the cloned
+                // `matrix_tier` is threaded through. None ⇒ the column stays 0.0, same
+                // as Swift when `graphCaches[handle]` / `preferenceStores[handle]` is nil.
+                let graph_cache = self.graph_caches.get(handle).cloned();
+                let preference_store = self.preference_stores.get(handle).cloned();
                 Self::recall_scored_multi_lane(
                     estate, request, plan, now, corpus, vector, handle,
-                    matrix_tier,
+                    matrix_tier, graph_cache, preference_store,
                     forced_vector_hamming_error, forced_embed_error,
                 )
             }
@@ -3344,6 +3431,12 @@ impl EstateCoordinator {
         // with no matrix data (matrix signals are 0.0, same as Swift's fallback when
         // matrixTiers[handle] == nil).
         matrix_tier: Option<crate::matrix::MatrixTier>,
+        // GraphCache / PreferenceStore registered for this estate — Some when the
+        // dreaming cycle / training daemon has registered one. None on a fresh estate
+        // with no graph/preference priors (the graph/preference columns read 0.0, same
+        // as Swift's fallback when graphCaches[handle] / preferenceStores[handle] == nil).
+        graph_cache: Option<Arc<dyn crate::recall::GraphCache>>,
+        preference_store: Option<Arc<dyn crate::recall::PreferenceStore>>,
         // Test seam values — consumed once by the caller from cfg(any(test, feature = "test-seams")) RefCells.
         // On the production path these are always None (compiler eliminates the branches).
         force_vector_hamming_error: Option<String>,
@@ -3752,9 +3845,9 @@ impl EstateCoordinator {
             && request.scoring == GLKRecallScoring::MatrixAware;
 
         // Tuple: (id, final_score, locus_raw, bm25_raw, vec_raw, dense_raw,
-        //         field_fit, co_occurrence, temporal).
+        //         field_fit, co_occurrence, temporal, graph, preference).
         #[allow(clippy::type_complexity)]
-        let fused_scored: Vec<(String, f32, f32, f32, f32, f32, f32, f32, f32)>;
+        let fused_scored: Vec<(String, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>;
 
         let union_profile: Option<RecallUnionProfile>;
 
@@ -3808,6 +3901,11 @@ impl EstateCoordinator {
             let mut col_field_fit:    Vec<f32> = vec![0.0; count];
             let mut col_co_occur:     Vec<f32> = vec![0.0; count];
             let mut col_temporal:     Vec<f32> = vec![0.0; count];
+            // Graph centrality + learned-preference columns (step 5.7). Stay 0.0
+            // unless a GraphCache / PreferenceStore is registered for the estate —
+            // populated from the caches below, mirroring Swift RecallDirector step 5.7.
+            let mut col_graph:        Vec<f32> = vec![0.0; count];
+            let mut col_preference:   Vec<f32> = vec![0.0; count];
 
             if let Some(ref tier) = matrix_tier {
                 // Derive query coords from the first (highest-ranked) locus candidate.
@@ -3892,6 +3990,27 @@ impl EstateCoordinator {
                 }
             }
 
+            // Step 5.7 — graph and preference scoring.
+            // Candidate-frontier lookups only: per-drawer scores are read from
+            // pre-built caches registered by the dreaming / training cycle. No
+            // synchronous estate-wide analytics are performed here (spec §15).
+            // Columns remain 0.0 when no cache is registered for the estate.
+            // normalize_column preserves all-zero columns as 0.0 (absent signal),
+            // distinguishing them from non-zero uniform columns (measured-uniform,
+            // normalized to 0.5). Absent columns therefore contribute nothing on a
+            // fresh estate — the correct behaviour for no priors. Mirrors Swift
+            // RecallDirector step 5.7 (`graphCaches[handle]` / `preferenceStores[handle]`).
+            if let Some(ref cache) = graph_cache {
+                for (i, id) in ordered_ids.iter().enumerate() {
+                    col_graph[i] = cache.graph_score(id);
+                }
+            }
+            if let Some(ref store) = preference_store {
+                for (i, id) in ordered_ids.iter().enumerate() {
+                    col_preference[i] = store.preference_score(id);
+                }
+            }
+
             // Initial final column = per-lane RRF before normalisation.
             // normalizeFinals will overwrite with the weighted path, but the
             // normaliser needs a populated `final` column to sort top-16 for
@@ -3907,6 +4026,8 @@ impl EstateCoordinator {
             Self::normalize_column(&mut col_field_fit, count);
             Self::normalize_column(&mut col_co_occur,  count);
             Self::normalize_column(&mut col_temporal,  count);
+            Self::normalize_column(&mut col_graph,     count);
+            Self::normalize_column(&mut col_preference, count);
             Self::normalize_column(&mut col_final,     count);
 
             // Compute union profile (step 7) over the normalised columns.
@@ -3957,10 +4078,11 @@ impl EstateCoordinator {
             // combined matrix term `weights.matrix * (co + temporal) * 0.5` is split so
             // coOccurrence and temporal steer independently; on the neutral 1.0/1.0
             // path the exact pre-steer combined expression is kept so the back-compat
-            // score is byte-identical (float reassociation avoided). NOTE: col_graph
-            // and col_preference are 0.0 in this port (no graph/preference cache wired
-            // on Rust), so their shape factor multiplies 0.0 — the steering surface is
-            // present and identical cross-port for when those columns become live.
+            // score is byte-identical (float reassociation avoided). col_graph and
+            // col_preference carry the registered GraphCache / PreferenceStore lookups
+            // (0.0 only when no cache is registered for the estate, same as Swift's
+            // absent-cache case); each is scaled by its signed shape weight so the graph
+            // and preference lanes steer cross-port identically to Swift.
             let (sh_locus, sh_bm25, sh_hamming, sh_dense) = match &request.recall_shape {
                 Some(s) => (
                     s.weight("locus"),
@@ -4000,8 +4122,10 @@ impl EstateCoordinator {
                    + sh_dense   * weights.vector   * col_dense[i]     // dense shares vector weight budget
                    + sh_field_fit * weights.field_fit * col_field_fit[i]
                    + matrix_term
-                   + sh_graph      * weights.graph * 0.0_f32          // graph: no cache registered → 0.0
-                   + sh_preference * weights.graph * 0.0_f32          // preference: no cache → 0.0
+                   // graph + preference share the `weights.graph` budget slice, exactly
+                   // as Swift (RecallDirector step 9: both columns multiply weights.graph).
+                   + sh_graph      * weights.graph * col_graph[i]
+                   + sh_preference * weights.graph * col_preference[i]
                    + agreement_bonus * source_masks[i].count_ones() as f32 / 4.0;
             }
 
@@ -4024,7 +4148,9 @@ impl EstateCoordinator {
                  col_dense[i],
                  col_field_fit[i],
                  col_co_occur[i],
-                 col_temporal[i])
+                 col_temporal[i],
+                 col_graph[i],
+                 col_preference[i])
             }).collect();
 
         } else {
@@ -4095,7 +4221,8 @@ impl EstateCoordinator {
                 ),
                 _ => (1.0, 1.0, 1.0),
             };
-            let mut scored: Vec<(String, f32, f32, f32, f32, f32, f32, f32, f32)> = all_ids
+            #[allow(clippy::type_complexity)]
+            let mut scored: Vec<(String, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> = all_ids
                 .iter()
                 .filter_map(|id| {
                     let (locus_rank, locus_raw) = locus_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
@@ -4155,7 +4282,10 @@ impl EstateCoordinator {
                             rrf
                         }
                     };
-                    Some((id.clone(), final_score, locus_raw, bm25_raw, vec_raw, dense_raw, 0.0_f32, 0.0_f32, 0.0_f32))
+                    // Trailing zeros: fieldFit, coOccurrence, temporal, graph, preference —
+                    // all absent on the non-matrixAware fusion path (no matrix/graph/
+                    // preference scoring runs here), matching Swift's .raw/.rrf path.
+                    Some((id.clone(), final_score, locus_raw, bm25_raw, vec_raw, dense_raw, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32))
                 })
                 .collect();
 
@@ -4199,17 +4329,27 @@ impl EstateCoordinator {
         let hits: Vec<RecallHit> = fused_scored
             .into_iter()
             .filter(|(id, ..)| drawer_index.contains_key(id))
-            .map(|(id, final_s, locus_s, bm25_s, vec_s, dense_s, ff_s, co_s, t_s)| {
+            .map(|(id, final_s, locus_s, bm25_s, vec_s, dense_s, ff_s, co_s, t_s, g_s, p_s)| {
                 let drawer = drawer_index.get(&id).cloned();
                 let mut sources = Vec::new();
                 if locus_contributed  && locus_score_map.contains_key(&id)  { sources.push(RecallEvidencePath::LocusBitmap); }
                 if bm25_contributed   && bm25_score_map.contains_key(&id)   { sources.push(RecallEvidencePath::CorpusBm25); }
                 if vector_contributed && vector_score_map.contains_key(&id) { sources.push(RecallEvidencePath::VectorHamming); }
                 if dense_contributed  && dense_score_map.contains_key(&id)  { sources.push(RecallEvidencePath::VectorDense); }
-                // Matrix evidence paths when signals are non-zero.
+                // Matrix / graph / preference evidence paths when their column is
+                // non-zero. This follows the Rust port's established matrix-evidence
+                // convention (the matrix paths above): graphCoherence / learnedPreference
+                // are surfaced exactly when col_graph[i] / col_preference[i] carry mass
+                // from a registered GraphCache / PreferenceStore. (Swift's director does
+                // not surface any matrix/graph/preference path in `sources`; that is a
+                // pre-existing Swift↔Rust sources divergence NOT introduced here — the
+                // score-column parity that closes ADR-011 D-4 is over `final` and the
+                // graph/preference columns, both of which now agree cross-port.)
                 if ff_s > 0.0 { sources.push(RecallEvidencePath::MatrixFieldPresence); }
                 if co_s > 0.0 { sources.push(RecallEvidencePath::MatrixCoOccurrence); }
                 if t_s  > 0.0 { sources.push(RecallEvidencePath::MatrixTemporal); }
+                if g_s  > 0.0 { sources.push(RecallEvidencePath::GraphCoherence); }
+                if p_s  > 0.0 { sources.push(RecallEvidencePath::LearnedPreference); }
                 if sources.is_empty() { sources.push(RecallEvidencePath::LocusBitmap); }
                 let score = RecallScoreVector {
                     locus: locus_s,
@@ -4218,8 +4358,8 @@ impl EstateCoordinator {
                     field_fit: ff_s,
                     co_occurrence: co_s,
                     temporal: t_s,
-                    graph: 0.0,
-                    preference: 0.0,
+                    graph: g_s,
+                    preference: p_s,
                     redundancy_penalty: 0.0,
                     final_score: final_s,
                     dense: dense_s,
@@ -4232,6 +4372,8 @@ impl EstateCoordinator {
                 if ff_s    > 0.0 { explanation.push("matrixFieldPresence".to_string()); }
                 if co_s    > 0.0 { explanation.push("matrixCoOccurrence".to_string()); }
                 if t_s     > 0.0 { explanation.push("matrixTemporal".to_string()); }
+                if g_s     > 0.0 { explanation.push("graphCoherence".to_string()); }
+                if p_s     > 0.0 { explanation.push("learnedPreference".to_string()); }
                 if explanation.is_empty() { explanation.push("locusBitmap".to_string()); }
                 // PER-SIGNAL DENSE PROVENANCE (6b-core): name the dense signals that
                 // voted for this id, in slot order. Mirrors Swift's step-11

@@ -184,6 +184,56 @@ impl RecallEvidencePath {
 }
 
 // ---------------------------------------------------------------------------
+// GraphCache / PreferenceStore (recall-scoring accelerators)
+// ---------------------------------------------------------------------------
+
+/// Cache of pre-built graph projections for one estate.
+///
+/// Implementations hold pre-computed per-drawer graph centrality scores
+/// (e.g. random-walk stationary distributions, eigenvalue centrality) built
+/// during the dreaming cycle. The director queries this cache for candidate-
+/// frontier lookups only — no synchronous estate-wide analytics are performed at
+/// recall time (spec §15).
+///
+/// When no implementation is registered for an estate the graph column remains
+/// 0.0, which is correct and not an error.
+///
+/// Mirrors the Swift `GeniusLocusKit.GraphCache` protocol
+/// (Sources/GeniusLocusKit/GeniusLocusKit.swift). `Send + Sync` is the Rust
+/// equivalent of Swift's `Sendable` requirement, so a registered cache can be
+/// shared across the recall path.
+pub trait GraphCache: Send + Sync {
+    /// Return the graph centrality score for the given drawer ID.
+    ///
+    /// Returns 0.0 when the drawer is not in the cache. Must not perform any
+    /// synchronous estate-wide graph traversal. Mirrors Swift
+    /// `GraphCache.graphScore(for:)`.
+    fn graph_score(&self, drawer_id: &str) -> f32;
+}
+
+/// Store of learned per-drawer preference scores for one estate.
+///
+/// Implementations hold pre-trained Bradley-Terry or RecallTrace preference
+/// weights built by the training daemon. The director queries this store for
+/// candidate-frontier lookups only — no synchronous model retraining occurs at
+/// recall time (spec §15).
+///
+/// When no implementation is registered for an estate the preference column
+/// remains 0.0, which is correct and not an error.
+///
+/// Mirrors the Swift `GeniusLocusKit.PreferenceStore` protocol
+/// (Sources/GeniusLocusKit/GeniusLocusKit.swift). `Send + Sync` mirrors Swift's
+/// `Sendable` requirement.
+pub trait PreferenceStore: Send + Sync {
+    /// Return the preference score for the given drawer ID.
+    ///
+    /// Returns 0.0 when the drawer is not in the store. Must not trigger any
+    /// synchronous preference model update. Mirrors Swift
+    /// `PreferenceStore.preferenceScore(for:)`.
+    fn preference_score(&self, drawer_id: &str) -> f32;
+}
+
+// ---------------------------------------------------------------------------
 // RecallFallbackPolicy
 // ---------------------------------------------------------------------------
 

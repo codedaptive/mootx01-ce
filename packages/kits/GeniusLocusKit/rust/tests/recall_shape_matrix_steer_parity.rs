@@ -10,9 +10,11 @@
 //   (b) fieldFit weight < 0 SUBTRACTS the column — strictly lower than weight 0.
 //   (c) a temporal-up shape ranks the temporally-relevant drawer no lower than a
 //       temporal-down shape — temporal steering is live.
-//   (d) graph/preference keys are ACCEPTED and a no-op in this port (the col_graph
-//       / col_preference columns are 0.0 here — no graph/preference cache is wired
-//       on Rust, mirrored honestly), so steering them does not change the output.
+//   (d) with a constant GraphCache (0.8) / PreferenceStore (0.9) registered, the
+//       graph / preference columns are LIVE: excluding them (weight 0) changes a
+//       fused final, and graph weight < 0 subtracts strictly below weight 0 —
+//       mirroring Swift RecallShapeMatrixSteerTests (a)/(b)/(c). This closes the
+//       ADR-011 D-4 parity violation (Rust no longer hardcodes the columns dark).
 //   (e) nil shape == an explicit all-ones shape over EVERY steerable key is
 //       BYTE-IDENTICAL (back-compat).
 //
@@ -27,7 +29,8 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::matrix::{MatrixTier, MatrixValueCoord};
 use genius_locus_kit::audit::UnifiedAuditValue;
 use genius_locus_kit::recall::{
-    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
+    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GraphCache,
+    PreferenceStore, RecallShape,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -36,6 +39,30 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 
 const NOW: i64 = 1_700_000_000;
+
+/// Constant graph cache — every drawer gets the same score, so the column is
+/// measured-uniform (normalize → 0.5 every slot) and its steered contribution
+/// moves every fused final by the same deterministic amount. Mirrors Swift
+/// `ConstantGraphCache` in RecallShapeMatrixSteerTests.
+struct ConstantGraphCache {
+    score: f32,
+}
+impl GraphCache for ConstantGraphCache {
+    fn graph_score(&self, _drawer_id: &str) -> f32 {
+        self.score
+    }
+}
+
+/// Constant preference store — same constant-column rationale as the graph cache.
+/// Mirrors Swift `ConstantPreferenceStore`.
+struct ConstantPreferenceStore {
+    score: f32,
+}
+impl PreferenceStore for ConstantPreferenceStore {
+    fn preference_score(&self, _drawer_id: &str) -> f32 {
+        self.score
+    }
+}
 
 fn open_one() -> (EstateCoordinator, genius_locus_kit::handle::EstateHandle) {
     let mut coord = EstateCoordinator::new();
@@ -232,39 +259,94 @@ fn temporal_up_ranks_relevant_no_lower() {
     }
 }
 
-// MARK: - (d) graph/preference keys are a no-op in this port (columns 0.0)
+// MARK: - (d) graph / preference columns are LIVE with a registered cache
 
-/// The graph/preference columns are 0.0 in the Rust port (no cache wired), so
-/// their shape factor multiplies 0.0 — steering them must NOT change the output.
-/// This documents the cross-port boundary honestly: the steering SURFACE accepts
-/// the keys identically to Swift, but the columns are dark here so the effect is a
-/// no-op (Swift moves them when a GraphCache/PreferenceStore is registered).
+/// With a constant GraphCache(0.8) registered, excluding the graph column
+/// (weight 0) must change at least one fused final relative to the neutral (nil)
+/// recall — the live column contributed mass that exclusion removes. Mirrors
+/// Swift RecallShapeMatrixSteerTests.graphWeightZeroExcludesColumn. This is the
+/// proof the Rust column is no longer hardcoded dark (ADR-011 D-4).
 #[test]
-fn graph_preference_keys_are_no_op_when_columns_dark() {
+fn graph_weight_zero_excludes_live_column() {
     let (mut coord, h, d1, d2) = two_drawer_estate();
     seed_matrix_tier(&mut coord, &h, &d1, &d2);
+    coord.register_graph_cache(&h, Arc::new(ConstantGraphCache { score: 0.8 }));
 
     let neutral = coord.recall_scored(&h, matrix_req(None), NOW + 10).expect("neutral");
-    let steered = coord
-        .recall_scored(
-            &h,
-            matrix_req(Some(shape(&[("graph", 5.0), ("preference", -3.0)]))),
-            NOW + 11,
-        )
-        .expect("steered");
+    let excluded = coord
+        .recall_scored(&h, matrix_req(Some(shape(&[("graph", 0.0)]))), NOW + 11)
+        .expect("excluded");
 
-    assert_eq!(
-        neutral.hits.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>(),
-        steered.hits.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>(),
-        "steering dark graph/preference columns must not reorder hits"
+    let neutral_finals = finals(&neutral);
+    let changed = excluded.hits.iter().any(|hit| {
+        neutral_finals.get(&hit.id).map_or(false, |b| *b != hit.score.final_score)
+    });
+    assert!(
+        changed,
+        "excluding the live graph column (w=0) must change at least one fused final"
     );
-    for (a, b) in neutral.hits.iter().zip(steered.hits.iter()) {
-        assert_eq!(
-            a.score.final_score, b.score.final_score,
-            "steering dark graph/preference columns must not change the fused final; {}",
-            a.id
-        );
+}
+
+/// With a constant PreferenceStore(0.9) registered, excluding the preference
+/// column (weight 0) must change at least one fused final. Mirrors Swift
+/// RecallShapeMatrixSteerTests.preferenceWeightZeroExcludesColumn.
+#[test]
+fn preference_weight_zero_excludes_live_column() {
+    let (mut coord, h, d1, d2) = two_drawer_estate();
+    seed_matrix_tier(&mut coord, &h, &d1, &d2);
+    coord.register_preference_store(&h, Arc::new(ConstantPreferenceStore { score: 0.9 }));
+
+    let neutral = coord.recall_scored(&h, matrix_req(None), NOW + 10).expect("neutral");
+    let excluded = coord
+        .recall_scored(&h, matrix_req(Some(shape(&[("preference", 0.0)]))), NOW + 11)
+        .expect("excluded");
+
+    let neutral_finals = finals(&neutral);
+    let changed = excluded.hits.iter().any(|hit| {
+        neutral_finals.get(&hit.id).map_or(false, |b| *b != hit.score.final_score)
+    });
+    assert!(
+        changed,
+        "excluding the live preference column (w=0) must change at least one fused final"
+    );
+}
+
+/// Demotion vs exclusion are distinct: with a constant graph column, weight `-1`
+/// SUBTRACTS the column mass while weight `0` merely drops it. For every drawer
+/// present in both results, the suppressed (w<0) fused final must be at/below the
+/// excluded (w=0) final, and at least one strictly below. Mirrors Swift
+/// RecallShapeMatrixSteerTests.graphNegativeWeightSubtracts.
+#[test]
+fn graph_negative_weight_subtracts_live_column() {
+    let (mut coord, h, d1, d2) = two_drawer_estate();
+    seed_matrix_tier(&mut coord, &h, &d1, &d2);
+    coord.register_graph_cache(&h, Arc::new(ConstantGraphCache { score: 0.8 }));
+
+    let excluded = coord
+        .recall_scored(&h, matrix_req(Some(shape(&[("graph", 0.0)]))), NOW + 10)
+        .expect("excluded");
+    let suppressed = coord
+        .recall_scored(&h, matrix_req(Some(shape(&[("graph", -1.0)]))), NOW + 11)
+        .expect("suppressed");
+
+    let excluded_finals = finals(&excluded);
+    let mut saw_strictly_lower = false;
+    for hit in &suppressed.hits {
+        if let Some(zero_final) = excluded_finals.get(&hit.id) {
+            assert!(
+                hit.score.final_score <= zero_final + 1e-6,
+                "suppressed graph final must not exceed the excluded final; {}: w<0={} w0={}",
+                hit.id, hit.score.final_score, zero_final
+            );
+            if hit.score.final_score < zero_final - 1e-6 {
+                saw_strictly_lower = true;
+            }
+        }
     }
+    assert!(
+        saw_strictly_lower,
+        "graph w=-1 must subtract mass — at least one drawer strictly below the w=0 final"
+    );
 }
 
 // MARK: - (e) nil shape == all-ones shape, byte-identical (back-compat)
@@ -277,6 +359,10 @@ fn graph_preference_keys_are_no_op_when_columns_dark() {
 fn nil_shape_equals_all_ones_across_all_columns() {
     let (mut coord, h, d1, d2) = two_drawer_estate();
     seed_matrix_tier(&mut coord, &h, &d1, &d2);
+    // Register the graph / preference caches too so EVERY steerable column is live,
+    // mirroring Swift RecallShapeMatrixSteerTests.nilShapeEqualsAllOnesAcrossAllColumns.
+    coord.register_graph_cache(&h, Arc::new(ConstantGraphCache { score: 0.8 }));
+    coord.register_preference_store(&h, Arc::new(ConstantPreferenceStore { score: 0.9 }));
 
     let ones = shape(&[
         ("locus", 1.0), ("bm25", 1.0), ("hamming", 1.0), ("dense", 1.0),
@@ -302,5 +388,15 @@ fn nil_shape_equals_all_ones_across_all_columns() {
         assert_eq!(a.score.temporal, b.score.temporal, "temporal byte-identical; {}", a.id);
         assert_eq!(a.score.co_occurrence, b.score.co_occurrence, "coOccurrence byte-identical; {}", a.id);
         assert_eq!(a.score.field_fit, b.score.field_fit, "fieldFit byte-identical; {}", a.id);
+        assert_eq!(a.score.graph, b.score.graph, "graph byte-identical; {}", a.id);
+        assert_eq!(a.score.preference, b.score.preference, "preference byte-identical; {}", a.id);
+        // CROSS-PORT CONFORMANCE (ADR-011 D-4): a constant cache (0.8 graph,
+        // 0.9 preference) gives every candidate the same column value, so it is
+        // measured-uniform and normalizes to exactly 0.5 — the SAME value Swift's
+        // RecallShapeMatrixSteerTests produces over the same fixture. Pinning the
+        // value here proves the columns are LIVE and agree cross-port, not merely
+        // self-consistent within Rust.
+        assert_eq!(a.score.graph, 0.5, "graph column must normalize to 0.5 (constant-uniform); {}", a.id);
+        assert_eq!(a.score.preference, 0.5, "preference column must normalize to 0.5 (constant-uniform); {}", a.id);
     }
 }
