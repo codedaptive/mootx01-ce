@@ -163,6 +163,11 @@ const DEFAULT_TOPOLOGY_CADENCE_MS: u64 = 300_000;
 /// ports ride the estate structure graph on the same cadence.
 const DEFAULT_GRAPH_CENTRALITY_CADENCE_MS: u64 = 600_000;
 
+/// Default preference producer cadence in milliseconds (600 000 = 10 minutes).
+/// Matches the Swift `preferenceIntervalMs` default — both ports ride the
+/// estate's recall-trace reward history on the same cadence as graph centrality.
+const DEFAULT_PREFERENCE_CADENCE_MS: u64 = 600_000;
+
 /// Default minimum spacing between pool-reduce passes, in milliseconds. 0 =
 /// NEAR-REALTIME: the reducer is considered every tick, gated by its own
 /// no-op-safe scan, then live-swaps the running tagger on a non-noop merge. When
@@ -234,6 +239,15 @@ pub struct GovernorReport {
     /// the registration happens whenever the gate fires (an empty estate
     /// registers an empty cache — every score 0.0, which is correct).
     pub graph_centrality_fired: bool,
+    /// Preference producer duty fired this tick. True when the cadence elapsed:
+    /// the duty read the estate's recall-trace reward history, fitted per-drawer
+    /// Bradley-Terry preference strengths via the `learned_preference` oracle, and
+    /// registered the `PreferenceStore` the recall `preference` column reads.
+    /// Mirrors Swift `GovernorReport.preferenceFired`. The flag reflects the
+    /// cadence gate; the registration happens whenever the gate fires (an estate
+    /// with no traces registers an empty store — every score 0.0, which is
+    /// correct).
+    pub preference_fired: bool,
     /// Topology snapshot duty fired this tick. True when the cadence elapsed
     /// and `stats_store` is Some (or cadence elapsed and store is None — the
     /// field reflects cadence gate only, not store presence, matching Swift).
@@ -320,6 +334,17 @@ pub struct AutonomicGovernor {
     /// from startup rather than dark for one cadence). Mirrors Swift
     /// `lastGraphCentralityFired`.
     last_graph_centrality_secs: Option<f64>,
+    /// Preference producer cadence in milliseconds (default 600 000 = 10 min,
+    /// mirroring Swift `preferenceIntervalMs`). The producer reads the estate's
+    /// recall-trace reward history, fits per-drawer Bradley-Terry preference
+    /// strengths via the `learned_preference` oracle, and registers the
+    /// `PreferenceStore` the recall `preference` column reads.
+    preference_cadence_ms: u64,
+    /// Epoch-seconds of the last preference producer fire. None = never fired, so
+    /// the first tick produces immediately (the `preference` column is live from
+    /// startup rather than dark for one cadence). Mirrors Swift
+    /// `lastPreferenceFired`.
+    last_preference_secs: Option<f64>,
     /// Process-local dirty token of the most recent COMPUTED topology snapshot
     /// inputs. A matching token at the next due cadence skips the math/encode/
     /// write — the stored snapshot is still current. In-memory only: None at
@@ -543,6 +568,12 @@ impl AutonomicGovernor {
             // exactly like topology. First fire is immediate (None).
             graph_centrality_cadence_ms: DEFAULT_GRAPH_CENTRALITY_CADENCE_MS,
             last_graph_centrality_secs: None,
+            // Preference producer cadence — fixed at the Swift default (600 s).
+            // Not env-tunable today (no Swift env knob either); the cadence field
+            // exists so tests can drive it via the per-tick gate exactly like
+            // graph centrality. First fire is immediate (None).
+            preference_cadence_ms: DEFAULT_PREFERENCE_CADENCE_MS,
+            last_preference_secs: None,
             pool_reduce_cadence_ms,
             last_pool_reduce_secs: None,
             pool_dir,
@@ -568,6 +599,15 @@ impl AutonomicGovernor {
     pub fn set_graph_centrality_cadence_ms(&mut self, cadence_ms: u64) {
         self.graph_centrality_cadence_ms = cadence_ms;
         self.last_graph_centrality_secs = None;
+    }
+
+    /// Override the preference producer cadence (milliseconds). Mirrors the Swift
+    /// `preferenceIntervalMs` init parameter; `0` fires the producer on every
+    /// tick. Test-only knob — production uses the 10-minute default. Resets the
+    /// last-fired marker so the next tick fires immediately under the new cadence.
+    pub fn set_preference_cadence_ms(&mut self, cadence_ms: u64) {
+        self.preference_cadence_ms = cadence_ms;
+        self.last_preference_secs = None;
     }
 
     // MARK: - Standing-signal registration seam
@@ -980,6 +1020,52 @@ impl AutonomicGovernor {
             }
         }
 
+        // ── Preference producer ────────────────────────────────────────────
+        //
+        // The PRODUCER for the recall `preference` score column — the sibling of
+        // the graph-centrality producer. Cadence gating mirrors Swift: fire when
+        // elapsed >= cadence_ms or never fired (last_preference_secs == None →
+        // immediate first fire). On fire, the duty reads the estate's recall-trace
+        // reward history through the SAME coordinator the HTTP transport uses,
+        // fits per-drawer Bradley-Terry preference strengths via the
+        // `learned_preference` oracle, and registers the resulting
+        // `PreferenceStore` on the coordinator. This is what takes the
+        // `unionBest`/`matrixAware` recall `preference` column from dark to live
+        // (the consumption surface — `register_preference_store` and the
+        // `preference` scoring column — already shipped; nothing was fitting
+        // strengths to register).
+        //
+        // Outcome source (the implicit relevance signal, C-15): each recall trace
+        // records a surfaced drawer (`target`) and whether the caller picked it
+        // (`used`). Surfaced-and-used is one endorsement (a win vs the neutral
+        // baseline in the fitter's anchor reduction); surfaced-and-passed-over is
+        // one dismissal. "What users picked vs passed over", aggregated per drawer.
+        //
+        // Determinism: no `SystemTime::now()` here — `now_i64` is the injected
+        // tick clock. The duty owns no fitting math (Bradley-Terry is the
+        // conformance-gated SubstrateML primitive surfaced by
+        // `neuron_kit::learned_preference`); it only shapes the outcomes and
+        // caches the strengths. Errors are logged and the loop continues — the
+        // producer must never crash the daemon. An estate with no traces registers
+        // an empty store (every score 0.0 — correct, identical to "no store
+        // registered").
+        let preference_elapsed_ms = self
+            .last_preference_secs
+            .map(|last| ((now_epoch_secs - last) * 1000.0) as u64);
+        let preference_fired = match preference_elapsed_ms {
+            None => true,                                  // never fired
+            Some(ms) => ms >= self.preference_cadence_ms,  // cadence elapsed
+        };
+        if preference_fired {
+            self.last_preference_secs = Some(now_epoch_secs);
+            if let Err(e) = preference_duty(&self.coord, &self.handle, now_i64) {
+                eprintln!(
+                    "AutonomicGovernor: preference producer error for estate {:?}: {e}",
+                    Uuid::from_bytes(self.handle.estate_uuid)
+                );
+            }
+        }
+
         // ── Pool reducer (novel-token merge-back) + LIVE TAGGER SWAP ───────
         //
         // The in-session learning loop. NEAR-REALTIME: considered every tick
@@ -1051,6 +1137,7 @@ impl AutonomicGovernor {
             maintenance_fired,
             signals_ticked,
             graph_centrality_fired,
+            preference_fired,
             topology_snapshot_fired,
             encode_drain_fired,
             pool_reduce_fired,
@@ -1129,6 +1216,72 @@ fn graph_centrality_duty(
     let scores = compute_centrality_scores(&graph);
 
     coord.register_graph_cache(handle, Arc::new(GraphCentralityCache::new(scores)));
+    Ok(())
+}
+
+// ── Preference producer duty ──────────────────────────────────────────────────
+
+/// Fit per-drawer Bradley-Terry preference strengths from the estate's
+/// recall-trace reward history and register them as a `PreferenceStore`, taking
+/// the `unionBest` / `matrixAware` recall `preference` score column from dark to
+/// live.
+///
+/// The Rust mirror of Swift `AutonomicGovernor.preferenceScan`. It reads the
+/// estate's recall-trace reward outcomes through the coordinator, shapes them
+/// into the per-drawer `(label, endorsements, dismissals)` records the
+/// `neuron_kit::learned_preference` fitter consumes (identical record multiset to
+/// the Swift port), runs that fitter, and installs the per-drawer strengths on
+/// the coordinator.
+///
+/// Math ownership (I-17): owns NO fitting math. Bradley-Terry is the
+/// conformance-gated SubstrateML primitive surfaced by
+/// `neuron_kit::learned_preference` (the `Bias` lens, anchor reduction); this
+/// duty only shapes the outcomes and caches the strengths. A faithful cadence
+/// wrapper of a direct `learned_preference` call on the same records.
+///
+/// Window: all retained recall traces up to `now` (`since` = the epoch-floor
+/// ISO8601 string, mirroring Swift `Date.distantPast`). Retention is bounded by
+/// the maintenance prune cycle. `now_i64` is the injected tick clock — no clock
+/// read here. Deterministic: a pure function of the recorded rows and `now`.
+///
+/// The only side effect is the store registration (idempotent re-registration
+/// replaces the prior snapshot). An estate with no traces yields no records ⇒
+/// `learned_preference(&[]) == []` ⇒ an empty store (every `preference_score`
+/// 0.0 — correct, C-16).
+///
+/// Locking: takes the coordinator `Mutex` briefly — one read + one register.
+/// Returns the lock-poison, read, or fit error as a string for the caller to
+/// log; the governor loop continues on error (never crashes the daemon).
+fn preference_duty(
+    coord: &Arc<Mutex<EstateCoordinator>>,
+    handle: &EstateHandle,
+    now_i64: i64,
+) -> Result<(), String> {
+    use crate::preference_producer::{
+        compute_preference_scores, preference_outcomes, PreferenceCache,
+    };
+
+    // ISO8601 bounds for the trace read. The lower bound is the epoch floor —
+    // the Rust mirror of Swift `Date.distantPast` — so the read returns the whole
+    // retained trace history (retention bounded upstream by the prune cycle).
+    let since = "0000-01-01T00:00:00Z";
+    let now_str = epoch_secs_to_iso8601(now_i64);
+
+    let mut coord = coord
+        .lock()
+        .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+
+    // Reads through the coordinator verb surface (B-1) — the same recall-trace
+    // window read the dreaming reader uses.
+    let traces = coord
+        .recent_recall_traces(handle, since, &now_str)
+        .map_err(|e| format!("recent_recall_traces failed: {e:?}"))?;
+
+    let records = preference_outcomes(&traces);
+    let scores =
+        compute_preference_scores(&records).map_err(|e| format!("learned_preference failed: {e:?}"))?;
+
+    coord.register_preference_store(handle, Arc::new(PreferenceCache::new(scores)));
     Ok(())
 }
 

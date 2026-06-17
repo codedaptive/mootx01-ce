@@ -48,6 +48,7 @@ pub mod http_server;
 pub mod interface_tools;
 pub mod jsonrpc;
 pub mod lens_tools;
+pub mod preference_producer;
 pub mod recipe_tools;
 pub mod runtime;
 pub mod server;
