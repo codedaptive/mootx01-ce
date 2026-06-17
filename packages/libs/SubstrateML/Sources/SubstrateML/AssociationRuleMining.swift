@@ -9,8 +9,11 @@
 // ordered (i, j) field pairs of a row INCLUDING i == j, so the
 // diagonal is retained — `O[(f,v),(f,v)]` is single-item support and
 // `O[(fi,vi),(fj,vj)]` is 2-itemset support. That is enough for
-// pairwise rules and NOT enough for k>2 itemsets (those need
-// row-replay — a separate future mission).
+// pairwise {A}→{B} rules. For k>2 multi-antecedent patterns such as
+// {A,B}→{C}, use `AprioriMining.mine(rows:thresholds:)` /
+// `mineAprioriRules(rows:thresholds:)` in `AprioriMining.swift`,
+// which implements standard Apriori over `RowAttributeView` row-replay
+// data and supports configurable `maxK` up to any itemset depth.
 //
 // Two contract points the engine relies on (both verified against
 // `SubstrateTypes/MatrixO.swift`):
