@@ -30,6 +30,12 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../libs/SubstrateTypes"),
+        // SubstrateKernel: float-vector ops (l2Norm, l2Normalize, dot,
+        // cosine) now live here as the canonical conformance-gated
+        // implementations. CorpusKitProviders consumes FloatVecOps;
+        // higher kits must call the substrate, not inline their own math.
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + arch mandate §4.
+        .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/EideticLib"),
@@ -63,7 +69,12 @@ let package = Package(
             name: "CorpusKitProviders",
             dependencies: [
                 "CorpusKit",
-                "SubstrateTypes", "SubstrateML",
+                "SubstrateTypes",
+                // SubstrateKernel supplies the canonical float-vector ops
+                // (FloatVecOps.l2Normalize, dot, cosine) that providers
+                // must call instead of inlining their own implementations.
+                "SubstrateKernel",
+                "SubstrateML",
                 "EngramLib",
                 "VectorKit",
             ],
