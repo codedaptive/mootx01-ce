@@ -1,0 +1,365 @@
+// JacobiSVD.swift
+//
+// Deterministic one-sided Jacobi SVD for real matrices (m × n, m ≥ n).
+// Part 1 of the ADR-010 Decision B LSA signal.
+//
+// ## Algorithm
+//
+// One-sided cyclic Jacobi SVD: iteratively orthogonalises the columns
+// of a working copy of A by applying planar Jacobi rotations to pairs
+// of columns (p, q) in the fixed cyclic order (0,1),(0,2),…,(n-2,n-1).
+// The right singular vectors V accumulate the same rotations; after
+// `sweeps` rounds the columns of the working matrix are approximately
+// orthogonal and carry the left singular vectors (un-normalised).
+//
+// Reference: Golub & Van Loan "Matrix Computations" 4th ed., §8.6.2.
+//
+// ## Determinism contract (cross-port bit-identity)
+//
+// Bit-identical output in Swift (this file) and Rust (substrate-ml
+// crate, svd.rs) is guaranteed by:
+//
+//   1. Fixed sweep count (no convergence criterion that depends on
+//      float comparisons reaching a threshold at different iterations).
+//   2. Fixed cyclic column-pair order: (0,1),(0,2),…,(n-2,n-1),
+//      (1,2),(1,3),…  — same in both ports.
+//   3. Identical scalar Float32 arithmetic — no platform SIMD, no FMA,
+//      no Accelerate, no LAPACK on either port.
+//   4. Jacobi rotation derived from α, β, γ in an identical expression
+//      tree on both ports (see `jacobiCS` helper below).
+//   5. Sign convention: for each left singular vector U[:,j], find the
+//      component with the largest absolute value and force it positive.
+//      Both ports compute argmax(|u_i|) then apply the same sign flip
+//      to both U[:,j] and V[:,j] (singular values are always ≥ 0).
+//
+// ## Reuse of substrate primitives
+//
+// Column dot products and norms are computed with the same flat-storage
+// loop order as NMFAlternatingLeastSquares, so no new substrate
+// primitive is needed. FloatVecOps.l2Normalize (SubstrateKernel) is
+// used to normalise the left singular vectors.
+//
+// ## LSA position
+//
+// SVD lives here in SubstrateML (general math primitive), not in
+// CorpusKit. CorpusKit's LsaProvider calls `JacobiSVD.decompose` to
+// factorise the term-document matrix and holds no SVD arithmetic.
+//
+// ## Limitations
+//
+// Requires m ≥ n (tall or square input). Operates in Float32 for
+// bit-identity with the Rust port (which also uses f32). The fixed
+// sweep count (default 30) is more than sufficient for the small
+// term-document matrices an on-device estate produces; large matrices
+// (vocabulary size > ~500) should not call this on every query.
+//
+// ## Conformance vectors
+//
+// See Tests/SubstrateMLTests/JacobiSVDTests.swift for the canonical
+// test matrix (pinned 4×3 input) whose expected singular values and
+// vectors both ports assert bit-for-bit.
+
+import Foundation
+import SubstrateKernel
+
+// MARK: - Result type
+
+/// Result of a JacobiSVD decomposition: A ≈ U · diag(singularValues) · Vᵀ.
+///
+/// All three components are row-major Float32 arrays:
+///   U: m × rank (left singular vectors)
+///   singularValues: rank (non-increasing, all ≥ 0)
+///   Vt: rank × n (rows are right singular vectors)
+///   rank: k (requested truncation; ≤ min(m, n))
+public struct SVDResult: Sendable {
+    /// Left singular vectors, row-major m × rank.
+    public let U: [[Float]]
+    /// Singular values in non-increasing order (all ≥ 0).
+    public let singularValues: [Float]
+    /// Right singular vectors (Vᵀ), row-major rank × n.
+    /// Row i of Vt is the i-th right singular vector.
+    public let Vt: [[Float]]
+    /// Requested truncation rank k.
+    public let rank: Int
+
+    public init(U: [[Float]], singularValues: [Float], Vt: [[Float]], rank: Int) {
+        self.U = U
+        self.singularValues = singularValues
+        self.Vt = Vt
+        self.rank = rank
+    }
+}
+
+// MARK: - JacobiSVD
+
+/// Deterministic one-sided Jacobi SVD for real matrices.
+///
+/// Computes the truncated SVD of A (m × n, m ≥ n) returning the top-k
+/// singular triplets. Output is bit-identical to the Rust port
+/// `substrate_ml::svd::JacobiSvd` given the same input and `sweeps`.
+///
+/// ## Usage example
+///
+/// ```swift
+/// let A: [[Float]] = [[1, 2], [3, 4], [5, 6]]
+/// let result = JacobiSVD.decompose(A: A, rank: 2)
+/// // result.singularValues: [σ₀, σ₁] in non-increasing order
+/// // result.U[i][j]: i-th row, j-th column of U (left singular vectors)
+/// // result.Vt[j]: j-th row of Vᵀ (j-th right singular vector)
+/// ```
+public enum JacobiSVD {
+
+    // MARK: - Public entry point
+
+    /// Decompose A into U, Σ, Vᵀ via one-sided cyclic Jacobi SVD.
+    ///
+    /// - Parameters:
+    ///   - A: Input matrix, m × n (row-major nested array), m ≥ n.
+    ///   - rank: Number of singular triplets to return. Clamped to min(m, n).
+    ///   - sweeps: Number of full cyclic sweeps over all column pairs.
+    ///     Default 30 — sufficient for convergence on the small term-
+    ///     document matrices an on-device estate produces.
+    ///     MUST be identical between Swift and Rust calls when bit-identity
+    ///     is required. The default of 30 is pinned in both ports.
+    /// - Returns: SVDResult with the top-k singular triplets, singular values
+    ///   in non-increasing order.
+    ///
+    /// - Precondition: A is non-empty, rectangular (all rows same length),
+    ///   m ≥ n, rank ≥ 1.
+    public static func decompose(
+        A: [[Float]],
+        rank: Int,
+        sweeps: Int = 30
+    ) -> SVDResult {
+        let m = A.count
+        precondition(m > 0, "JacobiSVD: A must have at least one row")
+        let n = A[0].count
+        precondition(n > 0, "JacobiSVD: A must have at least one column")
+        precondition(m >= n, "JacobiSVD: requires m >= n (tall or square input); got m=\(m) n=\(n)")
+        for i in 0..<m {
+            precondition(A[i].count == n,
+                "JacobiSVD: A is not rectangular: row 0 has \(n) cols but row \(i) has \(A[i].count)")
+        }
+        let k = max(1, min(rank, min(m, n)))
+        precondition(sweeps >= 0, "JacobiSVD: sweeps must be >= 0")
+
+        // Copy A into column-major flat storage for efficient column access.
+        // col j occupies indices [j*m ..< j*m + m].
+        // Using column-major because the algorithm repeatedly sweeps over
+        // pairs of columns; column-major avoids strided access.
+        var W = [Float](repeating: 0, count: m * n)  // column-major m×n
+        for i in 0..<m {
+            for j in 0..<n {
+                W[j * m + i] = A[i][j]
+            }
+        }
+
+        // V accumulates right-side rotations (n×n, column-major).
+        // Initialised to identity.
+        var V = [Float](repeating: 0, count: n * n)  // column-major n×n
+        for j in 0..<n { V[j * n + j] = 1 }
+
+        // Tolerance for declaring a pair already orthogonal.
+        // Using Float32 machine epsilon × matrix scale.
+        // Any pair whose off-diagonal cosine is below this threshold
+        // contributes nothing — skip the rotation to avoid unnecessary
+        // float ops that might diverge on edge cases.
+        let eps: Float = 1e-9
+
+        // One-sided cyclic Jacobi: sweep over all column pairs in
+        // fixed lexicographic order (p, q) with 0 ≤ p < q < n.
+        // Each sweep visits every pair exactly once.
+        // Fixed `sweeps` count ensures identical iteration counts on both
+        // ports regardless of how quickly the matrix converges.
+        for _ in 0..<sweeps {
+            for p in 0..<(n - 1) {
+                for q in (p + 1)..<n {
+                    // Compute inner products for columns p and q.
+                    // alpha = <W[:,p], W[:,p]>, beta = <W[:,q], W[:,q]>
+                    // gamma = <W[:,p], W[:,q]>
+                    // All three use the same loop nest order as NMF's matMulFlat
+                    // so cross-port accumulation order matches.
+                    var alpha: Float = 0
+                    var beta:  Float = 0
+                    var gamma: Float = 0
+                    let pBase = p * m
+                    let qBase = q * m
+                    for i in 0..<m {
+                        let wp = W[pBase + i]
+                        let wq = W[qBase + i]
+                        alpha = alpha + wp * wp
+                        beta  = beta  + wq * wq
+                        gamma = gamma + wp * wq
+                    }
+
+                    // Check orthogonality: if gamma² ≤ eps² × alpha × beta
+                    // the columns are already orthogonal enough — skip the
+                    // rotation. This test is purely multiplicative, not
+                    // transcendental, so it diverges identically on both ports.
+                    let gammaAbs = gamma < 0 ? -gamma : gamma
+                    let threshold: Float = eps * (alpha < 0 ? -alpha : alpha).squareRoot() *
+                                                 (beta  < 0 ? -beta  : beta ).squareRoot()
+                    if gammaAbs <= threshold { continue }
+
+                    // Compute the Jacobi rotation (c, s) that annihilates
+                    // the (p,q) off-diagonal entry of Wᵀ W.
+                    //
+                    //   ζ = (β − α) / (2γ)
+                    //   t = sign(ζ) / (|ζ| + sqrt(1 + ζ²))
+                    //   c = 1 / sqrt(1 + t²)
+                    //   s = c * t
+                    //
+                    // Using Float32 arithmetic throughout. Expression tree
+                    // is identical in Rust. Parenthesisation is explicit to
+                    // prevent compiler reordering.
+                    let (c, s) = jacobiCS(alpha: alpha, beta: beta, gamma: gamma)
+
+                    // Apply the rotation to columns p and q of W:
+                    //   W'[:,p] = c * W[:,p] - s * W[:,q]
+                    //   W'[:,q] = s * W[:,p] + c * W[:,q]
+                    // In-place: compute new W[:,p] first using a temp, then W[:,q].
+                    for i in 0..<m {
+                        let wp = W[pBase + i]
+                        let wq = W[qBase + i]
+                        W[pBase + i] = c * wp - s * wq
+                        W[qBase + i] = s * wp + c * wq
+                    }
+
+                    // Apply the same rotation to V (accumulates Vᵀ row-by-row
+                    // but stored column-major here, so V[:,p] and V[:,q]).
+                    let vpBase = p * n
+                    let vqBase = q * n
+                    for j in 0..<n {
+                        let vp = V[vpBase + j]
+                        let vq = V[vqBase + j]
+                        V[vpBase + j] = c * vp - s * vq
+                        V[vqBase + j] = s * vp + c * vq
+                    }
+                }
+            }
+        }
+
+        // After sweeps, the columns of W are approximately orthogonal.
+        // Compute singular values σ_j = ||W[:,j]||.
+        var sigmaAll = [Float](repeating: 0, count: n)
+        for j in 0..<n {
+            var norm2: Float = 0
+            let jBase = j * m
+            for i in 0..<m {
+                let v = W[jBase + i]
+                norm2 = norm2 + v * v
+            }
+            sigmaAll[j] = norm2.squareRoot()
+        }
+
+        // Sort singular values in non-increasing order; carry column
+        // indices so we can extract U and V in sorted order.
+        // Insertion sort (n is small — vocabulary rank ≤ 512).
+        var order = Array(0..<n)
+        for i in 1..<n {
+            let key = sigmaAll[order[i]]
+            let keyIdx = order[i]
+            var j = i - 1
+            while j >= 0 && sigmaAll[order[j]] < key {
+                order[j + 1] = order[j]
+                j -= 1
+            }
+            order[j + 1] = keyIdx
+        }
+
+        // Build U (m × k) and Vt (k × n) for the top k components.
+        // Apply sign convention: for each left singular vector u (length m),
+        // find the index with the largest |u_i| and force it positive.
+        // Apply the same sign flip to the corresponding row of Vt so that
+        // A ≈ U diag(Σ) Vt is preserved.
+        var U = [[Float]](repeating: [Float](repeating: 0, count: k), count: m)
+        var sigmaK = [Float](repeating: 0, count: k)
+        var Vt = [[Float]](repeating: [Float](repeating: 0, count: n), count: k)
+
+        for rankIdx in 0..<k {
+            let colIdx = order[rankIdx]
+            sigmaK[rankIdx] = sigmaAll[colIdx]
+
+            // Left singular vector U[:,rankIdx] = W[:,colIdx] / σ.
+            // Use FloatVecOps.l2Normalize via the kernel to get the
+            // conformance-gated implementation.
+            var colW = [Float](repeating: 0, count: m)
+            let colBase = colIdx * m
+            for i in 0..<m { colW[i] = W[colBase + i] }
+            let sigma = sigmaAll[colIdx]
+            let uCol: [Float]
+            if sigma < eps {
+                // Zero singular value: u is the zero vector.
+                // (The basis choice is arbitrary; use the column as-is.)
+                uCol = colW
+            } else {
+                // Divide by sigma (equivalent to l2Normalize on an
+                // orthogonal column after Jacobi — sigma is its norm).
+                var tmp = [Float](repeating: 0, count: m)
+                for i in 0..<m { tmp[i] = colW[i] / sigma }
+                uCol = tmp
+            }
+
+            // Sign convention: find argmax |u_i| and force it positive.
+            // Both ports use the same argmax loop (ties broken by lowest
+            // index — first maximum found wins because > not >=).
+            var maxAbsVal: Float = 0
+            var maxAbsIdx: Int = 0
+            for i in 0..<m {
+                let absVal = uCol[i] < 0 ? -uCol[i] : uCol[i]
+                if absVal > maxAbsVal {
+                    maxAbsVal = absVal
+                    maxAbsIdx = i
+                }
+            }
+            // Sign of the largest-magnitude component.
+            let signFlip: Float = (uCol[maxAbsIdx] < 0) ? -1 : 1
+
+            // Write U rows.
+            for i in 0..<m {
+                U[i][rankIdx] = uCol[i] * signFlip
+            }
+
+            // Right singular vector from V: V[:,colIdx] is the colIdx-th
+            // column of V (n-length). Vt[rankIdx] = (V[:,colIdx])ᵀ · signFlip.
+            let vColBase = colIdx * n
+            for j in 0..<n {
+                Vt[rankIdx][j] = V[vColBase + j] * signFlip
+            }
+        }
+
+        return SVDResult(U: U, singularValues: sigmaK, Vt: Vt, rank: k)
+    }
+
+    // MARK: - Jacobi rotation helper
+
+    /// Compute (c, s) for the Jacobi rotation that annihilates the
+    /// off-diagonal entry of the 2×2 symmetric matrix
+    ///   [[α, γ], [γ, β]].
+    ///
+    /// Formula (Golub & Van Loan §8.6.2, cross-port pinned):
+    ///   ζ = (β − α) / (2 · γ)
+    ///   t = sign(ζ) / (|ζ| + sqrt(1 + ζ²))    (t satisfies t² + 2ζt − 1 = 0)
+    ///   c = 1 / sqrt(1 + t²)
+    ///   s = c · t
+    ///
+    /// Both ports must compute this in EXACTLY this expression order
+    /// so the Float32 rounding is bit-identical. Parenthesisation is
+    /// explicit below; do NOT refactor.
+    @inline(__always)
+    static func jacobiCS(alpha: Float, beta: Float, gamma: Float) -> (c: Float, s: Float) {
+        // zeta = (beta - alpha) / (2 * gamma)
+        // Written as two separate ops (subtraction, then division) to
+        // match Rust's identical expression: (beta - alpha) / (2.0 * gamma).
+        let zeta: Float = (beta - alpha) / (2 * gamma)
+        // t = sign(zeta) / (|zeta| + sqrt(1 + zeta^2))
+        // sign(zeta): +1 if zeta >= 0, -1 otherwise (matching Rust's if >=0).
+        let zetaAbs: Float = zeta < 0 ? -zeta : zeta
+        let tDen: Float = zetaAbs + (1 + zeta * zeta).squareRoot()
+        let t: Float = (zeta >= 0 ? 1 : -1) / tDen
+        // c = 1 / sqrt(1 + t^2)
+        let c: Float = 1 / (1 + t * t).squareRoot()
+        let s: Float = c * t
+        return (c, s)
+    }
+}

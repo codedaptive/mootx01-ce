@@ -52,4 +52,9 @@ pub mod temporal_causality_fold;
 // algorithms. Parity with Swift's VizGraphSignals.swift.
 pub mod viz_graph_signals;
 
+// ADR-010 Decision B: deterministic one-sided Jacobi SVD.
+// General math primitive for SubstrateML; consumed by CorpusKit's
+// LsaProvider for LSA distributional embeddings. No platform SVD.
+pub mod svd;
+
 pub const VERSION: &str = "1.0.0-skeleton";
