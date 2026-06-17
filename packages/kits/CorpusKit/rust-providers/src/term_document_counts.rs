@@ -76,6 +76,27 @@ impl TermDocumentCounts {
         }
     }
 
+    /// Reconstruct a count builder from a known vocabulary and document
+    /// count, WITHOUT re-tokenizing any text (mission 6a-i deserialization).
+    ///
+    /// LSA and NMF read only `vocab` (term → index, for query fold-in) and
+    /// `document_count()` (for the `document_embedding(doc_idx)` range check)
+    /// from a finalized provider — the raw per-document TF counts are
+    /// training-phase scratch not needed for embedding. A deserialized
+    /// provider therefore seeds this builder with the persisted vocab and one
+    /// empty TF row per document so `document_count()` is preserved while the
+    /// (non-embed-relevant) raw counts are left empty.
+    ///
+    /// Mirror of Swift's `TermDocumentCounts.init(restoredVocab:documentCount:)`.
+    pub fn from_restored(vocab: HashMap<String, usize>, document_count: usize) -> Self {
+        TermDocumentCounts {
+            vocab,
+            // One empty TF row per document preserves `document_count()`.
+            tf_counts: vec![HashMap::new(); document_count],
+            df_counts: HashMap::new(),
+        }
+    }
+
     /// Tokenize `text` and accumulate TF counts for one document.
     ///
     /// Terms new to the corpus are assigned the next available vocabulary

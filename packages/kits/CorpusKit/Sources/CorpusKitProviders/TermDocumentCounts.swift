@@ -77,6 +77,28 @@ public struct TermDocumentCounts {
         self.dfCounts = [:]
     }
 
+    /// Reconstruct a count builder from a known vocabulary and document
+    /// count, WITHOUT re-tokenizing any text (mission 6a-i deserialization).
+    ///
+    /// LSA and NMF read only `vocab` (term → index, for query fold-in) and
+    /// `documentCount` (for the `documentEmbedding(at:)` range check) from a
+    /// finalized provider — the raw per-document TF counts are training-phase
+    /// scratch not needed for embedding. A deserialized provider therefore
+    /// seeds this builder with the persisted vocab and a placeholder TF row
+    /// per document (empty rows: `documentCount` is preserved, but the raw
+    /// counts are not — they are not part of the embed-relevant basis).
+    ///
+    /// - Parameters:
+    ///   - vocab: term → encounter-order index, as captured at serialize time.
+    ///   - documentCount: number of training documents (drives `documentCount`).
+    public init(restoredVocab vocab: [String: Int], documentCount: Int) {
+        self.vocab = vocab
+        // One empty TF row per document so `documentCount` reports correctly.
+        // The raw TF values are intentionally not restored (not embed-relevant).
+        self.tfCounts = Array(repeating: [:], count: max(0, documentCount))
+        self.dfCounts = [:]
+    }
+
     // MARK: - Mutation
 
     /// Tokenize `text` and accumulate TF counts for one document.

@@ -61,6 +61,7 @@
 // All of these are conformance-gated substrate primitives.
 // ─────────────────────────────────────────────────────────────────
 
+use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 use crate::random_indexing::ri_index_vector;
 use engram_lib::Engram;
 use std::collections::HashMap;
@@ -91,6 +92,10 @@ pub const PPMI_WINDOW: usize = 4;
 /// MUST differ from `RI_PROJECTION_SEED` so PPMI and RI engrams key to
 /// different storage buckets when both providers coexist in one estate.
 pub const PPMI_PROJECTION_SEED: u64 = 0x5050_4D49_5F56_314D;
+
+/// 4-byte magic identifying a PPMI basis blob ("PPB1"). Mirrors the Swift
+/// constant `PpmiProvider.basisMagic`.
+pub const PPMI_BASIS_MAGIC: &[u8; 4] = b"PPB1";
 
 // MARK: - PpmiProvider
 
@@ -321,6 +326,45 @@ impl PpmiProvider {
     /// filtering).  `vocabulary_size() <= training_vocab_size()`.
     pub fn training_vocab_size(&self) -> usize {
         self.co_count.len()
+    }
+
+    // MARK: - Basis serialization (mission 6a-i)
+
+    /// Serialize the finalized PPMI basis to a versioned, little-endian blob.
+    ///
+    /// PPMI's `embed`/`embed_float` output is fully determined by the
+    /// finalized `ppmi_vectors` map plus the projection seed. The raw
+    /// co-occurrence count tables are training-phase scratch and are NOT
+    /// part of the embed-relevant basis, so they are intentionally excluded.
+    /// Byte layout mirrors Swift's `serializeBasis()` exactly.
+    pub fn serialize_basis(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(PPMI_BASIS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u64(self.projection_seed);
+        w.write_string_f32_vector_map(&self.ppmi_vectors);
+        w.into_bytes()
+    }
+
+    /// Reconstruct a provider from a serialized PPMI basis blob.
+    ///
+    /// The reconstructed provider's embed output is identical to the original
+    /// finalized provider's. The count tables are left empty. Returns
+    /// `Err(BasisCodecError)` on a truncated blob, an unknown format version,
+    /// or a magic mismatch — never panics.
+    pub fn from_serialized_basis(bytes: &[u8]) -> Result<Self, BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(PPMI_BASIS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let model_id = r.read_string()?;
+        let model_version = r.read_string()?;
+        let projection_seed = r.read_u64()?;
+        let ppmi_vectors = r.read_string_f32_vector_map()?;
+        let mut provider = PpmiProvider::with_parameters(model_id, model_version, projection_seed);
+        provider.ppmi_vectors = ppmi_vectors;
+        Ok(provider)
     }
 
     // MARK: - Private helpers

@@ -29,6 +29,11 @@
 //! `CorpusKit` and `CorpusKitProviders`.
 
 pub mod deterministic_tokenizer;
+// Mission 6a-i: shared little-endian binary codec for distributional-provider
+// basis serialization. PROVIDER-FORMAT code (not a math primitive) used by
+// RandomIndexing, PPMI, LSA, and NMF. Swift port: Sources/CorpusKitProviders/
+// BasisCodec.swift. The byte layout is the cross-port contract.
+pub mod basis_codec;
 // Shared term-document count builder reused by LSA and NMF.
 // Owns vocab encounter-order construction, TF counts, and DF counts.
 // Swift port: Sources/CorpusKitProviders/TermDocumentCounts.swift.
@@ -50,6 +55,7 @@ pub mod text_providers;
 // Stateless — no training required.
 pub mod fdc_provider;
 
+pub use basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 pub use deterministic_tokenizer::DeterministicTokenizer;
 pub use term_document_counts::TermDocumentCounts;
 pub use lsa::{LsaProvider, LSA_DEFAULT_RANK, LSA_PROJECTION_SEED};

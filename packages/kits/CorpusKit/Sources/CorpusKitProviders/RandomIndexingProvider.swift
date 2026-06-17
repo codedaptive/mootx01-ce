@@ -294,4 +294,52 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
 
     /// The current trained vocabulary size.
     public var vocabularySize: Int { vocab.count }
+
+    // MARK: Basis serialization (mission 6a-i)
+
+    /// 4-byte magic identifying a Random Indexing basis blob ("RIB1").
+    /// Distinct per provider so a blob can never be deserialized by the
+    /// wrong provider type — `init(deserializing:)` rejects a mismatch.
+    static let basisMagic: [UInt8] = Array("RIB1".utf8)
+
+    /// Serialize the trained RI basis to a versioned, little-endian blob.
+    ///
+    /// The RI basis is fully determined by the `vocab` map (term → context
+    /// vector); the model identity and projection seed are also captured so
+    /// the reconstructed provider keys to the same Engram bucket.
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | projectionSeed (u64)
+    ///   | vocab (String→[Float] map, sorted keys)
+    ///
+    /// The same trained state produces byte-identical output on the Rust
+    /// port (`serialize_basis`), which is the cross-port conformance gate.
+    public func serializeBasis() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(RandomIndexingProvider.basisMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU64(projectionSeed)
+        w.writeStringFloatVectorMap(vocab)
+        return w.data
+    }
+
+    /// Reconstruct a provider from a serialized RI basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embedFloat` output is identical
+    /// to the original trained provider's (round-trip law). Throws
+    /// `CorpusKitError.decodingFailure` on a truncated blob, an unknown
+    /// format version, or a magic mismatch — never crashes.
+    public convenience init(deserializing data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(RandomIndexingProvider.basisMagic)
+        try r.expectVersion(basisFormatVersion)
+        let modelID = try r.readString()
+        let modelVersion = try r.readString()
+        let projectionSeed = try r.readU64()
+        let vocab = try r.readStringFloatVectorMap()
+        self.init(modelID: modelID, modelVersion: modelVersion, projectionSeed: projectionSeed)
+        self.vocab = vocab
+    }
 }

@@ -438,4 +438,95 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// The effective rank k used in the SVD (may be less than `rank` if
     /// the corpus has fewer documents or terms than requested).
     public var effectiveRank: Int { svd?.rank ?? 0 }
+
+    // MARK: Basis serialization (mission 6a-i)
+
+    /// 4-byte magic identifying an LSA basis blob ("LSB1").
+    static let basisMagic: [UInt8] = Array("LSB1".utf8)
+
+    /// Serialize the finalized LSA basis to a versioned, little-endian blob.
+    ///
+    /// The LSA basis that determines both query embeddings (fold-in) and
+    /// training-document embeddings is the SVD factorization plus the
+    /// TF-IDF support state:
+    ///   - `rank`, `svdSweeps`, `projectionSeed` — configuration that the
+    ///     reconstructed provider reports (and that pins the Engram bucket).
+    ///   - vocab (term → index) and `documentCount` — query tokens map to
+    ///     vocab positions; documentCount bounds `documentEmbedding(at:)`.
+    ///   - `idfWeights` — per-vocab IDF, applied to the query TF-IDF vector.
+    ///   - SVD factors `U` (numDocs × k), σ (length k), `Vt` (k × vocabSize),
+    ///     and `effectiveRank` — U drives document embeddings, σ + Vt drive
+    ///     the query fold-in.
+    ///
+    /// U, σ, and Vᵀ are PORT-NEUTRAL: serializing the raw factors lets each
+    /// port reconstruct its own internal representation (Swift keeps the full
+    /// SVDResult; Rust derives its pre-normalised doc_vecs from U·σ). This is
+    /// why the same trained state produces a byte-identical blob on both ports.
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | rank (u32) |
+    ///   svdSweeps (u32) | projectionSeed (u64) | documentCount (u32) |
+    ///   effectiveRank (u32) | vocab (String→u32 map) |
+    ///   idfWeights ([Float]) | U (matrix) | sigma ([Float]) | Vt (matrix)
+    ///
+    /// Returns a blob with an empty SVD section if `finalize()` has not been
+    /// called (U/sigma/Vt are empty); the round-trip still holds (an
+    /// unfinalized provider embeds to zero, and so does its restoration).
+    public func serializeBasis() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(LsaProvider.basisMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU32(UInt32(rank))
+        w.writeU32(UInt32(svdSweeps))
+        w.writeU64(projectionSeed)
+        w.writeU32(UInt32(counts.documentCount))
+        w.writeU32(UInt32(svd?.rank ?? 0))
+        w.writeStringU32Map(counts.vocab)
+        w.writeFloatArray(idfWeights)
+        w.writeFloatMatrix(svd?.U ?? [])
+        w.writeFloatArray(svd?.singularValues ?? [])
+        w.writeFloatMatrix(svd?.Vt ?? [])
+        return w.data
+    }
+
+    /// Reconstruct a provider from a serialized LSA basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embedFloat`/`documentEmbedding`
+    /// output is identical to the original finalized provider's (round-trip
+    /// law). Throws `CorpusKitError.decodingFailure` on a truncated blob,
+    /// unknown version, or magic mismatch — never crashes.
+    public convenience init(deserializing data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(LsaProvider.basisMagic)
+        try r.expectVersion(basisFormatVersion)
+        let modelID = try r.readString()
+        let modelVersion = try r.readString()
+        let rank = Int(try r.readU32())
+        let svdSweeps = Int(try r.readU32())
+        let projectionSeed = try r.readU64()
+        let documentCount = Int(try r.readU32())
+        let effectiveRank = Int(try r.readU32())
+        let vocab = try r.readStringU32Map()
+        let idfWeights = try r.readFloatArray()
+        let U = try r.readFloatMatrix()
+        let sigma = try r.readFloatArray()
+        let Vt = try r.readFloatMatrix()
+
+        self.init(modelID: modelID,
+                  modelVersion: modelVersion,
+                  rank: rank,
+                  svdSweeps: svdSweeps,
+                  projectionSeed: projectionSeed)
+        // Restore the term-document support (vocab + doc count) without
+        // re-tokenizing; raw TF rows are not embed-relevant.
+        self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
+        self.idfWeights = idfWeights
+        // An empty SVD section means the source provider was never finalized;
+        // leave `svd` nil so the restored provider is also unfinalized.
+        if effectiveRank > 0 || !sigma.isEmpty {
+            self.svd = SVDResult(U: U, singularValues: sigma, Vt: Vt, rank: effectiveRank)
+        }
+    }
 }

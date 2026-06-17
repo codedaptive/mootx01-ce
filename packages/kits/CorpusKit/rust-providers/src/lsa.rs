@@ -43,6 +43,7 @@
 // These are conformance-gated substrate primitives.
 // ─────────────────────────────────────────────────────────────────
 
+use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 use crate::term_document_counts::TermDocumentCounts;
 use corpus_kit::default_keyword_tokens;
 use engram_lib::Engram;
@@ -61,6 +62,10 @@ pub const LSA_PROJECTION_SEED: u64 = 0x4C53415F56315F4D;
 
 /// Default latent-semantic rank k for LSA.
 pub const LSA_DEFAULT_RANK: usize = 64;
+
+/// 4-byte magic identifying an LSA basis blob ("LSB1"). Mirrors the Swift
+/// constant `LsaProvider.basisMagic`.
+pub const LSA_BASIS_MAGIC: &[u8; 4] = b"LSB1";
 
 // MARK: - LsaProvider
 
@@ -100,14 +105,21 @@ pub struct LsaProvider {
     /// IDF weights indexed by vocabulary position. Empty until finalize().
     idf_weights: Vec<f32>,
 
+    /// Left singular vectors (U), numDocs × k. Empty until finalize().
+    /// Retained (not just the derived `doc_vecs`) because the basis blob
+    /// serializes the raw SVD factors U/σ/Vᵀ — keeping U lets the Rust port
+    /// emit a blob byte-identical to Swift's (which keeps the full SVDResult).
+    /// Document embeddings are still served from the pre-normalised `doc_vecs`.
+    u: Vec<Vec<f32>>,
+
     /// Right singular vectors (Vᵀ), k × vocabSize. Empty until finalize().
     vt: Vec<Vec<f32>>,
 
     /// Singular values, length k. Empty until finalize().
     sigma: Vec<f32>,
 
-    /// Left singular vectors scaled by sigma: U[d] · diag(Σ),
-    /// numDocs × k. Populated for training document projections.
+    /// Left singular vectors scaled by sigma then L2-normalised:
+    /// normalize(U[d] · diag(Σ)), numDocs × k. Document projections.
     doc_vecs: Vec<Vec<f32>>,
 
     /// Effective SVD rank after finalize().
@@ -130,6 +142,7 @@ impl LsaProvider {
             projection_seed,
             counts: TermDocumentCounts::new(),
             idf_weights: Vec::new(),
+            u: Vec::new(),
             vt: Vec::new(),
             sigma: Vec::new(),
             doc_vecs: Vec::new(),
@@ -230,6 +243,9 @@ impl LsaProvider {
         self.sigma = svd_result.singular_values.clone();
         self.vt = svd_result.vt.clone();
         self.effective_rank = k;
+        // Retain the raw left singular vectors so `serialize_basis` can emit
+        // U byte-identically to the Swift port (which keeps the full SVDResult).
+        self.u = svd_result.u.clone();
 
         // Pre-compute document embeddings: U[d] · Σ, then L2-normalise.
         self.doc_vecs = (0..n)
@@ -263,6 +279,85 @@ impl LsaProvider {
     /// Effective SVD rank after `finalize()`.
     pub fn effective_rank(&self) -> usize {
         self.effective_rank
+    }
+
+    // MARK: Basis serialization (mission 6a-i)
+
+    /// Serialize the finalized LSA basis to a versioned, little-endian blob.
+    ///
+    /// Emits configuration (`rank`, `svd_sweeps`, `projection_seed`), the
+    /// term-document support (vocab + document count), `idf_weights`, and the
+    /// raw SVD factors U/σ/Vᵀ plus `effective_rank`. The factors are
+    /// PORT-NEUTRAL: each port reconstructs its own internal representation
+    /// (Swift keeps the full SVDResult; Rust derives `doc_vecs` from U·σ).
+    /// Byte layout mirrors Swift's `serializeBasis()` exactly — the same
+    /// trained state yields a byte-identical blob on both ports.
+    pub fn serialize_basis(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(LSA_BASIS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u32(self.rank as u32);
+        w.write_u32(self.svd_sweeps as u32);
+        w.write_u64(self.projection_seed);
+        w.write_u32(self.counts.document_count() as u32);
+        w.write_u32(self.effective_rank as u32);
+        w.write_string_u32_map(&self.counts.vocab);
+        w.write_f32_array(&self.idf_weights);
+        w.write_f32_matrix(&self.u);
+        w.write_f32_array(&self.sigma);
+        w.write_f32_matrix(&self.vt);
+        w.into_bytes()
+    }
+
+    /// Reconstruct a provider from a serialized LSA basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embed_float`/`document_embedding`
+    /// output is identical to the original finalized provider's. Returns
+    /// `Err(BasisCodecError)` on a truncated blob, an unknown format version,
+    /// or a magic mismatch — never panics.
+    pub fn from_serialized_basis(bytes: &[u8]) -> Result<Self, BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(LSA_BASIS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let model_id = r.read_string()?;
+        let model_version = r.read_string()?;
+        let rank = r.read_u32()? as usize;
+        let svd_sweeps = r.read_u32()? as usize;
+        let projection_seed = r.read_u64()?;
+        let document_count = r.read_u32()? as usize;
+        let effective_rank = r.read_u32()? as usize;
+        let vocab = r.read_string_u32_map()?;
+        let idf_weights = r.read_f32_array()?;
+        let u = r.read_f32_matrix()?;
+        let sigma = r.read_f32_array()?;
+        let vt = r.read_f32_matrix()?;
+
+        // Derive the pre-normalised document embeddings from U·Σ, matching
+        // `finalize()`. An empty SVD section (never-finalized source) yields
+        // empty doc_vecs and an empty `u`/`vt`, so `is_finalized()` stays false.
+        let doc_vecs: Vec<Vec<f32>> = (0..u.len())
+            .map(|d| {
+                let v: Vec<f32> = (0..effective_rank).map(|rr| u[d][rr] * sigma[rr]).collect();
+                float_vec_ops::l2_normalize(v)
+            })
+            .collect();
+
+        Ok(LsaProvider {
+            model_id,
+            model_version,
+            rank: rank.max(1),
+            svd_sweeps,
+            projection_seed,
+            counts: TermDocumentCounts::from_restored(vocab, document_count),
+            idf_weights,
+            u,
+            vt,
+            sigma,
+            doc_vecs,
+            effective_rank,
+        })
     }
 
     /// Return the k-dim LSA embedding for `text` via the fold-in formula.

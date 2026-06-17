@@ -408,4 +408,93 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// The effective rank k used in the NMF (may be less than `rank` if
     /// the corpus has fewer documents or terms than requested).
     public var effectiveRank: Int { nmf?.rank ?? 0 }
+
+    // MARK: Basis serialization (mission 6a-i)
+
+    /// 4-byte magic identifying an NMF basis blob ("NMB1").
+    static let basisMagic: [UInt8] = Array("NMB1".utf8)
+
+    /// Serialize the finalized NMF basis to a versioned, little-endian blob.
+    ///
+    /// The NMF basis that determines both query embeddings (fold-in via W)
+    /// and training-document embeddings (column of H) is the W·H
+    /// factorization plus the term-document support:
+    ///   - `rank`, `maxIterations`, `seed`, `projectionSeed` — configuration
+    ///     the reconstructed provider reports (and that pins the Engram bucket).
+    ///   - vocab (term → index) and `documentCount` — query tokens map to
+    ///     vocab positions; documentCount bounds `documentEmbedding(at:)`.
+    ///   - factors `W` (vocabSize × k) and `H` (k × numDocs), plus
+    ///     `effectiveRank`. W drives the query fold-in; H drives document
+    ///     embeddings. Both are PORT-NEUTRAL raw factors, so the same trained
+    ///     state produces a byte-identical blob on both ports.
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | rank (u32) |
+    ///   maxIterations (u32) | seed (u64) | projectionSeed (u64) |
+    ///   documentCount (u32) | effectiveRank (u32) | vocab (String→u32 map) |
+    ///   W (matrix) | H (matrix)
+    public func serializeBasis() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(NmfProvider.basisMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU32(UInt32(rank))
+        w.writeU32(UInt32(maxIterations))
+        w.writeU64(seed)
+        w.writeU64(projectionSeed)
+        w.writeU32(UInt32(counts.documentCount))
+        w.writeU32(UInt32(nmf?.rank ?? 0))
+        w.writeStringU32Map(counts.vocab)
+        w.writeFloatMatrix(nmf?.W ?? [])
+        w.writeFloatMatrix(nmf?.H ?? [])
+        return w.data
+    }
+
+    /// Reconstruct a provider from a serialized NMF basis blob.
+    ///
+    /// The reconstructed provider's `embed`/`embedFloat`/`documentEmbedding`
+    /// output is identical to the original finalized provider's (round-trip
+    /// law). Throws `CorpusKitError.decodingFailure` on a truncated blob,
+    /// unknown version, or magic mismatch — never crashes.
+    public convenience init(deserializing data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(NmfProvider.basisMagic)
+        try r.expectVersion(basisFormatVersion)
+        let modelID = try r.readString()
+        let modelVersion = try r.readString()
+        let rank = Int(try r.readU32())
+        let maxIterations = Int(try r.readU32())
+        let seed = try r.readU64()
+        let projectionSeed = try r.readU64()
+        let documentCount = Int(try r.readU32())
+        let effectiveRank = Int(try r.readU32())
+        let vocab = try r.readStringU32Map()
+        let W = try r.readFloatMatrix()
+        let H = try r.readFloatMatrix()
+
+        self.init(modelID: modelID,
+                  modelVersion: modelVersion,
+                  rank: rank,
+                  maxIterations: maxIterations,
+                  seed: seed,
+                  projectionSeed: projectionSeed)
+        self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
+
+        // An empty factor section means the source provider was never
+        // finalized; leave `nmf` nil so the restored provider is unfinalized.
+        guard effectiveRank > 0 || !W.isEmpty else { return }
+        // Reconstruct the factorization. `iterations` and `finalError` are not
+        // embed-relevant (embedding reads only W/H), so they carry the
+        // configured iteration count and a zero error placeholder.
+        self.nmf = NMFFactorization(W: W, H: H, rank: effectiveRank,
+                                    iterations: maxIterations, finalError: 0)
+        // Re-derive the per-document embeddings exactly as finalize() does:
+        // L2-normalised column d of H.
+        let numDocs = documentCount
+        self.docEmbeddings = (0..<numDocs).map { d in
+            let col: [Float] = (0..<effectiveRank).map { rr in H[rr][d] }
+            return FloatVecOps.l2Normalize(col)
+        }
+    }
 }

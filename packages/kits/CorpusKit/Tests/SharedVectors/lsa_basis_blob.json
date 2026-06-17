@@ -1,0 +1,63 @@
+{
+  "blobBase64" : "TFNCMQEGAAAAbHNhLXYxBQAAADEuMC4wAwAAAB4AAABNXzFWX0FTTAUAAAADAAAAEAAAAAYAAABhbmltYWwNAAAABAAAAGJhcmsKAAAAAwAAAGNhcgAAAAADAAAAY2F0DgAAAAoAAABjb21idXN0aW9uBwAAAAMAAABkb2cJAAAABQAAAGRyaXZlAgAAAAYAAABlbmdpbmUBAAAABQAAAGZldGNoDAAAAAQAAABmdWVsBgAAAAMAAABwZXQPAAAABQAAAHBvd2VyCAAAAAQAAAByb2FkAwAAAAMAAABydW4LAAAACQAAAHRyYW5zcG9ydAUAAAAHAAAAdmVoaWNsZQQAAAAQAAAAH5nPPhhyMT9Un4w/GHIxPxhyMT9Un4w/GHIxP1SfjD9Un4w/GHIxP1SfjD8YcjE/VJ+MPxhyMT9Un4w/VJ+MPwUAAAADAAAAAAAAAIMCDT93BOO+AwAAAAAAAACDAg0/dwTjvgMAAAAAAAAAjIYgPwJrRz8DAAAA8wQ1PwAAAAAAAAAAAwAAAPMENT8AAAAAAAAAAAMAAACpMMw/c8a/P9GYlD8DAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOIT2j6N0qw+4hPaPo3SrD7iE9o+jdKsPo3SrD4QAAAAcQemPiZkwT79Vo8+69+0PuvftD79Vo8+JmTBPpMtoz6TLaM+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAACOz9W8hTcOPm7plL7k57u+5Oe7vm7plL6FNw4+284CP9vOAj8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "corpus" : [
+    "car engine drive road vehicle",
+    "vehicle road transport car fuel",
+    "engine fuel combustion power car",
+    "dog bark run fetch animal",
+    "animal run cat dog pet"
+  ],
+  "doc0FloatBits" : [
+    0,
+    1062811163,
+    3204938561
+  ],
+  "embeddings" : [
+    {
+      "block0" : 3817156145994140250,
+      "block1" : 7500750640864911625,
+      "block2" : 7893173327891288343,
+      "block3" : 14094729028861608059,
+      "floatBits" : [
+        0,
+        1064726954,
+        1049269610
+      ],
+      "text" : "car engine"
+    },
+    {
+      "block0" : 6950903504099821062,
+      "block1" : 16922564904639312067,
+      "block2" : 844476042188151679,
+      "block3" : 55378315227132808,
+      "floatBits" : [
+        0,
+        1058606626,
+        3209508124
+      ],
+      "text" : "vehicle road"
+    },
+    {
+      "block0" : 2491687614806572787,
+      "block1" : 2273363079051671836,
+      "block2" : 16327883740576644303,
+      "block3" : 14876259861772120001,
+      "floatBits" : [
+        1065353216,
+        0,
+        0
+      ],
+      "text" : "dog animal"
+    },
+    {
+      "block0" : 0,
+      "block1" : 0,
+      "block2" : 0,
+      "block3" : 0,
+      "floatBits" : [
+
+      ],
+      "text" : ""
+    }
+  ]
+}
