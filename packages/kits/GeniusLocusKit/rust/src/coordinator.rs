@@ -997,10 +997,17 @@ impl EstateCoordinator {
 
     /// Return a clone of the `VectorStore` registered for `handle`, or `None`
     /// when no store has been registered. Parity of the Swift
-    /// `registeredVectorStore(for:)` accessor. Used by the expunge orchestration
-    /// path to invalidate the standalone store's resident slot after
-    /// `Corpus::remove` has deleted from the shared backing table.
-    pub(crate) fn vector_store_for(&self, handle: &EstateHandle) -> Option<Arc<VectorStore>> {
+    /// `registeredVectorStore(for:)` accessor (which is `public`).
+    ///
+    /// Two consumers, both cross-checked against Swift:
+    ///   - the expunge orchestration path invalidates the standalone store's
+    ///     resident slot after `Corpus::remove` deletes from the shared backing
+    ///     table (in-crate);
+    ///   - the AriaMcpKit autonomic governor reads the live store to build the
+    ///     default standing-signal specs at registration time (cross-crate),
+    ///     mirroring the Swift resident's `kit.registeredVectorStore(for:)`
+    ///     bootstrap step. The latter is why this accessor is `pub`.
+    pub fn vector_store_for(&self, handle: &EstateHandle) -> Option<Arc<VectorStore>> {
         self.vector_stores.get(handle).map(Arc::clone)
     }
 
