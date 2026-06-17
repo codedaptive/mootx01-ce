@@ -1448,32 +1448,65 @@ public extension GeniusLocusKit {
         // The Hamming vector lane keys on "hamming"; the aggregate dense float lane
         // keys on "dense" (the per-signal `dense:<modelID>` steering already applied
         // in the consensus fold above, where the column itself was built). locus/bm25
-        // key on their own ids. Matrix/graph/preference lanes are NOT shape-steerable
-        // here — RecallShape addresses the retrieval lanes only.
-        let shapeLocus   = request.recallShape?.weight(for: "locus")   ?? 1.0
-        let shapeBM25    = request.recallShape?.weight(for: "bm25")    ?? 1.0
-        let shapeHamming = request.recallShape?.weight(for: "hamming") ?? 1.0
-        let shapeDense   = request.recallShape?.weight(for: "dense")   ?? 1.0
+        // key on their own ids. The matrix/graph/preference columns are ALSO
+        // shape-steerable (6b-modifiers-matrix-steer): each keys on its own stable
+        // id — "fieldFit", "coOccurrence", "temporal", "graph", "preference" — and
+        // its column contribution is scaled by that key's signed weight ON TOP of the
+        // adaptive `RecallWeights` budget, with the same signed semantics as the
+        // retrieval lanes (1.0 neutral, 0 excludes, <0 suppresses). The combined
+        // matrix budget is split so coOccurrence and temporal steer independently:
+        // `weights.matrix * (co + temporal) * 0.5` becomes
+        // `shapeCo * weights.matrix * 0.5 * co + shapeTemp * weights.matrix * 0.5 * temporal`,
+        // which sums to the original term when both weights are 1.0 (byte-identical).
+        // Steering the matrix columns is a no-op for .raw/.rrf — those paths never
+        // run this weighted formula (they read buffer.final directly below).
+        let shapeLocus        = request.recallShape?.weight(for: "locus")        ?? 1.0
+        let shapeBM25         = request.recallShape?.weight(for: "bm25")         ?? 1.0
+        let shapeHamming      = request.recallShape?.weight(for: "hamming")      ?? 1.0
+        let shapeDense        = request.recallShape?.weight(for: "dense")        ?? 1.0
+        let shapeFieldFit     = request.recallShape?.weight(for: "fieldFit")     ?? 1.0
+        let shapeCoOccurrence = request.recallShape?.weight(for: "coOccurrence") ?? 1.0
+        let shapeTemporal     = request.recallShape?.weight(for: "temporal")     ?? 1.0
+        let shapeGraph        = request.recallShape?.weight(for: "graph")        ?? 1.0
+        let shapePreference   = request.recallShape?.weight(for: "preference")   ?? 1.0
         switch request.scoring {
         case .matrixAware:
+            // Whether coOccurrence and temporal both steer at the neutral 1.0 weight.
+            // When they do, the matrix term is computed with the EXACT pre-steer
+            // expression `weights.matrix * ((co + temporal) * 0.5)` so a nil/all-ones
+            // shape is BYTE-IDENTICAL to the pre-matrix-steer score (float reassociation
+            // is avoided on the back-compat path). When either is steered the term is
+            // split into two independently-weighted halves whose 1.0/1.0 sum equals the
+            // combined form mathematically (the split is the steerable path only).
+            let matrixNeutral = (shapeCoOccurrence == 1.0 && shapeTemporal == 1.0)
             for i in 0..<buffer.count {
-                // Matrix lane: coOccurrence and temporal combined at equal weight
-                // under the matrix weight budget, so the two matrix signals share
-                // the same budget slice without over-weighting matrix overall.
-                let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
+                let matrixTerm: Float
+                if matrixNeutral {
+                    // Pre-steer combined matrix signal — both signals share the matrix
+                    // budget slice at equal weight without over-weighting matrix overall.
+                    let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
+                    matrixTerm = weights.matrix * matrixSignal
+                } else {
+                    // Steered: each matrix signal carries HALF the matrix budget and is
+                    // scaled independently by its own RecallShape key.
+                    matrixTerm =
+                        shapeCoOccurrence * weights.matrix * 0.5 * buffer.coOccurrence[i] +
+                        shapeTemporal     * weights.matrix * 0.5 * buffer.temporal[i]
+                }
                 // The dense float lane shares the `vector` weight budget with
                 // the Hamming lane (both are vector-similarity signals), so
                 // adding dense does not inflate the vector lane's overall share.
-                // Each retrieval lane is additionally scaled by its RecallShape weight.
+                // Each lane — retrieval AND matrix/graph/preference — is scaled by its
+                // RecallShape weight on top of the adaptive RecallWeights budget.
                 scores[i] =
-                    shapeLocus   * weights.locus    * buffer.locus[i] +
-                    shapeBM25    * weights.bm25     * buffer.bm25[i] +
-                    shapeHamming * weights.vector   * buffer.vector[i] +
-                    shapeDense   * weights.vector   * buffer.dense[i] +
-                    weights.fieldFit * buffer.fieldFit[i] +
-                    weights.matrix   * matrixSignal +
-                    weights.graph    * buffer.graph[i] +
-                    weights.graph    * buffer.preference[i] +
+                    shapeLocus      * weights.locus    * buffer.locus[i] +
+                    shapeBM25       * weights.bm25     * buffer.bm25[i] +
+                    shapeHamming    * weights.vector   * buffer.vector[i] +
+                    shapeDense      * weights.vector   * buffer.dense[i] +
+                    shapeFieldFit   * weights.fieldFit * buffer.fieldFit[i] +
+                    matrixTerm +
+                    shapeGraph      * weights.graph    * buffer.graph[i] +
+                    shapePreference * weights.graph    * buffer.preference[i] +
                     agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0
             }
         case .raw, .rrf:

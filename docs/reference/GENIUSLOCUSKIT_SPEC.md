@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1506,8 +1506,20 @@ per-signal dense float signals fuse:
 - **UnionBest weighted-column score.** The fixed lanes `locus`/`bm25`/`hamming`
   and the aggregate `dense` key additionally scale their column contributions on
   top of `RecallWeights.adaptive`: `w==0` zeroes a lane's column, `w<0` subtracts
-  it. Matrix/graph/preference columns are NOT shape-steerable (RecallShape
-  addresses the retrieval lanes only).
+  it. The matrix/graph/preference columns are ALSO shape-steerable
+  (6b-modifiers-matrix-steer): `fieldFit`, `coOccurrence`, `temporal`, `graph`,
+  and `preference` each scale their column with the same signed semantics, also
+  composed on top of `RecallWeights.adaptive`. The combined matrix term
+  `weights.matrix · (coOccurrence + temporal) · 0.5` is split so `coOccurrence`
+  and `temporal` steer independently (each carries half the matrix budget); the
+  neutral 1.0/1.0 path preserves the exact pre-steer combined expression, so a
+  nil/all-ones shape is byte-identical. These five matrix keys are active ONLY in
+  the `.matrixAware` weighted score — a NO-OP under `.raw`/`.rrf`, which read the
+  lane-normalised rank score directly and never run the weighted formula. (Per
+  port: the Swift `graph`/`preference` columns are populated from a registered
+  `GraphCache`/`PreferenceStore`; the Rust port's are 0.0 until those caches are
+  wired, so steering them is a no-op there — the steering surface is identical.)
+  See ADR-011 for the full lane-key surface.
 
 A `nil` shape — or an all-1.0 shape — is BYTE-IDENTICAL to the prior uniform
 fusion in EVERY lane including `unionBest` (the back-compat contract, proven by
@@ -1600,6 +1612,19 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-06-17
+Extended `RecallShape`'s steerable surface to the FULL set of recall scoring
+columns (mission 6b-modifiers-matrix-steer). The five matrix/graph/preference
+columns — `fieldFit`, `coOccurrence`, `temporal`, `graph`, `preference` — are now
+shape-steerable in the `unionBest` `.matrixAware` weighted score, with the same
+signed semantics (1.0 neutral, 0 excludes, <0 suppresses) composed on top of the
+adaptive `RecallWeights` budget. The combined matrix term is split so
+`coOccurrence`/`temporal` steer independently; the neutral path preserves the
+exact pre-steer expression so a nil/all-ones shape is byte-identical (proven both
+ports). The matrix keys are a no-op under `.raw`/`.rrf`. The stale "Matrix/graph/
+preference columns are NOT shape-steerable" statement is removed. See ADR-011.
+ADDITIVE (MINOR).
 
 ### 1.3.0 -- 2026-06-17
 Added the anti-similarity steering contract (mission 6b-modifiers-antisim):

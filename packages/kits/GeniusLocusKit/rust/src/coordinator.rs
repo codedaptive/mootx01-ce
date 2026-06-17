@@ -3948,9 +3948,19 @@ impl EstateCoordinator {
             // back-compat contract). w==0 zeroes a lane's column; w<0 subtracts it
             // (demotion). The Hamming lane keys "hamming", the aggregate dense float
             // lane keys "dense" (per-signal `dense:<model_id>` steering already
-            // applied in the consensus fold where col_dense was built). Matrix/graph/
-            // preference lanes are NOT shape-steerable — RecallShape addresses the
-            // retrieval lanes only, mirroring Swift.
+            // applied in the consensus fold where col_dense was built).
+            //
+            // 6b-modifiers-matrix-steer: the matrix/graph/preference columns are ALSO
+            // shape-steerable — each keys on its own stable id ("fieldFit",
+            // "coOccurrence", "temporal", "graph", "preference") and is scaled by that
+            // key's signed weight with the same semantics, mirroring Swift. The
+            // combined matrix term `weights.matrix * (co + temporal) * 0.5` is split so
+            // coOccurrence and temporal steer independently; on the neutral 1.0/1.0
+            // path the exact pre-steer combined expression is kept so the back-compat
+            // score is byte-identical (float reassociation avoided). NOTE: col_graph
+            // and col_preference are 0.0 in this port (no graph/preference cache wired
+            // on Rust), so their shape factor multiplies 0.0 — the steering surface is
+            // present and identical cross-port for when those columns become live.
             let (sh_locus, sh_bm25, sh_hamming, sh_dense) = match &request.recall_shape {
                 Some(s) => (
                     s.weight("locus"),
@@ -3960,17 +3970,38 @@ impl EstateCoordinator {
                 ),
                 None => (1.0, 1.0, 1.0, 1.0),
             };
+            let (sh_field_fit, sh_co_occur, sh_temporal, sh_graph, sh_preference) =
+                match &request.recall_shape {
+                    Some(s) => (
+                        s.weight("fieldFit"),
+                        s.weight("coOccurrence"),
+                        s.weight("temporal"),
+                        s.weight("graph"),
+                        s.weight("preference"),
+                    ),
+                    None => (1.0, 1.0, 1.0, 1.0, 1.0),
+                };
+            // Whether co/temporal both steer at the neutral 1.0 weight — when they do,
+            // the matrix term uses the EXACT pre-steer combined expression so the
+            // nil/all-ones score is byte-identical (no float reassociation).
+            let matrix_neutral = sh_co_occur == 1.0 && sh_temporal == 1.0;
             let agreement_bonus: f32 = 0.05;
             for (i, v) in col_final.iter_mut().take(count).enumerate() {
-                let matrix_signal = (col_co_occur[i] + col_temporal[i]) * 0.5;
+                let matrix_term = if matrix_neutral {
+                    let matrix_signal = (col_co_occur[i] + col_temporal[i]) * 0.5;
+                    weights.matrix * matrix_signal
+                } else {
+                    sh_co_occur  * weights.matrix * 0.5 * col_co_occur[i]
+                        + sh_temporal * weights.matrix * 0.5 * col_temporal[i]
+                };
                 *v = sh_locus   * weights.locus    * col_locus[i]
                    + sh_bm25    * weights.bm25     * col_bm25[i]
                    + sh_hamming * weights.vector   * col_vector[i]
                    + sh_dense   * weights.vector   * col_dense[i]     // dense shares vector weight budget
-                   + weights.field_fit * col_field_fit[i]
-                   + weights.matrix   * matrix_signal
-                   + weights.graph    * 0.0_f32          // graph: no cache registered → 0.0
-                   + weights.graph    * 0.0_f32          // preference: no cache → 0.0
+                   + sh_field_fit * weights.field_fit * col_field_fit[i]
+                   + matrix_term
+                   + sh_graph      * weights.graph * 0.0_f32          // graph: no cache registered → 0.0
+                   + sh_preference * weights.graph * 0.0_f32          // preference: no cache → 0.0
                    + agreement_bonus * source_masks[i].count_ones() as f32 / 4.0;
             }
 

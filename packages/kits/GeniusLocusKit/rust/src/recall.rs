@@ -489,12 +489,26 @@ impl Default for RecallOrigin {
 ///
 /// ## Lane-key scheme
 ///
-/// Weights are keyed by a STABLE lane identifier string:
+/// Weights are keyed by a STABLE lane identifier string. This is the COMPLETE
+/// steerable surface (the keys the optimizer and the preset roster target),
+/// spanning the retrieval lanes AND — since 6b-modifiers-matrix-steer — the
+/// matrix/graph/preference scoring columns:
+///   Retrieval lanes (steer the RRF fusion AND the unionBest weighted columns):
 ///   - `"locus"`           — the LocusKit bitmap lane.
 ///   - `"bm25"`            — the CorpusKit BM25 keyword lane.
 ///   - `"hamming"`         — the 256-bit SimHash-Hamming vector lane.
+///   - `"dense"`           — the aggregate dense float column in the unionBest
+///     weighted score (per-signal `dense:<modelID>` keys steer the consensus
+///     fold that builds that column).
 ///   - `"dense:<modelID>"` — a per-signal DENSE float lane, one key per held
 ///     embedding provider, mirroring the 6b-core per-signal fan-out.
+///   Matrix/graph/preference columns (steer ONLY the unionBest matrixAware
+///   weighted score; a no-op under raw/rrf, where the matrix columns are dark):
+///   - `"fieldFit"`        — the FDC field-fit column.
+///   - `"coOccurrence"`    — the MatrixTier co-occurrence column.
+///   - `"temporal"`        — the MatrixTier temporal-relevance column.
+///   - `"graph"`           — the connection-graph column.
+///   - `"preference"`      — the learned-preference column.
 ///
 /// A lane whose key is ABSENT uses the default weight `1.0`; an empty map
 /// reproduces the uniform fusion exactly (the back-compat contract — a `None`
