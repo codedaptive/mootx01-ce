@@ -1,7 +1,7 @@
 ---
 title: VectorKit Interface
 status: active
-version: 1.2.0
+version: 1.3.0
 date: 2026-06-17
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
@@ -48,6 +48,15 @@ purpose: |
 - `src/vector_store.rs` — `StoredVector`, `VectorMatch`, `VectorStore`
 - `src/error.rs` — `VectorKitError`
 - depends on `engram-lib`, `substrate-lib`, `persistence-kit`, `uuid`
+
+Both ports are backend-agnostic: `VectorStore` holds `any Storage` (Swift) /
+`Arc<dyn Storage>` (Rust) and never names a backend. Over the on-disk SQLite
+backend (`SQLiteStorage` / `persistence_kit::SqliteStorage`) the resident
+binary array and the Lane D float lane persist across a process restart —
+rebuilt from the durable `vectors` table, or loaded from the `.vec` sidecar
+when one is supplied and current. This cross-restart persistence is a
+conformance requirement gated in both ports (VECTORKIT_SPEC, "Cross-restart
+persistence"). PostgreSQL is the remote-backed v1.1 path (federation).
 
 ## § 2 — Public types
 
@@ -887,6 +896,18 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Documented that both ports are backend-agnostic and persist vector state
+across a process restart over the on-disk SQLite backend (`SQLiteStorage` /
+`persistence_kit::SqliteStorage`): the resident binary array and the Lane D
+float lane reconstruct from the durable `vectors` table (or load from a
+current `.vec` sidecar) on reopen. This is a conformance requirement
+(VECTORKIT_SPEC 1.3.0) gated in both ports. No public API surface change — the
+SQLite backend ships in PersistenceKit and `VectorStore` already holds it
+behind `any Storage` / `Arc<dyn Storage>`; this records the contract and
+closes the Rust conformance-coverage gap. PostgreSQL remains v1.1 (federation).
+Additive (MINOR).
 
 ### 1.1.0 -- 2026-06-17
 Added the float-lane FARTHEST (anti-similarity) retrieval surface
