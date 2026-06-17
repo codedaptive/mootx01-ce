@@ -1,5 +1,7 @@
 # MOOTx01
 
+# MOOTx01
+
 **Long-term memory for AI.**
 
 *Observe · Remember · Dream · Convene*
@@ -12,44 +14,34 @@
 ![interface](https://img.shields.io/badge/interface-ARIA%20over%20MCP-purple)
 ![license](https://img.shields.io/badge/license-open%20core-lightgrey)
 
-MOOTx01 is the layer your AI is missing — the **subconscious** between the context window and the archive. It captures every conversation **verbatim**, **consolidates it while you sleep**, and hands back ranked, theme-aware memory the moment you ask. It runs **where you do** — your laptop, your phone, your home server — and any AI that speaks the Model Context Protocol reads from it through **ARIA**. The intelligence is rented; the memory is owned.
+## What it is
 
-> Full story: [`ABOUT.md`](ABOUT.md) · live site: [mootx01.ai](https://mootx01.ai) · readable front door to the code: [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md)
+MOOTx01 gives your AI a memory that lasts. Every AI today forgets when a chat ends. You start over. You re-explain. You re-introduce yourself. MOOTx01 stores what was said so the next chat starts where the last one left off. It runs on your machine. Any AI that speaks the Model Context Protocol can read from it.
 
----
+## What it fixes
 
-## The gap
+Your AI has a short memory. It only holds what fits in one conversation. Close the chat and the memory is gone. Switch from Claude to ChatGPT and it is gone again. MOOTx01 stores what was said in a place your AI can read at any time. The memory belongs to you. You can take it from one AI to another and keep going.
 
-Your AI has a **context window**. It is sharp, expensive, and short — everything in it has to be there *right now*, paid for by the token. When the conversation ends, the window closes and the next one starts from nothing. That is short-term memory. It is what your AI *thinks with*. It is not what your AI *remembers from*.
+## What it looks like
 
-To paper over the forgetting, the industry built **RAG** — a vector database in deep storage that the AI searches on demand. RAG works as far as it goes, but it is the basement archive: the AI filters everything at the moment you ask, on every call, from chaos. Slow, expensive, context-dependent.
+Wire MOOTx01 into your AI client once. After that, your AI uses two short commands. One to store something. One to look it up.
 
-What's missing isn't a feature — it's a **layer**. The one you use every night: while you sleep, your subconscious runs cheap deterministic passes over the day, surfaces what mattered, strengthens what repeats, lets the rest fade. By morning, memory is already prepared. **Your AI doesn't have that layer. MOOTx01 is it.**
+```jsonc
+// store
+moot_file_memory { "content": "We ship the importer behind a flag.", "location": "project/alpha" }
 
-## Four behaviors
+// retrieve
+moot_memory_search { "query": "what did we decide about the importer?" }
+```
 
-| | |
-|---|---|
-| **Observe** | Capture every conversation exactly as it happened, in the words it happened in — verbatim, no paraphrase, no silent rewrite. |
-| **Remember** | Return ranked, filtered, theme-aware *signal* — not chaotic data — through one consistent grammar. |
-| **Dream** | A consolidation layer reweighs what mattered overnight; themes surface, connections strengthen, the answer is prepared *before* you ask. |
-| **Convene** | MOOTs gather — home + work, you + your spouse, an app + you — bounded by exactly what you authorize. Nothing centralized, nothing rented. |
+The full language is called ARIA. Nine verbs in total.
 
-## Why MOOTx01
+## Where to go next
 
-- **Yours, not rented.** It runs on your machine. Your memory belongs where you put it — never parked in someone else's cloud, readable by whoever owns the servers, gone if the vendor changes their mind.
-- **Verbatim.** What you said stays said, in the words you said it.
-- **Portable across every AI.** Claude, ChatGPT, a local model you run yourself — anything that speaks MCP reads your MOOT through ARIA. Switch tools next month; your memory comes with you.
-- **It dreams.** A real consolidation layer (the Brain) prepares recall overnight, so the AI reasons on prepared signal instead of searching the basement on every call.
-- **It convenes.** Bounded, private, automatic federation between MOOTs — no central coordinator. You decide what crosses.
-- **Apple Silicon *and* PC/Linux, byte-identical.** Swift and Rust ports, conformance-gated against shared test vectors. Neither port leads; both must agree, bit for bit.
-- **Deterministic and auditable.** Full audit trail, CRDT convergence, no hidden state. Every computation is reproducible.
-
-## The name
-
-A **moot** was the old assembly where a community brought its memory together — witnessed events, sworn oaths, who decided what last winter. The record lived in the gathering. Modern English kept the word but lost the meaning. We're taking it back, because the older meaning is what memory actually is: observed over time, kept exactly as it was, available across every AI you use.
-
-**You are x01.** Hex 01, first person — the hero of your story, and your MOOT is the gathering of it. There is no MOOTx02; you don't get upgraded to a later you. Your spouse is x01 in theirs, your calendar app is x01 in its domain, and when you authorize it, the MOOTs convene.
+- **Install it.** See [Quickstart](#quickstart-100-beta) below. One command on macOS, Linux, or Windows.
+- **Read the story.** [`ABOUT.md`](ABOUT.md) covers why MOOTx01 exists, what a moot is, and why memory belongs to you.
+- **See the architecture.** [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) is the readable map of the whole repository.
+- **Visit the live site.** [mootx01.ai](https://mootx01.ai)
 
 ---
 
