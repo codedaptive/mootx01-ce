@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Interface
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: Public API surface for SubstrateML in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -334,27 +334,34 @@ SPEC § 5 (background).
 
 ```swift
 public struct SplitMix64 {
+    public var state: UInt64
     public init(seed: UInt64)
     public mutating func next() -> UInt64
 }
 public enum RandomWalks {
     public typealias Adjacency = [[(neighbor: Int, weight: Double)]]
     public static let defaultRestartProb: Double = 0.15
+
+    // Indexed walk (NeuronKit / FreeAssociation consumer).
     // Precondition: every neighbor index in [0, N); every weight finite and ≥ 0.
     public static func walk(adjacency: Adjacency, start: Int, length: Int,
                             restartProb: Double = defaultRestartProb, seed: UInt64) -> [Int]
-    public static func walkWithRestart(adjacency: Adjacency, start: Int, length: Int,
-                                       restartProb: Double = defaultRestartProb, seed: UInt64) -> [Int]
+
+    // RowId walk (CognitionKit ExploratoryRecall consumer, cookbook § 19.1).
+    // Operates in RowId (UUID) space; accumulates visit counts per RowId.
+    // Preconditions: steps ≥ 1; restartProbability in [0, 1).
+    public static func walkWithRestart(
+        seed: RowId,
+        steps: Int,
+        restartProbability: Float32,
+        rngSeed: UInt64,
+        adjacency: [RowId: [RowId]]
+    ) -> [RowId: Int]
+
     // Precondition: neighbors must be non-empty.
     public static func sampleWeighted(_ neighbors: [(neighbor: Int, weight: Double)],
                                       rng: inout SplitMix64) -> Int
     public static func uniform01(_ rng: inout SplitMix64) -> Double
-}
-
-public struct SplitMix64 {
-    public var state: UInt64
-    public init(seed: UInt64)
-    public mutating func next() -> UInt64
 }
 ```
 
@@ -362,11 +369,21 @@ public struct SplitMix64 {
 pub struct SplitMix64 { pub state: u64 }
 impl SplitMix64 { pub fn new(seed: u64) -> Self; pub fn next(&mut self) -> u64; }
 impl RandomWalks {
-    // Same preconditions as Swift; violations panic.
+    // Indexed walk (NeuronKit consumer). Same preconditions as Swift; violations panic.
     pub fn walk(adjacency: &[Vec<(usize, f64)>], start: usize, length: usize,
                 restart_prob: f64, seed: u64) -> Vec<usize>;
-    pub fn walk_with_restart(adjacency: &[Vec<(usize, f64)>], start: usize, length: usize,
-                             restart_prob: f64, seed: u64) -> Vec<usize>;
+
+    // RowId walk (CognitionKit ExploratoryRecall consumer, cookbook § 19.1).
+    // Returns HashMap<RowId, u64> visit counts. RowId = substrate_types::row::RowId(u128).
+    // Preconditions: steps ≥ 1; restart_probability in [0, 1).
+    pub fn walk_with_restart(
+        seed: RowId,
+        steps: usize,
+        restart_probability: f32,
+        rng_seed: u64,
+        adjacency: &HashMap<RowId, Vec<RowId>>,
+    ) -> HashMap<RowId, u64>;
+
     pub fn sample_weighted(neighbors: &[(usize, f64)], rng: &mut SplitMix64) -> usize;
     pub fn uniform01(rng: &mut SplitMix64) -> f64;
 }
@@ -1576,6 +1593,7 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 | Eigenvalue centrality namespace | `EigenvalueCentrality` (enum) | `EigenvalueCentrality` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `EigenvalueCentralityTests.swift`, `EigenvalueCentralityDirectedTests.swift` / `rust:eigenvalue_centrality::tests` | Confirmed |
 | SplitMix64 RNG | `SplitMix64` | `SplitMix64` | public | identical (deterministic seed) | `RandomWalksTests.swift` / `rust:random_walks::tests` | Confirmed |
 | Random-walks namespace | `RandomWalks` (enum) | `RandomWalks` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; Swift precondition / Rust panic | `RandomWalksTests.swift`, `RandomWalksDomainTests.swift` / `rust:random_walks::tests` | Confirmed |
+| RowId walk (restart) | `RandomWalks.walkWithRestart(seed:steps:restartProbability:rngSeed:adjacency:)` → `[RowId:Int]` | `RandomWalks::walk_with_restart(seed, steps, restart_probability, rng_seed, adjacency)` → `HashMap<RowId,u64>` | public both | Swift `[RowId:[RowId]]` adjacency / Rust `&HashMap<RowId,Vec<RowId>>`; same SplitMix64 PRNG; visit counts: Swift `Int` / Rust `u64`; RNG seed derived by caller via FNV hash64 | `RandomWalksDomainTests.swift` (WR-1..5) / `rust:random_walks::tests` (WR-1..5) | Confirmed |
 | Lattice anchor (string) | `LatticeAnchorStr` | `LatticeAnchorStr` | public | identical | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
 | UDC tree distance namespace | `UDCTreeDistance` (enum) | `UDCTreeDistance` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
 | Wikidata adjacency provider | `WikidataAdjacencyProvider` (protocol) | `WikidataAdjacencyProvider` (trait) | public | Swift protocol / Rust trait | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
@@ -1792,6 +1810,17 @@ target dependencies (authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Additive (A-2 exploratory-recall): added `RandomWalks.walkWithRestart` in both ports —
+a RowId-space walk (A-2, cookbook § 19.1) consumed by CognitionKit's
+`recall_exploratory` recipe. Swift signature: `walkWithRestart(seed:steps:restartProbability:rngSeed:adjacency:) -> [RowId:Int]`
+(adjacency `[RowId:[RowId]]`, visit counts `Int`). Rust signature:
+`walk_with_restart(seed, steps, restart_probability, rng_seed, adjacency) -> HashMap<RowId,u64>`
+(adjacency `HashMap<RowId,Vec<RowId>>`, visit counts `u64`). Both use the same
+SplitMix64 PRNG and restart logic; the PRNG seed is derived by the caller via FNV
+hash64. Updated the signature block for `RandomWalks` in the API section and added
+a concordance row. The existing indexed `walk(adjacency:start:length:...)` is unchanged.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

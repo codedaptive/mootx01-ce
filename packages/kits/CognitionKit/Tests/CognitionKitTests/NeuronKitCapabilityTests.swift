@@ -57,10 +57,12 @@ struct CapabilityGateTests {
         // so the capability gate is identical across the two versions.
         #expect(NeuronKitCapability.associationRuleMining.rawValue == "associationRuleMining")
         #expect(NeuronKitCapability.formalConceptAnalysis.rawValue == "formalConceptAnalysis")
-        // Both new capabilities appear in allCases and therefore in
-        // shippedNeuronKitCapabilities.
+        #expect(NeuronKitCapability.exploratoryRecall.rawValue == "exploratoryRecall")
+        // All three analytics/walk capabilities appear in allCases and
+        // therefore in shippedNeuronKitCapabilities.
         #expect(NeuronKitCapability.allCases.contains(.associationRuleMining))
         #expect(NeuronKitCapability.allCases.contains(.formalConceptAnalysis))
+        #expect(NeuronKitCapability.allCases.contains(.exploratoryRecall))
     }
 
     @Test("RecipeError is equatable and described")

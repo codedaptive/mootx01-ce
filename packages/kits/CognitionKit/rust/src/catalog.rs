@@ -245,6 +245,18 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
+        // Exploratory-recall recipe: random walk with restart from a seed drawer
+        // over a wing's tunnel graph (cookbook § 19.1). Consumes
+        // SubstrateML::RandomWalks::walk_with_restart. Description matches the
+        // Swift `ExploratoryRecall.description` byte-for-byte (the conformance anchor).
+        RecipeDescriptor {
+            name: "recall_exploratory".into(),
+            version: "1.0.0".into(),
+            description:
+                "Walk with restart from a seed drawer over a wing's tunnel graph and return the most-visited drawers ranked by visit frequency."
+                    .into(),
+            required_capabilities: vec![NeuronKitCapability::ExploratoryRecall],
+        },
     ]
 }
 
@@ -271,7 +283,8 @@ mod tests {
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 14 reasoning lenses plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
-        // plus the steerable-fusion recipe (shaped_recall) = 24 total.
+        // plus the steerable-fusion recipe (shaped_recall)
+        // plus the exploratory-recall recipe (recall_exploratory) = 25 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -296,6 +309,7 @@ mod tests {
                 "moment",
                 "partial_cue_recall",
                 "precedence",
+                "recall_exploratory",
                 "rhythm",
                 "shaped_recall",
                 "theme_weather",
@@ -421,5 +435,24 @@ mod tests {
         );
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.contains("\"associationRuleMining\""));
+    }
+
+    #[test]
+    fn recall_exploratory_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift ExploratoryRecall recipe
+        // metadata (`ExploratoryRecall.swift`).
+        let d = recipe_descriptor("recall_exploratory").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Walk with restart from a seed drawer over a wing's tunnel graph and return the most-visited drawers ranked by visit frequency."
+        );
+        assert_eq!(
+            d.required_capabilities,
+            vec![NeuronKitCapability::ExploratoryRecall]
+        );
+        // Wire form uses the serde rename (Swift rawValue).
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"exploratoryRecall\""));
     }
 }

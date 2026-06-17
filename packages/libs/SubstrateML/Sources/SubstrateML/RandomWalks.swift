@@ -1,15 +1,11 @@
 // RandomWalks.swift
 //
-// Random walks with restart on the estate graph, per cookbook
-// § 7.4.
+// Random walks with restart on the estate graph, per cookbook § 7.4.
 //
-// A random walk starts at a designated row, repeatedly samples a
-// next row from the current row's weighted out-edges (or restarts
-// to the start row with probability `restartProb`), and records
-// the visited sequence. The result is consumed by CognitionKit's
-// exploratory recall primitives (cookbook § 19.1) — a future
-// cognition-tier mission not yet built; until that consumer lands
-// this engine is reference-only (harness/conformance).
+// `walk` operates over densely-indexed adjacency (used by NeuronKit's
+// spreading_activation and the conformance harness). `walkWithRestart`
+// operates in RowId space and is consumed by CognitionKit's
+// `recall_exploratory` recipe (ExploratoryRecall.swift, cookbook § 19.1).
 //
 // The substrate uses SplitMix64 as the random number generator
 // (mirroring the test harness's deterministic PRNG); calls with
@@ -30,9 +26,8 @@
 //
 // Cookbook references:
 //   § 7.4   Random walks (the spec)
-//   § 8.5   OR-reduction (downstream consumer for walk-aggregate
-//           fingerprints)
-//   § 19.1  recall_exploratory primitive (future cognition-tier consumer, not yet built)
+//   § 8.5   OR-reduction (downstream consumer for walk-aggregate fingerprints)
+//   § 19.1  recall_exploratory (live consumer: CognitionKit ExploratoryRecall.swift)
 
 import Foundation
 import SubstrateTypes
@@ -135,15 +130,15 @@ public enum RandomWalks {
         return Double(bits) * (1.0 / Double(1 << 53))
     }
 
-    /// Random walk with restart aggregating visits by row. The
-    /// CognitionKit `recall_exploratory` consumer (cookbook § 19.1)
-    /// is a future cognition-tier mission not yet built; the
-    /// reference here returns a usable result for harness tests.
-    /// Takes a `[RowId: [RowId]]` adjacency
-    /// rather than the indexed form because the cognition tier
-    /// works in RowId space, not in densely-numbered graph nodes.
+    /// Random walk with restart aggregating visits by RowId. The live
+    /// consumer is CognitionKit's `recall_exploratory` recipe
+    /// (ExploratoryRecall.swift, cookbook § 19.1).
     ///
-    /// Returns a dictionary mapping visited rowIds to visit counts.
+    /// Takes a `[RowId: [RowId]]` adjacency rather than the indexed form
+    /// because the cognition tier works in RowId space, not in
+    /// densely-numbered graph nodes.
+    ///
+    /// Returns a dictionary mapping visited RowIds to visit counts.
     public static func walkWithRestart(
         seed: RowId,
         steps: Int,
@@ -200,4 +195,6 @@ public struct SplitMix64 {
 //                      almost always return to start.
 //
 // MARK: - Cookbook references
-//   § 7.4, § 8.5, § 19.1
+//   § 7.4  — random walks (the spec)
+//   § 8.5  — OR-reduction (downstream consumer for walk-aggregate fingerprints)
+//   § 19.1 — recall_exploratory (live consumer: CognitionKit ExploratoryRecall.swift)

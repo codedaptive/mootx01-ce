@@ -158,6 +158,10 @@ public enum RecipeCatalog {
         // here (the entry point is the static `ShapedRecall` namespace); the
         // descriptor strings match `catalog.rs` byte-for-byte.
         RecipeDescriptor(ShapedRecall()),
+        // Exploratory-recall recipe: random walk with restart from a seed drawer
+        // over a wing's tunnel graph (cookbook § 19.1). Consumes
+        // SubstrateML.RandomWalks.walkWithRestart.
+        RecipeDescriptor(ExploratoryRecall()),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped
