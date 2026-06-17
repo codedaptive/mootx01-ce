@@ -12,6 +12,7 @@
 
 use crate::error::StorageResult;
 use crate::types::RowKey;
+use std::collections::HashSet;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -66,6 +67,33 @@ pub trait AuditLog: Send + Sync {
 
     /// Read events for a row, in HLC order.
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>>;
+
+    /// Return the subset of `row_ids` that have at least one audit event
+    /// whose verb matches any entry in `verbs`.
+    ///
+    /// This is the set-membership half of a SQL LEFT JOIN between the drawers
+    /// table and the audit table:
+    ///
+    /// ```sql
+    /// SELECT DISTINCT "row_id" FROM "_storagekit_audit"
+    /// WHERE "row_id" IN (?) AND "verb" IN (?)
+    /// ```
+    ///
+    /// SQL-backed implementations (SQLite, PostgreSQL) express this as a single
+    /// indexed query. The InMemory backend scans its in-memory event vec.
+    ///
+    /// Used by `DrawerStoreCore::tombstoned_rows_without_expunge_audit` to
+    /// replace N per-row `events_for_row` calls with a single batch query,
+    /// giving O(tombstoned + audit_index_scan) instead of
+    /// O(tombstoned × events_per_drawer).
+    ///
+    /// An empty `row_ids` or empty `verbs` slice returns an empty set without
+    /// touching the backend.
+    fn row_ids_with_audit_verbs(
+        &self,
+        row_ids: &[RowKey],
+        verbs: &[&str],
+    ) -> StorageResult<HashSet<RowKey>>;
 
     /// Total event count.
     fn count(&self) -> StorageResult<usize>;

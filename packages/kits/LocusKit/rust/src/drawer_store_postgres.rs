@@ -533,9 +533,26 @@ impl DrawerStore for PostgresDrawerStore {
     }
 
     fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
-        // Delegate to DrawerStoreCore (InMemory-compatible scan path).
-        // A future optimisation can replace this with a Postgres LEFT JOIN;
-        // for now the scan is correct and bounded (tombstoned rows are rare).
+        // DrawerStoreCore::tombstoned_rows_without_expunge_audit runs two
+        // queries that together are semantically equivalent to a SQL LEFT JOIN:
+        //
+        //   SELECT d.* FROM drawers d
+        //   LEFT JOIN "_storagekit_audit" a
+        //     ON UPPER(d.id) = a.row_id
+        //     AND a.verb IN ('tombstone', 'expungeOrphan')
+        //   WHERE d.tombstonedAt IS NOT NULL
+        //     AND a.row_id IS NULL
+        //   ORDER BY d.tombstonedAt ASC
+        //
+        // The first query fetches tombstoned drawers via the indexed
+        // idx_drawers_tombstoned predicate; the second resolves to:
+        //
+        //   SELECT DISTINCT "row_id" FROM "_storagekit_audit"
+        //   WHERE "row_id" IN (?) AND "verb" IN ('tombstone','expungeOrphan')
+        //
+        // via AuditLog::row_ids_with_audit_verbs, which PgAuditLog implements
+        // as a single SQL query covered by the _storagekit_audit_row_hlc index.
+        // Two queries total, not N+1. No schema change is needed.
         self.0.tombstoned_rows_without_expunge_audit()
     }
 

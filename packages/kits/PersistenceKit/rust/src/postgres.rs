@@ -1554,6 +1554,58 @@ impl AuditLog for TxAuditLog {
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
         self.iterate(None, Some(row_id), usize::MAX)
     }
+
+    fn row_ids_with_audit_verbs(
+        &self,
+        row_ids: &[RowKey],
+        verbs: &[&str],
+    ) -> StorageResult<std::collections::HashSet<RowKey>> {
+        if row_ids.is_empty() || verbs.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        // Build a single SQL query:
+        //   SELECT DISTINCT "row_id" FROM "_storagekit_audit"
+        //   WHERE "row_id" IN ($1,$2,...) AND "verb" IN ($n,...)
+        //
+        // row_id is stored as uppercase UUID TEXT (matching audit_params).
+        // This is the read-side of the LEFT JOIN that
+        // tombstoned_rows_without_expunge_audit uses to avoid N per-row
+        // events_for_row calls. The idx_storagekit_audit_row_hlc index covers
+        // the row_id filter; the verb filter is a cheap post-scan predicate.
+        let mut binds: Vec<PgParam> = row_ids
+            .iter()
+            .map(|id| -> PgParam { Box::new(id.to_string().to_uppercase()) })
+            .collect();
+        let row_placeholders: Vec<String> = (1..=row_ids.len())
+            .map(|i| format!("${i}"))
+            .collect();
+        let verb_start = row_ids.len() + 1;
+        for v in verbs {
+            binds.push(Box::new((*v).to_string()));
+        }
+        let verb_placeholders: Vec<String> = (verb_start..=verb_start + verbs.len() - 1)
+            .map(|i| format!("${i}"))
+            .collect();
+        let sql = format!(
+            r#"SELECT DISTINCT "row_id" FROM "_storagekit_audit" WHERE "row_id" IN ({}) AND "verb" IN ({})"#,
+            row_placeholders.join(", "),
+            verb_placeholders.join(", "),
+        );
+        let mut guard = self.conn.lock().unwrap();
+        let rows = guard
+            .get_mut()
+            .query(&sql, &param_refs(&binds))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        let covered = rows
+            .iter()
+            .filter_map(|row| {
+                let s: String = row.get(0);
+                Uuid::parse_str(&s).ok()
+            })
+            .collect();
+        Ok(covered)
+    }
+
     fn count(&self) -> StorageResult<usize> {
         let mut guard = self.conn.lock().unwrap();
         let row = guard
@@ -2110,6 +2162,58 @@ impl AuditLog for PgAuditLog {
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
         self.iterate(None, Some(row_id), usize::MAX)
     }
+
+    fn row_ids_with_audit_verbs(
+        &self,
+        row_ids: &[RowKey],
+        verbs: &[&str],
+    ) -> StorageResult<std::collections::HashSet<RowKey>> {
+        if row_ids.is_empty() || verbs.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        // Build a single SQL query:
+        //   SELECT DISTINCT "row_id" FROM "_storagekit_audit"
+        //   WHERE "row_id" IN ($1,$2,...) AND "verb" IN ($n,...)
+        //
+        // row_id is stored as uppercase UUID TEXT (matching audit_params).
+        // This is the read-side of the LEFT JOIN that
+        // tombstoned_rows_without_expunge_audit uses to avoid N per-row
+        // events_for_row calls. The idx_storagekit_audit_row_hlc index covers
+        // the row_id filter; the verb filter is a cheap post-scan predicate.
+        let mut binds: Vec<PgParam> = row_ids
+            .iter()
+            .map(|id| -> PgParam { Box::new(id.to_string().to_uppercase()) })
+            .collect();
+        let row_placeholders: Vec<String> = (1..=row_ids.len())
+            .map(|i| format!("${i}"))
+            .collect();
+        let verb_start = row_ids.len() + 1;
+        for v in verbs {
+            binds.push(Box::new((*v).to_string()));
+        }
+        let verb_placeholders: Vec<String> = (verb_start..=verb_start + verbs.len() - 1)
+            .map(|i| format!("${i}"))
+            .collect();
+        let sql = format!(
+            r#"SELECT DISTINCT "row_id" FROM "_storagekit_audit" WHERE "row_id" IN ({}) AND "verb" IN ({})"#,
+            row_placeholders.join(", "),
+            verb_placeholders.join(", "),
+        );
+        let mut conn = self.pool.checkout()?;
+        let rows = conn
+            .get_mut()
+            .query(&sql, &param_refs(&binds))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        let covered = rows
+            .iter()
+            .filter_map(|row| {
+                let s: String = row.get(0);
+                Uuid::parse_str(&s).ok()
+            })
+            .collect();
+        Ok(covered)
+    }
+
     fn count(&self) -> StorageResult<usize> {
         let mut conn = self.pool.checkout()?;
         let row = conn
