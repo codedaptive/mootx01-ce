@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.4.0
+version: 1.5.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -189,9 +189,19 @@ node_bundles). See ADR-012 for the full inclusion/exclusion list.
 **B-1 (capture validation, then write):** `capture` validates that
 `content`, `room`, `latticeAnchor.udcCode`, `addedBy`, and
 `embeddingModelID` are non-empty (throwing `LocusKitError.invalidContent`
-naming the violated rule) before any storage call, assembles the operational
-and adjective bitmaps from the frame's named slots, writes the drawer, and
-OR-folds its bitmaps into the per-container fingerprint aggregate.
+naming the violated rule) before any storage call, assembles the operational,
+adjective, and provenance bitmaps from the frame's named slots, writes the
+drawer, and OR-folds its bitmaps into the per-container fingerprint aggregate.
+The provenance bitmap (cookbook §2.5) carries `sourceType` (bits 0–5),
+`provenanceChannel` (bits 6–11), `confirmation` (bits 18–23), `confidence`
+(bits 24–29), and `provenanceSensitivity` (bits 30–35) from the frame. All five
+default to raw 0, so a frame that leaves them unset produces a zero-provenance
+drawer byte-for-byte identical to one captured before any provenance slot
+existed; a daemon capturing already-confirmed content with a known confidence
+band records `confirmation` / `confidence` at birth rather than via a later
+`confirm` mutation or enrichment pass. The capture-time write windows match the
+drawer's `confirmation` / `confidence` read accessors exactly (round-trip +
+default-byte-identity conformance-gated in both ports).
 
 **B-2 (supersession cascade):** when `CaptureFrame.lineageID` matches an
 active predecessor, capture fires the cascade atomically inside one
@@ -849,6 +859,23 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-06-17
+Expanded contract B-1: `capture` now assembles the provenance bitmap (cookbook
+§2.5) alongside the operational and adjective bitmaps, writing `confirmation`
+(bits 18–23) and `confidence` (bits 24–29) from the two new `CaptureFrame` slots
+in addition to the already-written `sourceType`, `provenanceChannel`, and
+`provenanceSensitivity`. All five provenance slots default to raw 0, so an
+existing caller produces byte-identical zero-provenance drawers; a daemon
+capturing already-confirmed content with a known confidence band records both at
+birth instead of relying on a later `confirm` mutation or enrichment pass.
+Additive and behaviour-preserving; round-trip + default-byte-identity
+conformance-gated in both ports (`EstateVerbTests.swift` ↔ `estate_verbs.rs`).
+No invariant or recall-default change. (Separately: corrected stale
+`BitmapEvaluator.evaluate` doc comments in both ports that claimed recall hands
+in `allDrawers()` and that fingerprint pruning § 7.9.4 step 1 was deferred —
+container OR-fingerprint pruning has shipped in the recall path and the
+evaluator already receives the pruned candidate set; comment-only.)
 
 ### 1.4.0 -- 2026-06-17
 Added contract B-7a: the per-drawer fingerprint's lattice-block `qidClosureHash`

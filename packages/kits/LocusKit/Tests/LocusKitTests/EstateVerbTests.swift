@@ -40,6 +40,61 @@ struct EstateVerbTests {
         #expect(drawer.operationalBitmap & 0x3F == Int64(CaptureChannel.typed.rawValue))
     }
 
+    @Test("capture with default provenance leaves confirmation/confidence at raw 0")
+    func capture_defaultProvenanceConfirmationConfidenceZero() async throws {
+        let (estate, _) = try await makeEstate()
+        // A frame that omits confirmation/confidence must produce the SAME
+        // provenance bytes as before those slots existed: both fields default
+        // to raw 0 (.unconfirmed / .null), so the confirmation window (bits
+        // 18–23) and confidence window (bits 24–29) are both zero.
+        let frame = CaptureFrame(
+            content: "default provenance",
+            channel: .typed,
+            room: "test-room",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "test-agent",
+            embeddingModelID: "minilm-v6"
+        )
+        let drawer = try await estate.capture(frame)
+        #expect(drawer.confirmation == .unconfirmed)
+        #expect(drawer.confidence == .null)
+        // Confirmation window (bits 18–23) and confidence window (bits 24–29)
+        // are zero — byte-identical to the pre-slot default.
+        #expect(drawer.provenance & 0x3FFC0000 == 0)
+    }
+
+    @Test("capture records non-default confirmation and confidence and round-trips")
+    func capture_nonDefaultProvenanceRoundTrips() async throws {
+        let (estate, _) = try await makeEstate()
+        // A daemon capturing with a known review status and confidence band
+        // records them at birth — no separate confirm/enrichment mutation.
+        let frame = CaptureFrame(
+            content: "daemon-confirmed",
+            channel: .typed,
+            room: "test-room",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "daemon",
+            embeddingModelID: "minilm-v6",
+            confirmation: .automatedConfirmed,
+            confidence: .high
+        )
+        let drawer = try await estate.capture(frame)
+        #expect(drawer.confirmation == .automatedConfirmed)
+        #expect(drawer.confidence == .high)
+        // Re-read from the store to prove the bytes round-trip through SQLite.
+        let refetched = try await estate._peekDrawer(id: drawer.id)
+        guard let refetched else {
+            Issue.record("drawer not found after capture")
+            return
+        }
+        #expect(refetched.confirmation == .automatedConfirmed)
+        #expect(refetched.confidence == .high)
+        // The two new axes do not disturb the other provenance fields
+        // (`sensitivity` decodes provenance bits 30–35).
+        #expect(refetched.sourceType == .user)
+        #expect(refetched.sensitivity == .normal)
+    }
+
     @Test("capture with the same lineageID triggers the supersession cascade")
     func capture_supersessionByLineage() async throws {
         let (estate, _) = try await makeEstate()
