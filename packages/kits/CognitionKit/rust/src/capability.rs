@@ -47,14 +47,21 @@ pub enum NeuronKitCapability {
     /// delegates all closure/dedup/ordering logic here.
     #[serde(rename = "formalConceptAnalysis")]
     FormalConceptAnalysis,
+
+    /// `RandomWalks::walk_with_restart(seed, steps, restart_probability,
+    /// rng_seed, adjacency)` — estate-graph exploratory recall in RowId
+    /// space, aggregating visits by row. Consumed by the `recall_exploratory`
+    /// recipe (`exploratory_recall_recipe.rs`; Swift: `ExploratoryRecall.swift`).
+    #[serde(rename = "exploratoryRecall")]
+    ExploratoryRecall,
 }
 
 impl NeuronKitCapability {
     /// Declaration order — MUST match the Swift `allCases` order. The
     /// capability gate walks this order and reports the first required
     /// capability that is unavailable, so both versions agree on which
-    /// one they name.
-    pub const ALL: [NeuronKitCapability; 8] = [
+    /// one they name. Currently 9 capabilities.
+    pub const ALL: [NeuronKitCapability; 9] = [
         NeuronKitCapability::HybridRecall,
         NeuronKitCapability::Synthesize,
         NeuronKitCapability::DeriveBranch,
@@ -63,6 +70,7 @@ impl NeuronKitCapability {
         NeuronKitCapability::RunTournament,
         NeuronKitCapability::AssociationRuleMining,
         NeuronKitCapability::FormalConceptAnalysis,
+        NeuronKitCapability::ExploratoryRecall,
     ];
 
     /// The capability's stable string identifier — identical to the Swift
@@ -77,6 +85,7 @@ impl NeuronKitCapability {
             NeuronKitCapability::RunTournament => "runTournament",
             NeuronKitCapability::AssociationRuleMining => "associationRuleMining",
             NeuronKitCapability::FormalConceptAnalysis => "formalConceptAnalysis",
+            NeuronKitCapability::ExploratoryRecall => "exploratoryRecall",
         }
     }
 }
@@ -180,6 +189,7 @@ mod tests {
                 NeuronKitCapability::FormalConceptAnalysis,
                 "formalConceptAnalysis",
             ),
+            (NeuronKitCapability::ExploratoryRecall, "exploratoryRecall"),
         ];
         for (cap, raw) in pairs {
             assert_eq!(cap.raw_value(), raw);
@@ -188,12 +198,16 @@ mod tests {
 
     #[test]
     fn new_capabilities_appear_in_all_and_shipped() {
-        // AR and FCA cases are in declaration order after runTournament,
-        // present in ALL, and covered by shipped_capabilities().
+        // AR, FCA, and ExploratoryRecall cases are in declaration order
+        // after runTournament, present in ALL, and covered by
+        // shipped_capabilities().
         assert!(NeuronKitCapability::ALL.contains(&NeuronKitCapability::AssociationRuleMining));
         assert!(NeuronKitCapability::ALL.contains(&NeuronKitCapability::FormalConceptAnalysis));
+        assert!(NeuronKitCapability::ALL.contains(&NeuronKitCapability::ExploratoryRecall));
         assert!(shipped_capabilities().contains(&NeuronKitCapability::AssociationRuleMining));
         assert!(shipped_capabilities().contains(&NeuronKitCapability::FormalConceptAnalysis));
-        assert_eq!(NeuronKitCapability::ALL.len(), 8);
+        assert!(shipped_capabilities().contains(&NeuronKitCapability::ExploratoryRecall));
+        // 9 total capabilities.
+        assert_eq!(NeuronKitCapability::ALL.len(), 9);
     }
 }

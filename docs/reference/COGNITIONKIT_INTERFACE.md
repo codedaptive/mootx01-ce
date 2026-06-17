@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Interface
-version: 1.1.0
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
@@ -67,6 +67,9 @@ public enum NeuronKitCapability: String, Sendable, Hashable, CaseIterable, Codab
     case promoteBranch
     case benchmark
     case runTournament
+    case associationRuleMining
+    case formalConceptAnalysis
+    case exploratoryRecall      // gates RandomWalks.walkWithRestart (ExploratoryRecall.swift)
 }
 
 public let shippedNeuronKitCapabilities: Set<NeuronKitCapability>
@@ -82,6 +85,7 @@ public func verifyCapabilities(
 ```rust
 pub enum NeuronKitCapability {
     HybridRecall, Synthesize, DeriveBranch, PromoteBranch, Benchmark, RunTournament,
+    AssociationRuleMining, FormalConceptAnalysis, ExploratoryRecall,
 }
 impl NeuronKitCapability { pub fn raw_value(&self) -> &'static str; }
 
@@ -481,14 +485,15 @@ pub fn recipe_names() -> Vec<String>;
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
 versions; a recipe enters only when both ports land together (SPEC § 8).
-Today that is all twenty-three shipped recipes: the two foundational recipes
+Today that is all twenty-five shipped recipes: the two foundational recipes
 **grounded_synthesis** and **migration_benchmark**, the eighteen reasoning
 lenses (`keystones`, `constellation`, `free_association`, `latent_themes`,
 `theme_weather`, `bias`, `drift`, `contradiction`, `trust_grounded_synthesis`,
 `partial_cue_recall`, `anticipate`, `tunnel_successor`, `mind_overlap`,
-`estate_divergence`, `moment`, `rhythm`, `precedence`, `complexity`), and
-the three knowledge-discovery recipes `association_rules`, `apriori_rules`,
-and `formal_concepts`.
+`estate_divergence`, `moment`, `rhythm`, `precedence`, `complexity`), the
+three knowledge-discovery recipes `association_rules`, `apriori_rules`, and
+`formal_concepts`, the steerable-fusion recipe `shaped_recall`, and the
+exploratory-recall recipe `recall_exploratory`.
 
 ---
 
@@ -526,7 +531,7 @@ every row, so it is stated once here rather than repeated:
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Recipe contract | `Recipe` protocol (`Recipe.swift:34`) | *(no trait)* — free `run_*` fn convention | Swift public protocol; Rust: convention only | Swift protocol / Rust free-fn convention (§ 2) — sanctioned recipe idiom | `RecipeTests.swift` | Confirmed |
-| Capability set | `NeuronKitCapability` enum (`NeuronKitCapability.swift:34`) | `NeuronKitCapability` enum (`capability.rs:19`) | public both | 8 cases; camelCase ↔ PascalCase; `rawValue`/`raw_value` strings match byte-for-byte | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
+| Capability set | `NeuronKitCapability` enum (`NeuronKitCapability.swift:34`) | `NeuronKitCapability` enum (`capability.rs:19`) | public both | 9 cases; camelCase ↔ PascalCase; `rawValue`/`raw_value` strings match byte-for-byte | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Shipped capabilities | `shippedNeuronKitCapabilities` let (`NeuronKitCapability.swift:81`) | `shipped_capabilities()` fn (`capability.rs:82`) | public both | Swift constant `Set` / Rust fn returning `Vec` (same membership) | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Capability verify | `verifyCapabilities(...)` fn (`NeuronKitCapability.swift:93`) | `verify_capabilities(...)` fn (`capability.rs:93`) | public both | Swift `throws` / Rust `Result` — deterministic first-missing order matches | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Recipe error | `RecipeError` enum (`RecipeError.swift:24`) | `RecipeError` enum (`error.rs:18`) | public both | 6 cases — names, payloads, `description`/`Display` strings match byte-for-byte | `RecipeErrorTests.swift` + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
@@ -622,6 +627,8 @@ every row, so it is stated once here rather than repeated:
 | Precise-recall match | `PreciseMatch` (`PreciseRecall.swift:9`) | `PreciseMatch` (`precise_recall.rs:66`) | public both | identical 4-field struct: `id: String`, `room: String`, `content: String`, `score: Double`/`f64` — the ranked result of one precise-recall candidate. Swift camelCase / Rust snake_case fields — idiom. | `CognitionKitTests.swift` (precise-recall suite) / `precise_recall.rs #[cfg(test)]` | Confirmed |
 | Precise-recall runner | `PreciseRecall` (`PreciseRecall.swift:66`) | `run_precise_recall` free fn + `DEFAULT_POOL as PRECISE_DEFAULT_POOL` (`precise_recall.rs:82`) | Swift public caseless-enum namespace / Rust pub free fn | Swift caseless-enum namespace `PreciseRecall.run(kit:handle:query:filter:limit:pool:composition:)` (async throws) / Rust free `run_precise_recall(coord, query, filter, limit, pool, composition)` (sync Result) — sanctioned recipe idiom: Swift-type-namespace ↔ Rust-free-run_*-fn; async↔sync seam. `defaultPool`/`DEFAULT_POOL` = 30 on both ports. | `CognitionKitTests.swift` / `precise_recall.rs #[cfg(test)]` | **Confirmed (swift enum namespace / Rust free-fn idiom)** |
 | Shaped-recall recipe | `ShapedRecall` struct (`ShapedRecall.swift`) | `run_shaped_recall` free fn + `ShapedRecallOutput` struct (`shaped_recall.rs`) | public both | Swift `Recipe` struct (async) `ShapedRecall().run(input:estate:kit:)` with nested `Input` (query/preset/filter/limit) + `Output` (matches/appliedPreset) / Rust free `run_shaped_recall(coord, handle, query, preset, filter, limit, now)` (sync Result) returning `ShapedRecallOutput`. Resolves a named GLK `RecallShape.preset` and runs `.unionBest`/`.matrixAware` recall with it; `"balanced"`/unknown ⇒ unsteered. Reuses `PreciseMatch` for matches. Registered as `shaped_recall` in the catalog. | `ShapedRecallTests.swift` / `shaped_recall.rs #[cfg(test)]` | Confirmed |
+| Exploratory-recall recipe | `ExploratoryRecall` struct (`ExploratoryRecall.swift`) | `run_exploratory_recall` free fn + `ExploratoryRecallOutput` struct (`exploratory_recall_recipe.rs`) | public both | Swift `Recipe` struct (async) with nested `Input` (wing/seedDrawerID/steps/restartProbability/k) + `Output` (results/visitedCount) / Rust free `run_exploratory_recall(coord, handle, wing, seed_drawer_id, steps, restart_probability, k)` (sync Result) returning `ExploratoryRecallOutput`. Both build a RowId adjacency from the tunnel graph, derive the RNG seed via FNV hash64, and delegate to `SubstrateML.RandomWalks.walkWithRestart`/`walk_with_restart`. Excludes seed from results; k=0 returns all. Declares `exploratoryRecall` capability. | `ExploratoryRecallTests.swift` (7 tests) / `exploratory_recall_recipe.rs #[cfg(test)]` (7 tests, CK-ER-1..7) | Confirmed |
+| Exploratory result | `ExploratoryResult` struct (`ExploratoryRecall.swift`) | `ExploratoryResult` struct (`exploratory_recall_recipe.rs`) | public both | `drawerID`/`drawer_id`: UUID string; `visitCount`/`visit_count`: Int/u64 — visit count for that drawer. Sorted descending by visit count, then ascending by drawer id (stable tie-break, cross-version identical). | `ExploratoryRecallTests.swift` + `exploratory_recall_recipe.rs #[cfg(test)]` | Confirmed |
 
 ### Shared-vector conformance artifact
 
@@ -699,6 +706,16 @@ disabled.
 *End of CognitionKit Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Additive (A-2 exploratory-recall): added `exploratoryRecall` to the capability enum
+(§ 3, 8→9 cases) in both ports. Added the `recall_exploratory` recipe (both ports):
+Swift `ExploratoryRecall: Recipe` with nested `Input`/`Output` + `ExploratoryResult`;
+Rust `run_exploratory_recall` + `ExploratoryRecallOutput` + `ExploratoryResult`. Both
+build a RowId adjacency from the tunnel graph and delegate to
+`RandomWalks.walkWithRestart`/`walk_with_restart`; RNG seed derived via FNV hash64.
+Added concordance rows for the recipe and its result type. Updated catalog count
+(24→25) and added `recall_exploratory` to the catalog prose.
 
 ### 1.1.0 -- 2026-06-17
 Additive (GLK-RECALL-SHAPE-PRESETS): new `ShapedRecall` recipe (both ports) — a
