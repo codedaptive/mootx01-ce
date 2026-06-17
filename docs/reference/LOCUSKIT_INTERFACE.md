@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.1.1
+version: 1.2.0
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -206,7 +206,12 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
     public init(id: String = UUID().uuidString, subject: String, predicate: String, object: String,
                 sourceDrawerID: String, adjectiveBitmap: Int64 = 0, operationalBitmap: Int64 = 0,
                 provenanceBitmap: Int64 = 0, filedAt: Date)
-    public var trust: Trust   // operational accessors in KGFactOperational.swift (Tier 2)
+    // All four adjective-bitmap axes (cookbook §2.3 / §5.5; same encoding as Drawer):
+    public var state: State                            // bits 0–5,  default .active
+    public var adjectiveSensitivity: AdjectiveSensitivity  // bits 6–11, default .normal
+    public var exportability: AdjectiveExportability   // bits 12–17, default .private_
+    public var trust: Trust                            // bits 18–23, default .verbatim
+    // operational accessors in KGFactOperational.swift (Tier 2)
 }
 
 public struct DiaryEntry: Equatable, Hashable, Codable, Sendable {
@@ -1159,6 +1164,9 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+`KGFact` now exposes all four adjective-bitmap axes in both ports. Added the `state` (bits 0–5), `adjectiveSensitivity` (bits 6–11), and `exportability` (bits 12–17) computed accessors alongside the existing `trust` (bits 18–23), matching the `Drawer` adjective layout and fail-closed defaults exactly (`.active` / `.normal` / `.private_` / `.verbatim`). Rust: `state()`, `adjective_sensitivity()`, `exportability()`. Additive surface; a fact can now be filtered by the same retrieval-layer predicates as its source drawer. Cross-port conformance added (shared-bitmap coexistence vector). Removed the stale "future sub-mission" comments that claimed these accessors were deferred.
 
 ### 1.1.1 -- 2026-06-17
 Rust `DrawerStore` brought to Swift parity on compile-enforcement: `all_drawers` and `room_level_fingerprints` are now required trait methods with NO default (a backend that forgets either fails to COMPILE, not at runtime). Documented the compile-required-reads exception alongside the existing fail-loud-default newtype-forwarding contract. No behaviour change for any production backend (all three already implement both); no signature change.

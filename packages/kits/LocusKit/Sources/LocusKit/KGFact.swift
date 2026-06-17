@@ -145,14 +145,44 @@ public extension KGFact {
     /// cookbook §2.3 / §5.5 — shared with Drawer). Returns
     /// `.verbatim` for unrecognised raw values — the neutral baseline
     /// matching `Drawer.trust` in `Adjectives.swift`. The four-axis
-    /// adjective bitmap is shared with `Drawer`; only the `trust`
-    /// accessor is exposed here because it is the axis the
-    /// extraction pipeline consults most often when filing facts.
-    /// State, exportability, and sensitivity accessors land alongside
-    /// the persistence path in LOCI_V035_06B when retrieval needs
-    /// them.
+    /// adjective bitmap is shared with `Drawer`; `KGFact` exposes all
+    /// four axes (`state`, `adjectiveSensitivity`, `exportability`,
+    /// `trust`) so a fact can be filtered by the same retrieval-layer
+    /// predicates as its source drawer. Encoding and fail-closed
+    /// defaults match the `Drawer` accessors in `Adjectives.swift`.
     var trust: Trust {
         // Cookbook §2.3: trust at bits 18–23.
         Trust(rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 18, width: 6))) ?? .verbatim
+    }
+
+    /// Decode bits 0–5 of `adjectiveBitmap` as a `State`. Returns
+    /// `.active` for unrecognised raw values so retrieval filters that
+    /// look for current beliefs fail closed (an unknown row surfaces for
+    /// review rather than silently disappearing). Cookbook §2.3 6-bit
+    /// field. Mirrors `Drawer.state` and Rust `KGFact::state`.
+    var state: State {
+        // Cookbook §2.3: state at bits 0–5.
+        State(rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 0, width: 6))) ?? .active
+    }
+
+    /// Decode bits 6–11 of `adjectiveBitmap` as an `AdjectiveSensitivity`.
+    /// Returns `.normal` for unrecognised raw values, matching the
+    /// estate-level default access posture. Named `adjectiveSensitivity`
+    /// (not `sensitivity`) to match the `Drawer` convention and stay
+    /// unambiguous about which bitmap axis is read. Cookbook §2.3 6-bit
+    /// field. Mirrors `Drawer.adjectiveSensitivity` and Rust
+    /// `KGFact::adjective_sensitivity`.
+    var adjectiveSensitivity: AdjectiveSensitivity {
+        // Cookbook §2.3: sensitivity at bits 6–11.
+        AdjectiveSensitivity(rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 6, width: 6))) ?? .normal
+    }
+
+    /// Decode bits 12–17 of `adjectiveBitmap` as an `AdjectiveExportability`.
+    /// Returns `.private_` for unrecognised raw values — non-exportable is
+    /// the safe fallback for an unknown encoding. Cookbook §2.3 6-bit field.
+    /// Mirrors `Drawer.exportability` and Rust `KGFact::exportability`.
+    var exportability: AdjectiveExportability {
+        // Cookbook §2.3: exportability at bits 12–17.
+        AdjectiveExportability(rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 12, width: 6))) ?? .private_
     }
 }
