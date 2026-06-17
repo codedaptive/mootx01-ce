@@ -1048,19 +1048,30 @@ public extension GeniusLocusKit {
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
             let perSignal = await corpus.floatNearestPerSignal(query: text, limit: plan.frontierK)
 
-            // Per-signal ranked id lists feed the N-way RRF voter set. `denseCosineByID`
-            // keeps the MAX normalized cosine across signals for the buffer `dense`
-            // column (N=1 → the single cosine, unchanged). `denseSignalsByID` records
-            // which modelIDs voted, for per-hit provenance. `denseOrder` is the
-            // deterministic first-seen id order.
-            var perSignalLists: [[(id: String, score: Float)]] = []
-            var denseCosineByID: [String: Float] = [:]
+            // Per-signal ranked id lists feed the N-way RRF voter set. Each list is
+            // tagged with its `modelID` so the dense-steering weight
+            // `shape.weight(for: "dense:<modelID>")` can scale it (6b-modifiers-core-2):
+            // the modelID is the only place per-signal dense identity exists before the
+            // lists collapse into the single aggregate `dense` column below.
+            // `denseSignalsByID` records which modelIDs voted, for per-hit provenance.
+            // `denseOrder` is the deterministic first-seen id order. The aggregate
+            // `dense` cosine column is accumulated LATER (after the weights are known)
+            // so a signal weighted <= 0 contributes no cosine — see the consensus fold.
+            var perSignalLists: [(modelID: String, list: [(id: String, score: Float)])] = []
             var denseOrder: [String] = []
+            var denseSeen: Set<String> = []
 
             for (idx, entry) in perSignal.enumerated() {
                 let modelID = entry.modelID
                 switch entry.outcome {
                 case .hits(let matches):
+                    // A signal EXCLUDED by the shape (w==0) did not vote in the
+                    // fusion, so it must not claim per-hit provenance either; record
+                    // its modelID only when it forwards or suppresses (w != 0). A
+                    // suppressing signal (w<0) DID contribute (subtracted mass), so it
+                    // stays in provenance — honest about which signals shaped the hit.
+                    let signalVotes =
+                        (request.recallShape?.weight(for: "dense:\(modelID)") ?? 1.0) != 0
                     var rankedList: [(id: String, score: Float)] = []
                     rankedList.reserveCapacity(matches.count)
                     for m in matches {
@@ -1069,11 +1080,12 @@ public extension GeniusLocusKit {
                         // [0, 1] column's convention (1.0 = identical direction).
                         let dense = max(0, min(1, (m.similarity + 1) / 2))
                         rankedList.append((id: m.itemID, score: dense))
-                        if denseCosineByID[m.itemID] == nil { denseOrder.append(m.itemID) }
-                        denseCosineByID[m.itemID] = max(denseCosineByID[m.itemID] ?? 0, dense)
-                        denseSignalsByID[m.itemID, default: []].append(modelID)
+                        if denseSeen.insert(m.itemID).inserted { denseOrder.append(m.itemID) }
+                        if signalVotes {
+                            denseSignalsByID[m.itemID, default: []].append(modelID)
+                        }
                     }
-                    perSignalLists.append(rankedList)
+                    perSignalLists.append((modelID: modelID, list: rankedList))
 
                 case .unavailableProviderOptOut:
                     // This signal has no float lane — dark, tagged with its modelID.
@@ -1118,29 +1130,62 @@ public extension GeniusLocusKit {
                 }
             }
 
-            // N-way consensus over the per-signal dense lists. For each id, accumulate
-            // the total reciprocal-rank mass across signals and the single largest
-            // per-signal term (the drawer's best rank in any one signal). The boost
-            // is `total − best`: the RRF mass from EVERY voter beyond the single
-            // best-ranked one. At N=1 (one list) total == best for every id → boost
-            // 0 → final == dense (identity with the pre-6b single-`floatNearest`
-            // path). At N>1 a drawer ranked highly by multiple signals accrues extra
-            // rank-aware mass — the consensus property. k=60 matches every other RRF
-            // fusion in this file.
+            // N-way consensus over the per-signal dense lists, DENSE-STEERED by the
+            // `dense:<modelID>` lane weights (6b-modifiers-core-2). For each list L
+            // tagged by `modelID`, `w = shape.weight(for: "dense:<modelID>")` (1.0 when
+            // the shape is nil or the key absent). Each list's reciprocal-rank term is
+            // scaled by `w` before the per-id fold:
+            //
+            //   - `w == 1.0` — neutral. The term is `1/(k+rank+1)`, exactly the
+            //     pre-steer formula. When EVERY held signal is 1.0 (the nil-shape
+            //     default, and any all-ones shape) `denseTotalRRF`, `denseBestTerm`,
+            //     and the aggregate cosine all match the unweighted code byte-for-byte
+            //     — the back-compat contract (proven by test).
+            //   - `w == 0`   — EXCLUDE / leave-one-out. The list is SKIPPED entirely:
+            //     no term enters the fold AND its cosine is withheld from the aggregate
+            //     `dense` column, so a drawer surfaced ONLY by this signal contributes
+            //     nothing (it can still appear if another lane surfaces it, but with no
+            //     dense mass from the excluded signal).
+            //   - `w < 0`    — SUPPRESS. The list's weighted term `w·1/(k+rank+1)` is
+            //     NEGATIVE, so it SUBTRACTS rank mass from `denseTotalRRF` — a drawer
+            //     this signal ranks high is demoted. A suppressed signal does NOT raise
+            //     the aggregate cosine column (only forwarding `w>0` signals do), so
+            //     suppression cannot inflate a drawer's `dense` score.
+            //
+            // `denseBestTerm` is the single largest WEIGHTED per-signal term (the best
+            // forwarding rank in any one signal); the boost `total − best` is therefore
+            // the extra-voter mass beyond that single best, generalised to signed
+            // weights. The aggregate `dense` column = MAX cosine across FORWARDING
+            // (w>0) signals — at N=1 with w=1.0 this is the single cosine, unchanged.
+            // k=60 matches every other RRF fusion in this file.
             let consensusK = 60
             var denseTotalRRF: [String: Float] = [:]
             var denseBestTerm: [String: Float] = [:]
-            for list in perSignalLists {
-                for (rank, item) in list.enumerated() {
-                    let term = Float(1.0 / Double(consensusK + rank + 1))
+            var denseCosineByID: [String: Float] = [:]
+            for entry in perSignalLists {
+                let w = request.recallShape?.weight(for: "dense:\(entry.modelID)") ?? 1.0
+                if w == 0 { continue }  // exclusion: this dense signal votes for nothing
+                for (rank, item) in entry.list.enumerated() {
+                    let term = w * Float(1.0 / Double(consensusK + rank + 1))
                     denseTotalRRF[item.id, default: 0] += term
-                    if term > (denseBestTerm[item.id] ?? 0) { denseBestTerm[item.id] = term }
+                    if term > (denseBestTerm[item.id] ?? -.greatestFiniteMagnitude) {
+                        denseBestTerm[item.id] = term
+                    }
+                    // Only forwarding signals (w > 0) contribute their cosine to the
+                    // aggregate column, so excluding/suppressing a signal removes its
+                    // cosine too (the weighted-combination contract). `item.score` is
+                    // the [0,1]-normalized cosine recorded above.
+                    if w > 0 {
+                        denseCosineByID[item.id] = max(denseCosineByID[item.id] ?? 0, item.score)
+                    }
                 }
             }
 
             // Build one dense hit per distinct id (deterministic first-seen order).
-            // `dense` column = max normalized cosine across signals (N=1 → the single
-            // cosine, unchanged). `final` = that cosine PLUS the consensus boost.
+            // `dense` column = max normalized cosine across forwarding signals (N=1 with
+            // w=1.0 → the single cosine, unchanged). `final` = that cosine PLUS the
+            // consensus boost. An id whose every voting signal was excluded/suppressed
+            // out has no positive cosine and no positive boost — it sinks accordingly.
             denseHits.reserveCapacity(denseOrder.count)
             for id in denseOrder {
                 let dense = denseCosineByID[id] ?? 0
@@ -1362,6 +1407,24 @@ public extension GeniusLocusKit {
         }
         let agreementBonus: Float = 0.05
         var scores = [Float](repeating: 0, count: buffer.count)
+        // Fixed-lane RecallShape steering for the unionBest weighted-column score
+        // (6b-modifiers-core-2). Each fixed lane's column contribution is scaled by
+        // its signed shape weight ON TOP of the adaptive `RecallWeights` budget:
+        //   - `w == 1.0` (nil shape, or any all-ones shape) — neutral. Every column
+        //     keeps its `RecallWeights.adaptive` contribution exactly, so the score is
+        //     BYTE-IDENTICAL to the pre-steer unionBest (the back-compat contract).
+        //   - `w == 0`   — EXCLUDE. That lane's whole column contribution is zeroed.
+        //   - `w < 0`    — SUPPRESS. That lane's column contribution is SUBTRACTED,
+        //     demoting candidates the lane scores high.
+        // The Hamming vector lane keys on "hamming"; the aggregate dense float lane
+        // keys on "dense" (the per-signal `dense:<modelID>` steering already applied
+        // in the consensus fold above, where the column itself was built). locus/bm25
+        // key on their own ids. Matrix/graph/preference lanes are NOT shape-steerable
+        // here — RecallShape addresses the retrieval lanes only.
+        let shapeLocus   = request.recallShape?.weight(for: "locus")   ?? 1.0
+        let shapeBM25    = request.recallShape?.weight(for: "bm25")    ?? 1.0
+        let shapeHamming = request.recallShape?.weight(for: "hamming") ?? 1.0
+        let shapeDense   = request.recallShape?.weight(for: "dense")   ?? 1.0
         switch request.scoring {
         case .matrixAware:
             for i in 0..<buffer.count {
@@ -1372,11 +1435,12 @@ public extension GeniusLocusKit {
                 // The dense float lane shares the `vector` weight budget with
                 // the Hamming lane (both are vector-similarity signals), so
                 // adding dense does not inflate the vector lane's overall share.
+                // Each retrieval lane is additionally scaled by its RecallShape weight.
                 scores[i] =
-                    weights.locus    * buffer.locus[i] +
-                    weights.bm25     * buffer.bm25[i] +
-                    weights.vector   * buffer.vector[i] +
-                    weights.vector   * buffer.dense[i] +
+                    shapeLocus   * weights.locus    * buffer.locus[i] +
+                    shapeBM25    * weights.bm25     * buffer.bm25[i] +
+                    shapeHamming * weights.vector   * buffer.vector[i] +
+                    shapeDense   * weights.vector   * buffer.dense[i] +
                     weights.fieldFit * buffer.fieldFit[i] +
                     weights.matrix   * matrixSignal +
                     weights.graph    * buffer.graph[i] +

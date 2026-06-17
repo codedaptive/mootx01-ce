@@ -84,7 +84,7 @@ use crate::handle::{EstateHandle, EstateUuid};
 use crate::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
     RecallEvidencePath, RecallHit, RecallOrigin, RecallPlan, RecallScoreVector,
-    RecallUnionProfile, RecallWeights,
+    RecallShape, RecallUnionProfile, RecallWeights,
 };
 use crate::verbs::lexicon::VerbError;
 
@@ -3259,38 +3259,57 @@ impl EstateCoordinator {
         }
     }
 
-    /// N-way per-signal dense consensus boost (6b-core).
+    /// N-way per-signal dense consensus fold, DENSE-STEERED by `dense:<model_id>`
+    /// lane weights (6b-core consensus + 6b-modifiers-core-2 steering).
     ///
-    /// Each per-signal dense list is an INDEPENDENT RRF voter: an id accrues
-    /// `Σ_L 1/(k + rank_in_L + 1)` over the per-signal lists `L` that contain it
-    /// (`total_rrf`). The returned boost is the RRF mass from EVERY voter BEYOND
-    /// the single best-ranked one — i.e. `total_rrf − best_single_term`, where
-    /// `best_single_term` is the largest per-signal reciprocal-rank term (the
-    /// drawer's best rank across signals). Therefore:
-    ///   - a drawer ranked by a SINGLE dense signal has `total_rrf == best_single
-    ///     _term` → boost 0, which keeps N=1 byte-identical to the pre-6b single
-    ///     `float_nearest` behaviour (one signal → one term → no extra mass);
-    ///   - a drawer ranked highly by MULTIPLE signals accrues extra rank-aware
-    ///     mass, so it ranks at/above a drawer ranked highly by one signal only
-    ///     (the rank-faithful consensus property — better cross-signal agreement
-    ///     yields a larger boost, not merely the presence of extra votes).
+    /// Each per-signal dense list is an INDEPENDENT RRF voter tagged by its
+    /// `model_id`. For list `L` the steering weight is
+    /// `w = shape.weight("dense:<model_id>")` (1.0 when `shape` is None or the key
+    /// is absent). Each list's reciprocal-rank term is scaled by `w`:
+    ///   - `w == 1.0` — neutral. The term is `1/(k+rank+1)`; when EVERY held signal
+    ///     is 1.0 (the None-shape default and any all-ones shape) `total_rrf`,
+    ///     `best_term`, and the aggregate cosine match the unweighted code BYTE-FOR-
+    ///     BYTE — the back-compat contract. A single signal at 1.0 has
+    ///     `total_rrf == best_term` → boost 0, so N=1 stays byte-identical.
+    ///   - `w == 0`   — EXCLUDE / leave-one-out. The list is SKIPPED: no term, and
+    ///     its cosine is withheld from the aggregate `dense` column.
+    ///   - `w < 0`    — SUPPRESS. The weighted term is NEGATIVE → it SUBTRACTS rank
+    ///     mass from `total_rrf` (a drawer this signal ranks high is demoted). A
+    ///     suppressed signal does NOT raise the aggregate cosine (only `w>0`
+    ///     forwarding signals do).
     ///
-    /// Mirrors Swift RecallDirector's `rrfFuseN` consensus fold over the per-signal
-    /// dense lists.
+    /// The boost is `total_rrf − best_term` (clamped at 0), where `best_term` is the
+    /// single largest WEIGHTED per-signal term — generalising the pre-steer formula
+    /// to signed weights. Returns `(boost_by_id, cosine_by_id)`; `cosine_by_id` is
+    /// the MAX normalized cosine across FORWARDING signals (the aggregate `dense`
+    /// column). Mirrors Swift RecallDirector's dense-steered consensus fold.
     fn dense_consensus_boost(
-        per_signal_lists: &[Vec<(String, f32)>],
+        per_signal_lists: &[(String, Vec<(String, f32)>)],
         k: f32,
-    ) -> HashMap<String, f32> {
-        // Per-id: total reciprocal-rank mass across signals, and the single largest
-        // per-signal term (the best rank the drawer achieved in any one signal).
+        shape: &Option<RecallShape>,
+    ) -> (HashMap<String, f32>, HashMap<String, f32>) {
+        // Per-id: total reciprocal-rank mass across signals, the single largest
+        // weighted per-signal term, and the max cosine across forwarding signals.
         let mut total_rrf: HashMap<String, f32> = HashMap::new();
         let mut best_term: HashMap<String, f32> = HashMap::new();
-        for list in per_signal_lists {
-            for (rank, (id, _)) in list.iter().enumerate() {
-                let term = 1.0 / (k + rank as f32 + 1.0);
+        let mut cosine_by_id: HashMap<String, f32> = HashMap::new();
+        for (model_id, list) in per_signal_lists {
+            let w = shape
+                .as_ref()
+                .map(|s| s.weight(&format!("dense:{model_id}")))
+                .unwrap_or(1.0);
+            if w == 0.0 { continue; } // exclusion: this dense signal votes for nothing
+            for (rank, (id, cosine)) in list.iter().enumerate() {
+                let term = w * (1.0 / (k + rank as f32 + 1.0));
                 *total_rrf.entry(id.clone()).or_insert(0.0) += term;
-                let b = best_term.entry(id.clone()).or_insert(0.0);
+                let b = best_term.entry(id.clone()).or_insert(f32::NEG_INFINITY);
                 if term > *b { *b = term; }
+                // Only forwarding signals (w > 0) contribute their cosine to the
+                // aggregate column (the weighted-combination contract).
+                if w > 0.0 {
+                    let c = cosine_by_id.entry(id.clone()).or_insert(0.0);
+                    if *cosine > *c { *c = *cosine; }
+                }
             }
         }
         let mut boost: HashMap<String, f32> = HashMap::with_capacity(total_rrf.len());
@@ -3299,7 +3318,7 @@ impl EstateCoordinator {
             // Extra-voter mass beyond the single best rank. 0 for a single voter.
             boost.insert(id, (mass - best).max(0.0));
         }
-        boost
+        (boost, cosine_by_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3511,14 +3530,18 @@ impl EstateCoordinator {
         // pre-6b single-signal semantics — at N=1 the default is the only signal.
         let include_dense = matches!(request.mode, GLKRecallMode::UnionBest);
         let mut dense_lane_status: Option<String> = None;
-        // RRF voter lists (one per signal that produced hits).
-        let mut per_signal_dense_lists: Vec<Vec<(String, f32)>> = Vec::new();
+        // RRF voter lists, each TAGGED with its model_id so the dense-steering weight
+        // `shape.weight("dense:<model_id>")` can scale it (6b-modifiers-core-2). The
+        // model_id is the only place per-signal dense identity exists before the lists
+        // collapse into the single aggregate `dense` column built in the consensus fold.
+        let mut per_signal_dense_lists: Vec<(String, Vec<(String, f32)>)> = Vec::new();
         // model_ids that voted for each id, in slot order, for per-hit provenance.
         let mut dense_signals_by_id: HashMap<String, Vec<String>> = HashMap::new();
-        // Consensus deduped list: id → MAX normalized cosine across signals, in
-        // first-seen order (deterministic).
-        let mut dense_cosine_by_id: HashMap<String, f32> = HashMap::new();
+        // First-seen id order (deterministic). The aggregate cosine column is built
+        // LATER (in the consensus fold, weight-aware) so a signal weighted <= 0
+        // contributes no cosine.
         let mut dense_order: Vec<String> = Vec::new();
+        let mut dense_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         if include_dense {
             if let Some(ref c) = corpus {
                 if !query_str.is_empty() {
@@ -3531,23 +3554,34 @@ impl EstateCoordinator {
                     {
                         match outcome {
                             FloatLaneOutcome::Hits(matches) => {
-                                // This signal contributed a ranked dense list.
+                                // This signal contributed a ranked dense list. A signal
+                                // EXCLUDED by the shape (w==0) did not vote in the fusion,
+                                // so it must not claim per-hit provenance either; record
+                                // its model_id only when it forwards or suppresses (w!=0).
+                                // A suppressing signal (w<0) DID contribute (subtracted
+                                // mass), so it stays in provenance — mirrors Swift.
+                                let signal_votes = request
+                                    .recall_shape
+                                    .as_ref()
+                                    .map(|s| s.weight(&format!("dense:{model_id}")))
+                                    .unwrap_or(1.0)
+                                    != 0.0;
                                 let mut ranked: Vec<(String, f32)> =
                                     Vec::with_capacity(matches.len());
                                 for (id, sim) in matches {
                                     let dense = ((sim + 1.0) / 2.0).clamp(0.0, 1.0);
                                     ranked.push((id.clone(), dense));
-                                    if !dense_cosine_by_id.contains_key(&id) {
+                                    if dense_seen.insert(id.clone()) {
                                         dense_order.push(id.clone());
                                     }
-                                    let entry = dense_cosine_by_id.entry(id.clone()).or_insert(0.0);
-                                    if dense > *entry { *entry = dense; }
-                                    dense_signals_by_id
-                                        .entry(id)
-                                        .or_default()
-                                        .push(model_id.clone());
+                                    if signal_votes {
+                                        dense_signals_by_id
+                                            .entry(id)
+                                            .or_default()
+                                            .push(model_id.clone());
+                                    }
                                 }
-                                per_signal_dense_lists.push(ranked);
+                                per_signal_dense_lists.push((model_id.clone(), ranked));
                             }
                             FloatLaneOutcome::UnavailableProviderOptOut => {
                                 // This signal has no float lane — dark, tagged by model_id.
@@ -3605,19 +3639,27 @@ impl EstateCoordinator {
                 }
             }
         }
-        // Consensus deduped dense list (id → max normalized cosine), first-seen order.
-        // Equals the single `float_nearest` list at N=1.
+        // N-way consensus RRF over the per-signal dense lists, DENSE-STEERED by the
+        // `dense:<model_id>` weights (6b-modifiers-core-2). The boost folded into a
+        // candidate's final score is the EXTRA-voter RRF mass beyond the single best
+        // weighted term (0 for a single forwarding voter, so N=1 is byte-identical);
+        // `dense_cosine_by_id` is the aggregate cosine column over FORWARDING signals
+        // (an excluded/suppressed signal contributes no cosine). At all-1.0 weights
+        // both maps equal the unweighted code byte-for-byte.
+        let (dense_consensus_boost, dense_cosine_by_id): (HashMap<String, f32>, HashMap<String, f32>) =
+            Self::dense_consensus_boost(&per_signal_dense_lists, 60.0, &request.recall_shape);
+        // Consensus deduped dense list (id → max normalized cosine over FORWARDING
+        // signals), first-seen order. Equals the single `float_nearest` list at N=1
+        // with neutral weights. Every id seen by the dense lane stays in the list
+        // (structural parity with Swift, which builds one dense hit per dense_order
+        // id); an id whose every voting signal was excluded/suppressed has cosine 0
+        // (no forwarding signal raised it), so it carries no dense mass — its dense
+        // column is 0 in the matrixAware score and its dense `final` contribution is
+        // the consensus boost only (0 at N=1, mirroring Swift's `cosine + boost`).
         let dense_list: Vec<(String, f32)> = dense_order
             .iter()
-            .map(|id| (id.clone(), dense_cosine_by_id[id]))
+            .map(|id| (id.clone(), dense_cosine_by_id.get(id).copied().unwrap_or(0.0)))
             .collect();
-        // N-way consensus RRF over the per-signal dense lists. The boost folded into
-        // a candidate's final score (Raw/Rrf paths below) is the RRF mass from the
-        // EXTRA voters beyond the first, so a single-signal candidate gets 0 boost —
-        // making N=1 byte-identical, while a multi-signal candidate ranks at/above
-        // an equal-cosine single-signal candidate (the consensus property).
-        let dense_consensus_boost: HashMap<String, f32> =
-            Self::dense_consensus_boost(&per_signal_dense_lists, 60.0);
 
         // --- Candidate set: collect unique IDs from all populated lanes ---
         let mut all_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3850,13 +3892,33 @@ impl EstateCoordinator {
             //   matrixSignal = (coOccurrence + temporal) * 0.5
             //   dense shares the vector weight budget.
             //   agreementBonus = 0.05 * popcount(sourceMask) / 4.
+            //
+            // Fixed-lane RecallShape steering (6b-modifiers-core-2): each retrieval
+            // lane's column contribution is scaled by its signed shape weight ON TOP
+            // of the adaptive `RecallWeights` budget. None shape (or any all-ones
+            // shape) → every weight 1.0 → BYTE-IDENTICAL to the pre-steer score (the
+            // back-compat contract). w==0 zeroes a lane's column; w<0 subtracts it
+            // (demotion). The Hamming lane keys "hamming", the aggregate dense float
+            // lane keys "dense" (per-signal `dense:<model_id>` steering already
+            // applied in the consensus fold where col_dense was built). Matrix/graph/
+            // preference lanes are NOT shape-steerable — RecallShape addresses the
+            // retrieval lanes only, mirroring Swift.
+            let (sh_locus, sh_bm25, sh_hamming, sh_dense) = match &request.recall_shape {
+                Some(s) => (
+                    s.weight("locus"),
+                    s.weight("bm25"),
+                    s.weight("hamming"),
+                    s.weight("dense"),
+                ),
+                None => (1.0, 1.0, 1.0, 1.0),
+            };
             let agreement_bonus: f32 = 0.05;
             for (i, v) in col_final.iter_mut().take(count).enumerate() {
                 let matrix_signal = (col_co_occur[i] + col_temporal[i]) * 0.5;
-                *v = weights.locus    * col_locus[i]
-                   + weights.bm25     * col_bm25[i]
-                   + weights.vector   * col_vector[i]
-                   + weights.vector   * col_dense[i]     // dense shares vector weight budget
+                *v = sh_locus   * weights.locus    * col_locus[i]
+                   + sh_bm25    * weights.bm25     * col_bm25[i]
+                   + sh_hamming * weights.vector   * col_vector[i]
+                   + sh_dense   * weights.vector   * col_dense[i]     // dense shares vector weight budget
                    + weights.field_fit * col_field_fit[i]
                    + weights.matrix   * matrix_signal
                    + weights.graph    * 0.0_f32          // graph: no cache registered → 0.0
