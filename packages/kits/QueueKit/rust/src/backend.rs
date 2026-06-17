@@ -23,13 +23,9 @@ pub trait QueueBackend: Send + Sync {
     /// parity: `QueueBackend.pendingCount()`. Used by `await_drain` to detect an
     /// empty `new/` frontier, and available to telemetry as a depth probe.
     ///
-    /// The default returns `BackendUnavailable` so a backend that has not
-    /// implemented the probe fails cleanly rather than at link time. Conforming
-    /// backends override.
-    fn pending_count(&self) -> Result<usize, QueueError> {
-        Err(QueueError::BackendUnavailable(
-            "pending_count() not implemented for this backend".to_string()))
-    }
+    /// Required, no default: an SDK backend that forgets the probe must fail to
+    /// COMPILE rather than at runtime. Every conforming backend implements it.
+    fn pending_count(&self) -> Result<usize, QueueError>;
 
     /// Block until the queue has no pending and no in-flight work, then return.
     ///
@@ -93,14 +89,9 @@ pub trait QueueBackend: Send + Sync {
     /// `handler` returns an error or until the watcher encounters a
     /// fatal error. Conforms to QUEUEKIT_SPEC §3 watch() semantics.
     ///
-    /// The default implementation returns `BackendUnavailable` so that
-    /// backends that have not yet implemented `watch()` fail cleanly
-    /// rather than at link time. Conforming backends override.
-    fn watch<F>(&self, _handler: F) -> Result<(), QueueError>
+    /// Required, no default: an SDK backend that forgets `watch()` must fail to
+    /// COMPILE rather than at runtime. Every conforming backend implements it.
+    fn watch<F>(&self, handler: F) -> Result<(), QueueError>
     where
-        F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync,
-    {
-        Err(QueueError::BackendUnavailable(
-            "watch() not implemented for this backend".to_string()))
-    }
+        F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync;
 }

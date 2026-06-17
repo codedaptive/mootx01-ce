@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.1.0
+version: 1.1.1
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -629,6 +629,15 @@ guard exercises the dreaming-reader B-1 path (`Estate::all_tunnels`) over a
 durable SQLite estate. The invariant: no durable-backend read method may
 inherit a trait default.
 
+**Compile-required reads (no default at all).** Two `DrawerStore` reads —
+`all_drawers` and `room_level_fingerprints` — carry NO trait default. Per the
+SDK compile-enforcement ruling, a backend that forgets a corpus-scan /
+container-fingerprint read must fail to COMPILE rather than fail loud at
+runtime. For these two the omitted-forward failure mode is a build error, not a
+runtime `DatabaseUnavailable`; the rest of the read surface retains the
+fail-loud default described above. This matches the Swift surface, where both
+are bare (non-defaulted) members of the concrete `DrawerStore` actor.
+
 ### Tier 2 — broader surface (table of contents)
 
 The following public types are part of the kit's surface and consumed by its
@@ -1150,6 +1159,9 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.1.1 -- 2026-06-17
+Rust `DrawerStore` brought to Swift parity on compile-enforcement: `all_drawers` and `room_level_fingerprints` are now required trait methods with NO default (a backend that forgets either fails to COMPILE, not at runtime). Documented the compile-required-reads exception alongside the existing fail-loud-default newtype-forwarding contract. No behaviour change for any production backend (all three already implement both); no signature change.
 
 ### 1.1.0 -- 2026-06-17
 Schema v1 → v2 (ADR-012): added the nullable `.json` `ext` forward-compat slot to the `keys` table, completing the one-`ext`-column-per-persistent-entity convention. Both ports; 1.0 writes NULL and never reads it. Updated the `LocusKitSchema.version` surface and the `keys`-table concordance row.

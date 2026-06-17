@@ -17,13 +17,19 @@
 //!
 //! ## Trait surface
 //!
-//! Every read-path default returns `LocusKitError::DatabaseUnavailable` so
+//! Most read-path defaults return `LocusKitError::DatabaseUnavailable` so
 //! any backend that forgets to implement a method fails loud rather than
-//! silently returning zero rows or `None`. The rule is unconditional: an
-//! abstract trait default that returns empty-success hides a missing
-//! implementation (math-provenance gate FINDING-3, 2026-06-12).
+//! silently returning zero rows or `None`: an abstract trait default that
+//! returns empty-success hides a missing implementation (math-provenance gate
+//! FINDING-3, 2026-06-12).
 //!
 //! Write-path defaults return the same error for the same reason.
+//!
+//! **Required methods — no default at all (compile-time enforcement):**
+//! `all_drawers` and `room_level_fingerprints` carry NO default. Per Bob's SDK
+//! ruling, a backend that forgets a corpus-scan / container-fingerprint read
+//! must fail to COMPILE rather than fail loud at runtime. The three production
+//! stores already implement both.
 //!
 //! **Exceptions — three no-op/delegation defaults that are deliberately
 //! non-fail-loud:**
@@ -42,11 +48,13 @@
 //!   aggregate MUST NOT prune, which is the sound safe-side behaviour for
 //!   backends that do not maintain the aggregate (spec § 11.5).
 //!
-//! **Test fakes** (`estate.rs::FakeStore`) override the three abstract
-//! methods they exercise (`read_manifest`, `set_meta`, `drawer_ids`).
-//! For methods not called by their tests, they must explicitly override
-//! with the appropriate empty-return if the test requires it — relying on
-//! the trait default is no longer allowed.
+//! **Test fakes** (`estate.rs::FakeStore`) override the methods they
+//! exercise (`read_manifest`, `set_meta`, `drawer_ids`) PLUS the two
+//! now-required reads (`all_drawers`, `room_level_fingerprints`) with trivial
+//! empty-returns, because those two carry no default. For other methods not
+//! called by their tests, they must explicitly override with the appropriate
+//! empty-return if the test requires it — relying on the trait default is no
+//! longer allowed.
 //!
 //! ## Async story
 //!
@@ -94,10 +102,13 @@ use substrate_types::fingerprint256::Fingerprint256;
 /// boundaries inside the `Estate` handle, which is the shape future
 /// async wrappers and FFI consumers need.
 ///
-/// Every method below has a default impl so minimal fakes (LP-1B
+/// Most methods below have a default impl so minimal fakes (LP-1B
 /// `FakeStore`, future net-new test stubs) compile without overriding
-/// what they do not exercise. Production backends — the LP-1E
-/// `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
+/// what they do not exercise. The exceptions are the manifest contract
+/// (`read_manifest` / `set_meta`) and the two compile-enforced reads
+/// (`all_drawers`, `room_level_fingerprints`) which have NO default — every
+/// store, including minimal fakes, must implement them. Production backends —
+/// the LP-1E `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
 /// `DrawerStoreCore`) — override every method.
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
@@ -234,18 +245,16 @@ pub trait DrawerStore: Send + Sync {
     /// its own tier (§ 7.9.4); callers needing a pre-filtered set use
     /// `drawers_in_wing` / `drawers_in_wing_room` instead.
     ///
-    /// ## Default impl — fail-loud, never silently empty
+    /// ## Required, no default — compile-time enforcement
     ///
-    /// All three production backends override this with a real scan.
-    /// An empty-`Ok` default is the exact bug class that shipped on the
+    /// An empty-`Ok` default was the exact bug class that shipped on the
     /// Postgres backend before this fix: a store that did not override
     /// `all_drawers` returned ZERO rows on every recall scan
-    /// (math-provenance gate FINDING-3, 2026-06-12).
-    fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "all_drawers not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
+    /// (math-provenance gate FINDING-3, 2026-06-12). Per Bob's SDK ruling, a
+    /// backend that forgets a corpus-scan method must fail to COMPILE rather
+    /// than at runtime — so this is a required trait method with no default.
+    /// All three production backends implement it.
+    fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError>;
 
     /// Bounded full-corpus scan ordered by `filed_at` ascending.
     ///
@@ -1275,18 +1284,16 @@ pub trait DrawerStore: Send + Sync {
     /// kit-level accessor GLK forwards to rather than reaching around to
     /// the store's storage directly (B-1).
     ///
-    /// ## Default impl — fail-loud, never silently empty
+    /// ## Required, no default — compile-time enforcement
     ///
-    /// All three production backends override this with a real scan of the
+    /// All three production backends implement this with a real scan of the
     /// `container_fingerprints` table. A silent-empty default would cause the
     /// maintenance daemon's fingerprint-drift signal to silently see zero
     /// containers and skip drift detection entirely
-    /// (math-provenance gate FINDING-3, 2026-06-12).
-    fn room_level_fingerprints(&self) -> Result<Vec<RoomLevelEntry>, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "room_level_fingerprints not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
+    /// (math-provenance gate FINDING-3, 2026-06-12). Per Bob's SDK ruling, a
+    /// backend that forgets this read must fail to COMPILE rather than at
+    /// runtime — so this is a required trait method with no default.
+    fn room_level_fingerprints(&self) -> Result<Vec<RoomLevelEntry>, LocusKitError>;
 
     /// OR one drawer's three bitmap fields into its room-level and
     /// wing-level container-fingerprint rows (spec § 11.5).
