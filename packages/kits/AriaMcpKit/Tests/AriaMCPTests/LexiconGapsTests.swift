@@ -159,6 +159,9 @@ struct LexiconGapsTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
         )
         #expect(text.contains("iron"), "fact_search must return filed facts; got: \(text)")
+        // Part 6: evaluation fields — filed= and source= must appear in each fact line.
+        #expect(text.contains("filed="), "fact_search must include filed= timestamp; got: \(text)")
+        #expect(text.contains("source="), "fact_search must include source= drawer ID; got: \(text)")
     }
 
     // MARK: - Tier 3: moot_retire_fact
@@ -206,6 +209,46 @@ struct LexiconGapsTests {
         }
         let obj = try #require(result.objectValue)
         #expect(obj["isError"] == .bool(false), "fact_timeline must return isError=false")
+    }
+
+    @Test("moot_fact_timeline includes sourceDrawerID evaluation field")
+    func factTimelineIncludesSourceField() async throws {
+        let dispatcher = try await makeDispatcher()
+        // File a fact to have something in the timeline.
+        _ = await dispatcher.handle(JSONRPCRequest(
+            id: .integer(0),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_file_fact"),
+                "arguments": .object([
+                    "subject": .string("copper"),
+                    "predicate": .string("is_a"),
+                    "object": .string("metal"),
+                ]),
+            ])
+        ))
+        let request = JSONRPCRequest(
+            id: .integer(6),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_fact_timeline"),
+                "arguments": .object([:]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_fact_timeline returned JSON-RPC error: \(response.payload)")
+            return
+        }
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false))
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
+        )
+        // Part 6: source= evaluation field must appear on every fact line.
+        #expect(text.contains("source="), "fact_timeline must include source= field; got: \(text)")
+        #expect(text.contains("copper"), "fact_timeline must include filed facts; got: \(text)")
     }
 
     // MARK: - Tier 4: moot_write_journal

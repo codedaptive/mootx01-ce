@@ -1201,8 +1201,13 @@ extension ToolDispatcher {
                 $0.object.lowercased().contains(q)
             }
         } ?? allFacts
+        // Include evaluation fields (filedAt, sourceDrawerID) so callers can
+        // reason about provenance and temporal ordering without a separate
+        // timeline call. ISO8601 for filedAt; sourceDrawerID for source tracing.
+        let formatter = ISO8601DateFormatter()
         let lines = facts.prefix(100).map { f -> String in
-            "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
+            let filed = formatter.string(from: f.filedAt)
+            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  source=\(f.sourceDrawerID)"
         }
         let header = query != nil
             ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
@@ -1281,10 +1286,12 @@ extension ToolDispatcher {
         let entity = try optionalString(args["entity"], argument: "entity")
         let facts = try await kit.recallKGFactTimeline(handle, entity: entity)
         let formatter = ISO8601DateFormatter()
+        // Include sourceDrawerID for provenance tracing. filedAt already present
+        // for chronological ordering; sourceDrawerID added for source evaluation.
         let lines = facts.prefix(200).map { f -> String in
             let filed = formatter.string(from: f.filedAt)
             let lifecycleTag = Self.lifecycleTag(forAdjectiveBitmap: f.adjectiveBitmap)
-            return "\(filed)  \(lifecycleTag)  \(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
+            return "\(filed)  \(lifecycleTag)  \(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  source=\(f.sourceDrawerID)"
         }
         let count = facts.count
         let header: String
