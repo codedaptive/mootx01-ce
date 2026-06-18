@@ -55,7 +55,7 @@ public final class PostgreSQLStorage: Storage, Sendable {
             searchPath: searchPath
         )
         self.pool = pool
-        let backend = PostgreSQLBackend(pool: pool)
+        let backend = PostgreSQLBackend(pool: pool, encryptionConfig: configuration.encryptionConfig)
         self.backend = backend
         let baseRowStore = PostgreSQLRowStore(backend: backend)
         // Wrap in the LRU hot-tier decorator when caching is enabled. The
@@ -122,9 +122,16 @@ actor PostgreSQLBackend {
     let pool: PostgreSQLPool
     let logger = Logger(label: "storagekit.postgres.backend")
     var schemaDeclaration: SchemaDeclaration?
+    /// At-rest encryption config for this estate. `nonisolated` so the row
+    /// stores can read it synchronously when applying the per-row content seam
+    /// (it is immutable and `Sendable`). Mode 2 (RowEncryption) is the only
+    /// mode the seam acts on; FullDatabase has no PostgreSQL analogue (the
+    /// server owns the schema), and plaintext is a no-op.
+    nonisolated let encryptionConfig: EstateEncryptionConfig
 
-    init(pool: PostgreSQLPool) {
+    init(pool: PostgreSQLPool, encryptionConfig: EstateEncryptionConfig) {
         self.pool = pool
+        self.encryptionConfig = encryptionConfig
     }
 
     func open(schema: SchemaDeclaration) async throws {
