@@ -20,7 +20,7 @@
 //!
 //! # Server defaults (mirrors Swift `ToolDispatch.swift` constants)
 //!
-//! - `channel` = `CaptureChannel::ImportedFile`
+//! - `channel` = `CaptureChannel::Actuator` (cookbook §2.4: actuator-driven capture)
 //! - `added_by` = `"aria-mcp-server"`
 //! - `lattice_anchor` = `LatticeAnchor::udc("000.000")`
 //! - `embedding_model_id` = `"default"` (selects the 1.0 default recall
@@ -31,12 +31,13 @@
 use std::collections::BTreeMap;
 
 use locus_kit::{
-    adjectives::AdjectiveExportability,
+    adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     estate_types::LatticeAnchor,
     filter::RecallFrame,
     frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
     tunnel_operational::TunnelKind,
-    drawer_operational::CaptureChannel,
+    drawer_operational::{CaptureChannel, ContentKind},
+    provenance::Channel,
 };
 
 use genius_locus_kit::WriteMode;
@@ -164,9 +165,16 @@ fn run_file_memory(
     let location = require_string(args, "location")?;
     let exportability = decode_exportability(args)?;
 
+    // Decode caller-supplied adjectives. Absent → keep CaptureFrame defaults.
+    // Unknown → reject with INVALID_PARAMS listing accepted values (mirrors Swift).
+    let kind = decode_content_kind_arg(args.get("kind"))?;
+    let sensitivity = decode_sensitivity_arg(args.get("sensitivity"))?;
+
     let mut frame = CaptureFrame::new(
         content,
-        CaptureChannel::ImportedFile,
+        // Actuator-driven capture (cookbook §2.4): file_memory is submitted by
+        // an MCP AI agent (actuator), not a file import. Raw 5 per DrawerOperational.
+        CaptureChannel::Actuator,
         location,
         LatticeAnchor::udc(DEFAULT_LATTICE_CODE),
         SERVER_ADDED_BY,
@@ -176,6 +184,17 @@ fn run_file_memory(
     // Private (privacy-preserving); supply "public" in the args to birth a
     // drawer that is immediately visible to filter:exportable recall.
     frame.exportability = exportability;
+    // Apply caller-supplied content kind (defaults to Prose if absent).
+    if let Some(k) = kind {
+        frame.kind = k;
+    }
+    // Apply caller-supplied sensitivity tier (defaults to Normal if absent).
+    if let Some(s) = sensitivity {
+        frame.sensitivity = s;
+    }
+    // Provenance channel: marks this row as MCP-agent-sourced in the provenance
+    // bitmap (§2.5). Mirrors Swift's `provenanceChannel: .mcpAgent`.
+    frame.provenance_channel = Channel::McpAgent;
 
     // D-A: `impatient` is an execution option on the write verb (Dual-Path
     // Intake), mirroring the Swift ARIA_MCP threading. When true the memory is
@@ -1169,6 +1188,69 @@ fn decode_exportability(args: &BTreeMap<String, JsonValue>) -> Result<AdjectiveE
         Some(other) => Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
             format!("Unknown exportability: {other}. Accepted values: private, public"),
+        )),
+    }
+}
+
+/// Decode the optional `kind` arg for a file_memory capture call.
+///
+/// Absent → `None` (caller keeps the `CaptureFrame` default of `Prose`).
+/// Unknown → `INVALID_PARAMS` listing accepted values.
+/// Mirrors Swift `ToolDispatch.decodeContentKind(_:)`.
+fn decode_content_kind_arg(value: Option<&JsonValue>) -> Result<Option<ContentKind>, JSONRPCError> {
+    let name = match value {
+        None => return Ok(None),
+        Some(JsonValue::String(s)) => s.as_str(),
+        Some(_) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "kind must be a string".to_string(),
+            ))
+        }
+    };
+    match name {
+        "prose"          => Ok(Some(ContentKind::Prose)),
+        "code"           => Ok(Some(ContentKind::Code)),
+        "transcript"     => Ok(Some(ContentKind::Transcript)),
+        "list"           => Ok(Some(ContentKind::List)),
+        "structuredJSON" => Ok(Some(ContentKind::StructuredJson)),
+        "imageCaption"   => Ok(Some(ContentKind::ImageCaption)),
+        "fingerprintOnly"=> Ok(Some(ContentKind::FingerprintOnly)),
+        other => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!(
+                "Unknown kind: {other}. Accepted values: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly"
+            ),
+        )),
+    }
+}
+
+/// Decode the optional `sensitivity` arg for a file_memory capture call.
+///
+/// Absent → `None` (caller keeps the `CaptureFrame` default of `Normal`).
+/// Unknown → `INVALID_PARAMS` listing accepted values.
+/// Mirrors Swift `ToolDispatch.decodeSensitivity(_:)`.
+fn decode_sensitivity_arg(value: Option<&JsonValue>) -> Result<Option<AdjectiveSensitivity>, JSONRPCError> {
+    let name = match value {
+        None => return Ok(None),
+        Some(JsonValue::String(s)) => s.as_str(),
+        Some(_) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "sensitivity must be a string".to_string(),
+            ))
+        }
+    };
+    match name {
+        "normal"     => Ok(Some(AdjectiveSensitivity::Normal)),
+        "elevated"   => Ok(Some(AdjectiveSensitivity::Elevated)),
+        "restricted" => Ok(Some(AdjectiveSensitivity::Restricted)),
+        "secret"     => Ok(Some(AdjectiveSensitivity::Secret)),
+        other => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!(
+                "Unknown sensitivity: {other}. Accepted values: normal, elevated, restricted, secret"
+            ),
         )),
     }
 }
