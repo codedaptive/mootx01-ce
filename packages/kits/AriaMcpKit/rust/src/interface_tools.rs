@@ -588,6 +588,29 @@ fn run_link_memories(
     let to_id = require_string(args, "to_id")?;
     let kind_str = require_string(args, "kind")?;
 
+    // Reject unknown kind strings — silent fallback to References would accept
+    // garbage input and produce a misleadingly-typed tunnel.
+    if !VALID_KIND_STRINGS.contains(&kind_str) {
+        let valid_list = {
+            let mut v: Vec<&str> = VALID_KIND_STRINGS.to_vec();
+            v.sort();
+            v.join(", ")
+        };
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown kind: {kind_str}. Valid kinds: {valid_list}"),
+        ));
+    }
+
+    // Reject self-loops — a tunnel from a drawer to itself is semantically
+    // meaningless and breaks graph traversal algorithms.
+    if from_id == to_id {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Self-loop not allowed: from_id and to_id are the same ({from_id})."),
+        ));
+    }
+
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
@@ -1255,19 +1278,41 @@ fn decode_sensitivity_arg(value: Option<&JsonValue>) -> Result<Option<AdjectiveS
     }
 }
 
-/// Map a kind string to `TunnelKind`, defaulting to `References`.
-/// Mirrors Swift `ToolDispatch.decodeTunnelKind(_:)`.
+/// Valid kind strings for `moot_link_memories`. Mirrors Swift `ToolDispatcher.validKindStrings`.
+/// Any string not in this list is rejected with INVALID_PARAMS before decode_tunnel_kind runs.
+const VALID_KIND_STRINGS: &[&str] = &[
+    // Caller-friendly vocabulary
+    "relates", "precedes", "contradicts", "supports", "refines",
+    "exemplifies", "extends",
+    // Pass-through substrate names (for advanced callers)
+    "supersedes", "references", "blocks", "validates", "derivesFrom",
+    "covers", "elaborates", "respondsTo",
+];
+
+/// Map a validated kind string to `TunnelKind`. Only called after
+/// `VALID_KIND_STRINGS` membership is confirmed — caller-friendly vocabulary
+/// maps to the matching substrate enum case; unknown strings are rejected
+/// before this function is reached. Mirrors Swift `ToolDispatcher.tunnelKind(for:)`.
 fn decode_tunnel_kind(s: &str) -> TunnelKind {
     match s {
-        "supersedes" => TunnelKind::Supersedes,
-        "references" => TunnelKind::References,
-        "blocks" => TunnelKind::Blocks,
-        "validates" => TunnelKind::Validates,
+        // Caller-friendly vocabulary
+        "relates"     => TunnelKind::References,
+        "precedes"    => TunnelKind::Blocks,
         "contradicts" => TunnelKind::Contradicts,
+        "supports"    => TunnelKind::Validates,
+        "refines"     => TunnelKind::Elaborates,
+        "exemplifies" => TunnelKind::Covers,
+        "extends"     => TunnelKind::DerivesFrom,
+        // Pass-through substrate names
+        "supersedes"  => TunnelKind::Supersedes,
+        "references"  => TunnelKind::References,
+        "blocks"      => TunnelKind::Blocks,
+        "validates"   => TunnelKind::Validates,
         "derivesFrom" => TunnelKind::DerivesFrom,
-        "covers" => TunnelKind::Covers,
-        "elaborates" => TunnelKind::Elaborates,
-        "respondsTo" => TunnelKind::RespondsTo,
+        "covers"      => TunnelKind::Covers,
+        "elaborates"  => TunnelKind::Elaborates,
+        "respondsTo"  => TunnelKind::RespondsTo,
+        // Unreachable — VALID_KIND_STRINGS gate ensures only the above reach here.
         _ => TunnelKind::References,
     }
 }
