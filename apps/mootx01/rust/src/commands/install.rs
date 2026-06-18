@@ -26,6 +26,7 @@ pub fn run(
     no_permissions: bool,
     no_mgr: bool,
     no_daemon: bool,
+    vault_on: bool,
 ) -> ExitCode {
     let home = home_dir();
     let registry = clients::supported();
@@ -102,7 +103,9 @@ pub fn run(
         use crate::core::service;
         let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
-            let unit = service::daemon_unit(&binary_path, data_override.as_deref());
+            // vault_on baked into the unit's Environment= block so the resident
+            // daemon reads MOOTX01_VAULT without it being set in the shell (ADR-015).
+            let unit = service::daemon_unit(&binary_path, data_override.as_deref(), vault_on);
             report_registration("daemon", service::register(&home, service::DAEMON_UNIT, &unit));
         }
         if !no_mgr {
@@ -131,7 +134,9 @@ pub fn run(
         use crate::core::service;
         let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
-            let (exe, arg) = service::daemon_task_command(&binary_path, data_override.as_deref());
+            // vault_on baked into the cmd wrapper as `set MOOTX01_VAULT=...&&`
+            // so the resident daemon reads MOOTX01_VAULT at launch (ADR-015).
+            let (exe, arg) = service::daemon_task_command(&binary_path, data_override.as_deref(), vault_on);
             report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg));
         }
         if !no_mgr {
@@ -169,6 +174,18 @@ pub fn run(
     if !wired.is_empty() {
         println!("Done. Restart your clients to pick up the new server.");
     }
+
+    // ADR-015 §1 mandatory disclosure: inform the user of the vault surface
+    // state so they can make an informed security choice. Always printed.
+    println!();
+    if vault_on {
+        println!("Vault (import/export to disk) is ON by default.");
+        println!("  For a more secure position: mootx01 install --vault-off  # disables import/export");
+    } else {
+        println!("Vault (import/export to disk) is OFF.");
+        println!("  To re-enable: mootx01 install --vault-on");
+    }
+
     ExitCode::from(exit::OK)
 }
 

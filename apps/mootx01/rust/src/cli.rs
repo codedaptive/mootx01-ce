@@ -18,6 +18,7 @@ pub enum Command {
     Serve { db: Option<String>, http: Option<HttpMode> },
     /// §4.2 install [--target <ids>] [--location global|local] [--yes]
     ///              [--no-permissions] [--no-mgr] [--no-daemon]
+    ///              [--vault-on | --vault-off]
     Install {
         target: Option<Vec<String>>,
         location: Location,
@@ -25,6 +26,11 @@ pub enum Command {
         no_permissions: bool,
         no_mgr: bool,
         no_daemon: bool,
+        /// True when vault is enabled (default). False when --vault-off is passed.
+        /// --vault-on is a no-op (vault is on by default) but is accepted for
+        /// symmetry and to let users be explicit. If both flags are given,
+        /// vault_on=false (--vault-off wins — the safer choice) per ADR-015.
+        vault_on: bool,
     },
     /// §4.3 uninstall [--target <ids>] [--yes] [--purge]
     Uninstall { target: Option<Vec<String>>, yes: bool, purge: bool },
@@ -167,6 +173,11 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
     let mut target = None;
     let mut location = Location::Global;
     let (mut yes, mut no_permissions, mut no_mgr, mut no_daemon) = (false, false, false, false);
+    // vault_on tracks the net choice: true = vault enabled (the default).
+    // --vault-off sets it false; --vault-on is a no-op but is accepted for
+    // symmetry. If both appear, --vault-off wins (last-write wins in the loop,
+    // but --vault-off always sets false regardless of order, so it dominates).
+    let mut vault_on = true;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--target" => {
@@ -189,11 +200,16 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
             "--no-permissions" => no_permissions = true,
             "--no-mgr" => no_mgr = true,
             "--no-daemon" => no_daemon = true,
+            // ADR-015: vault surface toggle. --vault-off wins over --vault-on
+            // when both are present (the safer choice). --vault-on is explicit
+            // opt-in to the default and is accepted for symmetry / scripting.
+            "--vault-on" => { /* vault_on already true; explicit for clarity */ }
+            "--vault-off" => vault_on = false,
             "--help" | "-h" => return Ok(Command::HelpFor("install")),
             other => return Err(unexpected(other, "install")),
         }
     }
-    Ok(Command::Install { target, location, yes, no_permissions, no_mgr, no_daemon })
+    Ok(Command::Install { target, location, yes, no_permissions, no_mgr, no_daemon, vault_on })
 }
 
 fn parse_uninstall(it: &mut Args) -> Result<Command, UsageError> {
@@ -367,7 +383,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + Brain pump + telemetry) instead of stdio.".into(),
         "install" => "Wire mootx01 into MCP clients and grant tool permissions.\n\
             \n\
-            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--yes] [--no-permissions] [--no-mgr] [--no-daemon]\n\
+            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--yes] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off]\n\
             \n\
             OPTIONS:\n\
             \x20 --target <ids>          Comma-separated client ids to install (e.g. claude,cursor). Default: interactive picker.\n\
@@ -375,7 +391,9 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 -y, --yes               Skip prompts; auto-detect and install all present clients.\n\
             \x20 --no-permissions        Skip writing to settings.json (do not grant tool permissions).\n\
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
-            \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + Brain pump) as a background service.".into(),
+            \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + Brain pump) as a background service.\n\
+            \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\
+            \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.".into(),
         "uninstall" => "Remove mootx01 from MCP clients.\n\
             \n\
             USAGE: mootx01 uninstall [--target <ids>] [--yes] [--purge]\n\
@@ -479,6 +497,50 @@ mod tests {
                 no_permissions: true,
                 no_mgr: true,
                 no_daemon: true,
+                vault_on: true, // default when neither --vault-on nor --vault-off is passed
+            }
+        );
+    }
+
+    #[test]
+    fn install_vault_flags() {
+        // --vault-off disables vault
+        assert_eq!(
+            p(&["install", "--vault-off"]).unwrap(),
+            Command::Install {
+                target: None,
+                location: Location::Global,
+                yes: false,
+                no_permissions: false,
+                no_mgr: false,
+                no_daemon: false,
+                vault_on: false,
+            }
+        );
+        // --vault-on is explicit opt-in to the default
+        assert_eq!(
+            p(&["install", "--vault-on"]).unwrap(),
+            Command::Install {
+                target: None,
+                location: Location::Global,
+                yes: false,
+                no_permissions: false,
+                no_mgr: false,
+                no_daemon: false,
+                vault_on: true,
+            }
+        );
+        // default (neither flag) is vault-on
+        assert_eq!(
+            p(&["install"]).unwrap(),
+            Command::Install {
+                target: None,
+                location: Location::Global,
+                yes: false,
+                no_permissions: false,
+                no_mgr: false,
+                no_daemon: false,
+                vault_on: true,
             }
         );
     }

@@ -61,12 +61,47 @@ public enum ToolProjection {
     /// as MOOTx01's so it never collides with another connected MCP server.
     public static let toolNamePrefix = "moot_"
 
+    /// True when the vault MCP tool surface is enabled for the given environment.
+    ///
+    /// The env var `MOOTX01_VAULT` governs the choice: any value other than
+    /// the literal string `"0"` (including absent/empty) means vault is ON.
+    /// Default is vault-on per ADR-015.
+    ///
+    /// Takes an explicit environment dictionary so the logic is testable
+    /// without mutating `ProcessInfo.processInfo.environment` (which is
+    /// read-only at runtime). Production callers use `vaultEnabled` (no args).
+    public static func vaultEnabled(environment: [String: String]) -> Bool {
+        environment["MOOTX01_VAULT"] != "0"
+    }
+
+    /// True when the vault MCP tool surface is enabled.
+    ///
+    /// Reads `MOOTX01_VAULT` from the process environment. Any value other than
+    /// the literal string `"0"` (including absent/empty) means vault is ON.
+    /// The daemon has this variable set from the `mootx01 install --vault-on/--vault-off`
+    /// flag at install time (written into the launchd plist EnvironmentVariables
+    /// block so it survives restarts). Default is vault-on per ADR-015.
+    public static var vaultEnabled: Bool {
+        vaultEnabled(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// The complete advertised tool list.
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.
     /// Every tool schema is wrapped with `withTeachme` so callers can pass
     /// `teachme: true` on any tool to receive its usage guide.
+    ///
+    /// Vault tools are omitted when `MOOTX01_VAULT=0` (installed with
+    /// `--vault-off`). All other tiers are unaffected. See ADR-015.
     public static func tools() -> [ProjectedTool] {
+        tools(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The complete advertised tool list evaluated against an explicit
+    /// environment dictionary. Used by tests that cannot mutate
+    /// `ProcessInfo.processInfo.environment` (which is read-only at runtime).
+    /// Production code uses `tools()` (no args).
+    public static func tools(environment: [String: String]) -> [ProjectedTool] {
         var raw: [ProjectedTool] = []
         raw.append(contentsOf: coreMemoryTools())
         raw.append(contentsOf: connectionTools())
@@ -76,7 +111,11 @@ public enum ToolProjection {
         raw.append(federationTool())
         raw.append(contentsOf: RecipeTools.tools())
         raw.append(contentsOf: LensTools.tools())
-        raw.append(contentsOf: VaultTools.tools())
+        // Vault tools are gated: omitted from tools/list when MOOTX01_VAULT=0.
+        // Default (env absent or any value ≠ "0") is vault-on (ADR-015).
+        if vaultEnabled(environment: environment) {
+            raw.append(contentsOf: VaultTools.tools())
+        }
         return raw.map { tool in
             ProjectedTool(
                 name: tool.name,

@@ -166,6 +166,17 @@ enum VaultTools {
         resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
         jobRegistry: VaultJobRegistry
     ) async throws -> JSONValue {
+        // Guard: vault surface is disabled (installed with --vault-off).
+        // Return a clear refusal rather than an opaque failure. The tool
+        // should never be called when disabled (it is absent from tools/list),
+        // but the guard ensures a clean error if a client hard-codes the name.
+        // MOOTX01_VAULT env var: absent/≠"0" = enabled; "0" = disabled (ADR-015).
+        guard ToolProjection.vaultEnabled else {
+            return ToolDispatcher.errorResult(
+                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
+            )
+        }
+
         // moot_vault_job only needs a job_id — no vaultPath.
         if name == "moot_vault_job" {
             let jobID = try requireString(args, "job_id")

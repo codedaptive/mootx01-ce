@@ -31,6 +31,12 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip registering the resident mootx01 daemon (HTTP MCP server + Brain pump) as a background launchd service (macOS).")
     var noDaemon: Bool = false
 
+    @Flag(name: .long, help: "Enable Vault MCP tools (moot_vault_*): expose export/import/status/reconcile/job on the MCP surface. Default behavior when neither --vault-on nor --vault-off is specified.")
+    var vaultOn: Bool = false
+
+    @Flag(name: .long, help: "Hide Vault MCP tools (moot_vault_*) from the MCP surface. For a more secure install position that disables import/export. Use --vault-on to re-enable.")
+    var vaultOff: Bool = false
+
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -168,10 +174,16 @@ struct InstallCommand: AsyncParsableCommand {
                 environment: ProcessInfo.processInfo.environment,
                 homeDirectory: home
             )
+            // MOOTX01_VAULT: "0" = vault-off (--vault-off); "1" = vault-on (default).
+            // The flag pair is mutually exclusive by convention: if both are set
+            // (CLI parse does not block this) --vault-off wins (safer default).
+            // When neither is set, vault is on (ADR-015 §1: default = vault-on).
+            let vaultValue = vaultOff ? "0" : "1"
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
                 "MOOTX01_DATA_DIR": dataDir.path,
                 "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
+                "MOOTX01_VAULT": vaultValue,
             ]
             switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
             case let .installed(plistPath, endpointURL):
@@ -258,5 +270,18 @@ struct InstallCommand: AsyncParsableCommand {
 
         print("")
         print("Run `mootx01 status` to confirm your setup.")
+
+        // ADR-015 §1 mandatory disclosure: tell the user about the Vault
+        // surface so they can make an informed security choice. Disclosure
+        // is always printed regardless of which Vault flag was passed, so
+        // the user knows the current state and how to change it.
+        print("")
+        if vaultOff {
+            print("Vault (import/export to disk) is OFF.")
+            print("  To re-enable: mootx01 install --vault-on")
+        } else {
+            print("Vault (import/export to disk) is ON by default.")
+            print("  For a more secure position: mootx01 install --vault-off  # disables import/export")
+        }
     }
 }
