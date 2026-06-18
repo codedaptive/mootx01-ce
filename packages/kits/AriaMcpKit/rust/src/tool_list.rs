@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition. Produces exactly
-//! 55 tools in this order:
+//! 56 tools in this order:
 //!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
@@ -11,11 +11,11 @@
 //!   Maintenance (1) — moot_reindex
 //!   Federation (1) — moot_federated_search
 //!   Recipe (8)  — list_lenses, list_recipes, synthesize, run_migration, confirm_migration, recall_precise, recall_shaped, dream
-//!   Lens (21)   — moot_lens_keystones … moot_lens_complexity
+//!   Lens (22)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Tool count 55 = 54 (prior surface) + 1 (moot_recall_shaped, the named
-//! RecallShape preset surface — GLK-RECALL-SHAPE-PRESETS).
+//! Tool count 56 = 55 (prior surface) + 1 (moot_lens_contradiction, genuine
+//! semantic contradiction detector added in Wave A drive-test fixes).
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -42,7 +42,7 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 55 tools when vault is enabled (the default) or 50 tools when
+/// Produces 56 tools when vault is enabled (the default) or 51 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). All non-vault tiers
 /// are always present. See ADR-015.
 pub fn build_tool_list() -> serde_json::Value {

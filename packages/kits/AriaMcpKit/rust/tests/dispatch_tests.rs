@@ -1,7 +1,8 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 53-tool surface: 19 interface tools (Tier 1–5), 1 federation tool,
-//! 7 recipe tools, 21 lens tools, and 5 vault tools. Exercises dispatch routing,
+//! Tests the 56-tool surface: 19 interface tools (Tier 1–5), 1 federation tool,
+//! 8 recipe tools, 22 lens tools (including moot_lens_cohesion and moot_lens_contradiction),
+//! 5 vault tools, and 1 maintenance tool (moot_reindex). Exercises dispatch routing,
 //! argument validation, and result shapes through the full stack using an in-memory
 //! estate. One success path + one error/validation path per tool group.
 //!
@@ -66,7 +67,7 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_55() {
+fn tools_list_count_is_56() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -87,7 +88,7 @@ fn tools_list_count_is_55() {
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_55_names() {
+fn tools_list_name_set_matches_expected_56_names() {
     // Gate: all 56 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_vault_job is a vault tool (Bob's ruling 2026-06-12: tool-surface
