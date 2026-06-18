@@ -9,13 +9,13 @@ the tag carries the pre-release qualifier.
 
 Second beta of the 1.0 line. 60 changes since `v1.0.0-beta` (37 features, 7
 fixes, 1 performance, 1 refactor, 4 test-hardenings, 4 spec/doc updates, 6
-README/ABOUT touch-ups). The headline is the honest-fusion semantic recall
+README/ABOUT touch-ups). The headline is the fusion-based semantic recall
 stack and the substrate/kit hardening sweep; both the Swift and Rust ports
 move together, conformance-gated.
 
-### Recall — honest classical-fusion semantic recall
+### Recall — classical-fusion semantic recall
 
-- **Decision recorded** — ADR-010: honest classical-fusion semantic recall +
+- **Decision recorded** — ADR-010: classical-fusion semantic recall +
   ARIA recall steering (Decision D); addendum for Decision B (full fusion incl.
   LSA/SVD) and CoreML-encoder flip-the-switch readiness for 1.1.
 - **Substrate primitive** — float-vector ops (l2Norm / l2Normalize / dot /
@@ -36,7 +36,7 @@ move together, conformance-gated.
 - **Steering** — named `RecallShape` preset roster + `ShapedRecall` recipe +
   ARIA exposure; the five matrix/graph/preference columns made RecallShape-
   steerable; anti-similarity (farthest-K) across VectorKit + CorpusKit + GLK.
-- **Production default flipped** to the five-signal honest ensemble.
+- **Production default flipped** to the five-signal ensemble.
 - **Capture/import → encode pipeline** wired across all paths + reindex
   backfill.
 - **GLK parity** — GraphCache/PreferenceStore recall surface ported to Rust GLK
