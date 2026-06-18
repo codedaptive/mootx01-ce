@@ -19,7 +19,7 @@ pub mod core;
 /// Semver for the installed binary. Reported by `--version`; compared by the
 /// online upgrade path against the latest release tag. Keep in lockstep with
 /// the Swift `Mootx01.currentVersion`.
-pub const CURRENT_VERSION: &str = "1.0.2";
+pub const CURRENT_VERSION: &str = "1.0.3";
 
 /// Exit codes per spec §5.
 pub mod exit {
