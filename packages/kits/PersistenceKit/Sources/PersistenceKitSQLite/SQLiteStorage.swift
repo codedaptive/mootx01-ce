@@ -36,7 +36,13 @@ public final class SQLiteStorage: Storage, Sendable {
             preconditionFailure("SQLiteStorage requires .sqlite backend configuration")
         }
         self.configuration = configuration
-        let conn = try SQLiteConnection(url: url, busyTimeout: busyTimeout)
+        // FullDatabase (Mode 3): the SQLCipher key (hex) is applied at open via
+        // PRAGMA key. nil for plaintext / row-encryption — a normal SQLite file.
+        let conn = try SQLiteConnection(
+            url: url,
+            busyTimeout: busyTimeout,
+            keyHex: configuration.encryptionConfig.fullDatabaseKeyHex
+        )
         let registry = SQLiteObserverRegistry()
         self.observerRegistry = registry
         let backend = SQLiteBackend(
@@ -521,10 +527,11 @@ actor SQLiteBackend {
     // (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1).
 
     /// Encrypt the "content" column and stamp the key identifier when the
-    /// estate is encrypted (mode 2/3). Returns `values` unchanged for mode 1
-    /// or for rows that carry no "content" column.
+    /// estate uses per-row encryption (mode 2 / RowEncryption). Returns `values`
+    /// unchanged for plaintext, for FullDatabase (the whole file is encrypted by
+    /// SQLCipher, so the per-row seam is a no-op), and for rows with no "content".
     private func encryptedForWrite(_ values: [String: TypedValue]) throws -> [String: TypedValue] {
-        guard encryptionConfig.mode != .plaintext,
+        guard encryptionConfig.usesRowCrypto,
               let key = encryptionConfig.key,
               let keyID = encryptionConfig.keyIdentifier,
               case .text(let plaintext)? = values["content"] else {
@@ -549,7 +556,7 @@ actor SQLiteBackend {
     /// failure. This makes the single-key path correct by construction and
     /// keeps the seam ready for a future multi-key registry lookup.
     private func decryptedForRead(_ values: [String: TypedValue]) throws -> [String: TypedValue] {
-        guard encryptionConfig.mode != .plaintext,
+        guard encryptionConfig.usesRowCrypto,
               let key = encryptionConfig.key,
               case .text(let keyID)? = values["keyID"], !keyID.isEmpty,
               keyID == encryptionConfig.keyIdentifier,
@@ -575,7 +582,7 @@ actor SQLiteBackend {
     /// (plaintext) returns immediately, so the path is byte-identical to
     /// before this guard existed.
     private func assertContentKeyIDInvariant(_ values: [String: TypedValue], table: String) throws {
-        guard encryptionConfig.mode != .plaintext else { return }
+        guard encryptionConfig.usesRowCrypto else { return }
         guard case .text? = values["content"] else { return }
         // A keyID is present only when the content is ciphertext; .text
         // content with no keyID is the unsafe, unencrypted write.

@@ -26,7 +26,7 @@ final class SQLiteConnection: @unchecked Sendable {
     let url: URL
     let busyTimeout: TimeInterval
 
-    init(url: URL, busyTimeout: TimeInterval) throws {
+    init(url: URL, busyTimeout: TimeInterval, keyHex: String? = nil) throws {
         self.url = url
         self.busyTimeout = busyTimeout
         // Ensure parent directory exists.
@@ -39,6 +39,17 @@ final class SQLiteConnection: @unchecked Sendable {
             let msg = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
             sqlite3_close(handle)
             throw StorageError.backendError(underlying: "sqlite open: \(msg)")
+        }
+
+        // Whole-database at-rest encryption (Mode 3 / FullDatabase): supply the
+        // estate key before any other access so SQLCipher can decrypt page 1
+        // (the schema) and every content page. This MUST be the first statement
+        // on the connection. With no key (modes 1/2) it is skipped and the file
+        // is a normal unencrypted SQLite database. `PRAGMA key = "x'<hex>'"` uses
+        // the 32 raw bytes directly as the cipher key (no passphrase KDF — the
+        // key is already full-entropy). Mirrors the Rust SqliteStorage chokepoint.
+        if let keyHex {
+            try exec("PRAGMA key = \"x'\(keyHex)'\";")
         }
 
         // Apple Data Protection: the OS stores the estate encrypted at rest

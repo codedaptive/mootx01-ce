@@ -24,9 +24,11 @@ public enum EncryptionMode: Sendable, Equatable {
     /// Mode 2 — per-row content ciphertext under a per-row or per-estate
     /// key; the row carries the key identifier.
     case rowEncryption
-    /// Mode 3 — the whole estate under a per-install key (hardware-wrapped
-    /// where available). Mechanically identical per-row crypto to mode 2 at
-    /// this layer; the distinction is key provenance (one per-install key).
+    /// Mode 3 — whole-database at-rest encryption under a per-install key
+    /// (hardware-wrapped where available). On Apple the entire SQLite file —
+    /// schema included — is encrypted by SQLCipher at the connection layer via
+    /// `PRAGMA key`; the per-row content seam is a no-op for this mode because
+    /// the file itself, schema and content, is ciphertext on disk.
     case fullDatabase
 }
 
@@ -78,4 +80,33 @@ public struct EstateEncryptionConfig: Sendable {
 
     /// The default, zero-change configuration: plaintext at rest.
     public static let plaintext = EstateEncryptionConfig(.plaintext)
+
+    /// Build a FullDatabase config from a caller-supplied 256-bit key — the
+    /// per-install key loaded from the Keychain (Secure-Enclave-wrapped on
+    /// Apple). Used by the resident services so every connection opens the
+    /// estate with the same SQLCipher key.
+    public static func fullDatabase(key: Data) -> EstateEncryptionConfig {
+        EstateEncryptionConfig(
+            mode: .fullDatabase,
+            keyIdentifier: "install-whole-file",
+            key: SymmetricKey(data: key)
+        )
+    }
+
+    /// True only for the per-row encrypting mode (Mode 2 / RowEncryption).
+    /// FullDatabase (Mode 3) protects the whole file via SQLCipher at the
+    /// connection layer, so the per-row content/keyID seam is a no-op for it.
+    package var usesRowCrypto: Bool { mode == .rowEncryption }
+
+    /// The whole-file SQLCipher key as lowercase hex, for FullDatabase estates
+    /// only (`nil` otherwise — no whole-file key, so a normal SQLite file). The
+    /// SQLite backend issues `PRAGMA key = "x'<hex>'"`, which uses the bytes as
+    /// the raw 256-bit cipher key (no passphrase KDF — the key is full-entropy).
+    /// Never logged.
+    package var fullDatabaseKeyHex: String? {
+        guard mode == .fullDatabase, let key else { return nil }
+        return key.withUnsafeBytes { raw in
+            raw.map { String(format: "%02x", $0) }.joined()
+        }
+    }
 }
