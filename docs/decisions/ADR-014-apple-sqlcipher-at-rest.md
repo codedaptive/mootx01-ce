@@ -3,7 +3,7 @@ status: decided
 question: What at-rest encryption mechanism does the Apple port (iOS + macOS) use, given that Apple Data Protection is iOS-only, native macOS has no per-file encryption primitive, SIP/app-group containers are disableable access-control rather than encryption, and the EE FedRAMP charter requires FIPS-validated cryptography?
 authors: MOOTx01 maintainers
 date: 2026-06-18
-version: 1.1.0
+version: 1.2.0
 relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/PERSISTENCEKIT_INTERFACE.md
@@ -98,15 +98,16 @@ plaintext. The contract per backend (mirrored in PERSISTENCEKIT_SPEC B-12):
 
 - **SQLite** — **Mode 3** whole-file SQLCipher (this ADR). Schema and content are
   ciphertext under the key; this is the structure-protection guarantee.
-- **PostgreSQL** — no app-level whole-file analogue (the server owns the schema).
-  Content confidentiality is **Mode 2** (per-row AEAD, applied client-side before
-  the value reaches Postgres) — the portable mechanism, currently **UNWIRED** in
-  the Postgres backend. Schema/structure and disk-at-rest are the FedRAMP
-  deployment's responsibility: FIPS-validated Postgres + TDE / disk encryption +
-  TLS + RBAC.
-- **InMemory** — no disk at-rest (volatile); at-rest encryption is **N/A**.
-  Sensitive data should not be persisted here; the relevant controls are
-  OS/process hardening (no-swap / `mlock`, zero-on-free), not DB encryption.
+- **PostgreSQL** — **DECIDED: encrypt the data (we encrypt it, not the
+  deployment).** There is no app-level whole-file analogue (the server owns the
+  schema), so content is encrypted **client-side via Mode 2 (per-row AEAD) before
+  the value reaches Postgres** — the bytes are ciphertext at rest in the database
+  regardless of the server. (Currently UNWIRED — to build.) Deployment TDE / TLS /
+  RBAC remain as defense-in-depth, not the primary answer.
+- **InMemory** — **DECIDED: protect the data in RAM.** The in-memory store holds
+  content **encrypted** (the same AEAD seam, Mode 2) so a memory dump, debugger,
+  or swap yields ciphertext, plus RAM hardening (no-swap / `mlock`, zero-on-free).
+  (Currently plaintext — to build.)
 
 **Mode 2 (per-row AEAD) is the cross-backend content-encryption mechanism** and is
 the path to give PostgreSQL content encryption; **Mode 3 (whole-file) is
@@ -176,6 +177,13 @@ third-party CVE/vendoring burden. The crypto *backend* is already first-party
 and it is the piece to replace when Apple offers a native one.
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-18
+Recorded two decisions on the non-SQLite backends (replacing the earlier
+"deployment's job" / "N/A" framing): **encrypt PostgreSQL** (client-side Mode 2
+AEAD; we encrypt the data, deployment TDE/TLS is defense-in-depth) and **protect
+InMemory data in RAM** (content held encrypted + RAM hardening: no-swap/mlock,
+zero-on-free). Both currently unwired — to build.
 
 ### 1.1.0 -- 2026-06-18
 Added Dependency placement (SQLCipher lives in the `PersistenceKitSQLite`
