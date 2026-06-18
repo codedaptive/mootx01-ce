@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.1.0
+version: 1.1.1
 status: active
 date: 2026-06-17
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -370,6 +370,14 @@ ciphertext, Mode 3 does NOT also apply the per-row content seam (the seam
 is a no-op for FullDatabase). An external process opening a Mode 3 file
 with a plain SQLite library cannot read or alter the schema.
 
+> **Decided, implementation queued (ADR-014, 2026-06-17).** The Apple port
+> moves to **SQLCipher on the CommonCrypto backend** (Apple CoreCrypto,
+> FIPS-validated) with a Secure-Enclave-wrapped Keychain key, unifying the
+> whole-file mechanism across all platforms. Apple Data Protection (iOS), the
+> macOS app-group container, and FileVault become additive defense-in-depth
+> layers. This paragraph is updated to SQLCipher-on-Apple when that integration
+> lands.
+
 Activation: a resident service writes a shared per-install key file
 (`<estates-dir>/db.key`, owner-only `0600`) at startup; `SqliteStorage::new`
 resolves that sibling key and opens the estate as FullDatabase. Estates
@@ -607,6 +615,12 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.1.1 -- 2026-06-17
+Added a forward-pointer in B-12 to ADR-014: the Apple port moves to SQLCipher on
+the CommonCrypto backend (FIPS-validated, Secure-Enclave-wrapped Keychain key),
+with Data Protection / app-group container / FileVault as additive layers
+(implementation queued).
 
 ### 1.1.0 -- 2026-06-17
 Planned encryption lockdown. Redefined Mode 3 (FullDatabase) from per-row
