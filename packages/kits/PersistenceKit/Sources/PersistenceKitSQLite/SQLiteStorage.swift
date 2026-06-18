@@ -331,12 +331,12 @@ actor SQLiteBackend {
     func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
         // At-rest encryption seam (mode 2/3): encrypt the content column
         // and stamp the key identifier before binding. No-op for mode 1.
-        let values = try encryptedForWrite(values)
+        let values = try encryptedForWrite(values, config: encryptionConfig)
         // Structural content/keyID invariant (FUP-D): after the seam, a
         // content row on an encrypting estate must carry a keyID. A correct
         // encrypting insert has already become .blob + keyID here, so the
         // guard is a no-op for it; it fires only if the seam could not run.
-        try assertContentKeyIDInvariant(values, table: table)
+        try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         let sortedKeys = values.keys.sorted()
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
         let placeholders = Array(repeating: "?", count: sortedKeys.count).joined(separator: ", ")
@@ -370,7 +370,7 @@ actor SQLiteBackend {
     // extend the encryption seam symmetrically with insertRow before this
     // guard would let such a write through.
     func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
-        try assertContentKeyIDInvariant(values, table: table)
+        try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         let sortedKeys = values.keys.sorted()
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
         let placeholders = Array(repeating: "?", count: sortedKeys.count).joined(separator: ", ")
@@ -401,7 +401,7 @@ actor SQLiteBackend {
         // would write plaintext with a null keyID. Guard it like the other
         // write paths. All current callers update only bitmap/timestamp
         // columns, so this is a no-op for them.
-        try assertContentKeyIDInvariant(values, table: table)
+        try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         // Pre-query row keys before mutating. The `values` dict carries only
         // the SET columns (not the primary key), so keys must be resolved via
         // a SELECT. The SQLiteBackend actor serializes all operations, so no
@@ -510,86 +510,17 @@ actor SQLiteBackend {
             }
             // At-rest decryption seam (mode 2/3): decrypt the content
             // column when the row carries a key identifier. No-op for mode 1.
-            rows.append(StorageRow(values: try decryptedForRead(values)))
+            rows.append(StorageRow(values: try decryptedForRead(values, config: encryptionConfig)))
         }
         return rows
     }
 
-    // MARK: - At-rest encryption seam (Mission ENC-01)
-    //
-    // Per-row content-column crypto wires in here, at the column-aware
-    // backend layer where rows are [String: TypedValue] and the content
-    // column is reachable by name. SQLiteConnection (the C wrapper) stays
-    // column-agnostic. Interception is by the "content" column name, which
-    // in the LocusKit schema belongs to drawers alone — the sole
-    // content-bearing table — so stamping the keyID column on write is
-    // always valid. The mechanism is AES-GCM-256 per record, not whole-file
-    // (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1).
-
-    /// Encrypt the "content" column and stamp the key identifier when the
-    /// estate uses per-row encryption (mode 2 / RowEncryption). Returns `values`
-    /// unchanged for plaintext, for FullDatabase (the whole file is encrypted by
-    /// SQLCipher, so the per-row seam is a no-op), and for rows with no "content".
-    private func encryptedForWrite(_ values: [String: TypedValue]) throws -> [String: TypedValue] {
-        guard encryptionConfig.usesRowCrypto,
-              let key = encryptionConfig.key,
-              let keyID = encryptionConfig.keyIdentifier,
-              case .text(let plaintext)? = values["content"] else {
-            return values
-        }
-        var out = values
-        out["content"] = .blob(try RowCrypto.encrypt(Data(plaintext.utf8), key: key))
-        out["keyID"] = .text(keyID)
-        return out
-    }
-
-    /// Decrypt the "content" column when the row carries a non-null keyID
-    /// (an encrypted row) and the estate holds the key. Returns `values`
-    /// unchanged for mode 1, for plaintext rows (null keyID), or when the
-    /// content is not stored as ciphertext bytes.
-    ///
-    /// The row's keyID must match this estate's key identifier. In the
-    /// single-key model of modes 2/3 that is the only key the estate holds,
-    /// so a mismatch means the row was sealed under a different key we
-    /// cannot open — pass it through unchanged (still ciphertext) rather
-    /// than attempt a decrypt that AES-GCM would only reject as an auth
-    /// failure. This makes the single-key path correct by construction and
-    /// keeps the seam ready for a future multi-key registry lookup.
-    private func decryptedForRead(_ values: [String: TypedValue]) throws -> [String: TypedValue] {
-        guard encryptionConfig.usesRowCrypto,
-              let key = encryptionConfig.key,
-              case .text(let keyID)? = values["keyID"], !keyID.isEmpty,
-              keyID == encryptionConfig.keyIdentifier,
-              case .blob(let cipher)? = values["content"] else {
-            return values
-        }
-        var out = values
-        out["content"] = .text(String(decoding: try RowCrypto.decrypt(cipher, key: key), as: UTF8.self))
-        return out
-    }
-
-    /// Structural enforcement of the content/keyID invariant (FUP-D, E-1).
-    ///
-    /// On an encrypting estate (mode 2/3), a content-bearing row must be
-    /// stored as ciphertext under a keyID. `encryptedForWrite` produces
-    /// exactly that — `.blob` content plus a non-empty keyID — so a correct
-    /// encrypting write passes this guard untouched. A `.text` `content`
-    /// value reaching the write boundary on an encrypting estate means the
-    /// encryption seam did not run (e.g. a raw `upsertRow`, a migration, or
-    /// a new store method); persisting it would leave plaintext content with
-    /// a null keyID — a row `decryptedForRead` cannot resolve. Refuse the
-    /// write rather than let convention be the only safeguard. Mode 1
-    /// (plaintext) returns immediately, so the path is byte-identical to
-    /// before this guard existed.
-    private func assertContentKeyIDInvariant(_ values: [String: TypedValue], table: String) throws {
-        guard encryptionConfig.usesRowCrypto else { return }
-        guard case .text? = values["content"] else { return }
-        // A keyID is present only when the content is ciphertext; .text
-        // content with no keyID is the unsafe, unencrypted write.
-        if case .text(let keyID)? = values["keyID"], !keyID.isEmpty { return }
-        throw StorageError.constraintViolation(detail:
-            "content/keyID invariant: table '\(table)' on an encrypting estate received plaintext content with no keyID; the encryption seam did not run, so this row would be unreadable")
-    }
+    // At-rest per-row encryption seam (Mission ENC-01): the write/read seam
+    // (`encryptedForWrite` / `decryptedForRead` / `assertContentKeyIDInvariant`)
+    // lives in PersistenceKit core (RowCrypto.swift) so the SQLite and
+    // PostgreSQL backends share one byte-compatible implementation. The call
+    // sites above (insertRow / upsertRow / updateRows / queryRows) invoke it
+    // with this backend's `encryptionConfig`.
 
     // MARK: - Introspection
 

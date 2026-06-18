@@ -40,6 +40,12 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        // At-rest encryption seam (Mode 2 / RowEncryption): encrypt the content
+        // column and stamp the keyID before binding. No-op for plaintext. The
+        // structural invariant then confirms a content row carries a keyID, so
+        // the seam cannot silently write unreadable plaintext content.
+        let values = try encryptedForWrite(values, config: backend.encryptionConfig)
+        try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         let placeholders = (1...cols.count).map { "$\($0)" }.joined(separator: ", ")
         let colList = cols.map { "\"\($0)\"" }.joined(separator: ", ")
@@ -59,6 +65,11 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func upsert(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
+        // upsert is not wired to encrypt: in the LocusKit schema it is only
+        // called for non-content tables. The structural invariant guards
+        // against a future content-bearing upsert writing plaintext with a
+        // null keyID — it must extend the encryption seam first.
+        try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         let placeholders = (1...cols.count).map { "$\($0)" }.joined(separator: ", ")
         let colList = cols.map { "\"\($0)\"" }.joined(separator: ", ")
@@ -86,6 +97,11 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func update(table: String, values: [String: TypedValue], where predicate: StoragePredicate) async throws -> Int {
+        // update does not run the encryption seam, so a content update on an
+        // encrypting estate would write plaintext with a null keyID. Guard it
+        // like the other write paths; all current callers update only
+        // bitmap/timestamp columns, so this is a no-op for them.
+        try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         var bindings: [TypedValue] = []
         for c in cols { bindings.append(values[c]!) }
@@ -145,11 +161,15 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         let _sql = sql
         let _bindings = bindings
         let _columns = columns
+        // Capture the encryption config for the @Sendable closure; the per-row
+        // decrypt seam reverses encryptedForWrite on read (no-op for plaintext).
+        let _encConfig = backend.encryptionConfig
         return try await withConnection { conn in
             let pgRows = try await conn.executeParameterized(_sql, bindings: _bindings, logger: Logger(label: "pg.row.query"))
             var out: [StorageRow] = []
             for try await row in pgRows {
-                out.append(StorageRow(values: decodeRow(row, columns: _columns)))
+                let decoded = try decryptedForRead(decodeRow(row, columns: _columns), config: _encConfig)
+                out.append(StorageRow(values: decoded))
             }
             return out
         }
