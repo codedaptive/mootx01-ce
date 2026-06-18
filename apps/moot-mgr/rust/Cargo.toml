@@ -49,6 +49,10 @@ observer-sink    = { path = "../../../packages/libs/ObserverSink/rust" }
 # the cache-on estate-construction path (DEBT-1), and CachingRowStore identity
 # for the cache proof. StatsStore is built on SqliteStorage from this crate.
 persistence-kit  = { path = "../../../packages/kits/PersistenceKit/rust" }
+# libc: mlockall/setrlimit at resident-host startup to keep the process's memory
+# (including decrypted estate content) out of swap. C-1 per-crate exception
+# (approved 2026-06-18); std has no mlockall. Best-effort, non-fatal.
+libc             = { version = "0.2" }
 # locus-kit: InMemoryDrawerStore (the DrawerStore the estate opens over) +
 # OwnerCredentials/CaptureFrame/RecallFrame/Filter/Drawer for the admin plane.
 locus-kit        = { path = "../../../packages/kits/LocusKit/rust" }

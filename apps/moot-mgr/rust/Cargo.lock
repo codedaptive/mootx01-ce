@@ -818,6 +818,7 @@ dependencies = [
  "genius-locus-kit",
  "interprocess",
  "lattice-lib",
+ "libc",
  "locus-kit",
  "observer-sink",
  "persistence-kit",

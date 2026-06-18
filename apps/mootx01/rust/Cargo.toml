@@ -34,6 +34,12 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 # SHA-256 verification of release downloads (upgrade); same version as aria-mcp.
 sha2       = { version = "0.10" }
+# libc: mlockall/setrlimit at daemon startup to keep the resident process's
+# memory (including decrypted estate content) out of the swap file. C-1 per-crate
+# exception (approved 2026-06-18) — the standard, minimal syscall crate; std has
+# no mlockall. Best-effort and non-fatal; the estate file is encrypted at rest
+# regardless.
+libc       = { version = "0.2" }
 
 # The complete Rust ARIA server (stdio + HTTP loops, backend selection,
 # Autonomic Governor). `serve` is a thin translation of spec flags onto
