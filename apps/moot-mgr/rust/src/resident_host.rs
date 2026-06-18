@@ -177,6 +177,12 @@ impl ResidentHost {
     /// `HUNT_RANGE` ports. Whatever port binds is written to the `mgr.port`
     /// file in the mootx01 data dir and removed on `stop()`.
     pub fn start(&mut self) -> Result<(), ManagerError> {
+        // Ensure the shared whole-file database key exists in the estates
+        // directory before any estate is provisioned or opened, so estates this
+        // host manages are encrypted at rest. Every estate opener resolves the
+        // sibling db.key, so the daemon and this host share the key for any
+        // directory they both touch.
+        persistence_kit::ensure_install_key(std::path::Path::new(&self.config.estates_directory))?;
         self.manager.lock().unwrap().start()?;
 
         let candidates: Vec<u16> = if self.config.http_port_explicit {

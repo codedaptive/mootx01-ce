@@ -45,6 +45,17 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
                 eprintln!("mootx01: cannot create estate directory {}: {e}", dir.display());
                 return ExitCode::from(exit::FAILURE);
             }
+            // Ensure the shared whole-file database key exists in the estate
+            // directory before the estate is opened, so the estate is encrypted
+            // at rest. Any process opening a file in this directory resolves the
+            // same db.key, so the daemon and moot-mgr share the key.
+            if let Err(e) = aria_mcp::ensure_install_key(dir) {
+                eprintln!(
+                    "mootx01: cannot prepare estate encryption key in {}: {e}",
+                    dir.display()
+                );
+                return ExitCode::from(exit::FAILURE);
+            }
         }
         std::env::set_var("ARIA_MCP_SQLITE_PATH", &estate);
         eprintln!("mootx01: estate '{name}' at {}", estate.display());

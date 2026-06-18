@@ -57,3 +57,8 @@ pub mod surfaced_recall_ledger;
 pub mod teachme_guides;
 pub mod tool_list;
 pub mod vault_tools;
+
+/// Re-export the shared whole-file key entry point so the `mootx01` binary can
+/// ensure the estate-encryption key exists at serve startup without a direct
+/// dependency on PersistenceKit.
+pub use persistence_kit::ensure_install_key;
