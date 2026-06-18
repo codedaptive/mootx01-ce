@@ -1007,11 +1007,24 @@ extension ToolDispatcher {
 
 extension ToolDispatcher {
 
-    /// Map caller-facing kind strings to the substrate's `TunnelKind` enum.
+    /// Valid caller-facing kind strings for `moot_link_memories`.
     ///
-    /// The caller vocabulary ("relates", "precedes", etc.) is more natural for
-    /// AI clients than the substrate names. Pass-through of substrate names is
-    /// also accepted so advanced callers can target specific kinds directly.
+    /// Includes both the human-friendly vocabulary exposed to AI clients and the
+    /// substrate enum names accepted as pass-through for advanced callers. Any
+    /// string not in this set is rejected with an invalidParams error listing the
+    /// accepted values. This prevents silent fallback to `.references` for
+    /// mistyped or unsupported kinds.
+    private static let validKindStrings: Set<String> = [
+        // Caller-friendly vocabulary
+        "relates", "precedes", "contradicts", "supports", "refines",
+        "exemplifies", "extends",
+        // Pass-through substrate names (for advanced callers)
+        "supersedes", "references", "blocks", "validates", "derivesFrom",
+        "covers", "elaborates", "respondsTo",
+    ]
+
+    /// Map a validated caller-facing kind string to the substrate's `TunnelKind`
+    /// enum. Only called after `validKindStrings` membership is confirmed.
     private static func tunnelKind(for kindString: String) -> TunnelKind {
         switch kindString {
         // Caller-friendly vocabulary
@@ -1031,6 +1044,7 @@ extension ToolDispatcher {
         case "covers":      return .covers
         case "elaborates":  return .elaborates
         case "respondsTo":  return .respondsTo
+        // Unreachable — validKindStrings gate ensures only the above reach here.
         default:            return .references
         }
     }
@@ -1042,11 +1056,34 @@ extension ToolDispatcher {
     /// `Estate.capture(TunnelCaptureFrame)` — the same path the existing
     /// tunnel tests use. No GLK kit-level captureTunnel verb exists; the
     /// estate actor is the direct write path.
+    ///
+    /// Validation: rejects unknown `kind` values (instead of silently defaulting
+    /// to `.references`), and rejects self-loops where `from_id == to_id`.
     func runLinkMemories(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let fromID = try requireString(args, "from_id")
         let toID = try requireString(args, "to_id")
         let kindString = try requireString(args, "kind")
+
+        // Reject unknown kind strings — silent fallback to .references would
+        // accept garbage input and produce a misleadingly-typed tunnel.
+        guard Self.validKindStrings.contains(kindString) else {
+            let validList = Self.validKindStrings.sorted().joined(separator: ", ")
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown kind: \(kindString). Valid kinds: \(validList)"
+            )
+        }
+
+        // Reject self-loops — a tunnel from a drawer to itself is semantically
+        // meaningless and creates cycles that break graph traversal algorithms.
+        guard fromID != toID else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Self-loop not allowed: from_id and to_id are the same (\(fromID))."
+            )
+        }
+
         let label = try optionalString(args["label"], argument: "label") ?? kindString
         let kind = Self.tunnelKind(for: kindString)
         // Resolve wing/room by looking up both drawers. `estate.allDrawers()`
