@@ -343,28 +343,29 @@ impl ResidentHost {
     }
 }
 
-/// §3 `mgr.port` location: the mootx01 data dir, honoring `MOOTX01_DATA_DIR`.
-/// Mirrors the mootx01 CLI's data-dir resolution (apps/mootx01/rust core::paths):
-/// macOS `~/Library/Application Support/ai.mootx01.ce`, Windows
-/// `%LOCALAPPDATA%\MOOTx01`, elsewhere `${XDG_DATA_HOME:-~/.local/share}/mootx01`.
-pub fn mgr_port_file_path() -> std::path::PathBuf {
+/// The mootx01 data dir, honoring `MOOTX01_DATA_DIR`. Mirrors the mootx01 CLI's
+/// data-dir resolution (apps/mootx01/rust core::paths): macOS
+/// `~/Library/Application Support/ai.mootx01.ce`, Windows `%LOCALAPPDATA%\MOOTx01`,
+/// elsewhere `${XDG_DATA_HOME:-~/.local/share}/mootx01`. Both `mgr.port` and the
+/// daemon's `daemon.port` live under this directory.
+pub fn mootx01_data_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Ok(v) = std::env::var("MOOTX01_DATA_DIR") {
         if !v.is_empty() {
-            return PathBuf::from(v).join("mgr.port");
+            return PathBuf::from(v);
         }
     }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
-        home.join("Library/Application Support/ai.mootx01.ce/mgr.port")
+        home.join("Library/Application Support/ai.mootx01.ce")
     }
     #[cfg(target_os = "windows")]
     {
         let base = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."));
-        base.join("MOOTx01").join("mgr.port")
+        base.join("MOOTx01")
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -377,6 +378,18 @@ pub fn mgr_port_file_path() -> std::path::PathBuf {
                     .map(|h| PathBuf::from(h).join(".local").join("share"))
                     .unwrap_or_else(|_| PathBuf::from("."))
             });
-        base.join("mootx01").join("mgr.port")
+        base.join("mootx01")
     }
+}
+
+/// §3 `mgr.port` location — `<data>/mgr.port`.
+pub fn mgr_port_file_path() -> std::path::PathBuf {
+    mootx01_data_dir().join("mgr.port")
+}
+
+/// §3 `daemon.port` location — `<data>/daemon.port`, where the mootx01 daemon
+/// writes the port it actually bound. moot-mgr reads this to reach the daemon
+/// rather than guessing 4242 (the daemon hunts off 4242 with `--http auto`).
+pub fn daemon_port_file_path() -> std::path::PathBuf {
+    mootx01_data_dir().join("daemon.port")
 }
