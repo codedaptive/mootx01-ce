@@ -20,7 +20,7 @@ extension ToolDispatcher {
     static let ARIASessionProtocol: String = """
 
     protocol:
-      — Call moot_estate_status with teachme:true for a full orientation guide.
+      — Call moot_estate_status with teachme:true to receive the orientation guide (no status payload is returned).
       — Call moot_list_lenses to see available cognition tools.
       — Add teachme:true to any tool to learn it before using it.
       — Watch for hint: lines in responses — they contain coaching for better results.

@@ -426,4 +426,4 @@ full argument reference.";
 
 const GUIDE_GENERIC: &str = "\
 No teachme guide is available for this tool.
-Call moot_estate_status with teachme:true for a full orientation guide.";
+Call moot_estate_status (no teachme) for the protocol block, or with teachme:true for the tool orientation guide.";
