@@ -28,8 +28,9 @@ use locus_kit::filter::{HydrationLevel, Ordering, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use uuid::Uuid;
 
-use crate::coordinator::EstateCoordinator;
+use crate::coordinator::{EstateCoordinator, VerbDispatchError};
 use crate::handle::EstateHandle;
+use crate::intake::WriteMode;
 
 /// Unique identifier for a COW branch, minted at derivation. Mirrors the
 /// Swift `BranchID = UUID`.
@@ -91,6 +92,11 @@ pub enum BranchError {
     PromotionTargetMismatch {
         branch_id: BranchId,
     },
+    /// A verb-dispatch failure from `capture_with_mode` during promote/merge.
+    /// Wraps `VerbDispatchError` so the coordinator's GLK-level capture
+    /// path (encode queue, Corpus feed) can be used instead of the bare
+    /// `Estate::capture` bypass (Finding #9 fix).
+    VerbDispatch(VerbDispatchError),
 }
 
 impl From<EstateError> for BranchError {
@@ -101,6 +107,11 @@ impl From<EstateError> for BranchError {
 impl From<LocusKitError> for BranchError {
     fn from(e: LocusKitError) -> Self {
         BranchError::Locus(e)
+    }
+}
+impl From<VerbDispatchError> for BranchError {
+    fn from(e: VerbDispatchError) -> Self {
+        BranchError::VerbDispatch(e)
     }
 }
 
@@ -267,25 +278,6 @@ impl EstateBranch {
         }
     }
 
-    /// Re-capture every post-derivation row into the parent estate and
-    /// transition to `Won`. Returns the count promoted. `pub(crate)` — driven
-    /// by the coordinator's `glk_promote_branch`.
-    pub(crate) fn promote(&mut self, now: i64) -> Result<usize, BranchError> {
-        // `.full` recall: each promoted row is re-captured into the parent
-        // estate (which requires non-empty content), so the content body must
-        // be loaded. Mirrors the Swift glkPromoteBranch `.full` frame.
-        let new_rows: Vec<Drawer> = Self::recall_all_full(&self.branch_estate, now)
-            .into_iter()
-            .filter(|row| !self.snapshot_ids.contains(&row.id))
-            .collect();
-        for row in &new_rows {
-            self.parent_estate
-                .capture(Self::capture_frame_from(row), now)?;
-        }
-        self.status = BranchStatus::Won;
-        Ok(new_rows.len())
-    }
-
     /// Cherry-pick branch rows into the parent by branch-estate ID; transition
     /// to `Merged`. Driven by the coordinator's `glk_merge_drawers`.
     pub(crate) fn merge_drawers(
@@ -374,6 +366,13 @@ impl EstateCoordinator {
     /// transitioning the branch to `Won`. Parity of `glkPromoteBranch`.
     /// Guards: branch must be tracked; `handle` must address the branch's
     /// parent estate (E-2).
+    ///
+    /// Capture routes through `capture_with_mode(Regular)` so promoted rows
+    /// are enqueued for BM25/vector encoding (Finding #9 fix). The old path
+    /// called `EstateBranch::promote` which used bare `Estate::capture`,
+    /// bypassing the coordinator's encode queue and leaving promoted memories
+    /// dark for semantic search. Mirrors Swift `glkPromoteBranch`'s
+    /// `capture(handle, captureFrame, mode: .regular)` call.
     pub fn glk_promote_branch(
         &mut self,
         branch_id: BranchId,
@@ -384,14 +383,46 @@ impl EstateCoordinator {
             .estate_for(handle)
             .map_err(|_| BranchError::EstateNotOpen)?
             .estate_uuid();
+
+        // Phase 1 — extract the post-derivation rows with an immutable borrow
+        // of the branch so we can release it before calling capture_with_mode.
+        // The borrow conflict: `branches.get_mut()` mutably borrows `self`,
+        // which prevents also calling `&mut self.capture_with_mode`. Collecting
+        // the rows first lets us drop the branch reference before the capture loop.
+        let new_rows: Vec<_> = {
+            let branch = self
+                .branches
+                .get(&branch_id)
+                .ok_or(BranchError::NotTracked { branch_id })?;
+            if branch.parent_estate_uuid() != target_uuid {
+                return Err(BranchError::PromotionTargetMismatch { branch_id });
+            }
+            // `.full` recall: each promoted row is re-captured into the parent
+            // estate (which requires non-empty content). Mirrors Swift `.full` frame.
+            EstateBranch::recall_all_full(&branch.branch_estate, now)
+                .into_iter()
+                .filter(|row| !branch.snapshot_ids.contains(&row.id))
+                .collect()
+            // branch reference dropped here — immutable borrow of self.branches ends.
+        };
+
+        // Phase 2 — capture each post-derivation row through the coordinator's
+        // GLK-level verb so the encode queue (BM25/vector lane) is fed. Parity
+        // of Swift `capture(handle, captureFrame, mode: .regular)` in `glkPromoteBranch`.
+        for row in &new_rows {
+            self.capture_with_mode(handle, EstateBranch::capture_frame_from(row), now, WriteMode::Regular)
+                .map_err(BranchError::from)?;
+        }
+
+        // Phase 3 — transition the branch to Won. This mutably borrows
+        // self.branches again, which is safe because Phase 2 holds no branch ref.
         let branch = self
             .branches
             .get_mut(&branch_id)
             .ok_or(BranchError::NotTracked { branch_id })?;
-        if branch.parent_estate_uuid() != target_uuid {
-            return Err(BranchError::PromotionTargetMismatch { branch_id });
-        }
-        branch.promote(now)
+        branch.status = BranchStatus::Won;
+
+        Ok(new_rows.len())
     }
 
     /// Cherry-pick specific branch rows into the estate addressed by
@@ -622,5 +653,123 @@ mod tests {
             Err(BranchError::NotTracked { branch_id }) => assert_eq!(branch_id, bogus),
             other => panic!("expected NotTracked, got {other:?}"),
         }
+    }
+
+    // BR-8 (Finding #9 fix): promoted rows are enqueued for BM25/vector
+    // encoding via `capture_with_mode(Regular)`, not bypassing the encode
+    // queue via bare `Estate::capture`. After `await_encode_drain`, the
+    // promoted memory is BM25-searchable through the coordinator's hybrid
+    // recall path. Pre-fix: `glk_promote_branch` called `EstateBranch::promote`
+    // which wrote directly to `parent_estate.capture`, leaving promoted rows
+    // dark for semantic search.
+    #[test]
+    fn br8_promoted_rows_are_semantically_searchable_after_drain() {
+        use crate::coordinator::{EstateKind, EstateProvisionParams, SyncMode};
+        use crate::recall::{
+            GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath,
+            RecallFallbackPolicy,
+        };
+        use corpus_kit::corpus::EmbeddingModelConfig;
+        use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::filter::{Filter, RecallFrame};
+        use persistence_kit::inmemory::InMemoryStorage;
+        use std::sync::Arc;
+
+        const T: i64 = 1_700_000_000_000;
+
+        // Provision a GLK estate (corpus-backed so BM25 lane is live).
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            InMemoryDrawerStore::with_storage(Arc::clone(&storage), T, None).unwrap(),
+        );
+        let storage_dyn: Arc<dyn persistence_kit::storage::Storage> = storage;
+        let mut coord = EstateCoordinator::new();
+        let params = EstateProvisionParams {
+            estate_name: "br8-branch-encode-test".to_string(),
+            kind: EstateKind::Glk,
+            zoom_window_low: 1,
+            zoom_window_high: 10,
+            framework_profile: "KnowledgeWork".to_string(),
+            sync_mode: SyncMode::None,
+        };
+        let handle = coord
+            .provision(
+                store,
+                storage_dyn,
+                None,
+                OwnerCredentials::new("owner-br8"),
+                params,
+                vec![EmbeddingModelConfig::Deterministic],
+            )
+            .expect("provision GLK estate for br8");
+
+        // Seed one row into the parent, derive a branch, add a new row
+        // into the branch only (the post-derivation "new" row).
+        let seed_frame = CaptureFrame::new(
+            "seed row — present at derivation, not promoted",
+            CaptureChannel::Typed,
+            "lab",
+            LatticeAnchor::udc("000"),
+            "br8-agent",
+            "test-model-v1",
+        );
+        coord
+            .capture_with_mode(&handle, seed_frame, T, WriteMode::Regular)
+            .expect("seed capture");
+        coord.await_encode_drain(&handle).expect("seed drain");
+
+        let bid = coord
+            .glk_derive_branch("br8-branch", &handle, T)
+            .expect("derive branch");
+
+        // Capture a distinctive phrase into the branch (post-derivation row).
+        let branch_frame = CaptureFrame::new(
+            "tangerine-unique-phrase-for-promote-encode-test",
+            CaptureChannel::Typed,
+            "lab",
+            LatticeAnchor::udc("000"),
+            "br8-agent",
+            "test-model-v1",
+        );
+        coord
+            .branch_handle_for(bid)
+            .expect("branch exists")
+            .capture(branch_frame, T)
+            .expect("branch capture");
+
+        // Promote the branch: post-derivation row should route through
+        // capture_with_mode(Regular), enqueuing an EncodeJob.
+        let promoted = coord
+            .glk_promote_branch(bid, &handle, T)
+            .expect("promote branch");
+        assert_eq!(promoted, 1, "exactly one post-derivation row promoted");
+
+        // Drain the encode queue so the promoted row is indexed in BM25.
+        coord
+            .await_encode_drain(&handle)
+            .expect("encode drain after promote");
+
+        // Verify the promoted row is reachable via the BM25 (corpus) lane —
+        // the lane that was dark before Finding #9 was fixed.
+        let recall_req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+            .with_mode(GLKRecallMode::Hybrid)
+            .with_scoring(GLKRecallScoring::Raw)
+            .with_limit(10)
+            .with_fallback(RecallFallbackPolicy::FailClosed)
+            .with_query_text("tangerine-unique-phrase-for-promote-encode-test".to_string());
+
+        let results = coord
+            .recall_scored(&handle, recall_req, T)
+            .expect("hybrid recall after promote");
+
+        let found = results.hits.iter().any(|hit| {
+            hit.sources.contains(&RecallEvidencePath::CorpusBm25)
+        });
+        assert!(
+            found,
+            "promoted row must be reachable via CorpusBm25 lane after drain; got {} hits",
+            results.hits.len()
+        );
     }
 }
