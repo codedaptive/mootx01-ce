@@ -114,9 +114,16 @@ public actor MootBridge {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
         let owner = OwnerCredentials(ownerIdentifier: "gateway-owner")
+        // Whole-file encryption (ADR-014): load the per-install key from the
+        // Keychain and open the estate as FullDatabase, so the file — schema and
+        // content — is SQLCipher-encrypted at rest. Sharing the key with a
+        // separately-spawned managed server needs a shared keychain access group
+        // + entitlement, verified on a signed build.
+        let key = try KeychainKeyStore(service: "com.codedaptive.mootx01").loadOrCreateKey()
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: url, busyTimeout: 5.0)
+            backend: .sqlite(url: url, busyTimeout: 5.0),
+            encryptionConfig: .fullDatabase(key: key)
         )
         let storage = try SQLiteStorage(configuration: configuration)
         let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
