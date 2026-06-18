@@ -32,6 +32,20 @@ pub enum VaultKitError {
     /// JSON, shape mismatch). The Swift port surfaces the analogous
     /// failures as Foundation `EncodingError`/`DecodingError`.
     Serialization(String),
+
+    /// Export aborted because the estate's corpus appears bricked: recall
+    /// returned 0 drawers but raw storage contains at least one drawer row.
+    /// The most common cause is a poison timestamp in a drawer row that the
+    /// scan-resilience path skips but `COUNT(*)` still sees. An empty export
+    /// would be a silent data loss; we fail loud so the caller can investigate
+    /// and repair before exporting. Mirrors Swift
+    /// `VaultKitError.exportBrickedEstate(drawerCount:reason:)`.
+    ExportBrickedEstate {
+        /// Raw row count from `COUNT(*)` on the drawers table.
+        drawer_count: usize,
+        /// Human-readable explanation of why the export was aborted.
+        reason: String,
+    },
 }
 
 impl fmt::Display for VaultKitError {
@@ -47,6 +61,10 @@ impl fmt::Display for VaultKitError {
             VaultKitError::Serialization(msg) => {
                 write!(f, "VaultKit corpus serialization error: {msg}")
             }
+            VaultKitError::ExportBrickedEstate { drawer_count, reason } => write!(
+                f,
+                "VaultKit export aborted — bricked estate ({drawer_count} drawer rows in storage, 0 returned by recall): {reason}"
+            ),
         }
     }
 }

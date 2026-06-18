@@ -992,6 +992,26 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Count raw rows in the `drawers` table via SQL `COUNT(*)`, bypassing
+    /// all row-decode logic. Corrupt rows (e.g. a poison timestamp) are still
+    /// counted because `COUNT(*)` never reads column values. Used by the
+    /// vault-export fail-loud path to distinguish "estate is genuinely empty"
+    /// from "recall returned 0 because all rows are corrupt."
+    ///
+    /// An estate with no captured drawers returns `Ok(0)`. Mirrors Swift
+    /// `DrawerStore.countDrawerRows()`.
+    ///
+    /// ## Default impl — fail-loud, never silently zero
+    ///
+    /// A backend that does not override this returns `DatabaseUnavailable`
+    /// rather than silently reporting zero rows, which would mask a bricked
+    /// corpus as an empty one and allow a silent 0-note vault export.
+    fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_drawer_rows not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------

@@ -1176,6 +1176,21 @@ public extension GeniusLocusKit {
         }
     }
 
+    /// Count raw rows in the `drawers` table via SQL `COUNT(*)`, bypassing
+    /// all decode logic. Corrupt rows (e.g. a poison timestamp) are still
+    /// counted. Used by the vault-export fail-loud path to distinguish
+    /// "estate is genuinely empty" from "recall returned 0 because all rows
+    /// are corrupt." Delegates to `Estate.countDrawerRows()`. Mirrors Rust
+    /// `EstateCoordinator::count_drawer_rows`.
+    func countDrawerRows(_ handle: EstateHandle) async throws -> Int {
+        let estate = try estate(for: handle)
+        do {
+            return try await estate.countDrawerRows()
+        } catch {
+            throw remap(verb: "countDrawerRows", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
     // MARK: - Internal helpers
 
     /// Return the cached `DrawerStore` for KGFact writes against `handle`,

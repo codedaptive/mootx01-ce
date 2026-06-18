@@ -146,4 +146,50 @@ struct DrawerMappingTests {
         let expected = DrawerMapping.lineageID(forStableSourceKey: "inbox/my-note")
         #expect(frame.lineageID == expected)
     }
+
+    // MARK: - Fix 4: vault import timestamp validation
+
+    /// A note with an in-range `created` ISO8601 timestamp must preserve its
+    /// `eventTime` through the capture frame (no clamping occurs for valid dates).
+    @Test("import: in-range created timestamp is preserved in eventTime")
+    func importInRangeTimestampPreserved() {
+        let mapping = DrawerMapping(classifyOnImport: false)
+        // A normal 2024 timestamp — well within the RFC-3339 range.
+        let iso = "2024-03-15T10:30:00.000Z"
+        let note = NoteIR(
+            stableSourceKey: "inbox/timestamped",
+            body: [Block(text: "timestamped note")],
+            frontmatter: ["room": "inbox"],
+            originDate: OccurredAt(iso8601: iso)
+        )
+        let (frame, _) = mapping.makeCaptureFrame(for: note, content: "timestamped note")
+        // The frame must preserve the event time — not clamp or drop it.
+        let result = frame.eventTime
+        #expect(result != nil, "in-range timestamp must survive into the capture frame")
+        if let t = result {
+            // Check the date is somewhere in 2024.
+            #expect(t.timeIntervalSince1970 > 1_700_000_000, "preserved timestamp must be in 2024")
+        }
+    }
+
+    /// A note whose `created` ISO8601 string cannot be parsed (returns nil from
+    /// `OccurredAt.date`) must produce `eventTime = nil`, letting the substrate
+    /// use the insertion clock. This covers the `+58432-...` poison format which
+    /// `ISO8601DateFormatter` cannot parse.
+    @Test("import: unparseable created timestamp yields nil eventTime (no poison write)")
+    func importUnparseableTimestampYieldsNilEventTime() {
+        let mapping = DrawerMapping(classifyOnImport: false)
+        // A 5-digit year string — ISO8601DateFormatter cannot parse this.
+        // OccurredAt(iso8601:) stores it as-is; .date returns nil.
+        let poisonISO = "+58432-12-25T03:04:25.000Z"
+        let note = NoteIR(
+            stableSourceKey: "inbox/poison",
+            body: [Block(text: "poison timestamp note")],
+            frontmatter: ["room": "inbox"],
+            originDate: OccurredAt(iso8601: poisonISO)
+        )
+        let (frame, _) = mapping.makeCaptureFrame(for: note, content: "poison timestamp note")
+        // The frame must drop the poison timestamp, not pass it to the substrate.
+        #expect(frame.eventTime == nil, "unparseable poison timestamp must produce nil eventTime")
+    }
 }

@@ -269,6 +269,32 @@ struct VaultBridgeTests {
         #expect(countMDFiles(in: vault) == 0, "confirmed drawer must be excluded under .unconfirmed scope")
     }
 
+    // MARK: - VK-EXPORT-FAILOUD: bricked-estate detection
+
+    /// Export of a genuinely empty estate must succeed with 0 notes, not throw
+    /// `exportBrickedEstate`. An empty estate has zero drawer rows in storage so
+    /// the two-step bricked check (COUNT(*) = 0) short-circuits correctly.
+    ///
+    /// This test verifies the non-bricked zero-note path — the "bricked" path
+    /// (COUNT > 0 AND unfiltered recall returns 0) requires corrupt rows in
+    /// storage, which the SQLite test module covers at the cursor level via
+    /// `query_skip_corrupt_skips_poison_timestamp_returns_clean_rows` in
+    /// PersistenceKit's Rust test suite.
+    @Test("export of genuinely empty estate succeeds with 0 notes (not bricked error)")
+    func exportOfEmptyEstateSucceedsWithZeroNotes() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        // The estate is empty — no drawers captured, no rows in storage.
+        // The export must succeed with 0 notes, not throw exportBrickedEstate.
+        let report = try await bridge.export(estate: handle, to: vault, now: Date())
+        #expect(report.notesExported == 0, "empty estate exports 0 notes")
+        // COUNT(*) is 0 on an empty estate — the bricked-estate path must not fire.
+    }
+
     // MARK: - moot_id round-trip identity tests
 
     @Test("export→re-import preserves lineage via moot_id (no duplicate drawers)")

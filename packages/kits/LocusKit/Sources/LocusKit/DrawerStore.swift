@@ -2255,6 +2255,20 @@ public actor DrawerStore {
         return rows.count
     }
 
+    /// Count all rows in the `drawers` table using a SQL `COUNT(*)` query.
+    ///
+    /// Unlike `allDrawers(hydrationLevel:limit:)` this bypasses all row-decode
+    /// logic, so corrupt rows (e.g. a poison timestamp) are still counted.
+    /// This is intentional: the count is used as a "is the estate genuinely
+    /// empty or is recall returning zero due to corruption?" sentinel in the
+    /// vault-export fail-loud path. A non-zero count when recall returns 0
+    /// means at least some rows are corrupt — the export should fail loud
+    /// rather than report a successful 0-note export. Mirrors Rust
+    /// `DrawerStore::count_drawer_rows`.
+    public func countDrawerRows() async throws -> Int {
+        try await storage.rowStore.count(table: "drawers", where: nil)
+    }
+
     // MARK: - Summary surface
 
     /// Wing-level taxonomy: one WingSummary per wing over

@@ -488,6 +488,15 @@ public actor Estate {
         try await store.countRecallTraces()
     }
 
+    /// Count all rows in the `drawers` table via a SQL `COUNT(*)` — bypasses
+    /// row-decode entirely, so corrupt rows are counted. Used by the vault-export
+    /// fail-loud path to distinguish "estate is genuinely empty" from "all rows
+    /// are corrupt". Delegates to `DrawerStore.countDrawerRows`. Mirrors Rust
+    /// `Estate::count_drawer_rows`.
+    public func countDrawerRows() async throws -> Int {
+        try await store.countDrawerRows()
+    }
+
     // MARK: - Unfiltered full-corpus reads (recall surface)
 
     /// All proposals estate-wide, ordered by `filedAt` ascending.
