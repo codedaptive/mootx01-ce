@@ -638,7 +638,8 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_latent_themes" => "Reasoning lens: extract latent topic clusters via matrix factorization.",
         "moot_lens_bias" => "Reasoning lens: detect over/under-representation relative to a reference distribution.",
         "moot_lens_drift" => "Reasoning lens: measure distribution drift across a temporal split point.",
-        "moot_lens_contradiction" => "Reasoning lens: surface drawers that are statistical outliers in their category.",
+        "moot_lens_cohesion" => "Reasoning lens: surface drawers that are statistical outliers in content cohesion with their peers (the odd-ones-out).",
+        "moot_lens_contradiction" => "Reasoning lens: surface genuine semantic contradictions — drawer pairs linked by a contradicts tunnel and KG facts with conflicting objects for the same subject+predicate key.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
         "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
         "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns.",
@@ -738,10 +739,17 @@ fn lens_schema(name: &str) -> serde_json::Value {
             }),
             json!(["splitAt"]),
         ),
-        "moot_lens_contradiction" => object_schema(
+        "moot_lens_cohesion" => object_schema(
             json!({
                 "threshold": number_schema("Z-score magnitude threshold (default 1.5)."),
                 "filter": filter,
+                "estateID": estate_id,
+                "teachme": teachme
+            }),
+            json!([]),
+        ),
+        "moot_lens_contradiction" => object_schema(
+            json!({
                 "estateID": estate_id,
                 "teachme": teachme
             }),
