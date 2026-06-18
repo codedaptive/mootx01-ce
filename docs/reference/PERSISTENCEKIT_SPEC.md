@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-18
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -391,14 +391,15 @@ Postgres and InMemory store plaintext.
 
 - **SQLite** — Mode 3 (whole-file SQLCipher) protects schema and content; Mode 2
   (per-row AEAD) is also available. The structure-protection guarantee.
-- **PostgreSQL** — no app-level whole-file analogue (the server owns the schema).
-  Content confidentiality is **Mode 2** (per-row AEAD applied client-side before
-  the value reaches Postgres) — the portable mechanism, currently UNWIRED in the
-  Postgres backend. Schema/structure and disk-at-rest are the deployment's
-  responsibility (FIPS-validated Postgres + TDE / disk encryption + TLS + RBAC).
-- **InMemory** — no disk at-rest (volatile); at-rest encryption is N/A. Sensitive
-  data is not persisted here; relevant controls are OS/process hardening
-  (no-swap / `mlock`, zero-on-free).
+- **PostgreSQL** — content is encrypted by the client via **Mode 2** (per-row
+  AEAD) before the value reaches Postgres, so the bytes are ciphertext at rest in
+  the database regardless of the server. (Currently UNWIRED in the Postgres
+  backend — to build.) Deployment TDE / TLS / RBAC are defense-in-depth, not the
+  primary answer; the schema/structure is the server's, the data is ours to
+  encrypt.
+- **InMemory** — the in-memory store holds content **encrypted** (the same Mode 2
+  AEAD seam) so a memory dump, debugger, or swap yields ciphertext, plus RAM
+  hardening (no-swap / `mlock`, zero-on-free). (Currently plaintext — to build.)
 
 Mode 2 (per-row AEAD) is the cross-backend content-encryption mechanism; Mode 3
 (whole-file) is SQLite-only. See ADR-014 (Backend coverage).
@@ -634,6 +635,11 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-18
+B-12b records two decisions for the non-SQLite backends: PostgreSQL content is
+encrypted client-side (Mode 2 AEAD); InMemory data is held encrypted in RAM with
+hardening (no-swap/mlock, zero-on-free). Both unwired today — to build.
 
 ### 1.2.0 -- 2026-06-18
 Added B-12b (per-backend at-rest coverage): the at-rest mechanism is not uniform
