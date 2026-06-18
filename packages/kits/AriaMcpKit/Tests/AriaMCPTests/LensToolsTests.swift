@@ -72,12 +72,15 @@ struct LensToolsTests {
     // MARK: - Projection
 
     @Test func everyCatalogedLensHasATool() {
-        // The lens tool count matches the catalog size minus the recipe-tool
-        // entries that are NOT lens tools: grounded_synthesis → moot_synthesize;
+        // The lens tool count matches the catalog size minus the recipe entries
+        // that are NOT lens tools: grounded_synthesis → moot_synthesize;
         // migration_benchmark → moot_run_migration; shaped_recall →
-        // moot_recall_shaped. All lens tools carry the moot_lens_ prefix.
+        // moot_recall_shaped; recall_exploratory is a library-only recall recipe
+        // (ExploratoryRecall) with no MCP tool. All lens tools carry the
+        // moot_lens_ prefix.
         let nonLensRecipes: Set<String> = [
             "grounded_synthesis", "migration_benchmark", "shaped_recall",
+            "recall_exploratory",
         ]
         let lensToolCount = RecipeCatalog.names
             .filter { !nonLensRecipes.contains($0) }
