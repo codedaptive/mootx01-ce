@@ -162,12 +162,14 @@ struct AriaMCPMain {
             // the PersistenceKit BackendConfiguration.sqlite default; sufficient
             // for a single-process server with no concurrent writers.
             // Whole-file encryption (ADR-014): open the estate as FullDatabase
-            // with the per-install key from the Keychain, so the file — schema and
-            // content — is SQLCipher-encrypted at rest. The shared keychain access
-            // group (verified on a signed build) lets this server and the app open
-            // the same estate with the same key.
+            // with this estate's per-estate key from the Keychain (keyed by the
+            // estate file path), so the file — schema and content — is
+            // SQLCipher-encrypted at rest. The app and this server point at the
+            // same file, so they derive the same account and load the same key;
+            // the shared keychain access group (verified on a signed build) lets
+            // them read the same item.
             do {
-                let dbKey = try KeychainKeyStore(service: "com.codedaptive.mootx01").loadOrCreateKey()
+                let dbKey = try KeychainKeyStore(service: "com.codedaptive.mootx01", estateURL: dbURL).loadOrCreateKey()
                 let configuration = EstateConfiguration(
                     estateID: UUID(),
                     backend: .sqlite(url: dbURL, busyTimeout: 5.0),
