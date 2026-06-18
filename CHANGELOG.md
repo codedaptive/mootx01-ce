@@ -5,6 +5,32 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.2-beta — 2026-06-18
+
+Third beta of the 1.0 line. The headline is the **planned at-rest encryption
+lockdown** — estate data and structure are protected at rest, both ports moving
+together.
+
+### Encryption — planned at-rest lockdown
+
+- **Mode 3 (FullDatabase) whole-file encryption** — SQLCipher on every platform
+  (`PRAGMA key`): OpenSSL FIPS on the Rust port, CommonCrypto (Apple CoreCrypto,
+  FIPS-validated) on Apple, vendored from the SQLCipher Community amalgamation.
+  An external process opening an estate with a plain SQLite library cannot read
+  or alter the schema. Proven end-to-end on both ports.
+- **Per-estate keys, both ports** — Rust keeps a `db.key` inside each estate's
+  directory; Apple keys a Keychain item by the estate file path
+  (`KeychainKeyStore`, Secure-Enclave-wrapped). Distinct estates get distinct
+  keys; the key is disposed on estate-remove, so it never outlives its data.
+- **Mode 2 (RowEncryption) per-row content AEAD** — AES-GCM-256 content seam
+  wired on SQLite and PostgreSQL, on both ports, sharing one byte-compatible
+  implementation in PersistenceKit core.
+- **RAM protection** — the Rust resident daemon `mlock`s its memory out of swap;
+  the Apple port relies on macOS's encrypted virtual memory.
+- **Federation signature** — ADR-013 selects ECDSA P-256 (FIPS-validated module
+  boundary). ADR-014 records the Apple SQLCipher at-rest decision and the
+  approved port divergences.
+
 ## v1.0.1-beta — 2026-06-17
 
 Second beta of the 1.0 line. 60 changes since `v1.0.0-beta` (37 features, 7
