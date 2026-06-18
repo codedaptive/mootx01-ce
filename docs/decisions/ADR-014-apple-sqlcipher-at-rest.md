@@ -3,7 +3,7 @@ status: decided
 question: What at-rest encryption mechanism does the Apple port (iOS + macOS) use, given that Apple Data Protection is iOS-only, native macOS has no per-file encryption primitive, SIP/app-group containers are disableable access-control rather than encryption, and the EE FedRAMP charter requires FIPS-validated cryptography?
 authors: MOOTx01 maintainers
 date: 2026-06-18
-version: 1.2.0
+version: 1.3.0
 relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/PERSISTENCEKIT_INTERFACE.md
@@ -79,13 +79,22 @@ is Swift-only and would break the Swift↔Rust parity model.)
 
 ## Supply chain (CE vs EE)
 
-- **CE** consumes SQLCipher as a **registry-linked dependency** — Rust via the
-  crates.io `bundled-sqlcipher-vendored-openssl` feature (already shipped), Apple
-  via a pinned SwiftPM Git dependency (CommonCrypto build). **No third-party
-  source is committed to the public/forkable CE repo;** a fork gets the
-  dependency reference, not a vendored build.
-- **EE** re-vendors the same pinned source in-tree and FIPS-builds it (auditable,
-  hermetic), in the EE repo only — never flowing back to CE.
+The boundary that must hold is narrow: **the EE FIPS-hardened / FedRAMP-validated
+build never lives in the public/forkable CE repo.** It is NOT "no third-party
+source in CE" — plain open-source SQLCipher source is fine in CE (decision A,
+2026-06-18). A fork getting plain BSD SQLCipher is not a disaster; a fork getting
+the EE FIPS build would be.
+
+- **CE** compiles the **official SQLCipher Community Edition amalgamation**
+  (BSD-licensed, CommonCrypto build). On **Apple** it is **vendored in-tree**
+  (`PersistenceKit/Sources/SQLCipher/sqlite3.c`, generated from Zetetic v4.16.0)
+  — the official SwiftPM package is a binary `xcframework` we reject, and the
+  Community path *is* "compile the source." On **Rust** it is the crates.io
+  `bundled-sqlcipher` source-compile. Attribution (the BSD notice) is reproduced
+  in the app's about/licensing surface.
+- **EE** re-vendors the same Community source and FIPS-builds it (auditable,
+  hermetic) in the EE repo only — that FIPS build is the EE-only artifact that
+  never flows back to CE.
 
 Never a prebuilt binary library on either edition.
 
@@ -177,6 +186,13 @@ third-party CVE/vendoring burden. The crypto *backend* is already first-party
 and it is the piece to replace when Apple offers a native one.
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-18
+Supply-chain decision A: the CE boundary is "no EE-FIPS build in the forkable CE
+repo," NOT "no third-party source in CE." CE vendors the official SQLCipher
+Community amalgamation in-tree on Apple (Zetetic v4.16.0, CommonCrypto); the EE
+FIPS build remains EE-only. Replaces the earlier "CE is registry-linked, no
+vendored source" framing.
 
 ### 1.2.0 -- 2026-06-18
 Recorded two decisions on the non-SQLite backends (replacing the earlier
