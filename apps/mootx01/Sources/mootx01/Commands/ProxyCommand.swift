@@ -12,7 +12,7 @@
 // URLSession sends no Origin header, so HTTPServer.isOriginAllowed(nil)
 // passes unchanged. No server code is touched.
 //
-// The installer writes ["command": binaryPath, "args": ["proxy", "--http", daemonURL]]
+// The installer writes ["command": binaryPath, "args": ["proxy"]]
 // into Claude Desktop's config (instead of the bare serve entry) when the
 // client has useProxyBridge: true — see ClientConfig.swift and Installer.swift.
 //
