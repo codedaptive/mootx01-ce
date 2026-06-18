@@ -33,7 +33,12 @@ enum LensTools {
     static let lensToolNames: Set<String> = [
         "moot_lens_keystones", "moot_lens_constellation", "moot_lens_free_association",
         "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
-        "moot_lens_drift", "moot_lens_contradiction", "moot_lens_trust_synthesis",
+        "moot_lens_drift",
+        // Renamed from moot_lens_contradiction (the lexical-cohesion outlier detector).
+        "moot_lens_cohesion",
+        // New: genuine contradiction detector — contradicts-tunnels + conflicting KG facts.
+        "moot_lens_contradiction",
+        "moot_lens_trust_synthesis",
         "moot_lens_partial_cue", "moot_lens_anticipate", "moot_lens_successors",
         "moot_lens_overlap", "moot_lens_divergence",
         // Analytics lenses (AR_FCA_CAPABILITY_001 + Apriori multi-antecedent).
@@ -140,12 +145,21 @@ enum LensTools {
                     required: ["splitAt"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_lens_contradiction",
-                description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out.",
+                name: "moot_lens_cohesion",
+                description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the lexical odd-ones-out.",
                 inputSchema: objectSchema(
                     properties: [
                         "threshold": numberSchema("Z-score magnitude threshold (default 1.5)."),
                         "filter": filterSchema,
+                        "estateID": estateIDSchema,
+                    ],
+                    required: []),
+                provenance: .recipe),
+            ProjectedTool(
+                name: "moot_lens_contradiction",
+                description: "Reasoning lens: surface genuine contradictions — drawer pairs connected by a contradicts tunnel, and KG facts with conflicting objects for the same subject+predicate.",
+                inputSchema: objectSchema(
+                    properties: [
                         "estateID": estateIDSchema,
                     ],
                     required: []),
@@ -412,13 +426,67 @@ enum LensTools {
             klDivergence: \(out.drift.klDivergence)
             """)
 
-        case "moot_lens_contradiction":
+        case "moot_lens_cohesion":
+            // Lexical-cohesion outlier detector (formerly moot_lens_contradiction).
+            // Surfaces memories whose content similarity with their peers is
+            // anomalously low — the lexical odd-ones-out.
             let out = try await Contradiction.run(
                 kit: kit, handle: handle, frame: try frame(args),
                 threshold: Float(try number(args, "threshold", default: 1.5)))
             return list(
-                "contradiction (considered \(out.considered))",
+                "cohesion_outliers (considered \(out.considered))",
                 out.outliers)
+
+        case "moot_lens_contradiction":
+            // Genuine contradiction detector: (a) drawer pairs linked by a
+            // `contradicts` tunnel; (b) KG facts with conflicting objects for
+            // the same (subject.lowercased, predicate.lowercased) key.
+            let estate = try await kit.estate(for: handle)
+            let allTunnels = try await estate.allTunnels()
+            // (a) Contradicts-tunnel pairs — non-tombstoned only.
+            let contradictsTunnels = allTunnels.filter {
+                $0.kind == .contradicts && $0.tombstonedAt == nil
+            }
+            var lines: [String] = []
+            if contradictsTunnels.isEmpty {
+                lines.append("contradicts_tunnels: none")
+            } else {
+                lines.append("contradicts_tunnels: \(contradictsTunnels.count)")
+                for t in contradictsTunnels.prefix(50) {
+                    let src = t.sourceDrawerId ?? "\(t.sourceWing)/\(t.sourceRoom)"
+                    let tgt = t.targetDrawerId ?? "\(t.targetWing)/\(t.targetRoom)"
+                    lines.append("  \(src) contradicts \(tgt) (tunnel \(t.id))")
+                }
+            }
+            // (b) Conflicting KG facts — group by (subject.lowercased, predicate.lowercased),
+            // flag groups where >1 distinct active object exists.
+            let allFacts = try await kit.recallKGFacts(handle)
+            var factsByKey: [String: [KGFact]] = [:]
+            for fact in allFacts {
+                let key = "\(fact.subject.lowercased())|\(fact.predicate.lowercased())"
+                factsByKey[key, default: []].append(fact)
+            }
+            let conflicting = factsByKey.filter { _, facts in
+                Set(facts.map { $0.object.lowercased() }).count > 1
+            }
+            if conflicting.isEmpty {
+                lines.append("conflicting_facts: none")
+            } else {
+                lines.append("conflicting_facts: \(conflicting.count) subject+predicate pair(s)")
+                let formatter = ISO8601DateFormatter()
+                for (key, facts) in conflicting.sorted(by: { $0.key < $1.key }).prefix(20) {
+                    let parts = key.split(separator: "|", maxSplits: 1)
+                    lines.append("  [\(parts.first ?? "")] \(parts.last ?? "")")
+                    for fact in facts {
+                        let filed = formatter.string(from: fact.filedAt)
+                        lines.append(
+                            "    \(fact.id)  object=[\(fact.object)]  "
+                            + "source=\(fact.sourceDrawerID)  filed=\(filed)"
+                        )
+                    }
+                }
+            }
+            return ToolDispatcher.textResult(lines.joined(separator: "\n"))
 
         case "moot_lens_trust_synthesis":
             let out = try await TrustLens.run(
@@ -477,17 +545,36 @@ enum LensTools {
             return list("tunnel_successor", out.map { "\($0.id) weight=\($0.weight)" })
 
         case "moot_lens_overlap":
+            let handleB = try resolveHandle(secondEstateArgs(args))
+            // Reject self-comparison — overlap of an estate with itself always
+            // produces a degenerate result (overlap=1.0) that provides no
+            // useful signal and may confuse the caller.
+            guard handleB.estateUUID != handle.estateUUID else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "estateIDB resolves to the same estate as estateID; self-comparison is not meaningful for overlap."
+                )
+            }
             let out = try await MindOverlapLens.run(
                 kit: kit, handleA: handle,
-                handleB: try resolveHandle(secondEstateArgs(args)),
+                handleB: handleB,
                 frame: try frame(args))
             return ToolDispatcher.textResult(
                 "mind_overlap: \(out.overlap) (a=\(out.aCount), b=\(out.bCount) drawer(s))")
 
         case "moot_lens_divergence":
+            let handleBD = try resolveHandle(secondEstateArgs(args))
+            // Reject self-comparison — divergence of an estate with itself always
+            // produces a degenerate result (JS=0) that provides no useful signal.
+            guard handleBD.estateUUID != handle.estateUUID else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "estateIDB resolves to the same estate as estateID; self-comparison is not meaningful for divergence."
+                )
+            }
             let out = try await EstateDivergenceLens.run(
                 kit: kit, handleA: handle,
-                handleB: try resolveHandle(secondEstateArgs(args)),
+                handleB: handleBD,
                 frame: try frame(args))
             return ToolDispatcher.textResult("""
             estate_divergence: jensenShannon=\(out.divergence.jensenShannon) klDivergence=\(out.divergence.klDivergence)
@@ -584,6 +671,27 @@ enum LensTools {
         case "moot_lens_complexity":
             let fieldA = try requireString(args, "fieldA")
             let fieldB = try optionalString(args["fieldB"], argument: "fieldB")
+
+            // Validate field names before calling into the recipe. The complexity
+            // recipe silently returns entropy=-0 for fields it does not recognise,
+            // which would surface as a successful but meaningless result. Reject
+            // early with the valid list so the caller can self-correct.
+            let validComplexityFields: Set<String> = ["room", "wing", "addedBy", "embeddingModelID"]
+            if !validComplexityFields.contains(fieldA) {
+                let validList = validComplexityFields.sorted().joined(separator: ", ")
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "Unknown fieldA: \(fieldA). Valid fields: \(validList)"
+                )
+            }
+            if let fb = fieldB, !validComplexityFields.contains(fb) {
+                let validList = validComplexityFields.sorted().joined(separator: ", ")
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "Unknown fieldB: \(fb). Valid fields: \(validList)"
+                )
+            }
+
             let out = try await Complexity.run(
                 kit: kit, handle: handle,
                 frame: try frame(args),

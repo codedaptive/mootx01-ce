@@ -1,15 +1,18 @@
-//! Reasoning-lens tool surface — the 21 hard-bound lens tools.
+//! Reasoning-lens tool surface — the 22 hard-bound lens tools.
 //!
 //! Mirrors Swift `LensTools.swift`. One arm per cataloged lens recipe;
 //! each arm calls its `run_*` function directly (no generic run-by-name
 //! dispatcher). Tool names use the `moot_lens_` prefix (e.g. `moot_lens_keystones`).
 //!
-//! Includes the 14 reasoning lenses (structure, topic, preference, surprise,
-//! grounding/trust, associative, prediction, federated), the 3 analytics
-//! lenses (moot_lens_associations, moot_lens_concepts, moot_lens_apriori)
-//! cataloged by AR_FCA_CAPABILITY_001, and the 4 temporal/information-
-//! theoretic lenses (moot_lens_moment, moot_lens_rhythm, moot_lens_precedence,
-//! moot_lens_complexity) added by the aria-tools mission.
+//! Includes the 15 reasoning lenses (structure, topic, preference, surprise,
+//! grounding/trust, associative, prediction, federated, plus the new genuine
+//! moot_lens_contradiction), the 3 analytics lenses (moot_lens_associations,
+//! moot_lens_concepts, moot_lens_apriori) cataloged by AR_FCA_CAPABILITY_001,
+//! and the 4 temporal/information-theoretic lenses (moot_lens_moment,
+//! moot_lens_rhythm, moot_lens_precedence, moot_lens_complexity) added by
+//! the aria-tools mission. moot_lens_cohesion (renamed from moot_lens_contradiction)
+//! detects content-cohesion outliers; moot_lens_contradiction detects genuine
+//! semantic contradictions via contradicts-tunnels and conflicting KG facts.
 //!
 //! Arg surfaces mirror the Swift LensTools schemas. The `now: i64` that
 //! the Rust `run_*` functions require is supplied by `crate::dispatch::wall_now()`;
@@ -32,6 +35,7 @@ use cognition_kit::{
 };
 use genius_locus_kit::{bridge_audit_event, event_lag_pairs};
 use locus_kit::drawer_operational::ContentKind;
+use locus_kit::tunnel_operational::TunnelKind;
 use substrate_ml::apriori_mining::AprioriThresholds;
 use substrate_ml::association_rule_mining::MiningThresholds;
 use substrate_ml::formal_concept_analysis::BoundedConceptMiner;
@@ -44,8 +48,9 @@ use crate::dispatch::{
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
-/// The 21 lens tool names — 14 reasoning lenses, 3 analytics lenses, and
-/// 4 temporal/information-theoretic lenses.
+/// The 22 lens tool names — 15 reasoning lenses (including the new genuine
+/// moot_lens_contradiction), 3 analytics lenses, and 4 temporal/information-
+/// theoretic lenses.
 /// All names use the `moot_lens_` prefix to match Swift `LensTools.swift`.
 pub const LENS_TOOLS: &[&str] = &[
     "moot_lens_keystones",
@@ -55,6 +60,12 @@ pub const LENS_TOOLS: &[&str] = &[
     "moot_lens_latent_themes",
     "moot_lens_bias",
     "moot_lens_drift",
+    // moot_lens_cohesion: content-cohesion outlier detector (renamed from
+    // moot_lens_contradiction; backed by CognitionKit run_contradiction).
+    "moot_lens_cohesion",
+    // moot_lens_contradiction: genuine semantic contradiction detector —
+    // contradicts-tunnels + KG facts with conflicting objects for the same
+    // subject+predicate key.
     "moot_lens_contradiction",
     "moot_lens_trust_synthesis",
     "moot_lens_partial_cue",
@@ -215,15 +226,102 @@ pub fn dispatch(
             )))
         }
 
-        "moot_lens_contradiction" => {
+        "moot_lens_cohesion" => {
+            // Content-cohesion outlier detector: flags recalled memories whose
+            // content cohesion with their peers is anomalously low.
+            // Backed by CognitionKit `run_contradiction` (the statistical
+            // cohesion algorithm); renamed at the MCP surface to avoid
+            // confusion with the genuine semantic contradiction detector below.
             let frame = recall_frame(args)?;
             let threshold = opt_float(args, "threshold", 1.5)? as f32;
             let out = run_contradiction(&coord, &estate.handle, frame, threshold, now)
                 .map_err(lens_error)?;
             Ok(list(
-                &format!("contradiction (considered {})", out.considered),
+                &format!("cohesion_outliers (considered {})", out.considered),
                 out.outliers,
             ))
+        }
+
+        "moot_lens_contradiction" => {
+            // Genuine semantic contradiction detector. Two signals:
+            // 1. Drawer pairs linked by an active `contradicts` tunnel.
+            // 2. KG facts with conflicting objects for the same
+            //    (subject.to_lowercase, predicate.to_lowercase) key.
+            // No recall frame needed — scans the full estate.
+            // all_tunnels returns VerbDispatchError, not RecipeRunError — use
+            // the direct JSONRPCError mapping rather than lens_error.
+            let all_tunnels = coord
+                .all_tunnels(&estate.handle)
+                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+            let contradicts_tunnels: Vec<_> = all_tunnels
+                .into_iter()
+                .filter(|t| t.kind == TunnelKind::Contradicts && t.tombstoned_at.is_none())
+                .collect();
+
+            let mut lines: Vec<String> = Vec::new();
+            if contradicts_tunnels.is_empty() {
+                lines.push("contradicts_tunnels: none".to_string());
+            } else {
+                lines.push(format!("contradicts_tunnels: {}", contradicts_tunnels.len()));
+                for t in contradicts_tunnels.iter().take(50) {
+                    let src = t
+                        .source_drawer_id
+                        .as_deref()
+                        .unwrap_or_else(|| t.source_wing.as_str());
+                    let tgt = t
+                        .target_drawer_id
+                        .as_deref()
+                        .unwrap_or_else(|| t.target_wing.as_str());
+                    lines.push(format!("  {} contradicts {} (tunnel {})", src, tgt, t.id));
+                }
+            }
+
+            // recall_kg_facts returns VerbDispatchError — same mapping as above.
+            let all_facts = coord
+                .recall_kg_facts(&estate.handle)
+                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+            // Group facts by (subject_lower, predicate_lower).
+            let mut facts_by_key: BTreeMap<String, Vec<_>> = BTreeMap::new();
+            for fact in &all_facts {
+                let key = format!(
+                    "{}|{}",
+                    fact.subject.to_lowercase(),
+                    fact.predicate.to_lowercase()
+                );
+                facts_by_key.entry(key).or_default().push(fact);
+            }
+            let conflicting: Vec<_> = facts_by_key
+                .iter()
+                .filter(|(_, facts)| {
+                    let objects: std::collections::HashSet<_> =
+                        facts.iter().map(|f| f.object.to_lowercase()).collect();
+                    objects.len() > 1
+                })
+                .collect();
+
+            if conflicting.is_empty() {
+                lines.push("conflicting_facts: none".to_string());
+            } else {
+                lines.push(format!(
+                    "conflicting_facts: {} subject+predicate pair(s)",
+                    conflicting.len()
+                ));
+                for (key, facts) in conflicting.iter().take(20) {
+                    let parts: Vec<_> = key.splitn(2, '|').collect();
+                    lines.push(format!(
+                        "  [{}] {}",
+                        parts.first().copied().unwrap_or(""),
+                        parts.get(1).copied().unwrap_or("")
+                    ));
+                    for fact in *facts {
+                        lines.push(format!(
+                            "    {}  object=[{}]  source={}  filed={}",
+                            fact.id, fact.object, fact.source_drawer_id, fact.filed_at
+                        ));
+                    }
+                }
+            }
+            Ok(text_result(&lines.join("\n")))
         }
 
         "moot_lens_trust_synthesis" => {
@@ -334,6 +432,17 @@ pub fn dispatch(
             // Both estates share the same coordinator Arc (single coordinator per
             // server); we call through coord already locked above with both handles.
             let estate_b = registry.resolve(args, "estateIDB")?;
+
+            // Reject self-comparison — overlap of an estate with itself always
+            // produces a degenerate result (overlap=1.0) that provides no useful
+            // signal. Mirrors Swift LensTools self-comparison guard.
+            if estate_b.handle.estate_uuid == estate.handle.estate_uuid {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "estateIDB resolves to the same estate as estateID; self-comparison is not meaningful for overlap.",
+                ));
+            }
+
             let frame = recall_frame(args)?;
             let make_frame = || frame.clone();
             let out = run_mind_overlap(&coord, &estate.handle, &estate_b.handle, make_frame, now)
@@ -348,6 +457,17 @@ pub fn dispatch(
             // Both estates share the same coordinator — coord (already locked
             // above) covers both handles. No need to re-lock.
             let estate_b = registry.resolve(args, "estateIDB")?;
+
+            // Reject self-comparison — divergence of an estate with itself always
+            // produces a degenerate result (JS=0) that provides no useful signal.
+            // Mirrors Swift LensTools self-comparison guard.
+            if estate_b.handle.estate_uuid == estate.handle.estate_uuid {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "estateIDB resolves to the same estate as estateID; self-comparison is not meaningful for divergence.",
+                ));
+            }
+
             let frame = recall_frame(args)?;
             let make_frame = || frame.clone();
             let out =
@@ -583,6 +703,33 @@ pub fn dispatch(
         "moot_lens_complexity" => {
             let field_a = require_string(args, "fieldA")?;
             let field_b = optional_string(args, "fieldB")?;
+
+            // Validate field names before calling the recipe. The complexity recipe
+            // returns entropy=-0 for unknown fields, producing a misleading success
+            // result. Reject early with the valid list. Mirrors Swift LensTools.
+            const VALID_COMPLEXITY_FIELDS: &[&str] =
+                &["addedBy", "embeddingModelID", "room", "wing"];
+            if !VALID_COMPLEXITY_FIELDS.contains(&field_a) {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown fieldA: {field_a}. Valid fields: {}",
+                        VALID_COMPLEXITY_FIELDS.join(", ")
+                    ),
+                ));
+            }
+            if let Some(fb) = field_b {
+                if !VALID_COMPLEXITY_FIELDS.contains(&fb) {
+                    return Err(JSONRPCError::new(
+                        JSONRPCErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Unknown fieldB: {fb}. Valid fields: {}",
+                            VALID_COMPLEXITY_FIELDS.join(", ")
+                        ),
+                    ));
+                }
+            }
+
             let frame = recall_frame(args)?;
             let out =
                 run_complexity(&coord, &estate.handle, frame, field_a, field_b, now)
