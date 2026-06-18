@@ -42,7 +42,7 @@ The honest boundary. B is the intended recipient of what A shares with B, so B m
 
 Five mechanisms carry the model. The first two already exist in the design. The rest are this document's proposals.
 
-Per-estate identity. Each estate holds an Ed25519 keypair generated on first launch (ConvergenceKit §8). Identity is per-estate, not per-device or per-user. Two estates never implicitly trust each other.
+Per-estate identity. Each estate holds an Ed25519 keypair generated on first launch (ConvergenceKit §8). Identity is per-estate, not per-device or per-user. Two estates never implicitly trust each other. *(Signature algorithm superseded by ADR-013: ECDSA P-256, for FIPS approved-mode compliance. The per-estate-identity model is unchanged.)*
 
 Sign with origin, then encrypt to recipient. Every outbound payload is signed by the originating estate's key and then encrypted to the intended recipient, scoped to the specific pairing. Signing proves authorship. Encrypting proves only that the recipient can open it, which is why both are required and why the order is sign-then-encrypt.
 
