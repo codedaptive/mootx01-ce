@@ -515,6 +515,89 @@ actor SQLiteBackend {
         return rows
     }
 
+    /// SQLite-cursor-level skip-corrupt scan.
+    ///
+    /// Iterates the result set row by row; when `readColumn` returns a
+    /// `.corruptStoredValue` error (e.g. a `+58432-...` poison timestamp that
+    /// `ISO8601DateFormatter` cannot parse back), the row is logged via OSLog
+    /// and skipped. Any other error (engine failure, locking) is re-thrown.
+    ///
+    /// Point lookups use strict `queryRows` — a corrupt value in a point-lookup
+    /// row is an unambiguous data-integrity failure and the caller must know.
+    /// Corpus scans (all drawers, wing scans) use this method so one bad row
+    /// does not brick the entire estate.
+    func queryRowsSkipCorrupt(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?
+    ) throws -> (rows: [StorageRow], skipped: Int) {
+        let resolvedSchema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        let projection: String
+        if let columns, !columns.isEmpty {
+            projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
+        } else {
+            projection = "*"
+        }
+        var sql = "SELECT \(projection) FROM \"\(table)\""
+        var bindings: [TypedValue] = []
+        if let predicate {
+            let compiled = SQLitePredicateCompiler.compile(predicate)
+            sql += " WHERE \(compiled.sql)"
+            bindings = compiled.bindings
+        }
+        if !orderBy.isEmpty {
+            let parts = orderBy.map { clause -> String in
+                let dir = clause.direction == .ascending ? "ASC" : "DESC"
+                return "\"\(clause.column.name)\" \(dir)"
+            }
+            sql += " ORDER BY " + parts.joined(separator: ", ")
+        }
+        if let limit { sql += " LIMIT \(limit)" }
+        if let offset, offset > 0 { sql += " OFFSET \(offset)" }
+
+        let stmt = try connection.prepare(sql)
+        defer { stmt.finalize() }
+        for (i, v) in bindings.enumerated() {
+            try stmt.bind(v, at: Int32(i + 1))
+        }
+
+        var rows: [StorageRow] = []
+        let colCount = stmt.columnCount()
+        var skipped = 0
+
+        while try stmt.step() {
+            var values: [String: TypedValue] = [:]
+            var rowIsCorrupt = false
+            for i in 0..<colCount {
+                let name = stmt.columnName(i)
+                do {
+                    values[name] = try readColumn(
+                        stmt: stmt, index: i,
+                        schema: resolvedSchema, columnName: name, table: table)
+                } catch StorageError.corruptStoredValue(let t, let c, let s) {
+                    // Log and mark row as corrupt; break out of the column loop
+                    // and continue to the next row.
+                    sqliteConnectionLog.warning(
+                        "[queryRowsSkipCorrupt] Skipping corrupt row in table '\(t, privacy: .public)' (column='\(c, privacy: .public)' storedText='\(s, privacy: .public)'). Row skipped until repaired."
+                    )
+                    skipped += 1
+                    rowIsCorrupt = true
+                    break
+                } catch {
+                    throw error // systemic failure — re-throw
+                }
+            }
+            if rowIsCorrupt { continue }
+            // At-rest decryption seam: decrypt content column when the row
+            // carries a key identifier. No-op for Plaintext mode.
+            rows.append(StorageRow(values: try decryptedForRead(values, config: encryptionConfig)))
+        }
+        return (rows, skipped)
+    }
+
     // At-rest per-row encryption seam (Mission ENC-01): the write/read seam
     // (`encryptedForWrite` / `decryptedForRead` / `assertContentKeyIDInvariant`)
     // lives in PersistenceKit core (RowCrypto.swift) so the SQLite and

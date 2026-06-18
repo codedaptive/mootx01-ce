@@ -4,6 +4,7 @@
 // connection (SQLite WAL mode handles multi-reader concurrency).
 
 import Foundation
+import OSLog
 import SubstrateTypes
 import SQLCipher
 import PersistenceKit
@@ -264,6 +265,29 @@ final class SQLiteStatement {
 // SQLITE_TRANSIENT tells sqlite to copy the data before returning.
 let SQLITE_TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1), to: sqlite3_destructor_type.self)
 
+// Internal so sibling files in PersistenceKitSQLite (e.g. SQLiteStorage.swift)
+// can share the same logger without a second OSLog allocation.
+let sqliteConnectionLog = Logger(subsystem: "com.mootx01.kit", category: "SQLiteConnection")
+
+// ─────────────────────────────────────────────────────────────────
+// Write-boundary clamp constants — mirrors Rust iso8601() in sqlite.rs.
+//
+// ISO8601DateFormatter (the read side) only accepts four-digit years
+// (0001–9999). An extreme Date — e.g. from a millisecond epoch that
+// was accidentally treated as seconds, or a bad Vault frontmatter
+// `created` field — can cause formatterWithFraction.string(from:) to
+// produce "+59009-..." which formatterWithFraction.date(from:) cannot
+// parse back. To prevent this, Date values are clamped to the
+// RFC-3339-parseable range before formatting. The clamped value is
+// wrong-but-readable; the warning log is the signal to fix the upstream.
+//
+// Seconds since 1970-01-01T00:00:00Z:
+//   MIN_ROUND_TRIP_SECS = 0001-01-01T00:00:00Z (−62135596800)
+//   MAX_ROUND_TRIP_SECS = 9999-12-31T23:59:59Z (+253402300799)
+// ─────────────────────────────────────────────────────────────────
+private let kMinRoundTripSecs: TimeInterval = -62_135_596_800
+private let kMaxRoundTripSecs: TimeInterval = 253_402_300_799
+
 enum ISO8601 {
     // Cached formatters — initialised once at first use, never mutated after.
     // ISO8601DateFormatter is thread-safe for concurrent reads after
@@ -291,8 +315,35 @@ enum ISO8601 {
         return f
     }()
 
+    /// Format a `Date` as an RFC-3339 string for storage in a TEXT timestamp
+    /// column.
+    ///
+    /// ## Write-boundary clamp (data-integrity invariant)
+    ///
+    /// `ISO8601DateFormatter` (the read side) only accepts four-digit years
+    /// (0001–9999). An extreme `Date` — e.g. from a millisecond epoch stored
+    /// where seconds were expected, or a bad Vault frontmatter `created` field
+    /// — can cause the formatter to produce `+59009-...` which cannot be parsed
+    /// back. To prevent this, `date` is clamped to the RFC-3339-parseable range
+    /// before formatting. The clamped value is wrong-but-readable; the warning
+    /// log is the signal to investigate the upstream source.
     static func string(from date: Date) -> String {
-        formatterWithFraction.string(from: date)
+        let secs = date.timeIntervalSince1970
+        let clamped: Date
+        if secs < kMinRoundTripSecs {
+            sqliteConnectionLog.warning(
+                "ISO8601: timestamp \(secs, privacy: .public) is below year 0001 (RFC-3339 minimum); clamping to \(kMinRoundTripSecs, privacy: .public). Investigate the upstream source."
+            )
+            clamped = Date(timeIntervalSince1970: kMinRoundTripSecs)
+        } else if secs > kMaxRoundTripSecs {
+            sqliteConnectionLog.warning(
+                "ISO8601: timestamp \(secs, privacy: .public) exceeds year 9999 (RFC-3339 maximum); clamping to \(kMaxRoundTripSecs, privacy: .public). Investigate the upstream source."
+            )
+            clamped = Date(timeIntervalSince1970: kMaxRoundTripSecs)
+        } else {
+            clamped = date
+        }
+        return formatterWithFraction.string(from: clamped)
     }
 
     /// Parse an ISO-8601 string, accepting both fractional-second and

@@ -44,6 +44,39 @@ public protocol RowStore: Sendable {
     ) async throws -> [StorageRow]
     func count(table: String, where predicate: StoragePredicate?) async throws -> Int
 
+    /// Corpus scan that skips rows with a corrupt stored value rather than
+    /// failing the entire scan.
+    ///
+    /// ## When to use
+    ///
+    /// Use this method for **best-effort corpus scans** (e.g. `allDrawers`,
+    /// `drawersIn(wing:)`) where a single corrupt row must not brick the entire
+    /// estate. For **point lookups** (single-row fetches by primary key) use
+    /// `query(...)`, which is strict: a corrupt value in a point-lookup row is
+    /// an unambiguous data-integrity failure and the caller must know about it.
+    ///
+    /// ## Contract
+    ///
+    /// Returns `(cleanRows, skippedCount)`. Rows that decode without error
+    /// appear in `cleanRows`. Rows that fail with `StorageError.corruptStoredValue`
+    /// are counted in `skippedCount` and logged via OSLog. Any other error
+    /// (engine failure, connectivity, locking) is re-thrown — those are systemic
+    /// failures, not data problems.
+    ///
+    /// ## Default implementation
+    ///
+    /// Calls `query(...)` and promotes a top-level `corruptStoredValue` error to
+    /// `([], 1)`. Backends that iterate at the cursor level (SQLiteStorage)
+    /// override this to skip individual corrupt rows without aborting the scan.
+    func querySkipCorrupt(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?
+    ) async throws -> (rows: [StorageRow], skipped: Int)
+
     /// Column-projecting query: like `query(...)` but reads ONLY the named
     /// `columns` from the row, leaving every unnamed column absent from the
     /// returned `StorageRow`. A `nil` projection is a full read (every column).
@@ -88,5 +121,30 @@ public extension RowStore {
         try await query(
             table: table, where: predicate,
             orderBy: orderBy, limit: limit, offset: offset)
+    }
+
+    /// Default skip-corrupt implementation: calls `query(...)` with the given
+    /// projection and promotes a top-level `StorageError.corruptStoredValue`
+    /// error to `([], 1)`. Backends that iterate at cursor level override this
+    /// for correct per-row skip-and-log behaviour.
+    func querySkipCorrupt(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?
+    ) async throws -> (rows: [StorageRow], skipped: Int) {
+        do {
+            let rows = try await query(
+                table: table, where: predicate,
+                orderBy: orderBy, limit: limit, offset: offset, columns: columns)
+            return (rows, 0)
+        } catch StorageError.corruptStoredValue {
+            // Promote: the whole-query abort becomes a skip-and-empty-result.
+            // Backends that iterate at cursor level override this for per-row
+            // skip-and-log behaviour (SQLiteRowStore overrides this).
+            return ([], 1)
+        }
     }
 }

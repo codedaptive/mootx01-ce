@@ -33,6 +33,7 @@
 // per the deterministic-engine rule.
 
 import Foundation
+import OSLog
 import IntellectusLib
 import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
@@ -51,6 +52,8 @@ import SubstrateKernel
 import SubstrateLib
 import SubstrateTypes
 import PersistenceKit
+
+private let drawerStoreLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit")
 
 public actor DrawerStore {
 
@@ -528,16 +531,21 @@ public actor DrawerStore {
     /// monitoring is enabled.
     public func drawersIn(wing: String) async throws -> [Drawer] {
         let startTs = Date().timeIntervalSince1970
-        let rows = try await storage.rowStore.query(
+        // Use querySkipCorrupt so rows with corrupt timestamp columns (e.g.
+        // a poison filedAt from a bad Vault import or millisecond-vs-seconds
+        // confusion) are skipped rather than bricking the entire wing scan.
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
                 .eq(Column(table: "drawers", name: "wing"), .text(wing)),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
-            limit: nil, offset: nil
+            limit: nil, offset: nil, columns: nil
         )
-        let result = try rows.map(Self.drawerFromRow)
+        // decodeDrawerRowsSkipCorrupt handles any remaining drawerFromRow failures
+        // (e.g. corrupt lineageID UUID) that survived the storage-level skip.
+        let result = try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "drawersIn(wing:)")
         // Emit query metrics at the operation boundary.
         // query="wing" labels this as a per-wing query path for per-path
         // latency dashboards. Off-path: single Atomic<Bool> load.
@@ -557,7 +565,7 @@ public actor DrawerStore {
     /// monitoring is enabled.
     public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
         let startTs = Date().timeIntervalSince1970
-        let rows = try await storage.rowStore.query(
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
                 .eq(Column(table: "drawers", name: "wing"), .text(wing)),
@@ -565,9 +573,9 @@ public actor DrawerStore {
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
-            limit: nil, offset: nil
+            limit: nil, offset: nil, columns: nil
         )
-        let result = try rows.map(Self.drawerFromRow)
+        let result = try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "drawersIn(wing:room:)")
         // query="wing_room" labels this as the per-wing/room path.
         emitDrawerQuery(
             start: startTs, now: Date().timeIntervalSince1970,
@@ -581,7 +589,7 @@ public actor DrawerStore {
     /// All non-tombstoned drawers for a source file, ordered by
     /// chunkIndex then filedAt.
     public func drawersBySource(file: String) async throws -> [Drawer] {
-        let rows = try await storage.rowStore.query(
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
                 .eq(Column(table: "drawers", name: "sourceFile"), .text(file)),
@@ -591,9 +599,9 @@ public actor DrawerStore {
                 OrderClause(column: Column(table: "drawers", name: "chunkIndex"), direction: .ascending),
                 OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)
             ],
-            limit: nil, offset: nil
+            limit: nil, offset: nil, columns: nil
         )
-        return try rows.map(Self.drawerFromRow)
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "drawersBySource(file:)")
     }
 
     /// Full-corpus scan ordered by filedAt, including tombstoned rows.
@@ -636,13 +644,17 @@ public actor DrawerStore {
         case .full:
             columns = nil
         }
-        let rows = try await storage.rowStore.query(
+        // Use querySkipCorrupt so rows with corrupt timestamp columns (e.g.
+        // a poison filedAt like "+58432-..." from a Vault import where a
+        // millisecond epoch was stored where seconds were expected) are skipped
+        // at the storage cursor level and do not abort the entire corpus scan.
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: nil,
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
             limit: limit.map { $0 }, offset: nil, columns: columns
         )
-        let result = try rows.map(Self.drawerFromRow)
+        let result = try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "allDrawers(hydrationLevel:limit:)")
         // query="all" labels this as the full-corpus path.
         // This is the most expensive drawer read and the one most worth
         // monitoring for latency regression in large estates.
@@ -2633,6 +2645,52 @@ public actor DrawerStore {
             wikidataQID: optString(row["wikidataQID"]),
             wikidataQidsSecondary: optString(row["wikidataQidsSecondary"])
         )
+    }
+
+    /// Decode a slice of `StorageRow` values into `Drawer` values, skipping
+    /// rows that fail with `LocusKitError.corruptStoredValue`.
+    ///
+    /// ## Scan-level resilience (data-integrity fix 2026-06-18)
+    ///
+    /// The per-value strict decode in `drawerFromRow` and in PersistenceKit's
+    /// SQLite backend (fail-loud, no silent identity lie) is preserved for POINT
+    /// LOOKUPS. For CORPUS SCANS (`allDrawers`, `drawersIn(wing:)`, etc.) one
+    /// corrupt row must NOT brick the entire estate. This helper implements the
+    /// skip-and-log policy:
+    ///
+    ///   - `.corruptStoredValue` from `drawerFromRow` (e.g. a non-parseable
+    ///     `lineageID` UUID) → log a warning via OSLog, skip the row, continue.
+    ///   - Any other error (storage backend failure, SQL engine error) →
+    ///     re-throw immediately. These indicate a systemic failure, not a data
+    ///     problem, and the caller must surface them.
+    ///
+    /// Timestamp corruption (a `+58432-…` value in `filedAt`) is caught one
+    /// level earlier by PersistenceKit's `readColumn` which returns a
+    /// `.corruptStoredValue` `StorageError`; that error propagates through
+    /// `query()` and surfaces as a throw before this function is called. When
+    /// the upstream `query()` call itself throws `.corruptStoredValue`, the
+    /// corpus-scan callers catch it and return an empty result plus a log. This
+    /// function handles only decode failures that `drawerFromRow` surfaces after
+    /// a clean `query()`.
+    private static func decodeDrawerRowsSkipCorrupt(
+        _ rows: [StorageRow],
+        scan: String
+    ) throws -> [Drawer] {
+        var out = [Drawer]()
+        out.reserveCapacity(rows.count)
+        for row in rows {
+            do {
+                out.append(try drawerFromRow(row))
+            } catch LocusKitError.corruptStoredValue(let table, let column, let storedText) {
+                drawerStoreLog.warning(
+                    "[\(scan, privacy: .public)] Skipping corrupt drawer row (table='\(table, privacy: .public)' column='\(column, privacy: .public)' storedText='\(storedText, privacy: .public)'). The row will not appear in corpus scans until repaired."
+                )
+                // Continue — skip this row, collect the rest.
+            } catch {
+                throw error // systemic failure — re-throw
+            }
+        }
+        return out
     }
 
     private static func tunnelFromRow(_ row: StorageRow) throws -> Tunnel {
