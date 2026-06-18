@@ -785,13 +785,17 @@ pub fn read_manifest(vault_path: &Path) -> Result<Option<ExportManifest>, String
     Ok(Some(m))
 }
 
-/// Enumerate every `.md` file under `vault_path` (skipping hidden files and
-/// directories), hash each with SHA-256, and return a BTreeMap keyed by
+/// Enumerate every `.md` note file under `vault_path` (skipping hidden files
+/// and directories), hash each with SHA-256, and return a BTreeMap keyed by
 /// forward-slash vault-relative path.
 ///
-/// Mirrors `VaultTools.hashAllNotes(vaultURL:)` and the `.skipsHiddenFiles`
-/// constraint of `ObsidianAdapter::to_ir`. Hidden files start with `.`, so the
-/// `.moot/export-manifest.json` sidecar is never included in its own stamp.
+/// Mirrors `VaultTools.hashAllNotes(vaultURL:)` and `ObsidianAdapter::to_ir`
+/// exactly:
+/// - Skips hidden files/dirs so `.moot/export-manifest.json` is never stamped
+///   into its own manifest.
+/// - Skips OKF navigation files (`index.md`, `log.md`) that `from_ir` emits
+///   for progressive-disclosure nav but that `to_ir` never imports as notes.
+///   Without this skip the manifest count is inflated by one per folder.
 pub fn hash_all_notes(
     vault_path: &Path,
 ) -> Result<BTreeMap<String, ManifestEntry>, std::io::Error> {
@@ -823,6 +827,15 @@ fn collect_and_hash(
         if file_type.is_dir() {
             collect_and_hash(&path, vault_root, out)?;
         } else if file_type.is_file() && name_str.ends_with(".md") {
+            // Skip OKF navigation files — mirrors ObsidianAdapter::to_ir which
+            // skips stems "index" and "log" on read. Without this skip the
+            // manifest count is inflated by one per folder (one index.md is
+            // emitted per folder by from_ir), breaking noteCount assertions and
+            // drift detection. Mirrors Swift VaultTools.hashAllNotes fix.
+            let stem = name_str.trim_end_matches(".md");
+            if stem == "index" || stem == "log" {
+                continue;
+            }
             // Vault-relative path with forward slashes.
             let rel = path
                 .strip_prefix(vault_root)
