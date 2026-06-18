@@ -47,14 +47,39 @@ pub fn parse_base_url(url: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
-/// Resolve the daemon's `(host, port)` from `ARIA_MCP_API_BASE`, falling back
-/// to `127.0.0.1:4242`.
+/// Resolve the daemon's `(host, port)`.
+///
+/// Priority: explicit `ARIA_MCP_API_BASE` override → the port the daemon actually
+/// bound, read from `<data>/daemon.port` (the daemon's own source of truth) →
+/// `127.0.0.1:4242`. Reading the real port matters because the daemon hunts
+/// upward off 4242 with `--http auto`, so a hardcoded 4242 misses it and the
+/// console never connects.
 pub fn resolved_addr() -> (String, u16) {
-    std::env::var("ARIA_MCP_API_BASE")
+    if let Some(addr) = std::env::var("ARIA_MCP_API_BASE")
         .ok()
         .as_deref()
         .and_then(parse_base_url)
-        .unwrap_or_else(|| ("127.0.0.1".to_string(), 4242))
+    {
+        return addr;
+    }
+    if let Some(port) = read_daemon_port() {
+        return ("127.0.0.1".to_string(), port);
+    }
+    ("127.0.0.1".to_string(), 4242)
+}
+
+/// Read the daemon's bound port from `<data>/daemon.port`. `None` when the file
+/// is absent or unparseable (daemon not running, or it hasn't written the port
+/// yet) — callers then fall back to the default 4242.
+fn read_daemon_port() -> Option<u16> {
+    let path = crate::resident_host::daemon_port_file_path();
+    parse_port_file_contents(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Parse a port-file body (the daemon writes the decimal port, possibly with a
+/// trailing newline). Pure, for testability. `None` for empty/zero/non-numeric.
+fn parse_port_file_contents(raw: &str) -> Option<u16> {
+    raw.trim().parse::<u16>().ok().filter(|&p| p != 0)
 }
 
 /// Issue a raw HTTP/1.0 GET for the given path against `host:port`.
@@ -114,6 +139,23 @@ pub fn get(host: &str, port: u16, path: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── parse_port_file_contents (daemon.port resolution) ─────────────────────
+
+    #[test]
+    fn parse_port_file_contents_accepts_decimal_with_newline() {
+        assert_eq!(parse_port_file_contents("4243\n"), Some(4243));
+        assert_eq!(parse_port_file_contents("4242"), Some(4242));
+        assert_eq!(parse_port_file_contents("  5000  "), Some(5000));
+    }
+
+    #[test]
+    fn parse_port_file_contents_rejects_empty_zero_and_garbage() {
+        assert_eq!(parse_port_file_contents(""), None);
+        assert_eq!(parse_port_file_contents("\n"), None);
+        assert_eq!(parse_port_file_contents("0"), None);
+        assert_eq!(parse_port_file_contents("not-a-port"), None);
+    }
 
     // ── parse_base_url ────────────────────────────────────────────────────────
 
