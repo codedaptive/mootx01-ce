@@ -783,6 +783,7 @@ name = "locus-kit"
 version = "0.1.0"
 dependencies = [
  "intellectus-lib",
+ "lattice-lib",
  "persistence-kit",
  "substrate-kernel",
  "substrate-lib",
@@ -826,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "mootx01-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aria-mcp",
  "serde",
