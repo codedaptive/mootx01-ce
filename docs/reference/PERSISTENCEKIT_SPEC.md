@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.3.2
+version: 1.3.3
 status: active
 date: 2026-06-18
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -376,13 +376,26 @@ or alter the schema.
 > mechanism across all platforms. Apple Data Protection (iOS), the macOS
 > app-group container, and FileVault are additive defense-in-depth layers.
 
-Activation: on the **Rust** port a resident service writes a shared per-install
-key file (`<estates-dir>/db.key`, owner-only `0600`) at startup;
-`SqliteStorage::new` resolves that sibling key and opens the estate as
-FullDatabase. On the **Apple** port the per-install key lives in the Keychain
-(`KeychainKeyStore`); the app/server constructs the estate with
-`EstateEncryptionConfig.fullDatabase(key:)`. Estates with no key (tests,
-pre-lockdown installs) remain plaintext, so existing call sites are unchanged.
+Activation: the whole-file key is **per-estate on both ports** — distinct estates
+get distinct keys, so a key compromise is scoped to one estate. On the **Rust**
+port a resident service writes a `db.key` file inside the estate's own directory
+(owner-only `0600`) at startup; `SqliteStorage::new` resolves that sibling key and
+opens the estate as FullDatabase. On the **Apple** port the key is a per-estate
+Keychain item keyed by the estate file path (`KeychainKeyStore(service:estateURL:)`);
+the app and the managed server point at the same file, derive the same account,
+and load the same key, then construct the estate with
+`EstateEncryptionConfig.fullDatabase(key:)`. Both ports **dispose the key when the
+estate is removed** (the Rust `db.key` goes with the estate directory; the Apple
+side calls `KeychainKeyStore.deleteKey()`), so a key never outlives the data it
+protected. Estates with no key (tests, pre-lockdown installs) remain plaintext, so
+existing call sites are unchanged.
+
+The key-storage **mechanism** differs by port — a `0600` `db.key` file on Rust
+(Windows/Linux), a Keychain item on Apple — as does FIPS provider (OpenSSL on
+Rust, CommonCrypto on Apple) and RAM-swap protection (the Rust resident daemon
+calls `mlockall`; the Apple port relies on macOS's encrypted virtual memory, so
+no `mlock` is needed). These are approved port divergences; the result — a
+per-estate-keyed, whole-file-encrypted estate — is identical. See ADR-014.
 
 **B-12b (per-backend at-rest coverage):** the at-rest mechanism is NOT uniform
 across backends — whole-file encryption is intrinsically a SQLite (embedded-file)
@@ -636,6 +649,16 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.3.3 -- 2026-06-18
+B-12 Activation: the Mode 3 whole-file key is per-estate on **both** ports (was
+described as per-install). Rust keeps a `db.key` inside each estate's directory;
+Apple keys a Keychain item by the estate file path
+(`KeychainKeyStore(service:estateURL:)`). Both ports dispose the key on
+estate-remove (Apple via `KeychainKeyStore.deleteKey()`), so a key never outlives
+its data. Recorded the approved port divergences: FIPS provider (OpenSSL vs
+CommonCrypto), key storage (file vs Keychain), and RAM-swap protection (Rust
+`mlockall` vs Apple's encrypted virtual memory — no `mlock` needed on Apple).
 
 ### 1.3.2 -- 2026-06-18
 B-12b: PostgreSQL Mode 2 content encryption is wired on both ports. The per-row

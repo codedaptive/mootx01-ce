@@ -3,7 +3,7 @@ status: decided
 question: What at-rest encryption mechanism does the Apple port (iOS + macOS) use, given that Apple Data Protection is iOS-only, native macOS has no per-file encryption primitive, SIP/app-group containers are disableable access-control rather than encryption, and the EE FedRAMP charter requires FIPS-validated cryptography?
 authors: MOOTx01 maintainers
 date: 2026-06-18
-version: 1.3.1
+version: 1.3.2
 relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/PERSISTENCEKIT_INTERFACE.md
@@ -162,8 +162,20 @@ that belongs to the app group. Therefore:
   `sqlite3_key`; the existing Data Protection `setAttributes` call stays as the
   iOS additive layer.
 - **Apple key management is new work:** a Secure-Enclave-wrapped 256-bit data key
-  in the Keychain, shared between the app and the managed server (ADR-005), the
-  Apple analogue of the Rust per-install `db.key`.
+  in the Keychain, **per estate** (keyed by the estate file path via
+  `KeychainKeyStore(service:estateURL:)`), shared between the app and the managed
+  server (ADR-005) — both point at the same file, so they derive the same account
+  and load the same key. This is the Apple analogue of the Rust per-estate
+  `db.key` (a `db.key` file inside each estate's directory). The estate-remove path
+  disposes the key (`KeychainKeyStore.deleteKey()` on Apple; the `db.key` goes with
+  the directory on Rust), so a key never outlives the data it protected.
+- **Approved port divergences (the result is identical; the means differ):**
+  - **FIPS provider** — OpenSSL FIPS on Rust (Windows/Linux), Apple CommonCrypto
+    (CoreCrypto) on Apple. Both are SQLCipher under one `PRAGMA key`.
+  - **Key storage** — a `0600` `db.key` file on Rust; a Keychain item on Apple.
+  - **RAM-swap protection** — the Rust resident daemon calls `mlockall`; the Apple
+    port relies on **macOS's encrypted virtual memory** (swap is OS-encrypted), so
+    no `mlock` is needed. Confirmed and approved 2026-06-18.
 - **macOS app-group container:** add `com.apple.security.application-groups`, put
   the estate path in the group container, and add the managed server to the same
   group.
@@ -187,6 +199,15 @@ third-party CVE/vendoring burden. The crypto *backend* is already first-party
 and it is the piece to replace when Apple offers a native one.
 
 ## Changelog
+
+### 1.3.2 -- 2026-06-18
+Apple key management is now **per-estate** (keyed by the estate file path), the
+Apple analogue of the Rust per-estate `db.key`; both ports dispose the key on
+estate-remove (`KeychainKeyStore.deleteKey()` on Apple) so a key never outlives
+its data. Recorded the approved port divergences: FIPS provider (OpenSSL vs
+CommonCrypto), key storage (file vs Keychain), and RAM-swap protection — Rust
+`mlockall` vs Apple's encrypted virtual memory (no `mlock` needed on Apple,
+confirmed 2026-06-18).
 
 ### 1.3.1 -- 2026-06-18
 Backend coverage status update: the PostgreSQL Mode 2 content seam is now wired
