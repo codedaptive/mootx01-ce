@@ -56,6 +56,21 @@ pub fn dispatch_tool(
     dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new())
 }
 
+/// Dispatch with an explicit vault-on flag. Used by tests that need to verify
+/// vault-gating behaviour without mutating the process environment
+/// (std::env::set_var is not thread-safe under the parallel Rust test runner).
+/// Production code uses `dispatch_tool` / `dispatch_tool_with_vault_ledger`
+/// which read the env var via `vault_enabled()`.
+pub fn dispatch_tool_with_vault_flag(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    vault_on: bool,
+) -> Result<serde_json::Value, JSONRPCError> {
+    dispatch_tool_with_vault_ledger_and_flag(name, args, registry, ledger, &VaultJobLedger::new(), vault_on)
+}
+
 /// Internal dispatch entry point that accepts an explicit `vault_ledger`.
 /// Used by `Dispatcher::handle` (passes the owned ledger) and by
 /// `dispatch_tool` (passes a throwaway ledger for callers that don't need job
@@ -66,6 +81,24 @@ pub fn dispatch_tool_with_vault_ledger(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
+) -> Result<serde_json::Value, JSONRPCError> {
+    dispatch_tool_with_vault_ledger_and_flag(
+        name, args, registry, ledger, vault_ledger, crate::tool_list::vault_enabled()
+    )
+}
+
+/// Inner dispatch that accepts an explicit vault-on flag. This is the single
+/// implementation all entry points delegate to. The flag controls whether
+/// vault tool calls are routed to the vault backend or rejected with a clear
+/// refusal. Callers that want env-var semantics pass `vault_enabled()`;
+/// callers that need deterministic testing pass `true`/`false` directly.
+fn dispatch_tool_with_vault_ledger_and_flag(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    vault_ledger: &VaultJobLedger,
+    vault_on: bool,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // 0. Teachme interception — intercepts BEFORE any runner fires.
     //    Returns guide text; estate is never touched.
@@ -99,7 +132,21 @@ pub fn dispatch_tool_with_vault_ledger(
     //    drift detection (ADR-VAULTKIT-002 decision b). No hint injection on
     //    vault results — they carry filesystem paths, not coaching triggers.
     //    vault_ledger tracks completed export/import jobs for moot_vault_job.
+    //
+    //    Gated by MOOTX01_VAULT env var (ADR-015): when vault is disabled
+    //    (MOOTX01_VAULT=0, installed with --vault-off), vault tool names are
+    //    absent from tools/list, but if a client hard-codes a name we return a
+    //    clear refusal rather than an opaque methodNotFound. Default = vault-on.
     if name.starts_with("moot_vault_") {
+        // vault_on is the resolved flag: true = vault surface enabled (the default),
+        // false = vault surface hidden (installed with --vault-off, ADR-015).
+        // The tool is absent from tools/list when disabled, but if a client
+        // hard-codes the name we return a clear refusal, not a methodNotFound.
+        if !vault_on {
+            return Ok(error_result(
+                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
+            ));
+        }
         return crate::vault_tools::dispatch_vault(name, args, registry, vault_ledger);
     }
 

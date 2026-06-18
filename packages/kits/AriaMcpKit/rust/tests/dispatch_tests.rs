@@ -15,11 +15,11 @@
 use std::collections::BTreeMap;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
+    dispatch::{dispatch_tool, dispatch_tool_with_vault_flag},
     estate_registry::EstateRegistry,
     jsonrpc::{JSONRPCErrorCode, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::build_tool_list,
+    tool_list::{build_tool_list, build_tool_list_with_vault_flag, vault_enabled},
 };
 
 // ---------------------------------------------------------------------------
@@ -3294,5 +3294,121 @@ fn dream_dispatch_rejects_malformed_now_as_invalid_params() {
         err.code,
         JSONRPCErrorCode::INVALID_PARAMS,
         "malformed now must be INVALID_PARAMS; got code {}", err.code as i64
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Vault gating (ADR-015)
+// ---------------------------------------------------------------------------
+
+/// `vault_enabled()` returns true when MOOTX01_VAULT is absent from the
+/// process env (the default for a freshly started process in CI).
+/// NOTE: this assertion only holds when the test process has not had
+/// MOOTX01_VAULT=0 set externally. That is always the case in CI and normal
+/// test runs; the test is skipped-equivalent if the env var is pre-set.
+#[test]
+fn vault_enabled_default_is_true() {
+    // When the env var is absent or set to anything other than "0", vault is on.
+    // We cannot mutate the process env safely in a parallel test runner, so we
+    // assert the contract of `vault_enabled()` for the common case (no env var).
+    // Explicit "0" / non-"0" values are covered by build_tool_list_with_vault_flag tests.
+    if std::env::var("MOOTX01_VAULT").as_deref() != Ok("0") {
+        assert!(vault_enabled(), "vault_enabled() must be true when MOOTX01_VAULT is absent or ≠ '0'");
+    }
+}
+
+/// With vault_on=true (the default), all five vault tools appear in the list.
+#[test]
+fn build_tool_list_with_vault_on_includes_vault_tools() {
+    let tools = build_tool_list_with_vault_flag(true);
+    let arr = tools.as_array().expect("must be array");
+    assert_eq!(arr.len(), 55, "vault-on must produce 55 tools");
+    let names: std::collections::HashSet<&str> =
+        arr.iter().filter_map(|t| t["name"].as_str()).collect();
+    for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
+                   "moot_vault_reconcile", "moot_vault_job"] {
+        assert!(names.contains(name), "vault-on: expected {name} in tools/list");
+    }
+}
+
+/// With vault_on=false (MOOTX01_VAULT=0), all five vault tools are absent.
+/// Non-vault surface (50 tools) is unchanged.
+#[test]
+fn build_tool_list_with_vault_off_excludes_vault_tools() {
+    let tools = build_tool_list_with_vault_flag(false);
+    let arr = tools.as_array().expect("must be array");
+    assert_eq!(arr.len(), 50, "vault-off must produce 50 tools (55 − 5 vault)");
+    let names: std::collections::HashSet<&str> =
+        arr.iter().filter_map(|t| t["name"].as_str()).collect();
+    for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
+                   "moot_vault_reconcile", "moot_vault_job"] {
+        assert!(!names.contains(name), "vault-off: {name} must NOT appear in tools/list");
+    }
+    // A sample of non-vault tools must still be present.
+    assert!(names.contains("moot_file_memory"), "vault-off: core tools must still be present");
+    assert!(names.contains("moot_federated_search"), "vault-off: federation tool must still be present");
+    assert!(names.contains("moot_lens_keystones"), "vault-off: lens tools must still be present");
+}
+
+/// When vault is disabled (vault_on=false), calling a vault tool returns a
+/// clear tool-level refusal (isError=true) rather than a transport fault.
+/// The error message directs the user to reinstall with --vault-on.
+#[test]
+fn dispatch_vault_tool_when_vault_off_returns_clear_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let vault_names = [
+        "moot_vault_export",
+        "moot_vault_import",
+        "moot_vault_status",
+        "moot_vault_reconcile",
+        "moot_vault_job",
+    ];
+    for name in &vault_names {
+        let result = dispatch_tool_with_vault_flag(
+            name,
+            &args![],
+            &registry,
+            &SurfacedRecallLedger::new(),
+            false, // vault_on=false
+        )
+        .expect("disabled vault must return Ok(error result), not Err(transport fault)");
+        assert!(
+            is_tool_error(&result),
+            "disabled vault tool {name} must return isError=true; got {result:?}"
+        );
+        let text = content_text(&result);
+        assert!(
+            text.contains("vault is disabled"),
+            "disabled vault tool {name} error must mention 'vault is disabled'; got: {text}"
+        );
+        assert!(
+            text.contains("--vault-on"),
+            "disabled vault tool {name} error must mention '--vault-on'; got: {text}"
+        );
+    }
+}
+
+/// When vault is enabled (vault_on=true, the default), calling a vault tool
+/// proceeds to the actual vault backend (not the refusal path).
+/// moot_vault_status with a non-existent path returns a tool-level success
+/// (the vault has no manifest — that is a valid, non-error state).
+#[test]
+fn dispatch_vault_tool_when_vault_on_does_not_return_disabled_error() {
+    let registry = EstateRegistry::new_inmemory();
+    // Use a non-existent vault path — vault_status handles this gracefully.
+    let result = dispatch_tool_with_vault_flag(
+        "moot_vault_status",
+        &args!["vaultPath" => "/tmp/no-such-vault-for-test-adr015"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true, // vault_on=true
+    )
+    .expect("vault-on must not produce a transport fault for vault_status");
+    // The result may be success or tool-error (no manifest), but it must NOT
+    // be the "vault is disabled" message — that would mean the guard fired incorrectly.
+    let text = content_text(&result);
+    assert!(
+        !text.contains("vault is disabled"),
+        "vault-on: vault_status must not return the 'vault is disabled' refusal; got: {text}"
     );
 }

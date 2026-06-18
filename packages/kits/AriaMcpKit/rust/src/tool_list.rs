@@ -27,9 +27,36 @@ use serde_json::json;
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Build the full 55-tool surface for `tools/list`.
+/// True when the vault MCP tool surface is enabled.
+///
+/// Reads `MOOTX01_VAULT` from the process environment. Any value other than
+/// the literal string `"0"` (including absent/empty) means vault is ON.
+/// The daemon has this variable set from the install-time `--vault-on/--vault-off`
+/// choice (written into the systemd unit Environment= line or Windows Task
+/// Scheduler cmd wrapper). Default is vault-on per ADR-015.
+pub fn vault_enabled() -> bool {
+    std::env::var("MOOTX01_VAULT")
+        .map(|v| v != "0")
+        .unwrap_or(true) // absent = vault-on (the default)
+}
+
+/// Build the tool surface for `tools/list`.
+///
+/// Produces 55 tools when vault is enabled (the default) or 50 tools when
+/// `MOOTX01_VAULT=0` (installed with `--vault-off`). All non-vault tiers
+/// are always present. See ADR-015.
 pub fn build_tool_list() -> serde_json::Value {
-    let mut tools: Vec<serde_json::Value> = Vec::with_capacity(55);
+    build_tool_list_with_vault_flag(vault_enabled())
+}
+
+/// Build the tool surface with an explicit vault-on flag. Used by tests
+/// that need to verify vault-gating behaviour without mutating the process
+/// environment (std::env::set_var is not thread-safe under the parallel
+/// Rust test runner). Production code uses `build_tool_list()` which reads
+/// the env var via `vault_enabled()`.
+pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
+    let capacity = if vault_on { 55 } else { 50 };
+    let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Tier 1 — Core memory (7)
     tools.push(file_memory_tool());
@@ -87,17 +114,23 @@ pub fn build_tool_list() -> serde_json::Value {
         tools.push(lens_tool(lens_name));
     }
 
-    // Vault (5) — both Swift and Rust ports are live (ADR-VAULTKIT-002 decision a is
-    // superseded; see DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md).
-    // `moot_vault_export` accepts an optional `scope` argument (default "believed").
-    // `moot_vault_job` added for tool-surface parity (Bob's ruling 2026-06-12):
+    // Vault (5) — gated by MOOTX01_VAULT env var (ADR-015).
+    // Default (env absent or ≠ "0") is vault-on: tools appear in tools/list.
+    // When MOOTX01_VAULT=0 (installed with --vault-off), all five vault tools
+    // are omitted from the surface and dispatch returns a clear refusal.
+    // Both Swift and Rust ports are live (ADR-VAULTKIT-002 decision a superseded;
+    // see DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md).
+    // `moot_vault_export` accepts an optional `scope` arg (default "believed").
+    // `moot_vault_job` provides tool-surface parity (Bob's ruling 2026-06-12):
     // Rust vault ops complete synchronously; the ledger records completed results
     // immediately so moot_vault_job can retrieve them. Schema is Swift-identical.
-    tools.push(vault_export_tool());
-    tools.push(vault_tool("moot_vault_import", "Import a vault archive into the estate."));
-    tools.push(vault_tool("moot_vault_status", "Report the current vault sync state."));
-    tools.push(vault_reconcile_tool());
-    tools.push(vault_job_tool());
+    if vault_on {
+        tools.push(vault_export_tool());
+        tools.push(vault_tool("moot_vault_import", "Import a vault archive into the estate."));
+        tools.push(vault_tool("moot_vault_status", "Report the current vault sync state."));
+        tools.push(vault_reconcile_tool());
+        tools.push(vault_job_tool());
+    }
 
     serde_json::Value::Array(tools)
 }

@@ -37,16 +37,21 @@ pub const MGR_TASK: &str = "mootx01-mgr";
 
 /// The logon-task action for the daemon: (execute, argument). The default
 /// case runs the binary directly — Task Scheduler's Stop then terminates the
-/// daemon itself cleanly. A data-dir override forces a `cmd /c "set …&& …"`
-/// wrapper since Task Scheduler has no per-task environment block.
-pub fn daemon_task_command(binary_path: &str, data_dir_override: Option<&str>) -> (String, String) {
-    match data_dir_override {
-        None => (binary_path.to_string(), "serve --http auto".to_string()),
-        Some(d) => (
-            "cmd.exe".to_string(),
-            format!("/c \"set MOOTX01_DATA_DIR={d}&& \"{binary_path}\" serve --http auto\""),
-        ),
-    }
+/// daemon itself cleanly. A data-dir override OR vault_off forces a
+/// `cmd /c "set …&& …"` wrapper since Task Scheduler has no per-task
+/// environment block. `vault_on` governs `MOOTX01_VAULT`: true → "1" (default,
+/// vault surface enabled), false → "0" (vault surface hidden) per ADR-015.
+pub fn daemon_task_command(binary_path: &str, data_dir_override: Option<&str>, vault_on: bool) -> (String, String) {
+    let vault_val = if vault_on { "1" } else { "0" };
+    // We always bake MOOTX01_VAULT so the daemon starts with the right
+    // vault posture regardless of the parent shell's environment.
+    let data_set = data_dir_override
+        .map(|d| format!("set MOOTX01_DATA_DIR={d}&& "))
+        .unwrap_or_default();
+    (
+        "cmd.exe".to_string(),
+        format!("/c \"{data_set}set MOOTX01_VAULT={vault_val}&& \"{binary_path}\" serve --http auto\""),
+    )
 }
 
 /// The logon-task action for the mgr: (execute, argument). The control token
@@ -165,12 +170,16 @@ pub fn restart_task(task_name: &str) -> Result<(), String> {
 }
 
 /// The daemon unit: runs `mootx01 serve --http auto` (§3 hunting form).
-/// `data_dir_override` bakes an Environment= line only when the caller has
-/// MOOTX01_DATA_DIR set — default installs carry no environment.
-pub fn daemon_unit(binary_path: &str, data_dir_override: Option<&str>) -> String {
-    let env_line = data_dir_override
+/// `data_dir_override` bakes an MOOTX01_DATA_DIR Environment= line when set.
+/// `vault_on` bakes MOOTX01_VAULT=1 (vault surface enabled, the default) or
+/// MOOTX01_VAULT=0 (vault surface hidden, installed with --vault-off) per ADR-015.
+/// MOOTX01_VAULT is always written so the resident daemon's posture is explicit
+/// and independent of whatever the launching shell's environment happens to carry.
+pub fn daemon_unit(binary_path: &str, data_dir_override: Option<&str>, vault_on: bool) -> String {
+    let env_data = data_dir_override
         .map(|d| format!("Environment=MOOTX01_DATA_DIR={d}\n"))
         .unwrap_or_default();
+    let vault_val = if vault_on { "1" } else { "0" };
     format!(
         "[Unit]\n\
          Description=mootx01 resident daemon (ARIA MCP server + Brain pump)\n\
@@ -180,7 +189,8 @@ pub fn daemon_unit(binary_path: &str, data_dir_override: Option<&str>) -> String
          ExecStart={binary_path} serve --http auto\n\
          Restart=on-failure\n\
          RestartSec=2\n\
-         {env_line}\
+         Environment=MOOTX01_VAULT={vault_val}\n\
+         {env_data}\
          \n\
          [Install]\n\
          WantedBy=default.target\n"
@@ -358,17 +368,27 @@ mod tests {
 
     #[test]
     fn daemon_unit_shape() {
-        let u = daemon_unit("/home/u/.mootx01/bin/mootx01", None);
+        let u = daemon_unit("/home/u/.mootx01/bin/mootx01", None, true);
         assert!(u.contains("ExecStart=/home/u/.mootx01/bin/mootx01 serve --http auto"));
         assert!(u.contains("Restart=on-failure"));
         assert!(u.contains("WantedBy=default.target"));
         assert!(!u.contains("Environment=MOOTX01_DATA_DIR"));
+        // vault-on baked explicitly (ADR-015)
+        assert!(u.contains("Environment=MOOTX01_VAULT=1"));
     }
 
     #[test]
     fn daemon_unit_bakes_data_dir_override() {
-        let u = daemon_unit("/b", Some("/srv/moot"));
+        let u = daemon_unit("/b", Some("/srv/moot"), true);
         assert!(u.contains("Environment=MOOTX01_DATA_DIR=/srv/moot"));
+        assert!(u.contains("Environment=MOOTX01_VAULT=1"));
+    }
+
+    #[test]
+    fn daemon_unit_vault_off() {
+        let u = daemon_unit("/b", None, false);
+        assert!(u.contains("Environment=MOOTX01_VAULT=0"));
+        assert!(!u.contains("MOOTX01_VAULT=1"));
     }
 
     #[test]
@@ -390,12 +410,22 @@ mod tests {
 
     #[test]
     fn daemon_task_command_shapes() {
-        let (exe, arg) = daemon_task_command(r"C:\Users\b\AppData\Local\Programs\mootx01\mootx01.exe", None);
-        assert_eq!(exe, r"C:\Users\b\AppData\Local\Programs\mootx01\mootx01.exe");
-        assert_eq!(arg, "serve --http auto");
-        let (exe, arg) = daemon_task_command(r"C:\p\mootx01.exe", Some(r"D:\moot"));
+        // vault-on, no data override: cmd wrapper for MOOTX01_VAULT=1
+        let (exe, arg) = daemon_task_command(r"C:\Users\b\AppData\Local\Programs\mootx01\mootx01.exe", None, true);
         assert_eq!(exe, "cmd.exe");
-        assert_eq!(arg, r#"/c "set MOOTX01_DATA_DIR=D:\moot&& "C:\p\mootx01.exe" serve --http auto""#);
+        assert!(arg.contains("set MOOTX01_VAULT=1"));
+        assert!(arg.contains("serve --http auto"));
+
+        // vault-on with data override
+        let (exe, arg) = daemon_task_command(r"C:\p\mootx01.exe", Some(r"D:\moot"), true);
+        assert_eq!(exe, "cmd.exe");
+        assert!(arg.contains(r"set MOOTX01_DATA_DIR=D:\moot&&"));
+        assert!(arg.contains("set MOOTX01_VAULT=1"));
+
+        // vault-off
+        let (_, arg_off) = daemon_task_command(r"C:\p\mootx01.exe", None, false);
+        assert!(arg_off.contains("set MOOTX01_VAULT=0"));
+        assert!(!arg_off.contains("MOOTX01_VAULT=1"));
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub mod upgrade;
 pub fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Serve { db, http } => serve::run(db, http),
-        Command::Install { target, location, yes, no_permissions, no_mgr, no_daemon } => {
-            install::run(target, location, yes, no_permissions, no_mgr, no_daemon)
+        Command::Install { target, location, yes, no_permissions, no_mgr, no_daemon, vault_on } => {
+            install::run(target, location, yes, no_permissions, no_mgr, no_daemon, vault_on)
         }
         Command::Uninstall { target, yes, purge } => uninstall::run(target, yes, purge),
         Command::Db(sub) => db::run(sub),

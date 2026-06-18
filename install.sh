@@ -118,6 +118,9 @@ esac
 echo ""
 echo "Next: wire mootx01 into your AI clients (interactive menu):"
 echo "  mootx01 install"
+echo ""
+echo "Vault (import/export to disk) is ON by default. For a more secure position:"
+echo "  mootx01 install --vault-off   # disables import/export"
 if [ "$mgr_installed" = "1" ]; then
   echo ""
   if [ "$os" = "macos" ]; then
