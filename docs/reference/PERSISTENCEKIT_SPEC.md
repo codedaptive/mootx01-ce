@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -355,23 +355,45 @@ readable via the backing store on the next read.
 
 **B-12 (encryption is transparent to consumers):** an estate's
 `EstateEncryptionConfig` selects mode 1 (plaintext), 2 (per-row content
-ciphertext), or 3 (full-database under a per-install key). Default is
-`.plaintext`, so existing call sites are unchanged and carry no crypto
-on any path. Modes 2 and 3 encrypt the content column under an
-AES-GCM-256 key; consumers issue the same reads and writes regardless of
-mode.
+ciphertext), or 3 (full-database, whole-file encryption). Consumers issue
+the same reads and writes regardless of mode.
 
-**B-12a (cross-port at-rest format parity):** the Rust SQLite backend
-encrypts the `content` column at rest using AES-GCM-256, mirroring the
-Swift `SQLiteBackend.encryptedForWrite`/`decryptedForRead` seam exactly.
-The stored envelope layout is `[12-byte nonce][16-byte GCM tag][ciphertext]`
-on both ports. A database file encrypted by the Swift port can be opened
-and decrypted by the Rust port, and vice versa. The nonce is
+Mode 2 (RowEncryption) encrypts the `content` column value under an
+AES-GCM-256 key and is the federation grant-granularity mechanism
+(per-row keys). Mode 3 (FullDatabase) encrypts the ENTIRE database file —
+schema included — at the storage layer, using each platform's native
+whole-file mechanism: SQLCipher (`PRAGMA key`, the estate key supplied as
+the raw 256-bit cipher key) on the Rust port (Windows/Linux), and Apple
+Data Protection (`FileProtectionType.completeUntilFirstUserAuthentication`,
+Secure Enclave-backed) on the Apple port (iOS). Because the whole file is
+ciphertext, Mode 3 does NOT also apply the per-row content seam (the seam
+is a no-op for FullDatabase). An external process opening a Mode 3 file
+with a plain SQLite library cannot read or alter the schema.
+
+Activation: a resident service writes a shared per-install key file
+(`<estates-dir>/db.key`, owner-only `0600`) at startup; `SqliteStorage::new`
+resolves that sibling key and opens the estate as FullDatabase. Estates
+without a sibling key (tests, pre-lockdown installs) remain plaintext, so
+existing call sites are unchanged and carry no crypto on any path.
+
+**B-12a (cross-port at-rest format parity — Mode 2 only):** for Mode 2
+(RowEncryption), the Rust SQLite backend encrypts the `content` column at
+rest using AES-GCM-256, mirroring the Swift
+`SQLiteBackend.encryptedForWrite`/`decryptedForRead` seam exactly. The
+stored envelope layout is `[12-byte nonce][16-byte GCM tag][ciphertext]`
+on both ports. A Mode 2 column value encrypted by the Swift port can be
+decrypted by the Rust port, and vice versa. The nonce is
 cryptographically random per encryption (via `OsRng` in Rust, via
 `AES.GCM.Nonce()` in Swift); nonce reuse is never permitted. The
 `assertContentKeyIDInvariant` / `assert_content_key_id_invariant` guard
-on both ports ensures upsert and update paths on encrypting estates
-cannot store plaintext content without a keyID.
+on both ports ensures upsert and update paths on Mode 2 estates cannot
+store plaintext content without a keyID.
+
+Mode 3 (FullDatabase) is deliberately NOT cross-port byte-compatible: the
+two ports use different native whole-file mechanisms (SQLCipher vs Apple
+Data Protection) and never share a physical file. Parity for Mode 3 is
+behavioral — the rows retrieved are identical across ports — not on-disk
+byte identity. See B-12.
 
 ## § 6 — Error model (conceptual)
 
@@ -585,6 +607,15 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Planned encryption lockdown. Redefined Mode 3 (FullDatabase) from per-row
+crypto to whole-file encryption using each platform's native mechanism
+(SQLCipher `PRAGMA key` on Rust; Apple Data Protection on iOS); the per-row
+content seam is now a no-op for Mode 3 (B-12). Scoped B-12a cross-port at-rest
+byte-parity to Mode 2 only; Mode 3 parity is behavioral, not byte-identical
+(the ports never share a file). Documented the shared per-install `db.key`
+sibling-file activation written by the resident services at startup.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
