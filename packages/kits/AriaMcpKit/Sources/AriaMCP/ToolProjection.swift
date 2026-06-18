@@ -110,7 +110,7 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_memory_search",
-                description: "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata.",
+                description: "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) indicating whether the ranking is trustworthy. Low discrimination on small corpora is expected until the embedding encoder lands (v1.1 planned feature) — in that case prefer moot_recall_precise for precision retrieval.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "query": stringSchema("Natural-language search query."),

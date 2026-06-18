@@ -247,13 +247,26 @@ pub fn dispatch(
             let k = opt_integer(args, "k", 5)? as usize;
             let frame = recall_frame(args)?;
             match run_partial_cue_recall(&coord, &estate.handle, frame, anchor_id, mode, k, now) {
-                Ok(matches) => Ok(list(
-                    "partial_cue_recall",
-                    matches
+                Ok(matches) => {
+                    // Discrimination signal: fingerprint-based scores tend to be
+                    // near-flat on small corpora — surface this honestly.
+                    let cue_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
+                    let discrimination = crate::recall_discrimination::classify(&cue_scores);
+                    let discrimination_line =
+                        crate::recall_discrimination::result_line(discrimination);
+                    let result_lines: Vec<String> = matches
                         .iter()
                         .map(|m| format!("{} score={}", m.id, m.score))
-                        .collect(),
-                )),
+                        .collect();
+                    let mut body =
+                        format!("partial_cue_recall: {} result(s)", result_lines.len());
+                    for line in &result_lines {
+                        body.push_str(&format!("\n  - {}", line));
+                    }
+                    body.push('\n');
+                    body.push_str(discrimination_line);
+                    Ok(crate::dispatch::text_result(&body))
+                }
                 Err(cognition_kit::RecipeRunError::Substrate(ref se))
                     if se.operation == "recall" || se.detail.contains("not in") =>
                 {

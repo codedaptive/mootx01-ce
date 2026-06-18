@@ -117,7 +117,7 @@ enum RecipeTools {
     private static func shapedRecallTool() -> ProjectedTool {
         ProjectedTool(
             name: shapedRecallToolName,
-            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search.",
+            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that are weaker on small corpora until the embedding encoder lands (v1.1 planned), so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema("The search query text — drives BM25 + vector recall."),
@@ -183,7 +183,7 @@ enum RecipeTools {
     private static func preciseRecallTool() -> ProjectedTool {
         ProjectedTool(
             name: preciseRecallToolName,
-            description: "Precise recall: coarse-grab a generous candidate pool then re-rank by query-specific precision (distinctive number/proper-noun match) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search.",
+            description: "Precise recall: coarse-grab a generous candidate pool then re-rank by query-specific precision (distinctive number/proper-noun match) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search including a discrimination signal. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema("The search query text — drives BM25 + vector recall and the precision re-rank."),
@@ -461,6 +461,11 @@ enum RecipeTools {
             kit: kit, handle: handle, query: query,
             filter: filter, limit: limit, pool: pool, composition: composition)
 
+        // Discrimination is computed over the full ordered list before the
+        // display prefix so the signal reflects all returned scores.
+        let preciseScores = matches.map { $0.score }
+        let preciseDiscrimination = RecallDiscrimination.classify(preciseScores)
+
         var lines: [String] = ["found \(matches.count) memory(s)"]
         for match in matches.prefix(50) {
             // Match moot_memory_search's preview: first 120 chars of content.
@@ -468,6 +473,7 @@ enum RecipeTools {
             let room = match.room.isEmpty ? "?" : match.room
             lines.append("\(match.id)  [\(room)]  \(preview)")
         }
+        lines.append(RecallDiscrimination.resultLine(for: preciseDiscrimination))
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
@@ -516,12 +522,18 @@ enum RecipeTools {
             input: .init(query: query, preset: preset, filter: filter, limit: limit),
             estate: handle, kit: kit)
 
+        // Discrimination is computed over the full ordered list before the
+        // display prefix so the signal reflects all returned scores.
+        let shapedScores = out.matches.map { $0.score }
+        let shapedDiscrimination = RecallDiscrimination.classify(shapedScores)
+
         var lines: [String] = ["found \(out.matches.count) memory(s)"]
         for match in out.matches.prefix(50) {
             let preview = match.content.prefix(120)
             let room = match.room.isEmpty ? "?" : match.room
             lines.append("\(match.id)  [\(room)]  \(preview)")
         }
+        lines.append(RecallDiscrimination.resultLine(for: shapedDiscrimination))
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 

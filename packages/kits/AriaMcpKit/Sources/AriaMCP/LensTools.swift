@@ -162,7 +162,7 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_partial_cue",
-                description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching.",
+                description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination from this lens is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
                 inputSchema: objectSchema(
                     properties: [
                         "anchorID": stringSchema("The anchor drawer id (the cue)."),
@@ -436,7 +436,16 @@ enum LensTools {
                     anchorID: try requireString(args, "anchorID"),
                     mode: try decodeCueMode(args["mode"]),
                     k: try integer(args, "k", default: 5))
-                return list("partial_cue_recall", out.map { "\($0.id) score=\($0.score)" })
+                // Discrimination signal: partial_cue scores are fingerprint-based
+                // and tend to be near-flat on small corpora — surface this honestly.
+                let cueScores = out.map { $0.score }
+                let cueDiscrimination = RecallDiscrimination.classify(cueScores)
+                let discriminationLine = RecallDiscrimination.resultLine(for: cueDiscrimination)
+                let resultLines = out.map { "\($0.id) score=\($0.score)" }
+                var body = "partial_cue_recall: \(resultLines.count) result(s)"
+                for line in resultLines { body += "\n  - \(line)" }
+                body += "\n\(discriminationLine)"
+                return ToolDispatcher.textResult(body)
             } catch let error as AnchorNotInRecalledSetError {
                 // The cue pointed at nothing — a lens-level refusal, not
                 // a transport fault.
