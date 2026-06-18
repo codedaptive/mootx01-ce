@@ -93,7 +93,7 @@ struct SessionProtocolTests {
 
     /// `moot_estate_status teachme:true` returns the nine-tier orientation guide.
     /// The guide must name every tier from Tier 1 through Tier 9 and state the
-    /// total tool count ("51 tools").
+    /// total tool count ("56 tools").
     @Test func teachmeExpandsToNineTierGuide() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "sp-3")
 
@@ -105,14 +105,14 @@ struct SessionProtocolTests {
         let t = text(of: result)
         #expect(t.contains("Tier 1"), "nine-tier guide must mention Tier 1")
         #expect(t.contains("Tier 9"), "nine-tier guide must mention Tier 9")
-        #expect(t.contains("51 tools"),
+        #expect(t.contains("56 tools"),
                 "nine-tier guide must state the total tool count")
     }
 
-    // MARK: - Test 4: list_lenses returns all 25 cognition tools
+    // MARK: - Test 4: list_lenses returns all 26 cognition tools
 
     /// `moot_list_lenses` returns the full cognition menu with at least the
-    /// 25 Tier 6 tools: `moot_synthesize`, `moot_lens_keystones`, and
+    /// 26 Tier 6 tools: `moot_synthesize`, `moot_lens_keystones`, and
     /// `moot_lens_concepts` must all appear in the response text.
     @Test func listLensesReturnsAllCognitionTools() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "sp-4")
@@ -129,8 +129,8 @@ struct SessionProtocolTests {
                 "moot_list_lenses must include moot_lens_keystones")
         #expect(t.contains("moot_lens_concepts"),
                 "moot_list_lenses must include moot_lens_concepts")
-        #expect(t.contains("25 cognition tools"),
-                "moot_list_lenses must report 25 cognition tools")
+        #expect(t.contains("26 cognition tools"),
+                "moot_list_lenses must report 26 cognition tools")
     }
 
     // MARK: - Test 5: list_lenses teachme returns guide not menu
@@ -138,7 +138,7 @@ struct SessionProtocolTests {
     /// `moot_list_lenses teachme:true` returns the static teachme guide for
     /// `moot_list_lenses`, not the runtime cognition menu. The two are
     /// distinguishable: the guide mentions "Common mistakes" or the tool name
-    /// at the top; the runtime menu mentions "25 cognition tools".
+    /// at the top; the runtime menu mentions "26 cognition tools".
     @Test func listLensesTeachmeReturnsGuideNotMenu() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "sp-5")
 
@@ -156,10 +156,10 @@ struct SessionProtocolTests {
         let normalText = text(of: normalResult)
 
         // The teachme guide must NOT be the runtime menu.
-        #expect(!teachmeText.contains("25 cognition tools"),
+        #expect(!teachmeText.contains("26 cognition tools"),
                 "teachme:true must return the guide, not the runtime menu")
         // The runtime menu must still contain the tool count.
-        #expect(normalText.contains("25 cognition tools"),
+        #expect(normalText.contains("26 cognition tools"),
                 "normal call must return the cognition menu with tool count")
     }
 

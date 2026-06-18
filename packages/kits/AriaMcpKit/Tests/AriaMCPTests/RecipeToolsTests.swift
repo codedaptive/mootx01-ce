@@ -57,6 +57,7 @@ struct RecipeToolsTests {
             "moot_lens_apriori",
             "moot_lens_associations",
             "moot_lens_bias",
+            "moot_lens_cohesion",
             "moot_lens_complexity",
             "moot_lens_concepts",
             "moot_lens_constellation",
@@ -101,7 +102,7 @@ struct RecipeToolsTests {
         // Migration tools are Tier 7 and intentionally absent from the cognition menu.
         #expect(!text.contains("moot_run_migration"))
         #expect(!text.contains("moot_confirm_migration"))
-        #expect(text.contains("25 cognition tools"))
+        #expect(text.contains("26 cognition tools"))
     }
 
     @Test func testRecipeToolNamesDoNotCollideWithInterfaceToolNames() {

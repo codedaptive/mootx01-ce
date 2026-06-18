@@ -130,7 +130,7 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 54 tools.
+    /// VC-2: `tools/list` returns exactly 56 tools.
     ///
     /// The count is a snapshot of the v1.0 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
@@ -154,9 +154,11 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 55 = 19 core ARIA + 1 federation + 8 recipe + 21 lens + 5 vault + 1
+        // 56 = 19 core ARIA + 1 federation + 8 recipe + 22 lens + 5 vault + 1
         // maintenance (moot_reindex). The 8th recipe tool is moot_recall_shaped.
-        #expect(tools.count == 55, "tools/list must return exactly 55 tools; got \(tools.count)")
+        // 22nd lens = moot_lens_contradiction (genuine contradiction detector added
+        // alongside renamed moot_lens_cohesion).
+        #expect(tools.count == 56, "tools/list must return exactly 56 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

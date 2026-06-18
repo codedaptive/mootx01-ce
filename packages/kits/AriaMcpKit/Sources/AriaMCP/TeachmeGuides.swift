@@ -487,7 +487,7 @@ enum TeachmeGuides {
           Watch for hint: lines appended to successful responses. These appear
           when the server detects a suboptimal call pattern.
 
-        Total: 51 tools. All accept teachme. All may return hint.
+        Total: 56 tools. All accept teachme. All may return hint.
         """
 
     private static let estateMapGuide = """
