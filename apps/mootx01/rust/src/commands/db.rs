@@ -116,6 +116,9 @@ fn delete(data: &std::path::Path, name: &str, force: bool) -> ExitCode {
             return ExitCode::from(exit::FAILURE);
         }
     }
+    // Removing the estate directory disposes of everything in it: the encrypted
+    // SQLite file, its -wal/-shm sidecars, AND the whole-file encryption key
+    // (db.key). The key never outlives the data it protects.
     if let Err(e) = std::fs::remove_dir_all(&dir) {
         eprintln!("Cannot delete estate '{name}': {e}");
         return ExitCode::from(exit::FAILURE);
@@ -124,7 +127,7 @@ fn delete(data: &std::path::Path, name: &str, force: bool) -> ExitCode {
     if paths::active_estate(data) == name {
         let _ = paths::set_active_estate(data, "default");
     }
-    println!("Estate '{name}' deleted.");
+    println!("Estate '{name}' deleted (database, sidecars, and encryption key).");
     ExitCode::from(exit::OK)
 }
 
@@ -155,5 +158,23 @@ mod tests {
         assert!(!valid_name("a/b"));
         assert!(!valid_name(""));
         assert!(valid_name("work"));
+    }
+
+    /// Deleting an estate removes the whole directory — including the encryption
+    /// key (db.key) and the SQLCipher sidecars — so the key never outlives the
+    /// data it protected.
+    #[test]
+    fn delete_removes_database_sidecars_and_key() {
+        let data = tmp_data("delete-key");
+        let dir = estate_dir(&data, "work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("estate.sqlite"), b"ciphertext").unwrap();
+        std::fs::write(dir.join("estate.sqlite-wal"), b"wal").unwrap();
+        std::fs::write(dir.join("db.key"), b"0123456789abcdef0123456789abcdef").unwrap();
+
+        let _ = delete(&data, "work", true);
+        assert!(!dir.exists(), "estate dir removed");
+        assert!(!dir.join("db.key").exists(), "encryption key removed");
+        let _ = std::fs::remove_dir_all(&data);
     }
 }
