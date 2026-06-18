@@ -722,9 +722,10 @@ extension ToolDispatcher {
     /// `moot_file_memory` — file a new memory drawer into the estate.
     ///
     /// The server owns infrastructure fields: lattice anchor (UDC "000.000"),
-    /// embedding model ("default"), capture channel (.importedFile), source
-    /// type (.agent), and addedBy (derived from the session handle). The caller
-    /// supplies only the content and a free-form location hint.
+    /// embedding model ("default"), capture channel (.actuator, cookbook §2.4 —
+    /// actuator-driven capture by an MCP AI agent), source type (.imported),
+    /// and addedBy ("aria-mcp-server"). The caller supplies content, location,
+    /// and optional adjectives (kind, sensitivity, exportability).
     func runFileMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let content = try requireString(args, "content")
@@ -1430,10 +1431,10 @@ extension ToolDispatcher {
 // MARK: - Server defaults (private)
 
 private extension ToolDispatcher {
-    /// Default capture channel for server-filed memories: `importedFile` signals
-    /// that content was imported through an automated interface (the MCP surface),
-    /// not typed directly by a user.
-    static let defaultChannel: CaptureChannel = .importedFile
+    /// Default capture channel for server-filed memories: `actuator` (raw 5,
+    /// cookbook §2.4) signals that content is submitted by an MCP AI agent
+    /// (actuator-driven capture), not a file import and not typed by a user.
+    static let defaultChannel: CaptureChannel = .actuator
 
     /// Actor identifier the server writes into rows it files. Uses a stable
     /// constant so the source is identifiable in the audit trail.

@@ -292,6 +292,160 @@ fn file_memory_missing_content_returns_invalid_params() {
     assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
 }
 
+// P0-STRESS-FIXES Findings #1/#2: kind and sensitivity must be decoded and
+// applied to the CaptureFrame. Before the fix these were silently ignored,
+// persisting as the CaptureFrame defaults (Prose / Normal).
+
+#[test]
+fn file_memory_with_kind_code_persists_content_kind_code() {
+    use locus_kit::drawer_operational::ContentKind;
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "fn main() { println!(\"hello\"); }",
+            "location" => "code/snippet",
+            "kind" => "code"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory with kind=code must succeed");
+    assert!(is_success(&result), "file_memory kind=code must succeed; got: {result:?}");
+
+    // Read back the filed drawer and assert contentKind == Code.
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.ordering = Ordering::ByCaptureTimeDesc;
+    frame.limit = Some(1);
+    let drawers = coord
+        .recall(&registry.default.handle, frame, wall_now())
+        .expect("recall must succeed");
+    let drawer = drawers.first().expect("at least one drawer must be present");
+    assert_eq!(
+        drawer.content_kind(),
+        ContentKind::Code,
+        "kind=code must persist as ContentKind::Code; got {:?}",
+        drawer.content_kind()
+    );
+}
+
+#[test]
+fn file_memory_with_sensitivity_restricted_persists_restricted() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "top-secret plan details",
+            "location" => "vault/plans",
+            "sensitivity" => "restricted"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory with sensitivity=restricted must succeed");
+    assert!(is_success(&result), "file_memory sensitivity=restricted must succeed; got: {result:?}");
+
+    // Recall with an explicit sensitivity=Restricted filter. The default recall
+    // ceiling is `SensitivityAtMost(Elevated)`, which would exclude Restricted
+    // rows — the explicit filter overrides the default so the row is visible.
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![
+        Filter::Sensitivity(AdjectiveSensitivity::Restricted),
+    ]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.ordering = Ordering::ByCaptureTimeDesc;
+    frame.limit = Some(1);
+    let drawers = coord
+        .recall(&registry.default.handle, frame, wall_now())
+        .expect("recall must succeed");
+    let drawer = drawers.first().expect("at least one restricted drawer must be present");
+    assert_eq!(
+        drawer.adjective_sensitivity(),
+        AdjectiveSensitivity::Restricted,
+        "sensitivity=restricted must persist as AdjectiveSensitivity::Restricted; got {:?}",
+        drawer.adjective_sensitivity()
+    );
+}
+
+#[test]
+fn file_memory_unknown_kind_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let err = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "some content",
+            "location" => "test/room",
+            "kind" => "notAKind"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect_err("unknown kind must produce transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+#[test]
+fn file_memory_unknown_sensitivity_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let err = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "some content",
+            "location" => "test/room",
+            "sensitivity" => "topSecret"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect_err("unknown sensitivity must produce transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+// P0-STRESS-FIXES Finding #10: file_memory capture channel must be
+// CaptureChannel::Actuator (cookbook §2.4: actuator-driven capture),
+// not CaptureChannel::ImportedFile. The MCP surface is an AI actuator,
+// not a file import.
+
+#[test]
+fn file_memory_sets_capture_channel_to_actuator() {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "channel verification content",
+            "location" => "channel/test"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory must succeed");
+    assert!(is_success(&result), "file_memory must succeed; got: {result:?}");
+
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.ordering = Ordering::ByCaptureTimeDesc;
+    frame.limit = Some(1);
+    let drawers = coord
+        .recall(&registry.default.handle, frame, wall_now())
+        .expect("recall must succeed");
+    let drawer = drawers.first().expect("at least one drawer must be present");
+    assert_eq!(
+        drawer.capture_channel(),
+        CaptureChannel::Actuator,
+        "file_memory must stamp CaptureChannel::Actuator (raw 5); got {:?}",
+        drawer.capture_channel()
+    );
+}
+
 #[test]
 fn memory_search_over_filed_memory_finds_it() {
     let registry = EstateRegistry::new_inmemory();
@@ -1498,8 +1652,10 @@ fn federated_search_content_level_gate_excludes_higher_sensitivity_rows() {
     assert!(is_success(&normal));
 
     // File an Elevated-sensitivity row directly through the coordinator.
-    // The MCP moot_file_memory surface does not expose the sensitivity arg;
-    // go through the coordinator directly to set the adjective_bitmap field.
+    // The test uses the coordinator path rather than moot_file_memory so it
+    // can set a specific sensitivity (Elevated) for the grant-content-level test;
+    // moot_file_memory also accepts sensitivity but the grant test logic here
+    // needs the coordinator-level channel control.
     // source_handle was returned by two_estate_registry_with_grant.
     {
         let mut frame = CaptureFrame::new(
