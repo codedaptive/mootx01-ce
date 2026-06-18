@@ -38,6 +38,17 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
         # Spawning the managed daemon needs no sandbox for this dev prototype.
         ENABLE_APP_SANDBOX: NO
+    # App-group container (ADR-014, macOS 15+): when the estate lives in the
+    # group container, the OS gives it System Integrity Protection even WITHOUT
+    # App Sandbox — a process outside the group is prompted before it can touch
+    # the estate. Defense-in-depth on top of SQLCipher whole-file encryption. The
+    # managed server must join the same group to reach the estate. NOTE: verify
+    # the group identifier against the Apple developer account before shipping.
+    entitlements:
+      path: App/Mootx01-macOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
