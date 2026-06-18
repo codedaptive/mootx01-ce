@@ -146,11 +146,11 @@ fn memory_search_tool() -> serde_json::Value {
 fn update_memory_tool() -> serde_json::Value {
     json!({
         "name": "moot_update_memory",
-        "description": "Apply a named mutation to a memory (confirm, archive, tag, etc.).",
+        "description": "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public, correctExportability(private) revokes public status.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "id": string_schema("UUID of the memory to update."),
-                "mutation": string_schema("Mutation kind: confirm, archive, unarchive, promote, demote."),
+                "mutation": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private)."),
                 "note": string_schema("Optional note to attach to the mutation.")
             }),
             json!(["id", "mutation"])
