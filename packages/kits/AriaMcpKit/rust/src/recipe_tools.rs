@@ -300,6 +300,10 @@ fn run_precise_recall_tool(
     )
     .map_err(error_from_recipe)?;
 
+    // Compute discrimination over the full ordered list before the display prefix.
+    let precise_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
+    let discrimination = crate::recall_discrimination::classify(&precise_scores);
+
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
     for m in matches.iter().take(50) {
         // Match moot_memory_search's preview: first 120 chars of content.
@@ -307,6 +311,7 @@ fn run_precise_recall_tool(
         let room = if m.room.is_empty() { "?" } else { &m.room };
         lines.push(format!("{}  [{}]  {}", m.id, room, preview));
     }
+    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
     Ok(text_result(&lines.join("\n")))
 }
 
@@ -355,6 +360,10 @@ fn run_shaped_recall_tool(
     let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now)
         .map_err(error_from_recipe)?;
 
+    // Compute discrimination over the full ordered list before the display prefix.
+    let shaped_scores: Vec<f64> = out.matches.iter().map(|m| m.score).collect();
+    let discrimination = crate::recall_discrimination::classify(&shaped_scores);
+
     let mut lines = vec![format!("found {} memory(s)", out.matches.len())];
     for m in out.matches.iter().take(50) {
         // Match moot_memory_search's preview: first 120 chars of content.
@@ -362,6 +371,7 @@ fn run_shaped_recall_tool(
         let room = if m.room.is_empty() { "?" } else { &m.room };
         lines.push(format!("{}  [{}]  {}", m.id, room, preview));
     }
+    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
     Ok(text_result(&lines.join("\n")))
 }
 

@@ -314,6 +314,13 @@ fn run_memory_search(
         ledger.record_surfaced(&surfaced_ids, now);
     }
 
+    // Compute discrimination over the full ordered hit list before the display
+    // prefix so the signal reflects all returned scores.
+    let hit_scores: Vec<f64> = result.hits.iter()
+        .map(|h| h.score.final_score as f64)
+        .collect();
+    let discrimination = crate::recall_discrimination::classify(&hit_scores);
+
     let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
     for hit in result.hits.iter().take(50) {
         let preview: String = hit
@@ -327,6 +334,7 @@ fn run_memory_search(
             hit.id, room, preview, hit.score.final_score
         ));
     }
+    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
     // Recall provenance: surface the dense-lane status and any degraded stages
     // so callers can distinguish retrieval quality (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
     //

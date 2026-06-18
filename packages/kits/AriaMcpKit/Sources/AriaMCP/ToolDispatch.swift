@@ -853,6 +853,11 @@ extension ToolDispatcher {
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
         }
+        // Compute discrimination before building the result lines so the signal
+        // reflects the full ordered hit list, not just the displayed prefix.
+        let hitScores = result.hits.map { Double($0.score.final) }
+        let discriminationLevel = RecallDiscrimination.classify(hitScores)
+
         var lines: [String] = ["found \(result.hits.count) memory(s)"]
         for hit in result.hits.prefix(50) {
             let preview = hit.drawer?.content.prefix(120) ?? "(not hydrated)"
@@ -862,6 +867,7 @@ extension ToolDispatcher {
                 for line in hit.explanation { lines.append("  \(line)") }
             }
         }
+        lines.append(RecallDiscrimination.resultLine(for: discriminationLevel))
         // Recall provenance: surface the dense-lane status and any degraded stages
         // so callers can distinguish retrieval quality (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
         //

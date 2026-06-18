@@ -128,7 +128,7 @@ fn file_memory_tool() -> serde_json::Value {
 fn memory_search_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_search",
-        "description": "Search memories by query. Returns ranked hits with content previews.",
+        "description": "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) indicating whether the ranking is trustworthy. Low discrimination on small corpora is expected until the embedding encoder lands (v1.1 planned feature) — in that case prefer moot_recall_precise for precision retrieval.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("Natural-language search query."),
@@ -493,7 +493,7 @@ fn run_migration_tool() -> serde_json::Value {
 fn recall_precise_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_precise",
-        "description": "Precise recall: coarse-grab a generous candidate pool then re-rank by a named reduction composition (the ablation selector) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search.",
+        "description": "Precise recall: coarse-grab a generous candidate pool then re-rank by a named reduction composition (the ablation selector) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search including a discrimination signal. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("The search query text — drives BM25 + vector recall and the precision re-rank."),
@@ -529,7 +529,7 @@ fn recall_shaped_tool() -> serde_json::Value {
         .collect();
     json!({
         "name": "moot_recall_shaped",
-        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search."),
+        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that are weaker on small corpora until the embedding encoder lands (v1.1 planned), so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision."),
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("The search query text — drives BM25 + vector recall."),
@@ -607,7 +607,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_drift" => "Reasoning lens: measure distribution drift across a temporal split point.",
         "moot_lens_contradiction" => "Reasoning lens: surface drawers that are statistical outliers in their category.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
-        "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor.",
+        "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
         "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns.",
         "moot_lens_successors" => "Reasoning lens: suggest probable successor drawers via tunnel traversal.",
         "moot_lens_overlap" => "Reasoning lens: compute thematic overlap between two estates.",
