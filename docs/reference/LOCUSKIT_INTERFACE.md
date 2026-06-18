@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.5.1
+version: 1.6.0
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -594,7 +594,11 @@ public enum LocusKitSchema { public static let kitID = "LocusKit"; public static
                              public static var schema: SchemaDeclaration { get } }
 public actor DrawerStore {
     public init(storage: any Storage) async throws
-    public func addDrawer(_ d: Drawer, now: Date = Date()) async throws
+    // addDrawer is internal (not public): the only sanctioned add path for verb-layer
+    // callers is Estate.addDrawerCovered(_:now:), which bundles store.addDrawer +
+    // containerFP.orIn atomically — the structural §11.5 Option B add-coverage guarantee.
+    // Direct use of addDrawer is reserved for rebuild/backfill paths inside LocusKit itself.
+    internal func addDrawer(_ d: Drawer, now: Date = Date()) async throws
     public func getDrawer(id: String) async throws -> Drawer?
     public func drawersIn(wing: String) async throws -> [Drawer]
     public func drawersIn(wing: String, room: String) async throws -> [Drawer]
@@ -642,6 +646,23 @@ inherits the fail-loud default and HARD-ERRORS on a real estate. A regression
 guard exercises the dreaming-reader B-1 path (`Estate::all_tunnels`) over a
 durable SQLite estate. The invariant: no durable-backend read method may
 inherit a trait default.
+
+**§11.5 Option B add-coverage guarantee (Swift).** `DrawerStore.addDrawer` is
+`internal`, not `public`. The only sanctioned verb-layer add path is
+`Estate.addDrawerCovered(_:now:)` (private to `Estate`), which bundles
+`store.addDrawer` + `containerFP.orIn` atomically. This structural chokepoint
+ensures that no caller outside LocusKit can add a drawer without simultaneously
+updating the per-container OR aggregate. External code (GeniusLocusKit, ARIA
+surfaces) must reach the add path through `Estate.capture`, never through
+`DrawerStore.addDrawer` directly. The `@testable import LocusKit` test gate
+gives LocusKit's own test targets access to `internal` in the usual Swift
+testing convention; this does not open the method to product code.
+
+**§11.5 Option B add-coverage guarantee (Rust).** `DrawerStoreCore::add_drawer`
+folds the FP update inside itself — every call to `add_drawer`, regardless of
+which `DrawerStore` trait impl invokes it, atomically calls
+`ContainerFingerprintStore::or_in` on success. The trait's
+`or_in_container_fingerprint` method remains for rebuild/backfill paths only.
 
 **Compile-required reads (no default at all).** Two `DrawerStore` reads —
 `all_drawers` and `room_level_fingerprints` — carry NO trait default. Per the
@@ -1181,7 +1202,21 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 
 ## Changelog
 
-### 1.5.0 -- 2026-06-17
+### 1.6.0 -- 2026-06-17
+`DrawerStore.addDrawer` narrowed from `public` to `internal` in Swift (§11.5
+Option B structural add-coverage guarantee). The only sanctioned verb-layer add
+path is now `Estate.addDrawerCovered(_:now:)`, a private Estate method that
+bundles `store.addDrawer` + `containerFP.orIn` atomically — ensuring every
+capture maintains the per-container OR aggregate without a second call site. On
+the Rust side, `DrawerStoreCore::add_drawer` folds the FP update inside itself;
+`or_in_container_fingerprint` is now the rebuild/backfill path only. Two new
+conformance tests added to both ports: `addCoverageGuaranteeAllThreeBitmaps`
+asserts `aggregate & drawerBits == drawerBits` for all three bitmap fields at
+both room and wing levels; `addCoverageTwoDrawersSameRoom` asserts the aggregate
+covers both drawers after two captures into the same room. Both new tests pass
+green in both ports.
+
+### 1.5.1 -- 2026-06-17
 `CaptureFrame` now exposes the `confirmation` (`Confirmation`, default
 `.unconfirmed`) and `confidence` (`Confidence`, default `.null`) provenance
 axes in both ports, joining the already-exposed `provenanceChannel`,
