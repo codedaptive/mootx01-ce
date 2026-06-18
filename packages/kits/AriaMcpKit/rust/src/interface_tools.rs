@@ -817,9 +817,16 @@ fn run_fact_search(
         format!("facts: {}", matches.len())
     };
 
+    // Include evaluation fields (filed_at as ISO8601, source_drawer_id) so
+    // callers can reason about provenance without a separate timeline call.
+    // Mirrors Swift runFactSearch field additions.
     let mut lines = vec![header];
     for f in &matches {
-        lines.push(format!("  {} — [{}] {} [{}]", f.id, f.subject, f.predicate, f.object));
+        let filed_iso = epoch_to_iso8601(f.filed_at);
+        lines.push(format!(
+            "  {} — [{}] {} [{}]  filed={}  source={}",
+            f.id, f.subject, f.predicate, f.object, filed_iso, f.source_drawer_id
+        ));
     }
     Ok(text_result(&lines.join("\n")))
 }
@@ -931,14 +938,16 @@ fn run_fact_timeline(
 
     let mut lines = vec![header];
     // Cap at 200 rows matching the Swift port.
+    // Include source_drawer_id for provenance tracing (mirrors Swift runFactTimeline
+    // which adds sourceDrawerID in the same Part 6 change).
     for f in facts.iter().take(200) {
         let lifecycle_tag = lifecycle_tag_for_adjective_bitmap(f.adjective_bitmap);
         // Emit ISO8601 timestamps to match the Swift port's output format.
         // filed_at is epoch seconds; format as UTC RFC3339 / ISO8601.
         let filed_iso = epoch_to_iso8601(f.filed_at);
         lines.push(format!(
-            "{}  {}  {}  [{}] {} [{}]",
-            filed_iso, lifecycle_tag, f.id, f.subject, f.predicate, f.object
+            "{}  {}  {}  [{}] {} [{}]  source={}",
+            filed_iso, lifecycle_tag, f.id, f.subject, f.predicate, f.object, f.source_drawer_id
         ));
     }
     Ok(text_result(&lines.join("\n")))
