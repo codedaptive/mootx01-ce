@@ -36,8 +36,13 @@ struct VaultBridgeTests {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// Count `.md` files under `vaultURL`, skipping hidden files. Synchronous
-    /// helper used to verify export output without async enumeration.
+    /// Count `.md` note files under `vaultURL`, skipping hidden files and OKF
+    /// navigation files (`index.md`, `log.md`). Synchronous helper used to
+    /// verify export output without async enumeration.
+    ///
+    /// OKF-format exports emit one `index.md` per folder for progressive-
+    /// disclosure navigation; these are not notes and must not be counted as
+    /// exported drawers in assertion helpers.
     private func countMDFiles(in vaultURL: URL) -> Int {
         var count = 0
         guard let enumerator = FileManager.default.enumerator(
@@ -46,12 +51,18 @@ struct VaultBridgeTests {
             options: [.skipsHiddenFiles]
         ) else { return 0 }
         while let next = enumerator.nextObject() as? URL {
-            if next.pathExtension == "md" { count += 1 }
+            guard next.pathExtension == "md" else { continue }
+            let stem = next.deletingPathExtension().lastPathComponent
+            // Skip OKF nav files — they are emitted by fromIR for progressive
+            // disclosure and are never notes (ObsidianAdapter.toIR skips them too).
+            if stem == "index" || stem == "log" { continue }
+            count += 1
         }
         return count
     }
 
-    /// Return first `.md` file under `vaultURL`, skipping hidden files. Nil if none.
+    /// Return first `.md` note file under `vaultURL`, skipping hidden files and
+    /// OKF navigation files (`index.md`, `log.md`). Nil if none.
     private func firstMDFile(in vaultURL: URL) -> URL? {
         guard let enumerator = FileManager.default.enumerator(
             at: vaultURL,
@@ -59,7 +70,10 @@ struct VaultBridgeTests {
             options: [.skipsHiddenFiles]
         ) else { return nil }
         while let next = enumerator.nextObject() as? URL {
-            if next.pathExtension == "md" { return next }
+            guard next.pathExtension == "md" else { continue }
+            let stem = next.deletingPathExtension().lastPathComponent
+            if stem == "index" || stem == "log" { continue }
+            return next
         }
         return nil
     }

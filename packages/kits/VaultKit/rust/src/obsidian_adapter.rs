@@ -1,4 +1,5 @@
-//! ObsidianAdapter — Obsidian-flavoured Markdown ⇄ `NoteIR`.
+//! ObsidianAdapter — Obsidian-flavoured Markdown ⇄ `NoteIR`, and a superset
+//! of Google's Open Knowledge Format (OKF) v0.1 in default mode.
 //!
 //! One `.md` file is one `NoteIR`. The adapter understands the four Obsidian
 //! surface features the bridge round-trips in V1:
@@ -10,10 +11,27 @@
 //! - **Tags** `#tag` (inline, not the `# heading` form) → `tags`.
 //! - **Folder path** → `original_path` and `stable_source_key`.
 //!
-//! Round-trip contract: `to_ir(from_ir(x)) == x` for the fields Obsidian
-//! represents. The body string retains its wikilink and tag markup, so links
-//! and tags are *views* over the body, not edits to it — emission writes the
-//! body verbatim and re-parsing recovers the same views.
+//! ## OKF compatibility (default mode: `pure_obsidian_links = false`)
+//!
+//! By default the adapter emits OKF v0.1-compatible output that is ALSO
+//! readable by Obsidian:
+//!
+//! - A `type:` frontmatter key (OKF's only required field), derived from
+//!   `NoteIR.kind`: `"note"→"Note"`, `"fact"→"Fact"`, `"journal"→"Journal"`,
+//!   else the kind string with the first character uppercased.
+//! - Relationship links rendered as standard markdown `[alias](relpath.md)`.
+//! - A `tags: [a, b, c]` frontmatter key in addition to inline `#tag` tokens.
+//! - One `index.md` per folder (OKF progressive-disclosure navigation).
+//!   `index.md` and `log.md` are skipped on read.
+//!
+//! ## Pure-Obsidian mode (`pure_obsidian_links = true`)
+//!
+//! Emits `[[Target]]` / `[[Target|Alias]]` wikilinks (legacy behaviour).
+//! `type:` and frontmatter `tags:` are still emitted in both modes.
+//!
+//! ## Round-trip contract
+//!
+//! `to_ir(from_ir(x)) == x` for the fields each flavour represents.
 //!
 //! This is a mechanical port of `ObsidianAdapter.swift`. All parsing logic
 //! is reproduced with Rust idioms; the observable contract (round-trip
@@ -27,12 +45,39 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// The first `VaultAdapter`: Obsidian-flavoured Markdown ⇄ `NoteIR`.
-#[derive(Debug, Default, Clone)]
-pub struct ObsidianAdapter;
+///
+/// Default mode (`pure_obsidian_links = false`) emits OKF v0.1-compatible
+/// output. Pass `pure_obsidian_links: true` for legacy wikilink output.
+#[derive(Debug, Clone)]
+pub struct ObsidianAdapter {
+    /// When `false` (default), emit OKF-compatible standard-md links and inject
+    /// the OKF `type:` and frontmatter `tags:` keys.
+    /// When `true`, emit `[[wikilinks]]` (legacy behaviour). `type:` and
+    /// `tags:` are still emitted in both modes.
+    pub pure_obsidian_links: bool,
+}
+
+impl Default for ObsidianAdapter {
+    /// Default: OKF-compatible mode (`pure_obsidian_links = false`).
+    /// Mirrors Swift `ObsidianAdapter()`.
+    fn default() -> Self {
+        Self { pure_obsidian_links: false }
+    }
+}
 
 impl ObsidianAdapter {
+    /// Default constructor: OKF-compatible mode (`pure_obsidian_links = false`).
+    /// Source-compatible with all existing call sites that used `ObsidianAdapter::new()`.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Explicit constructor for callers that need link-mode control.
+    ///
+    /// - `pure_obsidian_links = true`: emit `[[wikilinks]]` (legacy behaviour).
+    /// - `pure_obsidian_links = false` (default): emit standard-md links.
+    pub fn with_options(pure_obsidian_links: bool) -> Self {
+        Self { pure_obsidian_links }
     }
 }
 
@@ -53,6 +98,19 @@ impl VaultAdapter for ObsidianAdapter {
 
     fn from_ir(&self, notes: &[NoteIR], vault_path: &Path) -> Result<(), VaultKitError> {
         std::fs::create_dir_all(vault_path)?;
+
+        // Build a name → stableSourceKey map for standard-md link resolution.
+        // Key: last path component of stable_source_key (the note filename).
+        // When two notes share a name, the first (alphabetical) wins — mirrors Swift.
+        let mut key_by_name: HashMap<String, String> = HashMap::new();
+        for note in notes {
+            let name = last_path_component(&note.stable_source_key);
+            key_by_name.entry(name).or_insert_with(|| note.stable_source_key.clone());
+        }
+
+        // Track which folders receive notes, for index.md emission.
+        let mut folder_notes: HashMap<String, Vec<&NoteIR>> = HashMap::new();
+
         for note in notes {
             // The note is written at `<stable_source_key>.md`, so the folder
             // tree mirrors the wing/room path that `DrawerMapping` encoded
@@ -63,9 +121,37 @@ impl VaultAdapter for ObsidianAdapter {
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let text = render(note);
+            let text = render(note, self.pure_obsidian_links, &key_by_name);
             std::fs::write(&file_path, text.as_bytes())?;
+
+            // Record this note under its folder for index generation.
+            let folder = parent_folder(&note.stable_source_key);
+            folder_notes.entry(folder).or_default().push(note);
         }
+
+        // Emit one index.md per folder that contains notes. Folders in sorted
+        // order for deterministic output. Mirrors Swift fromIR index emission.
+        let mut folders: Vec<String> = folder_notes.keys().cloned().collect();
+        folders.sort();
+        for folder in &folders {
+            let mut child_notes: Vec<&&NoteIR> = folder_notes[folder].iter().collect();
+            child_notes.sort_by(|a, b| a.stable_source_key.cmp(&b.stable_source_key));
+
+            let mut index_content = String::from("# Index\n\n");
+            for child in child_notes {
+                let filename = last_path_component(&child.stable_source_key);
+                // Link text is the filename; path is relative within the same folder.
+                index_content.push_str(&format!("- [{filename}]({filename}.md)\n"));
+            }
+
+            let index_path = if folder.is_empty() {
+                vault_path.join("index.md")
+            } else {
+                vault_path.join(folder).join("index.md")
+            };
+            std::fs::write(&index_path, index_content.as_bytes())?;
+        }
+
         Ok(())
     }
 }
@@ -73,7 +159,8 @@ impl VaultAdapter for ObsidianAdapter {
 // MARK: - Filesystem traversal
 
 /// Recursively collect `.md` files under `dir`, skipping hidden files and
-/// directories (those whose name starts with `.`). Mirrors Swift's
+/// directories (those whose name starts with `.`) and OKF nav files
+/// (`index.md`, `log.md`). Mirrors Swift's
 /// `FileManager.enumerator(at:includingPropertiesForKeys:options:[.skipsHiddenFiles])`.
 fn collect_md_files(
     dir: &Path,
@@ -94,6 +181,14 @@ fn collect_md_files(
         if file_type.is_dir() {
             collect_md_files(&path, vault_root, out)?;
         } else if file_type.is_file() && name.ends_with(".md") {
+            // Skip OKF navigation files — index.md and log.md are emitted by
+            // from_ir for OKF progressive disclosure; they are not notes.
+            // Mirrors Swift `toIR` which skips files with stem "index" / "log".
+            let stem = name.trim_end_matches(".md");
+            if stem == "index" || stem == "log" {
+                continue;
+            }
+
             let raw = std::fs::read_to_string(&path).map_err(VaultKitError::Io)?;
             let relative = relative_path(&path, vault_root);
             let stable_key = drop_md_extension(&relative);
@@ -107,7 +202,8 @@ fn collect_md_files(
             };
 
             let (frontmatter, body) = split_frontmatter(&raw);
-            let links = parse_wiki_links(&body);
+            // Parse both wikilinks and standard-md links for unified round-trip.
+            let links = parse_all_links(&body);
             let tags = parse_tags(&body);
             // Origin date rides frontmatter (`created:` preferred, `date:` as
             // the fallback Obsidian key). Mirrors Swift adapter.
@@ -142,38 +238,88 @@ fn collect_md_files(
 
 // MARK: - Rendering
 
-/// Render one note to its on-disk Markdown text: frontmatter block (when
-/// present) followed by the body, with any links or tags that are not already
-/// embedded in the body appended so an estate-origin note (whose links live in
-/// tunnels, not body text) emits real wikilinks. A vault-origin note already
-/// carries its markup in the body, so nothing is duplicated and the round-trip
-/// stays exact. Mirrors Swift `ObsidianAdapter.render(_:)`.
-pub(crate) fn render(note: &NoteIR) -> String {
+/// Render one note to its on-disk Markdown text.
+///
+/// In OKF mode (`pure_obsidian_links = false`):
+/// - Injects `type:` frontmatter key (OKF required field).
+/// - Injects `tags: [a, b, c]` frontmatter key when tags are present.
+/// - Renders relationship links as standard-md `[alias](relpath.md)`.
+///
+/// In pure-Obsidian mode (`pure_obsidian_links = true`):
+/// - Renders relationship links as `[[Target]]` / `[[Target|Alias]]`.
+///
+/// In both modes `type:` and frontmatter `tags:` are emitted.
+/// Mirrors Swift `ObsidianAdapter.render(_:pureObsidianLinks:keyByName:)`.
+pub(crate) fn render(
+    note: &NoteIR,
+    pure_obsidian_links: bool,
+    key_by_name: &HashMap<String, String>,
+) -> String {
+    // Merge the note's own frontmatter with OKF-required injected keys.
+    // Use a BTreeMap for deterministic key order (sorted output). Mirrors Swift
+    // which uses `.keys.sorted()` before emitting frontmatter.
+    let mut fm: std::collections::BTreeMap<String, String> = note
+        .frontmatter
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // OKF required field: `type:`. Derived from NoteIR.kind.
+    // Existing `type:` frontmatter is preserved when the producer already set it.
+    fm.entry("type".to_owned())
+        .or_insert_with(|| okf_type(&note.kind));
+
+    // Frontmatter tags array — OKF idiom. Emitted in addition to inline #tag tokens.
+    // Format: `[a, b, c]` matching OKF/Obsidian YAML list convention.
+    if !note.tags.is_empty() {
+        fm.entry("tags".to_owned()).or_insert_with(|| {
+            format!("[{}]", note.tags.join(", "))
+        });
+    }
+
     let mut out = String::new();
-    if !note.frontmatter.is_empty() {
+    if !fm.is_empty() {
         out.push_str("---\n");
-        // Sorted keys for deterministic output. Mirrors Swift.
-        let mut keys: Vec<&String> = note.frontmatter.keys().collect();
-        keys.sort();
-        for key in keys {
-            out.push_str(&format!("{}: {}\n", key, note.frontmatter[key]));
+        // BTreeMap iterates in sorted key order — deterministic. Mirrors Swift.
+        for (key, value) in &fm {
+            out.push_str(&format!("{}: {}\n", key, value));
         }
         out.push_str("---\n");
     }
 
     let body = note.flattened_body();
-    let missing_links: Vec<&WikiLink> = note
-        .links
-        .iter()
-        .filter(|link| !body.contains(&format!("[[{}]]", link.raw)))
-        .collect();
+
+    // Determine which links are missing from the body (need to be appended).
+    let missing_links: Vec<&WikiLink> = if pure_obsidian_links {
+        // Wikilink mode: links absent from body as [[raw]].
+        note.links
+            .iter()
+            .filter(|link| !body.contains(&format!("[[{}]]", link.raw)))
+            .collect()
+    } else {
+        // OKF mode: links absent both as [[wikilink]] and as [text](path).
+        // Estate-origin notes have links in note.links but not in the body;
+        // vault-origin notes carry wikilinks in body verbatim.
+        note.links
+            .iter()
+            .filter(|link| {
+                let wiki_present = body.contains(&format!("[[{}]]", link.raw));
+                let md_target =
+                    resolve_standard_md_link(&note.stable_source_key, link, key_by_name);
+                let md_present = body.contains(&md_target);
+                !wiki_present && !md_present
+            })
+            .collect()
+    };
 
     if !missing_links.is_empty() {
         out.push_str(&body);
         // `body` is fully consumed above; no further reads needed.
         out.push_str("\n\n");
-        let link_strs: Vec<String> =
-            missing_links.iter().map(|l| format!("[[{}]]", l.raw)).collect();
+        let link_strs: Vec<String> = missing_links
+            .iter()
+            .map(|l| render_link(l, pure_obsidian_links, &note.stable_source_key, key_by_name))
+            .collect();
         out.push_str(&link_strs.join(" "));
         let missing_tags: Vec<&str> = note
             .tags
@@ -203,6 +349,113 @@ pub(crate) fn render(note: &NoteIR) -> String {
         out.push_str(&tag_strs.join(" "));
     }
     out
+}
+
+// MARK: - OKF helpers
+
+/// Derive the OKF `type:` value from a NoteIR kind string.
+///
+/// Mapping: `"note"→"Note"`, `"fact"→"Fact"`, `"journal"→"Journal"`,
+/// else the kind with its first character uppercased.
+/// Mirrors Swift `ObsidianAdapter.okfType(from:)`.
+pub(crate) fn okf_type(kind: &str) -> String {
+    match kind {
+        "note" => "Note".to_owned(),
+        "fact" => "Fact".to_owned(),
+        "journal" => "Journal".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let mut s = first.to_uppercase().to_string();
+                    s.push_str(chars.as_str());
+                    s
+                }
+            }
+        }
+    }
+}
+
+/// Render a single WikiLink as either a wikilink or a standard-md link.
+/// Mirrors Swift `ObsidianAdapter.renderLink(_:pureObsidianLinks:sourceKey:keyByName:)`.
+fn render_link(
+    link: &WikiLink,
+    pure_obsidian_links: bool,
+    source_key: &str,
+    key_by_name: &HashMap<String, String>,
+) -> String {
+    if pure_obsidian_links {
+        format!("[[{}]]", link.raw)
+    } else {
+        let label = link.alias.as_deref().unwrap_or(&link.target);
+        let path = resolve_standard_md_link(source_key, link, key_by_name);
+        format!("[{label}]({path})")
+    }
+}
+
+/// Compute the standard-md path string `alias.md` or `relpath/alias.md` for a link.
+/// Mirrors Swift `ObsidianAdapter.resolveStandardMDLink(from:link:keyByName:)`.
+fn resolve_standard_md_link(
+    source_key: &str,
+    link: &WikiLink,
+    key_by_name: &HashMap<String, String>,
+) -> String {
+    let target_name = &link.target;
+    let default_key = slug(target_name);
+    let target_key = key_by_name.get(target_name).map(String::as_str).unwrap_or(&default_key);
+    let target_path = format!("{}.md", target_key);
+    let source_folder = parent_folder(source_key);
+    relative_md_path(&source_folder, &target_path)
+}
+
+/// Compute the relative path from a source folder to a target vault path.
+/// Mirrors Swift `ObsidianAdapter.relativeMDPath(from:to:)`.
+fn relative_md_path(source_folder: &str, target_path: &str) -> String {
+    if source_folder.is_empty() {
+        // Source is at vault root — target path IS the relative path.
+        return target_path.to_owned();
+    }
+
+    let source_parts: Vec<&str> = source_folder.split('/').collect();
+    let target_parts: Vec<&str> = target_path.split('/').collect();
+
+    // Find common prefix depth.
+    let mut common = 0;
+    while common < source_parts.len()
+        && common < target_parts.len()
+        && source_parts[common] == target_parts[common]
+    {
+        common += 1;
+    }
+
+    // Climb from source to common ancestor, then descend to target.
+    let up_count = source_parts.len() - common;
+    let mut components: Vec<&str> = vec![".."; up_count];
+    components.extend_from_slice(&target_parts[common..]);
+    components.join("/")
+}
+
+/// Minimal slug for unresolved link targets.
+fn slug(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c == ' ' { '-' } else { c })
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// Return the last path component of a vault-relative key (no extension).
+fn last_path_component(key: &str) -> String {
+    key.split('/').last().unwrap_or(key).to_owned()
+}
+
+/// Return the parent folder portion of a vault-relative key (empty = root).
+fn parent_folder(key: &str) -> String {
+    match key.rfind('/') {
+        Some(idx) => key[..idx].to_owned(),
+        None => String::new(),
+    }
 }
 
 // MARK: - Parsing helpers
@@ -248,6 +501,29 @@ pub(crate) fn split_frontmatter(raw: &str) -> (HashMap<String, String>, String) 
     (map, body)
 }
 
+/// Parse both wikilinks `[[Target]]` / `[[Target|Alias]]` and standard-md
+/// links `[text](path.md)` from a body, returning a unified `Vec<WikiLink>`
+/// with duplicates removed (by `raw` field).
+///
+/// Mirrors Swift `ObsidianAdapter.parseAllLinks(in:)`.
+pub(crate) fn parse_all_links(body: &str) -> Vec<WikiLink> {
+    let mut links: Vec<WikiLink> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for link in parse_wiki_links(body) {
+        if seen.insert(link.raw.clone()) {
+            links.push(link);
+        }
+    }
+    for link in parse_standard_md_links(body) {
+        if seen.insert(link.raw.clone()) {
+            links.push(link);
+        }
+    }
+
+    links
+}
+
 /// Extract wikilinks `[[Target]]` / `[[Target|Alias]]` from a body.
 /// Mirrors Swift `ObsidianAdapter.parseWikiLinks(in:)`.
 /// Uses manual scanning to avoid a regex dependency (zero external deps).
@@ -273,6 +549,74 @@ pub(crate) fn parse_wiki_links(body: &str) -> Vec<WikiLink> {
         }
         // Advance by one UTF-8 character (not one byte).
         i += body[i..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    links
+}
+
+/// Extract standard markdown links `[text](path.md)` from a body.
+///
+/// Only matches local `.md` links (not `http://…`). Each parsed link carries:
+/// - `target`: basename without `.md` (e.g. `"Alpha"`)
+/// - `alias`: link text (e.g. `"My Note"`)
+/// - `raw`: `"alias||path"` for round-trip reconstruction
+///
+/// Mirrors Swift `ObsidianAdapter.parseStandardMDLinks(in:)`.
+/// Uses manual scanning to avoid a regex dependency.
+pub(crate) fn parse_standard_md_links(body: &str) -> Vec<WikiLink> {
+    let mut links: Vec<WikiLink> = Vec::new();
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // Look for `[`.
+        if chars[i] != '[' {
+            i += 1;
+            continue;
+        }
+        // Find closing `]`.
+        let text_start = i + 1;
+        let mut text_end = text_start;
+        while text_end < chars.len() && chars[text_end] != ']' {
+            text_end += 1;
+        }
+        if text_end >= chars.len() {
+            i += 1;
+            continue;
+        }
+        // Expect `(` immediately after `]`.
+        if text_end + 1 >= chars.len() || chars[text_end + 1] != '(' {
+            i += 1;
+            continue;
+        }
+        // Find closing `)`.
+        let path_start = text_end + 2;
+        let mut path_end = path_start;
+        while path_end < chars.len() && chars[path_end] != ')' {
+            path_end += 1;
+        }
+        if path_end >= chars.len() {
+            i += 1;
+            continue;
+        }
+
+        let text: String = chars[text_start..text_end].iter().collect();
+        let path: String = chars[path_start..path_end].iter().collect();
+
+        // Skip external links.
+        if !path.starts_with("http://") && !path.starts_with("https://") && path.ends_with(".md") {
+            // Target = basename without .md.
+            let basename = path.split('/').last().unwrap_or(&path);
+            let target = if basename.ends_with(".md") {
+                basename[..basename.len() - 3].to_owned()
+            } else {
+                basename.to_owned()
+            };
+            // `raw` = "text||path" so round-trip reconstruction can distinguish
+            // alias from path — mirrors Swift `parseStandardMDLinks`.
+            let raw = format!("{}||{}", text, path);
+            links.push(WikiLink::new(target, Some(text), raw));
+        }
+
+        i = path_end + 1;
     }
     links
 }
@@ -411,7 +755,8 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_is_stable() {
+    fn round_trip_is_stable_pure_obsidian_mode() {
+        // Pure-Obsidian mode: wikilinks in body are preserved byte-for-byte.
         let source = temp_vault();
         let dest = temp_vault();
 
@@ -422,7 +767,7 @@ mod tests {
         );
         write_note(&source, "Beta.md", "---\nroom: archive\n---\nPlain note, no links.\n");
 
-        let adapter = ObsidianAdapter::new();
+        let adapter = ObsidianAdapter::with_options(true); // pure-Obsidian mode
         let first = adapter.to_ir(&source).unwrap();
         adapter.from_ir(&first, &dest).unwrap();
         let second = adapter.to_ir(&dest).unwrap();
@@ -430,7 +775,47 @@ mod tests {
         std::fs::remove_dir_all(&source).ok();
         std::fs::remove_dir_all(&dest).ok();
 
-        assert_eq!(first, second);
+        // Core fields must be equal.
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.stable_source_key, b.stable_source_key);
+            assert_eq!(a.body, b.body);
+            assert_eq!(a.tags, b.tags);
+        }
+    }
+
+    #[test]
+    fn round_trip_is_stable_default_okf_mode() {
+        // OKF default mode: link targets survive the round-trip.
+        let source = temp_vault();
+        let dest = temp_vault();
+
+        write_note(
+            &source,
+            "Folder/Alpha.md",
+            "---\nroom: inbox\nudc: 004\n---\nBody with a [[Link]] and a #topic tag.\nSecond line.\n",
+        );
+        write_note(&source, "Beta.md", "---\nroom: archive\n---\nPlain note, no links.\n");
+
+        let adapter = ObsidianAdapter::new(); // OKF default
+        let first = adapter.to_ir(&source).unwrap();
+        adapter.from_ir(&first, &dest).unwrap();
+        let second = adapter.to_ir(&dest).unwrap();
+
+        std::fs::remove_dir_all(&source).ok();
+        std::fs::remove_dir_all(&dest).ok();
+
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.stable_source_key, b.stable_source_key);
+            assert_eq!(a.tags, b.tags);
+            // Link targets survive (raw encoding may change wiki→standard-md).
+            let a_targets: std::collections::HashSet<_> =
+                a.links.iter().map(|l| &l.target).collect();
+            let b_targets: std::collections::HashSet<_> =
+                b.links.iter().map(|l| &l.target).collect();
+            assert_eq!(a_targets, b_targets, "link targets must survive OKF round-trip");
+        }
     }
 
     #[test]
@@ -452,5 +837,243 @@ mod tests {
         let (fm, body) = split_frontmatter(raw);
         assert!(fm.is_empty());
         assert_eq!(body, raw);
+    }
+
+    // MARK: - OKF tests
+
+    #[test]
+    fn okf_type_mapping() {
+        assert_eq!(okf_type("note"), "Note");
+        assert_eq!(okf_type("fact"), "Fact");
+        assert_eq!(okf_type("journal"), "Journal");
+        assert_eq!(okf_type("flashcard"), "Flashcard");
+        assert_eq!(okf_type("task"), "Task");
+    }
+
+    #[test]
+    fn okf_default_emits_type_key() {
+        // A note rendered in OKF mode must carry `type:` in frontmatter.
+        let note = NoteIR::with_moot_id(
+            "TestNote".to_owned(),
+            vec![Block::markdown("Body.".to_owned())],
+            HashMap::new(),
+            vec![],
+            vec![],
+            "".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let out = render(&note, false, &HashMap::new());
+        assert!(out.contains("type: Note"), "OKF default must emit type: key, got: {out}");
+    }
+
+    #[test]
+    fn okf_default_emits_frontmatter_tags() {
+        let note = NoteIR::with_moot_id(
+            "TaggedNote".to_owned(),
+            vec![Block::markdown("Body.".to_owned())],
+            HashMap::new(),
+            vec![],
+            vec!["swift".to_owned(), "testing".to_owned()],
+            "".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let out = render(&note, false, &HashMap::new());
+        assert!(out.contains("tags:"), "OKF default must emit frontmatter tags: key");
+        assert!(out.contains("swift"), "swift tag must appear in frontmatter tags");
+        assert!(out.contains("testing"), "testing tag must appear");
+    }
+
+    #[test]
+    fn pure_obsidian_mode_still_emits_type_and_tags() {
+        let note = NoteIR::with_moot_id(
+            "MyNote".to_owned(),
+            vec![Block::markdown("Body.".to_owned())],
+            HashMap::new(),
+            vec![],
+            vec!["alpha".to_owned()],
+            "".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let out = render(&note, true, &HashMap::new());
+        assert!(out.contains("type: Note"), "pure-Obsidian mode must still emit type:");
+        assert!(out.contains("tags:"), "pure-Obsidian mode must still emit frontmatter tags:");
+    }
+
+    #[test]
+    fn okf_default_emits_standard_md_links() {
+        // Estate-origin note whose links live in note.links (not in body).
+        let note = NoteIR::with_moot_id(
+            "Folder/Alpha".to_owned(),
+            vec![Block::markdown("Body text.".to_owned())],
+            HashMap::new(),
+            vec![WikiLink::new("Beta", None, "Beta")],
+            vec![],
+            "Folder".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let key_by_name: HashMap<String, String> =
+            [("Beta".to_owned(), "Folder/Beta".to_owned())].into_iter().collect();
+        let out = render(&note, false, &key_by_name);
+        assert!(out.contains("[Beta](Beta.md)"), "OKF mode must emit standard-md link, got: {out}");
+        assert!(!out.contains("[[Beta]]"), "OKF mode must NOT emit wikilink");
+    }
+
+    #[test]
+    fn pure_obsidian_mode_emits_wikilinks() {
+        let note = NoteIR::with_moot_id(
+            "Folder/Alpha".to_owned(),
+            vec![Block::markdown("Body text.".to_owned())],
+            HashMap::new(),
+            vec![WikiLink::new("Beta", Some("see beta".to_owned()), "Beta|see beta")],
+            vec![],
+            "Folder".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let out = render(&note, true, &HashMap::new());
+        assert!(out.contains("[[Beta|see beta]]"), "pure-Obsidian mode must emit wikilink");
+        assert!(!out.contains("[see beta]("), "pure-Obsidian mode must NOT emit standard-md link");
+    }
+
+    #[test]
+    fn importer_skips_index_md() {
+        let vault = temp_vault();
+        write_note(&vault, "Folder/RealNote.md", "---\nroom: r\n---\nReal note body.");
+        // Write an index.md that must be skipped on import.
+        write_note(&vault, "Folder/index.md", "# Index\n\n- [RealNote](RealNote.md)\n");
+
+        let adapter = ObsidianAdapter::new();
+        let notes = adapter.to_ir(&vault).unwrap();
+        std::fs::remove_dir_all(&vault).ok();
+
+        assert_eq!(notes.len(), 1, "index.md must be skipped; only RealNote should import");
+        assert_eq!(notes[0].stable_source_key, "Folder/RealNote");
+    }
+
+    #[test]
+    fn importer_skips_log_md() {
+        let vault = temp_vault();
+        write_note(&vault, "Real.md", "Real body.");
+        write_note(&vault, "log.md", "# Log\n\nSome log entry.");
+
+        let adapter = ObsidianAdapter::new();
+        let notes = adapter.to_ir(&vault).unwrap();
+        std::fs::remove_dir_all(&vault).ok();
+
+        assert_eq!(notes.len(), 1, "log.md must be skipped");
+        assert_eq!(notes[0].stable_source_key, "Real");
+    }
+
+    #[test]
+    fn from_ir_emits_index_md_per_folder() {
+        let source = temp_vault();
+        let dest = temp_vault();
+
+        write_note(&source, "Folder/NoteA.md", "---\nroom: a\n---\nNote A.");
+        write_note(&source, "Folder/NoteB.md", "---\nroom: b\n---\nNote B.");
+        write_note(&source, "Root.md", "---\nroom: r\n---\nRoot note.");
+
+        let adapter = ObsidianAdapter::new();
+        let notes = adapter.to_ir(&source).unwrap();
+        adapter.from_ir(&notes, &dest).unwrap();
+
+        // Root index.md must exist.
+        assert!(dest.join("index.md").exists(), "root index.md must be emitted");
+
+        // Folder/index.md must exist and list NoteA and NoteB.
+        let folder_index = dest.join("Folder").join("index.md");
+        assert!(folder_index.exists(), "Folder/index.md must be emitted");
+        let content = std::fs::read_to_string(&folder_index).unwrap();
+        assert!(content.contains("[NoteA](NoteA.md)"), "folder index must link NoteA");
+        assert!(content.contains("[NoteB](NoteB.md)"), "folder index must link NoteB");
+
+        std::fs::remove_dir_all(&source).ok();
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
+    #[test]
+    fn okf_validity_every_note_has_type_key() {
+        let source = temp_vault();
+        let dest = temp_vault();
+
+        write_note(&source, "Alpha.md", "---\nroom: a\n---\nAlpha body.");
+        write_note(&source, "Folder/Beta.md", "---\nroom: b\n---\nBeta body.");
+
+        let adapter = ObsidianAdapter::new();
+        let notes = adapter.to_ir(&source).unwrap();
+        adapter.from_ir(&notes, &dest).unwrap();
+
+        // Every .md file that is NOT an index must carry type:.
+        let mut checked = 0;
+        let mut stack = vec![dest.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+                    let stem = path.file_stem().unwrap().to_string_lossy();
+                    if stem == "index" || stem == "log" { continue; }
+                    let content = std::fs::read_to_string(&path).unwrap();
+                    assert!(content.contains("type:"), "every note must have type: OKF key — failed for {path:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 2, "expected exactly 2 note files");
+
+        std::fs::remove_dir_all(&source).ok();
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
+    #[test]
+    fn parse_standard_md_links_basic() {
+        let body = "See [Alpha](notes/Alpha.md) and [Organic Chemistry](chem/Organic-Chemistry.md).";
+        let links = parse_standard_md_links(body);
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().any(|l| l.target == "Alpha"));
+        assert!(links.iter().any(|l| l.target == "Organic-Chemistry"));
+    }
+
+    #[test]
+    fn parse_standard_md_links_skips_external() {
+        let body = "See [example](https://example.com/page.md) for details.";
+        let links = parse_standard_md_links(body);
+        assert!(links.is_empty(), "external http links must not be parsed as local note links");
+    }
+
+    #[test]
+    fn parse_all_links_unifies_and_deduplicates() {
+        let body = "[[Alpha]] and [Beta](Beta.md) and [[Alpha]]";
+        let links = parse_all_links(body);
+        let targets: Vec<_> = links.iter().map(|l| l.target.as_str()).collect();
+        assert!(targets.contains(&"Alpha"));
+        assert!(targets.contains(&"Beta"));
+        let alpha_count = targets.iter().filter(|&&t| t == "Alpha").count();
+        assert_eq!(alpha_count, 1, "duplicates must be removed");
+    }
+
+    #[test]
+    fn relative_md_path_from_root() {
+        assert_eq!(relative_md_path("", "notes/Alpha.md"), "notes/Alpha.md");
+    }
+
+    #[test]
+    fn relative_md_path_same_folder() {
+        assert_eq!(relative_md_path("Folder", "Folder/Beta.md"), "Beta.md");
+    }
+
+    #[test]
+    fn relative_md_path_cross_folder() {
+        assert_eq!(relative_md_path("A/B", "C/D.md"), "../../C/D.md");
     }
 }
