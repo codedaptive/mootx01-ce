@@ -1174,7 +1174,7 @@ private final class SQLiteDirectWriter {
     func close() { sqlite3_close(db) }
 }
 
-import SQLite3
+import SQLCipher
 
 private enum TestError: Error {
     case sqliteOpen(code: Int32)

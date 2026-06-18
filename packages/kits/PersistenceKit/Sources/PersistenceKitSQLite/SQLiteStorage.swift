@@ -3,7 +3,7 @@
 // SQLite backend. One connection per estate, serialized via actor.
 
 import Foundation
-import SQLite3
+import SQLCipher
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.

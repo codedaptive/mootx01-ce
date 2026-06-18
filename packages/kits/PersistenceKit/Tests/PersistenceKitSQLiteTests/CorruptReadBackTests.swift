@@ -18,7 +18,7 @@ import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitSQLite
-import SQLite3
+import SQLCipher
 
 // MARK: - Helpers
 
