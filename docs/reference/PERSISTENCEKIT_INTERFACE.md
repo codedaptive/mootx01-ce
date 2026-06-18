@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-17
-version: 1.1.0
+date: 2026-06-18
+version: 1.1.1
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -783,8 +783,8 @@ struct inside `IncrementalReplicationSession.swift`.
 
 | Swift | Rust | Notes |
 |---|---|---|
-| `EncryptionMode` | `EncryptionMode` | Three cases: `plaintext`/`Plaintext`, `rowEncryption`/`RowEncryption`, `fullDatabase`/`FullDatabase`. Mode 3 (`fullDatabase`) is whole-file encryption (SQLCipher on Rust, Apple Data Protection on iOS), not per-row; the content seam is a no-op for it |
-| `EstateEncryptionConfig` | `EstateEncryptionConfig` | `mode`, `keyIdentifier`/`key_identifier`, key is `package`/`pub(crate)` scoped. Constructors: `.plaintext` static / `plaintext()`, `init(_ mode:)` / `row_encryption()`, `full_database()`, and (Rust) `full_database_with_key(key)` for the stable per-install key. Rust key-source API: `ensure_install_key(estates_dir)`, `INSTALL_KEY_FILE` |
+| `EncryptionMode` | `EncryptionMode` | Three cases: `plaintext`/`Plaintext`, `rowEncryption`/`RowEncryption`, `fullDatabase`/`FullDatabase`. Mode 3 (`fullDatabase`) is whole-file encryption — **SQLCipher on every platform** (CommonCrypto on Apple, OpenSSL FIPS on Rust), not per-row; the content seam is a no-op for it |
+| `EstateEncryptionConfig` | `EstateEncryptionConfig` | `mode`, `keyIdentifier`/`key_identifier`, key is `package`/`pub(crate)` scoped. Constructors: `.plaintext` static / `plaintext()`, `init(_ mode:)` / `row_encryption()`, `full_database()`, and **`.fullDatabase(key:)` (Swift) / `full_database_with_key(key)` (Rust)** for the stable per-install key. Key source: **`KeychainKeyStore` (Swift)** loads/creates the per-install key in the Keychain; Rust uses `ensure_install_key(estates_dir)` / `INSTALL_KEY_FILE` (`db.key`) |
 | `AeadProvider` (protocol) | `AeadProvider` (trait) | Two methods: `encrypt(_:key:)` / `encrypt(plaintext, key)`, `decrypt(_:key:)` / `decrypt(ciphertext, key)`. Conformers must generate a fresh random nonce per encrypt. Wire layout `[12-byte nonce][16-byte tag][ciphertext]` is identical in both ports |
 | `CryptoKitAeadProvider` | `AesGcmAeadProvider` | Default provider behind the seam. Swift uses CryptoKit AES.GCM; Rust uses the `aes-gcm` crate (C-1 exception). Both implement standard AES-GCM-256; cross-decryptable |
 | `RowCrypto` | `RowCrypto` | Thin wrapper calling through `AeadProvider`. Swift: `RowCrypto.encrypt(_:key:provider:)`. Rust: `RowCrypto::encrypt(plaintext, key, provider)`. Provider defaults to the CryptoKit/aes-gcm default |
@@ -1140,6 +1140,11 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 *End of PersistenceKit Interface.*
 
 ## Changelog
+
+### 1.1.1 -- 2026-06-18
+Mode 3 is SQLCipher on every platform (CommonCrypto on Apple, implemented).
+Added the Swift key API: `EstateEncryptionConfig.fullDatabase(key:)` and
+`KeychainKeyStore` (the Apple per-install key source).
 
 ### 1.1.0 -- 2026-06-17
 Planned encryption lockdown. Documented Mode 3 (`fullDatabase`) as whole-file
