@@ -5,6 +5,49 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.3-beta — 2026-06-18
+
+Fourth beta of the 1.0 line. A drive-test hardening pass over the ARIA MCP
+surface — quick fixes, correctness repairs, and recall guidance — plus the
+vault security posture decision and the moot-mgr console connection fix. Both
+ports move together.
+
+### ARIA MCP surface — drive-test fixes
+
+- **`file_fact` source_id always grounded** — when the caller omits `source_id`,
+  the server infers it as the ingest channel (`aria-mcp-server`) so a fact is
+  never stored unanchored and never rejected. Both ports.
+- **Recall discrimination/confidence signal** — `memory_search`,
+  `recall_shaped`, `recall_precise`, and `lens_partial_cue` now surface a
+  discrimination/confidence signal and recall-mode guidance. No ranking change;
+  both ports.
+- **Quick fixes** — `update_memory` schema drift (Rust) corrected; empty
+  `free_association` now returns an explanatory hint instead of a bare result.
+
+### Timestamp-corruption resilience
+
+- **Scan skips corrupt timestamps** — the Rust SQLite cursor skips rows with
+  unparseable timestamps rather than aborting the scan; the Swift write boundary
+  clamps out-of-range values at capture.
+- **Vault fail-loud + import validation** — vault export fails loud on a bad
+  timestamp rather than emitting `1970`; import validates timestamps before
+  filing.
+
+### Vault security posture
+
+- **ADR-015 — vault security posture** — vault is open in 1.0.x-beta (trust at
+  rest via encryption) with a gated vault-password feature deferred to 1.1.
+- **`mootx01 install --vault-on/--vault-off`** — coarse install switch (default
+  on); `--vault-off` hides and refuses the five vault MCP tools. Mandatory
+  post-install next-steps disclosure explains the trade-off (vault-on enables
+  import/export; vault-off disables them for a tighter posture).
+
+### moot-mgr console
+
+- **Daemon-port resolution** — the moot-mgr console reads the daemon's real bound
+  port from `<data>/daemon.port` instead of hardcoding 4242, so it connects to a
+  daemon that hunted upward off 4242 under `--http auto`.
+
 ## v1.0.2-beta — 2026-06-18
 
 Third beta of the 1.0 line. The headline is the **planned at-rest encryption
