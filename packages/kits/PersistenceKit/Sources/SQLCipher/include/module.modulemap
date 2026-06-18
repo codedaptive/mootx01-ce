@@ -1,0 +1,4 @@
+module SQLCipher {
+    header "sqlite3.h"
+    export *
+}

@@ -5,7 +5,7 @@
 
 import Foundation
 import SubstrateTypes
-import SQLite3
+import SQLCipher
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.

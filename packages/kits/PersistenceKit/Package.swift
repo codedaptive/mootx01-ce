@@ -36,6 +36,11 @@ let package = Package(
         .library(name: "PersistenceKit", targets: ["PersistenceKit"]),
         .library(name: "PersistenceKitInMemory", targets: ["PersistenceKitInMemory"]),
         .library(name: "PersistenceKitSQLite", targets: ["PersistenceKitSQLite"]),
+        // Vendored SQLCipher (Community Edition amalgamation, CommonCrypto
+        // backend). Exported so downstream kits that previously used the system
+        // SQLite3 module link the SAME encrypted engine — avoiding two sqlite
+        // libraries (duplicate sqlite3_* symbols) in one binary.
+        .library(name: "SQLCipher", targets: ["SQLCipher"]),
         .library(name: "PersistenceKitPostgreSQL", targets: ["PersistenceKitPostgreSQL"]),
         // Replication primitive (§5 full-snapshot flush/hydrate).
         // Depends only on the core PersistenceKit protocol surface — no backend
@@ -73,9 +78,39 @@ let package = Package(
             dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Sources/PersistenceKitInMemory"
         ),
+        // Vendored SQLCipher amalgamation (Community Edition, CommonCrypto). The
+        // SQLite backend links this instead of the system SQLite3 module so
+        // estates can be whole-file encrypted (SQLITE_HAS_CODEC + sqlite3_key).
+        // SQLCIPHER_CRYPTO_CC selects Apple CommonCrypto (→ CoreCrypto), so there
+        // is no OpenSSL on Apple. Plain BSD-licensed source (see LICENSE.md);
+        // attribution is reproduced in the app's about/licensing surface.
+        .target(
+            name: "SQLCipher",
+            path: "Sources/SQLCipher",
+            exclude: ["LICENSE.md"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .define("SQLITE_HAS_CODEC"),
+                .define("SQLCIPHER_CRYPTO_CC"),
+                .define("SQLITE_TEMP_STORE", to: "2"),
+                // Mandatory for SQLCipher: wires the codec init/shutdown hooks.
+                .define("SQLITE_EXTRA_INIT", to: "sqlcipher_extra_init"),
+                .define("SQLITE_EXTRA_SHUTDOWN", to: "sqlcipher_extra_shutdown"),
+                // Production SQLite build: asserts off. A SwiftPM debug build does
+                // not define NDEBUG, which would leave C asserts active while
+                // SQLITE_DEBUG is off — a mismatch that references debug-only
+                // internals (sqlite3BtreeHoldsAllMutexes, EdupBuf.zEnd, …). Every
+                // shipped SQLite builds with NDEBUG; the codec correctness does
+                // not depend on SQLite's internal asserts.
+                .define("NDEBUG"),
+            ],
+            linkerSettings: [
+                .linkedFramework("Security"),
+            ]
+        ),
         .target(
             name: "PersistenceKitSQLite",
-            dependencies: ["PersistenceKit", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "SubstrateTypes", "SQLCipher"],
             path: "Sources/PersistenceKitSQLite"
         ),
         .target(
@@ -133,6 +168,9 @@ let package = Package(
                 "PersistenceKitSQLite",
                 "PersistenceKitConformance",
                 "SubstrateTypes",
+                // SQLCipher: CorruptReadBackTests opens the raw DB file via the
+                // C API, so it links the same vendored engine (not system SQLite3).
+                "SQLCipher",
                 // IntellectusLib for telemetry isolation tests (GlobalTestLock + CapturingSink).
                 "IntellectusLib",
             ],
@@ -153,6 +191,9 @@ let package = Package(
                 "PersistenceKitInMemory",
                 "PersistenceKitSQLite",
                 "SubstrateTypes",
+                // SQLCipher: IncrementalReplicationTests opens the raw DB via the
+                // C API, so it links the same vendored engine (not system SQLite3).
+                "SQLCipher",
             ],
             path: "Tests/PersistenceKitReplicationTests"
         ),
