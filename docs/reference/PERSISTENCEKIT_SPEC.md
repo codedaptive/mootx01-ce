@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.1.1
+version: 1.2.0
 status: active
-date: 2026-06-17
+date: 2026-06-18
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -384,6 +384,25 @@ resolves that sibling key and opens the estate as FullDatabase. Estates
 without a sibling key (tests, pre-lockdown installs) remain plaintext, so
 existing call sites are unchanged and carry no crypto on any path.
 
+**B-12b (per-backend at-rest coverage):** the at-rest mechanism is NOT uniform
+across backends — whole-file encryption is intrinsically a SQLite (embedded-file)
+concept. The encryption seam is currently wired in the SQLite backend only;
+Postgres and InMemory store plaintext.
+
+- **SQLite** — Mode 3 (whole-file SQLCipher) protects schema and content; Mode 2
+  (per-row AEAD) is also available. The structure-protection guarantee.
+- **PostgreSQL** — no app-level whole-file analogue (the server owns the schema).
+  Content confidentiality is **Mode 2** (per-row AEAD applied client-side before
+  the value reaches Postgres) — the portable mechanism, currently UNWIRED in the
+  Postgres backend. Schema/structure and disk-at-rest are the deployment's
+  responsibility (FIPS-validated Postgres + TDE / disk encryption + TLS + RBAC).
+- **InMemory** — no disk at-rest (volatile); at-rest encryption is N/A. Sensitive
+  data is not persisted here; relevant controls are OS/process hardening
+  (no-swap / `mlock`, zero-on-free).
+
+Mode 2 (per-row AEAD) is the cross-backend content-encryption mechanism; Mode 3
+(whole-file) is SQLite-only. See ADR-014 (Backend coverage).
+
 **B-12a (cross-port at-rest format parity — Mode 2 only):** for Mode 2
 (RowEncryption), the Rust SQLite backend encrypts the `content` column at
 rest using AES-GCM-256, mirroring the Swift
@@ -615,6 +634,13 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-18
+Added B-12b (per-backend at-rest coverage): the at-rest mechanism is not uniform
+across backends. SQLite uses Mode 3 whole-file SQLCipher (schema + content);
+PostgreSQL has no whole-file analogue and relies on Mode 2 client-side AEAD
+(currently unwired) plus deployment TDE/TLS/RBAC; InMemory at-rest is N/A. Mode 2
+is the cross-backend content mechanism; Mode 3 is SQLite-only.
 
 ### 1.1.1 -- 2026-06-17
 Added a forward-pointer in B-12 to ADR-014: the Apple port moves to SQLCipher on
