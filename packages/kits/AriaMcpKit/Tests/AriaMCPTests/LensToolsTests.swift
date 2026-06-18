@@ -194,4 +194,48 @@ struct LensToolsTests {
         #expect(body.contains("estate_divergence:"))
         #expect(body.contains("a=1 drawer(s), b=1 drawer(s)"))
     }
+
+    // MARK: - Cohesion lens (renamed from contradiction; content-outlier detector)
+
+    /// `moot_lens_cohesion` dispatches to the content-cohesion outlier algorithm
+    /// and returns a result whose text mentions "cohesion_outliers".
+    @Test func cohesionLensDispatchReturnsCohesionHeader() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "coh-1"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        // One drawer is enough for dispatch to complete (empty set returns empty outliers).
+        _ = try await capture(kit, handle, content: "swift is a compiled language", room: "tech")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_cohesion",
+            arguments: .object([:]))
+
+        // text() internally asserts isError == false.
+        let body = try text(result)
+        #expect(body.contains("cohesion_outliers"))
+    }
+
+    // MARK: - Genuine contradiction lens
+
+    /// `moot_lens_contradiction` returns text distinguishing contradicts-tunnel
+    /// signal from conflicting-facts signal. With no tunnels or conflicting facts
+    /// in a fresh estate, both sub-reports should surface "none".
+    @Test func contradictionLensOnEmptyEstateReturnsNone() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ctrd-1"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_contradiction",
+            arguments: .object([:]))
+
+        // text() internally asserts isError == false.
+        let body = try text(result)
+        // Both signal lines must appear.
+        #expect(body.contains("contradicts_tunnels:"))
+        #expect(body.contains("conflicting_facts:"))
+        #expect(body.contains("none"))
+    }
 }
