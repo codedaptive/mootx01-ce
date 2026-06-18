@@ -360,6 +360,15 @@ enum LensTools {
                 seedDrawerID: try requireString(args, "seedDrawerID"),
                 walkLength: try integer(args, "walkLength", default: 10_000),
                 k: try integer(args, "k", default: 10))
+            // free_association is a forward walk; a seed with no outgoing tunnels
+            // (or one not present in the wing) yields no associations. Return a
+            // hint rather than a bare "0 results" that reads as an empty estate.
+            if out.isEmpty {
+                return ToolDispatcher.textResult(
+                    "free_association: 0 associations — the seed drawer has no outgoing tunnels to "
+                    + "walk (this lens is a forward walk), or the seed is not in the given wing. Use "
+                    + "moot_connection_map to see links pointing into this drawer.")
+            }
             return list("free_association", out.map { "\($0.drawerID) activation=\($0.activation)" })
 
         case "moot_lens_theme_weather":
