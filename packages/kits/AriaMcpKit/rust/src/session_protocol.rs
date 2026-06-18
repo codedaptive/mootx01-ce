@@ -8,7 +8,7 @@
 /// Static orientation block appended to every `moot_estate_status` response.
 /// Instructs the AI client on the ARIA surface and coaching workflow.
 pub const ARIA_SESSION_PROTOCOL: &str = "\n\nprotocol:\
-\n  \u{2014} Call moot_estate_status with teachme:true for a full orientation guide.\
+\n  \u{2014} Call moot_estate_status with teachme:true to receive the orientation guide (no status payload is returned).\
 \n  \u{2014} Call moot_list_lenses to see available cognition tools.\
 \n  \u{2014} Add teachme:true to any tool to learn it before using it.\
 \n  \u{2014} Watch for hint: lines in responses \u{2014} they contain coaching for better results.\

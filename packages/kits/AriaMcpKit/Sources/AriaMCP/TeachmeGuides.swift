@@ -744,6 +744,6 @@ enum TeachmeGuides {
     }
 
     private static func unknownGuide(_ name: String) -> String {
-        "Unknown tool '\(name)'. Call moot_estate_status with teachme:true for a full orientation guide."
+        "Unknown tool '\(name)'. Call moot_estate_status (no teachme) for the protocol block, or with teachme:true for the tool orientation guide."
     }
 }
