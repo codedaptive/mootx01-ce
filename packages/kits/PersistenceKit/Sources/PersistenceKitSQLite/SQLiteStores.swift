@@ -48,6 +48,23 @@ final class SQLiteRowStore: RowStore, Sendable {
     func count(table: String, where predicate: StoragePredicate?) async throws -> Int {
         try await backend.countRows(table: table, where: predicate)
     }
+
+    /// SQLite cursor-level skip-corrupt: overrides the `RowStore` default so
+    /// individual corrupt rows (e.g. a `+58432-...` poison timestamp) are
+    /// skipped and logged rather than aborting the entire corpus scan.
+    func querySkipCorrupt(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?
+    ) async throws -> (rows: [StorageRow], skipped: Int) {
+        try await backend.queryRowsSkipCorrupt(
+            table: table, where: predicate,
+            orderBy: orderBy, limit: limit, offset: offset,
+            columns: columns)
+    }
 }
 
 final class SQLiteBlobStore: BlobStore, Sendable {
