@@ -111,7 +111,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// The JSON entry for this client's transport.
 ///   supports_local_http → {"type":"http","url":daemon_url} or {"url":daemon_url}
-///   use_proxy_bridge    → {"command":binary,"args":["proxy","--http",daemon_url],"env":{}}
+///   use_proxy_bridge    → {"command":binary,"args":["proxy"],"env":{}}
 ///   headless stdio      → {"command":binary,"args":[],"env":{}}
 pub fn entry_for(client: &McpClient, binary_path: &str, daemon_url: &str) -> serde_json::Value {
     if client.id == "opencode" {
@@ -128,7 +128,7 @@ pub fn entry_for(client: &McpClient, binary_path: &str, daemon_url: &str) -> ser
     } else if client.use_proxy_bridge {
         serde_json::json!({
             "command": binary_path,
-            "args": ["proxy", "--http", daemon_url],
+            "args": ["proxy"],
             "env": {}
         })
     } else {
@@ -248,7 +248,7 @@ pub fn merge_into_toml_config(
         block.push(format!("url = \"{daemon_url}\""));
     } else if client.use_proxy_bridge {
         block.push(format!("command = \"{binary_path}\""));
-        block.push(format!("args = [\"proxy\", \"--http\", \"{daemon_url}\"]"));
+        block.push("args = [\"proxy\"]".to_string());
     } else {
         block.push(format!("command = \"{binary_path}\""));
         block.push("args = []".to_string());
@@ -747,7 +747,7 @@ mod tests {
     fn proxy_bridge_entry_shape() {
         let e = entry_for(&client("claude-desktop"), "/usr/local/bin/mootx01", "http://127.0.0.1:4242");
         assert_eq!(e["command"], "/usr/local/bin/mootx01");
-        assert_eq!(e["args"], serde_json::json!(["proxy", "--http", "http://127.0.0.1:4242"]));
+        assert_eq!(e["args"], serde_json::json!(["proxy"]));
         assert_eq!(e["env"], serde_json::json!({}));
     }
 

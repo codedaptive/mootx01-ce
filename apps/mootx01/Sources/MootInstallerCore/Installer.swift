@@ -510,7 +510,7 @@ public enum Installer {
     ///
     /// The entry shape follows the same logic as `install()`:
     ///   - supportsLocalHTTP → `{"type":"http","url":daemonURL}` or `{"url":daemonURL}`
-    ///   - useProxyBridge    → `{"command":binaryPath,"args":["proxy","--http",daemonURL],"env":{}}`
+    ///   - useProxyBridge    → `{"command":binaryPath,"args":["proxy"],"env":{}}`
     ///   - isHeadlessStdio  → `{"command":binaryPath,"args":[],"env":{}}` (not used for any
     ///                         current client but included for completeness)
     ///
@@ -538,7 +538,7 @@ public enum Installer {
                 : ["url": daemonURL]
         } else if client.useProxyBridge {
             entry = ["command": binaryPath,
-                     "args": ["proxy", "--http", daemonURL],
+                     "args": ["proxy"],
                      "env": [:] as [String: String]]
         } else {
             // Headless stdio: client spawns an ephemeral serve process per call.
@@ -603,7 +603,7 @@ public enum Installer {
     ///
     /// The entry shape follows the same transport logic as the JSON writer:
     ///   - supportsLocalHTTP → `url = "<daemonURL>"`
-    ///   - useProxyBridge    → `command`/`args = ["proxy", "--http", "<daemonURL>"]`
+    ///   - useProxyBridge    → `command`/`args = ["proxy"]`
     ///   - headless stdio    → `command`/`args = []`
     ///
     /// - Throws: `InstallerError.malformedConfig` if the existing file contains
@@ -621,7 +621,7 @@ public enum Installer {
             block.append("url = \"\(daemonURL)\"")
         } else if client.useProxyBridge {
             block.append("command = \"\(binaryPath)\"")
-            block.append("args = [\"proxy\", \"--http\", \"\(daemonURL)\"]")
+            block.append("args = [\"proxy\"]")
         } else {
             block.append("command = \"\(binaryPath)\"")
             block.append("args = []")

@@ -350,8 +350,8 @@ struct InstallerTests {
         // Proxy bridge: args carry the subcommand and daemon URL so Desktop's
         // frames execute inside the resident daemon, not an ephemeral serve instance.
         let args = entry?["args"] as? [String]
-        #expect(args == ["proxy", "--http", MootPaths.residentEndpointURL],
-                "claude-desktop must get proxy subcommand args")
+        #expect(args == ["proxy"],
+                "claude-desktop must get the bare proxy subcommand (it self-resolves the daemon port)")
     }
 
     @Test("removePlacedBinary removes the binary and the PATH symlink")
@@ -415,8 +415,8 @@ struct InstallerTests {
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
         #expect(entry?["command"] as? String == binaryPath,
                 "proxy entry must carry the absolute binary command")
-        #expect(entry?["args"] as? [String] == ["proxy", "--http", daemonURL],
-                "proxy entry must pass subcommand and daemon URL as args")
+        #expect(entry?["args"] as? [String] == ["proxy"],
+                "proxy entry must carry the bare proxy subcommand (it self-resolves the daemon port)")
         #expect(entry?["url"] == nil,
                 "proxy client must not get an HTTP url entry")
     }
@@ -735,8 +735,8 @@ struct InstallerTests {
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
         #expect(entry?["command"] as? String == binaryPath,
                 "proxy-bridge entry must carry the binary command")
-        #expect(entry?["args"] as? [String] == ["proxy", "--http", daemonURL],
-                "proxy-bridge entry must carry the proxy subcommand and daemon URL")
+        #expect(entry?["args"] as? [String] == ["proxy"],
+                "proxy-bridge entry must carry the bare proxy subcommand (it self-resolves the daemon port)")
         #expect(entry?["url"] == nil, "proxy-bridge entry must not have a url field")
     }
 
@@ -995,7 +995,7 @@ struct InstallerTests {
             let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
             #expect(entry?["command"] as? String == binaryPath,
                     "Parall instance \(configURL.deletingLastPathComponent().lastPathComponent) must be wired")
-            #expect(entry?["args"] as? [String] == ["proxy", "--http", MootPaths.residentEndpointURL],
+            #expect(entry?["args"] as? [String] == ["proxy"],
                     "Parall proxy-bridge args must be set correctly")
         }
     }

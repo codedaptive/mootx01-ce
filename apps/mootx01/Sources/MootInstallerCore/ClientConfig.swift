@@ -17,7 +17,7 @@
 // Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): HTTP clients are
 // wired to the resident daemon's loopback endpoint so concurrent clients share
 // the one running daemon + Brain pump. Claude Desktop uses the native proxy
-// subcommand (`mootx01 proxy --http <daemonURL>`) so its calls execute inside
+// subcommand (`mootx01 proxy`) so its calls execute inside
 // the resident daemon with full telemetry and single-writer semantics;
 // the installed binary is reused, no Node.js or npx required.
 //
@@ -75,11 +75,11 @@ public struct MCPClient: Sendable, Equatable {
     public let httpEntryIncludesType: Bool
 
     /// Whether this client should be wired via the native proxy subcommand
-    /// (`mootx01 proxy --http <daemonURL>`) instead of a bare `mootx01 serve`
+    /// (`mootx01 proxy`) instead of a bare `mootx01 serve`
     /// stdio entry. True for Claude Desktop, which cannot accept a direct HTTP
     /// URL in its config but gains single-writer and telemetry when routed
     /// through the resident daemon via the proxy. The installer writes
-    /// `["command": binaryPath, "args": ["proxy", "--http", daemonURL]]`.
+    /// `["command": binaryPath, "args": ["proxy"]]`.
     /// Clients with supportsLocalHTTP: true use the HTTP entry instead; the
     /// proxy flag is only consulted for non-HTTP clients.
     public let useProxyBridge: Bool
@@ -249,7 +249,7 @@ public enum MCPClients {
         // Transport per client (see ADR-LOOPBACKHTTP-001): clients are wired to the resident
         // daemon over HTTP where their config schema accepts a local HTTP/url entry, so
         // concurrent clients share the one running daemon + Brain pump. Claude Desktop
-        // uses the native proxy subcommand (`mootx01 proxy --http <daemonURL>`) — its
+        // uses the native proxy subcommand (`mootx01 proxy`) — its
         // config schema requires a stdio command entry, and the proxy routes each
         // JSON-RPC frame through the resident daemon so telemetry fires and a single
         // writer holds the estate (no second `mootx01 serve` process).
