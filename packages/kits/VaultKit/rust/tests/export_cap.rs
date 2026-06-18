@@ -79,6 +79,29 @@ fn recall_all_believed(coord: &EstateCoordinator, handle: &EstateHandle) -> usiz
         .len()
 }
 
+// MARK: - VK-EXPORT-FAILOUD: bricked-estate detection
+
+/// Export of a genuinely empty estate must succeed with 0 notes, not return
+/// an `ExportBrickedEstate` error. An empty estate has zero drawer rows in
+/// storage so the two-step bricked check (COUNT(*) = 0) short-circuits.
+///
+/// Mirrors Swift `VaultBridgeTests.exportOfEmptyEstateSucceedsWithZeroNotes`.
+#[test]
+fn export_of_genuinely_empty_estate_returns_zero_notes_not_bricked_error() {
+    let (coord, handle) = open_one();
+    // No drawers captured — the estate is genuinely empty.
+    let mapping = DrawerMapping::default();
+    let result = mapping.export(&coord, &handle, NOW, VaultExportScope::Believed);
+    let projection = result.expect("empty estate export must not return an error");
+    assert_eq!(
+        projection.notes.len(),
+        0,
+        "genuinely empty estate must export 0 notes"
+    );
+}
+
+// MARK: - VK-EXPORT-CAP regression
+
 /// Regression test: export an estate with >50 believed drawers and assert
 /// that every drawer is present in the NoteIR result.
 ///

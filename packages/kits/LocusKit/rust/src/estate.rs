@@ -742,6 +742,16 @@ mod tests {
     }
 
     #[test]
+    fn count_drawer_rows_default_fails_loud() {
+        // The DrawerStore trait's default impl for count_drawer_rows must return
+        // DatabaseUnavailable rather than silently returning 0 — a silent zero
+        // would mask a bricked corpus as an empty one, defeating the vault-export
+        // fail-loud check. Mirrors the `count_recall_traces_default_fails_loud` pattern.
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.count_drawer_rows(), "count_drawer_rows");
+    }
+
+    #[test]
     fn audit_events_for_row_default_fails_loud() {
         let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
         assert_fail_loud(s.audit_events_for_row("row-id"), "audit_events_for_row");
@@ -852,6 +862,18 @@ mod tests {
             .count_recall_traces()
             .expect("count_recall_traces on empty InMemory store");
         assert_eq!(count, 0, "empty estate has zero trace rows");
+    }
+
+    #[test]
+    fn concrete_inmemory_store_count_drawer_rows_returns_zero_on_empty_estate() {
+        // An empty InMemory estate has no drawer rows: COUNT(*) must return 0.
+        // Mirrors Swift `DrawerStore.countDrawerRows()` contract check.
+        use crate::drawer_store_inmemory::InMemoryDrawerStore;
+        let store = InMemoryDrawerStore::new(1_700_000_000, None).unwrap();
+        let count = store
+            .count_drawer_rows()
+            .expect("count_drawer_rows on empty InMemory store");
+        assert_eq!(count, 0, "empty estate has zero drawer rows");
     }
 
     #[test]

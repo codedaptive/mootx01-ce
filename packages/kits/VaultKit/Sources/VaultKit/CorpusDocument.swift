@@ -53,6 +53,19 @@ public enum VaultKitError: Error, Equatable, Sendable {
     /// store, malformed file, unsupported direction). Mirrors the Rust
     /// `VaultKitError::AdapterError(String)`.
     case adapterError(String)
+
+    /// Export aborted because the estate's corpus appears bricked: recall
+    /// returned 0 drawers but raw storage contains at least one drawer row.
+    /// The most common cause is a poison timestamp in a drawer row that the
+    /// scan-resilience path skips but the COUNT(*) still sees. An empty
+    /// export would be a silent data loss; we fail loud so the caller can
+    /// investigate and repair before exporting. Mirrors the Rust
+    /// `VaultKitError::ExportBrickedEstate { drawer_count, reason }`.
+    ///
+    /// - Parameters:
+    ///   - drawerCount: raw row count from `COUNT(*)` on the drawers table
+    ///   - reason: human-readable explanation of why the export was aborted
+    case exportBrickedEstate(drawerCount: Int, reason: String)
 }
 
 // MARK: - CorpusDocument

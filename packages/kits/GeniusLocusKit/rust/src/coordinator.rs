@@ -2370,6 +2370,23 @@ impl EstateCoordinator {
             .map_err(|e| remap("count_recall_traces", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
+    // MARK: - count_drawer_rows
+
+    /// Count raw rows in the `drawers` table via `COUNT(*)`, bypassing all
+    /// row-decode logic. Corrupt rows (e.g. a poison timestamp) are still
+    /// counted. Used by the vault-export fail-loud path to distinguish
+    /// "estate is genuinely empty" from "recall returned 0 because all rows
+    /// are corrupt." Mirrors Swift `GeniusLocusKit.countDrawerRows(_:)`.
+    pub fn count_drawer_rows(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<usize, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .count_drawer_rows()
+            .map_err(|e| remap("count_drawer_rows", &uuid_to_str(&handle.estate_uuid), e).into())
+    }
+
     // MARK: - Grant dispatch
     //
     // These methods mirror the Swift `issueGrant` and `revokeGrant` verbs on

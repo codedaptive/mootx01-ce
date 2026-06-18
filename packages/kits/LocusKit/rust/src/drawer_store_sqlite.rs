@@ -569,6 +569,10 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.count_recall_traces()
     }
 
+    fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
+        self.0.count_drawer_rows()
+    }
+
     fn audit_events_for_row(
         &self,
         row_id: &str,

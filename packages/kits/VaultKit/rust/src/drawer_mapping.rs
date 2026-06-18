@@ -179,6 +179,58 @@ impl DrawerMapping {
             .recall(handle, recall_frame, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
 
+        // VK-EXPORT-FAILOUD: if the filtered recall returned nothing, verify
+        // whether the estate is genuinely empty (or all drawers legitimately
+        // filtered out by scope) versus the corpus being bricked (all rows
+        // skipped due to corrupt timestamps by the scan-resilience path).
+        //
+        // Strategy: two-step check.
+        //   Step 1 — raw COUNT(*) on the drawers table. If 0, the estate is
+        //            genuinely empty — zero recall is correct, no bricking.
+        //   Step 2 — if rows exist in storage, probe with an unfiltered recall
+        //            (no scope, no sensitivity filter, limit 1). If THAT also
+        //            returns 0 and raw COUNT > 0, then ALL rows are corrupt and
+        //            the export must fail loud. If the unfiltered probe returns
+        //            >= 1, the scope/sensitivity filter legitimately excluded
+        //            everything (e.g. all drawers are secret or unconfirmed).
+        //
+        // Mirrors Swift `DrawerMapping.export(kit:handle:scope:)`.
+        if recalled.is_empty() {
+            let raw_count = coordinator
+                .count_drawer_rows(handle)
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+            if raw_count > 0 {
+                // Storage has rows. Probe with a minimal unfiltered recall
+                // (no filters, limit 1, structured hydration — no blobs) to
+                // distinguish "scope filtered everything out" from "all rows
+                // are corrupt".
+                let probe_frame = RecallFrame {
+                    filter_chain: vec![],
+                    hydration_level: HydrationLevel::Structured,
+                    limit: Some(1),
+                    ordering: Ordering::ByCaptureTimeDesc,
+                    as_of: None,
+                    trace_limit: None,
+                };
+                let probe = coordinator
+                    .recall(handle, probe_frame, now)
+                    .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                if probe.is_empty() {
+                    // Storage has rows but even an unfiltered scan returns
+                    // nothing — all rows are corrupt. Fail loud.
+                    return Err(VaultKitError::ExportBrickedEstate {
+                        drawer_count: raw_count,
+                        reason: format!(
+                            "recall returned 0 drawers even without scope filters, but storage contains {} drawer rows — likely corrupt timestamps in the drawers table. Run a repair before exporting.",
+                            raw_count
+                        ),
+                    });
+                }
+                // probe returned >= 1 row — scope or sensitivity filters
+                // legitimately excluded all drawers. Not bricking.
+            }
+        }
+
         // ADR-007 Decision 2 tier partition. The predicates encode the
         // normative 4→3 mapping (Normal → normal+elevated, Private →
         // restricted, Secret → secret) — see `AdjectiveSensitivity` in
@@ -714,8 +766,32 @@ impl DrawerMapping {
             .unwrap_or_else(|| Self::lineage_id(note.stable_source_key.as_str()));
         frame.lineage_id = Some(lineage);
         frame.feature_flags = feature_flags;
-        // Event time from origin date, if available.
-        frame.event_time = note.origin_date.as_ref().and_then(|o| iso8601_to_ms(&o.iso8601));
+        // Event time from origin date, if available. Clamp to the RFC-3339
+        // round-trippable range (years 0001–9999) before passing to the capture
+        // frame. The write side (iso8601() in PersistenceKit's sqlite.rs) also
+        // clamps, so this is defence-in-depth: a vault with a wildly out-of-range
+        // `created` frontmatter value (year < 0001 or > 9999) won't become a
+        // poison timestamp in the drawers table. Values outside the range are
+        // replaced with None so the substrate uses the insertion clock instead.
+        //
+        // Range in seconds (matching PersistenceKit's clamp constants):
+        //   MIN_ROUND_TRIP_SECS = -62_135_596_800  (year 0001-01-01T00:00:00Z)
+        //   MAX_ROUND_TRIP_SECS =  253_402_300_799  (year 9999-12-31T23:59:59Z)
+        // In milliseconds:
+        //   MIN = -62_135_596_800_000
+        //   MAX =  253_402_300_799_000
+        frame.event_time = note.origin_date.as_ref().and_then(|o| {
+            let ms = iso8601_to_ms(&o.iso8601)?;
+            const MIN_MS: i64 = -62_135_596_800_000;
+            const MAX_MS: i64 = 253_402_300_799_000;
+            if ms < MIN_MS || ms > MAX_MS {
+                // Out of range: ignore the frontmatter timestamp, let the
+                // substrate use its insertion clock.
+                None
+            } else {
+                Some(ms)
+            }
+        });
 
         (frame, classified)
     }

@@ -120,6 +120,56 @@ public struct DrawerMapping: Sendable {
             )
         )
 
+        // VK-EXPORT-FAILOUD: if the filtered recall returned nothing, verify
+        // whether the estate is genuinely empty (or all drawers legitimately
+        // filtered out by scope) versus the corpus being bricked (all rows
+        // skipped due to corrupt timestamps by the scan-resilience path).
+        //
+        // Strategy: two-step check.
+        //   Step 1 — raw COUNT(*) on the drawers table. If 0, the estate is
+        //            genuinely empty — zero recall is correct, no bricking.
+        //   Step 2 — if rows exist in storage, probe with an unfiltered recall
+        //            (no scope, no sensitivity filter, limit 1). If THAT also
+        //            returns 0, and raw COUNT > 0, then ALL rows are corrupt
+        //            and the export must fail loud. If the unfiltered probe
+        //            returns >= 1, the scope/sensitivity filter legitimately
+        //            excluded everything (e.g. the caller exported with
+        //            .unconfirmed but all drawers are confirmed, or all
+        //            drawers are secret).
+        //
+        // This two-step approach avoids false positives from legitimate scope
+        // exclusions (e.g. secret-only estate with a non-secret export scope).
+        if recalled.isEmpty {
+            let rawDrawerCount = try await kit.countDrawerRows(handle)
+            if rawDrawerCount > 0 {
+                // Storage has rows. Probe with a minimal unfiltered recall to
+                // distinguish "scope filtered everything out" from "all rows
+                // are corrupt". The probe reads no blobs (structured hydration,
+                // limit 1) so it is cheap even on a large estate.
+                let unfilteredProbe = try await kit.recall(
+                    handle,
+                    RecallFrame(
+                        filterChain: [],
+                        hydrationLevel: .structured,
+                        limit: 1
+                    )
+                )
+                if unfilteredProbe.isEmpty {
+                    // Storage has rows but even an unfiltered scan returns
+                    // nothing — all rows are corrupt (poison timestamps or
+                    // other decode failures skipped by scan resilience). The
+                    // export must fail loud; a 0-note vault would be silent
+                    // data loss.
+                    throw VaultKitError.exportBrickedEstate(
+                        drawerCount: rawDrawerCount,
+                        reason: "recall returned 0 drawers even without scope filters, but storage contains \(rawDrawerCount) drawer rows — likely corrupt timestamps in the drawers table. Run a repair before exporting."
+                    )
+                }
+                // unfilteredProbe returned >= 1 row — scope or sensitivity
+                // filters legitimately excluded all drawers. Not bricking.
+            }
+        }
+
         // ADR-007 Decision 2 tier partition. The predicates encode the
         // normative 4→3 mapping (Normal → normal+elevated, Private →
         // restricted, Secret → secret) — see AdjectiveSensitivity in LocusKit.
@@ -616,7 +666,26 @@ public struct DrawerMapping: Sendable {
             provenanceChannel: .fileImport,
             sourceType: .imported,
             lineageID: resolvedLineageID,
-            eventTime: note.originDate?.date,
+            // Clamp the origin date to the RFC-3339 round-trippable range before
+            // passing it into the CaptureFrame. The write side (ISO8601.string(from:)
+            // in SQLiteConnection) also clamps and logs, so this is defence-in-depth:
+            // a vault with a wildly out-of-range `created` frontmatter value (e.g.
+            // year 58432 or year 0) won't become a poison timestamp in the drawers
+            // table. Out-of-range dates are clamped silently here because the
+            // ISO8601DateFormatter used by OccurredAt already rejects most poison
+            // strings (returning nil), and a parsed-but-extreme Date is extremely
+            // unlikely from standard vaults. The write-side clamp remains the
+            // canonical guard and logs the clamp via OSLog.
+            eventTime: note.originDate?.date.flatMap { d in
+                let secs = d.timeIntervalSince1970
+                if secs < -62_135_596_800 || secs > 253_402_300_799 {
+                    // Return nil: let the substrate use the insertion clock.
+                    // The write-side clamp in SQLiteConnection will also catch
+                    // any value that slips through as the last line of defence.
+                    return nil
+                }
+                return d
+            },
             featureFlags: flags
         )
         return (frame, classified: classified)

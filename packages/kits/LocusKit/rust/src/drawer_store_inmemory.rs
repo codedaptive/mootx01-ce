@@ -2545,6 +2545,18 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
+    fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
+        // COUNT(*) on the drawers table — bypasses all row-decode logic so
+        // corrupt rows (e.g. a poison timestamp) are still counted. Used by
+        // the vault-export fail-loud path: a non-zero count when recall returns
+        // 0 means the corpus is bricked, not empty. Mirrors Swift
+        // `DrawerStore.countDrawerRows()`.
+        self.storage
+            .row_store()
+            .count(T_DRAWERS, None)
+            .map_err(map_storage_err)
+    }
+
     // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------
@@ -3444,6 +3456,9 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
         self.inner.count_recall_traces()
+    }
+    fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_drawer_rows()
     }
     fn audit_events_for_row(
         &self,

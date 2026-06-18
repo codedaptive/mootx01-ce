@@ -820,6 +820,16 @@ impl Estate {
         self.store.count_recall_traces()
     }
 
+    /// Count raw rows in the `drawers` table via `COUNT(*)`, bypassing all
+    /// row-decode logic. Corrupt rows (e.g. a poison timestamp) are still
+    /// counted. Used by the vault-export fail-loud path to distinguish
+    /// "estate is genuinely empty" from "recall returned 0 because all rows
+    /// are corrupt." Delegates to `DrawerStore::count_drawer_rows`. Mirrors
+    /// Swift `Estate.countDrawerRows()`.
+    pub fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
+        self.store.count_drawer_rows()
+    }
+
     // -----------------------------------------------------------------------
     // tunnels_from_wing
     // -----------------------------------------------------------------------
