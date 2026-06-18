@@ -775,8 +775,8 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
 
 /// The column names the encryption seam intercepts.
 /// Both names match the Swift SQLiteBackend design verbatim.
-const CONTENT_COL: &str = "content";
-const KEY_ID_COL:  &str = "keyID";
+pub(crate) const CONTENT_COL: &str = "content";
+pub(crate) const KEY_ID_COL:  &str = "keyID";
 
 /// Encrypt the `content` column and stamp `keyID` when the estate
 /// is in an encrypting mode (RowEncryption or FullDatabase). Returns
@@ -784,7 +784,7 @@ const KEY_ID_COL:  &str = "keyID";
 /// `content` column.
 ///
 /// Mirrors Swift's `encryptedForWrite` on `SQLiteBackend`.
-fn encrypted_for_write(
+pub(crate) fn encrypted_for_write(
     values: BTreeMap<String, TypedValue>,
     config: &EstateEncryptionConfig,
     provider: &dyn AeadProvider,
@@ -825,7 +825,7 @@ fn encrypted_for_write(
 /// open. Mirrors the Swift single-key-path note in `decryptedForRead`.
 ///
 /// Mirrors Swift's `decryptedForRead` on `SQLiteBackend`.
-fn decrypted_for_read(
+pub(crate) fn decrypted_for_read(
     values: BTreeMap<String, TypedValue>,
     config: &EstateEncryptionConfig,
     provider: &dyn AeadProvider,
@@ -883,7 +883,7 @@ fn decrypted_for_read(
 /// path is byte-identical to pre-encryption behavior.
 ///
 /// Mirrors Swift's `assertContentKeyIDInvariant` on `SQLiteBackend`.
-fn assert_content_key_id_invariant(
+pub(crate) fn assert_content_key_id_invariant(
     values: &BTreeMap<String, TypedValue>,
     table: &str,
     config: &EstateEncryptionConfig,
