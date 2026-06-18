@@ -166,6 +166,12 @@ Queue jobs use `.lastWriterWinsByHLC` for state transitions (claimed, completed)
 
 Each estate generates an Ed25519 keypair on first launch. Pairing with another estate's owner happens through an out-of-band channel (QR code, NFC tap, AirDrop, or shared link with token) carrying the public key and the proposed hyperplane family parameters. Once paired, federated audit-event exchange is signed by the sender and verified by the receiver.
 
+> **Superseded — signature algorithm (see ADR-013, 2026-06-17).** The signature
+> algorithm is **ECDSA P-256**, not Ed25519: Ed25519 is outside the approved
+> boundary of the FIPS-validated Apple CoreCrypto module EE must ship (SC-13).
+> The per-estate identity, out-of-band pairing, and signed-exchange design here
+> are otherwise unchanged.
+
 Identity is per-estate, not per-device or per-user. Multiple estates on one device have distinct identities; the same user's two estates do not implicitly trust each other across the federation channel.
 
 Out-of-band channel choice for v1.0: QR code displayed on one device, scanned by the other, encoding the public key + hyperplane parameters. AirDrop pairing is a v1.x improvement.
