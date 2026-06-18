@@ -100,8 +100,12 @@ public enum RecipeCatalog {
             description: "Reasoning lens: how far the room distribution after a split instant has drifted from the distribution before it.",
             requiredCapabilities: []),
         RecipeDescriptor(
-            name: "contradiction", version: "1.0.0",
+            name: "cohesion", version: "1.0.0",
             description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "lens_contradiction", version: "1.0.0",
+            description: "Reasoning lens: surface genuine contradictions — drawer pairs linked by a `contradicts` tunnel and KG facts with conflicting objects for the same subject+predicate key.",
             requiredCapabilities: []),
         // Grounding / trust lens (v1.1.0: adds optional calibrated confidences).
         RecipeDescriptor(

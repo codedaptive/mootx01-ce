@@ -116,10 +116,18 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
             required_capabilities: vec![],
         },
         RecipeDescriptor {
-            name: "contradiction".into(),
+            name: "cohesion".into(),
             version: "1.0.0".into(),
             description:
                 "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "lens_contradiction".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: surface genuine contradictions — drawer pairs linked by a `contradicts` tunnel and KG facts with conflicting objects for the same subject+predicate key."
                     .into(),
             required_capabilities: vec![],
         },
@@ -281,10 +289,11 @@ mod tests {
     fn catalog_lists_all_shipped_recipes() {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
-        // plus the 14 reasoning lenses plus the 3 analytics lenses plus
+        // plus the 15 reasoning lenses (14 + lens_contradiction added Part 5)
+        // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
-        // plus the exploratory-recall recipe (recall_exploratory) = 25 total.
+        // plus the exploratory-recall recipe (recall_exploratory) = 26 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -294,9 +303,9 @@ mod tests {
                 "apriori_rules",
                 "association_rules",
                 "bias",
+                "cohesion",
                 "complexity",
                 "constellation",
-                "contradiction",
                 "drift",
                 "estate_divergence",
                 "formal_concepts",
@@ -304,6 +313,7 @@ mod tests {
                 "grounded_synthesis",
                 "keystones",
                 "latent_themes",
+                "lens_contradiction",
                 "migration_benchmark",
                 "mind_overlap",
                 "moment",

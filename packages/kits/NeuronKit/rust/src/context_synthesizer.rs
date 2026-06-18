@@ -104,9 +104,40 @@ pub fn make_summary(rows: &[DrawerRow], meta: &[DrawerRowMeta]) -> String {
     )
 }
 
+/// Standard English stopwords excluded from pattern extraction. High-frequency
+/// function words and date literals provide no semantic signal and would
+/// otherwise dominate the pattern list when present in a corpus.
+///
+/// Mirrors the Swift `ContextSynthesisEngine.stopwords` set byte-for-byte so
+/// conformance test vectors produce identical output on both ports.
+const STOPWORDS: &[&str] = &[
+    "this", "that", "with", "from", "they", "them", "their", "there",
+    "were", "have", "been", "will", "would", "could", "should", "about",
+    "when", "then", "than", "also", "into", "your", "more", "some",
+    "what", "which", "these", "those", "just", "like", "over", "such",
+    "only", "very", "even", "most", "both", "each", "here", "after",
+    "well", "back", "much", "many", "make", "time", "know", "take",
+    "long", "made", "come", "want", "used", "same", "need",
+];
+
+/// True when `token` is a bare 4-digit year (1000–2999) or a pure numeric
+/// string — neither carries semantic meaning as a pattern. Mirrors Swift
+/// `ContextSynthesisEngine.isBareYearOrNumeric(_:)`.
+fn is_bare_year_or_numeric(token: &str) -> bool {
+    if !token.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // All-digit strings of any length are pure numeric — exclude.
+    true
+}
+
 /// Top-N patterns. Frequency descending, ties broken by first
 /// appearance, final tiebreak by token string. Identical ordering
 /// to Swift.
+///
+/// Excludes stopwords and bare numeric strings (including years)
+/// so high-frequency function words and date literals do not dominate
+/// the pattern list. Mirrors Swift `ContextSynthesisEngine.topPatterns`.
 pub fn top_patterns(rows: &[DrawerRow], max_count: usize) -> Vec<String> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut first_seen: BTreeMap<String, usize> = BTreeMap::new();
@@ -114,6 +145,10 @@ pub fn top_patterns(rows: &[DrawerRow], max_count: usize) -> Vec<String> {
     for row in rows {
         for token in tokens(&row.content) {
             if token.chars().count() < 4 {
+                continue;
+            }
+            // Skip stopwords and bare numeric strings (including years).
+            if STOPWORDS.contains(&token.as_str()) || is_bare_year_or_numeric(&token) {
                 continue;
             }
             *counts.entry(token.clone()).or_insert(0) += 1;
