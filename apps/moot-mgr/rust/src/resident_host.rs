@@ -150,6 +150,39 @@ pub struct ResidentHost {
     control: Option<crate::control_channel::ControlChannel>,
 }
 
+/// Best-effort: keep the resident host's memory — including decrypted estate
+/// content held in RAM — out of the swap file. Non-fatal: when the memlock limit
+/// can't be raised we lock only resident pages and never request `MCL_FUTURE`
+/// (which could fail future allocations under a low `RLIMIT_MEMLOCK` and abort).
+#[cfg(unix)]
+fn lock_memory_from_swap() {
+    // SAFETY: setrlimit/mlockall are plain libc syscalls with no aliasing concerns.
+    unsafe {
+        let unlimited = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        let raised = libc::setrlimit(libc::RLIMIT_MEMLOCK, &unlimited) == 0;
+        let flags = if raised {
+            libc::MCL_CURRENT | libc::MCL_FUTURE
+        } else {
+            libc::MCL_CURRENT
+        };
+        if libc::mlockall(flags) != 0 {
+            eprintln!(
+                "moot-mgr: mlockall failed ({}); RAM swap-protection off \
+                 (estate data is still encrypted at rest)",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_memory_from_swap() {
+    // Windows: per-region VirtualLock only; not applied process-wide here.
+}
+
 impl ResidentHost {
     /// Create a resident host. `start_instant_epoch` is the host start time
     /// (uptime base) in epoch seconds — injected so uptime is deterministic in
@@ -177,6 +210,9 @@ impl ResidentHost {
     /// `HUNT_RANGE` ports. Whatever port binds is written to the `mgr.port`
     /// file in the mootx01 data dir and removed on `stop()`.
     pub fn start(&mut self) -> Result<(), ManagerError> {
+        // Keep this resident host's memory (incl. decrypted estate content held
+        // in RAM) out of the swap file. Best-effort; encrypted at rest regardless.
+        lock_memory_from_swap();
         // Ensure the shared whole-file database key exists in the estates
         // directory before any estate is provisioned or opened, so estates this
         // host manages are encrypted at rest. Every estate opener resolves the

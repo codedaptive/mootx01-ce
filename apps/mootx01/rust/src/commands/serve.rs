@@ -30,7 +30,45 @@ const HUNT_RANGE: u16 = 100;
 /// §3 default daemon port.
 const DEFAULT_PORT: u16 = 4242;
 
+/// Best-effort: keep the daemon's memory — including decrypted estate content
+/// held in RAM during operations — out of the swap file. Non-fatal: if the
+/// memlock limit can't be raised (insufficient privilege) we lock only the
+/// currently-resident pages and never request `MCL_FUTURE`, which could fail
+/// future allocations under a low `RLIMIT_MEMLOCK` and abort the process. The
+/// estate file is encrypted at rest on disk regardless.
+#[cfg(unix)]
+fn lock_memory_from_swap() {
+    // SAFETY: setrlimit/mlockall are plain libc syscalls with no aliasing concerns.
+    unsafe {
+        let unlimited = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        let raised = libc::setrlimit(libc::RLIMIT_MEMLOCK, &unlimited) == 0;
+        let flags = if raised {
+            libc::MCL_CURRENT | libc::MCL_FUTURE
+        } else {
+            libc::MCL_CURRENT
+        };
+        if libc::mlockall(flags) != 0 {
+            eprintln!(
+                "mootx01: mlockall failed ({}); RAM swap-protection off \
+                 (estate data is still encrypted at rest)",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_memory_from_swap() {
+    // Windows: per-region VirtualLock only; not applied process-wide here.
+}
+
 pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
+    // Keep the daemon's memory (incl. decrypted estate content held in RAM) out
+    // of the swap file. Best-effort; the estate is encrypted at rest regardless.
+    lock_memory_from_swap();
     let data = paths::data_dir();
 
     // Estate selection. Explicit backend env vars win over --db; otherwise
