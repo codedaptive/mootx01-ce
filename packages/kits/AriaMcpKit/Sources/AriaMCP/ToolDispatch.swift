@@ -1132,7 +1132,11 @@ extension ToolDispatcher {
         let subject = try requireString(args, "subject")
         let predicate = try requireString(args, "predicate")
         let object = try requireString(args, "object")
-        let sourceDrawerID = try optionalString(args["source_id"], argument: "source_id") ?? ""
+        // source_id grounds the fact (provenance — KGFact: every fact traces back to
+        // a source). When the caller omits it, infer the source as the ingest
+        // channel that asserted it, so a fact is never stored unanchored.
+        let providedSource = try optionalString(args["source_id"], argument: "source_id") ?? ""
+        let sourceDrawerID = providedSource.isEmpty ? Self.serverAddedBy : providedSource
         let fact = try await kit.captureKGFact(
             handle,
             subject: subject,

@@ -714,7 +714,8 @@ fn run_connection_map(
 
 /// File a knowledge-graph fact. Requires `subject`, `predicate`, `object`.
 ///
-/// Optional `source_id` (default `""`) records the originating drawer. Calls
+/// `source_id` grounds the fact; when the caller omits it, it defaults to the
+/// ingest channel that asserted it (never unanchored). Calls
 /// `coordinator.add_kg_fact`. Mirrors Swift `runFileFact`.
 fn run_file_fact(
     args: &BTreeMap<String, JsonValue>,
@@ -724,7 +725,11 @@ fn run_file_fact(
     let subject = require_string(args, "subject")?;
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
-    let source_id = optional_string(args, "source_id")?.unwrap_or("");
+    // source_id grounds the fact (provenance — KGFact: every fact traces back to a
+    // source). When the caller omits it, infer the source as the ingest channel
+    // that asserted it, so a fact is never stored unanchored.
+    let provided = optional_string(args, "source_id")?.unwrap_or("");
+    let source_id = if provided.is_empty() { SERVER_ADDED_BY } else { provided };
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
