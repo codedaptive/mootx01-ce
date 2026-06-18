@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-15
-version: 1.0.1
+date: 2026-06-17
+version: 1.1.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -783,8 +783,8 @@ struct inside `IncrementalReplicationSession.swift`.
 
 | Swift | Rust | Notes |
 |---|---|---|
-| `EncryptionMode` | `EncryptionMode` | Three cases: `plaintext`/`Plaintext`, `rowEncryption`/`RowEncryption`, `fullDatabase`/`FullDatabase` |
-| `EstateEncryptionConfig` | `EstateEncryptionConfig` | `mode`, `keyIdentifier`/`key_identifier`, key is `package`/`pub(crate)` scoped. Constructors: `.plaintext` static / `plaintext()`, `init(_ mode:)` / `row_encryption()`, `full_database()` |
+| `EncryptionMode` | `EncryptionMode` | Three cases: `plaintext`/`Plaintext`, `rowEncryption`/`RowEncryption`, `fullDatabase`/`FullDatabase`. Mode 3 (`fullDatabase`) is whole-file encryption (SQLCipher on Rust, Apple Data Protection on iOS), not per-row; the content seam is a no-op for it |
+| `EstateEncryptionConfig` | `EstateEncryptionConfig` | `mode`, `keyIdentifier`/`key_identifier`, key is `package`/`pub(crate)` scoped. Constructors: `.plaintext` static / `plaintext()`, `init(_ mode:)` / `row_encryption()`, `full_database()`, and (Rust) `full_database_with_key(key)` for the stable per-install key. Rust key-source API: `ensure_install_key(estates_dir)`, `INSTALL_KEY_FILE` |
 | `AeadProvider` (protocol) | `AeadProvider` (trait) | Two methods: `encrypt(_:key:)` / `encrypt(plaintext, key)`, `decrypt(_:key:)` / `decrypt(ciphertext, key)`. Conformers must generate a fresh random nonce per encrypt. Wire layout `[12-byte nonce][16-byte tag][ciphertext]` is identical in both ports |
 | `CryptoKitAeadProvider` | `AesGcmAeadProvider` | Default provider behind the seam. Swift uses CryptoKit AES.GCM; Rust uses the `aes-gcm` crate (C-1 exception). Both implement standard AES-GCM-256; cross-decryptable |
 | `RowCrypto` | `RowCrypto` | Thin wrapper calling through `AeadProvider`. Swift: `RowCrypto.encrypt(_:key:provider:)`. Rust: `RowCrypto::encrypt(plaintext, key, provider)`. Provider defaults to the CryptoKit/aes-gcm default |
@@ -819,10 +819,13 @@ encryption seam at the storage layer:
 | Update guard | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Same guard; all current callers update non-content columns |
 
 Column names intercepted: `"content"` and `"keyID"`. Plaintext mode is a
-no-op on every path. Cross-port database file compatibility: a file
-encrypted by the Swift backend is openable by the Rust backend because
-both use AES-GCM-256 with the same `[nonce][tag][ciphertext]` envelope layout
-and the same key bytes from `EstateEncryptionConfig.key`.
+no-op on every path. Cross-port compatibility applies to Mode 2
+(RowEncryption) only: a Mode 2 content value encrypted by the Swift backend
+is decryptable by the Rust backend because both use AES-GCM-256 with the same
+`[nonce][tag][ciphertext]` envelope layout and the same key bytes from
+`EstateEncryptionConfig.key`. Mode 3 (FullDatabase) uses each platform's
+native whole-file mechanism and is not cross-port byte-compatible; the ports
+never share a file, so Mode 3 parity is behavioral, not byte-identical.
 
 ### EstateConfiguration field parity
 
@@ -1137,6 +1140,13 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 *End of PersistenceKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Planned encryption lockdown. Documented Mode 3 (`fullDatabase`) as whole-file
+encryption (SQLCipher on Rust, Apple Data Protection on iOS), not per-row.
+Added the Rust key-source surface: `EstateEncryptionConfig.full_database_with_key`,
+`ensure_install_key`, `INSTALL_KEY_FILE`. Scoped the cross-port at-rest
+byte-compatibility note to Mode 2; Mode 3 parity is behavioral.
 
 ### 1.0.1 -- 2026-06-15
 Completed Swift/Rust concordance table in § 7: added core protocol and value type rows (Storage, StorageTransaction, IsolationLevel, RowStore, RowKey, StorageRow, RowHandle, BlobStore, BlobKey, AuditLog, StorageObserver, StorageEvent, TableChange, BlobEvent, BlobChange, NoOpObserver, TypedValue, Column, ColumnType, StoragePredicate, OrderDirection, OrderClause, SchemaDeclaration, TableDeclaration, ColumnDeclaration, IndexDeclaration, Migration, SchemaOperation, GeneratedColumn, GeneratedExpression, EstateConfiguration, BackendConfiguration, NovelTokenTaggerChoice, StorageError, InMemoryStorage, SQLiteStorage, PostgreSQLStorage, StorageStats, StorageIntrospection); added replication module rows (ReplicationCursor, ReplicationError, DirtySet, IncrementalReplicationSession, BlobDirtySet/BlobDirtyAccumulator, EstateCacheConfig, CachingRowStore, CacheInvalidator); documented DirtyKey as Rust-only and StorageReplicator as Swift-only with justification.
