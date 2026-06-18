@@ -95,17 +95,41 @@ impl ManagerConfig {
 
 /// Resolve the store path: explicit env override, else the app-support default.
 ///
-/// Default: `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`. On headless
-/// Linux the app-support base is `$XDG_DATA_HOME` or `$HOME/.local/share`
-/// (the platform convention the Swift port's `applicationSupportDirectory`
-/// resolves to on Linux Foundation); falls back to the temp dir when neither
-/// is set so the manager stays functional in a bare CI container.
+/// Default: `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`. The
+/// per-platform app-support base MUST match `AriaMcpKit`'s
+/// `stats_store_path_from_env` so the resident MCP server and this manager
+/// resolve the SAME store file and the SAME estates directory:
+///   - macOS:   `$HOME/Library/Application Support`
+///   - Windows: `%LOCALAPPDATA%` (`%USERPROFILE%\AppData\Local` fallback, `.` last resort)
+///   - Linux:   `$XDG_DATA_HOME` or `$HOME/.local/share`
+/// A previous Linux-only resolution fell back to the temp dir on Windows, so
+/// moot-mgr looked under `%TEMP%` while the MCP server created estates under
+/// `%LOCALAPPDATA%` — moot-mgr then "couldn't connect to the databases".
+/// Reads from the injected env map so the resolution stays unit-testable.
 fn resolve_store_path(env: &HashMap<String, String>) -> String {
     if let Some(raw) = env.get(STORE_PATH_ENV_KEY) {
         if !raw.is_empty() {
             return raw.clone();
         }
     }
+    #[cfg(target_os = "macos")]
+    let base: PathBuf = env
+        .get("HOME")
+        .filter(|s| !s.is_empty())
+        .map(|h| PathBuf::from(h).join("Library").join("Application Support"))
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(target_os = "windows")]
+    let base: PathBuf = env
+        .get("LOCALAPPDATA")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env.get("USERPROFILE")
+                .filter(|s| !s.is_empty())
+                .map(|h| PathBuf::from(h).join("AppData").join("Local"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let base: PathBuf = env
         .get("XDG_DATA_HOME")
         .filter(|s| !s.is_empty())
