@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.3.1
+version: 1.3.2
 status: active
 date: 2026-06-18
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -386,17 +386,18 @@ pre-lockdown installs) remain plaintext, so existing call sites are unchanged.
 
 **B-12b (per-backend at-rest coverage):** the at-rest mechanism is NOT uniform
 across backends — whole-file encryption is intrinsically a SQLite (embedded-file)
-concept. The encryption seam is currently wired in the SQLite backend only;
-Postgres and InMemory store plaintext.
+concept. The Mode 2 content seam is wired in the SQLite and PostgreSQL backends
+(both ports); InMemory stores plaintext.
 
 - **SQLite** — Mode 3 (whole-file SQLCipher) protects schema and content; Mode 2
   (per-row AEAD) is also available. The structure-protection guarantee.
 - **PostgreSQL** — content is encrypted by the client via **Mode 2** (per-row
   AEAD) before the value reaches Postgres, so the bytes are ciphertext at rest in
-  the database regardless of the server. (Currently UNWIRED in the Postgres
-  backend — to build.) Deployment TDE / TLS / RBAC are defense-in-depth, not the
-  primary answer; the schema/structure is the server's, the data is ours to
-  encrypt.
+  the database regardless of the server. Wired on both ports: the per-row AEAD
+  seam lives in PersistenceKit core and `PostgreSQLRowStore` applies it on
+  insert (and asserts the content/keyID invariant on upsert/update). Deployment
+  TDE / TLS / RBAC are defense-in-depth, not the primary answer; the
+  schema/structure is the server's, the data is ours to encrypt.
 - **InMemory** — the in-memory store holds content **encrypted** (the same Mode 2
   AEAD seam) so a memory dump, debugger, or swap yields ciphertext, plus RAM
   hardening (no-swap / `mlock`, zero-on-free). (Currently plaintext — to build.)
@@ -417,11 +418,11 @@ cryptographically random per encryption (via `OsRng` in Rust, via
 on both ports ensures upsert and update paths on Mode 2 estates cannot
 store plaintext content without a keyID.
 
-Mode 3 (FullDatabase) is deliberately NOT cross-port byte-compatible: the
-two ports use different native whole-file mechanisms (SQLCipher vs Apple
-Data Protection) and never share a physical file. Parity for Mode 3 is
-behavioral — the rows retrieved are identical across ports — not on-disk
-byte identity. See B-12.
+Mode 3 (FullDatabase) is deliberately NOT cross-port byte-compatible: both
+ports use SQLCipher whole-file encryption but on different crypto backends
+(OpenSSL FIPS on Rust, CommonCrypto on Apple) and never share a physical
+file. Parity for Mode 3 is behavioral — the rows retrieved are identical
+across ports — not on-disk byte identity. See B-12.
 
 ## § 6 — Error model (conceptual)
 
@@ -635,6 +636,15 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.3.2 -- 2026-06-18
+B-12b: PostgreSQL Mode 2 content encryption is wired on both ports. The per-row
+AEAD seam (`encryptedForWrite` / `decryptedForRead` /
+`assertContentKeyIDInvariant`, with `RowCrypto` and the AEAD provider) now lives
+in PersistenceKit core, shared byte-compatibly by the SQLite and PostgreSQL
+backends; `PostgreSQLRowStore` applies it. Corrected the B-12a Mode 3 cross-port
+note: both ports use SQLCipher (OpenSSL FIPS on Rust, CommonCrypto on Apple), not
+"SQLCipher vs Apple Data Protection". InMemory at-rest remains plaintext.
 
 ### 1.3.1 -- 2026-06-18
 B-12: Apple SQLCipher is implemented (was queued). Mode 3 is now SQLCipher on

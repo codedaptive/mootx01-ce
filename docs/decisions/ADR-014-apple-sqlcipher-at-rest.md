@@ -3,7 +3,7 @@ status: decided
 question: What at-rest encryption mechanism does the Apple port (iOS + macOS) use, given that Apple Data Protection is iOS-only, native macOS has no per-file encryption primitive, SIP/app-group containers are disableable access-control rather than encryption, and the EE FedRAMP charter requires FIPS-validated cryptography?
 authors: MOOTx01 maintainers
 date: 2026-06-18
-version: 1.3.0
+version: 1.3.1
 relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/PERSISTENCEKIT_INTERFACE.md
@@ -101,8 +101,8 @@ Never a prebuilt binary library on either edition.
 ## Backend coverage
 
 Whole-file encryption is intrinsically a SQLite (embedded-file) concept; the
-at-rest mechanism is **not uniform across PersistenceKit's backends**. Today the
-encryption seam is wired in the SQLite backend only — Postgres and InMemory store
+at-rest mechanism is **not uniform across PersistenceKit's backends**. The Mode 2
+content seam is wired in the SQLite and PostgreSQL backends; InMemory stores
 plaintext. The contract per backend (mirrored in PERSISTENCEKIT_SPEC B-12):
 
 - **SQLite** — **Mode 3** whole-file SQLCipher (this ADR). Schema and content are
@@ -111,7 +111,8 @@ plaintext. The contract per backend (mirrored in PERSISTENCEKIT_SPEC B-12):
   deployment).** There is no app-level whole-file analogue (the server owns the
   schema), so content is encrypted **client-side via Mode 2 (per-row AEAD) before
   the value reaches Postgres** — the bytes are ciphertext at rest in the database
-  regardless of the server. (Currently UNWIRED — to build.) Deployment TDE / TLS /
+  regardless of the server. Wired on both ports via the shared Mode 2 seam in
+  PersistenceKit core, applied by `PostgreSQLRowStore`. Deployment TDE / TLS /
   RBAC remain as defense-in-depth, not the primary answer.
 - **InMemory** — **DECIDED: protect the data in RAM.** The in-memory store holds
   content **encrypted** (the same AEAD seam, Mode 2) so a memory dump, debugger,
@@ -186,6 +187,13 @@ third-party CVE/vendoring burden. The crypto *backend* is already first-party
 and it is the piece to replace when Apple offers a native one.
 
 ## Changelog
+
+### 1.3.1 -- 2026-06-18
+Backend coverage status update: the PostgreSQL Mode 2 content seam is now wired
+on both ports (Swift + Rust). The per-row AEAD seam was lifted into PersistenceKit
+core so the SQLite and PostgreSQL backends share one byte-compatible
+implementation; `PostgreSQLRowStore` applies it. InMemory at-rest remains
+plaintext (RAM protection is the resident daemon's `mlock`, Rust-side).
 
 ### 1.3.0 -- 2026-06-18
 Supply-chain decision A: the CE boundary is "no EE-FIPS build in the forkable CE
