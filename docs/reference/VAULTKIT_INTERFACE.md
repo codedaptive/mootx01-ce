@@ -1,10 +1,10 @@
 ---
 title: VaultKit Interface
-version: 1.6.0
+version: 1.7.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-06-18
 description: Public interface contract for VaultKit — bidirectional bridge between a MOOTx01 estate and human-readable Markdown vaults, programmatic exchange formats, and MemPalace.
 relates_to:
   - docs/decisions/ADR-VAULTKIT-001.md
@@ -163,6 +163,70 @@ public protocol VaultAdapter: Sendable {
 
 Markdown/YAML/wikilink/tag ⇄ `NoteIR`. One `.md` file → one `NoteIR`.
 Round-trip safe: `toIR(fromIR(x)) == x` for Obsidian-representable fields.
+
+**OKF v0.1 superset (default mode).** In default mode (`pureObsidianLinks = false`
+/ `pure_obsidian_links: false`) the adapter emits output that is a valid OKF v0.1
+document AND readable by Obsidian:
+
+- **`type:` frontmatter key** (OKF's only required field): derived deterministically
+  from `NoteIR.kind` — `"note"→"Note"`, `"fact"→"Fact"`, `"journal"→"Journal"`,
+  else the kind with its first character uppercased. An existing `type:` frontmatter
+  key from the producer is preserved.
+- **Standard-md relationship links**: `[alias](relpath.md)` instead of `[[wikilinks]]`.
+  The target name is resolved from a `name → stableSourceKey` map built from the
+  full `notes` slice passed to `fromIR`; the vault-relative path is computed
+  relative to the emitting note's folder. Unresolvable targets fall back to
+  `[target](slug.md)` — never a dangling `[[ ]]`.
+- **Frontmatter `tags:` array**: `tags: [a, b, c]` emitted in addition to any
+  inline `#tag` tokens already in the body — OKF consumers read the frontmatter
+  form; Obsidian reads both.
+- **`index.md` per folder**: a minimal OKF progressive-disclosure index listing
+  child notes as standard-md links. `index.md` and `log.md` are **skipped** during
+  `toIR` / `to_ir` so they never import as spurious notes.
+
+**Pure-Obsidian mode (`pureObsidianLinks = true` / `pure_obsidian_links: true`).**
+Emits literal `[[Target]]` / `[[Target|Alias]]` wikilinks (legacy behaviour). The
+`type:` and frontmatter `tags:` keys are still emitted in both modes — they are
+harmless to Obsidian and required for OKF.
+
+```swift
+public struct ObsidianAdapter: VaultAdapter {
+    public let pureObsidianLinks: Bool
+    public init()                              // default: pureObsidianLinks = false
+    public init(pureObsidianLinks: Bool)       // explicit control
+    // internal OKF helpers
+    static func okfType(from kind: String) -> String   // "note"→"Note" etc.
+    static func parseAllLinks(in body: String) -> [WikiLink]   // wikilinks ∪ standard-md links
+    static func parseStandardMDLinks(in body: String) -> [WikiLink]
+    static func relativeMDPath(from sourceFolder: String, to targetPath: String) -> String
+}
+```
+
+```rust
+// Rust: vault_kit::obsidian_adapter
+pub struct ObsidianAdapter {
+    pub pure_obsidian_links: bool,
+}
+impl ObsidianAdapter {
+    pub fn new() -> Self           // default: pure_obsidian_links = false
+    pub fn with_options(pure_obsidian_links: bool) -> Self
+}
+// helpers
+pub(crate) fn okf_type(kind: &str) -> String
+pub(crate) fn parse_all_links(body: &str) -> Vec<WikiLink>
+pub(crate) fn parse_standard_md_links(body: &str) -> Vec<WikiLink>
+fn relative_md_path(source_folder: &str, target_path: &str) -> String
+```
+
+**Skip rule.** `toIR` / `to_ir` skips any `.md` file whose stem is `"index"` or
+`"log"`. These are OKF navigation / diary files emitted by `fromIR` / `from_ir`
+and must not round-trip as notes.
+
+**Round-trip contract per mode.**
+- Default OKF mode: link *targets* survive the round-trip (raw encoding may change
+  wikilink → standard-md → back, but `WikiLink.target` is preserved).
+- Pure-Obsidian mode: full `WikiLink` equality holds (body bytes are stable).
+- Both modes: `type:`, frontmatter `tags:`, and all existing frontmatter keys survive.
 
 ### `ExchangeAdapter: VaultAdapter` + `ExchangeExport` (read + write)
 
@@ -584,7 +648,7 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `CorpusDocument` | `CorpusDocument` | `vault_kit::corpus_document` | `currentFormatVersion` -> `CURRENT_FORMAT_VERSION` (`i64`). `canonicalJSON()` -> `canonical_json() -> Result<String, VaultKitError>`. `decode(_:)` -> `CorpusDocument::decode(&str)`. Same strict version gate; same golden fixture byte-for-byte. |
 | `VaultExportScope` | `VaultExportScope` | `vault_kit::vault_export_scope` | Same 5 cases (incl. `believedIncludingPrivate` -> `BelievedIncludingPrivate`). `filterChain: [Filter]` -> `filter_chain() -> Vec<Filter>`. `includesPrivateTier` -> `includes_private_tier()`. `rawValue` -> `as_str()`; `allCases` -> `all_cases()`. Rust `Default` = `Believed`. Rust uses `Filter::AutomatedConfirmedOnly` (mirrors Swift `automatedConfirmedOnly`). |
 | `VaultAdapter` (protocol) | `VaultAdapter` (trait) | `vault_kit::vault_adapter` | `toIR(vaultURL:)` -> `to_ir(&Path)`. `fromIR(_:to:)` -> `from_ir(&[NoteIR], &Path)`. |
-| `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | Identical parsing behavior. Round-trip equality holds. Hidden files skipped. Parses `moot_id` frontmatter key into `NoteIR.moot_id`. |
+| `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | OKF v0.1 superset in default mode. `pureObsidianLinks: Bool` (Swift) / `pure_obsidian_links: bool` (Rust), default `false`. `init(pureObsidianLinks:)` (Swift) / `with_options(pure_obsidian_links)` (Rust). Default `init()`/`new()` unchanged (source-compatible). Emits `type:` frontmatter key, frontmatter `tags:` array, standard-md links (default) or wikilinks (pure mode), `index.md` per folder. Skips `index.md`/`log.md` on read. Both ports parse wikilinks AND standard-md links on read (`parseAllLinks`/`parse_all_links`). Hidden files skipped. Parses `moot_id` frontmatter key into `NoteIR.moot_id`. |
 | `ExchangeAdapter` | `ExchangeAdapter` | `vault_kit::exchange_adapter` | `decode(_:)` -> `decode(&[u8])`; `encode(_:) -> Data` -> `encode(&ExchangeExport) -> Result<String, VaultKitError>`. Identical field mapping, stable-source-key sort, canonical write form, and filename-derived corpus name in `fromIR`/`from_ir`. Decode failure: Foundation `DecodingError` (Swift) / `VaultKitError::Serialization` (Rust); encode failure: Foundation `EncodingError` (Swift) / `VaultKitError::Serialization` (Rust). Shared decode and canonical-encode fixtures (the latter byte-for-byte) exercised by both suites. |
 | `ExchangeExport` | `ExchangeExport` | `vault_kit::exchange_adapter` | `name` + `notes`, identical. |
 | `MemPalaceChromaAdapter` | `MemPalaceChromaAdapter` | `vault_kit::mem_palace_chroma_adapter` | Identical three-store read (chroma collections, tunnels.json, KG), identical field mapping, byte-identical `originDate` normalization (`canonicalISO8601(fromMemPalace:)` -> `canonical_iso8601_from_mem_palace`). Numeric metadata stringified by SQLite `CAST` in both. Swift speaks the system SQLite3 C API; Rust uses `rusqlite` (bundled, same declaration as persistence-kit) — both `SQLITE_OPEN_READONLY`. A shared fixture palace is asserted by both suites. |
@@ -631,3 +695,12 @@ CorpusKit RAG bundling; substrate-level origin-date and `SourceRef` primitive;
 attachment blob custody; the watched-source scheduler and the real
 QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a later,
 separately-gated mission).
+
+---
+
+## Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 1.7.0 | 2026-06-18 | `ObsidianAdapter` extended to be an OKF v0.1 superset. Added `pureObsidianLinks` flag (Swift `Bool`) / `pure_obsidian_links: bool` (Rust), default `false`. Default mode emits `type:` frontmatter key (OKF required), frontmatter `tags:` array, standard-md `[alias](relpath.md)` links, and one `index.md` per folder. Pure-Obsidian mode (`true`) emits `[[wikilinks]]` (legacy). Both ports read unified wikilinks + standard-md links via `parseAllLinks`/`parse_all_links`. `index.md`/`log.md` skipped on import. All existing callers of `ObsidianAdapter()`/`new()` remain source-compatible (defaulted param). |
+| 1.6.0 | 2026-06-14 | (prior) |
