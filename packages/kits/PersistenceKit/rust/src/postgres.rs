@@ -24,12 +24,18 @@ use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
 use crate::{
-    AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore, ColumnType,
-    EstateConfiguration, IndexDeclaration, IsolationLevel,
+    AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore,
+    ColumnType, EstateConfiguration, EstateEncryptionConfig, IndexDeclaration, IsolationLevel,
     OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
     Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
     StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
+// Mode 2 (RowEncryption) content seam — shared with the SQLite backend so the
+// client-side AES-GCM-256 envelope is byte-identical across backends. Postgres
+// has no whole-file analogue (the server owns the schema), so per-row content
+// encryption is how the bytes are ciphertext at rest in the database. No-op for
+// Plaintext / FullDatabase (see EstateEncryptionConfig::uses_row_crypto).
+use crate::sqlite::{assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write};
 
 // ─────────────────────────────────────────────────────────────────────
 // Value codec — TypedValue -> boxed postgres parameter. Native PG types
@@ -821,6 +827,7 @@ impl Storage for PostgresStorage {
             pool: self.pool.clone(),
             schema: self.schema.clone(),
             observers: self.observers.clone(),
+            encryption_config: self.config.encryption_config.clone(),
         });
         // When cache is enabled, wrap with an LRU hot tier. Disabled (the
         // default) is a zero-change passthrough — identical to pre-mission
@@ -931,6 +938,7 @@ impl Storage for PostgresStorage {
             conn: shared.clone(),
             schema: self.schema.clone(),
             observers: self.observers.clone(),
+            encryption_config: self.config.encryption_config.clone(),
         };
 
         match block(&ctx) {
@@ -1093,6 +1101,7 @@ struct PgTransactionContext {
     conn: TxConn,
     schema: Arc<Mutex<SharedSchema>>,
     observers: Arc<ObserverRegistry>,
+    encryption_config: EstateEncryptionConfig,
 }
 
 impl StorageTransaction for PgTransactionContext {
@@ -1101,6 +1110,7 @@ impl StorageTransaction for PgTransactionContext {
             conn: self.conn.clone(),
             schema: self.schema.clone(),
             observers: self.observers.clone(),
+            encryption_config: self.encryption_config.clone(),
         })
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
@@ -1121,6 +1131,7 @@ struct TxRowStore {
     conn: TxConn,
     schema: Arc<Mutex<SharedSchema>>,
     observers: Arc<ObserverRegistry>,
+    encryption_config: EstateEncryptionConfig,
 }
 
 impl RowStore for TxRowStore {
@@ -1129,6 +1140,10 @@ impl RowStore for TxRowStore {
         table: &str,
         values: BTreeMap<String, TypedValue>,
     ) -> StorageResult<RowHandle> {
+        // Mode 2: encrypt the content column client-side before it reaches
+        // Postgres (no-op for Plaintext / FullDatabase). Mirrors the SQLite path.
+        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
+        assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         let mut guard = self.conn.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1166,6 +1181,9 @@ impl RowStore for TxRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
+        // Guard: a content-bearing upsert on a Mode 2 estate must already be
+        // ciphertext under a keyID (the seam runs on insert, not upsert).
+        assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         let mut guard = self.conn.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1221,6 +1239,9 @@ impl RowStore for TxRowStore {
         values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
+        // Guard: a content-bearing update on a Mode 2 estate must carry ciphertext
+        // under a keyID, mirroring the SQLite update path.
+        assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         let mut guard = self.conn.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let mut binds: Vec<TypedValue> = Vec::new();
@@ -1324,6 +1345,7 @@ impl RowStore for TxRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
+            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -1390,6 +1412,7 @@ impl RowStore for TxRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
+            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -1627,6 +1650,7 @@ struct PgRowStore {
     pool: Arc<Pool>,
     schema: Arc<Mutex<SharedSchema>>,
     observers: Arc<ObserverRegistry>,
+    encryption_config: EstateEncryptionConfig,
 }
 
 fn extract_row_key(
@@ -1668,6 +1692,10 @@ impl RowStore for PgRowStore {
         table: &str,
         values: BTreeMap<String, TypedValue>,
     ) -> StorageResult<RowHandle> {
+        // Mode 2: encrypt the content column client-side before it reaches
+        // Postgres (no-op for Plaintext / FullDatabase). Mirrors the SQLite path.
+        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
+        assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1703,6 +1731,9 @@ impl RowStore for PgRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
+        // Guard: a content-bearing upsert on a Mode 2 estate must already be
+        // ciphertext under a keyID (the seam runs on insert, not upsert).
+        assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1756,6 +1787,9 @@ impl RowStore for PgRowStore {
         values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
+        // Guard: a content-bearing update on a Mode 2 estate must carry ciphertext
+        // under a keyID, mirroring the SQLite update path.
+        assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let mut binds: Vec<TypedValue> = Vec::new();
@@ -1857,6 +1891,7 @@ impl RowStore for PgRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
+            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -1923,6 +1958,7 @@ impl RowStore for PgRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
+            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -2453,6 +2489,7 @@ mod transaction_context_tests {
             conn,
             schema,
             observers,
+            encryption_config: EstateEncryptionConfig::plaintext(),
         };
     }
 
@@ -2477,6 +2514,7 @@ mod transaction_context_tests {
             conn: conn.clone(),
             schema: schema.clone(),
             observers: observers.clone(),
+            encryption_config: EstateEncryptionConfig::plaintext(),
         };
         let blob_store = TxBlobStore { conn: conn.clone() };
         let audit_log = TxAuditLog { conn: conn.clone() };
@@ -2512,6 +2550,7 @@ mod transaction_context_tests {
             conn: conn.clone(),
             schema,
             observers,
+            encryption_config: EstateEncryptionConfig::plaintext(),
         };
 
         // Invoke the StorageTransaction trait accessors. Each returns an
