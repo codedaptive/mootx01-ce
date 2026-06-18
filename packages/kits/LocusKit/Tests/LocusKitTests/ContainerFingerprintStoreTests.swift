@@ -122,6 +122,89 @@ struct ContainerFingerprintStoreTests {
                                              provenance: d1.provenance | d2.provenance))
     }
 
+    // MARK: - §11.5 Option B: add-coverage conformance
+
+    /// After adding a drawer through the sanctioned path (`Estate.capture`),
+    /// all three bitmap fields must be fully covered by both the room-level
+    /// AND the wing-level container aggregate: `aggregate & drawerBits == drawerBits`
+    /// for adjective, operational, and provenance. This is the structural
+    /// guarantee of §11.5 Option B — coverage cannot be skipped because the
+    /// only add path bundles FP maintenance.
+    @Test("§11.5 coverage: capture auto-covers room and wing aggregates for all three bitmap fields")
+    func addCoverageGuaranteeAllThreeBitmaps() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let estate = try await Estate.create(
+            storage: TestStorage.sqlite(url),
+            owner: OwnerCredentials(ownerIdentifier: "cov"))
+
+        // Capture one drawer with non-trivial values in all three bitmap axes.
+        // .voiced channel occupies bits 0–5 of operationalBitmap; .code kind
+        // occupies bits 6–11; .restricted sensitivity sits in adjectiveBitmap
+        // bits 6–11; .observed sourceType (raw 1) sits in provenance bits 0–5.
+        let frame = CaptureFrame(
+            content: "coverage-test",
+            channel: .voiced,
+            room: "r-cov",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "cov-tester",
+            embeddingModelID: "model-v1",
+            sensitivity: .restricted,
+            kind: .code,
+            sourceType: .observed)
+        let drawer = try await estate.capture(frame)
+
+        // Room-level aggregate must cover all three fields.
+        let room = try await estate.containerFP.get(wing: drawer.wing, room: drawer.room)
+        let roomFP = try #require(room, "room aggregate must exist after capture")
+        #expect(roomFP.adjective & drawer.adjectiveBitmap == drawer.adjectiveBitmap,
+                "room adjective aggregate must cover drawer.adjectiveBitmap")
+        #expect(roomFP.operational & drawer.operationalBitmap == drawer.operationalBitmap,
+                "room operational aggregate must cover drawer.operationalBitmap")
+        #expect(roomFP.provenance & drawer.provenance == drawer.provenance,
+                "room provenance aggregate must cover drawer.provenance")
+
+        // Wing-level rollup must also cover all three fields.
+        let wing = try await estate.containerFP.get(wing: drawer.wing, room: "")
+        let wingFP = try #require(wing, "wing aggregate must exist after capture")
+        #expect(wingFP.adjective & drawer.adjectiveBitmap == drawer.adjectiveBitmap,
+                "wing adjective aggregate must cover drawer.adjectiveBitmap")
+        #expect(wingFP.operational & drawer.operationalBitmap == drawer.operationalBitmap,
+                "wing operational aggregate must cover drawer.operationalBitmap")
+        #expect(wingFP.provenance & drawer.provenance == drawer.provenance,
+                "wing provenance aggregate must cover drawer.provenance")
+    }
+
+    /// Two drawers in the same room: aggregate covers both, so no field of
+    /// either drawer is absent from the aggregate. Cross-port invariant.
+    @Test("§11.5 coverage: two drawers in same room — aggregate covers both")
+    func addCoverageTwoDrawersSameRoom() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let estate = try await Estate.create(
+            storage: TestStorage.sqlite(url),
+            owner: OwnerCredentials(ownerIdentifier: "cov2"))
+
+        let f1 = CaptureFrame(content: "first", channel: .voiced, room: "r-cov2",
+                              latticeAnchor: LatticeAnchor(udcCode: "004"),
+                              addedBy: "t", embeddingModelID: "m", kind: .prose)
+        let f2 = CaptureFrame(content: "second", channel: .typed, room: "r-cov2",
+                              latticeAnchor: LatticeAnchor(udcCode: "004"),
+                              addedBy: "t", embeddingModelID: "m", kind: .code)
+        let d1 = try await estate.capture(f1)
+        let d2 = try await estate.capture(f2)
+
+        let room = try await estate.containerFP.get(wing: d1.wing, room: "r-cov2")
+        let fp = try #require(room)
+        // The aggregate must cover d1's bits AND d2's bits.
+        #expect(fp.adjective & d1.adjectiveBitmap == d1.adjectiveBitmap)
+        #expect(fp.adjective & d2.adjectiveBitmap == d2.adjectiveBitmap)
+        #expect(fp.operational & d1.operationalBitmap == d1.operationalBitmap)
+        #expect(fp.operational & d2.operationalBitmap == d2.operationalBitmap)
+        #expect(fp.provenance & d1.provenance == d1.provenance)
+        #expect(fp.provenance & d2.provenance == d2.provenance)
+    }
+
     @Test("Estate.open backfills the aggregate from existing rows")
     func openBackfillsAggregate() async throws {
         let url = TestStorage.tempURL()

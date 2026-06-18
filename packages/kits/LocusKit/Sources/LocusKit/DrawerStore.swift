@@ -271,7 +271,22 @@ public actor DrawerStore {
     /// `locuskit.drawer.capture_count` via IntellectusLib when monitoring
     /// is enabled. Off by default; the emit call short-circuits after
     /// a single Atomic<Bool> load when disabled.
-    public func addDrawer(_ d: Drawer, now: Date = Date()) async throws {
+    ///
+    /// ## Access: internal — not public (§11.5 Option B add-coverage guarantee)
+    ///
+    /// This method is `internal` rather than `public` so it is not the obvious
+    /// add path for callers outside LocusKit. The only sanctioned add path in
+    /// the verb layer is `Estate.addDrawerCovered`, which bundles
+    /// `store.addDrawer` + `containerFP.orIn` so coverage is structurally
+    /// guaranteed. Direct callers inside the package (e.g. backfill tests,
+    /// DrawerStore unit tests) access it via `@testable import LocusKit`; all
+    /// other callers must go through the Estate verb surface.
+    ///
+    /// The clear-side (withdraw / bit-off) is intentionally a no-op everywhere —
+    /// stale set bits are a harmless over-approximation (see
+    /// ContainerFingerprintStore header). Tightening is done by
+    /// `containerFP.rebuildAll` at estate open.
+    internal func addDrawer(_ d: Drawer, now: Date = Date()) async throws {
         // Capture start instant before any work. One epoch-seconds read
         // per call; the elapsed is computed inside emitDrawerCapture only
         // when monitoring is enabled, so this clock read is the only

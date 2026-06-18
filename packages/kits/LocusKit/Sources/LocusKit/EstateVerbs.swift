@@ -174,16 +174,12 @@ public extension Estate {
             wikidataQID: frame.latticeAnchor.wikidataQID,
             wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
         )
-        try await store.addDrawer(drawer, now: now)
-        // Maintain the per-container OR aggregate (spec section 11.5)
-        // so recall pruning stays current. The stored bitmaps equal
-        // the drawer's fields, addDrawer does not rewrite them.
-        try await containerFP.orIn(
-            wing: drawer.wing, room: drawer.room,
-            adjective: drawer.adjectiveBitmap,
-            operational: drawer.operationalBitmap,
-            provenance: drawer.provenance,
-            now: now)
+        // Route through the covered chokepoint so coverage is structurally
+        // guaranteed (spec § 11.5 Option B). addDrawerCovered bundles
+        // store.addDrawer + containerFP.orIn so the aggregate is always
+        // maintained — it is impossible to capture a drawer without updating
+        // the container fingerprint.
+        try await addDrawerCovered(drawer, now: now)
         // Notify the topology worker that a drawer was captured in this estate.
         // NounType.drawer.rawValue = 0 (wire-stable per SubstrateTypes/NounType.swift).
         Intellectus.report(.event(
@@ -194,6 +190,43 @@ public extension Estate {
             ts: now.timeIntervalSince1970
         ))
         return drawer
+    }
+
+    // MARK: - add-coverage chokepoint (§11.5 Option B)
+
+    /// The ONE sanctioned path to add a drawer inside the verb layer.
+    ///
+    /// Bundles `DrawerStore.addDrawer` and `ContainerFingerprintStore.orIn`
+    /// as a single atomic step so the per-container OR aggregate is ALWAYS
+    /// maintained. This structural chokepoint makes add-coverage impossible
+    /// to skip: every verb that needs to add a drawer calls this method, not
+    /// `store.addDrawer` directly.
+    ///
+    /// `DrawerStore.addDrawer` is restricted to `internal` access so it is
+    /// not the obvious entry point for verb code. This method is the only
+    /// correct call site for the verb layer. Callers inside the package that
+    /// legitimately bypass this (e.g. tests seeding drawers to test the
+    /// backfill path, or DrawerStore unit tests) use
+    /// `store.addDrawer` via `@testable import LocusKit` with explicit
+    /// documentation of why FP maintenance is not required for that path.
+    ///
+    /// The clear-side (withdraw / bit-off) is intentionally a no-op
+    /// everywhere — stale set bits are a harmless over-approximation
+    /// (spec § 11.5 / ContainerFingerprintStore header). Tightening is
+    /// done by `containerFP.rebuildAll` at estate open.
+    private func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
+        try await store.addDrawer(drawer, now: now)
+        // OR the drawer's three bitmaps into the room-level and wing-level
+        // container aggregate rows. The stored bitmaps equal the drawer's
+        // fields (store.addDrawer does not rewrite them), so ORing
+        // drawer's own bitmaps is exact. Routes through ContainerFingerprint.merging
+        // → ORReduce (conformance-gated substrate primitive, cookbook § 8.5).
+        try await containerFP.orIn(
+            wing: drawer.wing, room: drawer.room,
+            adjective: drawer.adjectiveBitmap,
+            operational: drawer.operationalBitmap,
+            provenance: drawer.provenance,
+            now: now)
     }
 
     /// File a new standalone **tunnel** (graph edge) into the estate.

@@ -150,6 +150,17 @@ pub trait DrawerStore: Send + Sync {
     /// `mutate_state(State::Superseded, RowVerb::Supersede)` (which
     /// appends one sealed `AuditEvent`), and file a directional
     /// `supersedes` tunnel. Otherwise a plain gated capture.
+    ///
+    /// ## Add-coverage guarantee (spec § 11.5 Option B)
+    ///
+    /// Every storage-backed implementation of this method MUST fold the
+    /// container-fingerprint OR update inside itself, so coverage is
+    /// structurally guaranteed: calling `add_drawer` is the one and only
+    /// sanctioned add path, and it ALWAYS maintains the aggregate. It is
+    /// impossible to add a drawer through this trait surface without
+    /// updating the per-container OR aggregate (spec § 11.5). The clear-side
+    /// (withdraw / bit-off) is intentionally a no-op — stale set bits are
+    /// harmless over-approximations (see `ContainerFingerprintStore` header).
     fn add_drawer(&self, _drawer: &Drawer, _now: i64) -> Result<(), LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "add_drawer not implemented for this DrawerStore impl".to_string(),
@@ -1298,13 +1309,20 @@ pub trait DrawerStore: Send + Sync {
     /// OR one drawer's three bitmap fields into its room-level and
     /// wing-level container-fingerprint rows (spec § 11.5).
     ///
-    /// Capture calls this after `add_drawer` so the per-container OR
-    /// aggregate stays current — the exact maintenance Swift `Estate`
-    /// performs via `containerFP.orIn(...)` after `store.addDrawer`. The
-    /// kit owns the `ContainerFingerprintStore`, so the maintenance write
+    /// ## Add-coverage guarantee (§11.5 Option B)
+    ///
+    /// Per-add coverage is now structurally guaranteed: `add_drawer` folds
+    /// the fingerprint update INSIDE itself. This method is retained for
+    /// rebuild/backfill paths (`rebuild_container_fingerprints`) and for
+    /// callers that need to OR a fingerprint in independently of an
+    /// `add_drawer` call (e.g. migration tooling, backfill sweeps). Callers
+    /// that want per-drawer coverage MUST use `add_drawer` — calling
+    /// `add_drawer` then `or_in_container_fingerprint` separately would
+    /// double-OR, which is harmless (OR is idempotent) but wasteful.
+    ///
+    /// The kit owns the `ContainerFingerprintStore`, so the maintenance write
     /// goes through this kit-level hook rather than the verb surface
-    /// reaching around to the store's storage directly (B-1), mirroring
-    /// the `room_level_fingerprints` read accessor above.
+    /// reaching around to the store's storage directly (B-1).
     ///
     /// `now` is the deterministic epoch-seconds clock threaded from the
     /// verb boundary.

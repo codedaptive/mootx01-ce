@@ -7,8 +7,11 @@
 //!
 //! Tombstones use a compact bitset: bit `i` in `tombstones[i/64]` at
 //! position `i % 64` marks slot `i` as logically deleted. The brute-force
-//! scanner skips tombstoned slots. Compaction is deferred until
-//! `build()` is called by a concrete index.
+//! scanner skips tombstoned slots. Compaction of this low-level struct is
+//! triggered by the concrete index calling `build()`. The higher-level
+//! `ResidentArrayStore` that wraps this struct auto-compacts (in-memory
+//! array + sidecar) once the tombstone ratio crosses the 0.25 threshold on
+//! a write — compaction is neither deferred nor missing at that layer.
 
 use crate::engine::key::VectorRecordKey;
 use crate::engine::payload::VectorKind;
