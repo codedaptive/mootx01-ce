@@ -41,6 +41,15 @@ final class SQLiteConnection: @unchecked Sendable {
             throw StorageError.backendError(underlying: "sqlite open: \(msg)")
         }
 
+        // Apple Data Protection: the OS stores the estate encrypted at rest
+        // under a Secure Enclave-derived key (the device passcode is the root
+        // secret). This is the Apple-native at-rest encryption — the Rust port
+        // uses SQLCipher; each port uses its platform's mechanism and the files
+        // are never shared. We bypass Core Data per PERSISTENCEKIT_SPEC
+        // invariant I-2, so we set directly the protection class Core Data would
+        // otherwise request via NSPersistentStoreFileProtectionKey.
+        Self.applyDataProtection(to: url)
+
         // WAL mode and busy timeout.
         // Durability pragmas per SQLiteDurabilityTail (cookbook § 4.3.3):
         // WAL for crash-safe concurrent reads, NORMAL fsync,
@@ -61,6 +70,26 @@ final class SQLiteConnection: @unchecked Sendable {
             sqlite3_close_v2(handle)
         }
         handle = nil
+    }
+
+    /// Best-effort application of Apple Data Protection to the database file.
+    ///
+    /// Sets `completeUntilFirstUserAuthentication`: the OS stores the file
+    /// encrypted at rest under a Secure Enclave-derived key, while keeping it
+    /// accessible to the resident/background process after the first device
+    /// unlock (so background work — dreaming, sync — is not locked out). Failure
+    /// is non-fatal: on a volume or platform without Data Protection support
+    /// (for example a development Mac running `swift test` without the
+    /// `com.apple.developer.default-data-protection` entitlement) the attribute
+    /// is simply not enforced. The shipping app's entitlement default is what
+    /// makes the OS honor protection for this file and for the `-wal`/`-shm`
+    /// sidecars SQLite creates on first write (they inherit the app's default
+    /// protection class).
+    private static func applyDataProtection(to url: URL) {
+        let attributes: [FileAttributeKey: Any] = [
+            .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
+        ]
+        try? FileManager.default.setAttributes(attributes, ofItemAtPath: url.path)
     }
 
     // MARK: - Direct exec
