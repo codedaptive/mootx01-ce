@@ -40,6 +40,18 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
+use std::path::Path;
+
+use crate::{StorageError, StorageResult};
+
+/// The whole-file key file name. A resident service writes this beside the
+/// estate `.sqlite` files (`<estates-dir>/db.key`); its presence marks every
+/// estate in that directory as whole-file encrypted, and both resident services
+/// resolve the identical path so they share one key.
+pub const INSTALL_KEY_FILE: &str = "db.key";
+
+/// The whole-file key length in bytes (AES-256).
+const INSTALL_KEY_LEN: usize = 32;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EncryptionMode — mirrors Swift's EncryptionMode enum
@@ -156,6 +168,24 @@ impl EstateEncryptionConfig {
         }
     }
 
+    /// Full-database mode under a caller-supplied key — the per-install key
+    /// loaded from the shared `db.key`, so every handle on the same estates
+    /// directory (across both resident services) opens the file with the same
+    /// SQLCipher key. The key identifier is a fixed, non-secret marker (the
+    /// whole-file mode writes no per-row keyID, so it is provenance only).
+    pub fn full_database_with_key(key: Vec<u8>) -> Self {
+        EstateEncryptionConfig {
+            mode: EncryptionMode::FullDatabase,
+            key_identifier: Some("install-whole-file".to_string()),
+            key: Some(key),
+        }
+    }
+
+    /// True for Mode 1 (Plaintext) — no key, no crypto applied.
+    pub(crate) fn is_plaintext(&self) -> bool {
+        matches!(self.mode, EncryptionMode::Plaintext)
+    }
+
     /// True only for the per-row encrypting mode (Mode 2 / RowEncryption).
     ///
     /// Plaintext (Mode 1) carries no crypto. FullDatabase (Mode 3) protects the
@@ -184,6 +214,95 @@ impl EstateEncryptionConfig {
             }
             s
         })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Whole-file key source — the shared per-install SQLCipher key
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ensure the per-install whole-file key exists at `<estates_dir>/db.key`,
+/// creating it (32 random bytes) if absent, and return the key bytes.
+///
+/// Each resident service calls this once at startup against the estates
+/// directory it manages. Because both services resolve the same estates
+/// directory, they create/read the same key file and therefore open every
+/// estate with the same SQLCipher key. After this runs, `SqliteStorage::new`
+/// resolves the sibling key for every estate it opens, so the estates are
+/// whole-file encrypted with no per-call-site wiring.
+pub fn ensure_install_key(estates_dir: &Path) -> StorageResult<Vec<u8>> {
+    load_or_create_install_key(&estates_dir.join(INSTALL_KEY_FILE))
+}
+
+/// Read the key file, creating it with fresh random bytes (0600 on unix) if
+/// absent. A key file of the wrong length is a tampered/corrupt key: fail loud
+/// rather than silently regenerate (which would orphan every existing estate).
+fn load_or_create_install_key(key_path: &Path) -> StorageResult<Vec<u8>> {
+    if let Ok(bytes) = std::fs::read(key_path) {
+        if bytes.len() == INSTALL_KEY_LEN {
+            return Ok(bytes);
+        }
+        return Err(StorageError::BackendError {
+            underlying: format!(
+                "install key at {key_path:?} is {} bytes, expected {INSTALL_KEY_LEN}",
+                bytes.len()
+            ),
+        });
+    }
+    if let Some(parent) = key_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::BackendError {
+                underlying: format!("install key: create dir {parent:?}: {e}"),
+            })?;
+        }
+    }
+    let key = Aes256Gcm::generate_key(OsRng).to_vec();
+    std::fs::write(key_path, &key).map_err(|e| StorageError::BackendError {
+        underlying: format!("install key: write {key_path:?}: {e}"),
+    })?;
+    // Restrict to owner read/write so a non-owner cannot read the key. On
+    // Windows the file inherits the per-user profile ACL of its LOCALAPPDATA
+    // location; tightening beyond that needs a platform ACL call (follow-on).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |e| StorageError::BackendError {
+                underlying: format!("install key: chmod {key_path:?}: {e}"),
+            },
+        )?;
+    }
+    Ok(key)
+}
+
+/// Resolve the whole-file encryption config for an estate file at `db_path`,
+/// IF a sibling `db.key` is present. Returns `None` when the key is absent — the
+/// estate is then a normal unencrypted SQLite file (the test / pre-lockdown
+/// path). Never creates the key; creation is the explicit `ensure_install_key`
+/// act performed by the resident services.
+pub(crate) fn resolve_install_encryption(
+    db_path: &str,
+) -> StorageResult<Option<EstateEncryptionConfig>> {
+    // In-memory databases have no directory and are never key-backed.
+    if db_path == ":memory:" || db_path.is_empty() {
+        return Ok(None);
+    }
+    let parent = match Path::new(db_path).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => return Ok(None),
+    };
+    let key_path = parent.join(INSTALL_KEY_FILE);
+    match std::fs::read(&key_path) {
+        Ok(bytes) if bytes.len() == INSTALL_KEY_LEN => {
+            Ok(Some(EstateEncryptionConfig::full_database_with_key(bytes)))
+        }
+        Ok(bytes) => Err(StorageError::BackendError {
+            underlying: format!(
+                "install key at {key_path:?} is {} bytes, expected {INSTALL_KEY_LEN}",
+                bytes.len()
+            ),
+        }),
+        Err(_) => Ok(None),
     }
 }
 

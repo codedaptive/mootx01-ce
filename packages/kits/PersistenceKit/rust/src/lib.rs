@@ -50,7 +50,8 @@ pub use cache_config::*;
 pub use cache_invalidator::CacheInvalidator;
 pub use caching_row_store::CachingRowStore;
 pub use encryption::{
-    AeadProvider, AesGcmAeadProvider, EncryptionMode, EstateEncryptionConfig, RowCrypto,
+    ensure_install_key, AeadProvider, AesGcmAeadProvider, EncryptionMode, EstateEncryptionConfig,
+    RowCrypto, INSTALL_KEY_FILE,
 };
 pub use error::*;
 pub use generated_column::*;
