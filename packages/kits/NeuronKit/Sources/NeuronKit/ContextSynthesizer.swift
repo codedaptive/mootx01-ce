@@ -142,16 +142,48 @@ internal enum ContextSynthesisEngine {
         return "\(count) drawers; dominant wing \(topWing); dominant room \(topRoom)."
     }
 
+    /// Standard English stopwords excluded from pattern extraction. These high-
+    /// frequency function words and bare 4-digit years add no semantic signal
+    /// and would dominate the pattern list when present in a corpus.
+    ///
+    /// Mirrors the Rust `STOPWORDS` constant in `context_synthesizer.rs`
+    /// byte-for-byte so conformance test vectors produce identical output.
+    static let stopwords: Set<String> = [
+        "this", "that", "with", "from", "they", "them", "their", "there",
+        "were", "have", "been", "will", "would", "could", "should", "about",
+        "when", "then", "than", "also", "into", "your", "more", "some",
+        "what", "which", "these", "those", "just", "like", "over", "such",
+        "only", "very", "even", "most", "both", "each", "here", "after",
+        "well", "back", "much", "many", "make", "time", "know", "take",
+        "long", "made", "come", "want", "used", "same", "need",
+    ]
+
+    /// True when `token` is a bare 4-digit year (1000–2999) or a pure numeric
+    /// string — neither carries semantic meaning as a pattern.
+    private static func isBareYearOrNumeric(_ token: String) -> Bool {
+        guard token.allSatisfy({ $0.isNumber }) else { return false }
+        if token.count == 4,
+           let year = Int(token), year >= 1000, year <= 2999 { return true }
+        // Pure numeric strings (any length) are also excluded.
+        return true
+    }
+
     /// Tokenise each drawer's content into 4-or-longer lowercase
     /// alphanumeric words, then return the most frequent ones across
     /// the page in descending order. Stable: ties break by first
     /// appearance.
+    ///
+    /// Excludes stopwords and bare numeric strings (including years)
+    /// so high-frequency function words and date literals do not dominate
+    /// the pattern list. Mirrors the Rust `top_patterns` filter.
     static func topPatterns(rows: [Drawer], maxCount: Int) -> [String] {
         var counts: [String: Int] = [:]
         var firstSeen: [String: Int] = [:]
         var insertionOrder = 0
         for row in rows {
-            for token in tokens(row.content) where token.count >= 4 {
+            for token in tokens(row.content) where token.count >= 4
+                && !stopwords.contains(token)
+                && !isBareYearOrNumeric(token) {
                 counts[token, default: 0] += 1
                 if firstSeen[token] == nil {
                     firstSeen[token] = insertionOrder
