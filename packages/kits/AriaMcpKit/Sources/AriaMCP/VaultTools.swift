@@ -510,11 +510,14 @@ enum VaultTools {
             files: files)
     }
 
-    /// Enumerate every `.md` file under `vaultURL` and stamp its SHA-256,
-    /// keyed by vault-relative path. Mirrors `ObsidianAdapter`'s note
-    /// enumeration (`.md`, `.skipsHiddenFiles`) so the manifest's key set
-    /// matches the notes the bridge writes and reads — and so the `.moot`
-    /// manifest itself (hidden) is never hashed into its own stamp.
+    /// Enumerate every `.md` note file under `vaultURL` and stamp its SHA-256,
+    /// keyed by vault-relative path. Mirrors `ObsidianAdapter.toIR` exactly:
+    /// - `.skipsHiddenFiles` so `.moot/export-manifest.json` is never included
+    ///   in its own stamp.
+    /// - Skips OKF navigation files (`index.md`, `log.md`) that `fromIR`
+    ///   emits for progressive-disclosure nav but that `toIR` never imports
+    ///   as notes. Without this skip the manifest count is inflated by one
+    ///   per folder, breaking `noteCount` assertions and drift detection.
     static func hashAllNotes(vaultURL: URL) throws -> [String: ManifestEntry] {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
@@ -525,6 +528,10 @@ enum VaultTools {
 
         var out: [String: ManifestEntry] = [:]
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "md" {
+            // Skip OKF navigation files — mirrors ObsidianAdapter.toIR which
+            // skips files with stem "index" or "log" on read.
+            let stem = fileURL.deletingPathExtension().lastPathComponent
+            if stem == "index" || stem == "log" { continue }
             let rel = relativePath(of: fileURL, under: vaultURL)
             let data = try Data(contentsOf: fileURL)
             out[rel] = ManifestEntry(sha256: sha256Hex(data))
