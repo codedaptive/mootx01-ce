@@ -43,8 +43,61 @@ fn native_type(t: ColumnType) -> &'static str {
     }
 }
 
+/// Format an epoch-seconds value as an ISO-8601 UTC string suitable for
+/// storage in a TEXT timestamp column.
+///
+/// ## Write-boundary clamp (data-integrity invariant)
+///
+/// `chrono::DateTime::parse_from_rfc3339` (the read side) only accepts
+/// four-digit years (0001–9999). If an out-of-range epoch slips through —
+/// for example from a bad Vault frontmatter timestamp rounded-tripping as
+/// a nanosecond or millisecond epoch — `iso8601` would format it as a
+/// `+58432-...` string that `parse_iso8601` can never read back, bricking
+/// every scan that hits that row. To prevent this, the epoch is clamped to
+/// the RFC-3339-accepted range **before** formatting, and a warning is
+/// emitted (the caller should investigate the upstream source of the
+/// out-of-range value — it indicates a bug in whichever layer computed
+/// the timestamp).
+///
+/// Clamp bounds (inclusive, seconds-since-Unix-epoch):
+///   MIN_ROUND_TRIP_SECS ≈ year 0001-01-01T00:00:00Z  (−62135596800)
+///   MAX_ROUND_TRIP_SECS ≈ year 9999-12-31T23:59:59Z  (253402300799)
+///
+/// Clamp is chosen over rejection because the write must not fail for
+/// callers (the upstream timestamp is wrong, but refusing to write would
+/// surface as a confusing storage error rather than a useful warning).
+/// The clamped value is wrong-but-readable; the log warning is the
+/// signal to fix the upstream source.
+const MIN_ROUND_TRIP_SECS: i64 = -62_135_596_800; // 0001-01-01T00:00:00Z
+const MAX_ROUND_TRIP_SECS: i64 = 253_402_300_799; // 9999-12-31T23:59:59Z
+
 fn iso8601(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
+    // Clamp to the RFC-3339-parseable range before formatting. This
+    // guarantees every value written by `to_sql` can be read back by
+    // `parse_iso8601`. Out-of-range values indicate an upstream bug
+    // (e.g. a millisecond or nanosecond epoch stored where seconds were
+    // expected, or a bad Vault frontmatter date); the warning is the
+    // signal to fix it.
+    let clamped = if secs < MIN_ROUND_TRIP_SECS {
+        eprintln!(
+            "[persistence_kit] WARNING: timestamp {} is below the RFC-3339 minimum year \
+             (0001); clamping to {} to preserve round-trip. Investigate the upstream \
+             source of this value.",
+            secs, MIN_ROUND_TRIP_SECS
+        );
+        MIN_ROUND_TRIP_SECS
+    } else if secs > MAX_ROUND_TRIP_SECS {
+        eprintln!(
+            "[persistence_kit] WARNING: timestamp {} exceeds the RFC-3339 maximum year \
+             (9999); clamping to {} to preserve round-trip. Investigate the upstream \
+             source of this value.",
+            secs, MAX_ROUND_TRIP_SECS
+        );
+        MAX_ROUND_TRIP_SECS
+    } else {
+        secs
+    };
+    chrono::DateTime::from_timestamp(clamped, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_default()
 }
@@ -1317,6 +1370,209 @@ impl RowStore for SqliteRowStore {
             .map_err(|e| map_sql_err(e, table))?;
         Ok(n as usize)
     }
+
+    /// SQLite-cursor-level override of the `RowStore` default. Iterates the
+    /// result set row by row; when `read_value` returns `CorruptStoredValue`
+    /// for a column in a row (e.g. a poison timestamp like `+58432-...` that
+    /// `parse_iso8601` cannot round-trip), the row is logged to stderr and
+    /// skipped rather than aborting the entire scan. Any other error
+    /// (engine failure, locking, connectivity) is re-raised immediately.
+    ///
+    /// This is the correct level to implement skip-and-log for the timestamp
+    /// corruption scenario: corruption surfaces inside `read_value` during
+    /// the column iteration loop, so the override must operate at the SQLite
+    /// cursor level — the default implementation in `RowStore` calls the whole
+    /// `query()` and wraps a single top-level error, which only handles the
+    /// case where the first corrupt row happens to be the only row.
+    ///
+    /// Corpus scans (all_drawers, drawers_in_wing, …) call this method so
+    /// one bad row does not brick the entire estate. Point-lookups (single-row
+    /// fetches by primary key) still call strict `query()`.
+    fn query_skip_corrupt(
+        &self,
+        table: &str,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> StorageResult<(Vec<StorageRow>, usize)> {
+        let guard = self.inner.lock().unwrap();
+        let mut sql = format!("SELECT * FROM \"{table}\"");
+        let mut binds: Vec<SqlValue> = Vec::new();
+        if let Some(p) = predicate {
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+        }
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|c| {
+                    let dir = match c.direction {
+                        OrderDirection::Ascending => "ASC",
+                        OrderDirection::Descending => "DESC",
+                    };
+                    format!("\"{}\" {dir}", c.column.name)
+                })
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {l}"));
+        }
+        if let Some(o) = offset {
+            if o > 0 {
+                sql.push_str(&format!(" OFFSET {o}"));
+            }
+        }
+
+        let mut stmt = guard
+            .conn
+            .prepare(&sql)
+            .map_err(|e| map_sql_err(e, table))?;
+        let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt
+            .query(params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
+
+        let mut out: Vec<StorageRow> = Vec::new();
+        let mut skipped: usize = 0;
+
+        'rows: while let Some(row) = rows.next().map_err(|e| map_sql_err(e, table))? {
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            for (i, name) in col_names.iter().enumerate() {
+                let vref = row.get_ref(i).map_err(|e| map_sql_err(e, table))?;
+                let kit = table_column_type(guard.schema.as_ref(), table, name);
+                match read_value(vref, kit, table, name) {
+                    Ok(v) => { values.insert(name.clone(), v); }
+                    Err(StorageError::CorruptStoredValue {
+                        table: ref t,
+                        column: ref c,
+                        stored_text: ref s,
+                    }) => {
+                        // Log the corrupt value and skip this row. The row is
+                        // still in the database; it can be repaired by fixing
+                        // the upstream write path and re-writing the value.
+                        eprintln!(
+                            "[persistence_kit] WARNING: query_skip_corrupt: skipping \
+                             corrupt row in table '{}' (column='{}' stored_text='{}'). \
+                             The row is skipped in corpus scans until repaired. \
+                             Investigate the upstream source of this value.",
+                            t, c, s
+                        );
+                        skipped += 1;
+                        continue 'rows;
+                    }
+                    // Any other error is a systemic failure — re-raise.
+                    Err(other) => return Err(other),
+                }
+            }
+            // At-rest decryption seam: decrypt the content column when the
+            // row carries a matching keyID. No-op for Plaintext mode.
+            let values = decrypted_for_read(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            out.push(StorageRow::new(values));
+        }
+
+        Ok((out, skipped))
+    }
+
+    /// SQLite-cursor-level override of the `RowStore` projected-skip-corrupt
+    /// default. Identical to `query_skip_corrupt` but issues a column-projected
+    /// `SELECT col1, col2, …` rather than `SELECT *`, so omitted columns (e.g.
+    /// the `content` blob in the no-blob recall path) are never read off disk.
+    ///
+    /// Rows where `read_value` returns `CorruptStoredValue` for any projected
+    /// column (e.g. a poison `filedAt` timestamp) are logged and skipped.
+    /// Any other error aborts and re-raises. An empty `columns` slice falls back
+    /// to `SELECT *` (matching `query_projected`'s convention).
+    fn query_projected_skip_corrupt(
+        &self,
+        table: &str,
+        columns: &[&str],
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> StorageResult<(Vec<StorageRow>, usize)> {
+        if columns.is_empty() {
+            return self.query_skip_corrupt(table, predicate, order_by, limit, offset);
+        }
+        let guard = self.inner.lock().unwrap();
+        let select_list = columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
+        let mut binds: Vec<SqlValue> = Vec::new();
+        if let Some(p) = predicate {
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+        }
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|c| {
+                    let dir = match c.direction {
+                        OrderDirection::Ascending => "ASC",
+                        OrderDirection::Descending => "DESC",
+                    };
+                    format!("\"{}\" {dir}", c.column.name)
+                })
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {l}"));
+        }
+        if let Some(o) = offset {
+            if o > 0 {
+                sql.push_str(&format!(" OFFSET {o}"));
+            }
+        }
+
+        let mut stmt = guard
+            .conn
+            .prepare(&sql)
+            .map_err(|e| map_sql_err(e, table))?;
+        let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt
+            .query(params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
+
+        let mut out: Vec<StorageRow> = Vec::new();
+        let mut skipped: usize = 0;
+
+        'rows: while let Some(row) = rows.next().map_err(|e| map_sql_err(e, table))? {
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            for (i, name) in col_names.iter().enumerate() {
+                let vref = row.get_ref(i).map_err(|e| map_sql_err(e, table))?;
+                let kit = table_column_type(guard.schema.as_ref(), table, name);
+                match read_value(vref, kit, table, name) {
+                    Ok(v) => { values.insert(name.clone(), v); }
+                    Err(StorageError::CorruptStoredValue {
+                        table: ref t,
+                        column: ref c,
+                        stored_text: ref s,
+                    }) => {
+                        eprintln!(
+                            "[persistence_kit] WARNING: query_projected_skip_corrupt: skipping \
+                             corrupt row in table '{}' (column='{}' stored_text='{}'). \
+                             The row is skipped in corpus scans until repaired.",
+                            t, c, s
+                        );
+                        skipped += 1;
+                        continue 'rows;
+                    }
+                    Err(other) => return Err(other),
+                }
+            }
+            // At-rest decryption seam: decrypt the content column when present
+            // and the row carries a matching keyID. No-op for Plaintext mode and
+            // for projected scans that omit the content column.
+            let values = decrypted_for_read(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            out.push(StorageRow::new(values));
+        }
+
+        Ok((out, skipped))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2390,5 +2646,275 @@ mod at_rest_encryption_tests {
             StorageError::ConstraintViolation { .. } => {}
             other => panic!("expected ConstraintViolation, got {:?}", other),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Timestamp clamp and skip-corrupt tests (data-integrity fix 2026-06-18)
+//
+// Verifies three properties:
+//   1. iso8601() clamps out-of-range epoch values to the RFC-3339 boundary
+//      rather than writing a +NNNNN-... string that parse_iso8601 cannot read.
+//   2. query_skip_corrupt skips rows with corrupt timestamp columns and
+//      returns the remaining clean rows.
+//   3. query_projected_skip_corrupt does the same for the projected scan path.
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod timestamp_clamp_and_skip_corrupt_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+        Storage, StoragePredicate, TableDeclaration, TypedValue,
+    };
+    use rusqlite::Connection;
+    use uuid::Uuid;
+
+    /// Build the shared `items` schema used by all tests in this module.
+    fn items_schema() -> SchemaDeclaration {
+        SchemaDeclaration::new(
+            "ts_kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::text("id"),
+                    ColumnDeclaration::text("name"),
+                    ColumnDeclaration::timestamp("ts"),
+                ],
+                vec!["id".to_string()],
+            )],
+        )
+    }
+
+    /// Return the filesystem path for a temporary SQLite storage (schema already
+    /// applied). The path is returned so tests that need to inject raw SQL can
+    /// open it via `rusqlite::Connection`, then re-open it via `SqliteStorage`.
+    fn ts_storage_path() -> (String, SchemaDeclaration) {
+        let path = std::env::temp_dir()
+            .join(format!("ts_skip_{}.sqlite", Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned();
+        let schema = items_schema();
+        // Create + apply schema, then let storage drop so the file is free for raw SQL.
+        {
+            let config = EstateConfiguration::new(
+                Uuid::new_v4(),
+                BackendConfiguration::Sqlite {
+                    path: path.clone(),
+                    busy_timeout_secs: 5.0,
+                },
+            );
+            let storage = SqliteStorage::new(config).expect("open sqlite");
+            storage.open(&schema).expect("apply schema");
+        }
+        (path, schema)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 1. Write-boundary clamp: iso8601 must NOT produce unparseable strings
+    // ─────────────────────────────────────────────────────────────────
+
+    /// A timestamp value corresponding to year 58432 (the poison value seen in
+    /// production: millisecond epoch treated as second epoch). When stored via
+    /// `TypedValue::Timestamp`, the write seam must clamp it to the RFC-3339
+    /// maximum (year 9999) rather than writing a "+58432-..." string that
+    /// `parse_iso8601` cannot read back.
+    #[test]
+    fn iso8601_clamps_future_poison_and_round_trips() {
+        // A millisecond-epoch value accidentally stored as seconds:
+        // 1_747_432_465_000 ms ≈ year 58432.
+        let poison_secs: i64 = 1_747_432_465_000;
+        assert!(
+            poison_secs > MAX_ROUND_TRIP_SECS,
+            "precondition: poison value must exceed the max round-trip boundary"
+        );
+
+        let formatted = iso8601(poison_secs);
+
+        // The clamped value must be parseable by parse_iso8601.
+        let parsed = parse_iso8601(&formatted).expect(
+            "iso8601 output must always be parseable by parse_iso8601 — the clamp invariant"
+        );
+        assert!(
+            parsed <= MAX_ROUND_TRIP_SECS,
+            "clamped value must not exceed the max round-trip boundary"
+        );
+        // Must not contain a 5-digit year prefix like "+58432-".
+        assert!(
+            !formatted.starts_with('+'),
+            "clamped timestamp must use a 4-digit year, not a +NNNNN prefix"
+        );
+    }
+
+    /// Same guard for below-minimum values (year 0 or negative nanosecond epochs).
+    #[test]
+    fn iso8601_clamps_ancient_poison_and_round_trips() {
+        let poison_secs: i64 = -100_000_000_000_i64; // Far before year 0001
+        assert!(
+            poison_secs < MIN_ROUND_TRIP_SECS,
+            "precondition: value must be below the min round-trip boundary"
+        );
+
+        let formatted = iso8601(poison_secs);
+        let parsed = parse_iso8601(&formatted).expect(
+            "iso8601 output must always be parseable — ancient value clamp invariant"
+        );
+        assert!(
+            parsed >= MIN_ROUND_TRIP_SECS,
+            "clamped value must not be below the min round-trip boundary"
+        );
+    }
+
+    /// Values inside the valid range must round-trip unchanged.
+    #[test]
+    fn iso8601_passes_through_in_range_value() {
+        let normal: i64 = 1_700_000_000; // ~2023-11-14
+        let formatted = iso8601(normal);
+        let parsed = parse_iso8601(&formatted)
+            .expect("in-range iso8601 must always round-trip");
+        assert_eq!(parsed, normal, "in-range timestamp must round-trip without change");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2. query_skip_corrupt: corpus scan skips poison rows, returns rest
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Write two clean rows and one row with a poison timestamp directly via
+    /// rusqlite (bypassing the clamp), then verify that `query_skip_corrupt`
+    /// returns the two clean rows and skips the poison one.
+    #[test]
+    fn query_skip_corrupt_skips_poison_timestamp_returns_clean_rows() {
+        let (path, schema) = ts_storage_path();
+
+        // Inject a poison timestamp directly via rusqlite, bypassing the clamp.
+        // This simulates an estate that already has a corrupt row on disk.
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute(
+                "INSERT INTO \"items\" (\"id\", \"name\", \"ts\") VALUES (?, ?, ?)",
+                rusqlite::params!["row-clean-1", "apple", "2024-01-15T10:00:00.000Z"],
+            )
+            .expect("insert clean row 1");
+            conn.execute(
+                "INSERT INTO \"items\" (\"id\", \"name\", \"ts\") VALUES (?, ?, ?)",
+                // Poison: 5-digit year that parse_iso8601 cannot handle.
+                rusqlite::params!["row-poison", "poison", "+58432-12-25T03:04:25.000Z"],
+            )
+            .expect("insert poison row");
+            conn.execute(
+                "INSERT INTO \"items\" (\"id\", \"name\", \"ts\") VALUES (?, ?, ?)",
+                rusqlite::params!["row-clean-2", "banana", "2024-03-20T08:30:00.000Z"],
+            )
+            .expect("insert clean row 2");
+        }
+
+        // Re-open via SqliteStorage with the schema so column types are known.
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("reopen sqlite");
+        storage.open(&schema).expect("apply schema");
+
+        // Strict query must fail: the poison row is encountered and aborts.
+        let strict_result = Storage::row_store(&storage).query("items", None, &[], None, None);
+        assert!(
+            strict_result.is_err(),
+            "strict query must return Err when a corrupt timestamp row is present"
+        );
+        match strict_result.unwrap_err() {
+            StorageError::CorruptStoredValue { column, .. } => {
+                assert_eq!(column, "ts", "corrupt column must be identified as 'ts'");
+            }
+            other => panic!("expected CorruptStoredValue, got {:?}", other),
+        }
+
+        // Skip-corrupt query must return the two clean rows.
+        let (rows, skipped) = Storage::row_store(&storage)
+            .query_skip_corrupt("items", None, &[], None, None)
+            .expect("query_skip_corrupt must succeed even with a poison row");
+
+        assert_eq!(skipped, 1, "exactly one row must have been skipped");
+        assert_eq!(rows.len(), 2, "the two clean rows must be returned");
+
+        // Verify that the returned rows are the two clean ones.
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Some(TypedValue::Text(s)) = r.get("name") {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(names.contains(&"apple"), "clean row 1 must be present");
+        assert!(names.contains(&"banana"), "clean row 2 must be present");
+        assert!(!names.contains(&"poison"), "poison row must be absent");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 3. query_projected_skip_corrupt: projected scan skips poison rows
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Same scenario as above but via `query_projected_skip_corrupt`, verifying
+    /// the projected-scan path also skips corrupt rows rather than aborting.
+    #[test]
+    fn query_projected_skip_corrupt_skips_poison_timestamp() {
+        let (path, schema) = ts_storage_path();
+
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute(
+                "INSERT INTO \"items\" (\"id\", \"name\", \"ts\") VALUES (?, ?, ?)",
+                rusqlite::params!["r1", "cherry", "2025-06-01T00:00:00.000Z"],
+            )
+            .expect("insert clean row");
+            conn.execute(
+                "INSERT INTO \"items\" (\"id\", \"name\", \"ts\") VALUES (?, ?, ?)",
+                rusqlite::params!["r2", "poison", "+58432-12-25T03:04:25.000Z"],
+            )
+            .expect("insert poison row");
+        }
+
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("reopen sqlite");
+        storage.open(&schema).expect("apply schema");
+
+        // Project only "id" and "name" — "ts" is still in the table but not in the
+        // SELECT list. However, the poison row should be skipped at the cursor level
+        // regardless (the corrupt column is included in the full row fetch even when
+        // projected away in a SELECT — but with query_projected_skip_corrupt we issue
+        // SELECT id, name and the ts column is never fetched, so we expect the row to
+        // appear cleanly since the corrupt column is not read).
+        //
+        // This test verifies the projection-without-ts-column path: when the poison
+        // column is not in the SELECT list, both rows are returned because the corrupt
+        // value is never fetched.
+        let (rows, skipped) = Storage::row_store(&storage)
+            .query_projected_skip_corrupt("items", &["id", "name"], None, &[], None, None)
+            .expect("projected skip-corrupt must succeed");
+
+        // When projecting away the corrupt column, both rows are readable.
+        assert_eq!(skipped, 0, "no rows skipped when corrupt column is not projected");
+        assert_eq!(rows.len(), 2, "both rows must be returned when ts is not in the projection");
+
+        // Now project WITH the timestamp column — the poison row must be skipped.
+        let (rows_with_ts, skipped_with_ts) = Storage::row_store(&storage)
+            .query_projected_skip_corrupt("items", &["id", "name", "ts"], None, &[], None, None)
+            .expect("projected skip-corrupt with ts column must succeed");
+
+        assert_eq!(skipped_with_ts, 1, "poison row must be skipped when ts is projected");
+        assert_eq!(rows_with_ts.len(), 1, "only clean row must be returned");
     }
 }

@@ -979,10 +979,13 @@ impl DrawerStore for DrawerStoreCore {
         // Capture start instant before I/O for latency telemetry.
         let _tel_start = std::time::Instant::now();
 
-        let rows = self
+        // Use query_skip_corrupt so rows with corrupt timestamp columns (e.g.
+        // a poison filedAt from a bad Vault import) are skipped at the SQLite
+        // cursor level rather than bricking the entire wing scan.
+        let (rows, _skipped) = self
             .storage
             .row_store()
-            .query(
+            .query_skip_corrupt(
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
                     StoragePredicate::Eq(
@@ -999,7 +1002,9 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
+        // decode_rows_skip_corrupt handles any remaining drawer_from_row failures
+        // (e.g. corrupt lineageID UUID) that survived the storage-level skip.
+        let drawers = decode_rows_skip_corrupt(&rows, "drawers_in_wing")?;
 
         // Emit query telemetry at the post-query operation boundary.
         // now_secs=0.0 because drawers_in_wing has no caller-supplied timestamp.
@@ -1009,10 +1014,10 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn drawers_in_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Drawer>, LocusKitError> {
-        let rows = self
+        let (rows, _skipped) = self
             .storage
             .row_store()
-            .query(
+            .query_skip_corrupt(
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
                     StoragePredicate::Eq(
@@ -1033,14 +1038,14 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
+        decode_rows_skip_corrupt(&rows, "drawers_in_wing_room")
     }
 
     fn drawers_by_source(&self, source_file: &str) -> Result<Vec<Drawer>, LocusKitError> {
-        let rows = self
+        let (rows, _skipped) = self
             .storage
             .row_store()
-            .query(
+            .query_skip_corrupt(
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
                     StoragePredicate::Eq(
@@ -1060,17 +1065,21 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
+        decode_rows_skip_corrupt(&rows, "drawers_by_source")
     }
 
     fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
         // Capture start instant before I/O for latency telemetry.
         let _tel_start = std::time::Instant::now();
 
-        let rows = self
+        // Use query_skip_corrupt so rows with corrupt timestamp columns (e.g.
+        // a poison filedAt like "+58432-..." from a bad Vault import or
+        // millisecond-vs-seconds epoch confusion) are skipped at the SQLite
+        // cursor level and do not abort the entire corpus scan.
+        let (rows, _skipped) = self
             .storage
             .row_store()
-            .query(
+            .query_skip_corrupt(
                 T_DRAWERS,
                 None,
                 &[OrderClause::new(
@@ -1081,7 +1090,8 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
+        // decode_rows_skip_corrupt handles any remaining drawer_from_row failures.
+        let drawers = decode_rows_skip_corrupt(&rows, "all_drawers")?;
 
         // Emit query telemetry at the post-query operation boundary.
         crate::telemetry::emit_drawer_query(&_tel_start, 0.0, drawers.len(), &self.estate_uuid, "all");
@@ -1101,10 +1111,10 @@ impl DrawerStore for DrawerStoreCore {
         // filedAt order, correct result set) matches the Swift port.
         let _tel_start = std::time::Instant::now();
 
-        let rows = self
+        let (rows, _skipped) = self
             .storage
             .row_store()
-            .query(
+            .query_skip_corrupt(
                 T_DRAWERS,
                 None,
                 &[OrderClause::new(
@@ -1115,7 +1125,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
+        let drawers = decode_rows_skip_corrupt(&rows, "all_drawers_bounded")?;
 
         crate::telemetry::emit_drawer_query(
             &_tel_start,
@@ -1139,10 +1149,15 @@ impl DrawerStore for DrawerStoreCore {
         // (spec § 7.3). `limit` is pushed to the storage layer, filedAt order.
         let _tel_start = std::time::Instant::now();
 
-        let rows = self
+        // Use query_projected_skip_corrupt so corrupt timestamp columns in the
+        // structured projection (filedAt is still included; only content is
+        // excluded) do not abort the scan. Skipped rows are logged at the
+        // storage level; decode_rows_skip_corrupt handles any remaining
+        // drawer_from_row failures.
+        let (rows, _skipped) = self
             .storage
             .row_store()
-            .query_projected(
+            .query_projected_skip_corrupt(
                 T_DRAWERS,
                 DRAWER_STRUCTURED_COLUMNS,
                 None,
@@ -1154,7 +1169,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
+        let drawers = decode_rows_skip_corrupt(&rows, "all_drawers_bounded_projected")?;
 
         crate::telemetry::emit_drawer_query(
             &_tel_start,
@@ -4003,6 +4018,52 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         wikidata_qid: opt_string_value_of(row.get("wikidataQID")),
         wikidata_qids_secondary: opt_string_value_of(row.get("wikidataQidsSecondary")),
     })
+}
+
+/// Decode a slice of `StorageRow` into `Drawer` values, skipping rows that
+/// fail with `LocusKitError::CorruptStoredValue`.
+///
+/// ## Scan-level resilience (data-integrity fix 2026-06-18)
+///
+/// The per-value strict decode in `drawer_from_row` (fail-loud, no silent
+/// identity lie) is preserved for POINT LOOKUPS. For CORPUS SCANS
+/// (all_drawers, drawers_in_wing, etc.) a single corrupt row must NOT brick
+/// the entire estate's recall and recall-adjacent paths. This helper
+/// implements the skip-and-log policy for `drawer_from_row` failures (e.g.
+/// unparseable lineageID UUID).
+///
+/// Timestamp corruption is handled one level up: scan functions call
+/// `RowStore::query_skip_corrupt` (implemented at the SQLite cursor level in
+/// `SqliteRowStore`) so rows with unparseable timestamp columns are skipped
+/// before they ever reach `drawer_from_row`. This helper handles any
+/// remaining decode failures that `drawer_from_row` surfaces.
+///
+///   - `CorruptStoredValue` from `drawer_from_row` → log a warning, skip, continue.
+///   - Any other error (backend connectivity, SQL errors, lock failures) →
+///     re-raise immediately (systemic failure, not a data problem).
+///
+/// The log line is written to stderr so it appears in the process log without
+/// requiring a tracing/logging dependency in PersistenceKit's crate.
+fn decode_rows_skip_corrupt(rows: &[StorageRow], scan: &str) -> Result<Vec<Drawer>, LocusKitError> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match drawer_from_row(row) {
+            Ok(d) => out.push(d),
+            Err(LocusKitError::CorruptStoredValue { ref table, ref column, ref stored_text }) => {
+                eprintln!(
+                    "[locus_kit] WARNING: skipping corrupt row in {} scan \
+                     (table='{}' column='{}' stored_text='{}'). \
+                     The row is readable by its id but will not appear in corpus scans \
+                     until the corrupt value is repaired. Fix the upstream write path \
+                     that produced this value.",
+                    scan, table, column, stored_text
+                );
+                // Continue — skip this row, collect the rest.
+            }
+            Err(other) => return Err(other), // systemic failure — re-raise
+        }
+    }
+    Ok(out)
 }
 
 fn tunnel_from_row(row: &StorageRow) -> Tunnel {
