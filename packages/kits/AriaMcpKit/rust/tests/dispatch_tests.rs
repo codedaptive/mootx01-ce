@@ -2254,15 +2254,29 @@ fn vault_reconcile_apply_modified_note_updates_estate() {
     )
     .expect("export must succeed");
 
-    // Read the manifest, find the exported note, and append a byte to it.
+    // Read the manifest, find the exported content note (not an OKF navigation
+    // file like index.md or log.md), and append text so the SHA changes.
+    // The exporter emits one index.md per folder for OKF navigation — those
+    // are skipped by the adapter on read and must not be the edit target.
     let manifest_path = vault.join(".moot/export-manifest.json");
     let manifest_json = std::fs::read_to_string(&manifest_path).expect("manifest must exist");
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_json).expect("manifest must be valid JSON");
     let note_path_key = manifest["files"]
         .as_object()
-        .and_then(|f| f.keys().next().cloned())
-        .expect("manifest must have at least one file");
+        .and_then(|f| {
+            f.keys().find(|k| {
+                // Skip OKF navigation files (index.md, log.md). The adapter
+                // skips these on read, so editing them produces a SHA diff
+                // that the reconcile detects but import_vault_filtered cannot
+                // action (no NoteIR is produced for them). Find the first
+                // real content note instead.
+                let base = k.split('/').next_back().unwrap_or("");
+                base != "index.md" && base != "log.md"
+            })
+        })
+        .cloned()
+        .expect("manifest must contain at least one content note");
     let note_path = vault.join(&note_path_key);
     let original = std::fs::read_to_string(&note_path).unwrap_or_default();
     std::fs::write(&note_path, original + "\nAppended in reconcile-apply test.").ok();

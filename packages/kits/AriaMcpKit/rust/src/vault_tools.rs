@@ -441,9 +441,12 @@ fn run_import(
     let report: ImportReport = bridge
         .import_vault(vault_path, &open.handle, now_ms)
         .map_err(|e| {
+            // Use Display (not Debug) to avoid leaking internal Rust type paths
+            // and enum variant names in the MCP error message. VaultKitError
+            // implements Display with clean English messages.
             JSONRPCError::new(
                 JSONRPCErrorCode::INTERNAL_ERROR,
-                format!("vault_import: bridge import failed: {e:?}"),
+                format!("vault_import: bridge import failed: {e}"),
             )
         })?;
 

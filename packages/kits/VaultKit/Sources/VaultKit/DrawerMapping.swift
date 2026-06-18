@@ -466,7 +466,22 @@ public struct DrawerMapping: Sendable {
         // on the real estate: 2354 drawers, node_bundles=0). Using .regular here
         // is the correct choice for bulk import: capture returns immediately and
         // encoding is handled in the background, so large imports don't block.
-        let drawer = try await kit.capture(handle, frame, mode: .regular)
+        //
+        // Idempotency: re-importing an export that was already imported into the
+        // same estate triggers a belief-state DisciplineViolation (e.g. Contested
+        // → Supersede is an illegal transition). This is expected for idempotent
+        // re-imports and must not abort the whole batch. Gracefully skip the note
+        // and continue. Other errors (storage, I/O) still propagate.
+        let drawer: Drawer
+        do {
+            drawer = try await kit.capture(handle, frame, mode: .regular)
+        } catch let verbErr as VerbError {
+            if case .underlyingEstateFailure(_, let reason) = verbErr,
+               reason.contains("DisciplineViolation") {
+                return .skipped(reason: "belief-state transition not permitted (re-import of existing content): \(reason)")
+            }
+            throw verbErr
+        }
 
         // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER
         // resolution: facts must land as substrate KG facts, not report-only).
