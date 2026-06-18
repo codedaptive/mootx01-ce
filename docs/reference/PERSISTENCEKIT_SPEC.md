@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.3.0
+version: 1.3.1
 status: active
 date: 2026-06-18
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -362,27 +362,27 @@ Mode 2 (RowEncryption) encrypts the `content` column value under an
 AES-GCM-256 key and is the federation grant-granularity mechanism
 (per-row keys). Mode 3 (FullDatabase) encrypts the ENTIRE database file —
 schema included — at the storage layer, using each platform's native
-whole-file mechanism: SQLCipher (`PRAGMA key`, the estate key supplied as
-the raw 256-bit cipher key) on the Rust port (Windows/Linux), and Apple
-Data Protection (`FileProtectionType.completeUntilFirstUserAuthentication`,
-Secure Enclave-backed) on the Apple port (iOS). Because the whole file is
-ciphertext, Mode 3 does NOT also apply the per-row content seam (the seam
-is a no-op for FullDatabase). An external process opening a Mode 3 file
-with a plain SQLite library cannot read or alter the schema.
+whole-file mechanism — **SQLCipher on every platform** (`PRAGMA key` with the
+raw 256-bit cipher key): the OpenSSL FIPS provider on the Rust port
+(Windows/Linux), and the **CommonCrypto backend** (Apple CoreCrypto) on the
+Apple port (iOS + macOS). Because the whole file is ciphertext, Mode 3 does NOT
+also apply the per-row content seam (the seam is a no-op for FullDatabase). An
+external process opening a Mode 3 file with a plain SQLite library cannot read
+or alter the schema.
 
-> **Decided, implementation queued (ADR-014, 2026-06-17).** The Apple port
-> moves to **SQLCipher on the CommonCrypto backend** (Apple CoreCrypto,
-> FIPS-validated) with a Secure-Enclave-wrapped Keychain key, unifying the
-> whole-file mechanism across all platforms. Apple Data Protection (iOS), the
-> macOS app-group container, and FileVault become additive defense-in-depth
-> layers. This paragraph is updated to SQLCipher-on-Apple when that integration
-> lands.
+> **Implemented (ADR-014).** Apple uses SQLCipher on CommonCrypto (Apple
+> CoreCrypto, FIPS-validated), vendored from the Community Edition source, with
+> the key from `KeychainKeyStore` (Secure-Enclave-wrapped). One whole-file
+> mechanism across all platforms. Apple Data Protection (iOS), the macOS
+> app-group container, and FileVault are additive defense-in-depth layers.
 
-Activation: a resident service writes a shared per-install key file
-(`<estates-dir>/db.key`, owner-only `0600`) at startup; `SqliteStorage::new`
-resolves that sibling key and opens the estate as FullDatabase. Estates
-without a sibling key (tests, pre-lockdown installs) remain plaintext, so
-existing call sites are unchanged and carry no crypto on any path.
+Activation: on the **Rust** port a resident service writes a shared per-install
+key file (`<estates-dir>/db.key`, owner-only `0600`) at startup;
+`SqliteStorage::new` resolves that sibling key and opens the estate as
+FullDatabase. On the **Apple** port the per-install key lives in the Keychain
+(`KeychainKeyStore`); the app/server constructs the estate with
+`EstateEncryptionConfig.fullDatabase(key:)`. Estates with no key (tests,
+pre-lockdown installs) remain plaintext, so existing call sites are unchanged.
 
 **B-12b (per-backend at-rest coverage):** the at-rest mechanism is NOT uniform
 across backends — whole-file encryption is intrinsically a SQLite (embedded-file)
@@ -635,6 +635,13 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.3.1 -- 2026-06-18
+B-12: Apple SQLCipher is implemented (was queued). Mode 3 is now SQLCipher on
+every platform — OpenSSL FIPS on Rust, CommonCrypto (CoreCrypto) on Apple,
+vendored from the Community amalgamation; the Apple per-install key lives in the
+Keychain (`KeychainKeyStore`) and is supplied via
+`EstateEncryptionConfig.fullDatabase(key:)`.
 
 ### 1.3.0 -- 2026-06-18
 B-12b records two decisions for the non-SQLite backends: PostgreSQL content is
