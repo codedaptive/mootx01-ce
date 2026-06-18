@@ -274,7 +274,7 @@ fn file_fact_tool() -> serde_json::Value {
                 "subject": string_schema("The entity this fact is about."),
                 "predicate": string_schema("The relationship or property."),
                 "object": string_schema("The value or target entity."),
-                "source_id": string_schema("Optional UUID of a memory that grounds this fact.")
+                "source_id": string_schema("Memory drawer id that grounds this fact (provenance). If omitted, the server infers the source as the ingest channel that asserted it — a fact always traces back to a source, never unanchored.")
             }),
             json!(["subject", "predicate", "object"])
         )))

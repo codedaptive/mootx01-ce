@@ -244,7 +244,7 @@ public enum ToolProjection {
                         "subject": stringSchema("The entity this fact is about."),
                         "predicate": stringSchema("The relationship or property being asserted."),
                         "object": stringSchema("The value or target entity."),
-                        "source_id": stringSchema("Optional memory row identifier that is the source of this fact."),
+                        "source_id": stringSchema("Memory drawer id that grounds this fact (provenance). If omitted, the server infers the source as the ingest channel that asserted it — a fact always traces back to a source, never unanchored."),
                     ],
                     required: ["subject", "predicate", "object"]
                 )),
