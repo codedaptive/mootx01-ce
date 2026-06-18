@@ -882,6 +882,34 @@ impl DrawerStore for DrawerStoreCore {
             }
         };
 
+        // Atomically maintain the per-container OR aggregate (spec § 11.5)
+        // so recall pruning stays current. Folded here so every add_drawer
+        // call — regardless of which code path invokes it — maintains
+        // coverage. This is the structural add-coverage guarantee: it is now
+        // impossible to add a drawer without updating the container aggregate.
+        //
+        // The clear-side (withdraw / bit-off) is intentionally a no-op
+        // everywhere — a stale set bit is a harmless over-approximation
+        // that only forgoes a prune, never causes a false prune. Tightening
+        // is done by rebuild_container_fingerprints (called at estate open).
+        //
+        // Mirrors Swift `Estate.addDrawerCovered`, which is the only public
+        // add path on the Swift side and bundles store.addDrawer + FP update.
+        if result.is_ok() {
+            // Construct a ContainerFingerprintStore view over the same
+            // backing Storage and OR the drawer's bitmaps into the room-level
+            // and wing-rollup rows. The schema re-open is idempotent.
+            let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+            fp_store.or_in(
+                &drawer.wing,
+                &drawer.room,
+                drawer.adjective_bitmap,
+                drawer.operational_bitmap,
+                drawer.provenance,
+                _now,
+            )?;
+        }
+
         // Emit capture telemetry at the post-write operation boundary.
         // This is additive: the return value and all side effects are
         // already determined before emit_drawer_capture is called.

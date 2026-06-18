@@ -290,23 +290,12 @@ impl Estate {
         // input frame), but Drawer.event_time is non-optional — fold here.
         drawer.event_time = frame.event_time.unwrap_or(now);
 
+        // add_drawer atomically maintains the per-container OR aggregate
+        // (spec § 11.5 Option B): coverage is now structurally guaranteed
+        // inside the DrawerStore implementation — no separate
+        // or_in_container_fingerprint call is needed or correct here.
+        // The clear-side (withdraw / bit-off) is intentionally a no-op.
         self.store.add_drawer(&drawer, now)?;
-        // Maintain the per-container OR aggregate (spec § 11.5) so recall
-        // pruning and the maintenance fingerprint-drift signal stay current.
-        // The stored bitmaps equal the drawer's fields — add_drawer does not
-        // rewrite them — so OR-ing the drawer's own bitmaps is exact. Mirrors
-        // Swift `Estate.capture`'s `containerFP.orIn(...)` call after
-        // `store.addDrawer`. Bit-identical OR-fold: the store delegates to
-        // `ContainerFingerprintStore`, whose `merging` routes through the
-        // conformance-gated `substrate_types::or_reduce` kernel.
-        self.store.or_in_container_fingerprint(
-            &drawer.wing,
-            &drawer.room,
-            drawer.adjective_bitmap,
-            drawer.operational_bitmap,
-            drawer.provenance,
-            now,
-        )?;
         // Emit a Capture event for the new drawer. NounType::Drawer = 0 (wire-stable,
         // matches SubstrateTypes/NounType.swift). The report!() macro is a no-op when
         // no sink is installed, so this is zero-cost in stdio/test mode.
