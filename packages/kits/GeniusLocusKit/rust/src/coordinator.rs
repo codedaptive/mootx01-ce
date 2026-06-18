@@ -1692,8 +1692,18 @@ impl EstateCoordinator {
         let mut facts = estate
             .all_kg_facts_including_retired()
             .map_err(|e| VerbDispatchError::from(remap("recall_kg_fact_timeline", "", e)))?;
+        // Case-insensitive substring match on subject OR object. Lowercase
+        // BOTH the needle and the haystack (mirrors Swift recallKGFactTimeline,
+        // which lowercases entity + subject + object). The prior code matched
+        // the original-case subject/object against a caller-lowered entity, so
+        // `"Voss".contains("voss")` was false and any capitalised entity filter
+        // returned zero results.
         if let Some(e) = entity {
-            facts.retain(|f| f.subject.contains(e) || f.object.contains(e));
+            let needle = e.to_lowercase();
+            facts.retain(|f| {
+                f.subject.to_lowercase().contains(&needle)
+                    || f.object.to_lowercase().contains(&needle)
+            });
         }
         Ok(facts)
     }
@@ -5856,6 +5866,24 @@ mod tests {
         let ids: Vec<&str> = filtered.iter().map(|f| f.id.as_str()).collect();
         assert!(ids.contains(&alice.id.as_str()), "alice fact must be present");
         assert!(!ids.contains(&bob.id.as_str()), "bob fact must be absent");
+
+        // Case-insensitivity (the FT entity-filter bug): a capitalised subject/
+        // object must match a lower/upper/mixed-case entity. Pre-fix the
+        // coordinator matched the original-case subject/object against a lowered
+        // entity, so `"Voss".contains("voss")` was false and any capitalised
+        // entity filtered to zero — exactly the field-reported regression.
+        let voss = coord
+            .add_kg_fact(&h, "Voss", "commands", "East Spire", "drawer-ft2", NOW + 2)
+            .expect("add Voss fact");
+        for needle in ["voss", "VOSS", "Voss", "spire", "EAST SPIRE"] {
+            let hit = coord
+                .recall_kg_fact_timeline(&h, Some(needle))
+                .expect("recall with case-variant entity");
+            assert!(
+                hit.iter().any(|f| f.id == voss.id),
+                "entity {needle:?} must match subject 'Voss' / object 'East Spire' case-insensitively"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------

@@ -853,11 +853,11 @@ fn run_fact_timeline(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    // Lower the entity filter for case-insensitive matching — coordinator
-    // receives a lowered entity and applies a simple String::contains check.
+    // The case-insensitive match is done in recall_kg_fact_timeline, which
+    // lowercases both the entity and each fact's subject/object. Pass the raw
+    // entity through.
     let entity_raw = optional_string(args, "entity")?;
-    let entity_lower: Option<String> = entity_raw.map(|e| e.to_lowercase());
-    let entity_ref: Option<&str> = entity_lower.as_deref();
+    let entity_ref: Option<&str> = entity_raw.as_deref();
 
     let coord = estate.coord.lock().unwrap();
     let mut facts = coord
