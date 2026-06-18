@@ -7,6 +7,7 @@
 import ArgumentParser
 import Foundation
 import MootInstallerCore
+import PersistenceKitSQLite
 
 struct DbCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -128,6 +129,22 @@ struct DbDeleteCommand: AsyncParsableCommand {
         }
 
         try DatabaseManager.deleteEstate(name: name, in: dataDir)
+
+        // Dispose this estate's whole-file encryption key so it never outlives the
+        // data it protected — the Apple analogue of removing the Rust `db.key`
+        // with the estate directory. Apple-only: the key lives in the Keychain,
+        // keyed by the estate file path the openers used. Best-effort: the data is
+        // already gone, so a Keychain error is a warning, not a command failure.
+        #if canImport(Security)
+        let estateURL = DatabaseManager.estateURL(for: name, in: dataDir)
+        do {
+            try KeychainKeyStore(service: "com.codedaptive.mootx01", estateURL: estateURL).deleteKey()
+        } catch {
+            FileHandle.standardError.write(Data(
+                "warning: estate deleted, but its encryption key could not be removed from the Keychain: \(error)\n".utf8))
+        }
+        #endif
+
         print("Estate '\(name)' deleted.")
     }
 }
