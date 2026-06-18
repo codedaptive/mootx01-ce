@@ -127,4 +127,45 @@ struct EncryptionWiringTests {
                 "content must be ciphertext at rest, not plaintext")
         await reader.close()
     }
+
+    /// Mode 3 (FullDatabase): the whole estate file — schema included — is
+    /// encrypted by SQLCipher. A reader with no key cannot open it (page 1, the
+    /// schema, is ciphertext); the correct key reopens and round-trips. This is
+    /// the Apple lockdown guarantee, mirroring the Rust port.
+    @Test func fullDatabaseWholeFileLockdown() async throws {
+        let url = freshDBURL()
+        // Deterministic 32-byte whole-file key (the per-install Keychain key in
+        // production; an explicit key here so the reopen uses the same one).
+        let key = Data((0..<32).map { UInt8($0) })
+
+        // Write under the whole-file key.
+        let writer = try makeStorage(.fullDatabase(key: key), at: url)
+        try await writer.open(schema: makeSchema())
+        _ = try await writer.rowStore.insert(
+            table: "drawers",
+            values: ["id": .text("d1"), "content": .text("locked note")]
+        )
+        await writer.close()
+
+        // No key → page 1 is ciphertext → the file cannot be opened/read as a
+        // database. Whichever access touches the DB first (the WAL pragma at
+        // open, or the schema DDL) fails — an external process cannot read or
+        // alter the structure.
+        await #expect(throws: (any Error).self) {
+            let noKey = try makeStorage(EstateEncryptionConfig(.plaintext), at: url)
+            try await noKey.open(schema: makeSchema())
+        }
+
+        // The correct whole-file key reopens and round-trips the content
+        // (FullDatabase no-ops the per-row seam, so content is verbatim).
+        let reader = try makeStorage(.fullDatabase(key: key), at: url)
+        try await reader.open(schema: makeSchema())
+        let rows = try await reader.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
+        )
+        #expect(rows.count == 1)
+        #expect(rows[0]["content"] == .text("locked note"))
+        await reader.close()
+    }
 }
