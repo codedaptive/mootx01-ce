@@ -436,7 +436,7 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     /// Open (creating if absent) the SQLite database named by the
     /// configuration's `Sqlite` backend variant.
-    pub fn new(config: EstateConfiguration) -> StorageResult<Self> {
+    pub fn new(mut config: EstateConfiguration) -> StorageResult<Self> {
         let (path, busy) = match &config.backend {
             BackendConfiguration::Sqlite {
                 path,
@@ -460,6 +460,17 @@ impl SqliteStorage {
                 std::fs::create_dir_all(parent).map_err(|e| StorageError::BackendError {
                     underlying: format!("sqlite open: create parent dir {parent:?}: {e}"),
                 })?;
+            }
+        }
+        // Adopt the shared whole-file key for estates that carry a sibling
+        // db.key (written by the resident service at startup), unless the caller
+        // already chose an explicit encryption mode. This is the single point
+        // where every estate opener — DrawerStore, the Corpus/Vector second
+        // handles, recipes — picks up the lockdown key, so no per-call-site
+        // wiring is required. Estates without a sibling key stay plaintext.
+        if config.encryption_config.is_plaintext() {
+            if let Some(install_cfg) = crate::encryption::resolve_install_encryption(&path)? {
+                config.encryption_config = install_cfg;
             }
         }
         let conn = Connection::open(&path).map_err(|e| StorageError::BackendError {
@@ -2246,6 +2257,52 @@ mod at_rest_encryption_tests {
         assert!(
             result.is_err(),
             "a wrong whole-file key must fail to open the database"
+        );
+    }
+
+    /// The shared-key convention: once a resident service writes the sibling
+    /// `db.key` (via `ensure_install_key`), a plaintext-config estate opened in
+    /// that directory is transparently whole-file encrypted. This is the single
+    /// activation point for production estates — no per-call-site wiring. An
+    /// estate created before the key is present stays a normal SQLite file.
+    #[test]
+    fn sibling_db_key_activates_whole_file_encryption() {
+        let dir = std::env::temp_dir().join(format!("estatedir_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir estates dir");
+
+        // No key yet: a plaintext-config estate is a normal, readable SQLite file.
+        let plain_path = dir.join("plain.sqlite").to_string_lossy().into_owned();
+        {
+            let s = make_storage_at_path(&plain_path, EstateEncryptionConfig::plaintext());
+            let rs = Storage::row_store(&s);
+            let mut v = BTreeMap::new();
+            v.insert("id".into(), TypedValue::Text("d1".into()));
+            v.insert("content".into(), TypedValue::Text("clear".into()));
+            rs.insert("drawers", v).expect("insert");
+        }
+        let raw = Connection::open(&plain_path).expect("file handle opens");
+        let n: rusqlite::Result<i64> =
+            raw.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0));
+        assert!(n.is_ok(), "without a sibling key the estate is a normal SQLite file");
+
+        // The service writes the shared key. New estates in this directory are
+        // whole-file encrypted even though the caller passes a plaintext config.
+        crate::ensure_install_key(&dir).expect("ensure install key");
+        let enc_path = dir.join("locked.sqlite").to_string_lossy().into_owned();
+        {
+            let s = make_storage_at_path(&enc_path, EstateEncryptionConfig::plaintext());
+            let rs = Storage::row_store(&s);
+            let mut v = BTreeMap::new();
+            v.insert("id".into(), TypedValue::Text("d1".into()));
+            v.insert("content".into(), TypedValue::Text("secret".into()));
+            rs.insert("drawers", v).expect("insert");
+        }
+        let raw2 = Connection::open(&enc_path).expect("file handle opens");
+        let schema_read: rusqlite::Result<i64> =
+            raw2.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0));
+        assert!(
+            schema_read.is_err(),
+            "a sibling db.key must make a new estate whole-file encrypted"
         );
     }
 
