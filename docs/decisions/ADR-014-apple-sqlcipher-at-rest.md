@@ -3,7 +3,7 @@ status: decided
 question: What at-rest encryption mechanism does the Apple port (iOS + macOS) use, given that Apple Data Protection is iOS-only, native macOS has no per-file encryption primitive, SIP/app-group containers are disableable access-control rather than encryption, and the EE FedRAMP charter requires FIPS-validated cryptography?
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.0.0
+version: 1.0.1
 relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/PERSISTENCEKIT_INTERFACE.md
@@ -117,7 +117,26 @@ that belongs to the app group. Therefore:
 - One encryption model across four platforms simplifies the FedRAMP audit story
   and the conformance surface.
 
+## Long-term direction
+
+SQLCipher on Apple is the **current means, not the destination.** Apple ships no
+native encrypted-SQLite codec today, so a third-party codec is required to get
+whole-file encryption with a FIPS-validated cipher. This is adopted with an
+explicit exit condition: **when Apple provides a suitable first-party equivalent
+(a native encrypted SQLite, or another Apple-native path that meets the
+requirement), migrate to it as soon as reasonable** — first-party Apple crypto is
+Apple-maintained, FIPS-validated, and patched via OS updates, shedding the
+third-party CVE/vendoring burden. The crypto *backend* is already first-party
+(CommonCrypto → CoreCrypto); only the SQLite *codec* (SQLCipher) is third-party,
+and it is the piece to replace when Apple offers a native one.
+
 ## Changelog
+
+### 1.0.1 -- 2026-06-17
+Added the Long-term direction section: SQLCipher on Apple is the current means
+with an explicit Apple-native exit condition — migrate to a first-party Apple
+equivalent (e.g. native encrypted SQLite) as soon as one exists and meets the
+requirement.
 
 ### 1.0.0 -- 2026-06-17
 Initial decision. SQLCipher (CommonCrypto/CoreCrypto, FIPS-validated, Secure-
