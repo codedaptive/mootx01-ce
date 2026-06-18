@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
-    CachingRowStore, ColumnType, EncryptionMode, EstateConfiguration, EstateEncryptionConfig,
+    CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
     IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore,
     SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate,
     StorageResult, StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
@@ -465,6 +465,19 @@ impl SqliteStorage {
         let conn = Connection::open(&path).map_err(|e| StorageError::BackendError {
             underlying: format!("sqlite open: {e}"),
         })?;
+        // Whole-database at-rest encryption (Mode 3 / FullDatabase): supply the
+        // estate key before any other access so SQLCipher can decrypt page 1
+        // (the schema) and every content page. This MUST be the first statement
+        // on the connection. Modes 1/2 set no key, leaving a normal unencrypted
+        // SQLite file, so existing plaintext / row-encryption estates are
+        // unchanged. `PRAGMA key = "x'<hex>'"` uses the 32 raw bytes directly as
+        // the cipher key (no passphrase KDF — the key is already full-entropy).
+        if let Some(key_hex) = config.encryption_config.full_database_key_hex() {
+            conn.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
+                .map_err(|e| StorageError::BackendError {
+                    underlying: format!("sqlite key: {e}"),
+                })?;
+        }
         let _ = conn.busy_timeout(Duration::from_secs_f64(busy));
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
@@ -765,8 +778,10 @@ fn encrypted_for_write(
     config: &EstateEncryptionConfig,
     provider: &dyn AeadProvider,
 ) -> StorageResult<BTreeMap<String, TypedValue>> {
-    // Mode 1 (Plaintext) — no-op. Key/keyID are None in this mode.
-    if config.mode == EncryptionMode::Plaintext {
+    // No per-row crypto for Plaintext (no key) or FullDatabase (the whole file
+    // is SQLCipher-encrypted at the connection layer). Only RowEncryption seals
+    // the content column here.
+    if !config.uses_row_crypto() {
         return Ok(values);
     }
     let (key, key_id) = match (&config.key, &config.key_identifier) {
@@ -804,7 +819,9 @@ fn decrypted_for_read(
     config: &EstateEncryptionConfig,
     provider: &dyn AeadProvider,
 ) -> StorageResult<BTreeMap<String, TypedValue>> {
-    if config.mode == EncryptionMode::Plaintext {
+    // No per-row decrypt for Plaintext or FullDatabase; only RowEncryption rows
+    // carry a content envelope to open here.
+    if !config.uses_row_crypto() {
         return Ok(values);
     }
     let (key, estate_key_id) = match (&config.key, &config.key_identifier) {
@@ -860,7 +877,10 @@ fn assert_content_key_id_invariant(
     table: &str,
     config: &EstateEncryptionConfig,
 ) -> StorageResult<()> {
-    if config.mode == EncryptionMode::Plaintext {
+    // The invariant only applies to RowEncryption, where content must be sealed
+    // (.blob) under a keyID. Plaintext writes plaintext; FullDatabase stores
+    // plaintext within a whole-file-encrypted database. Both skip the guard.
+    if !config.uses_row_crypto() {
         return Ok(());
     }
     // Only fire if the row carries a text `content` — .blob is already
@@ -2114,10 +2134,12 @@ mod at_rest_encryption_tests {
         );
     }
 
-    // ─── Test 5: Full-database mode round-trips identically ───────────────
+    // ─── Test 5: Full-database (whole-file SQLCipher) round-trips ──────────
 
-    /// Mode 3 (FullDatabase) is mechanically identical to mode 2 at this
-    /// layer — the distinction is key provenance. Verify round-trip.
+    /// Mode 3 (FullDatabase) stores content as plaintext within a
+    /// whole-file-encrypted database (SQLCipher), so a keyed round-trip returns
+    /// the original text. The on-disk protection of the schema and content is
+    /// proven by `full_database_file_unreadable_without_key` below.
     #[test]
     fn full_database_mode_round_trip() {
         let enc = EstateEncryptionConfig::full_database();
@@ -2135,6 +2157,95 @@ mod at_rest_encryption_tests {
             rows[0].get("content"),
             Some(&TypedValue::Text("full-db note".into())),
             "full-database mode must round-trip the plaintext"
+        );
+    }
+
+    // ─── Test 5b: Whole-file lockdown — schema is ciphertext on disk ───────
+
+    /// A FullDatabase estate's file is encrypted in full: a plain SQLite handle
+    /// with no key cannot read even `sqlite_master` (page 1, the schema). This
+    /// is the lockdown guarantee — an external process cannot inspect or ALTER
+    /// the structure. The correct whole-file key reopens and round-trips.
+    #[test]
+    fn full_database_file_unreadable_without_key() {
+        let path = std::env::temp_dir()
+            .join(format!("fulldb_lock_{}.sqlite", Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned();
+        let enc = EstateEncryptionConfig::full_database();
+
+        // Create + write under the whole-file key.
+        {
+            let writer = make_storage_at_path(&path, enc.clone());
+            let rs = Storage::row_store(&writer);
+            let mut v = BTreeMap::new();
+            v.insert("id".into(), TypedValue::Text("d1".into()));
+            v.insert("content".into(), TypedValue::Text("locked note".into()));
+            rs.insert("drawers", v).expect("insert");
+        }
+
+        // No key → page 1 is ciphertext → the schema cannot be read.
+        let raw = Connection::open(&path).expect("file handle opens");
+        let schema_read: rusqlite::Result<i64> =
+            raw.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0));
+        assert!(
+            schema_read.is_err(),
+            "plain SQLite must not read the schema of a FullDatabase estate"
+        );
+
+        // The correct whole-file key reopens and round-trips the content.
+        let reader = make_storage_at_path(&path, enc.clone());
+        let rs = Storage::row_store(&reader);
+        let rows = rs.query("drawers", None, &[], None, None).expect("query with key");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("content"),
+            Some(&TypedValue::Text("locked note".into())),
+            "the keyed reader must round-trip the content"
+        );
+    }
+
+    /// The production FullDatabase open path runs against SQLCipher: a keyed
+    /// connection reports a non-empty `cipher_version`. A plain (non-SQLCipher)
+    /// SQLite build returns no rows for this pragma, so this also guards the
+    /// build-feature wiring.
+    #[test]
+    fn full_database_uses_sqlcipher() {
+        let storage = make_storage_with_encryption(EstateEncryptionConfig::full_database());
+        let guard = storage.inner.lock().expect("lock inner");
+        let version: String = guard
+            .conn
+            .query_row("PRAGMA cipher_version", [], |r| r.get(0))
+            .expect("cipher_version returns when SQLCipher is the linked library");
+        assert!(!version.is_empty(), "SQLCipher must report a cipher version");
+    }
+
+    /// A different whole-file key cannot open the database — fail-closed. Wrong
+    /// key yields an open error, never a readable database.
+    #[test]
+    fn full_database_wrong_key_cannot_open() {
+        let path = std::env::temp_dir()
+            .join(format!("fulldb_wrongkey_{}.sqlite", Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned();
+        // Create under one whole-file key.
+        {
+            let _writer = make_storage_at_path(&path, EstateEncryptionConfig::full_database());
+        }
+        // A fresh FullDatabase config mints a different key; opening the existing
+        // file with it must fail (at the first header access).
+        let mut estate = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        estate.encryption_config = EstateEncryptionConfig::full_database();
+        let result = SqliteStorage::new(estate).and_then(|s| s.open(&drawers_schema()));
+        assert!(
+            result.is_err(),
+            "a wrong whole-file key must fail to open the database"
         );
     }
 

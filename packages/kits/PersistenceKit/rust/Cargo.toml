@@ -14,8 +14,13 @@ path = "src/lib.rs"
 [dependencies]
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 uuid = { version = "1", features = ["v4"] }
-# SQLite backend: bundled compiles SQLite from source (no system dep).
-rusqlite = { version = "0.31", features = ["bundled"] }
+# SQLite backend: SQLCipher compiled from source (bundled, no system dep),
+# with vendored OpenSSL libcrypto for the page cipher. Provides whole-database
+# at-rest encryption (Mode 3 / FullDatabase): the estate key is supplied via
+# PRAGMA key at open, so page 1 (the schema) and all content are ciphertext on
+# disk. Matches the prior zero-system-dependency posture of the plain bundled
+# build.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # intellectus-lib: zero-dep telemetry floor. persistence-kit emits DB-layer
 # health metrics via the report! macro, which is a no-op when monitoring is
 # disabled (the default). Off-path cost: one AtomicBool load + branch.

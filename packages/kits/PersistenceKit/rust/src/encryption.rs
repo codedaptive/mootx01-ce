@@ -60,9 +60,11 @@ pub enum EncryptionMode {
     /// Mode 2 — per-row content ciphertext under a per-row or per-estate
     /// key; the row carries the key identifier.
     RowEncryption,
-    /// Mode 3 — the whole estate under a per-install key. Mechanically
-    /// identical per-row crypto to mode 2 at this layer; the distinction
-    /// is key provenance (one per-install key).
+    /// Mode 3 — whole-database at-rest encryption under a per-install key.
+    /// The entire SQLite file (including page 1, the schema) is encrypted by
+    /// SQLCipher at the connection layer via `PRAGMA key`; the per-row content
+    /// seam is a no-op for this mode because the file itself — schema and
+    /// content — is ciphertext on disk.
     FullDatabase,
 }
 
@@ -141,9 +143,10 @@ impl EstateEncryptionConfig {
         }
     }
 
-    /// Full-database mode — mechanically identical to row-encryption at this
-    /// layer; the distinction is key provenance (one per-install key rather
-    /// than a per-row key).
+    /// Full-database mode — mints a fresh full-entropy 256-bit key used as the
+    /// SQLCipher whole-file key (supplied via `PRAGMA key` at open). The key
+    /// identifier records provenance; the per-row content seam is bypassed for
+    /// this mode because the whole file, schema included, is encrypted.
     pub fn full_database() -> Self {
         let key = Aes256Gcm::generate_key(OsRng);
         EstateEncryptionConfig {
@@ -151,6 +154,36 @@ impl EstateEncryptionConfig {
             key_identifier: Some(uuid::Uuid::new_v4().to_string()),
             key: Some(key.to_vec()),
         }
+    }
+
+    /// True only for the per-row encrypting mode (Mode 2 / RowEncryption).
+    ///
+    /// Plaintext (Mode 1) carries no crypto. FullDatabase (Mode 3) protects the
+    /// whole file via SQLCipher at the connection layer, so the per-row
+    /// content/keyID seam is a no-op for it. Centralising the test here keeps
+    /// the three seam call sites (`encrypted_for_write`, `decrypted_for_read`,
+    /// `assert_content_key_id_invariant`) consistent.
+    pub(crate) fn uses_row_crypto(&self) -> bool {
+        matches!(self.mode, EncryptionMode::RowEncryption)
+    }
+
+    /// The whole-file SQLCipher key as a lowercase hex string, for FullDatabase
+    /// estates only. `None` for every other mode (no whole-file key is set, so
+    /// the database is a normal unencrypted SQLite file). The hex is consumed by
+    /// the SQLite backend as `PRAGMA key = "x'<hex>'"`, which uses the bytes as
+    /// the raw 256-bit cipher key (no passphrase KDF — the key is already
+    /// full-entropy). Never logged; the raw key stays redacted in Debug.
+    pub(crate) fn full_database_key_hex(&self) -> Option<String> {
+        if self.mode != EncryptionMode::FullDatabase {
+            return None;
+        }
+        self.key.as_ref().map(|k| {
+            let mut s = String::with_capacity(k.len() * 2);
+            for b in k {
+                s.push_str(&format!("{b:02x}"));
+            }
+            s
+        })
     }
 }
 
