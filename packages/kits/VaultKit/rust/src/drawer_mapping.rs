@@ -537,9 +537,26 @@ impl DrawerMapping {
         // is correct for batch import: the write returns immediately, the encode
         // drain ingests asynchronously. The caller (VaultBridge.import_notes) drives
         // `await_encode_drain` when a synchronous-encode guarantee is needed.
-        let drawer = coordinator
-            .capture_with_mode(handle, frame, now, WriteMode::Regular)
-            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        //
+        // Idempotency: re-importing an export that was already imported into the
+        // same estate triggers a DisciplineViolation (e.g. Contested → Supersede
+        // is an illegal belief-state transition). This is expected for idempotent
+        // re-imports and must not abort the whole batch. Gracefully skip the note
+        // and continue. Other errors (storage failures, I/O) propagate.
+        let drawer = match coordinator.capture_with_mode(handle, frame, now, WriteMode::Regular) {
+            Ok(d) => d,
+            Err(e) => {
+                let reason = format!("{e:?}");
+                if reason.contains("DisciplineViolation") {
+                    return Ok(ImportOutcome::Skipped {
+                        reason: format!(
+                            "belief-state transition not permitted (re-import of existing content): {reason}"
+                        ),
+                    });
+                }
+                return Err(VaultKitError::VerbError(reason));
+            }
+        };
 
         // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER
         // resolution: facts must land as substrate KG facts, not report-only).
