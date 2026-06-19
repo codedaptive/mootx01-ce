@@ -205,7 +205,13 @@ pub fn run(
             id: candidate.id,
             room: candidate.room,
             content: candidate.content,
-            score: candidate.score.final_score as f64,
+            // precision_score is the weighted-sum composition score stamped
+            // during the reduce fold (reduction_composition::reduce). It
+            // reflects the re-rank signal, not the coarse fusion score
+            // (score.final_score), so discrimination classification downstream
+            // operates on the quality signal that actually drove the ordering.
+            // Mirrors Swift PreciseRecall.run's `candidate.precisionScore`.
+            score: candidate.precision_score,
         })
         .collect())
 }

@@ -56,6 +56,11 @@ pub enum DiscriminationLevel {
     Medium,
     /// Top results are within epsilon — the list is effectively unranked.
     Low,
+    /// Query had distinctive tokens (numbers or proper nouns) but no candidate
+    /// contained any of them — the recall set is a confident non-match.
+    /// Set by the caller (recipe_tools) after applying the containment gate;
+    /// `classify` never emits this variant. Mirrors Swift `DiscriminationLevel.notFound`.
+    NotFound,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +117,15 @@ pub fn result_line(level: DiscriminationLevel) -> &'static str {
             "discrimination: low — top results are within epsilon; treat as effectively unranked. \
              Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for \
              precision, or widen the query."
+        }
+        // The query carried distinctive tokens (numbers or capitalised words)
+        // that are reliable identity markers — yet zero candidates matched any of
+        // them. Returning a ranked list here would be fabrication. Direct the AI
+        // to try a different query or confirm the content exists.
+        DiscriminationLevel::NotFound => {
+            "discrimination: not_found — query contains distinctive tokens but no stored memory \
+             matches them. The content may not exist in this estate. \
+             Try moot_memory_search to confirm, or rephrase the query."
         }
     }
 }
@@ -172,5 +186,23 @@ mod tests {
         assert_eq!(classify(&[1.0, 0.99, 0.98, 0.97]), DiscriminationLevel::Low);
         // Vector C: medium separation → Medium
         assert_eq!(classify(&[1.0, 0.9, 0.4]), DiscriminationLevel::Medium);
+    }
+
+    // Wave B, Part 1a — NotFound level
+
+    #[test]
+    fn not_found_result_line_contains_key_guidance() {
+        let line = result_line(DiscriminationLevel::NotFound);
+        assert!(line.contains("discrimination: not_found"), "line: {line}");
+        assert!(line.contains("distinctive tokens"), "line: {line}");
+        assert!(line.contains("moot_memory_search"), "line: {line}");
+    }
+
+    #[test]
+    fn not_found_is_distinct_from_low_and_single() {
+        // not_found and low are separate variants — not_found means the token gate
+        // fired (definitive absence), not just that scores were flat.
+        assert_ne!(DiscriminationLevel::NotFound, DiscriminationLevel::Low);
+        assert_ne!(DiscriminationLevel::NotFound, DiscriminationLevel::Single);
     }
 }
