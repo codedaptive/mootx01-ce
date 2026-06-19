@@ -317,7 +317,7 @@ pub fn dispatch(
                     for fact in *facts {
                         // filed_at is epoch seconds; format as ISO8601 to match
                         // the Swift contradiction lens and substrate-wide date
-                        // conventions (Wave A filed_at ISO8601 fix, Part 4).
+                        // conventions (Wave C filed_at ISO8601 fix, Part 4).
                         lines.push(format!(
                             "    {}  object=[{}]  source={}  filed={}",
                             fact.id, fact.object, fact.source_drawer_id,
