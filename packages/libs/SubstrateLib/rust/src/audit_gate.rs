@@ -184,6 +184,37 @@ pub enum GateViolation {
     StateInconsistentWithVerb(String),
 }
 
+impl std::fmt::Display for GateViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // English messages used at the ARIA boundary. No internal type names
+        // (BasisViolation, IllegalTransition, enum variant paths) must appear
+        // in user-visible error text — this is the single format-to-Display
+        // conversion point for all gate rejections. The Debug form ({:?}) leaks
+        // Rust internal type chains; callers must use {} (this impl) at MCP
+        // boundaries.
+        match self {
+            Self::UndeclaredField(label) => {
+                write!(f, "undeclared field '{label}' in write request")
+            }
+            Self::IllegalValue(label, value) => {
+                write!(f, "illegal value {value} for field '{label}'")
+            }
+            Self::BasisViolation(e) => {
+                // RowStateError::Display for IllegalTransition emits "{state} --{verb}-->"
+                // (e.g. "active --reject-->"). Prefixing with "illegal state transition: "
+                // here produces the canonical form "illegal state transition: active --reject-->"
+                // that the AriaMcpKit describe_gate_rejection parser expects.
+                // RowStateError for ViolatesInvariant produces "safety invariant violation: ..."
+                // which passes through as "illegal state transition: safety invariant violation: ...".
+                write!(f, "illegal state transition: {e}")
+            }
+            Self::StateInconsistentWithVerb(verb) => {
+                write!(f, "state encoded in write is inconsistent with verb '{verb}'")
+            }
+        }
+    }
+}
+
 // MARK: - The gate
 
 /// Admit a write. Pure. Returns the canonical event (with its
