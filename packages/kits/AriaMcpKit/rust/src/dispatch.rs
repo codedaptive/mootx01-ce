@@ -261,13 +261,9 @@ fn run_federated_search(
         },
     };
 
-    // Wall-clock now for LocusKit bitmap evaluation (Unix seconds).
+    // Wall-clock now for both LocusKit bitmap evaluation and grant expiry.
+    // The grant subsystem uses Unix epoch seconds throughout on the Rust port.
     let now_unix = wall_now();
-    // Apple reference seconds for grant expiry evaluation.
-    // Apple reference = 2001-01-01; Unix = 1970-01-01.
-    // Offset is 978,307,200 seconds (31 years). Using now_unix is conservative
-    // (clocks agree on ordering; permanent grants ignore this value entirely).
-    let now_apple = now_unix as f64 - 978_307_200.0;
 
     // Visit candidate sources sorted by handle UUID string for deterministic
     // output. Filter out the requester itself (handle UUID comparison).
@@ -288,7 +284,7 @@ fn run_federated_search(
             frame.clone(),
             &source_handle,
             &requester_handle,
-            now_apple,
+            now_unix as f64,
             now_unix,
         );
         match result {

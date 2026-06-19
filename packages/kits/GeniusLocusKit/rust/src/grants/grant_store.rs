@@ -291,13 +291,13 @@ impl GrantStore {
         Ok(())
     }
 
-    /// Mark a grant revoked, supplying `now` as Apple reference seconds.
+    /// Mark a grant revoked, supplying `now` as Unix epoch seconds.
     ///
-    /// Converts `now_apple_ref` to an ISO-8601 string before persisting,
-    /// so callers can pass the same `f64` representation used elsewhere in
-    /// the grant subsystem. Mirrors Swift `GrantStore.revoke(id:at:)`.
-    pub fn revoke_at_apple_ref(&self, id: Uuid, now_apple_ref: f64) -> Result<(), GrantStoreError> {
-        let iso = apple_ref_to_iso8601(now_apple_ref);
+    /// Converts `now_unix` to an ISO-8601 string before persisting,
+    /// so callers can pass the same `f64` Unix-epoch representation used
+    /// throughout the Rust grant subsystem. Mirrors Swift `GrantStore.revoke(id:at:)`.
+    pub fn revoke_at_unix(&self, id: Uuid, now_unix: f64) -> Result<(), GrantStoreError> {
+        let iso = unix_secs_to_iso8601(now_unix);
         self.revoke(id, &iso)
     }
 
@@ -324,7 +324,7 @@ impl GrantStore {
         Ok(self.active_stored()?.into_iter().map(|sg| sg.grant).collect())
     }
 
-    /// Non-revoked grants that appear active at `now` (Apple reference seconds)
+    /// Non-revoked grants that appear active at `now` (Unix epoch seconds)
     /// — revoked_at IS NULL AND not yet expired.
     ///
     /// Used by the coordinator's `federated_recall` to filter active grants.
@@ -340,7 +340,7 @@ impl GrantStore {
     }
 
     /// Non-revoked grants that have expired strictly before `now`
-    /// (Apple reference seconds). Mirrors Swift `GrantStore.expired(before:)`.
+    /// (Unix epoch seconds). Mirrors Swift `GrantStore.expired(before:)`.
     pub fn expired(&self, now: f64) -> Result<Vec<Grant>, GrantStoreError> {
         let stored = self.active_stored()?;
         Ok(stored.into_iter()
@@ -411,21 +411,19 @@ impl GrantStore {
 
         // Fail-closed: a corrupt issued_at must throw rather than produce epoch-0.
         // See GrantStoreError::CorruptIssuedAt for the security rationale.
-        let issued_at_apple_ref = match row.get("issued_at") {
+        let issued_at_unix = match row.get("issued_at") {
             Some(TypedValue::Text(s)) => {
-                parse_iso8601_to_apple_ref(s).ok_or_else(|| GrantStoreError::CorruptIssuedAt {
+                parse_iso8601_to_unix_secs(s).ok_or_else(|| GrantStoreError::CorruptIssuedAt {
                     stored_text: s.clone(),
                 })?
             }
             Some(TypedValue::Timestamp(t)) => {
                 // Defensive: if the InMemory backend ever stored issued_at as a
                 // raw Timestamp rather than ISO8601 Text. PersistenceKit
-                // `Timestamp(i64)` is epoch SECONDS (sqlite.rs iso8601(secs)), so
-                // convert Unix-epoch seconds → Apple-reference seconds by
-                // subtracting the 2001-01-01 offset — same result the Text path
-                // produces via parse_iso8601_to_apple_ref. No /1000 (it is NOT ms).
-                const APPLE_EPOCH_OFFSET_SECS: f64 = 978_307_200.0;
-                (*t as f64) - APPLE_EPOCH_OFFSET_SECS
+                // `Timestamp(i64)` is Unix epoch SECONDS (sqlite.rs iso8601(secs)),
+                // which is exactly the unit we want — pass through directly.
+                // No /1000 (it is NOT ms) and no epoch offset needed.
+                *t as f64
             }
             Some(other) => return Err(GrantStoreError::CorruptIssuedAt {
                 stored_text: format!("<{}>", other.type_description()),
@@ -441,16 +439,16 @@ impl GrantStore {
             None | Some(TypedValue::Null) => None,
             Some(TypedValue::Text(s)) if s.is_empty() => None,
             Some(TypedValue::Text(s)) => {
-                Some(parse_iso8601_to_apple_ref(s).ok_or_else(|| {
+                Some(parse_iso8601_to_unix_secs(s).ok_or_else(|| {
                     GrantStoreError::CorruptRow(
                         format!("grants.revoked_at not ISO-8601: {s}")
                     )
                 })?)
             }
             Some(TypedValue::Timestamp(t)) => {
-                // PersistenceKit Timestamp is epoch SECONDS; Unix→Apple-ref, no /1000.
-                const APPLE_EPOCH_OFFSET_SECS: f64 = 978_307_200.0;
-                Some((*t as f64) - APPLE_EPOCH_OFFSET_SECS)
+                // PersistenceKit Timestamp is Unix epoch SECONDS — pass through
+                // directly. No /1000 (NOT ms), no epoch offset needed.
+                Some(*t as f64)
             }
             Some(other) => return Err(GrantStoreError::CorruptRow(
                 format!("grants.revoked_at unexpected type {:?}", other.type_description())
@@ -468,7 +466,7 @@ impl GrantStore {
             ))?;
 
         // Mode-4 decay columns (NULL for other modes). decay_started_at is a
-        // TEXT/Timestamp date column parsed to Apple-reference seconds the same
+        // TEXT/Timestamp date column parsed to Unix epoch seconds the same
         // way issued_at is; a non-date value is ignored (treated as absent) so
         // the documented default (started_at = issued_at) can fire.
         let decay_half_life: Option<i64> = match row.get("decay_half_life") {
@@ -484,11 +482,11 @@ impl GrantStore {
             _ => None,
         };
         let decay_started_at: Option<f64> = match row.get("decay_started_at") {
-            Some(TypedValue::Text(s)) => parse_iso8601_to_apple_ref(s),
+            Some(TypedValue::Text(s)) => parse_iso8601_to_unix_secs(s),
             Some(TypedValue::Timestamp(t)) => {
-                // PersistenceKit Timestamp is epoch SECONDS; Unix→Apple-ref, no /1000.
-                const APPLE_EPOCH_OFFSET_SECS: f64 = 978_307_200.0;
-                Some((*t as f64) - APPLE_EPOCH_OFFSET_SECS)
+                // PersistenceKit Timestamp is Unix epoch SECONDS — pass through
+                // directly. No /1000 (NOT ms), no epoch offset needed.
+                Some(*t as f64)
             }
             _ => None,
         };
@@ -497,7 +495,7 @@ impl GrantStore {
             decay_half_life,
             decay_started_at,
             decay_floor,
-            Some(issued_at_apple_ref),
+            Some(issued_at_unix),
         )?;
         let reshare = Self::decode_reshare(&text("reshare")?)?;
 
@@ -529,7 +527,7 @@ impl GrantStore {
             custody_mode,
             re_share_permission: reshare,
             inference_remaining_budget: inference_budget,
-            issued_at: issued_at_apple_ref,
+            issued_at: issued_at_unix,
             signature,
         };
         Ok(StoredGrant { grant, revoked_at })
@@ -562,7 +560,7 @@ impl GrantStore {
             .ok_or_else(|| GrantStoreError::CorruptIssuedAt {
                 stored_text: "<null>".into(),
             })?;
-        let issued_at = parse_iso8601_to_apple_ref(issued_at_str)
+        let issued_at = parse_iso8601_to_unix_secs(issued_at_str)
             .ok_or_else(|| GrantStoreError::CorruptIssuedAt {
                 stored_text: issued_at_str.to_string(),
             })?;
@@ -570,7 +568,7 @@ impl GrantStore {
         let revoked_at = match row.get("revoked_at").copied() {
             None | Some("") => None,
             Some(s) => {
-                let t = parse_iso8601_to_apple_ref(s)
+                let t = parse_iso8601_to_unix_secs(s)
                     .ok_or_else(|| GrantStoreError::CorruptRow(
                         format!("grants.revoked_at not ISO-8601: {s}")
                     ))?;
@@ -606,7 +604,7 @@ impl GrantStore {
         let decay_floor: Option<i64> = row.get("decay_floor")
             .and_then(|s| s.parse::<i64>().ok());
         let decay_started_at: Option<f64> = row.get("decay_started_at")
-            .and_then(|s| parse_iso8601_to_apple_ref(s));
+            .and_then(|s| parse_iso8601_to_unix_secs(s));
         let custody_mode: CustodyMode = if let Some(t) = row.get("custody_mode").copied() {
             Self::decode_custody_mode(t, decay_half_life, decay_started_at, decay_floor, Some(issued_at))?
         } else {
@@ -646,7 +644,7 @@ impl GrantStore {
             .map_err(|e| GrantStoreError::StorageFailure(format!("scope encode: {e}")))?;
         let lifetime_json = serde_json::to_string(&grant.lifetime)
             .map_err(|e| GrantStoreError::StorageFailure(format!("lifetime encode: {e}")))?;
-        let issued_at_iso = apple_ref_to_iso8601(grant.issued_at);
+        let issued_at_iso = unix_secs_to_iso8601(grant.issued_at);
         let mut map: BTreeMap<String, TypedValue> = BTreeMap::new();
         map.insert("id".to_string(), TypedValue::Text(grant.id.to_string()));
         map.insert("grantee_id".to_string(), TypedValue::Text(grant.grantee_estate_id.to_string()));
@@ -665,7 +663,7 @@ impl GrantStore {
         // Every other mode leaves them absent (NULL on insert).
         if let CustodyMode::TimeAging(policy) = &grant.custody_mode {
             map.insert("decay_half_life".to_string(), TypedValue::Int(policy.half_life_seconds));
-            map.insert("decay_started_at".to_string(), TypedValue::Text(apple_ref_to_iso8601(policy.started_at)));
+            map.insert("decay_started_at".to_string(), TypedValue::Text(unix_secs_to_iso8601(policy.started_at)));
             map.insert("decay_floor".to_string(), TypedValue::Int(policy.floor));
         }
         Ok(map)
@@ -908,26 +906,27 @@ impl<'de> Deserialize<'de> for GrantLifetime {
 }
 
 // -----------------------------------------------------------------------
-// ISO-8601 ↔ Apple reference seconds helpers
+// ISO-8601 ↔ Unix epoch seconds helpers
 // -----------------------------------------------------------------------
 
-/// Format Apple reference seconds as an ISO-8601 string.
+/// Format Unix epoch seconds (f64) as an ISO-8601 string.
 ///
-/// Apple reference date is 2001-01-01 00:00:00 UTC.
-/// Produces "YYYY-MM-DDThh:mm:ssZ" (whole-second resolution) matching
-/// Swift `ISO8601DateFormatter().string(from:)` with no fractional seconds.
-pub(crate) fn apple_ref_to_iso8601(apple_ref: f64) -> String {
-    // Apple reference offset from Unix epoch: 978307200 seconds.
-    const APPLE_EPOCH_OFFSET_SECS: i64 = 978_307_200;
-    let unix_secs = apple_ref as i64 + APPLE_EPOCH_OFFSET_SECS;
-    unix_secs_to_iso8601(unix_secs)
+/// Produces "YYYY-MM-DDThh:mm:ssZ" (whole-second resolution). The grant
+/// subsystem stores all dates as ISO-8601 TEXT (fleet rule). The input is
+/// truncated to whole seconds — sub-second precision is not preserved in
+/// the persisted string, matching Swift's `ISO8601DateFormatter` behaviour
+/// with no fractional-seconds option. NOTE: the Apple reference date
+/// (2001-01-01) is NOT used here — the input is plain Unix epoch seconds
+/// (1970-01-01 origin), consistent with the rest of the Rust substrate.
+pub(crate) fn unix_secs_to_iso8601(unix_secs: f64) -> String {
+    format_iso8601_from_unix_i64(unix_secs as i64)
 }
 
-/// Format Unix epoch seconds as "YYYY-MM-DDThh:mm:ssZ".
-fn unix_secs_to_iso8601(unix_secs: i64) -> String {
+/// Internal civil-date ISO-8601 formatter from Unix epoch seconds (i64).
+fn format_iso8601_from_unix_i64(unix_secs: i64) -> String {
     // Convert Unix seconds to (y, m, d, h, min, s) via civil-date math.
     // Howard Hinnant's civil_from_days algorithm.
-    let (y, mo, d) = civil_from_unix_secs(unix_secs);
+    let (y, mo, d) = civil_from_unix_secs_inner(unix_secs);
     let remaining = unix_secs.rem_euclid(86_400);
     let hh = remaining / 3_600;
     let mm = (remaining % 3_600) / 60;
@@ -935,7 +934,7 @@ fn unix_secs_to_iso8601(unix_secs: i64) -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, hh, mm, ss)
 }
 
-fn civil_from_unix_secs(unix_secs: i64) -> (i64, i64, i64) {
+fn civil_from_unix_secs_inner(unix_secs: i64) -> (i64, i64, i64) {
     // Days since Unix epoch.
     let z = unix_secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
@@ -950,10 +949,7 @@ fn civil_from_unix_secs(unix_secs: i64) -> (i64, i64, i64) {
     (y, mo, d)
 }
 
-/// Parse an ISO-8601 date-time string to Apple reference seconds (f64).
-///
-/// Apple reference date is 2001-01-01 00:00:00 UTC.
-/// Unix epoch offset from Apple reference: 978307200 seconds.
+/// Parse an ISO-8601 date-time string to Unix epoch seconds (f64).
 ///
 /// Accepted forms match what Swift's `ISO8601DateFormatter` with
 /// `.withInternetDateTime` produces:
@@ -961,10 +957,9 @@ fn civil_from_unix_secs(unix_secs: i64) -> (i64, i64, i64) {
 ///   - `YYYY-MM-DDThh:mm:ss.sssZ`       (24 chars, millisecond)
 ///
 /// Returns `None` if the string does not structurally match either form.
-pub(crate) fn parse_iso8601_to_apple_ref(s: &str) -> Option<f64> {
-    // Apple reference date offset from Unix epoch (2001-01-01 00:00:00 UTC).
-    const APPLE_EPOCH_OFFSET_SECS: i64 = 978_307_200;
-
+/// NOTE: returns plain Unix epoch seconds (1970-01-01 origin) — the Apple
+/// reference date offset (978307200) is NOT applied.
+pub(crate) fn parse_iso8601_to_unix_secs(s: &str) -> Option<f64> {
     let b = s.as_bytes();
     // Require exactly the two accepted shapes.
     let (len, has_frac) = match b.len() {
@@ -1003,9 +998,8 @@ pub(crate) fn parse_iso8601_to_apple_ref(s: &str) -> Option<f64> {
     // Days since Unix epoch (Howard Hinnant's days_from_civil).
     let days = days_from_civil(y, mo, d);
     let unix_secs = days * 86_400 + hh * 3_600 + mm * 60 + ss;
-    let apple_secs = unix_secs - APPLE_EPOCH_OFFSET_SECS;
 
-    Some(apple_secs as f64 + frac_millis as f64 / 1_000.0)
+    Some(unix_secs as f64 + frac_millis as f64 / 1_000.0)
 }
 
 /// Days from 1970-01-01 for a civil (y, m, d) date (Howard Hinnant).
@@ -1043,7 +1037,7 @@ mod tests {
             custody_mode: CustodyMode::Mediated,
             re_share_permission: ReSharePermission::None,
             inference_remaining_budget: 1000.0,
-            issued_at: 801_964_800.0, // 2026-06-01T00:00:00Z in Apple ref seconds
+            issued_at: 1_780_272_000.0, // 2026-06-01T00:00:00Z in Unix epoch seconds
             signature: vec![],
         }
     }
@@ -1069,7 +1063,7 @@ mod tests {
         let issued_at = grant.issued_at;
         store.insert(&grant).expect("insert");
         // Revoke using an ISO-8601 time after issuance.
-        let revoke_time = apple_ref_to_iso8601(issued_at + 100.0);
+        let revoke_time = unix_secs_to_iso8601(issued_at + 100.0);
         store.revoke(id, &revoke_time).expect("revoke");
         let active = store.active(issued_at + 200.0).expect("active");
         assert!(active.is_empty(), "revoked grant must not appear in active");
@@ -1079,7 +1073,8 @@ mod tests {
     fn active_excludes_expired() {
         let storage = make_storage();
         let store = GrantStore::new(storage).expect("store init");
-        let grant = make_grant(GrantLifetime::Until(801_964_900.0));
+        // Until deadline = issued_at + 100 Unix epoch seconds.
+        let grant = make_grant(GrantLifetime::Until(1_780_272_100.0));
         let issued_at = grant.issued_at;
         store.insert(&grant).expect("insert");
         // Before expiry: active.
@@ -1165,9 +1160,10 @@ mod tests {
         let result = GrantStore::decode_row(&row);
         assert!(result.is_ok(), "valid ISO-8601 issued_at must decode; got {:?}", result.err());
         let sg = result.unwrap();
+        // 2026-06-01T00:00:00Z is Unix epoch second 1_780_272_000.
         assert!(
-            (sg.grant.issued_at - 801_964_800.0).abs() < 1.0,
-            "issued_at Apple ref must be ~801964800, got {}", sg.grant.issued_at
+            (sg.grant.issued_at - 1_780_272_000.0).abs() < 1.0,
+            "issued_at Unix epoch must be ~1780272000, got {}", sg.grant.issued_at
         );
     }
 
@@ -1216,17 +1212,59 @@ mod tests {
 
     #[test]
     fn iso8601_round_trip() {
-        // apple_ref_to_iso8601(parse_iso8601_to_apple_ref(s)) must equal s.
+        // unix_secs_to_iso8601(parse_iso8601_to_unix_secs(s)) must equal s.
+        // Verifies that the round-trip is lossless: the stored ISO-8601 TEXT
+        // for any given wall-clock instant is byte-identical regardless of
+        // which epoch is used internally, as long as the formatter and parser
+        // are consistent.
         let cases = [
             "2026-06-01T00:00:00Z",
-            "2001-01-01T00:00:00Z", // Apple epoch itself
+            "1970-01-01T00:00:00Z", // Unix epoch itself
             "2026-12-31T23:59:59Z",
         ];
         for s in &cases {
-            let apple_ref = parse_iso8601_to_apple_ref(s)
+            let unix_secs = parse_iso8601_to_unix_secs(s)
                 .unwrap_or_else(|| panic!("parse failed for {s}"));
-            let back = apple_ref_to_iso8601(apple_ref);
+            let back = unix_secs_to_iso8601(unix_secs);
             assert_eq!(&back, s, "ISO-8601 round-trip failed for {s}");
         }
+    }
+
+    #[test]
+    fn unix_epoch_known_instant_round_trips_iso8601() {
+        // A grant issued at a known Unix epoch instant must persist the
+        // SAME ISO-8601 string it would have produced with Apple-ref
+        // internally — because the persisted form is always ISO-8601 TEXT
+        // and the TEXT is epoch-independent.
+        // 2026-06-01T00:00:00Z = Unix second 1_780_272_000.
+        let unix_secs = 1_780_272_000.0_f64;
+        let iso = unix_secs_to_iso8601(unix_secs);
+        assert_eq!(iso, "2026-06-01T00:00:00Z",
+            "Unix 1780272000 must format as 2026-06-01T00:00:00Z, got {iso}");
+        let parsed = parse_iso8601_to_unix_secs(&iso)
+            .expect("round-trip parse must succeed");
+        assert!((parsed - unix_secs).abs() < 1.0,
+            "round-trip must recover the Unix epoch value; got {parsed}");
+    }
+
+    #[test]
+    fn unix_epoch_grant_round_trips_through_storage() {
+        // A grant issued at a known Unix instant must persist and reload
+        // with the same issued_at value. Verifies the ISO-8601 TEXT stored
+        // in SQLite is byte-identical to the formatter output.
+        let storage = make_storage();
+        let store = GrantStore::new(storage).expect("store init");
+        // 2026-06-01T00:00:00Z in Unix epoch seconds.
+        let unix_issued_at = 1_780_272_000.0_f64;
+        let mut grant = make_grant(GrantLifetime::Permanent);
+        grant.issued_at = unix_issued_at;
+        let id = grant.id;
+        store.insert(&grant).expect("insert");
+        let sg = store.get(id).expect("get ok").expect("grant present");
+        assert!(
+            (sg.grant.issued_at - unix_issued_at).abs() < 1.0,
+            "issued_at must round-trip through storage; expected ~{unix_issued_at}, got {}",
+            sg.grant.issued_at
+        );
     }
 }

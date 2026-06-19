@@ -6,9 +6,13 @@
 // the signing payload exactly as the Swift side so a cross-platform audit
 // trail can verify signatures and signing payloads without port-specific paths.
 //
-// Date representation: `issued_at` and `revoked_at` are stored as f64 seconds
-// since the Apple reference date (2001-01-01 UTC) — matching the Swift side's
-// `Date.timeIntervalSinceReferenceDate` so signing tokens are bit-identical.
+// Date representation: on the Rust port, `issued_at`, `revoked_at`, and
+// `decay_started_at` are f64 Unix epoch seconds (1970-01-01 UTC). The Swift
+// port uses Apple reference date seconds (2001-01-01 UTC) via `Date`. Both
+// ports persist dates as ISO-8601 TEXT, so the on-disk form is byte-identical
+// for any given wall-clock instant. The raw f64 in signing tokens differs
+// between ports by 978_307_200 (the Apple→Unix offset); cross-port
+// signature verification must use the same epoch convention on both sides.
 
 use uuid::Uuid;
 
@@ -50,7 +54,7 @@ impl GrantScope {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GrantLifetime {
     Permanent,
-    Until(f64),       // seconds since Apple reference date (2001-01-01)
+    Until(f64),       // Unix epoch seconds (1970-01-01) on the Rust port
     DecayWindow { seconds: i64 },
 }
 
@@ -65,7 +69,7 @@ impl GrantLifetime {
         }
     }
 
-    /// The expiry instant in Apple reference seconds, or `None` if permanent.
+    /// The expiry instant in Unix epoch seconds, or `None` if permanent.
     pub fn expiry(&self, issued_at: f64) -> Option<f64> {
         match self {
             GrantLifetime::Permanent => None,
@@ -159,9 +163,9 @@ pub struct DecayPolicy {
     /// non-positive value is clamped to 1 by `effective_level` so the formula
     /// never divides by zero.
     pub half_life_seconds: i64,
-    /// The instant decay is measured from, in Apple reference seconds. Persisted
-    /// explicitly so the decay clock is independent of `issued_at`; a legacy row
-    /// with no decay fields documents `started_at = issued_at`.
+    /// The instant decay is measured from, in Unix epoch seconds (Rust port).
+    /// Persisted explicitly so the decay clock is independent of `issued_at`;
+    /// a legacy row with no decay fields documents `started_at = issued_at`.
     pub started_at: f64,
     /// The minimum content level the grant decays toward. `0` means the grant
     /// can decay to no access (and is refused once it reaches the floor); a
@@ -176,8 +180,9 @@ impl DecayPolicy {
     pub const DEFAULT_HALF_LIFE_SECONDS: i64 = 30 * 24 * 60 * 60;
 
     /// Deterministic token fragment for the signing payload. The instant is
-    /// rendered as the same `f64` Apple-reference-seconds form the grant uses
-    /// for `issued_at`. Byte-identical to Swift `DecayPolicy.signingToken`.
+    /// rendered as the same `f64` Unix-epoch-seconds form the Rust grant uses
+    /// for `issued_at`. Note: the Swift port renders this in Apple-reference
+    /// seconds; cross-port token identity requires both ports use the same epoch.
     pub fn signing_token(&self) -> String {
         format!(
             "halfLife:{}|start:{}|floor:{}",
@@ -244,8 +249,10 @@ pub struct GrantOptions {
 
 /// A grant row. Mirror of Swift `Grant`.
 ///
-/// `issued_at` is seconds since the Apple reference date (2001-01-01 00:00:00 UTC)
-/// to match the signing-token format used by the Swift side.
+/// `issued_at` is Unix epoch seconds (1970-01-01 00:00:00 UTC) on the Rust
+/// port. The Swift port uses Apple reference date seconds (2001-01-01). The
+/// persisted form is ISO-8601 TEXT in both cases, so on-disk behaviour is
+/// byte-identical. The raw f64 in signing tokens differs by the epoch offset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grant {
     pub id: Uuid,
@@ -256,17 +263,19 @@ pub struct Grant {
     pub custody_mode: CustodyMode,
     pub re_share_permission: ReSharePermission,
     pub inference_remaining_budget: f64,
-    pub issued_at: f64,     // Apple reference date seconds
+    pub issued_at: f64,     // Unix epoch seconds (Rust port; Swift uses Apple-ref)
     pub signature: Vec<u8>,
 }
 
 impl Grant {
     /// The canonical signing payload.
     ///
-    /// Byte-identical to Swift `Grant.canonicalPayload(...)`: a pipe-delimited
-    /// UTF-8 string of all grant fields except the signature itself. The
-    /// `issued_at` token uses the same `timeIntervalSinceReferenceDate` float
-    /// format as the Swift side so the byte stream is identical.
+    /// Pipe-delimited UTF-8 string of all grant fields except the signature.
+    /// Mirrors Swift `Grant.canonicalPayload(...)`. NOTE: the `issued_at`
+    /// field is Unix epoch seconds on the Rust port and Apple reference seconds
+    /// on the Swift port — the raw numeric values differ by 978_307_200.
+    /// Cross-port signature verification requires both ports to normalise to
+    /// the same epoch before computing or verifying a payload.
     pub fn canonical_payload(
         id: Uuid,
         grantee_estate_id: Uuid,
@@ -340,7 +349,7 @@ impl std::fmt::Debug for IssueGrantResult {
 #[derive(Debug)]
 pub struct StoredGrant {
     pub grant: Grant,
-    /// `None` while active; seconds since Apple reference date when revoked.
+    /// `None` while active; Unix epoch seconds when revoked (Rust port).
     pub revoked_at: Option<f64>,
 }
 
