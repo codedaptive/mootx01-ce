@@ -37,6 +37,10 @@
 //! fixtures as the Swift `*Tests` and asserts identical results.
 
 pub mod anticipate_recipe;
+// consolidate.rs — ConsolidateInput/Output data types and the
+// consolidate_input_to_sweep_params mapping. Rust parity with
+// CognitionKit/Consolidate.swift.
+pub mod consolidate;
 pub mod association_rules_recipe;
 pub mod exploratory_recall_recipe;
 pub mod bias_recipe;
@@ -68,6 +72,9 @@ pub mod trust_lens_recipe;
 pub mod tunnel_successor_recipe;
 
 pub use anticipate_recipe::run_anticipate;
+pub use consolidate::{
+    consolidate_input_to_sweep_params, ConsolidateInput, ConsolidateOutput,
+};
 pub use association_rules_recipe::{
     run_apriori_rules, run_association_rules, AprioriRulesOutput, AssociationRuleResult,
     AssociationRulesOutput,
