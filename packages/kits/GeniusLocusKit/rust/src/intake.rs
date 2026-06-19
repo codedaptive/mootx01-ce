@@ -563,7 +563,12 @@ impl EstateCoordinator {
             &handle.estate_uuid,
             drawer.content.clone(),
             drawer.embedding_model_id.clone(),
-            drawer.filed_at,
+            // `drawer.filed_at` is epoch SECONDS; `EncodeJob::new` expects
+            // `captured_at_millis` in MILLISECONDS (it runs the value through
+            // millis_to_iso8601, which divides by 1000). Convert here — without
+            // the ×1000 the encode job's captured_at, and the vector filing
+            // timestamp Corpus::ingest derives from it, land in 1970.
+            drawer.filed_at * 1000,
         );
         let eq = self.encode_queues.get_mut(handle).expect("queue present");
         // Stamp the submission on the estate's per-estate HLC. The HLC physical
@@ -599,7 +604,11 @@ impl EstateCoordinator {
             return Ok(());
         }
         corpus
-            .ingest(&drawer.content, &drawer.id, drawer.filed_at)
+            // `Corpus::ingest` expects `now_millis` (MILLISECONDS — it divides by
+            // 1000 internally); `drawer.filed_at` is epoch SECONDS, so ×1000.
+            // Without this the inline (impatient) path files vectors at 1970,
+            // mirroring the drain-path EncodeJob fix above.
+            .ingest(&drawer.content, &drawer.id, drawer.filed_at * 1000)
             .map_err(|e| verb_fail(format!("corpus ingest failed: {e:?}")))
     }
 
