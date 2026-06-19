@@ -138,34 +138,28 @@ struct GateRejectionMessageTests {
         #expect(isError, "active → reject must produce a tool error; got: \(result)")
     }
 
-    /// contested + reject → generic fallback ("does not allow this mutation")
+    /// rejected + reject → "memory is already rejected"
     ///
-    /// Contested → Reject is not in the automaton table; only ResolveContest,
-    /// Retract, and Tombstone are legal from Contested. The generic fallback
-    /// fires since the (contested, reject) pair is not in the message table.
-    /// The test also verifies no Swift type names appear in the fallback path.
-    @Test func contestedRejectEmitsActionableMessage() async throws {
+    /// A memory that is already in the Rejected state cannot be rejected again.
+    /// This test drives a memory to Rejected via the now-legal Contested → Reject
+    /// path (contested memories can be judged false and rejected), then attempts
+    /// a second Reject and asserts the specific "already rejected" actionable
+    /// message is returned with no internal Swift type names in the error text.
+    @Test func rejectedRejectEmitsActionableMessage() async throws {
         let dispatcher = try await makeDispatcher()
         let id = try await fileActiveMemory(dispatcher)
-        // Move to Contested (Active → Contest is legal per automaton table).
+        // Move to Contested (Active → Contest is legal).
         let contestResult = try await updateMemory(dispatcher, id: id, mutation: "contest")
         let contestedIsSuccess = contestResult.objectValue?["isError"]?.boolValue == false
         #expect(contestedIsSuccess, "contest must succeed on active row; got: \(contestResult)")
+        // Move to Rejected (Contested → Reject is legal: contested → reject → rejected).
+        let rejectResult = try await updateMemory(dispatcher, id: id, mutation: "reject")
+        let rejectedIsSuccess = rejectResult.objectValue?["isError"]?.boolValue == false
+        #expect(rejectedIsSuccess, "reject must succeed on contested row; got: \(rejectResult)")
 
-        // Contested → Reject is illegal; gate returns BasisViolation.
+        // Rejected → Reject is illegal; gate returns "memory is already rejected".
         let result = try await updateMemory(dispatcher, id: id, mutation: "reject")
-        let isError = result.objectValue?["isError"]?.boolValue == true
-        #expect(isError, "expected error from contested→reject; got: \(result)")
-
-        let msg = result.objectValue?["content"]?
-            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        #expect(!msg.contains("basisViolation"), "no Swift type names in: \(msg)")
-        #expect(!msg.contains("illegalTransition"), "no Swift type names in: \(msg)")
-        #expect(!msg.contains("GateViolation"), "no Swift type names in: \(msg)")
-        #expect(
-            msg.contains("does not allow this mutation") || msg.contains("cannot reject"),
-            "expected actionable phrase in contested→reject message; got: \(msg)"
-        )
+        assertGateRejection(result, expectedPhrase: "already rejected")
     }
 
     /// Non-gate error (missing id) must NOT produce gate-rejection text.

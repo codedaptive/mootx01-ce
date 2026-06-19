@@ -3835,36 +3835,33 @@ fn illegal_transition_active_reject_emits_actionable_message() {
     );
 }
 
-/// contested + reject → generic fallback (the memory's current state (contested) does not
-/// allow this mutation). Contested → Reject is not in the automaton table; only
-/// ResolveContest, Retract, and Tombstone are legal from Contested. The test also
-/// verifies that no internal type names appear in the fallback path.
+/// rejected + reject → "memory is already rejected"
+///
+/// A memory that is already in the Rejected state cannot be rejected again.
+/// This test drives a memory to Rejected via the now-legal Contested → Reject
+/// path (contested memories can be judged false and rejected), then attempts a
+/// second Reject and asserts the specific "already rejected" actionable message
+/// is returned with no internal type names in the error text. Parity with
+/// Swift's GateRejectionMessageTests.rejectedRejectEmitsActionableMessage.
 #[test]
-fn illegal_transition_contested_reject_emits_actionable_message() {
+fn illegal_transition_rejected_reject_emits_actionable_message() {
     let registry = EstateRegistry::new_inmemory();
     let id = file_active_memory(&registry);
-    // Move to Contested (Active → Contest is legal per automaton table).
+    // Move to Contested (Active → Contest is legal).
     let contest_result = update_memory(&registry, &id, "contest");
     assert!(
         is_success(&contest_result),
         "contest must succeed on active row; got: {contest_result:?}"
     );
-    // Contested → Reject is illegal; gate returns BasisViolation.
+    // Move to Rejected (Contested → Reject is legal: contested → reject → rejected).
+    let reject_result = update_memory(&registry, &id, "reject");
+    assert!(
+        is_success(&reject_result),
+        "reject must succeed on contested row; got: {reject_result:?}"
+    );
+    // Rejected → Reject is illegal; gate returns "memory is already rejected".
     let result = update_memory(&registry, &id, "reject");
-    let msg = content_text(&result);
-    assert!(is_tool_error(&result), "expected error from contested→reject; got: {result:?}");
-    assert!(
-        !msg.contains("BasisViolation"),
-        "no internal type names in gate rejection; got: {msg}"
-    );
-    assert!(
-        !msg.contains("IllegalTransition"),
-        "no internal type names in gate rejection; got: {msg}"
-    );
-    assert!(
-        msg.contains("does not allow this mutation") || msg.contains("cannot reject"),
-        "expected actionable phrase in gate rejection; got: {msg}"
-    );
+    assert_gate_rejection(&result, "already rejected");
 }
 
 /// Tombstoned row + any mutation → "memory has been permanently erased"
