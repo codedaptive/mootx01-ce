@@ -68,11 +68,20 @@ pub struct Dispatcher {
     /// `moot_vault_export` / `moot_vault_import` write here on completion;
     /// `moot_vault_job` reads by job ID. Bounded to 100 entries.
     vault_ledger: VaultJobLedger,
+    /// Build serial surfaced by `moot_estate_ping`. Computed once at
+    /// server startup via `crate::build_serial::derive()` and stored here
+    /// so the filesystem is not touched on every ping call.
+    pub(crate) build_serial: String,
 }
 
 impl Dispatcher {
-    /// Construct from an estate registry and server identity.
-    pub fn new(registry: EstateRegistry, name: &str, version: &str) -> Self {
+    /// Construct from an estate registry, server identity, and build serial.
+    ///
+    /// `build_serial` is produced by `crate::build_serial::derive()` at
+    /// server startup and carried unchanged for the lifetime of the server.
+    /// It is surfaced by `moot_estate_ping` so drivers can confirm they are
+    /// talking to the most recently compiled binary.
+    pub fn new(registry: EstateRegistry, name: &str, version: &str, build_serial: &str) -> Self {
         let tools = build_tool_list();
         Dispatcher {
             registry,
@@ -81,6 +90,7 @@ impl Dispatcher {
             tools,
             ledger: SurfacedRecallLedger::new(),
             vault_ledger: VaultJobLedger::new(),
+            build_serial: build_serial.to_owned(),
         }
     }
 
@@ -170,6 +180,7 @@ impl Dispatcher {
 
         crate::dispatch::dispatch_tool_with_vault_ledger(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger,
+            &self.build_serial,
         )
     }
 }

@@ -300,7 +300,12 @@ pub fn run_http_loop(
     // allows concurrent read-only routing (GET endpoints) to proceed without
     // waiting on active dispatches.
     let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version)
+        Dispatcher::new(
+            config.registry,
+            &config.server_name,
+            &config.server_version,
+            &config.build_serial,
+        )
     ));
 
     let listener = bind_loopback(port)?;

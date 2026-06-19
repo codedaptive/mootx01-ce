@@ -70,16 +70,31 @@ public struct ToolDispatcher: Sendable {
     /// are still correlated.
     let recallLedger: SurfacedRecallLedger
 
+    /// The build serial for this running executable, surfaced by
+    /// `moot_estate_ping` so drivers can confirm they are talking to the
+    /// most recently compiled build.
+    ///
+    /// Computed once at dispatcher construction and stored here — not
+    /// recomputed on every ping call.
+    public let buildSerial: String
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
     /// construction site uses exactly this initializer.
-    public init(kit: GeniusLocusKit, handle: EstateHandle) {
+    ///
+    /// `buildSerial` defaults to `Self.deriveBuildSerial()` so callers do
+    /// not need to know the derivation — pass an explicit value only in
+    /// tests or when `MOOTX01_BUILD_SERIAL` is already resolved at a
+    /// higher level.
+    public init(kit: GeniusLocusKit, handle: EstateHandle,
+                buildSerial: String = Self.deriveBuildSerial()) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
         self.jobRegistry = VaultJobRegistry()
         self.recallLedger = SurfacedRecallLedger()
+        self.buildSerial = buildSerial
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -94,23 +109,85 @@ public struct ToolDispatcher: Sendable {
         var next = estates
         next[additional.estateUUID] = additional
         return ToolDispatcher(kit: kit, handle: handle, estates: next,
-                              jobRegistry: jobRegistry, recallLedger: recallLedger)
+                              jobRegistry: jobRegistry, recallLedger: recallLedger,
+                              buildSerial: buildSerial)
     }
 
     /// Private designated initializer carrying an explicit estate map,
-    /// a shared job registry, and a shared recall ledger. Used by
-    /// `registering(_:)`; the public `init(kit:handle:)` is the only
-    /// construction path external callers use.
+    /// a shared job registry, a shared recall ledger, and the build
+    /// serial. Used by `registering(_:)`; the public `init(kit:handle:)`
+    /// is the only construction path external callers use.
     private init(
         kit: GeniusLocusKit, handle: EstateHandle,
         estates: [UUID: EstateHandle], jobRegistry: VaultJobRegistry,
-        recallLedger: SurfacedRecallLedger
+        recallLedger: SurfacedRecallLedger, buildSerial: String
     ) {
         self.kit = kit
         self.handle = handle
         self.estates = estates
         self.jobRegistry = jobRegistry
         self.recallLedger = recallLedger
+        self.buildSerial = buildSerial
+    }
+
+    // MARK: - Build serial derivation
+
+    /// Derive a build serial from the running executable.
+    ///
+    /// ## Override
+    ///
+    /// If `MOOTX01_BUILD_SERIAL` is set and non-empty, it is returned
+    /// verbatim. This lets test harnesses and CI inject a known serial
+    /// without recompiling.
+    ///
+    /// ## Derived value
+    ///
+    /// When the env override is absent, the serial is computed from the
+    /// executable file's modification time and byte count:
+    ///
+    ///   `<mtime-yyyyMMddHHmmss>/<8-hex-fingerprint>`
+    ///
+    /// The 8-hex fingerprint is the lower 32 bits of
+    /// `mtime_seconds XOR file_size`, formatted as zero-padded lowercase
+    /// hex. This is not a cryptographic hash — its purpose is purely
+    /// build-identity: the value changes on every relink because the
+    /// linker always updates the mtime and the output size varies with
+    /// code changes. No large file read is performed; only filesystem
+    /// metadata attributes are queried (O(1) syscall).
+    ///
+    /// On any error (unreadable exe path, missing attributes), falls
+    /// back to `"unknown"` so the server still starts cleanly.
+    public static func deriveBuildSerial() -> String {
+        // 1. Env override wins unconditionally.
+        let envOverride = ProcessInfo.processInfo.environment["MOOTX01_BUILD_SERIAL"] ?? ""
+        if !envOverride.isEmpty { return envOverride }
+
+        // 2. Derive from the running executable's mtime + size.
+        let exePath = CommandLine.arguments[0]
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: exePath)
+            guard let mtime = attrs[.modificationDate] as? Date,
+                  let sizeNS = attrs[.size] as? NSNumber else {
+                return "unknown"
+            }
+            let mtimeSecs = UInt64(max(0, mtime.timeIntervalSince1970))
+            let fileSize = UInt64(sizeNS.uint64Value)
+
+            // Compact mtime: yyyyMMddHHmmss in UTC (14 chars, sortable, human-readable).
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyyMMddHHmmss"
+            fmt.timeZone = TimeZone(identifier: "UTC")
+            let compact = fmt.string(from: mtime)
+
+            // 8-hex fingerprint: lower 32 bits of (mtime_seconds XOR file_size).
+            // Changes on every relink (mtime advances; size varies with code delta).
+            let fingerprint = UInt32(truncatingIfNeeded: mtimeSecs ^ fileSize)
+            let hex = String(format: "%08x", fingerprint)
+
+            return "\(compact)/\(hex)"
+        } catch {
+            return "unknown"
+        }
     }
 
     /// Resolve the estate a tool call targets from its `estateID`
@@ -1528,13 +1605,18 @@ extension ToolDispatcher {
     /// This tool resolves the handle — if it succeeds, the estate is live;
     /// if it throws `estateNotOpen`, the server needs restarting. No drawer
     /// scan is performed; this is a true lightweight ping.
+    ///
+    /// The response includes a build serial so a driver can confirm it is
+    /// talking to the most recently compiled binary (see `buildSerial` and
+    /// `ToolDispatcher.deriveBuildSerial()`). The serial changes on every
+    /// relink and can be overridden via `MOOTX01_BUILD_SERIAL`.
     func runEstatePing(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         // Resolving the handle is the entire check. If the estate were not
         // open, resolveHandle would throw estateNotOpen and dispatch would
         // surface it as isError:true before this line runs.
         return Self.textResult(
-            "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live"
+            "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
         )
     }
 

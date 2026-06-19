@@ -53,7 +53,7 @@ pub fn dispatch_tool(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new())
+    dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "")
 }
 
 /// Dispatch with an explicit vault-on flag. Used by tests that need to verify
@@ -68,30 +68,35 @@ pub fn dispatch_tool_with_vault_flag(
     ledger: &SurfacedRecallLedger,
     vault_on: bool,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger_and_flag(name, args, registry, ledger, &VaultJobLedger::new(), vault_on)
+    dispatch_tool_with_vault_ledger_and_flag(name, args, registry, ledger, &VaultJobLedger::new(), vault_on, "")
 }
 
-/// Internal dispatch entry point that accepts an explicit `vault_ledger`.
-/// Used by `Dispatcher::handle` (passes the owned ledger) and by
-/// `dispatch_tool` (passes a throwaway ledger for callers that don't need job
-/// tracking, such as test helpers that call individual tools in isolation).
+/// Internal dispatch entry point that accepts an explicit `vault_ledger` and
+/// build serial. Used by `Dispatcher::handle` (passes the owned ledger and
+/// serial) and by `dispatch_tool` (passes a throwaway ledger and empty serial
+/// for callers that don't need job tracking or build-serial surfacing, such as
+/// test helpers that call individual tools in isolation).
 pub fn dispatch_tool_with_vault_ledger(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
+    build_serial: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     dispatch_tool_with_vault_ledger_and_flag(
-        name, args, registry, ledger, vault_ledger, crate::tool_list::vault_enabled()
+        name, args, registry, ledger, vault_ledger, crate::tool_list::vault_enabled(),
+        build_serial,
     )
 }
 
-/// Inner dispatch that accepts an explicit vault-on flag. This is the single
-/// implementation all entry points delegate to. The flag controls whether
-/// vault tool calls are routed to the vault backend or rejected with a clear
-/// refusal. Callers that want env-var semantics pass `vault_enabled()`;
-/// callers that need deterministic testing pass `true`/`false` directly.
+/// Inner dispatch that accepts an explicit vault-on flag and build serial. This
+/// is the single implementation all entry points delegate to. The `vault_on`
+/// flag controls whether vault tool calls are routed to the vault backend or
+/// rejected with a clear refusal. Callers that want env-var semantics pass
+/// `vault_enabled()`; callers that need deterministic testing pass `true`/`false`
+/// directly. `build_serial` is forwarded to `interface_tools::dispatch` so
+/// `moot_estate_ping` can include it without touching the filesystem.
 fn dispatch_tool_with_vault_ledger_and_flag(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
@@ -99,6 +104,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
     vault_on: bool,
+    build_serial: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // 0. Teachme interception — intercepts BEFORE any runner fires.
     //    Returns guide text; estate is never touched.
@@ -122,8 +128,9 @@ fn dispatch_tool_with_vault_ledger_and_flag(
 
     // 2. Interface tools (Tier 1–5) — pass the session ledger so moot_memory_search
     //    can record surfaced ids and dereference verbs can note usage.
+    //    Also passes build_serial so moot_estate_ping can include it.
     if crate::interface_tools::is_interface_tool(name) {
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, build_serial)?;
         return Ok(inject_hint(name, args, result));
     }
 

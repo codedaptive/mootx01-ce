@@ -1209,11 +1209,16 @@ fn read_journal_on_empty_estate_returns_zero_entries() {
 
 #[test]
 fn estate_ping_returns_live_pong() {
+    // The convenience dispatch_tool passes "" as the build serial (it has
+    // no context to derive one). This test checks the stable shape:
+    // "pong: estate … is live — build <serial>" where the serial may be
+    // empty when called through the convenience path.
     let registry = EstateRegistry::new_inmemory();
     let result = dispatch_tool("moot_estate_ping", &args![], &registry, &SurfacedRecallLedger::new())
         .expect("estate_ping must not throw");
     assert!(is_success(&result));
     let text = content_text(&result);
+    // Stable shape assertions — these must hold regardless of the serial value.
     assert!(
         text.contains("pong"),
         "ping must return pong; got: {text}"
@@ -1221,6 +1226,38 @@ fn estate_ping_returns_live_pong() {
     assert!(
         text.contains("is live"),
         "pong must confirm estate is live; got: {text}"
+    );
+    // Build segment "— build " must be present in the output.
+    assert!(
+        text.contains("— build "),
+        "pong must include '— build <serial>'; got: {text}"
+    );
+}
+
+/// `MOOTX01_BUILD_SERIAL` override is threaded to estate_ping via the
+/// `dispatch_tool_with_vault_ledger` path. Because the override is an env var
+/// and Rust tests run in parallel, we use the lower-level
+/// `interface_tools::dispatch` directly with an explicit serial string to test
+/// the threading without touching process env.
+#[test]
+fn estate_ping_includes_injected_build_serial() {
+    use aria_mcp::interface_tools;
+    use std::collections::BTreeMap;
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let result = interface_tools::dispatch(
+        "moot_estate_ping",
+        &BTreeMap::new(),
+        &registry,
+        &ledger,
+        "TESTSERIAL-XYZ",
+    )
+    .expect("estate_ping must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains("build TESTSERIAL-XYZ"),
+        "estate_ping must echo the injected serial; got: {text}"
     );
 }
 
@@ -2579,6 +2616,7 @@ fn vault_export_returns_job_id_and_moot_vault_job_returns_completed_export_recor
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("moot_vault_export must not throw transport fault");
 
@@ -2609,6 +2647,7 @@ fn vault_export_returns_job_id_and_moot_vault_job_returns_completed_export_recor
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("moot_vault_job must not throw transport fault");
 
@@ -2660,6 +2699,7 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("export must succeed");
 
@@ -2669,6 +2709,7 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("moot_vault_import must not throw transport fault");
 
@@ -2695,6 +2736,7 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("moot_vault_job must not throw transport fault");
 
@@ -2746,6 +2788,7 @@ fn vault_job_unknown_id_returns_swift_identical_not_found_shape() {
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("moot_vault_job with unknown id must not throw transport fault");
 
