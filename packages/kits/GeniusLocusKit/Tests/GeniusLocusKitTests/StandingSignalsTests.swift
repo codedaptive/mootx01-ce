@@ -7,7 +7,7 @@ import PersistenceKitInMemory
 import SubstrateTypes
 @testable import GeniusLocusKit
 
-/// Firing tests for the six default standing signals — architecture
+/// Firing tests for the eight default standing signals — architecture
 /// spec §11.2 / mission GLK-05.
 ///
 /// Every test follows the same template:
@@ -314,18 +314,18 @@ struct StandingSignalsTests {
     // MARK: - Registration helper
 
     @Test
-    func registerDefaultStandingSignalsRegistersAllSeven() async throws {
+    func registerDefaultStandingSignalsRegistersAllEight() async throws {
         let (kit, handle) = try await openOneEstate()
         let emptyStore = try await makeEmptyVectorStore()
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        #expect(registered.count == 7, "all seven v1 signals register")
+        #expect(registered.count == 8, "all eight v1 signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 7)
+        #expect(reports.count == 8)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
@@ -359,6 +359,10 @@ struct StandingSignalsTests {
         // decision superseding cookbook §6.4's weekly cadence.
         #expect(TemporalCausalitySignal.defaultCadenceSeconds == 3_600,
             "hourly T fold per DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04")
+        // Added 2026-06-19 (Dg4): distillation sweep runs hourly per
+        // architecture spec §11.2, signal 8.
+        #expect(DistillationSignal.defaultCadenceSeconds == 3_600,
+            "distillation sweep runs hourly per architecture spec §11.2")
     }
 
     // MARK: - T-population end-to-end

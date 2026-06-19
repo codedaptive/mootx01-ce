@@ -57,4 +57,21 @@ pub mod viz_graph_signals;
 // LsaProvider for LSA distributional embeddings. No platform SVD.
 pub mod svd;
 
+// Delta feature extraction per DISTILLATION_DESIGN.md §2.1.
+// Rust port of DeltaFeatureExtractor.swift (Ds1). Parity to be verified in Dp1.
+pub mod delta_feature_extractor;
+
+// Type-specific exponential decay weighting per DISTILLATION_DESIGN.md §2.1.
+// Rust port of TypedDecayWeighting.swift (Ds2). Parity to be verified in Dp1.
+pub mod typed_decay_weighting;
+
+// Core distillation scoring per DISTILLATION_DESIGN.md §2.1 and DISTILLATION_MATH_SSA.md §2–6.
+// Rust port of DistillationScorer.swift (Ds3). Parity to be verified in Dp1.
+pub mod distillation_scorer;
+
+// Five-stage cold-path distillation algorithm per DISTILLATION_DESIGN.md §2.1,
+// DISTILLATION_MATH_SSA.md §2–6, and DISTILLATION_MATH_DIFFUSION.md.
+// Rust port of DistillationPipeline.swift (Ds4). Parity to be verified in Dp1.
+pub mod distillation_pipeline;
+
 pub const VERSION: &str = "1.0.0-skeleton";

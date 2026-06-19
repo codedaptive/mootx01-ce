@@ -8,7 +8,8 @@
 //! development-time scaffolding for a store that never shipped, collapsed into
 //! the v1 CREATE. v2 adds the nullable `.json` `ext` forward-compat slot to the
 //! `keys` table (ADR-012), completing the one-`ext`-column-per-persistent-entity
-//! convention; 1.0 writes NULL and never reads it.
+//! convention; 1.0 writes NULL and never reads it. v3 adds the `memory_clusters`
+//! distillation staging table (DG1).
 //!
 //! ## Bitmap reservation map (low bit = 0)
 //!
@@ -50,9 +51,10 @@ pub const KIT_ID: &str = "LocusKit";
 /// Current schema version. v2 adds the nullable `.json` `ext`
 /// forward-compatibility slot to the `keys` table (ADR-012), bringing
 /// every persistent entity table to the one-`ext`-column convention.
-/// There is no migration ladder behind v2 — no estate data has shipped,
-/// so the bump re-declares the full column set fresh.
-pub const SCHEMA_VERSION: i32 = 2;
+/// v3 adds the `memory_clusters` distillation staging table (DG1).
+/// There is no migration ladder — no estate data has shipped, so each
+/// bump re-declares the full column set fresh.
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -78,6 +80,7 @@ pub fn schema() -> SchemaDeclaration {
             container_fingerprints_table(),
             recall_trace_table(),
             keys_table(),
+            memory_clusters_table(),
         ],
         indices: indices(),
         migrations: Vec::new(),
@@ -662,6 +665,44 @@ pub fn keys_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// memory_clusters (distillation staging)
+// ---------------------------------------------------------------------------
+
+/// Distillation staging table (DG1; DISTILLATION_DESIGN.md §3). Tracks the
+/// lifecycle of a drawer cluster from grouping through SNR computation to
+/// factoid production. A cluster advances open → held | distilling →
+/// distilled | failed. This is a coordination/staging structure, not a
+/// retrieval table: distilled factoids are stored as ordinary drawers in
+/// room "_distilled" so the existing `recall` verb finds them without
+/// changes. Column-for-column mirror of `GeniusLocusKitSchema.glkTables`
+/// in Swift.
+///
+/// Column note: `id` uses `ColumnDeclaration::uuid` (maps to TEXT in SQLite,
+/// which PersistenceKit stores as the canonical string form). `member_ids` is
+/// JSON so it round-trips as the string form of a JSON array. `filed_at` and
+/// `updated_at` are TEXT ISO8601 per the fleet date-storage rule (Timestamp type).
+fn memory_clusters_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "memory_clusters".to_string(),
+        columns: vec![
+            ColumnDeclaration::uuid("id"),
+            ColumnDeclaration::text("status"),                  // open|held|distilling|distilled|failed
+            ColumnDeclaration::float("snr").nullable(),
+            ColumnDeclaration::json("member_ids"),              // JSON array of drawer UUIDs
+            ColumnDeclaration::int("member_count"),
+            ColumnDeclaration::text("factoid_id").nullable(),   // UUID of produced "_distilled" drawer
+            ColumnDeclaration::text("held_reason").nullable(),
+            ColumnDeclaration::timestamp("filed_at"),
+            ColumnDeclaration::timestamp("updated_at"),
+        ],
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // indices
 // ---------------------------------------------------------------------------
 
@@ -821,6 +862,18 @@ fn indices() -> Vec<IndexDeclaration> {
             "recall_trace",
             vec!["recalledAt".to_string()],
         ),
+        // memory_clusters — query by lifecycle status (daemon sweep) and
+        // by factoid_id (provenance lookup from produced drawer)
+        IndexDeclaration::new(
+            "idx_memory_clusters_status",
+            "memory_clusters",
+            vec!["status".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_memory_clusters_factoid",
+            "memory_clusters",
+            vec!["factoid_id".to_string()],
+        ),
     ]
 }
 
@@ -838,18 +891,18 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v2 of the schema, no migrations. Mirrors Swift's
-    /// `LocusKitSchema.version = 2` (ADR-012: `keys.ext` added).
+    /// v3 of the schema, no migrations. v2 added `keys.ext` (ADR-012);
+    /// v3 adds `memory_clusters` distillation staging table (DG1).
     #[test]
-    fn schema_version_is_two() {
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_is_three() {
+        assert_eq!(SCHEMA_VERSION, 3);
         assert!(schema().migrations.is_empty());
     }
 
     /// Tables in the declared order, matching the Swift declaration.
     /// `proposals` follows `kg_facts` (both noun tables). `keys` is the
-    /// ENC-01 encryption-key registry — last in both the Swift and Rust
-    /// declarations.
+    /// ENC-01 encryption-key registry. `memory_clusters` is the DG1
+    /// distillation staging table — last in both Swift and Rust.
     #[test]
     fn table_count_and_order() {
         let names: Vec<String> = schema().tables.iter().map(|t| t.name.clone()).collect();
@@ -869,6 +922,7 @@ mod tests {
                 "container_fingerprints",
                 "recall_trace",
                 "keys",
+                "memory_clusters",
             ]
         );
     }
@@ -1109,7 +1163,8 @@ mod tests {
 
     /// Index set carries every name from the Swift declaration in
     /// declaration order. The bit-range functional indices reference
-    /// the generated columns by name.
+    /// the generated columns by name. DG1 appended
+    /// `idx_memory_clusters_status` and `idx_memory_clusters_factoid`.
     #[test]
     fn index_names_match_swift_order() {
         let names: Vec<String> = indices().iter().map(|i| i.name.clone()).collect();
@@ -1147,6 +1202,8 @@ mod tests {
                 "idx_source_catalog_handle",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
+                "idx_memory_clusters_status",
+                "idx_memory_clusters_factoid",
             ]
         );
     }
@@ -1163,5 +1220,109 @@ mod tests {
             .find(|g| g.name == "g_provenance_confirmation")
             .unwrap();
         assert_eq!(conf.expression.render_sql(), "((\"provenance\" >> 4) & 7)");
+    }
+
+    /// memory_clusters column names and key mirror the Swift declaration
+    /// (GeniusLocusKitSchema.glkTables) and DISTILLATION_DESIGN.md §3.
+    /// No generated columns — flat staging table, no bitmap extracts.
+    #[test]
+    fn memory_clusters_column_names() {
+        let s = schema();
+        let mc = s
+            .tables
+            .iter()
+            .find(|t| t.name == "memory_clusters")
+            .expect("memory_clusters table must be present");
+        let names: Vec<&str> = mc.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "id",
+                "status",
+                "snr",
+                "member_ids",
+                "member_count",
+                "factoid_id",
+                "held_reason",
+                "filed_at",
+                "updated_at",
+            ]
+        );
+        assert_eq!(mc.primary_key, vec!["id".to_string()]);
+        assert!(
+            mc.generated_columns.is_empty(),
+            "memory_clusters must have no generated columns"
+        );
+        assert!(!mc.append_only, "memory_clusters is not append-only");
+    }
+
+    /// Both memory_clusters indices are present in the index set with
+    /// the correct table, columns, and unique constraints.
+    #[test]
+    fn memory_clusters_indices_present() {
+        let idxs = indices();
+        let status_idx = idxs
+            .iter()
+            .find(|i| i.name == "idx_memory_clusters_status")
+            .expect("idx_memory_clusters_status must be present");
+        assert_eq!(status_idx.table, "memory_clusters");
+        assert_eq!(status_idx.columns, vec!["status".to_string()]);
+        assert!(!status_idx.unique);
+
+        let factoid_idx = idxs
+            .iter()
+            .find(|i| i.name == "idx_memory_clusters_factoid")
+            .expect("idx_memory_clusters_factoid must be present");
+        assert_eq!(factoid_idx.table, "memory_clusters");
+        assert_eq!(factoid_idx.columns, vec!["factoid_id".to_string()]);
+        assert!(!factoid_idx.unique);
+    }
+
+    /// Open an in-memory estate with the full schema and insert a minimal
+    /// memory_clusters row (status="open", member_ids="[]", member_count=0).
+    /// Query back by status and confirm the row is returned.
+    #[test]
+    fn memory_clusters_insert_and_query_by_status() {
+        use persistence_kit::inmemory::InMemoryStorage;
+        use persistence_kit::predicate::StoragePredicate;
+        use persistence_kit::storage::Storage;
+        use persistence_kit::types::{Column, TypedValue};
+        use uuid::Uuid;
+
+        let storage = InMemoryStorage::with_estate(Uuid::new_v4());
+        storage.open(&schema()).expect("schema open must succeed");
+
+        let cluster_id = Uuid::new_v4();
+        // filed_at / updated_at as ISO-8601 TEXT strings (fleet date-storage rule:
+        // TEXT ISO8601 — never REAL / Unix epoch).
+        let now_text = "2026-06-19T00:00:00Z";
+
+        let mut values: std::collections::BTreeMap<String, TypedValue> =
+            std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(cluster_id));
+        values.insert("status".into(), TypedValue::Text("open".into()));
+        values.insert("member_ids".into(), TypedValue::Json(b"[]".to_vec()));
+        values.insert("member_count".into(), TypedValue::Int(0));
+        values.insert("filed_at".into(), TypedValue::Text(now_text.into()));
+        values.insert("updated_at".into(), TypedValue::Text(now_text.into()));
+
+        let row_store = storage.row_store();
+        row_store
+            .insert("memory_clusters", values)
+            .expect("insert must succeed");
+
+        let rows = row_store
+            .query(
+                "memory_clusters",
+                Some(&StoragePredicate::Eq(
+                    Column::new("memory_clusters", "status"),
+                    TypedValue::Text("open".into()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "exactly one row returned for status='open'");
     }
 }

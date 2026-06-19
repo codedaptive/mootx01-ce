@@ -265,6 +265,42 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::ExploratoryRecall],
         },
+        // Distillation-family recipes (Dc1–Dc3, registered Dc4). Descriptor
+        // metadata registered here; full Rust implementations ship in a future
+        // mission. Description strings match Swift byte-for-byte.
+        RecipeDescriptor {
+            name: "consolidate".into(),
+            version: "1.0.0".into(),
+            description:
+                "Compact working memory by distilling open clusters into factoids. \
+                Calls the GLK distillation sweep, which processes all ready clusters \
+                (member_count \u{2265} 3, status = open) and persists each factoid as a \
+                drawer in room `_distilled`."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "distilled_recall".into(),
+            version: "1.0.0".into(),
+            description:
+                "Dense recall: search the distilled memory tier and return factoid \
+                prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint \
+                Hamming NN \u{2014} no embedding model inference, no full corpus scan."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "expand_memory".into(),
+            version: "1.0.0".into(),
+            description:
+                "Expand a distilled factoid to its source memories: follows the \
+                _distilled_from tunnel graph and returns full episodic content \
+                from the M memories that produced the factoid. Use when the user \
+                needs the full explanation behind a dense factoid. The AI synthesises \
+                the sources into a user-facing narrative."
+                    .into(),
+            required_capabilities: vec![],
+        },
     ]
 }
 
@@ -293,7 +329,9 @@ mod tests {
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
-        // plus the exploratory-recall recipe (recall_exploratory) = 26 total.
+        // plus the exploratory-recall recipe (recall_exploratory)
+        // plus the 3 distillation-family recipes (Dc1–Dc3, registered Dc4)
+        // = 29 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -305,9 +343,12 @@ mod tests {
                 "bias",
                 "cohesion",
                 "complexity",
+                "consolidate",
                 "constellation",
+                "distilled_recall",
                 "drift",
                 "estate_divergence",
+                "expand_memory",
                 "formal_concepts",
                 "free_association",
                 "grounded_synthesis",
@@ -464,5 +505,53 @@ mod tests {
         // Wire form uses the serde rename (Swift rawValue).
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.contains("\"exploratoryRecall\""));
+    }
+
+    #[test]
+    fn consolidate_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift Consolidate recipe
+        // metadata (`Consolidate.swift`).
+        let d = recipe_descriptor("consolidate").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Compact working memory by distilling open clusters into factoids. \
+            Calls the GLK distillation sweep, which processes all ready clusters \
+            (member_count \u{2265} 3, status = open) and persists each factoid as a \
+            drawer in room `_distilled`."
+        );
+        assert!(d.required_capabilities.is_empty());
+    }
+
+    #[test]
+    fn distilled_recall_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift DistilledRecall recipe
+        // metadata (`DistilledRecall.swift`).
+        let d = recipe_descriptor("distilled_recall").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Dense recall: search the distilled memory tier and return factoid \
+            prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint \
+            Hamming NN \u{2014} no embedding model inference, no full corpus scan."
+        );
+        assert!(d.required_capabilities.is_empty());
+    }
+
+    #[test]
+    fn expand_memory_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift ExpandMemory recipe
+        // metadata (`ExpandMemory.swift`).
+        let d = recipe_descriptor("expand_memory").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Expand a distilled factoid to its source memories: follows the \
+            _distilled_from tunnel graph and returns full episodic content \
+            from the M memories that produced the factoid. Use when the user \
+            needs the full explanation behind a dense factoid. The AI synthesises \
+            the sources into a user-facing narrative."
+        );
+        assert!(d.required_capabilities.is_empty());
     }
 }

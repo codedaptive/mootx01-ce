@@ -76,10 +76,6 @@ let package = Package(
                 "LocusKit",
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-                // SQLCipher: several LocusKit tests open the raw estate DB via the
-                // C API, so they link the same vendored engine as the SQLite
-                // backend (not system SQLite3) — one sqlite per binary.
-                .product(name: "SQLCipher", package: "PersistenceKit"),
                 "IntellectusLib",
             ],
             path: "Tests/LocusKitTests"

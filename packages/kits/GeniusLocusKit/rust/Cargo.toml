@@ -71,6 +71,14 @@ intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # dependency on genius-locus-kit.
 # Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
 convergence-kit = { path = "../../ConvergenceKit/rust" }
+# EngramLib: promoted from dev-dep to production dep by DG3 (findNearestDistilled).
+# The `find_nearest_distilled` function takes `&Engram` in its public signature —
+# the probe is a structural fingerprint computed by DistillationPipeline — so
+# Engram must be nameable in production code. Engram was already a transitive dep
+# via vectorkit → engram-lib; this entry makes the dependency explicit per the
+# production signature. Layering: genius-locus-kit (composition) → engram-lib
+# (substrate primitive) does NOT invert. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+engram-lib = { path = "../../../libs/EngramLib/rust" }
 
 [features]
 # test-seams: exposes EstateCoordinator::inject_vector_hamming_error and
@@ -138,4 +146,10 @@ required-features = ["test-seams"]
 
 [[test]]
 name = "coordinator_dispatcher_tests"
+required-features = ["test-seams"]
+
+# distillation_signal_tests uses the SchedulerNoopDispatcher stub, which is
+# gated behind test-seams (same pattern as standing_signals_parity above).
+[[test]]
+name = "distillation_signal_tests"
 required-features = ["test-seams"]

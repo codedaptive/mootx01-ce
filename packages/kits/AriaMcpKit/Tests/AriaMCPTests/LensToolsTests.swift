@@ -76,11 +76,16 @@ struct LensToolsTests {
         // that are NOT lens tools: grounded_synthesis → moot_synthesize;
         // migration_benchmark → moot_run_migration; shaped_recall →
         // moot_recall_shaped; recall_exploratory is a library-only recall recipe
-        // (ExploratoryRecall) with no MCP tool. All lens tools carry the
-        // moot_lens_ prefix.
+        // (ExploratoryRecall) with no MCP tool. The three distillation-family
+        // recipes (consolidate, distilled_recall, expand_memory) added by Dc4
+        // are dispatched as recipe tools (moot_ prefix) not lens tools
+        // (moot_lens_ prefix). All lens tools carry the moot_lens_ prefix.
         let nonLensRecipes: Set<String> = [
             "grounded_synthesis", "migration_benchmark", "shaped_recall",
             "recall_exploratory",
+            // Distillation-family recipes registered by Dc4: dispatched as
+            // recipe tools by RecipeTools, not as lens tools by LensTools.
+            "consolidate", "distilled_recall", "expand_memory",
         ]
         let lensToolCount = RecipeCatalog.names
             .filter { !nonLensRecipes.contains($0) }

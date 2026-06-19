@@ -24,7 +24,7 @@
 
 import Foundation
 import Testing
-import SQLCipher
+import SQLite3
 @testable import LocusKit
 import PersistenceKit
 import SubstrateTypes

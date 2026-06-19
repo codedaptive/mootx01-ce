@@ -166,6 +166,12 @@ public enum RecipeCatalog {
         // over a wing's tunnel graph (cookbook § 19.1). Consumes
         // SubstrateML.RandomWalks.walkWithRestart.
         RecipeDescriptor(ExploratoryRecall()),
+        // Distillation-family recipes (Dc1–Dc3). Registered here in one step
+        // rather than one per mission to avoid three concurrent stream edits
+        // to this file (Dc4 consolidation strategy).
+        RecipeDescriptor(Consolidate()),
+        RecipeDescriptor(DistilledRecall()),
+        RecipeDescriptor(ExpandMemory()),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

@@ -2,11 +2,11 @@ import Foundation
 import LocusKit
 import VectorKit
 
-/// Registration helper for the seven v1 standing signals — architecture
+/// Registration helper for the eight v1 standing signals — architecture
 /// spec §11.2.
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// seven default signal specs against the addressed estate's scheduler
+/// eight default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -21,9 +21,14 @@ import VectorKit
 /// weekly cadence in cookbook §6.4. It is registered using
 /// `defaultSpec()` (diagnostic no-op); production callers wire a live
 /// fold closure via `TemporalCausalitySignal.spec(foldCycle:)`.
+///
+/// Signal 8 (DistillationSignal) was wired in DG5. Production callers
+/// supply a `distillationCycle` closure that wraps
+/// `kit.runDistillationSweep(handle:distillFn:now:)` with the estate
+/// handle and the NeuronKit-backed `distillFn` closure.
 public extension GeniusLocusKit {
 
-    /// Names of the seven v1 standing signals, in the order they are
+    /// Names of the eight v1 standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -36,6 +41,7 @@ public extension GeniusLocusKit {
             ByReferenceValiditySignal.signalName,
             EndOfDayTournamentSignal.signalName,
             TemporalCausalitySignal.signalName,
+            DistillationSignal.signalName,
         ]
     }
 
@@ -54,6 +60,12 @@ public extension GeniusLocusKit {
     ///     `daemon.triggerDreamingCycle(now:).proposalsEmitted` here.
     ///     Defaults to a no-op that returns zero proposals — correct for
     ///     test registration where no live daemon is available.
+    ///   - distillationCycle: async closure forwarded to
+    ///     `DistillationSignal.spec(distillationCycle:)`. The caller wraps
+    ///     `kit.runDistillationSweep(handle:distillFn:now:)` with the estate
+    ///     handle and a NeuronKit-backed `distillFn` closure here.
+    ///     Defaults to a no-op that returns zero factoids — correct for
+    ///     test registration where no live distillation engine is available.
     ///   - modelID: the embedding model whose stored vectors are scanned
     ///     by the vector-similarity signal. Default `"minilm-v6"`.
     ///   - now: the deterministic clock — flowed through to the
@@ -67,6 +79,7 @@ public extension GeniusLocusKit {
         in handle: EstateHandle,
         vectorStore: VectorStore,
         dreamingCycle: @escaping @Sendable (Date) async throws -> [ProposeFrame] = { _ in [] },
+        distillationCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         modelID: String = "minilm-v6",
         now: Date
     ) async throws -> [String: SignalID] {
@@ -85,6 +98,11 @@ public extension GeniusLocusKit {
             // context (audit log, mutable MatrixTier) without breaking the
             // method's generic signature.
             TemporalCausalitySignal.defaultSpec(),
+            // DistillationSignal wired with the injected distillationCycle closure
+            // per architecture spec §11.2, signal 8 (DG5). The caller supplies
+            // a closure wrapping kit.runDistillationSweep; the default no-op
+            // (returns 0) is appropriate for tests without a live sweep engine.
+            DistillationSignal.spec(distillationCycle: distillationCycle),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {

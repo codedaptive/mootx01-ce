@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 @testable import LocusKit
-import SQLCipher
+import SQLite3
 
 /// Persistence and migration coverage for the LOCI_V035_07B diary
 /// `operationalBitmap` column per spec § 5.6.

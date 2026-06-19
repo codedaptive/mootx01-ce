@@ -20,7 +20,9 @@ struct RecipeCatalogTests {
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence,
         // complexity) plus the steerable-fusion recipe (shaped_recall)
-        // plus the exploratory-recall recipe (recall_exploratory) = 26 total.
+        // plus the exploratory-recall recipe (recall_exploratory)
+        // plus the 3 distillation-family recipes (Dc1–Dc3, registered Dc4)
+        // = 29 total.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
             "apriori_rules",
@@ -28,9 +30,12 @@ struct RecipeCatalogTests {
             "bias",
             "cohesion",
             "complexity",
+            "consolidate",
             "constellation",
+            "distilled_recall",
             "drift",
             "estate_divergence",
+            "expand_memory",
             "formal_concepts",
             "free_association",
             "grounded_synthesis",
@@ -89,11 +94,15 @@ struct RecipeCatalogTests {
         #expect(descriptor.requiredCapabilities == [.deriveBranch, .benchmark, .promoteBranch])
     }
 
-    @Test("catalog names match catalog.rs declaration order — 25 entries")
+    @Test("catalog names match catalog.rs declaration order — 29 entries")
     func catalogNamesMatchRustDeclarationOrder() {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
-        // Any reordering on either side, or a recipe added on one side but not
-        // the other, breaks this test — that is its purpose.
+        // All 29 entries are registered in both Swift and Rust. The three
+        // distillation-family entries (consolidate, distilled_recall,
+        // expand_memory) carry descriptor metadata in Rust; their full Rust
+        // implementations ship in a future mission. Any reordering on either
+        // side, or a Swift recipe absent from this list, breaks this test —
+        // that is its purpose.
         #expect(RecipeCatalog.names == [
             "grounded_synthesis",
             "migration_benchmark",
@@ -121,6 +130,9 @@ struct RecipeCatalogTests {
             "complexity",
             "shaped_recall",
             "recall_exploratory",
+            "consolidate",
+            "distilled_recall",
+            "expand_memory",
         ])
     }
 

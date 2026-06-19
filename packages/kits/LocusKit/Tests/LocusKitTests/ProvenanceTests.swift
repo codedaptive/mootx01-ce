@@ -1,6 +1,6 @@
 import Foundation
 import SubstrateTypes
-import SQLCipher
+import SQLite3
 import Testing
 @testable import LocusKit
 // ─────────────────────────────────────────────────────────────────

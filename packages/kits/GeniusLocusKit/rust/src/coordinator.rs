@@ -62,7 +62,8 @@ use crate::telemetry::metric_names;
 use crate::glk_emit;
 
 use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
-use vectorkit::vector_store::VectorStore;
+use engram_lib::Engram;
+use vectorkit::vector_store::{VectorMatch, VectorStore};
 use persistence_kit::storage::Storage;
 use persistence_kit::inmemory::InMemoryStorage;
 use locus_kit::diary_entry::DiaryEntry;
@@ -1184,6 +1185,56 @@ impl EstateCoordinator {
             .collect();
 
         Ok([stored_tunnels, synthetic].concat())
+    }
+
+    // MARK: - find_nearest_distilled
+
+    /// Find the nearest distilled-tier vectors to `engram` in the estate
+    /// addressed by `handle`. Parity of the Swift
+    /// `findNearestDistilled(_:engram:limit:)`.
+    ///
+    /// Thin wrapper over `VectorStore::find_nearest` scoped to the
+    /// `"distillation-features-v1"` model lane. Called by the DistilledRecall
+    /// recipe for no-inference Hamming NN on the distilled tier — the probe
+    /// Engram is produced by `DistillationPipeline::query_fingerprint`, so no
+    /// embedding model call is needed at search time.
+    ///
+    /// `limit = 0` returns an empty `Vec` without error (the inner
+    /// `find_nearest` guards `k > 0` and returns early).
+    ///
+    /// Returns `VerbDispatchError::EstateNotOpen` for a stale handle;
+    /// `VerbDispatchError::Verb(VerbError::NotSupportedByEstate)` when no
+    /// VectorStore is registered for the estate.
+    pub fn find_nearest_distilled(
+        &self,
+        handle: &EstateHandle,
+        engram: &Engram,
+        limit: usize,
+    ) -> Result<Vec<VectorMatch>, VerbDispatchError> {
+        // Validate that the handle is open before accessing the VectorStore.
+        // Returns VerbDispatchError::EstateNotOpen for stale handles —
+        // parity of the Swift surface's `estate(for:)` guard.
+        self.estate_for_verb(handle)?;
+        let store = self.vector_store_for(handle).ok_or_else(|| {
+            // Estate is open but no VectorStore is registered. The distillation
+            // tier requires a VectorStore; raise NotSupportedByEstate so callers
+            // receive a typed, structured error — parity of the Swift surface.
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "find_nearest_distilled".to_string(),
+            })
+        })?;
+        // Dispatch to the distillation lane. model_id is the fixed string for
+        // the structural fingerprint lane — "distillation-features-v1" — not
+        // the estate's semantic embedding model. limit = 0 returns an empty
+        // Vec without error (VectorStore::find_nearest guards k > 0 internally).
+        store
+            .find_nearest(engram, "distillation-features-v1", limit)
+            .map_err(|e| {
+                VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                    verb: "find_nearest_distilled".to_string(),
+                    reason: format!("{e:?}"),
+                })
+            })
     }
 
     // MARK: - mutate

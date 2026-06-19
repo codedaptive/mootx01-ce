@@ -132,7 +132,7 @@ pub fn composite_schema() -> SchemaDeclaration {
 
     SchemaDeclaration {
         kit_id: "GeniusLocusKit".to_string(),
-        version: composite_version, // LocusKit v2 + VectorKit v3 + CorpusKit v2 = 7
+        version: composite_version, // LocusKit v3 + VectorKit v3 + CorpusKit v2 = 8
         tables,
         indices,
         // No cross-kit migrations at the composite level — each component kit
@@ -148,11 +148,10 @@ mod composite_version_tests {
     use super::*;
 
     /// The composite version is the SUM of the three GLK-composed component
-    /// versions. After the ADR-012 `ext` pre-provisioning that sum is
-    /// LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7. This guards
-    /// the coupling the global-MAX replication gate depends on: a drift between
-    /// composite and components would let a fresh estate open at a version the
-    /// gate rejects. Mirrors Swift `CompositeSchemaVersionTests`.
+    /// versions. LocusKit v3 + VectorKit v3 + CorpusKit/BundleStore v2 = 8.
+    /// This guards the coupling the global-MAX replication gate depends on:
+    /// a drift between composite and components would let a fresh estate open
+    /// at a version the gate rejects. Mirrors Swift `CompositeSchemaVersionTests`.
     #[test]
     fn composite_version_equals_component_sum() {
         let lk = locus_kit::schema::SCHEMA_VERSION;
@@ -160,7 +159,7 @@ mod composite_version_tests {
         let ck = corpus_kit::BundleStore::schema_declaration().version;
         let s = composite_schema();
         assert_eq!(s.version, lk + vk + ck);
-        assert_eq!(s.version, 7);
+        assert_eq!(s.version, 8);
         assert_eq!(s.kit_id, "GeniusLocusKit");
     }
 }

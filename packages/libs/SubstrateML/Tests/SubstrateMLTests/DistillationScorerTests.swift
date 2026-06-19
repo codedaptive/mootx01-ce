@@ -1,0 +1,220 @@
+// DistillationScorerTests.swift
+//
+// Tests for DistillationScorer: majority threshold, SNR gate, PMI graph,
+// connected components, dominant component selection, and confidence scoring.
+//
+// Wave-1 isolation note: ExtractedFeature depends on DistillationFeatureType
+// (TypedDecayWeighting.swift, Ds2). These tests compile at wave merge.
+
+import Testing
+@testable import SubstrateML
+
+struct DistillationScorerTests {
+
+    // MARK: - binaryEntropy
+
+    @Test func binaryEntropy_zero_returnsZero() {
+        #expect(DistillationScorer.binaryEntropy(0) == 0)
+    }
+
+    @Test func binaryEntropy_one_returnsZero() {
+        #expect(DistillationScorer.binaryEntropy(1) == 0)
+    }
+
+    @Test func binaryEntropy_half_returnsOne() {
+        // H(0.5) = -(0.5 · log₂(0.5)) × 2 = 1.0
+        #expect(abs(DistillationScorer.binaryEntropy(0.5) - 1.0) < 1e-5)
+    }
+
+    // MARK: - majorityThreshold
+
+    @Test func majorityThreshold_M3() {
+        // ⌈(3+1)/2⌉/3 = 2/3 ≈ 0.667
+        let τ = DistillationScorer.majorityThreshold(M: 3)
+        #expect(abs(τ - Float32(2) / Float32(3)) < 1e-5)
+    }
+
+    @Test func majorityThreshold_M4() {
+        // ⌈(4+1)/2⌉/4 = ⌈2.5⌉/4 = 3/4 = 0.750 per §3.2 table
+        let τ = DistillationScorer.majorityThreshold(M: 4)
+        #expect(abs(τ - 0.75) < 1e-5)
+    }
+
+    @Test func majorityThreshold_M5() {
+        // ⌈(5+1)/2⌉/5 = 3/5 = 0.600
+        let τ = DistillationScorer.majorityThreshold(M: 5)
+        #expect(abs(τ - 0.6) < 1e-5)
+    }
+
+    // MARK: - applyMajorityThreshold
+
+    @Test func applyMajorityThreshold_splitsCorrectly() {
+        let M = 5
+        let τ = DistillationScorer.majorityThreshold(M: M)  // 0.6
+        let features = [
+            ExtractedFeature(type: .entity,   value: "A", docFrequency: 0.8),  // passes
+            ExtractedFeature(type: .relation, value: "B", docFrequency: 0.4),  // fails
+            ExtractedFeature(type: .temporal, value: "C", docFrequency: 0.6),  // passes (== τ)
+        ]
+        let (passing, failing) = DistillationScorer.applyMajorityThreshold(
+            features: features, M: M
+        )
+        #expect(passing.count == 2)
+        #expect(failing.count == 1)
+        #expect(passing.allSatisfy { $0.docFrequency >= τ })
+        #expect(failing.allSatisfy { $0.docFrequency < τ })
+    }
+
+    // MARK: - computeSNR
+
+    @Test func computeSNR_pureStructuralCluster_readyToDistill() {
+        // M=3, all 3 features appear in all 3 memories (df=1.0)
+        // σ(1.0) = 1.0 × (1 − H(1.0)) = 1.0; structuralSignal = 3.0; noise ≈ 0
+        let features = [
+            ExtractedFeature(type: .entity,   value: "A", docFrequency: 1.0),
+            ExtractedFeature(type: .entity,   value: "B", docFrequency: 1.0),
+            ExtractedFeature(type: .relation, value: "C", docFrequency: 1.0),
+        ]
+        let snr = DistillationScorer.computeSNR(features: features, M: 3)
+        #expect(snr.readyToDistill == true)
+        #expect(snr.snr >= 2.0)
+        #expect(snr.structuralSignal > 0)
+        #expect(snr.episodicNoise == 0)
+    }
+
+    @Test func computeSNR_allNoiseCluster_notReadyToDistill() {
+        // M=5, threshold=0.6; all features at df=0.2 (each in 1 of 5 memories)
+        // No structural signal; all episodic
+        let features = [
+            ExtractedFeature(type: .entity,    value: "A", docFrequency: 0.2),
+            ExtractedFeature(type: .temporal,  value: "B", docFrequency: 0.2),
+            ExtractedFeature(type: .numerical, value: "C", docFrequency: 0.2),
+        ]
+        let snr = DistillationScorer.computeSNR(features: features, M: 5)
+        #expect(snr.readyToDistill == false)
+        #expect(snr.snr < 2.0)
+        #expect(snr.structuralSignal == 0)
+        #expect(snr.episodicNoise > 0)
+    }
+
+    // MARK: - computeStructuralScores
+
+    @Test func computeStructuralScores_setsScoreOnFeatures() {
+        // σ(1.0) = 1.0 × (1 − H(1.0)) = 1.0 × 1.0 = 1.0
+        var features = [ExtractedFeature(type: .entity, value: "A", docFrequency: 1.0)]
+        DistillationScorer.computeStructuralScores(features: &features)
+        #expect(abs(features[0].structuralScore - 1.0) < 1e-5)
+    }
+
+    @Test func computeStructuralScores_halfDf_lowScore() {
+        // σ(0.5) = 0.5 × (1 − H(0.5)) = 0.5 × (1 − 1.0) = 0.0
+        var features = [ExtractedFeature(type: .entity, value: "A", docFrequency: 0.5)]
+        DistillationScorer.computeStructuralScores(features: &features)
+        #expect(abs(features[0].structuralScore - 0.0) < 1e-5)
+    }
+
+    // MARK: - buildPMIGraph
+
+    @Test func buildPMIGraph_edgeExistsWhenCoOccurrenceAboveChance() {
+        // M=4; features A and B both appear in memories {0,1,2}
+        // p(A) = p(B) = 3/4, p(A∧B) = 3/4
+        // PMI = log₂(0.75 / (0.75 × 0.75)) = log₂(4/3) > 0 → edge exists
+        let features = [
+            ExtractedFeature(type: .entity, value: "A", docFrequency: 0.75),
+            ExtractedFeature(type: .entity, value: "B", docFrequency: 0.75),
+        ]
+        let incidence: [[Bool]] = [
+            [true,  true ],
+            [true,  true ],
+            [true,  true ],
+            [false, false],
+        ]
+        let graph = DistillationScorer.buildPMIGraph(
+            thresholdFeatures: features, incidenceMatrix: incidence, M: 4
+        )
+        #expect(graph.pmiMatrix[0][1] > 0)
+        #expect(graph.components.count == 1)
+    }
+
+    @Test func buildPMIGraph_noEdgeWhenIndependent() {
+        // M=4; feature A in memories {0,1}, feature B in memories {2,3}
+        // p(A∧B) = 0 → PMI = -infinity → no edge
+        let features = [
+            ExtractedFeature(type: .entity, value: "A", docFrequency: 0.5),
+            ExtractedFeature(type: .entity, value: "B", docFrequency: 0.5),
+        ]
+        let incidence: [[Bool]] = [
+            [true,  false],
+            [true,  false],
+            [false, true ],
+            [false, true ],
+        ]
+        let graph = DistillationScorer.buildPMIGraph(
+            thresholdFeatures: features, incidenceMatrix: incidence, M: 4
+        )
+        #expect(graph.pmiMatrix[0][1] <= 0)
+        #expect(graph.components.count == 2)
+    }
+
+    // MARK: - selectDominantComponent
+
+    @Test func selectDominantComponent_returnsHighestWeightComponent() {
+        // Two components: {0} weight=0.25, {1,2} weight=1.5 (dominant)
+        // Feature 0 never co-occurs with 1 or 2; features 1 and 2 always co-occur.
+        let features = [
+            ExtractedFeature(type: .entity, value: "low",   docFrequency: 0.25),
+            ExtractedFeature(type: .entity, value: "highA", docFrequency: 0.75),
+            ExtractedFeature(type: .entity, value: "highB", docFrequency: 0.75),
+        ]
+        let incidence: [[Bool]] = [
+            [false, true,  true ],
+            [false, true,  true ],
+            [false, true,  true ],
+            [true,  false, false],
+        ]
+        let graph = DistillationScorer.buildPMIGraph(
+            thresholdFeatures: features, incidenceMatrix: incidence, M: 4
+        )
+        let dominant = DistillationScorer.selectDominantComponent(graph: graph)
+        #expect(dominant.count == 2)
+        #expect(dominant.allSatisfy { abs($0.docFrequency - 0.75) < 1e-5 })
+    }
+
+    // MARK: - computeConfidence
+
+    @Test func computeConfidence_fullCoherence_returnsOne() {
+        // All threshold features are selected: mean_df=1.0, coherence_ratio=1.0 → conf=1.0
+        let features = [
+            ExtractedFeature(type: .entity, value: "A", docFrequency: 1.0),
+            ExtractedFeature(type: .entity, value: "B", docFrequency: 1.0),
+        ]
+        let confidence = DistillationScorer.computeConfidence(
+            selected: features, allThreshold: features
+        )
+        #expect(abs(confidence - 1.0) < 1e-5)
+    }
+
+    @Test func computeConfidence_partialCoherence_penalizedByRatio() {
+        // 2 selected out of 4 threshold features; mean_df=0.8
+        // conf = 0.8 × (2/4) = 0.4
+        let allThreshold = [
+            ExtractedFeature(type: .entity, value: "A", docFrequency: 0.8),
+            ExtractedFeature(type: .entity, value: "B", docFrequency: 0.8),
+            ExtractedFeature(type: .entity, value: "C", docFrequency: 0.8),
+            ExtractedFeature(type: .entity, value: "D", docFrequency: 0.8),
+        ]
+        let selected = Array(allThreshold.prefix(2))
+        let confidence = DistillationScorer.computeConfidence(
+            selected: selected, allThreshold: allThreshold
+        )
+        #expect(abs(confidence - 0.4) < 1e-5)
+    }
+
+    @Test func computeConfidence_emptySelected_returnsZero() {
+        let allThreshold = [ExtractedFeature(type: .entity, value: "A", docFrequency: 1.0)]
+        let confidence = DistillationScorer.computeConfidence(
+            selected: [], allThreshold: allThreshold
+        )
+        #expect(confidence == 0)
+    }
+}

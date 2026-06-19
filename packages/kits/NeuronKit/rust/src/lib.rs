@@ -4,10 +4,10 @@
 //! maintenance, standing-signals scheduler, SolverBandit,
 //! audit-chain monitor), reasoning functions (hybrid recall,
 //! MMR diversification, ContextSynthesizer, branch derivation,
-//! tournament scoring), and five reasoning lenses — MomentSignature,
-//! Rhythm, Precedence, Complexity, Calibration — that surface gated
-//! SubstrateML and GeniusLocusKit primitives per SPEC § 7.5, § 8.
-//! Per NEURONKIT_SPEC.md.
+//! tournament scoring), and reasoning lenses (MomentSignature,
+//! Rhythm, Precedence, Complexity, Calibration, Distillation) that
+//! surface gated SubstrateML and GeniusLocusKit primitives per
+//! SPEC § 7.5, § 7.6, § 8. Per NEURONKIT_SPEC.md.
 //!
 //! First reasoning surface: the lattice-anchor inference path.
 //! NeuronKit composes EideticLib's deterministic `lookup` and
@@ -45,6 +45,7 @@ pub mod estate_dreaming_reader;
 pub mod estate_dreaming_sink;
 pub mod estate_maintenance_reader;
 pub mod estate_maintenance_sink;
+pub mod distillation;
 pub mod drift;
 pub mod hybrid_recall;
 pub mod keystones;
@@ -74,6 +75,7 @@ pub use anomaly_scan::{anomalies, Anomaly};
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
 pub use calibration_lens::{calibrate, CalibratedValue};
 pub use complexity::{complexity, ComplexityResult};
+pub use distillation::{distill_cluster, DistillationLensResult, InjectionDepth};
 pub use benchmark_live::{benchmark as benchmark_branch, BenchmarkReport};
 pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
 pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};

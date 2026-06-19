@@ -1,5 +1,5 @@
 import Foundation
-import SQLCipher
+import SQLite3
 import Testing
 import SubstrateTypes
 @testable import LocusKit

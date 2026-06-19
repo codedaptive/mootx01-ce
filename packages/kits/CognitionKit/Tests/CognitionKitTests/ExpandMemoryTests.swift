@@ -1,0 +1,174 @@
+// ExpandMemoryTests.swift
+//
+// Tests for the ExpandMemory recipe: fan-out from a _distilled factoid
+// to its source memories via _distilled_from tunnels.
+//
+// Test IDs: EM-1..EM-6 (5 test functions; EM-1 and EM-2 covered in one)
+// Layer discipline: estates opened via GeniusLocusKit — no direct substrate access.
+// Rust mirror: pending (Swift-only recipe; Rust port deferred to a future stream).
+
+import Testing
+import Foundation
+import GeniusLocusKit
+import LocusKit
+import PersistenceKit
+import PersistenceKitInMemory
+@testable import CognitionKit
+
+@Suite("ExpandMemoryTests")
+struct ExpandMemoryTests {
+
+    // ownerIdentifier → wing = "wing_\(ownerID)" per EstateLifecycle convention
+    private static let ownerID = "expand-memory-test"
+    private static let wing = "wing_\(ownerID)"
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: Self.ownerID)
+        // Estate.create stamps ownerIdentifier into the manifest. Estate.open
+        // (called by kit.open) only reads it — without this call the owner
+        // would be the schema default ("") and wing derivation would produce
+        // "wing_" instead of the expected value.
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    /// Capture a drawer and return its real UUID (required for hydrate to resolve content).
+    private func capture(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle,
+        content: String, room: String = "notes"
+    ) async throws -> String {
+        let frame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: room,
+            latticeAnchor: .udc("0"),
+            addedBy: "test",
+            embeddingModelID: "test-v1")
+        return try await kit.capture(handle, frame).id
+    }
+
+    /// Create a _distilled_from tunnel from factoid → source in the estate wing.
+    private func wireTunnel(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle,
+        factoidID: String, sourceID: String, targetRoom: String = "notes"
+    ) async throws {
+        let estate = try await kit.estate(for: handle)
+        let frame = TunnelCaptureFrame(
+            sourceWing: Self.wing, sourceRoom: "notes",
+            targetWing: Self.wing, targetRoom: targetRoom,
+            label: "_distilled_from", addedBy: "test",
+            sourceDrawerId: factoidID, targetDrawerId: sourceID,
+            kind: .references)
+        _ = try await estate.capture(frame)
+    }
+
+    // EM-1 / EM-2: golden path — DIST factoid + 3 source drawers + 3 _distilled_from tunnels.
+    // Sources are returned in filedAt order (oldest first); prose is extracted from the header.
+    @Test("golden path: 3 sources returned in filedAt order with correct prose")
+    func goldenPath() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Capture 3 source drawers in sequence — natural filedAt oldest → newest
+        let src1 = try await capture(kit, handle, content: "source memory one")
+        let src2 = try await capture(kit, handle, content: "source memory two")
+        let src3 = try await capture(kit, handle, content: "source memory three")
+
+        // DIST header: conf=0.85, src=3, snr=6.2, delta=STATIC
+        let distContent = "[DIST|conf=0.85|src=3|snr=6.2|delta=STATIC] user prefers morning coffee"
+        let factoidID = try await capture(kit, handle, content: distContent, room: "distilled")
+
+        // Wire tunnels oldest → newest
+        try await wireTunnel(kit, handle, factoidID: factoidID, sourceID: src1)
+        try await wireTunnel(kit, handle, factoidID: factoidID, sourceID: src2)
+        try await wireTunnel(kit, handle, factoidID: factoidID, sourceID: src3)
+
+        let out = try await ExpandMemory().run(
+            input: ExpandMemory.Input(factoidDrawerID: factoidID),
+            estate: handle, kit: kit)
+
+        #expect(out.factoidID == factoidID)
+        #expect(out.prose == "user prefers morning coffee")
+        #expect(out.confidence == 0.85)
+        #expect(out.sourceCount == 3)
+        #expect(out.deltaType == "STATIC")
+        #expect(out.sources.count == 3)
+        #expect(out.sources.map(\.id) == [src1, src2, src3],
+                "sources ordered oldest → newest by tunnel filedAt")
+        #expect(out.sources[0].content == "source memory one")
+        #expect(out.sources[1].content == "source memory two")
+        #expect(out.sources[2].content == "source memory three")
+    }
+
+    // EM-3: a drawer whose content lacks a DIST header → notADistilledDrawer
+    @Test("notADistilledDrawer: regular content throws")
+    func notADistilledDrawerThrows() async throws {
+        let (kit, handle) = try await openEstate()
+        let regularID = try await capture(kit, handle, content: "just a plain note")
+
+        await #expect(throws: ExpandError.notADistilledDrawer(id: regularID)) {
+            _ = try await ExpandMemory().run(
+                input: ExpandMemory.Input(factoidDrawerID: regularID),
+                estate: handle, kit: kit)
+        }
+    }
+
+    // EM-4: a drawer UUID that was never captured → factoidNotFound
+    @Test("factoidNotFound: missing drawer ID throws")
+    func factoidNotFoundThrows() async throws {
+        let (kit, handle) = try await openEstate()
+        let missingID = UUID().uuidString
+
+        await #expect(throws: ExpandError.factoidNotFound(id: missingID)) {
+            _ = try await ExpandMemory().run(
+                input: ExpandMemory.Input(factoidDrawerID: missingID),
+                estate: handle, kit: kit)
+        }
+    }
+
+    // EM-5: valid DIST drawer but no _distilled_from tunnels wired → noSourceTunnels
+    @Test("noSourceTunnels: DIST drawer with no tunnels throws")
+    func noSourceTunnelsThrows() async throws {
+        let (kit, handle) = try await openEstate()
+
+        let distContent = "[DIST|conf=0.75|src=2|snr=4.1|delta=STATIC] a factoid with no wiring"
+        let factoidID = try await capture(kit, handle, content: distContent, room: "distilled")
+
+        await #expect(throws: ExpandError.noSourceTunnels(id: factoidID)) {
+            _ = try await ExpandMemory().run(
+                input: ExpandMemory.Input(factoidDrawerID: factoidID),
+                estate: handle, kit: kit)
+        }
+    }
+
+    // EM-6: a tunnel pointing at a withdrawn (non-existent) drawer is silently
+    // skipped. Output.sourceCount (from DIST header, frozen at distillation time)
+    // remains 3 while sources.count is 2.
+    @Test("withdrawn source is silently skipped; sourceCount stays accurate")
+    func withdrawnSourceSkipped() async throws {
+        let (kit, handle) = try await openEstate()
+
+        let src1 = try await capture(kit, handle, content: "live source one")
+        let src2 = try await capture(kit, handle, content: "live source two")
+        // Simulate a withdrawn drawer by referencing an ID that was never captured
+        let withdrawnID = "withdrawn-\(UUID().uuidString)"
+
+        // DIST header claims src=3 — matches the original distillation count
+        let distContent = "[DIST|conf=0.9|src=3|snr=7.0|delta=STATIC] factoid with one withdrawn"
+        let factoidID = try await capture(kit, handle, content: distContent, room: "distilled")
+
+        try await wireTunnel(kit, handle, factoidID: factoidID, sourceID: src1)
+        try await wireTunnel(kit, handle, factoidID: factoidID, sourceID: src2)
+        try await wireTunnel(kit, handle, factoidID: factoidID, sourceID: withdrawnID)
+
+        let out = try await ExpandMemory().run(
+            input: ExpandMemory.Input(factoidDrawerID: factoidID),
+            estate: handle, kit: kit)
+
+        #expect(out.sourceCount == 3, "DIST header's src= count preserved from distillation time")
+        #expect(out.sources.count == 2, "withdrawn drawer is absent from hydrate result — silently skipped")
+    }
+}

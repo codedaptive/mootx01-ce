@@ -1,6 +1,7 @@
 import Foundation
 import GeniusLocusKit
 import LocusKit
+import SubstrateML
 // Scoped imports: pull ONLY the lifecycle-cluster classifier from
 // SubstrateTypes. A blanket `import SubstrateTypes` collides with LocusKit
 // on `LatticeAnchor.udc` (both modules export `LatticeAnchor`), so we import
@@ -923,9 +924,19 @@ extension ToolDispatcher {
 
         var lines: [String] = ["found \(result.hits.count) memory(s)"]
         for hit in result.hits.prefix(50) {
-            let preview = hit.drawer?.content.prefix(120) ?? "(not hydrated)"
             let room = hit.drawer?.room ?? "?"
-            lines.append("\(hit.id)  [\(room)]  \(preview)")
+            // For _distilled drawers, apply injection-depth formatting so the LLM
+            // caller sees factoid prose with calibrated provenance annotations rather
+            // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
+            if room == "_distilled",
+               let content = hit.drawer?.content,
+               let header = DistilledHeader.parse(content) {
+                let formatted = Self.injectionDepthFormatted(header: header, drawerID: hit.id)
+                lines.append("\(hit.id)  [\(room)]  \(formatted)")
+            } else {
+                let preview = hit.drawer?.content.prefix(120) ?? "(not hydrated)"
+                lines.append("\(hit.id)  [\(room)]  \(preview)")
+            }
             if explain {
                 for line in hit.explanation { lines.append("  \(line)") }
             }
@@ -1545,6 +1556,30 @@ private extension ToolDispatcher {
     /// Actor identifier the server writes into rows it files. Uses a stable
     /// constant so the source is identifiable in the audit trail.
     static let serverAddedBy = "aria-mcp-server"
+}
+
+// MARK: - Injection depth formatting
+
+extension ToolDispatcher {
+    /// Format a parsed `_distilled` drawer hit for injection into the LLM context.
+    ///
+    /// Three cases per DISTILLATION_DESIGN.md §2.5 and the InjectionDepth thresholds:
+    ///   conf >= 0.7  (factoidOnly):           prose only — confidence is high; no annotation needed.
+    ///   conf ∈ [0.4, 0.7) (factoidWithMeta):  prose + source memory count and confidence.
+    ///   conf < 0.4  (factoidWithProvenance):  prose + confidence and source drawer ID for full audit trail.
+    static func injectionDepthFormatted(header: DistilledHeader, drawerID: RowID) -> String {
+        let confStr = String(format: "%.2f", header.confidence)
+        if header.confidence >= 0.7 {
+            // factoidOnly: prose only; confidence is high enough to trust without annotation
+            return header.prose
+        } else if header.confidence >= 0.4 {
+            // factoidWithMeta: append memory count and confidence so the caller can weigh certainty
+            return "\(header.prose)\n[distilled from \(header.sourceCount) memories, conf=\(confStr)]"
+        } else {
+            // factoidWithProvenance: append confidence and source drawer ID for full traceability
+            return "\(header.prose)\n[distilled, conf=\(confStr), sources: \(drawerID)]"
+        }
+    }
 }
 
 // MARK: - ClassificationScheme

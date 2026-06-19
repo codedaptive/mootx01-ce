@@ -3,6 +3,7 @@ import IntellectusLib
 import OSLog
 import CryptoKit
 import CorpusKit
+import EngramLib
 import LocusKit
 import PersistenceKit
 import VectorKit
@@ -211,6 +212,64 @@ public extension GeniusLocusKit {
         }
 
         return storedTunnels + synthetic
+    }
+
+    // MARK: - findNearestDistilled
+
+    /// Find the nearest distilled-tier vectors to `engram` in the estate
+    /// addressed by `handle`.
+    ///
+    /// Thin wrapper over `VectorStore.findNearest` scoped to the
+    /// `"distillation-features-v1"` model lane. Called by the DistilledRecall
+    /// recipe for no-inference Hamming NN on the distilled tier — the probe
+    /// Engram is produced by `DistillationPipeline.queryFingerprint`, so no
+    /// embedding model call is needed at search time.
+    ///
+    /// - Parameters:
+    ///   - handle: the estate to search. Must be open in this kit.
+    ///   - engram: the Hamming probe fingerprint (structural feature fingerprint).
+    ///   - limit: maximum nearest-neighbour results to return.
+    ///     A `limit` of 0 returns an empty array without error.
+    /// - Returns: `[VectorMatch]` sorted by ascending Hamming distance.
+    /// - Throws:
+    ///   - `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    ///   - `VerbError.notSupportedByEstate` if no VectorStore is registered
+    ///     for this estate.
+    ///   - `VerbError.underlyingEstateFailure` wrapping any `VectorKitError`
+    ///     surfaced by `VectorStore.findNearest`.
+    func findNearestDistilled(
+        _ handle: EstateHandle,
+        engram: Engram,
+        limit: Int
+    ) async throws -> [VectorMatch] {
+        // Validate that the handle is open before accessing the VectorStore.
+        // estateNotOpen is thrown here if the handle is stale — matching the
+        // error contract of every other verb surface method.
+        _ = try estate(for: handle)
+        guard let vectorStore = vectorStores[handle] else {
+            // Estate is open but no VectorStore is registered. The distillation
+            // tier requires a VectorStore; raise notSupportedByEstate so callers
+            // receive a typed, structured error rather than an empty result.
+            throw VerbError.notSupportedByEstate(verb: "findNearestDistilled")
+        }
+        // Dispatch to the distillation lane. modelID is the fixed string for the
+        // structural fingerprint lane — no semantic embedding model is involved.
+        // limit: 0 returns [] without error (VectorStore.findNearest guards
+        // limit > 0 internally). VectorKitError is caught and re-raised as
+        // VerbError.underlyingEstateFailure so callers see a unified error type —
+        // parity of the Rust port's `.map_err` wrapper.
+        do {
+            return try await vectorStore.findNearest(
+                probe: engram,
+                modelID: "distillation-features-v1",
+                limit: limit
+            )
+        } catch {
+            throw VerbError.underlyingEstateFailure(
+                verb: "findNearestDistilled",
+                reason: "\(error)"
+            )
+        }
     }
 
     // MARK: - recallKGFacts

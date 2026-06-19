@@ -67,6 +67,18 @@ enum RecipeTools {
     /// this runs — the reason the matrix-driven precise compositions score zero
     /// on an undreamt estate.
     static let dreamToolName = "moot_dream"
+    /// On-demand distillation sweep: compact working memory by distilling open
+    /// clusters into factoids. Delegates to GeniusLocusKit.runDistillationSweep,
+    /// which processes all clusters with member_count ≥ 3 and status = open.
+    static let consolidateToolName = "moot_consolidate"
+    /// Dense distilled-tier recall: Hamming NN over the distillation-features-v1
+    /// VectorKit lane — no embedding model inference. Returns factoid prose
+    /// (~10 tokens/hit) + confidence metadata. Full spec: DISTILLATION_ARIA_TOOLS.md §2.
+    static let recallDistilledToolName = "moot_recall_distilled"
+    /// Expand a distilled factoid to its source memories by following the
+    /// _distilled_from tunnel graph. Returns full episodic content from the M
+    /// source memories that produced the factoid. Full spec: DISTILLATION_ARIA_TOOLS.md §3.
+    static let expandMemoryToolName = "moot_expand_memory"
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
@@ -78,6 +90,9 @@ enum RecipeTools {
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
+            || name == consolidateToolName
+            || name == recallDistilledToolName
+            || name == expandMemoryToolName
     }
 
     // MARK: - tools/list projection
@@ -95,6 +110,9 @@ enum RecipeTools {
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
             dreamTool(),
+            consolidateTool(),
+            recallDistilledTool(),
+            expandMemoryTool(),
         ]
     }
 
@@ -279,6 +297,103 @@ enum RecipeTools {
             provenance: .recipe)
     }
 
+    // MARK: - consolidate descriptor
+
+    /// On-demand distillation sweep. Delegates all work to
+    /// GeniusLocusKit.runDistillationSweep — processes all open clusters with
+    /// member_count ≥ 3 and persists each factoid as a drawer in room `_distilled`.
+    /// Optional `cluster_id` and `include_held` are accepted but forwarded as
+    /// Input fields; the current GLK sweep API processes all eligible clusters
+    /// (per-cluster targeting requires a future GLK enhancement).
+    private static func consolidateTool() -> ProjectedTool {
+        ProjectedTool(
+            name: consolidateToolName,
+            description: "Compact working memory by distilling open clusters into factoids. "
+                + "Calls the GLK distillation sweep, which processes all ready clusters "
+                + "(member_count ≥ 3, status = open) and persists each factoid as a "
+                + "drawer in room `_distilled`. Returns the count of factoids produced "
+                + "this sweep.",
+            inputSchema: objectSchema(
+                properties: [
+                    "cluster_id": stringSchema(
+                        "Optional UUID of a specific cluster to distill. Omit to sweep all "
+                            + "eligible open clusters. Per-cluster targeting is accepted but the "
+                            + "current GLK sweep API processes all eligible clusters."),
+                    "include_held": .object([
+                        "type": .string("boolean"),
+                        "description": .string(
+                            "When true, include SNR-gated held clusters in the sweep. "
+                                + "Accepted but does not yet alter GLK behaviour; held-cluster "
+                                + "support requires a future GLK enhancement. Default false."),
+                    ]),
+                    "estateID": stringSchema(
+                        "Optional UUID of the open estate to target. Omit for the default estate."),
+                ],
+                required: []),
+            provenance: .recipe)
+    }
+
+    // MARK: - recall_distilled descriptor
+
+    /// Dense distilled-tier recall. Structural fingerprint Hamming NN over the
+    /// distillation-features-v1 VectorKit lane — no embedding model inference.
+    /// Returns factoid prose (~10 tokens/hit) + confidence metadata.
+    private static func recallDistilledTool() -> ProjectedTool {
+        ProjectedTool(
+            name: recallDistilledToolName,
+            description: "Dense recall: search the distilled memory tier and return factoid "
+                + "prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint "
+                + "Hamming NN — no embedding model inference, no full corpus scan. Factoids "
+                + "carry confidence scores and source counts. For full episodic detail on a "
+                + "specific factoid call moot_expand_memory with the returned drawer_id. "
+                + "Returns a discrimination signal over confidence scores.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema(
+                        "Query text — feature-extracted and fingerprinted for Hamming NN "
+                            + "against the distillation-features-v1 lane. No embedding inference."),
+                    "limit": integerSchema(
+                        "Max factoids to return. Default 20. Omit to use the default; "
+                            + "null is invalid."),
+                    "filter": stringSchema(
+                        "Filter kind: unconfirmed, userConfirmed, exportable, contained, "
+                            + "currentlyBelieve. Omit for ordinary recall across any confirmation "
+                            + "state. null is invalid."),
+                    "estateID": stringSchema(
+                        "Optional UUID of the open estate to target. Omit for the default estate; "
+                            + "null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe)
+    }
+
+    // MARK: - expand_memory descriptor
+
+    /// Expand a distilled factoid to its M source memories by following the
+    /// _distilled_from tunnel graph. Returns full episodic content for the AI
+    /// to synthesize into a user-facing narrative.
+    private static func expandMemoryTool() -> ProjectedTool {
+        ProjectedTool(
+            name: expandMemoryToolName,
+            description: "Expand a distilled factoid to its source memories: follows the "
+                + "_distilled_from tunnel graph from a _distilled drawer and returns the "
+                + "full episodic content of the M source memories that produced it. Use "
+                + "when the user needs the full explanation behind a dense factoid returned "
+                + "by moot_recall_distilled. You synthesize the sources into a narrative — "
+                + "MOOTx01 provides the evidence chain.",
+            inputSchema: objectSchema(
+                properties: [
+                    "drawer_id": stringSchema(
+                        "UUID of the _distilled drawer to expand. Obtain from "
+                            + "moot_recall_distilled results."),
+                    "estateID": stringSchema(
+                        "Optional UUID of the open estate to target. Omit for the default estate; "
+                            + "null is invalid."),
+                ],
+                required: ["drawer_id"]),
+            provenance: .recipe)
+    }
+
     // MARK: - Dispatch
 
     /// Run the named recipe tool. `resolveHandle` is the dispatcher's own
@@ -316,6 +431,12 @@ enum RecipeTools {
             return try await runConfirmPromotion(args, kit: kit, handle: handle)
         case dreamToolName:
             return try await runDream(args, kit: kit, handle: handle)
+        case consolidateToolName:
+            return try await runConsolidate(args, kit: kit, handle: handle)
+        case recallDistilledToolName:
+            return try await runRecallDistilled(args, kit: kit, handle: handle)
+        case expandMemoryToolName:
+            return try await runExpandMemory(args, kit: kit, handle: handle)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -728,6 +849,188 @@ enum RecipeTools {
         belowThreshold: \(report.belowThreshold)
         """
         return ToolDispatcher.textResult(body)
+    }
+
+    // MARK: - consolidate
+
+    /// Run `moot_consolidate`: trigger a distillation sweep on demand.
+    ///
+    /// Decodes the optional `cluster_id` and `include_held` args and delegates
+    /// to the Consolidate recipe, which calls GLK.runDistillationSweep. Returns
+    /// a plain-text summary of factoids produced this sweep.
+    private static func runConsolidate(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let clusterID = try optionalString(args["cluster_id"], argument: "cluster_id")
+        // include_held: boolean parameter — absent means false (the safe default).
+        // Present non-bool values are rejected so the caller knows what went wrong.
+        let includeHeld: Bool
+        if let raw = args["include_held"] {
+            guard let b = raw.boolValue else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "include_held must be a boolean; omit it to use the default (false)")
+            }
+            includeHeld = b
+        } else {
+            includeHeld = false
+        }
+
+        let out = try await Consolidate().run(
+            input: .init(clusterID: clusterID, includeHeld: includeHeld),
+            estate: handle, kit: kit)
+
+        let heldCount = out.heldClusterIDs.count
+        let failedCount = out.failedClusterIDs.count
+        let body = """
+        moot_consolidate: sweep complete
+        factoidsProduced: \(out.factoidsProduced)
+        heldClusters: \(heldCount)
+        failedClusters: \(failedCount)
+        """
+        return ToolDispatcher.textResult(body)
+    }
+
+    // MARK: - recall_distilled
+
+    /// Run `moot_recall_distilled`: dense Hamming NN recall over the distilled tier.
+    ///
+    /// Decodes query, limit, filter, and estateID, runs the DistilledRecall recipe,
+    /// and formats output as:
+    ///   found N distilled factoid(s) for: {query}
+    ///   [1] drawer_id: {uuid}
+    ///       {prose}
+    ///       confidence: X | sources: N | snr: X | delta: TYPE [uncertain]
+    ///   ...
+    ///   discrimination: {level} — {description}
+    private static func runRecallDistilled(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        let filter = try decodeSingleFilter(args["filter"])
+
+        let out: DistilledRecall.Output
+        do {
+            out = try await DistilledRecall().run(
+                input: .init(query: query, filter: filter, limit: limit),
+                estate: handle, kit: kit)
+        } catch {
+            // The distillation-features-v1 VectorKit lane may not exist yet
+            // (estate has never been consolidated). Per DISTILLATION_ARIA_TOOLS.md §2.3:
+            // return "found 0" and suggest moot_consolidate to build the tier.
+            let body = """
+            found 0 distilled factoid(s) for: \(query)
+
+            discrimination: single — only one result.
+            hint: distilled tier not yet available for this estate. \
+            Run moot_consolidate to build the distilled tier from accumulated memories.
+            """
+            return ToolDispatcher.textResult(body)
+        }
+
+        var lines: [String] = [
+            "found \(out.matches.count) distilled factoid(s) for: \(query)",
+        ]
+
+        for (idx, match) in out.matches.enumerated() {
+            lines.append("")
+            lines.append("[\(idx + 1)] drawer_id: \(match.id)")
+            lines.append("    \(match.prose)")
+
+            // Metadata line — delta and uncertain are optional.
+            var meta = "confidence: \(String(format: "%.2f", match.confidence))"
+                + " | sources: \(match.sourceCount)"
+                + " | snr: \(String(format: "%.1f", match.snr))"
+            if let delta = match.deltaType {
+                meta += " | delta: \(delta)"
+            }
+            if match.uncertain {
+                meta += " [uncertain]"
+            }
+            lines.append("    \(meta)")
+        }
+
+        lines.append("")
+        // Discrimination signal mirrors moot_memory_search format (RecallDiscrimination.resultLine).
+        let discLevel: String
+        switch out.discrimination {
+        case .high:   discLevel = "discrimination: high — clear top result."
+        case .medium: discLevel = "discrimination: medium — some separation."
+        case .low:    discLevel = "discrimination: low — results are effectively unranked."
+        case .single: discLevel = "discrimination: single — only one result."
+        }
+        lines.append(discLevel)
+
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
+    // MARK: - expand_memory
+
+    /// Run `moot_expand_memory`: fan-out from a distilled factoid to its source memories.
+    ///
+    /// Decodes `drawer_id` and estateID, runs the ExpandMemory recipe, and formats
+    /// output as:
+    ///   expand: {drawer_id}
+    ///   factoid: {prose}
+    ///   confidence: X | sources: N | delta: TYPE
+    ///
+    ///   source [1] — room: {room} | id: {uuid}
+    ///   {full content}
+    ///   ...
+    ///
+    /// ExpandError cases map to errorResult with guidance for the caller.
+    private static func runExpandMemory(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let drawerID = try requireString(args, "drawer_id")
+
+        let out: ExpandMemory.Output
+        do {
+            out = try await ExpandMemory().run(
+                input: .init(factoidDrawerID: drawerID),
+                estate: handle, kit: kit)
+        } catch let err as ExpandError {
+            switch err {
+            case .notADistilledDrawer(let id):
+                return ToolDispatcher.errorResult(
+                    "drawer \(id) is not a distilled factoid. "
+                        + "Use moot_recall_distilled to find distilled drawers.")
+            case .factoidNotFound(let id):
+                return ToolDispatcher.errorResult(
+                    "drawer \(id) not found — it may have been expunged from the estate.")
+            case .noSourceTunnels(let id):
+                return ToolDispatcher.errorResult(
+                    "drawer \(id) has no _distilled_from tunnels. "
+                        + "The factoid may predate tunnel wiring — "
+                        + "fall back to lineage_id + memory_clusters query.")
+            }
+        }
+
+        var lines: [String] = [
+            "expand: \(out.factoidID)",
+            "factoid: \(out.prose)",
+        ]
+        var meta = "confidence: \(String(format: "%.2f", out.confidence))"
+            + " | sources: \(out.sourceCount)"
+        if let delta = out.deltaType {
+            meta += " | delta: \(delta)"
+        }
+        lines.append(meta)
+
+        for (idx, source) in out.sources.enumerated() {
+            lines.append("")
+            lines.append("source [\(idx + 1)] — room: \(source.room) | id: \(source.id)")
+            lines.append(source.content)
+        }
+
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
     // MARK: - Argument decoding
