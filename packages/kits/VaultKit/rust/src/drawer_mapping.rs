@@ -350,8 +350,10 @@ impl DrawerMapping {
         frontmatter.insert("moot_id".to_owned(), drawer.lineage_id.to_string());
         // Origin date rides frontmatter (no substrate origin-date column).
         // `created:` is the Obsidian key the adapter reads back.
-        let event_ms = drawer.event_time;
-        let event_iso = ms_to_iso8601(event_ms);
+        // drawer.event_time is epoch SECONDS (not milliseconds) — use
+        // secs_to_iso8601 to avoid the ÷1000 double-conversion that
+        // produced 1970-01-21 dates for typical second-range timestamps.
+        let event_iso = secs_to_iso8601(drawer.event_time);
         frontmatter.insert("created".to_owned(), event_iso.clone());
 
         if let Some(qid) = &drawer.wikidata_qid {
@@ -944,6 +946,20 @@ pub(crate) fn ms_to_iso8601(ms: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
 }
 
+/// Convert epoch SECONDS to a LocusKit-compatible ISO8601 string.
+///
+/// Use this when the input is already in seconds (e.g. `Drawer::event_time`,
+/// `filed_at`). `ms_to_iso8601` divides by 1000 first, so calling it with
+/// a seconds value yields a date ~1000× too early (1970-01-21 for a
+/// typical 2020s timestamp).
+///
+/// Format: `YYYY-MM-DDTHH:MM:SS.000Z` (zero milliseconds — seconds
+/// precision matches the substrate's filed_at/event_time resolution).
+pub(crate) fn secs_to_iso8601(secs: i64) -> String {
+    let (year, month, day, hour, min, sec) = secs_to_ymdhms(secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.000Z")
+}
+
 /// Parse an ISO8601 string of the form `YYYY-MM-DDTHH:MM:SS[.mmm]Z` to
 /// milliseconds-since-epoch. Returns `None` on parse failure.
 fn iso8601_to_ms(s: &str) -> Option<i64> {
@@ -1038,6 +1054,28 @@ mod tests {
         assert!(s.contains('.'));
         let back = iso8601_to_ms(&s).expect("should parse back");
         assert_eq!(back, ms);
+    }
+
+    #[test]
+    fn secs_to_iso8601_not_1970() {
+        // Regression for the vault export 1970 bug: drawer.event_time is epoch
+        // seconds. Feeding it directly to ms_to_iso8601 (which divides by 1000)
+        // produced 1970-01-21 for a typical 2020s timestamp.
+        // secs_to_iso8601 must produce the correct year — 2023, not 1970.
+        let secs = 1_700_000_000_i64; // 2023-11-14T22:13:20Z
+        let s = secs_to_iso8601(secs);
+        assert!(
+            s.starts_with("2023-"),
+            "expected 2023-..., got: {s}"
+        );
+        assert_eq!(s, "2023-11-14T22:13:20.000Z");
+        // Sanity-check: feeding the same value to ms_to_iso8601 (the old path)
+        // would produce 1970 — confirm the functions differ.
+        let wrong = ms_to_iso8601(secs);
+        assert!(
+            wrong.starts_with("1970-"),
+            "ms_to_iso8601 with secs input should produce 1970, got: {wrong}"
+        );
     }
 
     #[test]

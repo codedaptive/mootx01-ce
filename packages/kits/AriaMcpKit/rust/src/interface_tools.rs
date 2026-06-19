@@ -195,6 +195,19 @@ fn run_file_memory(
     // Provenance channel: marks this row as MCP-agent-sourced in the provenance
     // bitmap (§2.5). Mirrors Swift's `provenanceChannel: .mcpAgent`.
     frame.provenance_channel = Channel::McpAgent;
+    // Optional back-dated event time. When supplied, the drawer's event_time
+    // is set to the caller's ISO8601 instant (epoch seconds) instead of the
+    // ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory which
+    // parses event_time to Date and passes it as eventTime on the CaptureFrame.
+    if let Some(raw) = optional_string(args, "event_time")? {
+        let secs = parse_iso8601_to_secs(&raw).ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("event_time is not a valid ISO8601 instant: {raw}"),
+            )
+        })?;
+        frame.event_time = Some(secs);
+    }
 
     // D-A: `impatient` is an execution option on the write verb (Dual-Path
     // Intake), mirroring the Swift ARIA_MCP threading. When true the memory is
@@ -852,12 +865,61 @@ fn run_retire_fact(
 
 /// Format an epoch-seconds timestamp as an ISO8601 / RFC3339 UTC string.
 ///
-/// Mirrors `recipe_tools::epoch_to_iso8601` (private there) and the
-/// `neuron_kit::topology_analysis::epoch_to_iso8601` helper both delegate to.
-/// Duplicated here to avoid making the recipe_tools function pub — neither file
-/// is a natural home for a cross-crate helper and the implementation is trivial.
-fn epoch_to_iso8601(epoch_secs: i64) -> String {
+/// Convert epoch seconds to ISO8601 UTC string.
+///
+/// `pub(crate)` so that `lens_tools` can call it directly for the
+/// contradiction lens `filed=` field (Part 4 — filed_at ISO8601 fix).
+/// Delegates to the canonical helper in NeuronKit's topology_analysis module;
+/// the duplication in recipe_tools stays private (its own use only).
+pub(crate) fn epoch_to_iso8601(epoch_secs: i64) -> String {
     neuron_kit::topology_analysis::epoch_to_iso8601(epoch_secs)
+}
+
+/// Minimal ISO8601 UTC parser — handles the subset the ARIA MCP server accepts.
+///
+/// Accepts "YYYY-MM-DDTHH:MM:SSZ", "YYYY-MM-DDTHH:MM:SS.mmmZ", and
+/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch seconds (not milliseconds).
+/// Used to decode the optional `event_time` argument in `run_file_memory`,
+/// mirroring Swift's `ISO8601DateFormatter().date(from:)` in `runFileMemory`.
+fn parse_iso8601_to_secs(s: &str) -> Option<i64> {
+    // Strip timezone suffix and milliseconds fraction before splitting on T.
+    let s = s
+        .trim_end_matches('Z')
+        .trim_end_matches("+00:00")
+        .trim_end_matches("+0000");
+    // Drop optional fractional seconds (.mmm) — we only need whole-second precision.
+    let s = if let Some(dot_pos) = s.rfind('.') {
+        &s[..dot_pos]
+    } else {
+        s
+    };
+    let parts: Vec<&str> = s.split('T').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let date_parts: Vec<i64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_parts: Vec<i64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
+    if date_parts.len() < 3 || time_parts.len() < 3 {
+        return None;
+    }
+    let (y, m, d) = (date_parts[0], date_parts[1], date_parts[2]);
+    let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
+    // Days since Unix epoch via Howard Hinnant's algorithm (same as lens_tools).
+    let days = days_from_ymd_interface(y, m, d)?;
+    Some(days * 86400 + h * 3600 + min * 60 + sec)
+}
+
+fn days_from_ymd_interface(y: i64, m: i64, d: i64) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let m = if m <= 2 { m + 9 } else { m - 3 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
 }
 
 /// Render a retired lifecycle cluster as its single-letter label for the
@@ -1074,8 +1136,12 @@ fn run_estate_status(
         .sync_state_token(&estate.handle)
         .unwrap_or_else(|_| "local-only".to_string());
 
+    // Label mirrors Swift runEstateStatus: "memories: N active" so both ports
+    // use the same field name. The Rust recall with an empty filter chain
+    // defaults to CurrentlyBelieve (cluster A), matching Swift's
+    // `allDrawers().filter { $0.tombstonedAt == nil }` active count.
     let body = format!(
-        "estate: {estate_name} [{estate_uuid}]\ndrawers: {}\nkg_facts: {}\nwings: {}\ntrace_rows: {}\nsync: {}\n{}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active\nkg_facts: {}\nwings: {}\ntrace_rows: {}\nsync: {}\n{}",
         drawers.len(),
         kg_facts.len(),
         wings_list,
@@ -1097,6 +1163,13 @@ fn run_estate_map(
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
+    // Resolve estate name for the header — mirrors Swift `handle.estateName`.
+    let estate_info = coord.estate_for(&estate.handle).ok();
+    let estate_name = estate_info
+        .and_then(|e| e.manifest().ok())
+        .map(|m| m.estate_name)
+        .unwrap_or_else(|| "unknown".to_string());
+
     let drawers = coord
         .recall(&estate.handle, RecallFrame::new(vec![]), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
@@ -1112,7 +1185,9 @@ fn run_estate_map(
             .or_insert(0) += 1;
     }
 
-    let mut lines = vec![format!("estate map: {} drawer(s)", drawers.len())];
+    // Header mirrors Swift runEstateMap: "estate map: estateName" (not a raw count).
+    // The per-room counts in the body enumerate the currently-believed drawers.
+    let mut lines = vec![format!("estate map: {estate_name}")];
     for (wing, rooms) in &tree {
         lines.push(format!("  {wing}/"));
         for (room, count) in rooms {
