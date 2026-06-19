@@ -187,11 +187,65 @@ pub enum RowStateError {
     ViolatesInvariant(&'static str),
 }
 
+impl std::fmt::Display for RowState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // English state names used in user-facing error messages.
+        // These are the canonical lowercase names that surface at the ARIA
+        // boundary, consistent with the moot tool descriptions and cookbook §9.1.
+        let name = match self {
+            RowState::Active     => "active",
+            RowState::Pending    => "pending",
+            RowState::Contested  => "contested",
+            RowState::Accepted   => "accepted",
+            RowState::Superseded => "superseded",
+            RowState::Decayed    => "decayed",
+            RowState::Withdrawn  => "withdrawn",
+            RowState::Expired    => "expired",
+            RowState::Rejected   => "rejected",
+            RowState::Tombstoned => "tombstoned",
+        };
+        write!(f, "{name}")
+    }
+}
+
+impl std::fmt::Display for RowVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // English verb names used in user-facing error messages.
+        // Match the token() strings in substrate_types exactly so log messages
+        // and MCP error text agree.
+        let name = match self {
+            RowVerb::Capture        => "capture",
+            RowVerb::Observe        => "observe",
+            RowVerb::Mutate         => "mutate",
+            RowVerb::Retract        => "retract",
+            RowVerb::Promote        => "promote",
+            RowVerb::Reject         => "reject",
+            RowVerb::Supersede      => "supersede",
+            RowVerb::Decay          => "decay",
+            RowVerb::Expire         => "expire",
+            RowVerb::Contest        => "contest",
+            RowVerb::ResolveContest => "resolveContest",
+            RowVerb::Tombstone      => "tombstone",
+        };
+        write!(f, "{name}")
+    }
+}
+
 impl std::fmt::Display for RowStateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IllegalTransition(s, v) => {
-                write!(f, "illegal transition: {s:?} --{v:?}-->")
+                // Emit the compact state-and-verb descriptor only — no "illegal"
+                // prefix here. GateViolation::BasisViolation(e) wraps this with
+                // "illegal state transition: {e}", producing the canonical form
+                // "illegal state transition: active --reject-->". Keeping the prefix
+                // out of RowStateError::Display avoids the doubled-prefix problem
+                // ("illegal state transition: illegal transition: active --reject-->")
+                // that broke the describe_gate_rejection parser.
+                //
+                // Display tokens are lowercase English via RowState/RowVerb::Display
+                // (same casing as the ARIA verb surface / RowVerb::token()).
+                write!(f, "{s} --{v}-->")
             }
             Self::ViolatesInvariant(msg) => {
                 write!(f, "safety invariant violation: {msg}")
