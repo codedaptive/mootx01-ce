@@ -545,7 +545,13 @@ impl DrawerMapping {
         // is an illegal belief-state transition). This is expected for idempotent
         // re-imports and must not abort the whole batch. Gracefully skip the note
         // and continue. Other errors (storage failures, I/O) propagate.
-        let drawer = match coordinator.capture_with_mode(handle, frame, now, WriteMode::Regular) {
+        // `now` is epoch-MILLISECONDS at the bridge boundary; the coordinator
+        // capture path stores it directly into the drawer's epoch-SECONDS
+        // `filed_at`/`event_time` columns, so divide by 1000 here — matching the
+        // tunnel/fact writes below (which all do `now / 1000` for the same reason).
+        // Without this, imported drawers carry a millisecond magnitude that
+        // PersistenceKit's iso8601() clamps to the RFC-3339 max year (9999).
+        let drawer = match coordinator.capture_with_mode(handle, frame, now / 1000, WriteMode::Regular) {
             Ok(d) => d,
             Err(e) => {
                 let reason = format!("{e:?}");

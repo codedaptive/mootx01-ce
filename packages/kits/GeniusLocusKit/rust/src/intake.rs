@@ -317,10 +317,11 @@ impl EstateCoordinator {
     /// is registered for the estate (e.g. a LocusOnly estate). The row-only
     /// `capture(_:_:_)` is unchanged; this is purely additive.
     ///
-    /// `now` is the capture instant in milliseconds since the Unix epoch,
-    /// explicit per the Rust determinism convention. It is the drawer's filed-at
-    /// instant; the ingest reuses it so vector filing timestamps reproduce
-    /// capture time (no clock read inside the engine).
+    /// `now` is the capture instant in **epoch SECONDS** (NOT milliseconds),
+    /// explicit per the Rust determinism convention. It is stored directly as the
+    /// drawer's epoch-seconds `filed_at`/`event_time`; the ingest reuses it so
+    /// vector filing timestamps reproduce capture time (no clock read inside the
+    /// engine). Callers must pass seconds (e.g. `wall_now()`, not `wall_now_ms()`).
     pub fn capture_with_mode(
         &mut self,
         handle: &EstateHandle,
