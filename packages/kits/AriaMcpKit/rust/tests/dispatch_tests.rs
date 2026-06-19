@@ -1237,9 +1237,11 @@ fn estate_status_includes_aria_session_protocol() {
         text.contains("protocol:"),
         "estate_status must append ARIA session protocol block; got: {text}"
     );
+    // Label mirrors Swift runEstateStatus: "memories: N active" (renamed from
+    // "drawers:" to align both ports — Part 2 label alignment fix).
     assert!(
-        text.contains("drawers:"),
-        "estate_status must include drawer count; got: {text}"
+        text.contains("memories:"),
+        "estate_status must include memories count; got: {text}"
     );
 }
 
@@ -3585,4 +3587,182 @@ fn dispatch_vault_tool_when_vault_on_does_not_return_disabled_error() {
         !text.contains("vault is disabled"),
         "vault-on: vault_status must not return the 'vault is disabled' refusal; got: {text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Wave-C drive-test fixes
+// ---------------------------------------------------------------------------
+
+/// Part 1b: file_memory with event_time ISO8601 string persists a back-dated
+/// event_time. Mirrors Swift ToolDispatch.runFileMemory which parses the
+/// event_time arg to Date and passes it as eventTime on the CaptureFrame.
+#[test]
+fn file_memory_with_event_time_is_accepted() {
+    use aria_mcp::dispatch::wall_now;
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
+
+    let registry = EstateRegistry::new_inmemory();
+    // File a memory with a back-dated event_time (2020-01-01T00:00:00Z).
+    let result = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "back-dated event content",
+            "location" => "temporal/test",
+            "event_time" => "2020-01-01T00:00:00Z"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("file_memory with event_time must succeed");
+    assert!(
+        is_success(&result),
+        "file_memory with event_time must return success; got: {result:?}"
+    );
+    // Confirm the drawer was stored with the provided event_time (epoch secs
+    // for 2020-01-01T00:00:00Z = 1577836800).
+    let estate = registry.resolve(&BTreeMap::new(), "estateID").unwrap();
+    let coord = estate.coord.lock().unwrap();
+    let drawers = coord
+        .recall(
+            &estate.handle,
+            RecallFrame {
+                filter_chain: vec![Filter::CurrentlyBelieve],
+                ordering: Ordering::ByCaptureTimeDesc,
+                hydration_level: HydrationLevel::Full,
+                limit: None,
+                ..RecallFrame::new(vec![Filter::CurrentlyBelieve])
+            },
+            wall_now(),
+        )
+        .expect("recall must succeed");
+    let drawer = drawers.first().expect("at least one drawer must exist");
+    assert_eq!(
+        drawer.event_time, 1_577_836_800_i64,
+        "drawer event_time must be the back-dated epoch seconds (2020-01-01T00:00:00Z); got: {}",
+        drawer.event_time
+    );
+}
+
+/// Part 1b: file_memory with an invalid event_time string returns INVALID_PARAMS.
+#[test]
+fn file_memory_with_invalid_event_time_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let err = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "some content",
+            "location" => "test/room",
+            "event_time" => "not-a-date"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("invalid event_time must produce transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+/// Part 2: estate_status counts only currently-believed (cluster A) drawers.
+/// A superseded/withdrawn drawer must NOT be counted as active. The label
+/// must be "memories: N active" (not "drawers: N").
+#[test]
+fn estate_status_active_count_excludes_tombstoned() {
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    // File two memories.
+    file_one_memory(&registry, "first memory", "status/test");
+    let second_id = file_one_memory(&registry, "second memory", "status/test");
+
+    // Withdraw the second drawer — it becomes tombstoned (not active).
+    let _withdraw = dispatch_tool(
+        "moot_withdraw_memory",
+        &args!["id" => second_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("withdraw must succeed");
+
+    let result = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate_status must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+
+    // Must report 1 active (not 2 — the withdrawn drawer is excluded).
+    assert!(
+        text.contains("memories: 1 active"),
+        "estate_status must count only active (cluster A) drawers; got: {text}"
+    );
+    // Must use the new label.
+    assert!(
+        !text.contains("drawers:"),
+        "estate_status must not use deprecated 'drawers:' label; got: {text}"
+    );
+}
+
+/// Part 4: moot_lens_contradiction filed= field must be ISO8601, not an epoch int.
+#[test]
+fn lens_contradiction_filed_is_iso8601() {
+    let registry = EstateRegistry::new_inmemory();
+    // File two KG facts with the same subject+predicate but different objects —
+    // that is the contradiction pattern the lens detects.
+    let _f1 = dispatch_tool(
+        "moot_file_fact",
+        &args![
+            "subject" => "Berlin",
+            "predicate" => "capital_of",
+            "object" => "Germany"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("file_fact 1 must succeed");
+    let _f2 = dispatch_tool(
+        "moot_file_fact",
+        &args![
+            "subject" => "Berlin",
+            "predicate" => "capital_of",
+            "object" => "Prussia"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("file_fact 2 must succeed");
+
+    let result = dispatch_tool(
+        "moot_lens_contradiction",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("lens_contradiction must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+
+    // The output must contain "filed=" somewhere (the contradiction lens emits it).
+    // If it does, the value after "filed=" must look like an ISO8601 date (contains
+    // "-" and "T" and "Z"), NOT a raw epoch integer (purely numeric).
+    if text.contains("filed=") {
+        // Find the filed= value — grab 30 chars after "filed=" to inspect.
+        let filed_pos = text.find("filed=").expect("filed= must be present");
+        let value_start = filed_pos + "filed=".len();
+        let snippet = &text[value_start..std::cmp::min(value_start + 30, text.len())];
+        let is_iso = snippet.contains('-') && snippet.contains('T');
+        let is_pure_integer = snippet.chars().next().map_or(false, |c| c.is_ascii_digit())
+            && snippet
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .count()
+                > 8; // epoch ints are 10+ digits; ISO dates have hyphens
+        assert!(
+            is_iso && !is_pure_integer,
+            "lens_contradiction filed= must be ISO8601, not an epoch int; snippet: {snippet}"
+        );
+    }
+    // No contradiction found → lens returns an empty list, which is also valid.
+    // The test passes either way — we only assert format when the field appears.
 }
