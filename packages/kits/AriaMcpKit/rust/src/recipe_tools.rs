@@ -300,7 +300,33 @@ fn run_precise_recall_tool(
     )
     .map_err(error_from_recipe)?;
 
-    // Compute discrimination over the full ordered list before the display prefix.
+    // Part 1a — distinctive-token containment gate.
+    //
+    // When the query carries distinctive tokens (numbers or proper nouns) but NO
+    // returned candidate's content contains any of those tokens, the result set is
+    // a confident NON-match. Return zero results with not_found discrimination so
+    // the calling AI knows to widen the search or confirm the content exists.
+    //
+    // When the query has no distinctive tokens we cannot apply the gate — emit a
+    // coaching hint so the calling AI knows the recall may be indiscriminate.
+    let candidate_contents: Vec<&str> = matches.iter().map(|m| m.content.as_str()).collect();
+    let has_distinctive = neuron_kit::has_distinctive_tokens(&query);
+    let satisfied = neuron_kit::containment_satisfied(&query, &candidate_contents);
+
+    if has_distinctive && !satisfied {
+        let lines = vec![
+            "found 0 memory(s)".to_string(),
+            crate::recall_discrimination::result_line(
+                crate::recall_discrimination::DiscriminationLevel::NotFound,
+            )
+            .to_string(),
+        ];
+        return Ok(text_result(&lines.join("\n")));
+    }
+
+    // Part 1b — discrimination computed over composition precision scores
+    // (PreciseMatch.score = candidate.precision_score from the reduce fold), not
+    // the coarse fusion score. Mirrors Swift RecipeTools.runPreciseRecall.
     let precise_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
     let discrimination = crate::recall_discrimination::classify(&precise_scores);
 
@@ -312,6 +338,16 @@ fn run_precise_recall_tool(
         lines.push(format!("{}  [{}]  {}", m.id, room, preview));
     }
     lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    if !has_distinctive {
+        // Coaching hint: query has no distinctive tokens (numbers or proper nouns),
+        // so exact containment cannot be verified. Results may include near-duplicates
+        // that are semantically close but not the specific record the user wants.
+        lines.push(
+            "hint: query contains no distinctive tokens (numbers or proper nouns) — \
+             results may be imprecise. Refine with specific identifiers for higher confidence."
+                .to_string(),
+        );
+    }
     Ok(text_result(&lines.join("\n")))
 }
 

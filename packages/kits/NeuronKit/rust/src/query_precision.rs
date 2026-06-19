@@ -114,6 +114,38 @@ pub fn distinctive_tokens(s: &str) -> BTreeSet<String> {
     out
 }
 
+/// Whether `query` contains at least one distinctive token (a number or a word
+/// with an uppercase letter). When true, the exact-token gate in
+/// `moot_recall_precise` applies: a result set where no candidate contains any
+/// of those tokens should be suppressed (not_found) rather than returned as a
+/// confident ranked list. Mirrors Swift `NeuronKit.hasDistinctiveTokens`.
+pub fn has_distinctive_tokens(query: &str) -> bool {
+    !distinctive_tokens(query).is_empty()
+}
+
+/// Whether at least one of `candidate_contents` satisfies the distinctive-token
+/// containment gate for `query`. Returns `true` when:
+///   - the query has no distinctive tokens (gate does not apply), OR
+///   - at least one candidate's content contains at least one distinctive token
+///     from the query (i.e. `token_exact_rate` for that candidate > 0).
+///
+/// When this returns `false`, the recall set is a confident non-match.
+/// Mirrors Swift `NeuronKit.containmentSatisfied(query:candidateContents:)`.
+pub fn containment_satisfied(query: &str, candidate_contents: &[&str]) -> bool {
+    let distinctive = distinctive_tokens(query);
+    if distinctive.is_empty() {
+        return true;
+    }
+    for content in candidate_contents {
+        let tokens: BTreeSet<String> = word_tokens(content).into_iter().collect();
+        // Any match where at least one distinctive token is present passes.
+        if distinctive.iter().any(|t| tokens.contains(t)) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +178,46 @@ mod tests {
         // All query content words present → content_match 1.0.
         let s = query_precision("what is the reserve value", "the reserve value is large", DEFAULT_DISTINCTIVE_BONUS);
         assert!((s - 1.0).abs() < 1e-6, "expected full content match, got {s}");
+    }
+
+    // Wave B, Part 1a — containment gate helpers
+
+    #[test]
+    fn has_distinctive_tokens_detects_numbers_and_proper_nouns() {
+        assert!(has_distinctive_tokens("the indemnity was 46 million marks"));
+        assert!(has_distinctive_tokens("the treaty of Versailles"));
+        assert!(has_distinctive_tokens("Q3 revenue report"));
+        // Plain lowercase words only — no distinctive tokens.
+        assert!(!has_distinctive_tokens("the quick brown fox"));
+        assert!(!has_distinctive_tokens("what is the indemnity"));
+        assert!(!has_distinctive_tokens(""));
+    }
+
+    #[test]
+    fn containment_satisfied_no_distinctive_always_true() {
+        // Generic query — gate cannot fire; result is always satisfied.
+        assert!(containment_satisfied("what is the indemnity", &["anything at all", "another result"]));
+        // Empty candidates is also satisfied when no distinctive tokens.
+        assert!(containment_satisfied("what is the indemnity", &[]));
+    }
+
+    #[test]
+    fn containment_satisfied_partial_match_passes() {
+        // "46" is distinctive; one candidate contains it.
+        assert!(containment_satisfied(
+            "indemnity 46 million",
+            &["indemnity was 11 million", "indemnity was 46 million"],
+        ));
+    }
+
+    #[test]
+    fn containment_satisfied_no_match_fires() {
+        // "46" is distinctive; neither candidate contains it.
+        assert!(!containment_satisfied(
+            "indemnity 46 million",
+            &["indemnity was 11 million", "indemnity was 23 million"],
+        ));
+        // Empty candidates with a distinctive query also fires.
+        assert!(!containment_satisfied("Versailles treaty", &[]));
     }
 }

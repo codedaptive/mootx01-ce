@@ -47,6 +47,13 @@ pub struct ReductionCandidate {
     /// Whether the candidate is in a currently-believed state (drawer state
     /// Cluster A). Read body-free from the adjective state bitmap.
     pub is_currently_believed: bool,
+    /// The composition precision score stamped during the weighted-sum fold
+    /// (`reduce` / `reduce_late`). Callers (e.g. `precise_recall`) should
+    /// surface this as `PreciseMatch.score` so discrimination classification
+    /// operates on the re-rank signal, not the coarse fusion score.
+    /// Defaults to 0.0 when a candidate has not been scored by a composition.
+    /// Mirrors Swift `ReductionCandidate.precisionScore`.
+    pub precision_score: f64,
 }
 
 impl ReductionCandidate {
@@ -83,6 +90,9 @@ impl ReductionCandidate {
             coarse_rank,
             event_time,
             is_currently_believed,
+            // precision_score is populated by the composition fold; zero here
+            // because from_hit builds pre-fold candidates.
+            precision_score: 0.0,
         }
     }
 }

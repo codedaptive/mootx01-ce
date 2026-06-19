@@ -128,7 +128,9 @@ pub use mmr_rank::{mmr_rank, mmr_select};
 // and the ARIA moot_recall_precise dispatch consume these.
 pub use composition_grid as composition_grid_mod;
 pub use composition_grid::{named as named_composition, DEFAULT_NAME as DEFAULT_COMPOSITION};
-pub use query_precision::{distinctive_tokens, query_precision, word_tokens};
+pub use query_precision::{
+    containment_satisfied, distinctive_tokens, has_distinctive_tokens, query_precision, word_tokens,
+};
 pub use reduction_composition::{
     assembly_expand, mmr_diversity_rerank, reduce, reduce_late, ReductionComposition,
     WeightedSignal, DEFAULT_SURVIVOR_MULTIPLE,

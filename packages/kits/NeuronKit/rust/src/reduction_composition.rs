@@ -128,7 +128,7 @@ pub fn reduce(
 
     // 1. WEIGHTED SUM per candidate over the per-candidate terms.
     let per_terms = composition.per_candidate_terms();
-    let mut scored: Vec<(ReductionCandidate, f64)> = candidates
+    let scored: Vec<(ReductionCandidate, f64)> = candidates
         .iter()
         .map(|candidate| {
             let mut sum = 0.0;
@@ -141,27 +141,42 @@ pub fn reduce(
         })
         .collect();
 
-    // 2. STABLE SORT: precision desc, then a CONTENT-stable tie-break. The
-    //    content tie-break (not coarse rank alone) is what makes the reduce
-    //    deterministic across runs: the coarse-grab pool order is itself
-    //    unstable run-to-run (random UUIDs break RRF ties), so tie-breaking on
-    //    the stable content string removes that dependence. Coarse rank is the
-    //    last resort for the degenerate identical-content case.
-    scored.sort_by(|lhs, rhs| {
+    // 2a. STAMP precision_score onto each candidate so callers (e.g.
+    //     precise_recall) can surface the composition score, not the coarse
+    //     fusion score, as the reported match score. Mirrors the Swift
+    //     `stamped` block in `ReductionComposition.reduce`.
+    let stamped: Vec<ReductionCandidate> = scored
+        .into_iter()
+        .map(|(mut c, precision)| {
+            c.precision_score = precision;
+            c
+        })
+        .collect();
+
+    // 2b. STABLE SORT on precision_score desc, then a CONTENT-stable tie-break.
+    //     The content tie-break (not coarse rank alone) makes the reduce
+    //     deterministic across runs: the coarse-grab pool order is itself
+    //     unstable run-to-run (random UUIDs break RRF ties), so tie-breaking on
+    //     the stable content string removes that dependence. Coarse rank is the
+    //     last resort for the degenerate identical-content case.
+    let mut stamped = stamped;
+    stamped.sort_by(|lhs, rhs| {
         // precision desc
-        match rhs.1.partial_cmp(&lhs.1).unwrap_or(std::cmp::Ordering::Equal) {
+        match rhs.precision_score.partial_cmp(&lhs.precision_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+        {
             std::cmp::Ordering::Equal => {}
             ord => return ord,
         }
         // content asc
-        match lhs.0.content.cmp(&rhs.0.content) {
+        match lhs.content.cmp(&rhs.content) {
             std::cmp::Ordering::Equal => {}
             ord => return ord,
         }
         // coarse rank asc
-        lhs.0.coarse_rank.cmp(&rhs.0.coarse_rank)
+        lhs.coarse_rank.cmp(&rhs.coarse_rank)
     });
-    let mut ranked: Vec<ReductionCandidate> = scored.into_iter().map(|(c, _)| c).collect();
+    let mut ranked: Vec<ReductionCandidate> = stamped;
 
     // 3. MMR RE-RANK (optional, set-level).
     if composition.has_mmr() {
@@ -386,6 +401,8 @@ mod tests {
             coarse_rank,
             event_time: None,
             is_currently_believed: true,
+            // precision_score is 0 here — the fold stamps the real value.
+            precision_score: 0.0,
         }
     }
 
