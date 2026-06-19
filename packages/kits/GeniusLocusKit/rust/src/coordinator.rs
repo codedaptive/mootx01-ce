@@ -3844,7 +3844,22 @@ impl EstateCoordinator {
                             }
                         }
                     }
+                } else {
+                    // Part 2 — dense_lane dark:emptyQuery. A corpus is registered
+                    // but the query string is empty: the float index cannot be
+                    // queried without query text. Tag explicitly so callers can
+                    // distinguish "lane never attempted due to empty query" from
+                    // "lane ran and returned hits" (None). Mirrors Swift
+                    // RecallDirector's else branch on `!text.isEmpty`.
+                    dense_lane_status = Some("dark:emptyQuery".to_string());
                 }
+            } else {
+                // Part 2 — dense_lane dark:noCorpus. No corpus is registered for
+                // this handle (corpus.is_none()): the dense lane was never attempted.
+                // Previously serialized as None (indistinguishable from "active"); now
+                // carries an explicit tag. Mirrors Swift RecallDirector's `else if
+                // corpusKits[handle] == nil` branch.
+                dense_lane_status = Some("dark:noCorpus".to_string());
             }
         }
         // N-way consensus RRF over the per-signal dense lists, DENSE-STEERED by the

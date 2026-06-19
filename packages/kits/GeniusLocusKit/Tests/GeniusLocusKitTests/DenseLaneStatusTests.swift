@@ -4,8 +4,11 @@
 // the GLK RecallDirector (Step 4.5) and the FloatLaneOutcome consumption path.
 //
 // §1 Dark lane explainer: unionBest result carries a non-nil denseLaneStatus
-//    when the corpus is registered but the lane is dark (noFloatRows).
-//    No-corpus case → denseLaneStatus == nil (lane never attempted).
+//    when the dense lane is dark. All dark reasons now carry an explicit tag:
+//    - No corpus: "dark:noCorpus" (previously nil — ambiguous).
+//    - Corpus present, empty/nil query: "dark:emptyQuery".
+//    - Corpus + query, but lane dark: "dark:noFloatRows", "dark:providerOptOut", etc.
+//    - Lane ran and returned hits: nil (the ONLY nil case).
 // §2 Dark lane counter: glk.recall.dense_lane_dark counter moves when lane is
 //    dark in a unionBest recall.
 // §3 Hit path: denseLaneStatus is nil when the lane ran and produced hits.
@@ -134,9 +137,10 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 struct DenseLaneExplainerTests {
 
     /// unionBest with no corpus registered: dense lane was never attempted →
-    /// denseLaneStatus must be nil (the lane did not run, so no dark marker).
-    @Test("denseLaneStatus is nil when no corpus is registered")
-    func denseLaneStatusNilWhenNoCorpus() async throws {
+    /// denseLaneStatus must carry "dark:noCorpus" so callers can distinguish
+    /// "lane never attempted" from "lane ran and returned hits" (nil).
+    @Test("denseLaneStatus is dark:noCorpus when no corpus is registered")
+    func denseLaneStatusDarkNoCorpusWhenNoCorpus() async throws {
         let (kit, handle) = try await openBareEstate()
         let request = GLKRecallRequest(
             frame: recallAllActive(),
@@ -147,8 +151,45 @@ struct DenseLaneExplainerTests {
             origin: .internal
         )
         let result = try await kit.recall(handle, request)
-        #expect(result.denseLaneStatus == nil,
-            "denseLaneStatus must be nil when no corpus is registered")
+        #expect(result.denseLaneStatus == "dark:noCorpus",
+            "denseLaneStatus must be 'dark:noCorpus' when no corpus is registered; got '\(result.denseLaneStatus ?? "nil")'")
+    }
+
+    /// unionBest with no corpus + empty query → denseLaneStatus must be
+    /// "dark:noCorpus" (the no-corpus check fires first; same outer guard).
+    @Test("denseLaneStatus is dark:noCorpus when no corpus and empty query text")
+    func denseLaneStatusDarkNoCorpusEmptyQuery() async throws {
+        let (kit, handle) = try await openBareEstate()
+        let request = GLKRecallRequest(
+            frame: recallAllActive(),
+            mode: .unionBest,
+            scoring: .rrf,
+            limit: 5,
+            queryText: "",   // empty query
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.denseLaneStatus == "dark:noCorpus",
+            "denseLaneStatus must be 'dark:noCorpus' when no corpus (no-corpus check fires first); got '\(result.denseLaneStatus ?? "nil")'")
+    }
+
+    /// unionBest with corpus registered but query text nil → denseLaneStatus
+    /// must be "dark:emptyQuery" so callers can distinguish "lane never
+    /// attempted due to missing query" from "lane ran and returned hits".
+    @Test("denseLaneStatus is dark:emptyQuery when corpus registered and query text is nil")
+    func denseLaneStatusDarkEmptyQueryWhenQueryTextNil() async throws {
+        let (kit, handle) = try await openEstateWithDeterministicCorpusNoIngest()
+        let request = GLKRecallRequest(
+            frame: recallAllActive(),
+            mode: .unionBest,
+            scoring: .rrf,
+            limit: 5,
+            queryText: nil,  // no query text
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.denseLaneStatus == "dark:emptyQuery",
+            "denseLaneStatus must be 'dark:emptyQuery' when corpus registered but no query; got '\(result.denseLaneStatus ?? "nil")'")
     }
 
     /// unionBest with a deterministic corpus + no ingest: corpus is registered, the

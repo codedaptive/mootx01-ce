@@ -857,11 +857,12 @@ fn c7_union_best_with_corpus_and_vector_populates_union_profile() {
 //
 // Verifies the Rust GLKRecallResult.dense_lane_status field mirrors the Swift
 // denseLaneStatus field contract (GLKRecallResult.swift):
-//   D-1  locusOnly carries None (lane not attempted).
-//   D-2  unionBest with no corpus carries None (lane never attempted).
+//   D-1  locusOnly carries None (lane not attempted — mode doesn't use dense lane).
+//   D-2  unionBest with no corpus → dark:noCorpus (Wave B Part 2: was None, now explicit).
 //   D-3  unionBest with deterministic corpus + no ingest → dark:noFloatRows.
 //   D-4  unionBest with ingested corpus → None (lane ran and produced hits).
 //   D-5  unionBest dark path with ThrowingFloatProvider → dark:providerOptOut.
+//   D-6  unionBest with corpus + empty query → dark:emptyQuery (Wave B Part 2: new).
 //
 // The deterministic Corpus provider (FloatSimHashEmbeddingProvider) supports
 // embed_float — it returns a valid probe vector — so an empty corpus produces
@@ -884,10 +885,11 @@ fn d1_locus_only_dense_lane_status_is_none() {
     );
 }
 
-/// D-2: unionBest with no corpus registered → dense_lane_status = None
-/// (lane was never attempted — no corpus to call float_nearest on).
+/// D-2: unionBest with no corpus registered → dark:noCorpus (Wave B Part 2).
+/// Previously serialized as None; now carries an explicit tag so callers can
+/// distinguish "lane never attempted (no corpus)" from "lane ran and produced hits".
 #[test]
-fn d2_union_best_no_corpus_dense_lane_status_is_none() {
+fn d2_union_best_no_corpus_dense_lane_status_is_dark_no_corpus() {
     let (mut coord, h) = open_one();
     let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
@@ -896,9 +898,33 @@ fn d2_union_best_no_corpus_dense_lane_status_is_none() {
         .with_limit(5);
 
     let result = coord.recall_scored(&h, req, NOW).expect("recall_scored");
-    assert!(
-        result.dense_lane_status.is_none(),
-        "unionBest with no corpus must carry None dense_lane_status; got {:?}",
+    assert_eq!(
+        result.dense_lane_status.as_deref(),
+        Some("dark:noCorpus"),
+        "unionBest with no corpus must carry dark:noCorpus; got {:?}",
+        result.dense_lane_status
+    );
+}
+
+/// D-6: unionBest with corpus registered but empty query text → dark:emptyQuery
+/// (Wave B Part 2). The float index cannot be queried without a query string.
+#[test]
+fn d6_union_best_corpus_empty_query_dense_lane_status_is_dark_empty_query() {
+    let (mut coord, h) = open_one();
+    let corpus = make_corpus_for_test();
+    coord.register_corpus(&h, corpus);
+
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+        .with_mode(GLKRecallMode::UnionBest)
+        .with_scoring(GLKRecallScoring::Rrf)
+        // no query text → empty string after Option::unwrap_or_default
+        .with_limit(5);
+
+    let result = coord.recall_scored(&h, req, NOW).expect("recall_scored");
+    assert_eq!(
+        result.dense_lane_status.as_deref(),
+        Some("dark:emptyQuery"),
+        "unionBest with corpus + empty query must carry dark:emptyQuery; got {:?}",
         result.dense_lane_status
     );
 }
