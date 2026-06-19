@@ -335,11 +335,20 @@ public extension GeniusLocusKit {
         try await queue.send(queueJob)
     }
 
-    /// Ingest a single drawer into the estate's Corpus (P4/P6 shared call).
+    /// Ingest a single drawer into the estate's Corpus (P4/P6 shared call),
+    /// then assign it to a cluster (Dg5 write-path wiring).
     ///
     /// `sourceID = drawer.id` (G4) so BM25/vector hits hydrate to this drawer.
     /// `now = drawer.filedAt` for deterministic vector filing timestamps. A
     /// no-op when no Corpus is registered.
+    ///
+    /// After a successful ingest, `assignClusterAfterIngest` embeds the drawer
+    /// content via the same corpus (the prose engram is now in VectorKit) and
+    /// calls `assignCluster` to place the drawer in an open cluster or seed a
+    /// new one. Cluster-assignment errors are logged but never rethrown — the
+    /// drawer row is already durably stored and the ingest succeeded; a cluster
+    /// miss degrades gracefully (no distillation for this drawer) rather than
+    /// failing the write.
     private func ingestDrawerIntoCorpus(
         handle: EstateHandle,
         drawer: Drawer
@@ -351,6 +360,90 @@ public extension GeniusLocusKit {
             sourceID: drawer.id,
             now: drawer.filedAt
         )
+        // Dg5: wire cluster assignment after the prose engram lands in VectorKit.
+        await assignClusterAfterIngest(
+            handle: handle,
+            corpus: corpus,
+            drawerID: drawer.id,
+            content: drawer.content,
+            now: drawer.filedAt
+        )
+    }
+
+    /// Embed `content` via `corpus`, register the drawer's engram in a
+    /// dedicated cluster-assignment VectorKit lane, then call `assignCluster`
+    /// (Dg5).
+    ///
+    /// Called immediately after a successful `corpus.ingest` so the prose
+    /// engram is guaranteed to be in the Corpus when this helper runs. Errors
+    /// are logged but never rethrown — cluster assignment is best-effort
+    /// relative to the write; a miss degrades distillation formation, not the
+    /// stored drawer.
+    ///
+    /// WHY a dedicated cluster-assignment lane: `corpus.ingest` stores engrams
+    /// in VectorKit under chunk IDs (content-addressed chunk UUIDs), not drawer
+    /// IDs. `assignCluster`'s nearest-neighbor search uses the returned `itemID`
+    /// to look up a cluster in `memory_clusters.member_ids`, which is populated
+    /// with drawer IDs. If the nearest-neighbor result is a chunk ID instead of
+    /// a drawer ID, `findOpenCluster(containing: chunk_id)` returns nil and
+    /// every capture seeds a fresh cluster rather than joining an existing one.
+    ///
+    /// By storing the drawer's engram under a SEPARATE modelID
+    /// (`<corpus_modelID>-cluster`), the cluster-assignment `findNearest` call
+    /// sees ONLY drawer-keyed rows — the chunk-ID rows live under the base
+    /// modelID and are not mixed in. This means `nearest.itemID` is always a
+    /// drawer ID, and `findOpenCluster(containing: drawer_id)` correctly finds
+    /// the cluster seeded by the first capture with that content.
+    ///
+    /// `assignCluster` is called with the cluster-lane modelID, not the base
+    /// corpus modelID, for the same reason.
+    ///
+    /// - Parameters:
+    ///   - handle: The estate the drawer belongs to.
+    ///   - corpus: The Corpus that just completed ingest (used to embed).
+    ///   - drawerID: UUID string of the captured drawer.
+    ///   - content: The drawer's text content (same text that was ingested).
+    ///   - now: Capture instant — passed through to `assignCluster` unchanged.
+    private func assignClusterAfterIngest(
+        handle: EstateHandle,
+        corpus: Corpus,
+        drawerID: String,
+        content: String,
+        now: Date
+    ) async {
+        do {
+            let engram = try await corpus.embed(content)
+            let baseModelID = await corpus.modelID
+            // Use a dedicated model lane for cluster assignment so the
+            // nearest-neighbor search sees only drawer-keyed rows (not chunk
+            // IDs from corpus.ingest). The lane suffix "-cluster" is a fixed
+            // convention shared between the write path here and assignCluster
+            // (via the clusterModelID passed below). This lane never participates
+            // in recall — it exists solely to drive cluster formation.
+            let clusterModelID = baseModelID + "-cluster"
+            if let vectorStore = vectorStores[handle] {
+                try await vectorStore.addVector(
+                    itemID: drawerID,
+                    engram: engram,
+                    modelID: clusterModelID,
+                    modelVersion: "1",
+                    filedAt: now
+                )
+            }
+            try await assignCluster(
+                handle: handle,
+                engram: engram,
+                drawerID: drawerID,
+                modelID: clusterModelID,
+                now: now
+            )
+        } catch {
+            // Cluster-assignment failure is non-fatal: the drawer is stored and
+            // the prose engram is in VectorKit. Log the miss so it is observable
+            // but never surface it to the caller (the write already succeeded).
+            Self.intakeLog.error(
+                "assignCluster failed for drawer \(drawerID, privacy: .public) in estate \(handle.estateUUID, privacy: .public): \(error, privacy: .public)")
+        }
     }
 
     /// The background drain loop for an estate's encode queue (P4).
@@ -439,6 +532,11 @@ public extension GeniusLocusKit {
     /// `.blocked` after the budget is spent (the drawer row is already durably
     /// stored, so the queue never wedges and `awaitEncodeDrain` can still
     /// release).
+    ///
+    /// Dg5: after a successful ingest (prose engram now in VectorKit),
+    /// `assignClusterAfterIngest` is called before reply. Cluster-assignment
+    /// errors are logged but never block the reply — at-least-once delivery
+    /// of the encode job is not affected by a cluster miss.
     private func ingestAndReply(
         job: Job,
         on queue: QueueKit,
@@ -469,6 +567,16 @@ public extension GeniusLocusKit {
                 try await corpus.ingest(
                     encodeJob.text,
                     sourceID: encodeJob.drawerID,
+                    now: encodeJob.capturedAt
+                )
+                // Dg5: prose engram is now in VectorKit — assign a cluster.
+                // Done before replying so the cluster assignment is attempted
+                // within the same drain pass; errors are logged not rethrown.
+                await assignClusterAfterIngest(
+                    handle: handle,
+                    corpus: corpus,
+                    drawerID: encodeJob.drawerID,
+                    content: encodeJob.text,
                     now: encodeJob.capturedAt
                 )
                 try await queue.reply(to: job.id, status: .done, artifacts: [])
