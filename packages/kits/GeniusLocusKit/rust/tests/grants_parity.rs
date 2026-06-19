@@ -1127,9 +1127,11 @@ fn grt07b_issue_and_readback_round_trips_policy() {
 #[test]
 fn grt07c_legacy_physical_decay_token_decodes_with_defaults() {
     use std::collections::HashMap;
-    // issued_at as ISO-8601 for Apple-ref t0 = 1_000_000s. Build a text-dict row
-    // with the legacy token and no decay_* columns, then decode it.
-    let issued_iso = "2001-01-12T13:46:40Z"; // 2001-01-01 + 1_000_000s
+    // Build a text-dict row with the legacy physicalDecay token and no
+    // decay_* columns. The issued_at ISO string is "2001-01-12T13:46:40Z"
+    // which is Unix epoch second 979_307_200 (= Apple-ref 1_000_000 + offset
+    // 978_307_200). The Rust port parses ISO-8601 to Unix epoch seconds.
+    let issued_iso = "2001-01-12T13:46:40Z"; // Unix epoch: 979_307_200
     let mut row: HashMap<&str, &str> = HashMap::new();
     row.insert("id", "12345678-1234-1234-1234-123456789ABC");
     row.insert("grantee_id", "ABCDEF01-2345-6789-ABCD-EF0123456789");
@@ -1143,8 +1145,8 @@ fn grt07c_legacy_physical_decay_token_decodes_with_defaults() {
         CustodyMode::TimeAging(p) => {
             assert_eq!(p.half_life_seconds, DecayPolicy::DEFAULT_HALF_LIFE_SECONDS);
             assert_eq!(p.floor, 0);
-            // started_at defaults to issued_at (Apple-ref 1_000_000, within rounding).
-            assert!((p.started_at - 1_000_000.0).abs() < 1.0,
+            // started_at defaults to issued_at (Unix epoch 979_307_200, within rounding).
+            assert!((p.started_at - 979_307_200.0).abs() < 1.0,
                 "legacy row defaults the decay clock to issued_at; got {}", p.started_at);
         }
         other => panic!("legacy physicalDecay did not decode into TimeAging: {other:?}"),

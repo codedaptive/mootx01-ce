@@ -2410,8 +2410,9 @@ impl EstateCoordinator {
     /// Curve25519). Used as HKDF IKM for mode-1 and mode-2 scope-key
     /// derivation. Mirror of Swift `VerbSurface.issueGrant`.
     ///
-    /// `now` is Apple reference seconds (seconds since 2001-01-01 UTC),
-    /// matching the Swift `Date.timeIntervalSinceReferenceDate` convention.
+    /// `now` is Unix epoch seconds (1970-01-01 UTC) on the Rust port.
+    /// The Swift port passes Apple reference seconds via `Date.timeIntervalSinceReferenceDate`;
+    /// the Rust port uses Unix epoch throughout for consistency with the substrate.
     pub fn issue_grant(
         &mut self,
         handle: &EstateHandle,
@@ -2462,7 +2463,7 @@ impl EstateCoordinator {
     /// Revoke a grant for the estate addressed by `handle`.
     ///
     /// Marks the grant revoked in the `GrantStore` and drops any mediated
-    /// key from the `ScopeKeyVault`. `now` is Apple reference seconds.
+    /// key from the `ScopeKeyVault`. `now` is Unix epoch seconds (Rust port).
     ///
     /// Mirror of Swift `VerbSurface.revokeGrant`.
     pub fn revoke_grant(
@@ -2473,9 +2474,9 @@ impl EstateCoordinator {
     ) -> Result<(), GrantError> {
         let store = self.grant_stores.get_mut(handle)
             .ok_or(GrantError::GrantNotFound(grant_id))?;
-        // revoke_at_apple_ref converts the f64 Apple reference seconds to
-        // ISO-8601 before persisting — matching Swift GrantStore.revoke(id:at:).
-        store.revoke_at_apple_ref(grant_id, now)
+        // revoke_at_unix converts the f64 Unix epoch seconds to ISO-8601
+        // before persisting — matching Swift GrantStore.revoke(id:at:).
+        store.revoke_at_unix(grant_id, now)
             .map_err(|_| GrantError::GrantNotFound(grant_id))?;
         if let Some(vault) = self.scope_vaults.get_mut(handle) {
             vault.revoke(grant_id);
@@ -2567,8 +2568,10 @@ impl EstateCoordinator {
     ///    wing/room/lattice subtree/single row.
     /// 10. Return `FederatedRecallResult` with the filtered drawers and grant.
     ///
-    /// Both `now` (Apple ref seconds, grant expiry) and `now_unix` (Unix
-    /// seconds, LocusKit bitmap evaluation) are explicit for determinism.
+    /// Both `now` (Unix epoch seconds, grant expiry) and `now_unix` (Unix
+    /// epoch seconds, LocusKit bitmap evaluation) are explicit for determinism.
+    /// `now` is `f64` for compatibility with grant lifetime arithmetic;
+    /// `now_unix` is `i64` for LocusKit bitmap integer evaluation.
     /// `&mut self` is required by the budget debit in step 6.
     pub fn federated_recall(
         &mut self,
