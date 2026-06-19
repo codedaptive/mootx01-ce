@@ -56,11 +56,11 @@ struct RecallShapeMatrixSteerTests {
         let handle = try await kit.open(storage: storage, owner: owner)
 
         let f1 = CaptureFrame(content: "matrix steer alpha content", channel: .typed,
-                              room: "matrix-steer-tests", latticeAnchor: .udc("000.000"),
+                              room: "matrix-steer-tests", latticeAnchor: .udc("000"),
                               addedBy: "matrix-steer-tests", embeddingModelID: "test-v1")
         let d1 = try await kit.capture(handle, f1)
         let f2 = CaptureFrame(content: "matrix steer beta content", channel: .voiced,
-                              room: "matrix-steer-tests", latticeAnchor: .udc("000.000"),
+                              room: "matrix-steer-tests", latticeAnchor: .udc("000"),
                               addedBy: "matrix-steer-tests", embeddingModelID: "test-v1")
         let d2 = try await kit.capture(handle, f2)
         return (kit: kit, handle: handle, d1: d1.id, d2: d2.id)

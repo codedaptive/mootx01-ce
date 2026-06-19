@@ -85,7 +85,7 @@ struct PersistenceTests {
             content: "in-memory config behaviour test",
             channel: .typed,
             room: "persistence-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "persistence-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -134,7 +134,7 @@ struct PersistenceTests {
                 content: capturedContent,
                 channel: .typed,
                 room: "persistence-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "persistence-tests",
                 embeddingModelID: "test-model-v1"
             )

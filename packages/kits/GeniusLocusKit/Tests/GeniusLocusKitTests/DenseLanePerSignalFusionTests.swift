@@ -64,7 +64,7 @@ private func openEstateWithDrawers(_ contents: [String], owner ownerID: String) 
             content: content,
             channel: .typed,
             room: "per-signal-fusion-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "per-signal-fusion-tests",
             embeddingModelID: "test-model-v1"
         )

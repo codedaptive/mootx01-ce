@@ -160,7 +160,7 @@ struct HydrateRoundTripTests {
                 content: content,
                 channel: .typed,
                 room: "hydrate-rt",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "hydrate-test",
                 embeddingModelID: "test-model-v1"
             ))
@@ -271,7 +271,7 @@ struct HydrateRoundTripTests {
                 content: "matrix tier parity test content row \(i)",
                 channel: .typed,
                 room: "matrix-rt",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "hydrate-test",
                 embeddingModelID: "test-model-v1"
             ))

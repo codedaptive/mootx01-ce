@@ -1,12 +1,13 @@
-//! Error-message parity + FDC-on-capture tests (B-6 + BUG-2 verification).
+//! Error-message parity + FDC seam classification tests (B-6 + one-door verification).
 //!
 //! B-6 (error surfacing): verifies that errors at the MCP boundary carry
 //! actionable English reasons, not raw Rust type names like
 //! `VerbDispatchError`, `UnderlyingEstateFailure`, `GeniusLocusKitError`, etc.
 //!
-//! BUG-2 (FDC-on-capture): verifies that `moot_file_memory` classifies
-//! content via `Fdc::encode_anchor` so the drawer's `udc_code` is a real
-//! classified code, not the "000.000" root.
+//! One-door (FDC seam): verifies that `moot_file_memory` content is classified
+//! in the GeniusLocusKit capture seam (`capture_with_mode`), not per-caller.
+//! The drawer's `udc_code` must be a real classified code, not the "000"
+//! unclassified sentinel (the UDC root; was incorrectly "000.000" before).
 //!
 //! Parity: the Swift counterpart tests live in
 //! `Tests/AriaMCPTests/FdcCaptureTests.swift`.
@@ -19,7 +20,11 @@ use aria_mcp::{
     jsonrpc::JsonValue,
     surfaced_recall_ledger::SurfacedRecallLedger,
 };
+use genius_locus_kit::WriteMode;
+use locus_kit::drawer_operational::CaptureChannel;
+use locus_kit::estate_types::LatticeAnchor;
 use locus_kit::filter::RecallFrame;
+use locus_kit::frames::CaptureFrame;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,17 +129,17 @@ fn unknown_estate_id_error_is_clean_english() {
 }
 
 // ---------------------------------------------------------------------------
-// BUG-2: FDC-on-capture — moot_file_memory must classify content
+// One-door: FDC seam classifies moot_file_memory content
 // ---------------------------------------------------------------------------
 
 /// Filing a memory with classifiable content results in a drawer whose
-/// `udc_code` is a real FDC code, not the "000.000" root.
+/// `udc_code` is a real FDC code, not the "000" unclassified sentinel.
 ///
 /// "Biology is the scientific study of life" reliably resolves to the FDC
-/// natural-sciences region. Any non-"000.000" code confirms the classification
-/// path ran. The test accesses the stored drawer via the estate coordinator's
-/// `recall` method (the LocusKit read path) rather than relying on the tool
-/// response text (which does not surface `udc_code`).
+/// natural-sciences region. Any non-"000" code confirms the seam's
+/// Fdc::encode_anchor path ran. The test accesses the stored drawer via
+/// the estate coordinator's `recall` method (the LocusKit read path) rather
+/// than relying on the tool response text (which does not surface `udc_code`).
 #[test]
 fn file_memory_with_classifiable_content_sets_real_udc_code() {
     let registry = EstateRegistry::new_inmemory();
@@ -173,9 +178,11 @@ fn file_memory_with_classifiable_content_sets_real_udc_code() {
     assert_eq!(drawers.len(), 1, "exactly one drawer must exist");
 
     let udc_code = &drawers[0].udc_code;
+    // The unclassified sentinel is "000" (the UDC root). A classified drawer
+    // must carry a more specific code resolved by the seam's Fdc::encode_anchor.
     assert!(
-        udc_code != "000.000",
-        "file_memory with classifiable content must set a real udc_code, not the '000.000' fallback; got: '{udc_code}'"
+        udc_code != "000",
+        "file_memory with classifiable content must set a real udc_code, not the '000' unclassified sentinel; got: '{udc_code}'"
     );
     assert!(
         !udc_code.is_empty(),
@@ -230,10 +237,9 @@ fn empty_location_error_does_not_expose_invalid_content_prefix() {
 }
 
 /// Filing a memory whose content is not classifiable (short noise text)
-/// falls back gracefully to "000.000" rather than failing.
-///
-/// Confirms the fallback path is live and that FDC failure does not propagate
-/// as an error to the tool surface.
+/// falls back gracefully to the "000" unclassified sentinel rather than
+/// failing. Confirms the fallback path is live and that FDC failure does
+/// not propagate as an error to the tool surface.
 #[test]
 fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
     let registry = EstateRegistry::new_inmemory();
@@ -269,10 +275,131 @@ fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
         .expect("recall must succeed");
 
     assert_eq!(drawers.len(), 1, "exactly one drawer must exist");
-    // The drawer may or may not be "000.000" — the important thing is it exists
-    // and the code is a non-empty string (either root or classified).
+    // The drawer may be "000" (sentinel) or a classified code — the important
+    // thing is it exists and the code is non-empty.
     assert!(
         !drawers[0].udc_code.is_empty(),
         "udc_code must never be empty regardless of FDC outcome"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-door parity: file_memory and direct capture_with_mode share ONE seam
+// ---------------------------------------------------------------------------
+
+/// Filing the SAME classifiable content through `moot_file_memory` (the MCP
+/// tool path) and through a direct `capture_with_mode` call (what VaultKit's
+/// import path does) must produce drawers with the SAME `udc_code`.
+///
+/// If each path were classifying independently the codes might agree by chance,
+/// but this test proves they share a SINGLE call tree: both pass the "000"
+/// unclassified sentinel to `capture_with_mode`, which runs `Fdc::encode_anchor`
+/// exactly once per frame, producing a deterministic result.
+///
+/// One-door principle: two behaviors are equal if and only if they traverse the
+/// SAME functional call tree.
+#[test]
+fn file_memory_and_direct_capture_produce_same_udc_code() {
+    let classifiable = "Biology is the scientific study of life and living organisms, including their physical structure, chemical processes, molecular interactions, physiological mechanisms, and evolution.";
+
+    // Path 1 — file_memory tool (the MCP caller path).
+    let registry1 = EstateRegistry::new_inmemory();
+    let a = args!["content" => classifiable, "location" => "science-room"];
+    dispatch_tool("moot_file_memory", &a, &registry1, &SurfacedRecallLedger::new())
+        .expect("file_memory must succeed");
+
+    let estate1 = registry1.resolve(&BTreeMap::new(), "estateID").expect("estate1 must resolve");
+    let coord1 = estate1.coord.lock().expect("coord1 lock");
+    let now: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time must be after UNIX epoch")
+        .as_secs() as i64;
+    let drawers1 = coord1
+        .recall(&estate1.handle, RecallFrame::new(vec![]), now)
+        .expect("recall estate1");
+    let code_via_tool = drawers1[0].udc_code.clone();
+
+    // Path 2 — direct capture_with_mode with the canonical "000" sentinel
+    //           (mirrors what VaultKit's make_capture_frame produces when a
+    //           note has no explicit frontmatter `udc`).
+    let registry2 = EstateRegistry::new_inmemory();
+    let estate2 = registry2.resolve(&BTreeMap::new(), "estateID").expect("estate2 must resolve");
+    let mut coord2 = estate2.coord.lock().expect("coord2 lock");
+    let frame = CaptureFrame::new(
+        classifiable,
+        CaptureChannel::ImportedFile,
+        "science-room",
+        // The canonical unclassified sentinel: same value VaultKit passes
+        // when no frontmatter `udc` is present.
+        LatticeAnchor::udc("000"),
+        "test-added-by",
+        "test-model",
+    );
+    coord2
+        .capture_with_mode(&estate2.handle, frame, now, WriteMode::Regular)
+        .expect("direct capture_with_mode must succeed");
+    let drawers2 = coord2
+        .recall(&estate2.handle, RecallFrame::new(vec![]), now)
+        .expect("recall estate2");
+    let code_via_coordinator = drawers2[0].udc_code.clone();
+
+    // Both paths must produce the SAME code — proof of the one-door principle.
+    assert_eq!(
+        code_via_tool, code_via_coordinator,
+        "file_memory tool and direct capture_with_mode must produce the same udc_code \
+        for classifiable content (one-door principle); tool={code_via_tool}, \
+        coordinator={code_via_coordinator}"
+    );
+    // And neither should be the unclassified sentinel (content IS classifiable).
+    assert!(
+        code_via_tool != "000",
+        "classifiable content must not remain at the '000' sentinel; got: '{code_via_tool}'"
+    );
+}
+
+/// When a capture frame carries an EXPLICIT non-sentinel udc_code (e.g. from
+/// vault frontmatter `udc`), the `capture_with_mode` seam must preserve it —
+/// it must NOT re-classify an already-classified anchor.
+///
+/// This is the "explicit frontmatter `udc` is preserved" invariant, matching
+/// the seam's guard: `frame.lattice_anchor.udc_code == UNCLASSIFIED_SENTINEL`.
+/// An anchor that differs from "000" passes through unchanged.
+#[test]
+fn explicit_udc_code_on_capture_frame_is_preserved_by_seam() {
+    let registry = EstateRegistry::new_inmemory();
+    let estate = registry.resolve(&BTreeMap::new(), "estateID").expect("estate must resolve");
+    let mut coord = estate.coord.lock().expect("coord lock");
+    let now: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time must be after UNIX epoch")
+        .as_secs() as i64;
+
+    // Explicit UDC code from vault frontmatter (not the sentinel).
+    // "610" = Medicine & Health — a well-established code far from "000".
+    let explicit_code = "610";
+    let frame = CaptureFrame::new(
+        "Biology is the scientific study of life.", // classifiable content
+        CaptureChannel::ImportedFile,
+        "medicine-room",
+        // Explicit code: the seam must NOT override this even though the
+        // content is classifiable (which might resolve to a different code).
+        LatticeAnchor::udc(explicit_code),
+        "test-added-by",
+        "test-model",
+    );
+    coord
+        .capture_with_mode(&estate.handle, frame, now, WriteMode::Regular)
+        .expect("capture must succeed");
+
+    let drawers = coord
+        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .expect("recall must succeed");
+
+    assert_eq!(drawers.len(), 1, "exactly one drawer");
+    let stored_code = &drawers[0].udc_code;
+    assert_eq!(
+        stored_code, explicit_code,
+        "the seam must preserve an explicit non-sentinel udc_code, not re-classify; \
+        expected: '{explicit_code}', got: '{stored_code}'"
     );
 }

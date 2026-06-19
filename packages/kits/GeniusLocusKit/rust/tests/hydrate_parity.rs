@@ -138,7 +138,9 @@ fn make_capture_frame(content: &str) -> CaptureFrame {
         content,
         CaptureChannel::Typed,
         "hydrate-rt",
-        LatticeAnchor::udc("000.000"),
+        // "000" is the canonical unclassified sentinel (UDC root). The
+        // capture_with_mode seam classifies non-empty content on the way in.
+        LatticeAnchor::udc("000"),
         "hydrate-test",
         "test-model-v1",
     )

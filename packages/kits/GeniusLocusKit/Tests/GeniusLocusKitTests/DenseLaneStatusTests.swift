@@ -82,7 +82,7 @@ private func openEstateWithFloatCorpusAndIngest() async throws
         content: "dense float lane test content for embedding recall",
         channel: .typed,
         room: "dense-lane-tests",
-        latticeAnchor: .udc("000.000"),
+        latticeAnchor: .udc("000"),
         addedBy: "dense-lane-tests",
         embeddingModelID: "test-model-v1"
     )
@@ -409,7 +409,7 @@ struct DenseLaneStoreErrorTests {
                 content: "store error chain test content photosynthesis recall",
                 channel: .typed,
                 room: "store-error-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "store-error-tests",
                 embeddingModelID: "test-model-v1"
             )

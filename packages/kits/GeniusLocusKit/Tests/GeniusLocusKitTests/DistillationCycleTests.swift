@@ -80,7 +80,7 @@ struct DistillationCycleTests {
                 content: "Source memory \(i) mentioning Alice, Bob, Carol",
                 channel: .typed,
                 room: "inbox",
-                latticeAnchor: LatticeAnchor.udc("000.000"),
+                latticeAnchor: LatticeAnchor.udc("000"),
                 addedBy: "test-dg5",
                 embeddingModelID: modelID
             )

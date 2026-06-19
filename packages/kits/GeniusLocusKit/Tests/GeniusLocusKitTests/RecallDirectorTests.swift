@@ -71,7 +71,7 @@ struct RecallDirectorTests {
             content: content,
             channel: .typed,
             room: "recall-director-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "recall-director-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -100,7 +100,7 @@ struct RecallDirectorTests {
             content: content,
             channel: .typed,
             room: "rd2-corpus-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "rd2-corpus-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -641,7 +641,7 @@ struct RecallDirectorDenseSignalTests {
                 content: content,
                 channel: .typed,
                 room: "dense-signal-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "dense-signal-tests",
                 embeddingModelID: "test-model-v1"
             )
@@ -924,7 +924,7 @@ struct RecallDirector004Tests {
         for w in words {
             let f = CaptureFrame(content: "\(w) recall test duplicate content",
                                  channel: .typed, room: "mmr-test",
-                                 latticeAnchor: .udc("000.000"), addedBy: "test",
+                                 latticeAnchor: .udc("000"), addedBy: "test",
                                  embeddingModelID: "test-v1")
             _ = try await kit.capture(handle, f)
         }
@@ -956,7 +956,7 @@ struct RecallDirector004Tests {
         let handle = try await kit.open(storage: storage, owner: owner)
 
         let f = CaptureFrame(content: "fallback test content", channel: .typed, room: "test",
-                             latticeAnchor: .udc("000.000"), addedBy: "test",
+                             latticeAnchor: .udc("000"), addedBy: "test",
                              embeddingModelID: "test-v1")
         _ = try await kit.capture(handle, f)
 
@@ -1046,7 +1046,7 @@ struct RecallDirector004Tests {
         for i in 0..<20 {
             let f = CaptureFrame(content: "drawer \(i) content for limit test",
                                  channel: .typed, room: "limit-test",
-                                 latticeAnchor: .udc("000.000"), addedBy: "test",
+                                 latticeAnchor: .udc("000"), addedBy: "test",
                                  embeddingModelID: "test-v1")
             _ = try await kit.capture(handle, f)
         }
@@ -1081,11 +1081,11 @@ struct RecallDirector004Tests {
 
         // Capture two drawers.
         let f1 = CaptureFrame(content: "alpha estate content", channel: .typed, room: "test",
-                              latticeAnchor: .udc("000.000"), addedBy: "test",
+                              latticeAnchor: .udc("000"), addedBy: "test",
                               embeddingModelID: "test-v1")
         let d1 = try await kit.capture(handle, f1)
         let f2 = CaptureFrame(content: "beta estate content", channel: .voiced, room: "test",
-                              latticeAnchor: .udc("000.000"), addedBy: "test",
+                              latticeAnchor: .udc("000"), addedBy: "test",
                               embeddingModelID: "test-v1")
         let d2 = try await kit.capture(handle, f2)
 
@@ -1247,7 +1247,7 @@ struct RecallDirectorSafetyTests {
             content: content,
             channel: .typed,
             room: "tombstone-safety",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "safety-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -1348,7 +1348,7 @@ struct RecallDirectorSafetyTests {
             content: content,
             channel: .typed,
             room: "bitmaponly-safety",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "safety-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -1405,7 +1405,7 @@ struct RecallDirectorSafetyTests {
             content: content,
             channel: .typed,
             room: "structured-safety",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "safety-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -1522,7 +1522,7 @@ struct RecallAPI001Tests {
             content: "aria-param-routing-test",
             channel: .typed,
             room: "test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "test",
             embeddingModelID: "test"
         )
@@ -1573,7 +1573,7 @@ struct RecallAPI001Tests {
             content: "rrf-scoring-acceptance-test",
             channel: .typed,
             room: "test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "test",
             embeddingModelID: "test"
         )
@@ -1618,7 +1618,7 @@ struct RecallDirectorGraphShingleTests {
             content: content,
             channel: .typed,
             room: "graph-shingle-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "graph-shingle-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -1638,7 +1638,7 @@ struct RecallDirectorGraphShingleTests {
             content: "second drawer graph test",
             channel: .typed,
             room: "graph-shingle-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "graph-shingle-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -1731,7 +1731,7 @@ struct RecallDirectorGraphShingleTests {
                 content: content,
                 channel: .typed,
                 room: "shingle-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "shingle-tests",
                 embeddingModelID: "test-model-v1"
             )
@@ -1778,7 +1778,7 @@ struct RecallDirectorGraphShingleTests {
             content: "second content for fallback test",
             channel: .typed,
             room: "graph-shingle-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "graph-shingle-tests",
             embeddingModelID: "test-model-v1"
         )
@@ -1942,11 +1942,11 @@ struct RecallDirectorAdaptiveLambdaTests {
 
         // Capture two drawers so there are candidates for both branches to rank.
         let f1 = CaptureFrame(content: "rrf skip matrix alpha content", channel: .typed,
-                              room: "rrf-test", latticeAnchor: .udc("000.000"),
+                              room: "rrf-test", latticeAnchor: .udc("000"),
                               addedBy: "rrf-test", embeddingModelID: "test-v1")
         _ = try await kit.capture(handle, f1)
         let f2 = CaptureFrame(content: "rrf skip matrix beta content", channel: .voiced,
-                              room: "rrf-test", latticeAnchor: .udc("000.000"),
+                              room: "rrf-test", latticeAnchor: .udc("000"),
                               addedBy: "rrf-test", embeddingModelID: "test-v1")
         _ = try await kit.capture(handle, f2)
 
@@ -2012,11 +2012,11 @@ struct RecallDirectorAdaptiveLambdaTests {
 
         // Capture two drawers on different channels so operationalBitmaps differ.
         let f1 = CaptureFrame(content: "matrix aware alpha content", channel: .typed,
-                              room: "matrix-aware-test", latticeAnchor: .udc("000.000"),
+                              room: "matrix-aware-test", latticeAnchor: .udc("000"),
                               addedBy: "matrix-test", embeddingModelID: "test-v1")
         let d1 = try await kit.capture(handle, f1)
         let f2 = CaptureFrame(content: "matrix aware beta content", channel: .voiced,
-                              room: "matrix-aware-test", latticeAnchor: .udc("000.000"),
+                              room: "matrix-aware-test", latticeAnchor: .udc("000"),
                               addedBy: "matrix-test", embeddingModelID: "test-v1")
         let d2 = try await kit.capture(handle, f2)
 
@@ -2091,7 +2091,7 @@ struct RecallDirectorAdaptiveLambdaTests {
             content: "rebuild temporal source content",
             channel: .typed,
             room: "rebuild-temporal-test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "rebuild-temporal-test",
             embeddingModelID: "test-v1")
         let d1 = try await kit.capture(handle, f1)
@@ -2100,7 +2100,7 @@ struct RecallDirectorAdaptiveLambdaTests {
             content: "rebuild temporal target content",
             channel: .voiced,
             room: "rebuild-temporal-test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "rebuild-temporal-test",
             embeddingModelID: "test-v1")
         let d2 = try await kit.capture(handle, f2)
@@ -2414,7 +2414,7 @@ struct RecallDirectorMatrixConformanceTests {
             content: "combined conformance source drawer alpha",
             channel: .typed,
             room: "a1-combined-conformance",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "a1-combined-conformance",
             embeddingModelID: "test-v1")
         let d1 = try await kit.capture(handle, f1)
@@ -2423,7 +2423,7 @@ struct RecallDirectorMatrixConformanceTests {
             content: "combined conformance target drawer beta",
             channel: .voiced,
             room: "a1-combined-conformance",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "a1-combined-conformance",
             embeddingModelID: "test-v1")
         let d2 = try await kit.capture(handle, f2)

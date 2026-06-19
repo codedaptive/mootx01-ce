@@ -64,7 +64,7 @@ struct FrameFaithfulRecallDropTests {
             content: content,
             channel: .typed,
             room: "frame-faithful",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "frame-faithful-tests",
             embeddingModelID: "test-model-v1"
         )

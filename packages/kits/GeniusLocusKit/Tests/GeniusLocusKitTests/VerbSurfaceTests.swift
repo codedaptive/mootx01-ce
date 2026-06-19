@@ -49,7 +49,7 @@ struct VerbSurfaceTests {
             content: content,
             channel: .typed,
             room: "verb-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "verb-tests",
             embeddingModelID: "test-model-v1"
         )

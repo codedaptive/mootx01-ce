@@ -79,6 +79,14 @@ convergence-kit = { path = "../../ConvergenceKit/rust" }
 # production signature. Layering: genius-locus-kit (composition) → engram-lib
 # (substrate primitive) does NOT invert. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
 engram-lib = { path = "../../../libs/EngramLib/rust" }
+# One-door FDC classification seam (fix/fdc-capture-seam): capture_with_mode
+# now classifies the lattice anchor via Fdc::encode_anchor when the incoming
+# frame carries the unclassified sentinel "000" and content is non-empty — the
+# single place every capture path (file_memory, vault import, branch promotion)
+# runs FDC. Layering: genius-locus-kit (composition) → lattice-lib (algorithm
+# substrate) does NOT invert (lattice-lib has no dependency on GLK).
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 
 [features]
 # test-seams: exposes EstateCoordinator::inject_vector_hamming_error and

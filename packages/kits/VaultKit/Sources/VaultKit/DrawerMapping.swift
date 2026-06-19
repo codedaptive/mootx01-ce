@@ -1,7 +1,6 @@
 import Foundation
 import GeniusLocusKit
 import LocusKit
-import EideticLib
 
 /// Maps `NoteIR` ⇄ substrate `Drawer`/`Tunnel` over the GeniusLocusKit
 /// and LocusKit **public** API only.
@@ -20,8 +19,11 @@ import EideticLib
 /// `addedBy`, `embeddingModelID`, or `latticeAnchor.udcCode`. Import
 /// therefore supplies all five non-empty on every drawer, or the note is
 /// skipped before a malformed frame is ever emitted. The `udcCode` is
-/// supplied from the FDC anchor when EideticLib resolves it, and from the
-/// deterministic fallback `"000"` otherwise (ADR-VAULTKIT-001 (g)).
+/// supplied from explicit frontmatter `udc` when present, and from the
+/// deterministic unclassified sentinel `"000"` otherwise. Classification
+/// happens in the GeniusLocusKit capture seam (one-door principle) —
+/// the seam classifies the sentinel content via EideticLib on the way in
+/// (ADR-VAULTKIT-001 (g)).
 public struct DrawerMapping: Sendable {
 
     /// Default actor identifier stamped on imported drawers and tunnels
@@ -36,10 +38,11 @@ public struct DrawerMapping: Sendable {
     /// silently compare across versions (I-4).
     public var embeddingModelID: String
 
-    /// When true, import attempts FDC classification via EideticLib and
-    /// uses the live anchor when one resolves. When false (or when the
-    /// lookup does not resolve), the note lands with the fallback UDC and
-    /// provenance intact — no classification is faked either way.
+    /// Retained for API compatibility. Since the one-door refactor, FDC
+    /// classification for notes without explicit frontmatter `udc` happens
+    /// in the GeniusLocusKit capture seam (`capture(_:_:mode:)`), not here.
+    /// This flag no longer triggers in-process EideticLib lookup; it is
+    /// preserved so callers compiled against the old API do not break.
     public var classifyOnImport: Bool
 
     /// The deterministic fallback UDC used when no live FDC anchor and no
@@ -646,11 +649,12 @@ public struct DrawerMapping: Sendable {
     }
 
     /// Build the `CaptureFrame` for a note. Returns the frame plus whether
-    /// a real classification (live FDC anchor or an explicit frontmatter
-    /// `udc`) was used, as opposed to the `"000"` fallback.
+    /// a real classification (explicit frontmatter `udc`) was used, as
+    /// opposed to the `"000"` unclassified sentinel.
     ///
-    /// Pure with respect to the substrate; the only outside call is the
-    /// deterministic, network-free `EideticLib.lookup`.
+    /// Pure with respect to the substrate. FDC classification for notes
+    /// without an explicit frontmatter `udc` now happens in the
+    /// GeniusLocusKit capture seam (one-door principle), not here.
     ///
     /// ## Identity resolution (Decision cp-vault-bidir)
     ///
@@ -689,18 +693,19 @@ public struct DrawerMapping: Sendable {
         let modelValue = nonEmpty(note.frontmatter["embeddingModelID"]) ?? embeddingModelID
 
         // UDC resolution, in priority order:
-        //   1. explicit frontmatter `udc` (a pre-classified note)
-        //   2. live FDC anchor from EideticLib (when classifyOnImport)
-        //   3. deterministic fallback "000"
-        var resolvedUDC = nonEmpty(note.frontmatter["udc"])
-        var classified = resolvedUDC != nil
-        if resolvedUDC == nil, classifyOnImport {
-            let anchor = EideticLib.lookup(content)
-            if !anchor.code.isEmpty {
-                resolvedUDC = anchor.code
-                classified = true
-            }
-        }
+        //   1. explicit frontmatter `udc` (a pre-classified note, preserved as-is)
+        //   2. deterministic fallback "000" (the unclassified sentinel)
+        //
+        // Classification (EideticLib.lookup) was previously done here, but the
+        // one-door principle mandates that ALL capture paths classify through the
+        // same seam: GeniusLocusKit.capture(_:_:mode:). When the seam receives
+        // a frame with sentinel "000" and non-empty content, it classifies via
+        // EideticLib.lookup internally. Frontmatter `udc` (priority 1) flows
+        // through unchanged because it is never "000" — the seam preserves any
+        // non-sentinel anchor. Notes without frontmatter `udc` land with the
+        // "000" sentinel and the seam classifies them on the way in.
+        let resolvedUDC = nonEmpty(note.frontmatter["udc"])
+        let classified = resolvedUDC != nil
         let udcCode = resolvedUDC ?? fallbackUDC
 
         var flags: DrawerFeatureFlags = []

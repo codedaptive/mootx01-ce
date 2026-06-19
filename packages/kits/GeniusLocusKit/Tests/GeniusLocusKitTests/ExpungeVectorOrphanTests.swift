@@ -79,7 +79,7 @@ struct ExpungeVectorOrphanTests {
             content: content,
             channel: .typed,
             room: "expunge-vector-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "expunge-vector-tests",
             embeddingModelID: "test-model-v1"
         )

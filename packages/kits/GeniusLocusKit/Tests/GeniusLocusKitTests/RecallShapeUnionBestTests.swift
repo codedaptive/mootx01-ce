@@ -110,7 +110,7 @@ struct RecallShapeUnionBestTests {
                 content: content,
                 channel: .typed,
                 room: "recall-shape-unionbest-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "recall-shape-unionbest-tests",
                 embeddingModelID: "test-model-v1"
             )

@@ -1,17 +1,19 @@
 // FdcCaptureTests.swift
 //
-// BUG-2 (FDC-on-capture) verification + B-6 (error message quality) — Swift leg.
+// FDC seam classification verification + B-6 (error message quality) — Swift leg.
 //
-// BUG-2: `moot_file_memory` was filing every drawer at UDC "000.000" (the
-// general-knowledge root) because `runFileMemory` hardcoded `defaultLatticeAnchor`.
-// The fix calls `FDC.encodeAnchor(content)` from LatticeLib before constructing the
-// CaptureFrame so classifiable content gets a real UDC code.
+// One-door principle: FDC classification now happens in the GeniusLocusKit
+// capture seam (`capture(_:_:mode:)`) — not per-caller. All capture paths
+// (file_memory, vault import, branch promotion) funnel through the seam;
+// the seam classifies content that arrives with the "000" sentinel via
+// EideticLib.lookup. The canonical unclassified sentinel is "000" (the UDC
+// three-digit root); "000.000" was a child node and is no longer used.
 //
 // These tests:
 //   1. Verify that filing content with a clear domain signature produces a
-//      non-"000.000" udc_code on the stored drawer.
+//      non-"000" udc_code on the stored drawer (seam classified it).
 //   2. Verify the fallback: unclassifiable noise content does NOT crash and
-//      produces a valid (possibly "000.000") code.
+//      produces a valid (possibly "000") code.
 //   3. Verify that error messages at the MCP boundary are actionable English
 //      phrases, not Swift type-chain strings.
 //
@@ -26,7 +28,7 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-@Suite("FDC-on-capture + error message quality (B-6 / BUG-2)", .serialized)
+@Suite("FDC seam classification + error message quality (one-door / B-6)", .serialized)
 struct FdcCaptureTests {
 
     // MARK: - Fixture
@@ -62,14 +64,14 @@ struct FdcCaptureTests {
         return flag
     }
 
-    // MARK: - BUG-2: FDC classification path fires on moot_file_memory
+    // MARK: - One-door: classification happens in the seam, not per-caller
 
     /// Filing content with a clear scientific-domain signature must produce a
-    /// drawer whose `udcCode` is a real FDC code — not the "000.000" root.
+    /// drawer whose `udcCode` is a real FDC code — not the "000" sentinel.
     ///
     /// "Biology is the scientific study of life" reliably resolves into the
-    /// FDC natural-sciences region. Any non-"000.000" result confirms the
-    /// `FDC.encodeAnchor` path is live in `runFileMemory`.
+    /// FDC natural-sciences region. Any non-"000" result confirms the
+    /// seam's EideticLib.lookup path is live.
     @Test func fileMemoryClassifiesContentViaDFC() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
 
@@ -93,9 +95,11 @@ struct FdcCaptureTests {
         #expect(drawers.count == 1, "exactly one drawer must exist after one file_memory call")
 
         let udcCode = drawers.first?.udcCode ?? ""
+        // The unclassified sentinel is "000" (the UDC root, not the child
+        // "000.000"). A classified drawer must carry a more specific code.
         #expect(
-            udcCode != "000.000",
-            "file_memory with classifiable content must produce a real udc_code, not '000.000'; got: '\(udcCode)'"
+            udcCode != "000",
+            "file_memory with classifiable content must produce a real udc_code, not the '000' unclassified sentinel; got: '\(udcCode)'"
         )
         #expect(
             !udcCode.isEmpty,
@@ -177,6 +181,110 @@ struct FdcCaptureTests {
         #expect(
             msg.contains("room must not be empty") || msg.contains("empty"),
             "error message must describe the failing condition; got: \(msg)"
+        )
+    }
+
+    // MARK: - Cross-door parity: file_memory and direct capture share ONE seam
+
+    /// Filing the SAME classifiable content through `moot_file_memory` (the MCP
+    /// tool path) and through a direct `kit.capture(_:_:mode:)` call (what
+    /// VaultKit's import path does) must produce drawers with the SAME `udcCode`.
+    ///
+    /// If each path were classifying independently the codes might agree by chance,
+    /// but this test proves they share a SINGLE call tree: both pass the "000"
+    /// unclassified sentinel to `capture(_:_:mode:)`, which runs
+    /// `EideticLib.lookup` exactly once per frame, producing a deterministic result.
+    ///
+    /// One-door principle: two behaviors are equal if and only if they traverse the
+    /// SAME functional call tree.
+    @Test func fileMemoryAndDirectCaptureProduceSameUdcCode() async throws {
+        let classifiable = "Biology is the scientific study of life and living organisms, including their physical structure, chemical processes, molecular interactions, physiological mechanisms, and evolution."
+
+        // Path 1 — moot_file_memory tool (the MCP caller path).
+        let (dispatcher, kit1, handle1) = try await makeDispatcher()
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content":  .string(classifiable),
+                "location": .string("science-room"),
+            ])
+        )
+        #expect(!isError(result), "file_memory must succeed; got: \(result)")
+
+        let drawers1 = try await kit1.recall(
+            handle1,
+            RecallFrame(filterChain: [], hydrationLevel: .structured, limit: nil, ordering: .byCaptureTimeDesc)
+        )
+        let codeViaToolPath = drawers1.first?.udcCode ?? ""
+
+        // Path 2 — direct kit.capture(_:_:mode:) with the canonical "000"
+        //           sentinel (mirrors what VaultKit's makeCaptureFrame produces
+        //           when a note has no explicit frontmatter `udc`).
+        let (_, kit2, handle2) = try await makeDispatcher()
+        let frame2 = CaptureFrame(
+            content: classifiable,
+            channel: .importedFile,   // vault import channel — matches VaultKit
+            room: "science-room",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),  // canonical sentinel
+            addedBy: "test-added-by",
+            embeddingModelID: "test-model"
+        )
+
+        _ = try await kit2.capture(handle2, frame2, mode: .regular)
+
+        let drawers2 = try await kit2.recall(
+            handle2,
+            RecallFrame(filterChain: [], hydrationLevel: .structured, limit: nil, ordering: .byCaptureTimeDesc)
+        )
+        let codeViaDirectPath = drawers2.first?.udcCode ?? ""
+
+        // Both paths must produce the SAME code — proof of the one-door principle.
+        #expect(
+            codeViaToolPath == codeViaDirectPath,
+            "file_memory and direct capture must produce the same udcCode for classifiable content (one-door); tool=\(codeViaToolPath), direct=\(codeViaDirectPath)"
+        )
+        // And neither should be the unclassified sentinel.
+        #expect(
+            codeViaToolPath != "000",
+            "classifiable content must not remain at the '000' sentinel via the tool path; got: '\(codeViaToolPath)'"
+        )
+    }
+
+    /// When a capture frame carries an EXPLICIT non-sentinel `udcCode` (e.g.
+    /// from vault frontmatter `udc`), the `capture(_:_:mode:)` seam must
+    /// preserve it — it must NOT re-classify an already-classified anchor.
+    ///
+    /// This is the "explicit frontmatter `udc` is preserved" invariant. The seam's
+    /// guard checks `latticeAnchor.udcCode == Self.unclassifiedSentinel`: an
+    /// anchor that differs from "000" passes through unchanged.
+    @Test func explicitUdcCodeOnCaptureFrameIsPreservedBySeam() async throws {
+        let (_, kit, handle) = try await makeDispatcher()
+
+        // Explicit UDC code from vault frontmatter (not the sentinel).
+        // "610" = Medicine & Health — a well-established code far from "000".
+        let explicitCode = "610"
+
+        let frame = CaptureFrame(
+            content: "Biology is the scientific study of life.",  // classifiable content
+            channel: .importedFile,
+            room: "medicine-room",
+            latticeAnchor: LatticeAnchor(udcCode: explicitCode),  // explicit — seam must preserve
+            addedBy: "test-added-by",
+            embeddingModelID: "test-model"
+        )
+
+        _ = try await kit.capture(handle, frame, mode: .regular)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [], hydrationLevel: .structured, limit: nil, ordering: .byCaptureTimeDesc)
+        )
+
+        #expect(drawers.count == 1, "exactly one drawer")
+        let storedCode = drawers.first?.udcCode ?? ""
+        #expect(
+            storedCode == explicitCode,
+            "seam must preserve an explicit non-sentinel udcCode, not re-classify; expected: '\(explicitCode)', got: '\(storedCode)'"
         )
     }
 }

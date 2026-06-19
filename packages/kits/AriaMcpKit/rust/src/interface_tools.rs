@@ -22,9 +22,11 @@
 //!
 //! - `channel` = `CaptureChannel::Actuator` (cookbook §2.4: actuator-driven capture)
 //! - `added_by` = `"aria-mcp-server"`
-//! - `lattice_anchor` = FDC classification via `Fdc::encode_anchor(content)` for
-//!   `moot_file_memory`; falls back to `LatticeAnchor::udc("000.000")` for
-//!   UNRESOLVED content. All other capture tools retain the "000.000" default.
+//! - `lattice_anchor` = `LatticeAnchor::udc("000")` (the unclassified sentinel)
+//!   for all capture paths. The GeniusLocusKit seam (`capture_with_mode`)
+//!   classifies the sentinel via `Fdc::encode_anchor` on the way in — one
+//!   classification door for `moot_file_memory`, vault import, and branch
+//!   promotion (one-door principle). UNRESOLVED content keeps the "000" sentinel.
 //! - `embedding_model_id` = `"default"` (selects the 1.0 default recall
 //!   ensemble — the five honest signals RI/PPMI/LSA/NMF/FDC fused in Lane D,
 //!   trained on-corpus and reproducible cross-port; NOT a learned model-weight
@@ -61,7 +63,13 @@ use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 
 const SERVER_ADDED_BY: &str = "aria-mcp-server";
 const DEFAULT_EMBEDDING_MODEL: &str = "default";
-const DEFAULT_LATTICE_CODE: &str = "000.000";
+/// The canonical unclassified-content sentinel passed to the capture seam.
+/// Matches `GeniusLocusKit::UNCLASSIFIED_SENTINEL` and the Swift
+/// `GeniusLocusKit.unclassifiedSentinel`. The seam classifies the content
+/// when it sees this sentinel (one-door principle). Previously "000.000"
+/// (a child node); corrected to "000" (the UDC root, per the LatticeLib
+/// Code grammar — the three-digit root is the correct unresolved sentinel).
+const DEFAULT_LATTICE_CODE: &str = "000";
 
 // ---------------------------------------------------------------------------
 // Tool surface declaration
@@ -319,10 +327,11 @@ pub fn dispatch(
 ///
 /// `location` maps to `room`; wing is derived by the estate from its manifest
 /// owner identifier. Server owns infrastructure fields (channel, lattice,
-/// added_by, embeddingModelID). The lattice anchor is determined by running
-/// the deterministic FDC encoder (`Fdc::encode_anchor`) on the content; when
-/// the encoder resolves a code the drawer is classified at that UDC position,
-/// otherwise it falls back to "000.000". Mirrors Swift `runFileMemory`.
+/// added_by, embeddingModelID). The lattice anchor sentinel is passed to the
+/// GeniusLocusKit capture seam (`capture_with_mode`), which classifies via
+/// `Fdc::encode_anchor` when the sentinel arrives with non-empty content;
+/// UNRESOLVED content keeps the "000" sentinel (one-door principle). Mirrors
+/// Swift `runFileMemory`.
 fn run_file_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -337,36 +346,20 @@ fn run_file_memory(
     let kind = decode_content_kind_arg(args.get("kind"))?;
     let sensitivity = decode_sensitivity_arg(args.get("sensitivity"))?;
 
-    // BUG-2 (FDC-on-capture): classify the content with the deterministic FDC
-    // encoder before building the frame. `Fdc::encode_anchor` is pure and
-    // deterministic over the pinned LatticeLib artifacts — the same engine
-    // that `DrawerMapping.makeCaptureFrame` uses via `EideticLib.lookup` in
-    // the Swift vault-import path. When the encoder returns a non-empty code
-    // the frame carries the real UDC so the capture lands classified, not at
-    // root "000.000". When the encoder returns no code (UNRESOLVED) the server
-    // falls back to the "000.000" default rather than failing the capture —
-    // the memory still files, it just lands at the generic root bucket.
-    // Mirrors the Swift port change in `runFileMemory` (same commit).
-    let lattice_anchor = {
-        let (code_opt, qid_opt) = lattice_lib::fdc_runtime::Fdc::encode_anchor(content);
-        match code_opt {
-            Some(code) if !code.is_empty() => locus_kit::estate_types::LatticeAnchor {
-                udc_code: code,
-                udc_facets: None,
-                wikidata_qid: qid_opt,
-                wikidata_qids_secondary: None,
-            },
-            _ => LatticeAnchor::udc(DEFAULT_LATTICE_CODE),
-        }
-    };
-
+    // Pass the unclassified sentinel anchor to the capture seam.
+    // The GeniusLocusKit seam (capture_with_mode) classifies the content via
+    // Fdc::encode_anchor when it sees the "000" sentinel and the content is
+    // non-empty — one classification door for all capture paths (file_memory,
+    // vault import, branch promotion). The per-caller Fdc::encode_anchor call
+    // that was here before the one-door refactor is removed; the seam owns
+    // classification exclusively.
     let mut frame = CaptureFrame::new(
         content,
         // Actuator-driven capture (cookbook §2.4): file_memory is submitted by
         // an MCP AI agent (actuator), not a file import. Raw 5 per DrawerOperational.
         CaptureChannel::Actuator,
         location,
-        lattice_anchor,
+        LatticeAnchor::udc(DEFAULT_LATTICE_CODE),
         SERVER_ADDED_BY,
         DEFAULT_EMBEDDING_MODEL,
     );

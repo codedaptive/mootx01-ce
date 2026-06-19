@@ -58,7 +58,7 @@ private func captureOne(
         content: content,
         channel: .typed,
         room: "trace-reward-room",
-        latticeAnchor: .udc("000.000"),
+        latticeAnchor: .udc("000"),
         addedBy: "trace-reward-tests",
         embeddingModelID: "test-model-v1"
     )

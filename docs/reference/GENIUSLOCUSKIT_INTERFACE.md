@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-19
-version: 1.9.1
+version: 1.9.2
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -1796,6 +1796,24 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.9.2 -- 2026-06-19
+Behavioral change on `capture(_:_:mode:)` (Swift) / `capture_with_mode` (Rust):
+the method now classifies the incoming frame's `latticeAnchor.udcCode` at the seam
+before storing the drawer. When the frame carries the canonical unclassified sentinel
+`"000"` and non-empty `content`, the seam runs `EideticLib.lookup` (Swift) /
+`Fdc::encode_anchor` (Rust) to resolve a real UDC code and updates the frame's
+`latticeAnchor` before capture. Non-sentinel anchors pass through unchanged. This is
+the one-door refactor: all capture paths (file_memory, vault import, branch promotion)
+pass `"000"` and receive classification from the seam; per-caller classification code
+is removed. The canonical unclassified sentinel is `"000"` (three-digit UDC root);
+the previous incorrect value `"000.000"` (a child node) is retired fleet-wide.
+
+Callers that previously set an explicit FDC code per call should now set
+`latticeAnchor = LatticeAnchor.udc("000")` / `LatticeAnchor::udc("000")` and let
+the seam classify, unless they have a pre-classified anchor from an authoritative
+source (vault frontmatter `udc`, promotion of an already-classified branch drawer)
+— in which case the non-sentinel code passes through unchanged.
 
 ### 1.9.1 -- 2026-06-19
 Additive (FINDING-1b cluster C): `tombstonedLineageIDs(_ handle: EstateHandle) async throws -> Set<UUID>` added to the GLK verb surface (Swift `public extension GeniusLocusKit`). Rust twin: `EstateCoordinator::tombstoned_lineage_ids(&self, handle: &EstateHandle) -> Result<HashSet<Uuid>, VerbDispatchError>`. Returns the lineage IDs of all cluster C (permanently erased, `tombstonedAt IS NOT NULL`) drawers. The storage-tier predicate path bypasses timestamp parsing — resilient to format differences between `ISO8601DateFormatter()` (used by `expungeGated`) and `LKISO8601` (fractional-seconds parser). B-1-compliant: VaultKit reaches tombstoned rows through this GLK method, never by importing LocusKit directly.

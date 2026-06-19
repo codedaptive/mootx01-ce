@@ -69,7 +69,7 @@ struct PreciseRecallTests {
                 content: content,
                 channel: .typed,
                 room: "ledger",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "tester",
                 embeddingModelID: "test-model-v1")
             let drawer = try await kit.capture(handle, frame)
@@ -303,7 +303,7 @@ struct PreciseRecallTests {
                     content: content,
                     channel: .typed,
                     room: "trace-test",
-                    latticeAnchor: .udc("000.000"),
+                    latticeAnchor: .udc("000"),
                     addedBy: "tester",
                     embeddingModelID: "test-model-v1")
                 let drawer = try await kit.capture(handle, frame)

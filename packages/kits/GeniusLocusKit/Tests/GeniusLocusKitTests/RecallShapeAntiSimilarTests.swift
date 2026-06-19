@@ -142,7 +142,7 @@ struct RecallShapeAntiSimilarTests {
                 content: content,
                 channel: .typed,
                 room: "recall-shape-antisim-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "recall-shape-antisim-tests",
                 embeddingModelID: "test-model-v1"
             )
