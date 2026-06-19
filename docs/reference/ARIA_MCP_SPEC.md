@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.3.0
+version: 1.4.0
 status: active
-date: 2026-06-17
+date: 2026-06-19
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -335,7 +335,16 @@ handle-resolution check only. A full `allDrawers()` table scan would be O(N) on
 estate size — an expensive proxy for a question that `resolveHandle` already
 answers in O(1), so the ping deliberately avoids it.
 
-`moot_estate_ping` resolves the handle and returns `pong: estate <name> is live`.
+`moot_estate_ping` resolves the handle and returns
+`pong: estate <name> [<uuid>] is live — build <serial>`. The build serial is
+derived once at server startup from the running executable's modification time
+and file size (`<mtime-yyyyMMddHHmmss>/<8-hex-fingerprint>`) and changes on
+every relink. It can be overridden via the `MOOTX01_BUILD_SERIAL` environment
+variable (set and non-empty value is used verbatim). This lets a driver — an
+AI client or a test harness — confirm it is talking to the most recently
+compiled build without restarting the session. The serial is stored on the
+dispatcher at construction; no filesystem access occurs on each ping call.
+
 If the estate is not open, `resolveHandle` throws `.estateNotOpen` and dispatch
 surfaces it as `isError: true` before the runner is called. If that occurs, the
 correct remediation is restarting the server process — no MCP tool can reopen
@@ -714,6 +723,16 @@ register a cache, and its synchronous emit closure has no `&mut` coordinator). T
 Bradley-Terry preference producer remains a separate future duty. Swift + Rust at
 parity; conformance `GraphCentralityProducerTests.swift` /
 `graph_centrality_parity.rs`.
+
+### 1.4.0 -- 2026-06-19
+`moot_estate_ping` now surfaces the build serial in its response:
+`pong: estate <name> [<uuid>] is live — build <serial>`. § 14 updated with the
+full derivation contract: mtime+size fingerprint (`<yyyyMMddHHmmss>/<8-hex>`)
+computed once at server construction, `MOOTX01_BUILD_SERIAL` env override
+honored verbatim. Both Swift and Rust ports at parity. Tests asserting the
+exact `estate_ping` text updated to assert the stable prefix/shape rather than
+a specific serial. New unit and dispatch tests added for serial threading and
+the env override path.
 
 ### 1.1.0 -- 2026-06-17
 Additive + correction (#8 Track 1 — Brain harness, Rust side). §17.1

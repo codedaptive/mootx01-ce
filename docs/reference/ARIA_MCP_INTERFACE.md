@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.3.0
+version: 1.4.0
 status: active
-date: 2026-06-17
+date: 2026-06-19
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -817,6 +817,18 @@ and the governor benign-skips, parity with the Swift resident). Conformance:
 `tests/governor_standing_signals.rs` (benign skip / registered-defaults fire /
 queryable emission / interval cadence) over the existing GLK
 `tests/scheduler_parity.rs` engine gate. Swift behavior unchanged.
+
+### 1.4.0 -- 2026-06-19
+`moot_estate_ping` response now includes a build serial segment:
+`pong: estate <name> [<uuid>] is live — build <serial>`. The serial is derived
+once at `ToolDispatcher` (Swift) / `Dispatcher` (Rust) construction from the
+running executable's mtime and size; stored as `buildSerial` on the dispatcher;
+threaded to `runEstatePing` / `run_estate_ping` without per-call filesystem
+access. Override via `MOOTX01_BUILD_SERIAL` env var (non-empty value used
+verbatim). New tests: `testEstatePingIncludesBuildSerial`,
+`testEstatePingHonorsBuildSerialOverride` (Swift);
+`estate_ping_includes_injected_build_serial` (Rust). Spec companion: § 14 in
+ARIA_MCP_SPEC.md updated to document the derivation contract.
 
 ### 1.1.0 -- 2026-06-17
 Additive (GLK-RECALL-SHAPE-PRESETS): new `moot_recall_shaped` recipe tool (both

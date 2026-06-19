@@ -252,6 +252,7 @@ pub fn dispatch(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    build_serial: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
         "moot_file_memory" => run_file_memory(args, registry),
@@ -272,7 +273,8 @@ pub fn dispatch(
         "moot_read_journal" => run_read_journal(args, registry),
         "moot_estate_status" => run_estate_status(args, registry),
         "moot_estate_map" => run_estate_map(args, registry),
-        "moot_estate_ping" => run_estate_ping(args, registry),
+        // Pass build_serial so the pong includes the build segment.
+        "moot_estate_ping" => run_estate_ping(args, registry, build_serial),
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         _ => Err(JSONRPCError::new(
@@ -1366,12 +1368,22 @@ fn run_estate_map(
     Ok(text_result(&lines.join("\n")))
 }
 
-/// Verify the estate is reachable. Returns a pong with estate name and UUID.
+/// Verify the estate is reachable. Returns a pong with estate name, UUID,
+/// and the build serial of this running binary.
 ///
-/// Mirrors Swift `runEstatePing`.
+/// Mirrors Swift `runEstatePing`. The build serial is forwarded from
+/// `build_serial::derive()`, computed once at server startup and threaded
+/// through the dispatch chain — no filesystem access per call.
+///
+/// Response format: `pong: estate <name> [<uuid>] is live — build <serial>`
+///
+/// The serial changes on every relink so a driver can confirm it is
+/// talking to the most recently compiled binary. Override via
+/// `MOOTX01_BUILD_SERIAL` to inject a known value (CI, tests, debugging).
 fn run_estate_ping(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
+    build_serial: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
     let coord = estate.coord.lock().unwrap();
@@ -1387,8 +1399,8 @@ fn run_estate_ping(
     })?;
 
     Ok(text_result(&format!(
-        "pong: estate {} [{}] is live",
-        manifest.estate_name, manifest.estate_uuid
+        "pong: estate {} [{}] is live — build {}",
+        manifest.estate_name, manifest.estate_uuid, build_serial
     )))
 }
 

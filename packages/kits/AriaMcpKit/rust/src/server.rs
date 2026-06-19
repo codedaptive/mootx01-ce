@@ -47,6 +47,10 @@ pub struct ServerConfig {
     pub registry: EstateRegistry,
     pub server_name: String,
     pub server_version: String,
+    /// Build serial surfaced by `moot_estate_ping`. Computed once at
+    /// construction via `crate::build_serial::derive()` so the filesystem
+    /// is not touched on every ping call.
+    pub build_serial: String,
 }
 
 impl ServerConfig {
@@ -147,6 +151,9 @@ impl ServerConfig {
             registry,
             server_name: "ARIA_MCP_Rust".to_owned(),
             server_version: "0.1.0".to_owned(),
+            // Derive build serial once at config construction so the
+            // filesystem is not touched on every estate_ping call.
+            build_serial: crate::build_serial::derive(),
         }
     }
 
@@ -158,6 +165,9 @@ impl ServerConfig {
             registry: EstateRegistry::new_inmemory(),
             server_name: "ARIA_MCP_Rust".to_owned(),
             server_version: "0.1.0".to_owned(),
+            // Derive build serial once at config construction so the
+            // filesystem is not touched on every estate_ping call.
+            build_serial: crate::build_serial::derive(),
         }
     }
 }
@@ -170,7 +180,12 @@ impl ServerConfig {
 /// server's behavior, so a client can recover by sending the next
 /// well-formed request without restarting the server.
 pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: ServerConfig) {
-    let dispatcher = Dispatcher::new(config.registry, &config.server_name, &config.server_version);
+    let dispatcher = Dispatcher::new(
+        config.registry,
+        &config.server_name,
+        &config.server_version,
+        &config.build_serial,
+    );
     let mut buf = BufReader::new(reader);
     let mut line = String::new();
 

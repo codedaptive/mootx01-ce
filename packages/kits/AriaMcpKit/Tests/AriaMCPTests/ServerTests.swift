@@ -365,4 +365,91 @@ struct ServerTests {
         }
         #expect(error.code == JSONRPCErrorCode.methodNotFound)
     }
+
+    // MARK: - Build serial in estate_ping
+
+    /// `moot_estate_ping` response includes a non-empty build segment.
+    ///
+    /// The stable prefix/shape assertion (starts with "pong: estate",
+    /// contains "is live") must hold even after the serial is appended.
+    /// The serial itself is non-empty and follows "— build ".
+    @Test func testEstatePingIncludesBuildSerial() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(60),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_estate_ping"),
+                "arguments": .object([:]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("estate_ping returned error: \(response.payload)")
+            return
+        }
+        // Must not be a tool-level error result.
+        #expect(result.objectValue?["isError"] != .bool(true),
+                "estate_ping must not return isError:true")
+        // Extract the text content.
+        let content = try #require(result.objectValue?["content"]?.arrayValue)
+        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+        // Stable shape assertions — these must hold regardless of the serial value.
+        #expect(text.hasPrefix("pong: estate"),
+                "estate_ping must start with 'pong: estate'; got: \(text)")
+        #expect(text.contains("is live"),
+                "estate_ping must contain 'is live'; got: \(text)")
+        // Build segment: "— build <non-empty-serial>" must be present.
+        #expect(text.contains("— build "),
+                "estate_ping must contain '— build <serial>'; got: \(text)")
+        // The part after "— build " must be non-empty.
+        if let buildRange = text.range(of: "— build ") {
+            let serial = String(text[buildRange.upperBound...])
+            #expect(!serial.isEmpty,
+                    "build serial must be non-empty; got empty string after '— build '")
+        }
+    }
+
+    /// `MOOTX01_BUILD_SERIAL` env override is honored by `deriveBuildSerial`.
+    ///
+    /// We cannot set process env vars in Swift Testing without side-effects,
+    /// so we test the override path by constructing a `ToolDispatcher` with
+    /// an explicit `buildSerial` value (the same codepath the env override
+    /// drives at server startup).
+    @Test func testEstatePingHonorsBuildSerialOverride() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-serial-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Inject a known serial to simulate MOOTX01_BUILD_SERIAL=ABC123.
+        let knownSerial = "ABC123"
+        let tooling = ToolDispatcher(kit: kit, handle: handle, buildSerial: knownSerial)
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        let request = JSONRPCRequest(
+            id: .integer(61),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_estate_ping"),
+                "arguments": .object([:]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("estate_ping returned error: \(response.payload)")
+            return
+        }
+        let content = try #require(result.objectValue?["content"]?.arrayValue)
+        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+        // The known serial must appear verbatim in the response.
+        #expect(text.contains("build \(knownSerial)"),
+                "estate_ping must echo the injected serial 'ABC123'; got: \(text)")
+    }
 }

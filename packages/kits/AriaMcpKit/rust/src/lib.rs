@@ -39,6 +39,7 @@
 //! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
 
 pub mod autonomic_governor;
+pub mod build_serial;
 pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
