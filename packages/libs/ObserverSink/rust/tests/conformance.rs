@@ -569,6 +569,31 @@ fn topology_snapshot_none_estate_returns_newest() {
                "None estate must return the newest generated_at across estates");
 }
 
+/// 17b. Newest wins regardless of write/iteration order — regression for the
+/// generated_at tie-break bug (every row read as i64::MIN because the read only
+/// matched `Timestamp`, but the column is TEXT ISO-8601, so all rows tied and an
+/// arbitrary one won). Newest is written FIRST here, so a tie-break-by-iteration
+/// would wrongly return the OLDER row.
+#[test]
+fn topology_snapshot_none_newest_wins_regardless_of_order() {
+    let store = make_store();
+    store
+        .write_topology_snapshot("estate-newer", 2_000_000.0, "payload-newer")
+        .expect("write newer must succeed");
+    store
+        .write_topology_snapshot("estate-older", 1_000_000.0, "payload-older")
+        .expect("write older must succeed");
+
+    let got = store
+        .latest_topology_snapshot(None)
+        .expect("query must not error")
+        .expect("must be Some");
+    assert_eq!(
+        got, "payload-newer",
+        "newest generated_at must win even when the newer row is written/iterated first"
+    );
+}
+
 /// 18. None estate returns None on an empty store.
 #[test]
 fn topology_snapshot_none_estate_empty_store() {
