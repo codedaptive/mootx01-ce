@@ -1158,6 +1158,49 @@ public actor DrawerStore {
         return orphans
     }
 
+    /// The set of lineage IDs whose rows have been permanently erased (cluster C:
+    /// `tombstonedAt IS NOT NULL`). Reads the `lineageID` column directly from
+    /// storage rows without a full `drawerFromRow` decode — the `tombstonedAt`
+    /// column is used only as a filter predicate at the storage tier, never parsed
+    /// here. This avoids a format-mismatch between `ISO8601DateFormatter()` (used
+    /// by `expungeGated` to stamp `tombstonedAt`) and `LKISO8601` (used by
+    /// `optDate` to parse it back) that would cause `.text` timestamps written
+    /// without fractional seconds to decode as `nil`, making tombstoned rows
+    /// indistinguishable from live rows at the Swift layer.
+    ///
+    /// The query predicate `tombstonedAt IS NOT NULL` is evaluated by the storage
+    /// backend on the raw `TypedValue` (`.isNotNull` → `!value.isNull`), which
+    /// correctly identifies `.text(anyString)` as non-null regardless of the
+    /// timestamp string format.
+    ///
+    /// Used by `Estate.tombstonedLineageIDs()` → `GLK.tombstonedLineageIDs` →
+    /// `VaultBridge.existingTombstonedLineageIDs` to block vault re-import from
+    /// resurrecting erased notes (FINDING-1b cluster C fix).
+    public func tombstonedLineageIDs() async throws -> Set<UUID> {
+        // Project only the lineageID column — the content blob and most
+        // metadata fields are not needed for this lookup.
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
+            table: "drawers",
+            where: .isNotNull(Column(table: "drawers", name: "tombstonedAt")),
+            orderBy: [],
+            limit: nil,
+            offset: nil,
+            columns: ["lineageID"]
+        )
+        // Extract lineageID from each raw row. Rows where lineageID is absent,
+        // null, or not a valid UUID are silently skipped — a corrupt lineageID
+        // on a tombstoned row does not prevent other tombstoned lineages from
+        // being detected. The critical invariant is that every well-formed
+        // tombstoned row contributes its lineageID to the block-set.
+        var result = Set<UUID>()
+        for row in rows {
+            guard case .text(let raw) = row["lineageID"], !raw.isEmpty,
+                  let uuid = UUID(uuidString: raw) else { continue }
+            result.insert(uuid)
+        }
+        return result
+    }
+
     /// Seal a synthetic "expungeOrphan" audit event for a crash-window row.
     ///
     /// Called by the GLK integrity sweep after re-attempting the cross-kit

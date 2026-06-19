@@ -1778,6 +1778,45 @@ impl EstateCoordinator {
         estate.all_diary_entries().map_err(|e| remap("recall_diary_entries", "", e).into())
     }
 
+    // MARK: - tombstoned_lineage_ids
+
+    /// The set of lineage IDs whose drawer rows have been permanently erased
+    /// (tombstoned via the `expunge` verb — cluster C: `tombstoned_at IS NOT NULL`).
+    ///
+    /// Uses `Estate::all_drawers()`, which is a full-corpus scan that explicitly
+    /// INCLUDES tombstoned rows. The recall pipeline's `live_rows` pre-filters
+    /// `tombstoned_at IS NULL`, so cluster C rows are invisible to any
+    /// `recall`-based query. This method goes through `all_drawers` to surface
+    /// them, filters for rows where `tombstoned_at` is `Some`, and returns the
+    /// distinct lineage IDs — one entry per erased lineage.
+    ///
+    /// This is the B-1-compliant GLK passthrough: VaultKit reaches tombstoned
+    /// rows through GeniusLocusKit (`EstateCoordinator`), never by importing
+    /// LocusKit's `DrawerStore` directly. Parity of the Swift
+    /// `GeniusLocusKit.tombstonedLineageIDs(_:)`.
+    ///
+    /// `now` is unused at the storage layer but kept in the signature so
+    /// callers can pass it deterministically for future filtering needs without
+    /// a signature change.
+    pub fn tombstoned_lineage_ids(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<std::collections::HashSet<uuid::Uuid>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // Full-corpus scan including tombstoned rows. We filter for rows where
+        // tombstoned_at is Some — these are cluster C (expunged via moot_erase_memory).
+        // The cost is one full-corpus read per import run, which is acceptable
+        // because erased drawers are rare and this is called once, not per-note.
+        let all = estate
+            .all_drawers()
+            .map_err(|e| VerbDispatchError::from(remap("tombstoned_lineage_ids", "", e)))?;
+        Ok(all
+            .into_iter()
+            .filter(|d| d.tombstoned_at.is_some())
+            .map(|d| d.lineage_id)
+            .collect())
+    }
+
     // MARK: - add_kg_fact
 
     /// Capture a new KGFact in the estate addressed by `handle`.

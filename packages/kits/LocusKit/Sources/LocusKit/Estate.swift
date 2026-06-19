@@ -330,6 +330,17 @@ public actor Estate {
         try await store.allDrawers(hydrationLevel: .full, limit: limit)
     }
 
+    /// The set of lineage IDs whose rows have been permanently erased (cluster C:
+    /// `tombstonedAt IS NOT NULL`). Delegates to `DrawerStore.tombstonedLineageIDs()`,
+    /// which reads the `lineageID` column directly via a storage-tier `.isNotNull`
+    /// predicate without a full row decode — avoiding any timestamp-format sensitivity.
+    ///
+    /// Used by GLK's `tombstonedLineageIDs` passthrough so VaultKit can detect
+    /// erased lineages without importing LocusKit directly (B-1).
+    public func tombstonedLineageIDs() async throws -> Set<UUID> {
+        try await store.tombstonedLineageIDs()
+    }
+
     /// Every room-level container fingerprint (room non-empty) with its
     /// bitwise-OR aggregate over the container's active drawers. Delegates to
     /// the estate's `ContainerFingerprintStore.roomLevelEntries()`.

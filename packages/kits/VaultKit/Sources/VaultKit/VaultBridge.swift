@@ -538,37 +538,38 @@ public struct VaultBridge: Sendable {
         return (lineageIDs, wings, contentByLineage)
     }
 
-    /// The set of lineage IDs that exist in the estate but whose last known
-    /// state is withdrawn/superseded — the non-resurrection set (FINDING-1b).
+    /// The set of lineage IDs the import path must not resurrect — the union
+    /// of cluster B (withdrawn/superseded) and cluster C (erased/tombstoned).
     ///
-    /// Uses `Filter.usedToBelieve` to surface lineages that were previously
-    /// active but have since been withdrawn from the estate (cluster B:
-    /// superseded, decayed, withdrawn, expired). A note whose lineage appears
-    /// in this set must NOT be re-imported: doing so would resurrect content
-    /// the operator deliberately withdrew. The withdrawal is respected and the
-    /// skip is counted in `ImportReport.drawersSkippedTombstoned` for full
-    /// observability.
+    /// Two disjoint sets are combined here because the recall pipeline hides
+    /// one of them from every recall-based query:
     ///
-    /// ## Why usedToBelieve, not knewOnceAndErased
+    /// **Cluster B — withdrawn (state = 18, `tombstonedAt == nil`):**
+    /// Surfaced via `Filter.usedToBelieve` over the standard recall path.
+    /// These lineages were deliberately withdrawn by the operator. The import
+    /// path must not resurrect them.
     ///
-    /// The recall pipeline operates on non-tombstoned rows only: `liveRows`
-    /// pre-filters `tombstonedAt == nil` before the BitmapEvaluator runs.
-    /// This means cluster C (tombstoned/rejected, state ≥ 32) rows whose
-    /// `tombstonedAt` is set (i.e. expunged via the `expunge` verb) are
-    /// invisible to recall — `knewOnceAndErased` (cluster C) never fires on
-    /// them. Withdrawn drawers (state = `withdrawn = 18`, cluster B) DO have
-    /// `tombstonedAt == nil` and ARE surfaced by `usedToBelieve`. For vault
-    /// import purposes, `withdraw` is the correct verb to "delete" a note
-    /// that must not resurface — the operator moves the drawer out of the
-    /// believed set via withdraw, and the import guard respects that boundary.
+    /// **Cluster C — erased/tombstoned (state ≥ 32, `tombstonedAt != nil`):**
+    /// Permanently erased via `moot_erase_memory` / the `expunge` verb, which
+    /// sets `tombstonedAt` and zeroes the content blob. The recall pipeline's
+    /// `liveRows` pre-filters `tombstonedAt == nil`, so cluster C rows are
+    /// invisible to any `recall`-based query. `GeniusLocusKit.tombstonedLineageIDs`
+    /// reaches them via `Estate.allDrawers()` — the only corpus scan that
+    /// explicitly includes tombstoned rows — and returns the distinct set of
+    /// erased lineage IDs.
+    ///
+    /// Both clusters are skipped and counted in
+    /// `ImportReport.drawersSkippedTombstoned` for full observability. The
+    /// combined guard ensures that neither a `withdraw` nor an `expunge`
+    /// (i.e. `moot_erase_memory`) can be undone by a subsequent vault
+    /// re-import.
     private func existingTombstonedLineageIDs(
         handle: EstateHandle
     ) async throws -> Set<UUID> {
-        // .usedToBelieve surfaces drawers in cluster B (superseded, decayed,
-        // withdrawn, expired — state values 16..31). These are lineages the
-        // estate once held but that have since been deliberately withdrawn.
-        // The import path must not resurrect them.
-        let drawers = try await kit.recall(
+        // Cluster B: withdrawn/superseded lineages (tombstonedAt == nil,
+        // state values 16..31). Visible to the recall pipeline via
+        // usedToBelieve. These have been deliberately withdrawn.
+        let withdrawnDrawers = try await kit.recall(
             handle,
             RecallFrame(
                 filterChain: [.usedToBelieve],
@@ -576,7 +577,16 @@ public struct VaultBridge: Sendable {
                 limit: 10_000_000
             )
         )
-        return Set(drawers.map(\.lineageID))
+        let withdrawnIDs = Set(withdrawnDrawers.map(\.lineageID))
+
+        // Cluster C: expunged/tombstoned lineages (tombstonedAt != nil,
+        // state ≥ 32). Invisible to the recall pipeline. Reached via the
+        // GLK passthrough to Estate.allDrawers() — the only scan that
+        // includes tombstoned rows. B-1 compliant: VaultKit never imports
+        // LocusKit's DrawerStore directly.
+        let erasedIDs = try await kit.tombstonedLineageIDs(handle)
+
+        return withdrawnIDs.union(erasedIDs)
     }
 
     /// The current sensitivity tier of every believed drawer, keyed by

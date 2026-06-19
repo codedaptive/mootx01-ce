@@ -953,4 +953,61 @@ struct VaultBridgeTests {
         let afterReimport = try await currentDrawers(kit, handle)
         #expect(afterReimport.isEmpty, "estate must remain empty after re-import of withdrawn lineage")
     }
+
+    /// FINDING-1b cluster C: A note whose drawer was ERASED via `moot_erase_memory`
+    /// (the `expunge` verb, which sets `tombstonedAt != nil`) must NOT be
+    /// resurrected on re-import. This is the gap the prior fix left open: the
+    /// cluster B guard (`usedToBelieve`) catches withdrawn drawers but misses
+    /// expunged/tombstoned ones because `liveRows` pre-filters `tombstonedAt == nil`
+    /// — making cluster C invisible to all recall-based queries.
+    ///
+    /// The fix adds `GeniusLocusKit.tombstonedLineageIDs(_:)`, which uses
+    /// `Estate.allDrawers()` — the only corpus scan that includes tombstoned rows —
+    /// and unions the erased set with the withdrawn set so both clusters are blocked.
+    @Test("re-importing a note whose drawer was ERASED (expunged/tombstoned) does NOT resurrect it (FINDING-1b cluster C)")
+    func reimportAfterExpungeDoesNotResurrect() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = try seedVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let now = Date()
+
+        // First import: note lands as a new drawer.
+        let first = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(first.drawersWritten == 1, "first import must write the drawer")
+
+        // Retrieve the drawer and EXPUNGE it (cluster C: tombstonedAt is set,
+        // content blob zeroed). This mirrors `moot_erase_memory` — the verb that
+        // triggered the resurrection bug in the original transcript.
+        let drawers = try await currentDrawers(kit, handle)
+        let drawer = try #require(drawers.first)
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id,
+            reason: "test-expunge",
+            confirmation: true
+        ))
+
+        // Verify the estate is now empty of active (believed) drawers.
+        // NOTE: recall only sees non-tombstoned rows, so this is expected to be empty
+        // regardless — the critical assertion is the re-import behaviour below.
+        let afterExpunge = try await currentDrawers(kit, handle)
+        #expect(afterExpunge.isEmpty, "estate must have no active drawers after expunge")
+
+        // Re-import the SAME vault. The note's lineage is in the erased (cluster C)
+        // set. The import must NOT resurrect it — must skip and count as tombstoned.
+        // Before the fix, this would write a new drawer (resurrection bug).
+        let second = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(second.drawersWritten == 0,
+                "erased note must NOT be resurrected on re-import — cluster C gap (moot_erase_memory)")
+        #expect(second.drawersUpdated == 0)
+        #expect(second.drawersSkippedTombstoned == 1,
+                "erased lineage must be counted as skipped-tombstoned")
+
+        // Estate must remain empty — resurrection did not happen.
+        let afterReimport = try await currentDrawers(kit, handle)
+        #expect(afterReimport.isEmpty,
+                "estate must remain empty after re-import of erased (expunged) lineage")
+    }
 }

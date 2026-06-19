@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-17
-version: 1.9.0
+date: 2026-06-19
+version: 1.9.1
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -1796,6 +1796,9 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.9.1 -- 2026-06-19
+Additive (FINDING-1b cluster C): `tombstonedLineageIDs(_ handle: EstateHandle) async throws -> Set<UUID>` added to the GLK verb surface (Swift `public extension GeniusLocusKit`). Rust twin: `EstateCoordinator::tombstoned_lineage_ids(&self, handle: &EstateHandle) -> Result<HashSet<Uuid>, VerbDispatchError>`. Returns the lineage IDs of all cluster C (permanently erased, `tombstonedAt IS NOT NULL`) drawers. The storage-tier predicate path bypasses timestamp parsing — resilient to format differences between `ISO8601DateFormatter()` (used by `expungeGated`) and `LKISO8601` (fractional-seconds parser). B-1-compliant: VaultKit reaches tombstoned rows through this GLK method, never by importing LocusKit directly.
 
 ### 1.9.0 -- 2026-06-17
 Additive (#8 Track 1 — Brain harness, Rust side). `EstateCoordinator::vector_store_for(&handle)
