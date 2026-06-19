@@ -253,7 +253,7 @@ pub fn dispatch(
             // the direct JSONRPCError mapping rather than lens_error.
             let all_tunnels = coord
                 .all_tunnels(&estate.handle)
-                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::interface_tools::describe_verb_dispatch_error(&e)))?;
             let contradicts_tunnels: Vec<_> = all_tunnels
                 .into_iter()
                 .filter(|t| t.kind == TunnelKind::Contradicts && t.tombstoned_at.is_none())
@@ -280,7 +280,7 @@ pub fn dispatch(
             // recall_kg_facts returns VerbDispatchError — same mapping as above.
             let all_facts = coord
                 .recall_kg_facts(&estate.handle)
-                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::interface_tools::describe_verb_dispatch_error(&e)))?;
             // Group facts by (subject_lower, predicate_lower).
             let mut facts_by_key: BTreeMap<String, Vec<_>> = BTreeMap::new();
             for fact in &all_facts {
@@ -378,7 +378,10 @@ pub fn dispatch(
                         "anchor '{anchor_id}' is not in the recalled set"
                     )))
                 }
-                Err(e) => Ok(error_result(&format!("{e:?}"))),
+                // RecipeRunError implements Display — forward it cleanly so no
+                // internal Rust type names (RecipeRunError::Substrate etc.) reach
+                // the agent boundary.
+                Err(e) => Ok(error_result(&format!("{e}"))),
             }
         }
 
@@ -641,7 +644,7 @@ pub fn dispatch(
                 .map_err(|e| {
                     JSONRPCError::new(
                         JSONRPCErrorCode::INTERNAL_ERROR,
-                        format!("fingerprint_bit_series failed: {e:?}"),
+                        format!("fingerprint_bit_series failed: {e}"),
                     )
                 })?;
             let out = run_rhythm(&buckets, bucket_seconds as f64, top_k);
@@ -675,7 +678,7 @@ pub fn dispatch(
             let drawers = estate.store.all_drawers().map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::INTERNAL_ERROR,
-                    format!("all_drawers failed: {e:?}"),
+                    format!("all_drawers failed: {e}"),
                 )
             })?;
             // Pre-filter by eventTime window (epoch seconds comparison).
@@ -689,7 +692,7 @@ pub fn dispatch(
                 let events = estate.store.audit_events_for_row(&drawer.id).map_err(|e| {
                     JSONRPCError::new(
                         JSONRPCErrorCode::INTERNAL_ERROR,
-                        format!("audit_events_for_row failed: {e:?}"),
+                        format!("audit_events_for_row failed: {e}"),
                     )
                 })?;
                 for event in &events {
@@ -905,6 +908,10 @@ fn list(heading: &str, items: Vec<String>) -> serde_json::Value {
     text_result(&lines.join("\n"))
 }
 
+/// Convert a `RecipeRunError` to a `JSONRPCError` for out-of-band lens
+/// failures. Uses `Display` (not `Debug`) so no internal Rust type names
+/// leak to the agent boundary. `RecipeRunError` implements `Display` with
+/// clean English messages parity with the Swift port.
 fn lens_error(e: cognition_kit::RecipeRunError) -> JSONRPCError {
-    JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+    JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}"))
 }
