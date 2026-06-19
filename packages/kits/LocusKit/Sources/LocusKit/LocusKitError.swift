@@ -81,3 +81,42 @@ public enum LocusKitError: Error, Sendable, Equatable {
     /// producing data does not exist.
     case notSupported(String)
 }
+
+extension LocusKitError: CustomStringConvertible {
+    /// English description without internal Swift type-chain noise
+    /// (LocusKitError.invalidContent(...), GateViolation cases, etc.).
+    /// Used at the GeniusLocusKit boundary (VerbSurface.remap) so
+    /// VerbError.underlyingEstateFailure.reason carries English text
+    /// that the AriaMcpKit describe_gate_rejection parser can parse.
+    public var description: String {
+        switch self {
+        case .databaseUnavailable(let msg):
+            return "database unavailable: \(msg)"
+        case .drawerNotFound(let id):
+            return "drawer not found: \(id)"
+        case .tunnelNotFound(let id):
+            return "tunnel not found: \(id)"
+        case .diaryEntryNotFound(let id):
+            return "diary entry not found: \(id)"
+        case .recallTraceItemNotFound(let id):
+            return "recall trace item not found: \(id)"
+        case .sqliteError(let msg):
+            return "SQLite error: \(msg)"
+        case .schemaTooNew(let found, let expected):
+            return "schema version \(found) is newer than expected \(expected)"
+        case .invalidContent(let msg):
+            // The msg already contains the English text produced by
+            // GateViolation::description (Swift) or GateViolation::Display (Rust),
+            // e.g. "state mutation rejected by gate: illegal state transition: active --reject-->".
+            // Pass it through verbatim so upstream parsers (describe_gate_rejection) can
+            // find the sentinel "illegal state transition: " as a substring.
+            return "InvalidContent: \(msg)"
+        case .disciplineViolation(let from, let to, let reason):
+            return "discipline violation (\(from)→\(to)): \(reason)"
+        case .corruptStoredValue(let table, let column, let storedText):
+            return "corrupt stored value in \(table).\(column): '\(storedText)'"
+        case .notSupported(let msg):
+            return "not supported: \(msg)"
+        }
+    }
+}
