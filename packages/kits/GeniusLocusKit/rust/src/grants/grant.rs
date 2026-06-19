@@ -148,7 +148,7 @@ impl CustodyMode {
 /// Parameters of the mode-4 time-aging custody policy. Mirror of Swift
 /// `DecayPolicy`.
 ///
-/// The effective content level at instant `now` (Apple reference seconds) is
+/// The effective content level at instant `now` (Unix epoch seconds, Rust port) is
 /// `max(floor, round(base_level * 0.5^(elapsed / half_life_seconds)))`
 /// where `elapsed = max(0, now - started_at)`. The half-life form mirrors the
 /// matrix-calibration decay (math treatise §8). The fraction is computed in
