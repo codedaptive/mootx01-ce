@@ -930,7 +930,13 @@ public extension Estate {
             guard try await store.getDrawer(id: rowID) != nil else {
                 throw LocusKitError.drawerNotFound(id: rowID)
             }
-            // pending → reject → rejected per automaton §9.2.
+            // pending → reject → rejected and contested → reject → rejected
+            // per automaton §9.2. A contested memory judged false must be
+            // terminally rejectable; the automaton now admits both source
+            // states via the same verb. The DrawerStore write gate consults
+            // SubstrateLib's transition table and will throw
+            // `disciplineViolation` if the current state is anything else
+            // (e.g. active, accepted), so no extra guard is needed here.
             let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
             try await store.mutateState(
                 drawerId: rowID,

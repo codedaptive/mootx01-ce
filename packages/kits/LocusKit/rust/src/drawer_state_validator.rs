@@ -283,6 +283,30 @@ mod tests {
         assert!(validate(State::Accepted, State::Active, Observe).is_err());
     }
 
+    // ---- contested → rejected (the fix) ----
+
+    #[test]
+    fn contested_to_rejected_via_reject() {
+        // Cookbook §9.2: a contested memory judged false is terminally
+        // rejectable. Both Pending and Contested may transition via Reject.
+        assert!(validate(State::Contested, State::Rejected, Reject).is_ok());
+    }
+
+    #[test]
+    fn accepted_to_rejected_illegal() {
+        // Accepted is an audit-grade terminal; reject from Accepted must fail.
+        // This pinned the S-3-class invariant for the reject verb: only
+        // Pending and Contested are legal sources.
+        assert!(validate(State::Accepted, State::Rejected, Reject).is_err());
+    }
+
+    #[test]
+    fn active_to_rejected_illegal() {
+        // Active → Reject is not in the §9.2 transition table.
+        // Only Pending and Contested may be rejected.
+        assert!(validate(State::Active, State::Rejected, Reject).is_err());
+    }
+
     // --- Error message carries the relevant context ---
 
     #[test]

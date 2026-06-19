@@ -145,6 +145,11 @@ public enum RowStateAutomaton {
 
         // ---- from contested ----
         TransitionKey(.contested, .resolveContest): .active,
+        // A contested memory judged false is terminally rejectable. The
+        // verb-string table (verbTable above, §10 vocabulary) has always
+        // carried this edge; this entry aligns the canonical §9 lifecycle
+        // table to match. Cook­book §9.2: contested → reject → rejected.
+        TransitionKey(.contested, .reject):         .rejected,
         TransitionKey(.contested, .retract):        .withdrawn,
         TransitionKey(.contested, .tombstone):      .tombstoned,
 
