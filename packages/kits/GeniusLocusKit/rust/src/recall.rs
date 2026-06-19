@@ -825,11 +825,18 @@ impl RecallShape {
             // Preference-led: amplify the learned-preference column (matrixAware-only).
             "preference" => Some(shape(&[("preference", 1.5)], None)),
 
-            // Diversity: invert the FDC dense lane to FARTHEST (anti-similarity).
+            // Diversity: invert the FDC dense lane to FARTHEST (anti-similarity) +
+            // suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate
+            // the fused ranking. Frontier narrowed to the floor (64) to avoid hauling
+            // a wide pool of duplicates. Mirrors Swift `RecallShape.preset("anti_redundant")`.
             "anti_redundant" => {
                 let mut anti = HashSet::new();
                 anti.insert(Self::DENSE_FDC.to_string());
-                Some(RecallShape::new(HashMap::new(), None).with_anti_similar_lanes(anti))
+                let s = shape(
+                    &[("bm25", -0.5), ("hamming", -0.5)],
+                    Some(Self::FRONTIER_K_FLOOR),
+                );
+                Some(s.with_anti_similar_lanes(anti))
             }
 
             _ => None,
@@ -860,7 +867,7 @@ impl RecallShape {
             "connection" => "Connection-led — amplify the connection-graph column (matrixAware scoring only).",
             "field" => "Field-led — amplify the co-occurrence column (matrixAware scoring only).",
             "preference" => "Preference-led — amplify the learned-preference column (matrixAware scoring only).",
-            "anti_redundant" => "Diversity — invert the FDC dense lane to farthest (anti-similarity) so the set avoids near-duplicates.",
+            "anti_redundant" => "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64.",
             _ => "",
         }
     }

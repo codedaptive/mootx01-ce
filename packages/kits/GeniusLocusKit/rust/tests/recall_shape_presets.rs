@@ -143,13 +143,21 @@ fn matrix_column_presets_amplify_their_column() {
 }
 
 #[test]
-fn anti_redundant_inverts_the_fdc_lane() {
+fn anti_redundant_inverts_fdc_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant").unwrap();
-    // The FDC dense lane is anti-similar (farthest), and no lane weights are set.
+    // FDC dense lane is anti-similar (farthest-neighbour direction).
     assert!(s.is_anti_similar(RecallShape::DENSE_FDC));
     assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
-    // It does not also suppress — distinct from a negative weight.
+    // FDC lane weight stays at 1.0 — anti_similar flag flips direction, not magnitude.
     assert_eq!(s.weight(RecallShape::DENSE_FDC), 1.0);
+    // BM25 and Hamming are suppressed so lexical near-duplicates cannot dominate.
+    assert!(s.weight("bm25") < 0.0);
+    assert!(s.weight("hamming") < 0.0);
+    // Frontier narrowed to the floor so the engine does not haul a wide pool of duplicates.
+    assert_eq!(
+        s.effective_frontier_k(200),
+        RecallShape::FRONTIER_K_FLOOR
+    );
 }
 
 #[test]
