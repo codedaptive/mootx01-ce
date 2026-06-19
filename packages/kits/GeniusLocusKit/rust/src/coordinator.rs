@@ -2537,7 +2537,7 @@ impl EstateCoordinator {
     ///    `grantee_estate_id` equals the requester's UUID. None →
     ///    `CrossEstateReadRefused { NoActiveGrant }`.
     /// 4. Among matching grants, require at least one unexpired at `now`
-    ///    (Apple reference seconds). Pick the one with highest
+    ///    (Unix epoch seconds, Rust port). Pick the one with highest
     ///    `content_level` to give the requester maximum entitled access.
     ///    All expired → `CrossEstateReadRefused { GrantExpired }`.
     /// 5. CustodyMode gate (per-mode semantics, mirrors Swift step 5):
