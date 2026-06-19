@@ -83,7 +83,7 @@ private func openFullyWiredEstate(
         content: content,
         channel: .typed,
         room: "degradation-tests",
-        latticeAnchor: .udc("000.000"),
+        latticeAnchor: .udc("000"),
         addedBy: "degradation-tests",
         embeddingModelID: "test-model-v1"
     )

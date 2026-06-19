@@ -55,7 +55,7 @@ struct ShapedRecallTests {
                 content: content,
                 channel: .typed,
                 room: "ledger",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "tester",
                 embeddingModelID: "test-model-v1")
             let drawer = try await kit.capture(handle, frame)

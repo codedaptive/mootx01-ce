@@ -679,7 +679,7 @@ struct EstateProvisionSQLiteTests {
             content: "SQLite durable provision round-trip test content.",
             channel: .typed,
             room: "sqlite-provision-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "sqlite-provision-test",
             embeddingModelID: "test-model-v1"
         )

@@ -785,10 +785,13 @@ impl DrawerMapping {
         let model_value = non_empty(note.frontmatter.get("embeddingModelID"))
             .unwrap_or_else(|| self.embedding_model_id.clone());
 
-        // UDC resolution:
-        //   1. explicit frontmatter `udc` (a pre-classified note)
-        //   2. no EideticLib in Rust V1 — skip lookup
-        //   3. deterministic fallback "000"
+        // UDC resolution (one-door principle):
+        //   1. Explicit frontmatter `udc` (a pre-classified note): passed through
+        //      unchanged — the GLK seam preserves any non-sentinel anchor.
+        //   2. Deterministic fallback "000" (the unclassified sentinel): the GLK
+        //      seam (`capture_with_mode`) classifies via Fdc::encode_anchor when
+        //      it sees this sentinel and the content is non-empty. Classification
+        //      happens once at the seam, not per caller.
         let resolved_udc = non_empty(note.frontmatter.get("udc"));
         let classified = resolved_udc.is_some();
         let udc_code = resolved_udc.unwrap_or_else(|| self.fallback_udc.clone());

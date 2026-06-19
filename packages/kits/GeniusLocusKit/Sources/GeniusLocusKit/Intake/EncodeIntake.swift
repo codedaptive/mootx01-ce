@@ -28,6 +28,7 @@
 
 import Foundation
 import CorpusKit
+import EideticLib
 import LocusKit
 import OSLog
 import PersistenceKit
@@ -90,8 +91,38 @@ public extension GeniusLocusKit {
         _ frame: CaptureFrame,
         mode: WriteMode
     ) async throws -> Drawer {
+        // One-door classification: every capture path funnels through here.
+        // When the incoming frame carries the unclassified sentinel "000" AND
+        // the content is non-empty, classify via EideticLib before filing so
+        // the drawer is lattice-anchored at the moment of capture — regardless
+        // of which caller (file_memory, vault import, branch promotion) reached
+        // this seam. When the frame already carries an explicit non-sentinel
+        // anchor (e.g. vault frontmatter `udc`), preserve it — do not override.
+        //
+        // EideticLib.lookup delegates to FDC.encodeAnchor (deterministic,
+        // network-free, pinned to bundled LatticeLib artifacts). An empty code
+        // from the classifier (UNRESOLVED content) leaves the sentinel intact —
+        // the drawer files with "000" rather than failing.
+        let classifiedFrame: CaptureFrame = {
+            guard frame.latticeAnchor.udcCode == Self.unclassifiedSentinel,
+                  !frame.content.isEmpty else {
+                return frame
+            }
+            let anchor = EideticLib.lookup(frame.content)
+            guard !anchor.code.isEmpty else {
+                // UNRESOLVED: content could not be classified. Leave sentinel.
+                return frame
+            }
+            var classified = frame
+            classified.latticeAnchor = LatticeAnchor(
+                udcCode: anchor.code,
+                wikidataQID: anchor.wikidataQID
+            )
+            return classified
+        }()
+
         // 1. Store the drawer row (identical to the legacy capture verb).
-        let drawer = try await capture(handle, frame)
+        let drawer = try await capture(handle, classifiedFrame)
 
         // 2. Encode per mode — only when a Corpus is registered for the estate.
         guard corpusKits[handle] != nil else {
@@ -460,4 +491,21 @@ public extension GeniusLocusKit {
     static func encodeStreamID(for handle: EstateHandle) -> StreamID {
         StreamID(rawValue: "glk_encode_\(handle.estateUUID.uuidString.lowercased())")
     }
+
+    /// The canonical unclassified-content sentinel UDC code. A drawer that
+    /// carries this code arrived at the capture seam without a real
+    /// classification. The seam attempts FDC classification on the content
+    /// and replaces this sentinel with the resolved code; when the content is
+    /// unresolvable the sentinel remains so the drawer still files cleanly.
+    ///
+    /// "000" is the three-digit root per the FDC code grammar (see LatticeLib
+    /// Code.swift): all subject-matter spine codes descend from it. Using the
+    /// root (not a child like "000.000") as the sentinel is correct because
+    /// a classified drawer never resolves to the bare root — every resolved
+    /// code is a spine code or a decimal extension thereof, always more
+    /// specific than "000". This gives callers a reliable way to detect
+    /// unclassified content without a separate boolean flag.
+    ///
+    /// Rust parity: `UNCLASSIFIED_SENTINEL` in `intake.rs`.
+    static let unclassifiedSentinel: String = "000"
 }

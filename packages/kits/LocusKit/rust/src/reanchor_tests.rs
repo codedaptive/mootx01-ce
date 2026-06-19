@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn reanchor_gated_room_move_bitmaps_unchanged() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "bitmap preserve", "room-orig", "000.000");
+        let d = basic_capture(&estate, "bitmap preserve", "room-orig", "000");
         let before_adj = d.adjective_bitmap;
         let before_op = d.operational_bitmap;
         let before_prov = d.provenance;
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn reanchor_gated_lattice_move_updates_anchor() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "lattice test", "room-x", "000.000");
+        let d = basic_capture(&estate, "lattice test", "room-x", "000");
 
         let new_anchor = LatticeAnchor {
             udc_code: "003.456".to_string(),
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn reanchor_gated_audit_event_appended() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "audit test", "room-a", "000.000");
+        let d = basic_capture(&estate, "audit test", "room-a", "000");
         let count_before = audit_event_count(estate.store.as_ref(), &d.id);
         assert_eq!(count_before, 1); // genesis capture event
 
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn estate_reanchor_empty_args_returns_invalid_content() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "empty guard", "room-a", "000.000");
+        let d = basic_capture(&estate, "empty guard", "room-a", "000");
         let err = estate.reanchor(&d.id, None, None).unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
     }
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn estate_reanchor_to_room_updates_room() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "room move via estate", "original-room", "000.000");
+        let d = basic_capture(&estate, "room move via estate", "original-room", "000");
 
         estate.reanchor(&d.id, Some("moved-room"), None).unwrap();
 
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn estate_reanchor_to_lattice_updates_anchor() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "lattice via estate", "room-x", "000.000");
+        let d = basic_capture(&estate, "lattice via estate", "room-x", "000");
 
         estate
             .reanchor(&d.id, None, Some(LatticeAnchor::udc("003.000")))
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn estate_reanchor_bitmaps_preserved() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "bitmaps via estate", "room-a", "000.000");
+        let d = basic_capture(&estate, "bitmaps via estate", "room-a", "000");
         let before_adj = d.adjective_bitmap;
         let before_op = d.operational_bitmap;
         let before_prov = d.provenance;
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn estate_reanchor_audit_entry_written() {
         let estate = make_estate();
-        let d = basic_capture(&estate, "audit via estate", "room-a", "000.000");
+        let d = basic_capture(&estate, "audit via estate", "room-a", "000");
         let count_before = audit_event_count(estate.store.as_ref(), &d.id);
         assert_eq!(count_before, 1); // genesis
 

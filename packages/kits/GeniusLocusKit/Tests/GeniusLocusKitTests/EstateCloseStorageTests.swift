@@ -336,7 +336,7 @@ struct EstateCloseStaleHandleVerbTests {
             content: "test content",
             channel: .typed,
             room: "test-room",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "test-agent",
             embeddingModelID: "test-model"
         )

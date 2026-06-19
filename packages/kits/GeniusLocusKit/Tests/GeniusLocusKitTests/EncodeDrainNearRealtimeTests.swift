@@ -78,7 +78,7 @@ struct EncodeDrainNearRealtimeTests {
             content: content,
             channel: .typed,
             room: "near-realtime-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "near-realtime-tests",
             embeddingModelID: "test-model-v1"
         )

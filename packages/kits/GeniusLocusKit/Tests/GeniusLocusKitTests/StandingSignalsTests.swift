@@ -376,7 +376,7 @@ struct StandingSignalsTests {
             content: "temporal causality source row",
             channel: .typed,
             room: "t-test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "temporal-test",
             embeddingModelID: "test-model-v1")
         _ = try await kit.capture(handle, frame1)
@@ -385,7 +385,7 @@ struct StandingSignalsTests {
             content: "temporal causality target row",
             channel: .voiced,
             room: "t-test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "temporal-test",
             embeddingModelID: "test-model-v1")
         _ = try await kit.capture(handle, frame2)

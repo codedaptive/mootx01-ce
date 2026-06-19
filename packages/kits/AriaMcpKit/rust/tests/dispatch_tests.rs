@@ -1705,7 +1705,8 @@ fn federated_search_content_level_gate_excludes_higher_sensitivity_rows() {
             "elevated-sensitivity-content",
             CaptureChannel::ImportedFile,
             "test-room",
-            LatticeAnchor::udc("000.000"),
+            // "000" is the canonical unclassified sentinel (UDC root).
+            LatticeAnchor::udc("000"),
             "aria-mcp-server",
             "default",
         );
@@ -3176,7 +3177,9 @@ fn run_migration_for_confirm(registry: &EstateRegistry) -> (String, String) {
         JsonValue::from(serde_json::json!([{
             "name": "plan-alpha",
             "room": "test-room",
-            "latticeCode": "000.000",
+            // "000" is the canonical unclassified-sentinel UDC code (UDC root).
+            // The seam classifies migration corpus entries on capture.
+            "latticeCode": "000",
             "embeddingModelID": "test-model"
         }])),
     );

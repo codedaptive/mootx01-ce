@@ -213,21 +213,43 @@ struct VaultBridgeTests {
         }
     }
 
-    // MARK: - Feature-flag-off (EideticLib classification disabled)
+    // MARK: - Feature-flag: classifyOnImport no longer suppresses seam classification
 
-    @Test("feature-flag-off import lands the fallback UDC and counts as unclassified")
-    func featureFlagOffFallbackUDC() async throws {
+    /// `classifyOnImport: false` tells VaultKit not to pre-classify in-process
+    /// (before the one-door refactor, it suppressed EideticLib.lookup). The
+    /// report counters reflect VaultKit's own classification: `fdcClassified`
+    /// counts notes that carried explicit frontmatter `udc`; `fdcUnclassified`
+    /// counts notes that did not. The GeniusLocusKit seam now ALWAYS classifies
+    /// content arriving with the "000" sentinel — so even when VaultKit's own
+    /// classification is off, the seam runs classification and the stored
+    /// udcCode is a real code (not the sentinel). `classifyOnImport` is retained
+    /// for API compatibility; it can no longer produce an unclassified drawer.
+    @Test("classifyOnImport=false still produces a classified drawer (seam owns classification)")
+    func featureFlagOffStillClassifiedBySeam() async throws {
         let (kit, handle) = try await openEstate()
         let vault = try seedVault()
         defer { try? FileManager.default.removeItem(at: vault) }
 
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
         let report = try await bridge.importVault(at: vault, into: handle, now: Date())
+        // VaultKit's own in-process classification: 0 pre-classified (no frontmatter udc).
         #expect(report.fdcClassified == 0)
+        // VaultKit counts this as unclassified from its own perspective (no frontmatter udc).
         #expect(report.fdcUnclassified == 1)
 
+        // The seam classifies on capture: the drawer must have a real udcCode,
+        // not the "000" unclassified sentinel — the seam ran EideticLib.lookup
+        // when the frame arrived with "000" and non-empty content.
         let drawers = try await currentDrawers(kit, handle)
-        #expect(drawers.first?.udcCode == "000")
+        let storedCode = drawers.first?.udcCode ?? ""
+        #expect(
+            storedCode != "000",
+            "the GLK capture seam must classify the content even when classifyOnImport=false; got sentinel"
+        )
+        #expect(
+            !storedCode.isEmpty,
+            "udcCode must not be empty after seam classification"
+        )
     }
 
     // MARK: - Export scope tests

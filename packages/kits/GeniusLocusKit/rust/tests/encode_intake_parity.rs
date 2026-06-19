@@ -85,7 +85,10 @@ fn capture_frame(content: &str) -> CaptureFrame {
         content,
         CaptureChannel::Typed,
         "encode-intake-tests",
-        LatticeAnchor::udc("000.000"),
+        // "000" is the canonical unclassified sentinel (UDC root) — the
+        // capture_with_mode seam classifies non-empty content on the way in
+        // (one-door principle). "000.000" was the old incorrect value.
+        LatticeAnchor::udc("000"),
         "encode-intake-tests",
         "test-model-v1",
     )

@@ -60,7 +60,7 @@ struct GLK03_AuditIntegrationTests {
             content: content,
             channel: .typed,
             room: "glk03-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "glk03-tests",
             embeddingModelID: "test-model-v1"
         )

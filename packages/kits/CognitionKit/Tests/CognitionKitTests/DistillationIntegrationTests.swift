@@ -97,7 +97,7 @@ struct DistillationIntegrationTests {
                 content: content,
                 channel: .typed,
                 room: "inbox",
-                latticeAnchor: LatticeAnchor.udc("000.000"),
+                latticeAnchor: LatticeAnchor.udc("000"),
                 addedBy: "dp3-integration-test",
                 embeddingModelID: "test-v1")
             let drawer = try await kit.capture(handle, frame)

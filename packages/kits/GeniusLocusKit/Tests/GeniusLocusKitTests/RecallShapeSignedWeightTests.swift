@@ -58,7 +58,7 @@ struct RecallShapeSignedWeightTests {
                 content: content,
                 channel: .typed,
                 room: "recall-shape-tests",
-                latticeAnchor: .udc("000.000"),
+                latticeAnchor: .udc("000"),
                 addedBy: "recall-shape-tests",
                 embeddingModelID: "test-model-v1"
             )

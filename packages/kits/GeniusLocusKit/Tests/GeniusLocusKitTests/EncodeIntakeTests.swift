@@ -80,7 +80,7 @@ struct EncodeIntakeTests {
             content: content,
             channel: .typed,
             room: "encode-intake-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "encode-intake-tests",
             embeddingModelID: "test-model-v1"
         )

@@ -90,7 +90,7 @@ struct ConsolidateTests {
                 content: "Source memory \(i) about Alice and her daily schedule",
                 channel: .typed,
                 room: "inbox",
-                latticeAnchor: LatticeAnchor.udc("000.000"),
+                latticeAnchor: LatticeAnchor.udc("000"),
                 addedBy: "consolidate-test",
                 embeddingModelID: "minilm-v6")
             let drawer = try await kit.capture(handle, frame)

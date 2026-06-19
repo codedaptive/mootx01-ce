@@ -1,6 +1,5 @@
 import Foundation
 import GeniusLocusKit
-import LatticeLib
 import LocusKit
 import SubstrateML
 // Scoped imports: pull ONLY the lifecycle-cluster classifier from
@@ -805,12 +804,14 @@ public struct ToolDispatcher: Sendable {
 // MARK: - Server-owned defaults
 
 extension ToolDispatcher {
-    /// Fallback lattice anchor used when FDC classification returns no code
-    /// (UNRESOLVED content). The UDC "000.000" root is the general-knowledge
-    /// default per the substrate spec. `runFileMemory` classifies content via
-    /// `FDC.encodeAnchor` first and only falls back here when the result is nil
-    /// or empty. Other capture paths that do not classify still use this directly.
-    static let defaultLatticeAnchor = LatticeAnchor.udc("000.000")
+    /// The canonical unclassified-content sentinel UDC code passed to the
+    /// capture seam when the caller does not supply an explicit anchor.
+    /// The GeniusLocusKit seam (`capture(_:_:mode:)`) classifies the content
+    /// via EideticLib.lookup when it sees this sentinel and the content is
+    /// non-empty; UNRESOLVED content keeps the sentinel and files at the UDC
+    /// root. Matches GeniusLocusKit.unclassifiedSentinel and the Rust
+    /// `UNCLASSIFIED_SENTINEL` constant.
+    static let defaultLatticeAnchor = LatticeAnchor.udc("000")
 
     /// Embedding model ID that selects the deterministic vector provider.
     /// GeniusLocusKit resolves "default" to `EmbeddingModelConfig.deterministic`
@@ -905,7 +906,7 @@ extension ToolDispatcher {
     /// `moot_file_memory` — file a new memory drawer into the estate.
     ///
     /// The server owns infrastructure fields: lattice anchor (classified via
-    /// `FDC.encodeAnchor`; falls back to UDC "000.000" for UNRESOLVED content),
+    /// The seam classifies via EideticLib.lookup; falls back to UDC "000" for UNRESOLVED content),
     /// embedding model ("default"), capture channel (.actuator, cookbook §2.4 —
     /// actuator-driven capture by an MCP AI agent), source type (.imported),
     /// and addedBy ("aria-mcp-server"). The caller supplies content, location,
@@ -940,24 +941,17 @@ extension ToolDispatcher {
         // room field (structural coordinate). Wing defaults to "memories";
         // future routing logic can refine this per estate topology.
         let room = location
-        // Run FDC classification on the content so the drawer is lattice-anchored
-        // from the moment of capture, not left at the "000.000" root. The same
-        // deterministic encoder runs on the Rust port (lattice_lib::fdc_runtime::Fdc::encode_anchor)
-        // and in the vault import path (DrawerMapping.makeCaptureFrame via EideticLib).
-        // FDC.encodeAnchor returns (nil, nil) only when the bundled artifacts are
-        // unavailable; in that case we fall back to the "000.000" root gracefully.
-        let latticeAnchor: LatticeAnchor = {
-            let (code, qid) = FDC.encodeAnchor(content)
-            guard let code, !code.isEmpty else {
-                return Self.defaultLatticeAnchor
-            }
-            return LatticeAnchor(udcCode: code, wikidataQID: qid)
-        }()
+        // Pass the unclassified sentinel anchor to the capture seam. The seam
+        // (GeniusLocusKit.capture(_:_:mode:)) classifies the content via
+        // EideticLib.lookup when it sees the "000" sentinel — one classification
+        // door for all capture paths (file_memory, vault import, branch promotion).
+        // This removes the per-caller FDC call that was here before the one-door
+        // refactor; the seam now owns classification exclusively.
         let frame = CaptureFrame(
             content: content,
             channel: Self.defaultChannel,
             room: room,
-            latticeAnchor: latticeAnchor,
+            latticeAnchor: Self.defaultLatticeAnchor,
             addedBy: Self.serverAddedBy,
             embeddingModelID: Self.defaultEmbeddingModelID,
             sensitivity: sensitivity,

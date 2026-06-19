@@ -329,8 +329,43 @@ impl EstateCoordinator {
         now: i64,
         mode: WriteMode,
     ) -> Result<Drawer, VerbDispatchError> {
+        // One-door classification: every capture path funnels through here.
+        // When the incoming frame carries the unclassified sentinel "000" AND
+        // the content is non-empty, classify via Fdc::encode_anchor before
+        // filing so the drawer is lattice-anchored at the moment of capture —
+        // regardless of which caller (file_memory, vault import, branch
+        // promotion) reached this seam. When the frame already carries an
+        // explicit non-sentinel anchor (e.g. vault frontmatter `udc`),
+        // preserve it — the seam does not override explicit anchors.
+        //
+        // Fdc::encode_anchor is pure and deterministic over the pinned
+        // LatticeLib artifacts. An empty return (UNRESOLVED content) leaves
+        // the sentinel intact — the drawer files at "000" rather than failing.
+        // Swift parity: GeniusLocusKit.capture(_:_:mode:) unclassified-sentinel
+        // guard + EideticLib.lookup block.
+        let classified_frame = if frame.lattice_anchor.udc_code == UNCLASSIFIED_SENTINEL
+            && !frame.content.is_empty()
+        {
+            let (code_opt, qid_opt) = lattice_lib::fdc_runtime::Fdc::encode_anchor(&frame.content);
+            match code_opt {
+                Some(code) if !code.is_empty() => {
+                    let mut f = frame;
+                    f.lattice_anchor = locus_kit::estate_types::LatticeAnchor {
+                        udc_code: code,
+                        udc_facets: None,
+                        wikidata_qid: qid_opt,
+                        wikidata_qids_secondary: None,
+                    };
+                    f
+                }
+                _ => frame, // UNRESOLVED: keep sentinel, still files cleanly
+            }
+        } else {
+            frame // Explicit non-sentinel anchor: preserve as-is
+        };
+
         // 1. Store the drawer row (identical to the row-only capture verb).
-        let drawer = self.capture(handle, frame, now)?;
+        let drawer = self.capture(handle, classified_frame, now)?;
 
         // 2. Encode per mode — only when a Corpus is registered for the estate.
         if !self.has_corpus(handle) {
@@ -706,6 +741,14 @@ impl EstateCoordinator {
 /// Mirrors the Swift `encodeIngestMaxAttempts`. 8 attempts outlasts a realistic
 /// transient hiccup while bounding a permanently-failing job's cost.
 const ENCODE_INGEST_MAX_ATTEMPTS: usize = 8;
+
+/// The canonical unclassified-content sentinel UDC code. Matches the Swift
+/// `GeniusLocusKit.unclassifiedSentinel` ("000"). A frame carrying this code
+/// at the `capture_with_mode` seam has not yet been classified; the seam
+/// classifies via `Fdc::encode_anchor` when content is non-empty. A frame
+/// carrying any other code (e.g. explicit vault frontmatter `udc`) is
+/// preserved as-is — the seam does not override explicit anchors.
+pub(crate) const UNCLASSIFIED_SENTINEL: &str = "000";
 
 /// Ingest one drained job into the corpus from the background WATCH worker, with
 /// the same bounded at-least-once retry as the pump path. G4: source_id = drawer

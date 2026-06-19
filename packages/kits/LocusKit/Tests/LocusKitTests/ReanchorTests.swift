@@ -58,7 +58,7 @@ struct ReanchorTests {
     private func captureOne(
         estate: Estate,
         room: String = "room-original",
-        lattice: LatticeAnchor = LatticeAnchor.udc("000.000")
+        lattice: LatticeAnchor = LatticeAnchor.udc("000")
     ) async throws -> Drawer {
         let frame = CaptureFrame(
             content: "reanchor test content \(UUID().uuidString)",
@@ -128,7 +128,7 @@ struct ReanchorTests {
     @Test("reanchorGated: updating lattice anchor reflects in getDrawer")
     func reanchorGatedLatticeMove() async throws {
         let (estate, _) = try await makeEstate()
-        let drawer = try await captureOne(estate: estate, lattice: LatticeAnchor.udc("000.000"))
+        let drawer = try await captureOne(estate: estate, lattice: LatticeAnchor.udc("000"))
 
         try await estate.store.reanchorGated(
             drawerId: drawer.id,
@@ -245,7 +245,7 @@ struct ReanchorTests {
     @Test("Estate.reanchor: toLattice updates the drawer's lattice anchor")
     func estateReanchorToLattice() async throws {
         let (estate, _) = try await makeEstate()
-        let drawer = try await captureOne(estate: estate, lattice: LatticeAnchor.udc("000.000"))
+        let drawer = try await captureOne(estate: estate, lattice: LatticeAnchor.udc("000"))
 
         try await estate.reanchor(rowID: drawer.id, toLattice: LatticeAnchor.udc("003.000"))
 

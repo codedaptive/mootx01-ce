@@ -49,6 +49,13 @@ let package = Package(
         .package(name: "VectorKit", path: "../VectorKit"),
         .package(name: "CorpusKit", path: "../CorpusKit"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
+        // EideticLib: the deterministic FDC text-to-anchor utility. GeniusLocusKit's
+        // capture_with_mode seam classifies the lattice anchor via EideticLib.lookup
+        // when the incoming frame carries the unclassified sentinel "000" and has
+        // non-empty content — the one-door principle (all capture paths classify once,
+        // here). Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; layering is
+        // EideticLib → LatticeLib (below GLK), no inversion.
+        .package(name: "EideticLib", path: "../../libs/EideticLib"),
         // QueueKit is the twelfth kit in the graph (DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21).
         // GLK-04 consumes it as the single-serial-dispatch substrate for
         // standing signals: scheduler enqueues jobs through QueueKit; a
@@ -113,6 +120,9 @@ let package = Package(
                 // active SyncEngine per estate handle and exposes syncState(for:)
                 // so honest sync status flows from ConvergenceKit → GLK → ARIA.
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
+                // EideticLib: used by the capture_with_mode seam to classify the
+                // lattice anchor at the one capture door (one-door principle).
+                .product(name: "EideticLib", package: "EideticLib"),
             ],
             path: "Sources/GeniusLocusKit"
         ),

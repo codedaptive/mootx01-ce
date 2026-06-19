@@ -210,7 +210,7 @@ struct TraceRewardTests {
             content: "internal trace test",
             channel: .typed,
             room: "internal-test",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "trace-reward-tests",
             embeddingModelID: "test-model-v1"
         )

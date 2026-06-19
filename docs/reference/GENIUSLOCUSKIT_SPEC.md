@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.7.1
+version: 1.7.2
 status: active
 date: 2026-06-19
-description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
+description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.7.2: one-door FDC classification seam."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -1681,6 +1681,30 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.7.2 -- 2026-06-19
+One-door FDC classification seam (fix/fdc-capture-seam): `capture(_:_:mode:)` /
+`capture_with_mode` now classifies the `latticeAnchor.udcCode` at the seam before
+filing the drawer, when the incoming frame carries the canonical unclassified sentinel
+`"000"` (the UDC three-digit root) and non-empty content. Classification runs
+`EideticLib.lookup` / `Fdc::encode_anchor` (deterministic, pinned LatticeLib
+artifacts). Callers that previously classified per-call (file_memory's direct
+`FDC.encodeAnchor` / `Fdc::encode_anchor`, vault import's `EideticLib.lookup`) have
+been simplified to pass the `"000"` sentinel; the seam is the single classification
+site for all capture paths. An explicit non-sentinel `udcCode` on the incoming frame
+is preserved unchanged — the seam does not override a pre-classified anchor. When
+content is UNRESOLVED (no FDC code returned), the sentinel remains so the drawer
+files cleanly. The canonical sentinel is corrected from the incorrect child node
+`"000.000"` to the UDC root `"000"` in all sentinels, test helpers, and comments
+across the codebase.
+
+Invariant (one-door): two capture behaviors are equal ONLY if they traverse the SAME
+functional call tree. All call sites — `moot_file_memory`, vault import
+(`DrawerMapping.makeCaptureFrame`), and branch promotion — funnel through
+`capture(_:_:mode:)` / `capture_with_mode`, which is now the sole FDC classification
+site. Parity: `GeniusLocusKit/Intake/EncodeIntake.swift` (Swift) and
+`GeniusLocusKit/rust/src/intake.rs` (Rust); test parity in
+`FdcCaptureTests.swift` / `error_message_and_fdc_tests.rs`.
 
 ### 1.7.1 -- 2026-06-19
 Additive (FINDING-1b cluster C): `tombstonedLineageIDs(_ handle:)` added to the GLK verb surface (B-1-compliant passthrough for VaultKit). Delegates to `Estate.tombstonedLineageIDs()` → `DrawerStore.tombstonedLineageIDs()`, which issues a storage-tier `.isNotNull(tombstonedAt)` predicate and reads `lineageID` from raw rows without a full decode — deliberately avoiding timestamp-format parsing, which is sensitive to the format difference between `ISO8601DateFormatter()` (no fractional seconds, used by `expungeGated`) and `LKISO8601` (fractional seconds). Returns `Set<UUID>` of cluster C lineage IDs. Parity: `EstateCoordinator::tombstoned_lineage_ids` in the Rust port.

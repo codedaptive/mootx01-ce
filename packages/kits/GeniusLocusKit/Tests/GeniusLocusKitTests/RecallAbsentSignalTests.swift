@@ -34,7 +34,7 @@ struct RecallAbsentSignalTests {
             content: content,
             channel: .typed,
             room: "absent-signal-tests",
-            latticeAnchor: .udc("000.000"),
+            latticeAnchor: .udc("000"),
             addedBy: "absent-signal-tests",
             embeddingModelID: "test-model-v1"
         )
