@@ -176,4 +176,35 @@ struct EstateStatusSyncTests {
         #expect(!hasOldStatusLine,
                 "estate_status must not use the old 'status:' key; got:\n\(body)")
     }
+
+    // MARK: - Wave-C Part 2: count label alignment
+
+    /// estate_status must say "memories: N active" (not "drawers: N") to match
+    /// the Rust port label alignment fix (Wave C, Part 2). A withdrawn drawer
+    /// must not appear in the active count.
+    @Test func statusCountLabel_memoriesActive() async throws {
+        let dispatcher = try await makeDispatcher(ownerID: "label-test")
+        // File one memory so the count is 1.
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("label test content"),
+                "location": .string("label/room")
+            ])
+        )
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_status",
+            arguments: .object([:])
+        )
+        let body = text(of: result)
+        // Must use "memories:" label (Wave C label alignment).
+        #expect(body.contains("memories: "),
+                "estate_status must use 'memories:' label; got:\n\(body)")
+        // Must say "active" to distinguish from total.
+        #expect(body.contains("active"),
+                "estate_status label must include 'active'; got:\n\(body)")
+        // The old "drawers:" label must not appear.
+        #expect(!body.contains("drawers:"),
+                "estate_status must not use deprecated 'drawers:' label; got:\n\(body)")
+    }
 }
