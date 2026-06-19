@@ -418,13 +418,14 @@ impl GrantStore {
                 })?
             }
             Some(TypedValue::Timestamp(t)) => {
-                // InMemory backend may store as Timestamp(i64 epoch_ms) if the
-                // column was inserted as TypedValue::Timestamp. Convert ms→seconds.
-                // Apple reference offset from Unix epoch: 978307200 seconds.
+                // Defensive: if the InMemory backend ever stored issued_at as a
+                // raw Timestamp rather than ISO8601 Text. PersistenceKit
+                // `Timestamp(i64)` is epoch SECONDS (sqlite.rs iso8601(secs)), so
+                // convert Unix-epoch seconds → Apple-reference seconds by
+                // subtracting the 2001-01-01 offset — same result the Text path
+                // produces via parse_iso8601_to_apple_ref. No /1000 (it is NOT ms).
                 const APPLE_EPOCH_OFFSET_SECS: f64 = 978_307_200.0;
-                // Timestamp in PersistenceKit is stored as i64 milliseconds
-                // since Unix epoch (per PersistenceKit Timestamp semantics).
-                (*t as f64 / 1_000.0) - APPLE_EPOCH_OFFSET_SECS
+                (*t as f64) - APPLE_EPOCH_OFFSET_SECS
             }
             Some(other) => return Err(GrantStoreError::CorruptIssuedAt {
                 stored_text: format!("<{}>", other.type_description()),
@@ -447,8 +448,9 @@ impl GrantStore {
                 })?)
             }
             Some(TypedValue::Timestamp(t)) => {
+                // PersistenceKit Timestamp is epoch SECONDS; Unix→Apple-ref, no /1000.
                 const APPLE_EPOCH_OFFSET_SECS: f64 = 978_307_200.0;
-                Some((*t as f64 / 1_000.0) - APPLE_EPOCH_OFFSET_SECS)
+                Some((*t as f64) - APPLE_EPOCH_OFFSET_SECS)
             }
             Some(other) => return Err(GrantStoreError::CorruptRow(
                 format!("grants.revoked_at unexpected type {:?}", other.type_description())
@@ -484,8 +486,9 @@ impl GrantStore {
         let decay_started_at: Option<f64> = match row.get("decay_started_at") {
             Some(TypedValue::Text(s)) => parse_iso8601_to_apple_ref(s),
             Some(TypedValue::Timestamp(t)) => {
+                // PersistenceKit Timestamp is epoch SECONDS; Unix→Apple-ref, no /1000.
                 const APPLE_EPOCH_OFFSET_SECS: f64 = 978_307_200.0;
-                Some((*t as f64 / 1_000.0) - APPLE_EPOCH_OFFSET_SECS)
+                Some((*t as f64) - APPLE_EPOCH_OFFSET_SECS)
             }
             _ => None,
         };
