@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SubstrateTypes
 import Testing
 @testable import LocusKit
@@ -255,5 +256,157 @@ struct ExpungeTests {
         await #expect(throws: LocusKitError.self) {
             try await estate.expunge(rowID: Self.idAbsent, reason: "", confirmation: true)
         }
+    }
+
+    // MARK: - One-door SQLite round-trip (tombstonedAt must survive reload)
+
+    /// SQLite-backed round-trip: expunge a drawer, close and reopen the store,
+    /// reload via getDrawer, and assert that tombstonedAt is NON-nil with the
+    /// exact timestamp value that was passed to expungeGated.
+    ///
+    /// This test is the regression guard for the one-door violation that was
+    /// previously present in expungeGated: using a bare ISO8601DateFormatter()
+    /// (no canonical door) produced a string that, if read by a strict
+    /// fractional-seconds parser, would decode as nil. The fix writes
+    /// TypedValue.timestamp(now) through the canonical PersistenceKit path,
+    /// which serialises with fractional seconds and round-trips cleanly.
+    ///
+    /// The test uses a SQLite backend (NOT InMemory) because InMemory keeps the
+    /// TypedValue in memory and never exercises the serialise/parse path. The
+    /// bug only manifests on the serialise→parse round-trip through the SQLite
+    /// TEXT column.
+    @Test("tombstonedAt round-trips through SQLite: non-nil with exact value after store reopen")
+    func tombstonedAtRoundTripsSQLite() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+
+        let expungeNow = t(1_700_001_000)
+
+        // Write and expunge in one store lifetime, then let it go out of scope
+        // so the WAL is checkpointed to the main file.
+        do {
+            let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+            try await store.addDrawer(sampleDrawer(id: Self.idActive))
+            try await store.expungeGated(
+                drawerId: Self.idActive,
+                changedBy: "round-trip-test",
+                reason: "one-door test",
+                now: expungeNow
+            )
+            // Verify within the same store lifetime (baseline — no serialisation path).
+            let withinLifetime = try await store.getDrawer(id: Self.idActive)
+            #expect(withinLifetime?.tombstonedAt != nil, "tombstonedAt must be non-nil within same store lifetime")
+        }
+
+        // Reopen the store — this exercises the full serialise→read path through
+        // the SQLite backend. Any format mismatch would surface here as nil.
+        let store2 = try await TestStorage.openStore(url)
+        let reloaded = try await store2.getDrawer(id: Self.idActive)
+        #expect(reloaded != nil, "expunged drawer must be readable after store reopen")
+        // The key assertion: tombstonedAt must survive the serialise/parse round-trip.
+        guard let reloadedDate = reloaded?.tombstonedAt else {
+            Issue.record("tombstonedAt is nil after SQLite round-trip — one-door violation: expungeGated must write TypedValue.timestamp(now), not a raw ISO8601DateFormatter string")
+            return
+        }
+        // Timestamps round-trip through ISO-8601 with fractional-second precision
+        // (0.001 s). Allow a 1 ms tolerance to absorb any sub-millisecond truncation.
+        #expect(abs(reloadedDate.timeIntervalSince(expungeNow)) < 0.001,
+                "tombstonedAt must survive the SQLite round-trip with the exact value passed to expungeGated")
+    }
+
+    /// allDrawers + tombstonedAt == nil filter correctly excludes expunged rows
+    /// after a SQLite round-trip. This is the EstateVerbs.swift:675 pattern:
+    /// .filter { $0.tombstonedAt == nil } is the Swift-layer live-row gate.
+    /// If tombstonedAt decoded as nil on a tombstoned row, expunged rows would
+    /// pass this filter and appear as live recall candidates — the silent data
+    /// integrity failure the one-door fix prevents.
+    @Test("tombstonedAt == nil filter excludes expunged rows after SQLite round-trip")
+    func tombstonedAtFilterExcludesExpungedAfterRoundTrip() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+
+        let liveId   = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        let expungeId = Self.idActive  // aaaaaaaa-...
+
+        do {
+            let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+            try await store.addDrawer(sampleDrawer(id: liveId))
+            try await store.addDrawer(sampleDrawer(id: expungeId))
+            try await store.expungeGated(
+                drawerId: expungeId,
+                changedBy: "filter-test",
+                reason: "filter test",
+                now: t(1_700_001_500)
+            )
+        }
+
+        // Reopen and apply the EstateVerbs.swift tombstonedAt == nil filter.
+        let store2 = try await TestStorage.openStore(url)
+        let all = try await store2.allDrawers()
+        let live = all.filter { $0.tombstonedAt == nil }
+
+        #expect(live.count == 1, "exactly one live row after round-trip; got \(live.count)")
+        #expect(live.first?.id == liveId, "the live row must be the non-expunged drawer")
+
+        // The tombstoned row must appear in allDrawers (unfiltered) but with
+        // a non-nil tombstonedAt, confirming the filter correctly excluded it.
+        let tombstoned = all.first { $0.id == expungeId }
+        #expect(tombstoned?.tombstonedAt != nil,
+                "the expunged drawer's tombstonedAt must be non-nil after round-trip so the tombstonedAt == nil filter correctly excludes it")
+    }
+
+    /// Verify the raw stored tombstonedAt string is canonical ISO-8601 with
+    /// fractional seconds (the TypedValue.timestamp canonical write format),
+    /// NOT the bare ISO8601DateFormatter format that omits fractional seconds.
+    ///
+    /// This is the lowest-level regression guard: it reads the stored TEXT
+    /// value directly from SQLite (bypassing all kit decode logic) and asserts
+    /// the format. A bare ISO8601DateFormatter() produces "2026-06-19T14:00:00Z";
+    /// the canonical path produces "2026-06-19T14:00:00.000Z". Both may parse
+    /// successfully today (PersistenceKit accepts both shapes), but the canonical
+    /// form is the contract. This test catches a future regression before it
+    /// becomes a silent data-quality issue.
+    @Test("tombstonedAt stored value uses canonical ISO-8601 with fractional seconds")
+    func tombstonedAtStoredAsFractionalSecondsISO8601() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+
+        let drawerId = Self.idActive
+
+        do {
+            let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+            try await store.addDrawer(sampleDrawer(id: drawerId))
+            try await store.expungeGated(
+                drawerId: drawerId,
+                changedBy: "format-test",
+                reason: "canonical format test",
+                now: t(1_700_001_234)
+            )
+        }
+        // WAL checkpointed on store deinit. Read the raw TEXT value via sqlite3.
+        var db: OpaquePointer?
+        let rc = sqlite3_open(url.path, &db)
+        defer { sqlite3_close(db) }
+        guard rc == SQLITE_OK, let db else {
+            Issue.record("rawRead: sqlite3_open failed rc=\(rc)")
+            return
+        }
+        let sql = "SELECT tombstonedAt FROM drawers WHERE id = '\(drawerId)';"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+              let stmt else {
+            Issue.record("rawRead: prepare failed")
+            return
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let rawBytes = sqlite3_column_text(stmt, 0) else {
+            Issue.record("rawRead: no row or null tombstonedAt")
+            return
+        }
+        let raw = String(cString: rawBytes)
+        // Canonical form has a decimal point in the time component, e.g. "…:00.234Z".
+        // The non-canonical (bare ISO8601DateFormatter) form omits the decimal: "…:00Z".
+        #expect(raw.contains("."), "tombstonedAt stored value '\(raw)' must contain fractional seconds (a '.' in the time component) — write must use TypedValue.timestamp, not a bare ISO8601DateFormatter")
     }
 }

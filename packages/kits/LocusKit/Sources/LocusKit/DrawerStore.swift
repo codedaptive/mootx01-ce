@@ -1009,13 +1009,20 @@ public actor DrawerStore {
             // cookbook §10.5: "Content blob zeroized in the same
             // transaction as the state transition (atomic; verbatim
             // sacred only up to expunge)."
-            let nowTimestamp = ISO8601DateFormatter().string(from: now)
+            //
+            // TypedValue.timestamp is the canonical door for all
+            // timestamp column writes (PersistenceKit serialises it as
+            // ISO-8601 with fractional seconds, matching every other
+            // date column in the schema and the read-back path in
+            // drawerValues(_:) at line 2489). Using a bare
+            // ISO8601DateFormatter() here would be a bespoke side-door
+            // and a one-door violation.
             _ = try await txn.rowStore.update(
                 table: "drawers",
                 values: [
                     "adjectiveBitmap": .bitmap(event.afterBitmaps.adjective),
                     "content": .text(""),
-                    "tombstonedAt": .text(nowTimestamp),
+                    "tombstonedAt": .timestamp(now),
                 ],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
@@ -1162,16 +1169,15 @@ public actor DrawerStore {
     /// `tombstonedAt IS NOT NULL`). Reads the `lineageID` column directly from
     /// storage rows without a full `drawerFromRow` decode — the `tombstonedAt`
     /// column is used only as a filter predicate at the storage tier, never parsed
-    /// here. This avoids a format-mismatch between `ISO8601DateFormatter()` (used
-    /// by `expungeGated` to stamp `tombstonedAt`) and `LKISO8601` (used by
-    /// `optDate` to parse it back) that would cause `.text` timestamps written
-    /// without fractional seconds to decode as `nil`, making tombstoned rows
-    /// indistinguishable from live rows at the Swift layer.
+    /// here. `IS NOT NULL` is the correct existence predicate for the timestamp
+    /// column: it lets the SQLite index handle the live/tombstoned split without
+    /// decoding the timestamp value, and it is unambiguous regardless of whether
+    /// the column carries `.timestamp(Date)` (the canonical write from
+    /// `expungeGated`) or `.null` (live row).
     ///
     /// The query predicate `tombstonedAt IS NOT NULL` is evaluated by the storage
     /// backend on the raw `TypedValue` (`.isNotNull` → `!value.isNull`), which
-    /// correctly identifies `.text(anyString)` as non-null regardless of the
-    /// timestamp string format.
+    /// correctly identifies `.timestamp(_)` as non-null.
     ///
     /// Used by `Estate.tombstonedLineageIDs()` → `GLK.tombstonedLineageIDs` →
     /// `VaultBridge.existingTombstonedLineageIDs` to block vault re-import from
