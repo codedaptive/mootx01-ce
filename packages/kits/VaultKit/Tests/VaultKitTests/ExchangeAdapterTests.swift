@@ -297,10 +297,13 @@ struct ExchangeAdapterTests {
 
         let second = try await bridge.importVault(at: Self.fixtureURL, into: handle, now: Date())
         #expect(second.drawersWritten == 0)
-        #expect(second.drawersUpdated == 3)
+        // Content is identical on re-import of the same fixture; the
+        // idempotent guard fires for all 3 drawers: skippedUnchanged.
+        #expect(second.drawersUpdated == 0)
+        #expect(second.drawersSkippedUnchanged == 3)
 
         let drawers = try await currentDrawers(kit, handle)
-        #expect(drawers.count == 3, "supersession, not duplication, on re-import")
+        #expect(drawers.count == 3, "idempotent skip, not duplication, on re-import")
     }
 
     // MARK: - End-to-end: bridge → adapter write side (VK-EXPORT-01)

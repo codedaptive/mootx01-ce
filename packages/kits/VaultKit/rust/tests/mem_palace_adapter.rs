@@ -403,13 +403,17 @@ fn import_mem_palace_fixture_palace_lands_in_estate_idempotent_on_reimport() {
     assert_eq!(first.tunnels_created, 2);
     assert_eq!(first.fdc_classified + first.fdc_unclassified, 11);
 
-    // Idempotency: a re-import supersedes every lineage (updated, not
-    // duplicated) and re-creates no tunnels.
+    // Idempotency: a re-import of the SAME content is now content-idempotent —
+    // no supersession, no UUID rotation. All 11 lineages are active with
+    // byte-identical content, so they land as skipped_unchanged rather than
+    // updated. Tunnels are already present from the first import; no new ones
+    // are created. This is FINDING-1a fixed behavior.
     let second = bridge
         .import_mem_palace(Path::new(FIXTURE_PALACE), &handle, NOW, &adapter)
         .expect("second import");
     assert_eq!(second.drawers_written, 0);
-    assert_eq!(second.drawers_updated, 11);
+    assert_eq!(second.drawers_updated, 0);
+    assert_eq!(second.drawers_skipped_unchanged, 11);
     assert_eq!(second.tunnels_created, 0);
 }
 

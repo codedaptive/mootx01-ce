@@ -290,12 +290,14 @@ struct MemPalaceChromaAdapterTests {
         #expect(first.tunnelsCreated == 2)
         #expect(first.fdcClassified + first.fdcUnclassified == 11)
 
-        // Idempotency: a re-import supersedes every lineage (updated, not
-        // duplicated) and re-creates no tunnels.
+        // Idempotency: re-importing the same fixture with identical content
+        // must not rotate UUIDs or supersede. The content-idempotent guard
+        // fires for every lineage → all 11 skipped-unchanged, none updated.
         let second = try await bridge.importMemPalace(
             at: Self.fixturePalaceURL, into: handle, now: now)
         #expect(second.drawersWritten == 0)
-        #expect(second.drawersUpdated == 11)
+        #expect(second.drawersUpdated == 0)
+        #expect(second.drawersSkippedUnchanged == 11)
         #expect(second.tunnelsCreated == 0)
     }
 

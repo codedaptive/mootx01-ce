@@ -409,6 +409,14 @@ public struct DrawerMapping: Sendable {
         /// The note could not be imported (e.g. empty content would
         /// violate I-5); nothing was written.
         case skipped(reason: String)
+        /// Re-import of a note whose lineage exists and content is
+        /// byte-identical to the active drawer. No supersession, no
+        /// UUID rotation — idempotent no-op.
+        case skippedUnchanged
+        /// Re-import of a note whose lineage was previously erased
+        /// (withdrawn) in the estate. The tombstone is respected;
+        /// the note is NOT resurrected.
+        case skippedTombstoned
     }
 
     /// Import one note: build a `CaptureFrame`, capture the drawer through
@@ -416,27 +424,41 @@ public struct DrawerMapping: Sendable {
     /// (de-duplicated against `existingTunnelSignatures` so a re-import
     /// adds no duplicates).
     ///
-    /// Idempotency is keyed on `stableSourceKey`: the derived `lineageID`
-    /// is deterministic, so a re-import of the same note triggers the
-    /// substrate's supersession cascade rather than creating a parallel
-    /// drawer. `existingLineageIDs` lets the caller report written vs.
-    /// updated without a second probe.
+    /// ## Content-idempotent matching (FINDING-1a)
     ///
-    /// `existingSensitivityByLineage` carries the current sensitivity tier of
-    /// every believed drawer (across ALL tiers) so the sensitivity FLOOR can
-    /// be enforced on re-import: a re-import may RAISE a drawer's tier but
-    /// never LOWER it. This closes the supersession-downgrade attack — a
-    /// hostile vault file carrying a victim's `moot_id` (exposed in exported
-    /// notes by design) plus `sensitivity: normal` would otherwise downgrade
-    /// the victim drawer via the supersession cascade, after which it would
-    /// ride bulk export. Import is ungated for arrival, but it must not be a
-    /// declassification channel (ADR-007 Decision 2 threat model).
+    /// When a note's lineage matches an existing ACTIVE drawer AND the
+    /// flattened content is byte-identical to that drawer's content AND no
+    /// sensitivity UPGRADE is requested, the import is a no-op — no
+    /// supersession, no UUID rotation. Only when the content or tier actually
+    /// changed does the supersession cascade run. Content identity is tested
+    /// by comparing the note's flattened body against
+    /// `existingContentByLineage[lineage]`; the caller populates this map
+    /// from the active-drawer snapshot built before the loop. A sensitivity
+    /// UPGRADE (incoming tier strictly higher than stored tier) bypasses the
+    /// idempotent guard so the tier raise lands even when content is unchanged.
+    ///
+    /// ## Tombstone-aware matching (FINDING-1b)
+    ///
+    /// When a note's lineage appears in `tombstonedLineageIDs` — i.e. its
+    /// lineage was previously erased (state: withdrawn/superseded past the
+    /// active cluster) — the note is NOT resurrected. The tombstone is
+    /// respected and the outcome is `.skippedTombstoned`. The count is
+    /// surfaced in `ImportReport.drawersSkippedTombstoned` (never silent).
+    ///
+    /// ## Sensitivity floor
+    ///
+    /// `existingSensitivityByLineage` carries the current tier of every
+    /// believed drawer (across ALL tiers) so the sensitivity FLOOR can be
+    /// enforced: a re-import may RAISE a drawer's tier but never LOWER it.
+    /// This closes the supersession-downgrade attack (ADR-007 Decision 2).
     public func importNote(
         _ note: NoteIR,
         kit: GeniusLocusKit,
         handle: EstateHandle,
         existingLineageIDs: Set<UUID>,
         existingSensitivityByLineage: [UUID: AdjectiveSensitivity],
+        tombstonedLineageIDs: Set<UUID>,
+        existingContentByLineage: [UUID: String],
         existingTunnelSignatures: inout Set<String>,
         now: Date
     ) async throws -> ImportOutcome {
@@ -449,7 +471,41 @@ public struct DrawerMapping: Sendable {
 
         var (frame, classified) = makeCaptureFrame(for: note, content: content)
         let lineage = frame.lineageID ?? Self.lineageID(forStableSourceKey: note.stableSourceKey)
+
+        // TOMBSTONE-AWARE: if this lineage was previously erased (withdrawn),
+        // do not resurrect it. Respect the tombstone and surface the skip count.
+        // Tombstone check runs BEFORE the active-lineage check so a lineage
+        // that was active and then erased between import runs does not
+        // accidentally fall through to supersession.
+        if tombstonedLineageIDs.contains(lineage) {
+            return .skippedTombstoned
+        }
+
         let isUpdate = existingLineageIDs.contains(lineage)
+
+        // CONTENT-IDEMPOTENT: when the lineage already has an active drawer
+        // with byte-identical content AND no sensitivity upgrade requested,
+        // skip — no supersession, no UUID rotation. Only supersede when
+        // something actually changed. This is the fix for FINDING-1a:
+        // previously every re-import triggered the supersession cascade
+        // regardless of whether content had changed.
+        //
+        // Sensitivity exception: if the incoming note requests a HIGHER tier
+        // than the stored tier, the upgrade is meaningful and must proceed even
+        // when body content is identical (e.g. a note re-tagged `sensitivity:
+        // secret` after it was originally captured as `.normal`). A LOWER
+        // incoming tier is not meaningful because the floor (applied below)
+        // would hold the tier at the existing level regardless.
+        let requestedSensitivity = frame.sensitivity
+        let existingTier = existingSensitivityByLineage[lineage]
+        // A sensitivity upgrade occurs when the incoming tier is strictly
+        // higher than the stored tier (rawValue ordering: normal=0, elevated=16,
+        // restricted=32, secret=48). Only upgrades block the idempotent skip.
+        let isSensitivityUpgrade = existingTier.map { requestedSensitivity.rawValue > $0.rawValue } ?? false
+        if isUpdate, let existingContent = existingContentByLineage[lineage],
+           existingContent == content, !isSensitivityUpgrade {
+            return .skippedUnchanged
+        }
 
         // Sensitivity floor: a re-import never lowers an existing drawer's
         // tier. Raw values are tier-ordered (normal 0 < elevated 16 <
