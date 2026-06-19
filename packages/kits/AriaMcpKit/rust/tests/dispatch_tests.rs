@@ -2798,6 +2798,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("export must succeed");
 
@@ -2808,6 +2809,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("first import must not throw");
 
@@ -2818,6 +2820,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("second import must not throw");
 
@@ -2843,6 +2846,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
+        "",
     )
     .expect("moot_vault_job must not throw");
 
