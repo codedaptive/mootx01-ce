@@ -501,7 +501,17 @@ pub struct EstateCoordinator {
     corpus_kits: HashMap<EstateHandle, Arc<Corpus>>,
     /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
-    vector_stores: HashMap<EstateHandle, Arc<VectorStore>>,
+    /// `pub(crate)` so `intake.rs` can access it from `assign_cluster_after_ingest`
+    /// without routing through a public accessor that would expose the type externally.
+    pub(crate) vector_stores: HashMap<EstateHandle, Arc<VectorStore>>,
+    /// Per-estate raw PersistenceKit storage handles. Needed by the cluster-assignment
+    /// write-path (`assign_cluster_after_ingest`, Dg5) to read and write the
+    /// `memory_clusters` table without routing through LocusKit or CorpusKit.
+    /// Populated for GLK estates at provision; absent for LocusOnly / CorpusOnly.
+    /// Mirrors the Swift actor's use of the `storage` parameter it captures from
+    /// `EstateConfiguration` at provision time.
+    /// `pub(crate)` so `intake.rs` can access it from `assign_cluster_after_ingest`.
+    pub(crate) estate_storages: HashMap<EstateHandle, Arc<dyn Storage>>,
     /// Per-estate mount state. Set to `Mounted` on open, updated by quiesce/drain,
     /// removed on close. Mirrors Swift actor's `mountStates: [EstateHandle: EstateMountState]`.
     mount_states: HashMap<EstateHandle, EstateMountState>,
@@ -616,6 +626,7 @@ impl EstateCoordinator {
             scope_vaults: HashMap::new(),
             corpus_kits: HashMap::new(),
             vector_stores: HashMap::new(),
+            estate_storages: HashMap::new(),
             mount_states: HashMap::new(),
             encode_queues: HashMap::new(),
             audit_logs: HashMap::new(),
@@ -779,6 +790,10 @@ impl EstateCoordinator {
         self.scope_vaults.remove(handle);
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
+        // Drop the raw storage handle so cluster-assignment I/O cannot run
+        // against a closed estate. Mirrors the lifecycle cleanup for the other
+        // per-handle maps above.
+        self.estate_storages.remove(handle);
         // Drop the dedicated encode queue (Dual-Path Intake D-B). Mirrors Swift
         // `dropEncodeQueue(for:)` in `close`. No worker to cancel in the
         // synchronous Rust port — just drop the queue registry entry.
@@ -3084,6 +3099,31 @@ impl EstateCoordinator {
                 }
                 if let Some(vs) = vs_opt {
                     self.vector_stores.insert(handle, Arc::new(vs));
+                }
+                // GLK estate: register the raw storage handle for cluster-assignment
+                // I/O (Dg5). The `memory_clusters` table lives on `backing_storage`;
+                // apply the composite GLK schema to create it now.
+                //
+                // Mirrors Swift `GeniusLocusKit.provision` calling
+                // `storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)`
+                // in the test fixture — here we do it automatically at provision
+                // so callers do not need to apply the schema separately.
+                //
+                // `params.kind` is still available because `wiring_result` does not
+                // consume it (only the match arms move `embedding_models`).
+                if params.kind == EstateKind::Glk {
+                    // Apply the composite GLK schema (adds memory_clusters).
+                    // This is idempotent (CREATE TABLE IF NOT EXISTS) so
+                    // re-provisioning the same storage is safe.
+                    let glk_schema = crate::hydration::composite_schema();
+                    backing_storage
+                        .open(&glk_schema)
+                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                            reason: format!("GLK composite schema open failed: {e:?}"),
+                        })?;
+                    // Store the storage handle for the cluster-assignment write-path.
+                    self.estate_storages
+                        .insert(handle, Arc::clone(&backing_storage));
                 }
                 // Dual-Path Intake D-B: mount the dedicated encode queue for
                 // estates that have a Corpus to feed (Glk / CorpusOnly). Mirrors
