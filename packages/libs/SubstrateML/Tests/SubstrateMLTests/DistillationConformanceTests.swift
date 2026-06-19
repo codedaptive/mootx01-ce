@@ -7,10 +7,9 @@
 // between Swift and Rust is a parity failure — both sides must produce
 // bit-identical Float32 results.
 //
-// Conformance vectors are sourced from
-// docs_internal/substrate_math/DISTILLATION_MISSIONS.md §9.
+// Conformance vectors are sourced from the distillation conformance
+// specification (§9).
 //
-// Mission: DP1 (stream dp1-substateml-conformance-vectors)
 // Inputs and expected values MUST NOT be changed to make tests pass.
 // If a value doesn't match, fix the algorithm, not the vector.
 

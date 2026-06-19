@@ -7,10 +7,9 @@
 // between Rust and Swift on featureHash or pipeline run behavior is a
 // parity failure.
 //
-// Conformance vectors are sourced from
-// docs_internal/substrate_math/DISTILLATION_MISSIONS.md §9.
+// Conformance vectors are sourced from the distillation conformance
+// specification (§9).
 //
-// Mission: DP1 (stream dp1-substateml-conformance-vectors)
 // Inputs and expected values MUST NOT be changed to make tests pass.
 // If a value doesn't match, fix the algorithm, not the vector.
 //
