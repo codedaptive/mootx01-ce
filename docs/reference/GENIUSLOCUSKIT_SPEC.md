@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.7.0
+version: 1.7.1
 status: active
-date: 2026-06-17
+date: 2026-06-19
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1681,6 +1681,9 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.7.1 -- 2026-06-19
+Additive (FINDING-1b cluster C): `tombstonedLineageIDs(_ handle:)` added to the GLK verb surface (B-1-compliant passthrough for VaultKit). Delegates to `Estate.tombstonedLineageIDs()` → `DrawerStore.tombstonedLineageIDs()`, which issues a storage-tier `.isNotNull(tombstonedAt)` predicate and reads `lineageID` from raw rows without a full decode — deliberately avoiding timestamp-format parsing, which is sensitive to the format difference between `ISO8601DateFormatter()` (no fractional seconds, used by `expungeGated`) and `LKISO8601` (fractional seconds). Returns `Set<UUID>` of cluster C lineage IDs. Parity: `EstateCoordinator::tombstoned_lineage_ids` in the Rust port.
 
 ### 1.7.0 -- 2026-06-17
 Added invariant I-16 (composite schema version = sum of component versions, derived in both ports): after the ADR-012 `ext` pre-provisioning the composite is 7 (LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2). The `grants` table gained the ADR-012 `ext` forward-compat slot. Pre-ship pre-provisioning during the 1.0.0 free-migration window.

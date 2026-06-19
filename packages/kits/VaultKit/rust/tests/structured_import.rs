@@ -84,14 +84,23 @@ fn structured_note() -> NoteIR {
 ///
 /// `coord` is `&mut` because `import_note` routes through `capture_with_mode`
 /// (dual-path intake fix, G7) which requires mutable coordinator access.
+///
+/// Passes empty tombstone and content maps (no prior state) so this helper
+/// exercises the first-import path. Tests that need prior-state should call
+/// `import_note` directly with populated maps.
 fn import_structured(
     mapping: &DrawerMapping,
     note: &NoteIR,
     coord: &mut EstateCoordinator,
     handle: &EstateHandle,
 ) -> vault_kit::ImportOutcome {
-    let mut existing_lineage_ids: HashSet<uuid::Uuid> = HashSet::new();
-    let mut existing_sensitivity: std::collections::HashMap<uuid::Uuid, AdjectiveSensitivity> =
+    let existing_lineage_ids: HashSet<uuid::Uuid> = HashSet::new();
+    let existing_sensitivity: std::collections::HashMap<uuid::Uuid, AdjectiveSensitivity> =
+        std::collections::HashMap::new();
+    // Empty tombstone set: no previously-erased lineages in this helper.
+    let tombstoned_lineage_ids: HashSet<uuid::Uuid> = HashSet::new();
+    // Empty content map: no prior content to compare against (first import).
+    let existing_content_by_lineage: std::collections::HashMap<uuid::Uuid, String> =
         std::collections::HashMap::new();
     let mut existing_tunnel_sigs: HashSet<String> = HashSet::new();
     mapping
@@ -101,6 +110,8 @@ fn import_structured(
             handle,
             &existing_lineage_ids,
             &existing_sensitivity,
+            &tombstoned_lineage_ids,
+            &existing_content_by_lineage,
             &mut existing_tunnel_sigs,
             NOW,
         )

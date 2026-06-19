@@ -67,6 +67,16 @@ pub struct ImportReport {
     /// currently empty for every fully-structured fixture (hard-close #29).
     /// `BTreeMap` for deterministic iteration. Mirrors Swift `ImportReport.fieldsDropped`.
     pub fields_dropped: std::collections::BTreeMap<String, usize>,
+
+    /// Re-imports whose lineage already has an ACTIVE drawer with byte-identical
+    /// content. No supersession, no UUID rotation — true idempotent no-op.
+    /// Fixes FINDING-1a. Mirrors Swift `ImportReport.drawersSkippedUnchanged`.
+    pub drawers_skipped_unchanged: usize,
+
+    /// Re-imports whose lineage was previously erased (withdrawn) in the
+    /// estate. The tombstone is respected; the note is NOT resurrected.
+    /// Fixes FINDING-1b. Mirrors Swift `ImportReport.drawersSkippedTombstoned`.
+    pub drawers_skipped_tombstoned: usize,
 }
 
 /// Counts returned by an export run, including the per-tier exclusion counts
@@ -274,12 +284,18 @@ impl<'a> VaultBridge<'a> {
     ) -> Result<ImportReport, VaultKitError> {
         // Snapshot existing state once so written-vs-updated and tunnel
         // de-duplication need no per-note probe.
-        let (existing_lineage_ids, existing_wings) =
+        // existing_content_by_lineage: verbatim content of every active drawer
+        // keyed by lineage_id — used by the content-idempotent check (FINDING-1a)
+        // to skip re-imports where nothing changed.
+        let (existing_lineage_ids, existing_wings, existing_content_by_lineage) =
             self.existing_drawer_state(handle, now)?;
         // The current tier of every believed drawer across ALL sensitivity
         // levels, so the import sensitivity floor can never be lowered by a
         // re-import (supersession-downgrade defense — see import_note).
         let existing_sensitivity = self.existing_sensitivity_by_lineage(handle, now)?;
+        // tombstoned_lineage_ids: lineages that were previously erased/withdrawn
+        // (FINDING-1b). Notes whose lineage appears here must NOT be resurrected.
+        let tombstoned_lineage_ids = self.existing_tombstoned_lineage_ids(handle, now)?;
         let mut existing_tunnel_sigs = self.existing_tunnel_signatures(handle, &existing_wings)?;
 
         let mut report = ImportReport::default();
@@ -290,6 +306,8 @@ impl<'a> VaultBridge<'a> {
                 handle,
                 &existing_lineage_ids,
                 &existing_sensitivity,
+                &tombstoned_lineage_ids,
+                &existing_content_by_lineage,
                 &mut existing_tunnel_sigs,
                 now,
             )?;
@@ -316,6 +334,16 @@ impl<'a> VaultBridge<'a> {
                 }
                 ImportOutcome::Skipped { .. } => {
                     report.items_skipped += 1;
+                }
+                ImportOutcome::SkippedUnchanged => {
+                    // Content-idempotent no-op: lineage active, content unchanged.
+                    // No substrate write occurs; the count is surfaced for observability.
+                    report.drawers_skipped_unchanged += 1;
+                }
+                ImportOutcome::SkippedTombstoned => {
+                    // Tombstone respected: lineage was erased, not resurrected.
+                    // Surfaced in the report so callers know which notes were blocked.
+                    report.drawers_skipped_tombstoned += 1;
                 }
             }
         }
@@ -403,12 +431,22 @@ impl<'a> VaultBridge<'a> {
 
     // MARK: - Snapshot helpers
 
-    /// The lineage IDs of currently-believed drawers and the wings they occupy.
+    /// The lineage IDs and wing set of currently-believed drawers, plus a
+    /// map from `lineage_id` → verbatim content for the content-idempotent
+    /// check (FINDING-1a). Mirrors Swift `VaultBridge.existingDrawerState`.
+    ///
+    /// Hydration level is `Full` so `drawer.content` is populated.
+    /// `Structured` reads metadata rows only and leaves content empty, which
+    /// would make the content-idempotent check always false (spurious supersession).
+    ///
+    /// When a lineage has more than one active row (supersession race), the
+    /// first-seen content wins — the check is conservative: any active content
+    /// match prevents an unnecessary supersession.
     fn existing_drawer_state(
         &self,
         handle: &EstateHandle,
         now: i64,
-    ) -> Result<(HashSet<Uuid>, HashSet<String>), VaultKitError> {
+    ) -> Result<(HashSet<Uuid>, HashSet<String>, std::collections::HashMap<Uuid, String>), VaultKitError> {
         // limit 10_000_000 = "all drawers" — the same full-scan intent as the
         // sibling existing_sensitivity_by_lineage below. Without an explicit
         // limit the recall scan caps at the candidate floor (256), silently
@@ -416,9 +454,12 @@ impl<'a> VaultBridge<'a> {
         // written-vs-updated misclassification for drawers #257+. Matches Swift
         // VaultBridge.existingDrawerState. trace_limit None: not a reward-cycle
         // caller.
+        // HydrationLevel::Full: required to populate drawer.content for the
+        // content-idempotent check (FINDING-1a). Structured would leave content
+        // blank, making every re-import appear changed.
         let frame = RecallFrame {
             filter_chain: vec![Filter::Unconfirmed],
-            hydration_level: HydrationLevel::Structured,
+            hydration_level: HydrationLevel::Full,
             limit: Some(10_000_000),
             ordering: Ordering::ByCaptureTimeDesc,
             as_of: None,
@@ -428,9 +469,79 @@ impl<'a> VaultBridge<'a> {
             .coordinator
             .recall(handle, frame, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
-        let lineage_ids: HashSet<Uuid> = drawers.iter().map(|d| d.lineage_id).collect();
-        let wings: HashSet<String> = drawers.into_iter().map(|d| d.wing).collect();
-        Ok((lineage_ids, wings))
+        let mut lineage_ids: HashSet<Uuid> = HashSet::new();
+        let mut wings: HashSet<String> = HashSet::new();
+        let mut content_by_lineage: std::collections::HashMap<Uuid, String> =
+            std::collections::HashMap::new();
+        for d in drawers {
+            lineage_ids.insert(d.lineage_id);
+            wings.insert(d.wing.clone());
+            // Store the first-seen content for each lineage_id. When multiple
+            // rows share a lineage (supersession race), any content match
+            // prevents an unnecessary supersession — conservative is correct.
+            content_by_lineage.entry(d.lineage_id).or_insert(d.content);
+        }
+        Ok((lineage_ids, wings, content_by_lineage))
+    }
+
+    /// The set of lineage IDs the import path must not resurrect — the union
+    /// of cluster B (withdrawn/superseded) and cluster C (erased/tombstoned).
+    /// Mirrors Swift `VaultBridge.existingTombstonedLineageIDs`.
+    ///
+    /// Two disjoint sets are combined here because the recall pipeline hides
+    /// one of them from every recall-based query:
+    ///
+    /// **Cluster B — withdrawn (state = 18, `tombstoned_at IS NULL`):**
+    /// Surfaced via `Filter::UsedToBelieve` over the standard recall path.
+    /// These lineages were deliberately withdrawn by the operator. The import
+    /// path must not resurrect them.
+    ///
+    /// **Cluster C — erased/tombstoned (state ≥ 32, `tombstoned_at IS NOT NULL`):**
+    /// Permanently erased via `moot_erase_memory` / the `expunge` verb, which
+    /// sets `tombstoned_at` and zeroes the content blob. The recall pipeline's
+    /// `live_rows` pre-filters `tombstoned_at IS NULL`, so cluster C rows are
+    /// invisible to any `recall`-based query.
+    /// `EstateCoordinator::tombstoned_lineage_ids` reaches them via
+    /// `Estate::all_drawers()` — the only corpus scan that explicitly includes
+    /// tombstoned rows — and returns the distinct set of erased lineage IDs.
+    ///
+    /// Both clusters are skipped and counted in
+    /// `ImportReport::drawers_skipped_tombstoned` for full observability. The
+    /// combined guard ensures that neither a `withdraw` nor an `expunge`
+    /// (i.e. `moot_erase_memory`) can be undone by a subsequent vault re-import.
+    fn existing_tombstoned_lineage_ids(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<HashSet<Uuid>, VaultKitError> {
+        // Cluster B: withdrawn/superseded lineages (tombstoned_at IS NULL,
+        // state values 16..31). Visible to the recall pipeline via
+        // UsedToBelieve. These have been deliberately withdrawn.
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::UsedToBelieve],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(10_000_000),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let withdrawn_drawers = self
+            .coordinator
+            .recall(handle, frame, now)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let withdrawn_ids: HashSet<Uuid> = withdrawn_drawers.into_iter().map(|d| d.lineage_id).collect();
+
+        // Cluster C: expunged/tombstoned lineages (tombstoned_at IS NOT NULL,
+        // state ≥ 32). Invisible to the recall pipeline. Reached via the GLK
+        // passthrough to Estate::all_drawers() — the only scan that includes
+        // tombstoned rows. B-1 compliant: VaultKit never imports LocusKit's
+        // DrawerStore directly.
+        let erased_ids = self
+            .coordinator
+            .tombstoned_lineage_ids(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+
+        Ok(withdrawn_ids.union(&erased_ids).copied().collect())
     }
 
     /// The current sensitivity tier of every believed drawer, keyed by

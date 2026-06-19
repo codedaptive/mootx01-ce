@@ -440,6 +440,41 @@ public extension GeniusLocusKit {
         return try await estate.allLearnedReferences()
     }
 
+    // MARK: - tombstonedLineageIDs
+
+    /// The set of lineage IDs whose drawer rows have been permanently erased
+    /// (tombstoned via the `expunge` verb — cluster C: `tombstonedAt IS NOT NULL`).
+    ///
+    /// Delegates to `Estate.tombstonedLineageIDs()` → `DrawerStore.tombstonedLineageIDs()`,
+    /// which uses a storage-tier `.isNotNull` predicate on `tombstonedAt` and reads the
+    /// `lineageID` column directly from raw rows — it does NOT parse `tombstonedAt` as a
+    /// timestamp. This design is deliberately format-agnostic: `expungeGated` stamps
+    /// `tombstonedAt` via `ISO8601DateFormatter()` (no fractional seconds), while
+    /// `LKISO8601.date(from:)` requires fractional seconds; parsing the stored value
+    /// would silently return `nil` and make cluster C rows appear live.
+    ///
+    /// The recall pipeline's `liveRows` pre-filters `tombstonedAt == nil`, so cluster C
+    /// rows are invisible to any `recall`-based query. This method surfaces them through
+    /// the storage predicate path that bypasses the recall pipeline.
+    ///
+    /// This is the B-1-compliant GLK passthrough: VaultKit reaches tombstoned rows
+    /// through GeniusLocusKit, never by importing LocusKit's DrawerStore directly.
+    /// Parity of the Rust `EstateCoordinator::tombstoned_lineage_ids`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale;
+    ///   any LocusKit failure propagated from `DrawerStore.tombstonedLineageIDs`.
+    func tombstonedLineageIDs(_ handle: EstateHandle) async throws -> Set<UUID> {
+        let estate = try estate(for: handle)
+        // Delegates to Estate.tombstonedLineageIDs() → DrawerStore.tombstonedLineageIDs(),
+        // which reads lineageID directly from storage using an isNotNull predicate at the
+        // storage tier. This avoids parsing the tombstonedAt timestamp, which sidesteps a
+        // format mismatch between ISO8601DateFormatter() (no fractional seconds, used by
+        // expungeGated to stamp tombstonedAt) and LKISO8601 (fractional-seconds format,
+        // used by optDate to parse it back). A parse failure would silently decode
+        // tombstonedAt as nil, making cluster C rows appear live to the Swift filter.
+        return try await estate.tombstonedLineageIDs()
+    }
+
     // MARK: - mutate
 
     /// Apply a named mutation to a drawer in the estate addressed by

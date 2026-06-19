@@ -38,6 +38,19 @@ public struct ImportReport: Sendable, Equatable {
     /// is currently empty for every fully-structured fixture.
     public var fieldsDropped: [String: Int]
 
+    /// Re-imports whose lineage already has an ACTIVE drawer with
+    /// byte-identical content. No supersession, no UUID rotation — true
+    /// idempotent no-op. Fixes FINDING-1a: previously every re-import
+    /// triggered the supersession cascade regardless of whether content
+    /// had changed.
+    public var drawersSkippedUnchanged: Int
+
+    /// Re-imports whose lineage was previously erased (withdrawn) in
+    /// the estate. The tombstone is respected; the note is NOT
+    /// resurrected. Fixes FINDING-1b: previously an erased lineage
+    /// would re-import as a fresh active drawer.
+    public var drawersSkippedTombstoned: Int
+
     public init(
         drawersWritten: Int = 0,
         drawersUpdated: Int = 0,
@@ -45,7 +58,9 @@ public struct ImportReport: Sendable, Equatable {
         itemsSkipped: Int = 0,
         fdcClassified: Int = 0,
         fdcUnclassified: Int = 0,
-        fieldsDropped: [String: Int] = [:]
+        fieldsDropped: [String: Int] = [:],
+        drawersSkippedUnchanged: Int = 0,
+        drawersSkippedTombstoned: Int = 0
     ) {
         self.drawersWritten = drawersWritten
         self.drawersUpdated = drawersUpdated
@@ -54,6 +69,8 @@ public struct ImportReport: Sendable, Equatable {
         self.fdcClassified = fdcClassified
         self.fdcUnclassified = fdcUnclassified
         self.fieldsDropped = fieldsDropped
+        self.drawersSkippedUnchanged = drawersSkippedUnchanged
+        self.drawersSkippedTombstoned = drawersSkippedTombstoned
     }
 }
 
@@ -277,11 +294,19 @@ public struct VaultBridge: Sendable {
     ) async throws -> ImportReport {
         // Snapshot existing state once so written-vs-updated and tunnel
         // de-duplication need no per-note probe.
-        let (existingLineageIDs, existingWings) = try await existingDrawerState(handle: handle)
+        // existingContentByLineage: the verbatim content of every active
+        // drawer keyed by lineageID — used by the content-idempotent check
+        // (FINDING-1a) to skip re-imports where nothing changed.
+        let (existingLineageIDs, existingWings, existingContentByLineage) =
+            try await existingDrawerState(handle: handle)
         // The current tier of every believed drawer across ALL sensitivity
         // levels, so the import sensitivity floor can never be lowered by a
         // re-import (supersession-downgrade defense — see importNote).
         let existingSensitivityByLineage = try await existingSensitivityByLineage(handle: handle)
+        // tombstonedLineageIDs: lineage IDs that exist in the estate but
+        // whose last known state is erased/withdrawn (FINDING-1b). A note
+        // whose lineage is in this set must NOT be resurrected on re-import.
+        let tombstonedLineageIDs = try await existingTombstonedLineageIDs(handle: handle)
         var existingTunnelSignatures = try await existingTunnelSignatures(
             handle: handle, wings: existingWings
         )
@@ -294,6 +319,8 @@ public struct VaultBridge: Sendable {
                 handle: handle,
                 existingLineageIDs: existingLineageIDs,
                 existingSensitivityByLineage: existingSensitivityByLineage,
+                tombstonedLineageIDs: tombstonedLineageIDs,
+                existingContentByLineage: existingContentByLineage,
                 existingTunnelSignatures: &existingTunnelSignatures,
                 now: now
             )
@@ -310,12 +337,20 @@ public struct VaultBridge: Sendable {
                 recordDroppedFields(of: note, in: &report)
             case .skipped:
                 report.itemsSkipped += 1
+            case .skippedUnchanged:
+                // Content-idempotent no-op: lineage active, content unchanged.
+                // No substrate write occurs; the count is surfaced for observability.
+                report.drawersSkippedUnchanged += 1
+            case .skippedTombstoned:
+                // Tombstone respected: lineage was erased, not resurrected.
+                // Surfaced in the report so callers know which notes were blocked.
+                report.drawersSkippedTombstoned += 1
             }
         }
 
         try await writeImportReceipt(report, source: source, handle: handle, now: now)
         Self.log.info(
-            "imported vault: \(report.drawersWritten, privacy: .public) written, \(report.drawersUpdated, privacy: .public) updated, \(report.itemsSkipped, privacy: .public) skipped"
+            "imported vault: \(report.drawersWritten, privacy: .public) written, \(report.drawersUpdated, privacy: .public) updated, \(report.itemsSkipped, privacy: .public) skipped, \(report.drawersSkippedUnchanged, privacy: .public) unchanged, \(report.drawersSkippedTombstoned, privacy: .public) tombstoned"
         )
         return report
     }
@@ -453,26 +488,105 @@ public struct VaultBridge: Sendable {
 
     // MARK: - Snapshot helpers
 
-    /// The lineage IDs of currently-believed drawers and the set of wings
-    /// they occupy. Used to classify written vs. updated and to scope the
-    /// tunnel-signature snapshot.
+    /// The lineage IDs and wing set of currently-believed drawers, plus a
+    /// map from lineageID → verbatim content for the content-idempotent
+    /// check (FINDING-1a).
+    ///
+    /// `existingContentByLineage` is keyed by lineageID and stores the
+    /// content of the current best-believed drawer for that lineage. When
+    /// a lineage has more than one believed row (unusual but possible during
+    /// a supersession race), the first one encountered wins — the check is
+    /// conservative: if any active content matches the import content, no
+    /// supersession is issued.
+    ///
+    /// Hydration: `.full` is required to populate `drawer.content`; the
+    /// `.structured` hydration level reads metadata rows only and leaves
+    /// content blank.
     private func existingDrawerState(
         handle: EstateHandle
-    ) async throws -> (lineageIDs: Set<UUID>, wings: Set<String>) {
+    ) async throws -> (lineageIDs: Set<UUID>, wings: Set<String>, contentByLineage: [UUID: String]) {
         // limit: 10_000_000 means "all drawers" — the same full-scan intent
         // as the sibling existingSensitivityByLineage call below. Without an
         // explicit limit the estate scan caps at 256, silently truncating
         // estates with more than 256 drawers and causing written-vs-updated
         // misclassification for drawers #257+.
+        // Hydration level is .full so drawer.content is populated for the
+        // content-idempotent check (FINDING-1a). The cost is one extra blob
+        // read per drawer versus .structured, which is acceptable at import time
+        // since the vault is the authoritative source being reconciled.
         let drawers = try await kit.recall(
             handle,
             RecallFrame(
                 filterChain: [.unconfirmed],
+                hydrationLevel: .full,
+                limit: 10_000_000
+            )
+        )
+        var lineageIDs: Set<UUID> = []
+        var wings: Set<String> = []
+        var contentByLineage: [UUID: String] = [:]
+        for drawer in drawers {
+            lineageIDs.insert(drawer.lineageID)
+            wings.insert(drawer.wing)
+            // Store the first-seen content for each lineageID. When multiple
+            // rows share a lineage (supersession race), any content match
+            // prevents an unnecessary supersession — conservative is correct.
+            if contentByLineage[drawer.lineageID] == nil {
+                contentByLineage[drawer.lineageID] = drawer.content
+            }
+        }
+        return (lineageIDs, wings, contentByLineage)
+    }
+
+    /// The set of lineage IDs the import path must not resurrect — the union
+    /// of cluster B (withdrawn/superseded) and cluster C (erased/tombstoned).
+    ///
+    /// Two disjoint sets are combined here because the recall pipeline hides
+    /// one of them from every recall-based query:
+    ///
+    /// **Cluster B — withdrawn (state = 18, `tombstonedAt == nil`):**
+    /// Surfaced via `Filter.usedToBelieve` over the standard recall path.
+    /// These lineages were deliberately withdrawn by the operator. The import
+    /// path must not resurrect them.
+    ///
+    /// **Cluster C — erased/tombstoned (state ≥ 32, `tombstonedAt != nil`):**
+    /// Permanently erased via `moot_erase_memory` / the `expunge` verb, which
+    /// sets `tombstonedAt` and zeroes the content blob. The recall pipeline's
+    /// `liveRows` pre-filters `tombstonedAt == nil`, so cluster C rows are
+    /// invisible to any `recall`-based query. `GeniusLocusKit.tombstonedLineageIDs`
+    /// reaches them via `Estate.allDrawers()` — the only corpus scan that
+    /// explicitly includes tombstoned rows — and returns the distinct set of
+    /// erased lineage IDs.
+    ///
+    /// Both clusters are skipped and counted in
+    /// `ImportReport.drawersSkippedTombstoned` for full observability. The
+    /// combined guard ensures that neither a `withdraw` nor an `expunge`
+    /// (i.e. `moot_erase_memory`) can be undone by a subsequent vault
+    /// re-import.
+    private func existingTombstonedLineageIDs(
+        handle: EstateHandle
+    ) async throws -> Set<UUID> {
+        // Cluster B: withdrawn/superseded lineages (tombstonedAt == nil,
+        // state values 16..31). Visible to the recall pipeline via
+        // usedToBelieve. These have been deliberately withdrawn.
+        let withdrawnDrawers = try await kit.recall(
+            handle,
+            RecallFrame(
+                filterChain: [.usedToBelieve],
                 hydrationLevel: .structured,
                 limit: 10_000_000
             )
         )
-        return (Set(drawers.map(\.lineageID)), Set(drawers.map(\.wing)))
+        let withdrawnIDs = Set(withdrawnDrawers.map(\.lineageID))
+
+        // Cluster C: expunged/tombstoned lineages (tombstonedAt != nil,
+        // state ≥ 32). Invisible to the recall pipeline. Reached via the
+        // GLK passthrough to Estate.allDrawers() — the only scan that
+        // includes tombstoned rows. B-1 compliant: VaultKit never imports
+        // LocusKit's DrawerStore directly.
+        let erasedIDs = try await kit.tombstonedLineageIDs(handle)
+
+        return withdrawnIDs.union(erasedIDs)
     }
 
     /// The current sensitivity tier of every believed drawer, keyed by

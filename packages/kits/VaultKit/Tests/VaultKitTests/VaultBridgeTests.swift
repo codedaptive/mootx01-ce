@@ -162,7 +162,10 @@ struct VaultBridgeTests {
 
         let second = try await bridge.importVault(at: vault, into: handle, now: Date())
         #expect(second.drawersWritten == 0)
-        #expect(second.drawersUpdated == 1)        // superseded, not duplicated
+        // Content is unchanged between first and second import of the same vault;
+        // the idempotent guard must fire → skippedUnchanged, NOT updated/superseded.
+        #expect(second.drawersUpdated == 0)
+        #expect(second.drawersSkippedUnchanged == 1)
         #expect(second.tunnelsCreated == 0)        // de-duplicated
 
         // Currently-believed drawer count is stable at 1.
@@ -330,10 +333,15 @@ struct VaultBridgeTests {
         try await bridge.export(estate: handle, to: exportVault, now: Date())
 
         // Re-import the exported vault. The moot_id must map back to the
-        // SAME lineage, so it supersedes rather than duplicates.
+        // SAME lineage, so it must not create a new drawer. The body content
+        // (flattenedBody) is the same in the exported vault — the only
+        // difference is the moot_id frontmatter key, which is NOT part of the
+        // body — so the idempotent guard fires: skippedUnchanged, not updated.
         let second = try await bridge.importVault(at: exportVault, into: handle, now: Date())
-        #expect(second.drawersWritten == 0)
-        #expect(second.drawersUpdated == 1, "re-import via moot_id must supersede")
+        #expect(second.drawersWritten == 0, "moot_id re-import must not create a duplicate drawer")
+        // Content is identical (moot_id in frontmatter, not in body), so
+        // the idempotent guard fires.
+        #expect(second.drawersSkippedUnchanged == 1, "re-import via moot_id with unchanged body must be skipped-unchanged")
 
         // Drawer count stable at 1.
         let drawers = try await currentDrawers(kit, handle)
@@ -364,9 +372,11 @@ struct VaultBridgeTests {
         // Re-import the vault with the renamed file. moot_id in frontmatter
         // must win over the new filename's FNV-derived key.
         let report = try await bridge.importVault(at: exportVault, into: handle, now: Date())
-        // Must supersede (not write a new drawer) even though the file was renamed.
-        #expect(report.drawersWritten == 0)
-        #expect(report.drawersUpdated == 1, "moot_id must win over filename after rename")
+        // Must not write a new drawer even though the file was renamed.
+        // Body content is unchanged (moot_id is frontmatter, not body), so
+        // the idempotent guard fires: skippedUnchanged.
+        #expect(report.drawersWritten == 0, "moot_id must win over filename after rename — no new drawer")
+        #expect(report.drawersSkippedUnchanged == 1, "renamed file with unchanged body must be skipped-unchanged")
         let drawers = try await currentDrawers(kit, handle)
         #expect(drawers.count == 1, "rename must not create a duplicate drawer")
     }
@@ -501,8 +511,11 @@ struct VaultBridgeTests {
         let mapping = DrawerMapping(classifyOnImport: false)
         // Import directly through DrawerMapping so the note fixture exercises
         // the capture seam without needing a real vault on disk.
+        // Empty prior-state maps: first import, no tombstones, no existing content.
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var tombstonedLineageIDs: Set<UUID> = []
+        var existingContentByLineage: [UUID: String] = [:]
         var existingTunnelSigs: Set<String> = []
         let outcome = try await mapping.importNote(
             note,
@@ -510,6 +523,8 @@ struct VaultBridgeTests {
             handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: Date()
         )
@@ -542,6 +557,8 @@ struct VaultBridgeTests {
         let mapping = DrawerMapping(classifyOnImport: false)
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         var existingTunnelSigs: Set<String> = []
         _ = try await mapping.importNote(
             note,
@@ -549,6 +566,8 @@ struct VaultBridgeTests {
             handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: Date()
         )
@@ -572,6 +591,8 @@ struct VaultBridgeTests {
         let mapping = DrawerMapping(classifyOnImport: false)
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         var existingTunnelSigs: Set<String> = []
         _ = try await mapping.importNote(
             note,
@@ -579,6 +600,8 @@ struct VaultBridgeTests {
             handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: Date()
         )
@@ -608,10 +631,15 @@ struct VaultBridgeTests {
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
         var existingTunnelSigs: Set<String> = []
+        // Empty prior-state maps: first import, no tombstones, no existing content.
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         let outcome = try await mapping.importNote(
             note, kit: kit, handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: now
         )
@@ -642,10 +670,15 @@ struct VaultBridgeTests {
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
         var existingTunnelSigs: Set<String> = []
+        // Empty prior-state maps: first import, no tombstones, no existing content.
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         _ = try await mapping.importNote(
             note, kit: kit, handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: now
         )
@@ -675,10 +708,15 @@ struct VaultBridgeTests {
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
         var existingTunnelSigs: Set<String> = []
+        // Empty prior-state maps: first import, no tombstones, no existing content.
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         let outcome = try await mapping.importNote(
             note, kit: kit, handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: now
         )
@@ -707,10 +745,15 @@ struct VaultBridgeTests {
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
         var existingTunnelSigs: Set<String> = []
+        // Empty prior-state maps: first import, no tombstones, no existing content.
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         _ = try await mapping.importNote(
             note, kit: kit, handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: now
         )
@@ -736,10 +779,15 @@ struct VaultBridgeTests {
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
         var existingTunnelSigs: Set<String> = []
+        // Empty prior-state maps: first import, no tombstones, no existing content.
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         _ = try await mapping.importNote(
             note, kit: kit, handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: now
         )
@@ -793,12 +841,17 @@ struct VaultBridgeTests {
         var existingLineageIDs: Set<UUID> = []
         var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
         var existingTunnelSigs: Set<String> = []
+        // Empty prior-state maps: first import, no tombstones, no existing content.
+        let tombstonedLineageIDs: Set<UUID> = []
+        let existingContentByLineage: [UUID: String] = [:]
         _ = try await mapping.importNote(
             note,
             kit: kit,
             handle: handle,
             existingLineageIDs: existingLineageIDs,
             existingSensitivityByLineage: existingSensitivity,
+            tombstonedLineageIDs: tombstonedLineageIDs,
+            existingContentByLineage: existingContentByLineage,
             existingTunnelSignatures: &existingTunnelSigs,
             now: Date()
         )
@@ -816,5 +869,145 @@ struct VaultBridgeTests {
         // Here we verify the importNote outcome has the right semantics.
         let kgFacts = try await kit.recallKGFacts(handle)
         #expect(!kgFacts.isEmpty, "structured import must produce KG facts (not drop them)")
+    }
+
+    // MARK: - FINDING-1: content-idempotent + tombstone-aware import
+
+    /// FINDING-1a: Re-importing the same vault (unchanged content) must not
+    /// rotate the drawer UUID or supersede. The second import must leave the
+    /// drawer UUID UNCHANGED and report `drawersSkippedUnchanged`.
+    ///
+    /// FINDING-1b (non-resurrection): A note whose drawer was expunged must
+    /// NOT be resurrected on re-import. The import must skip it and report
+    /// `drawersSkippedTombstoned`.
+    @Test("re-import with unchanged content skips supersession: UUID stable, count stable")
+    func reimportUnchangedLeavesUUIDStable() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = try seedVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let now = Date()
+
+        // First import: note lands as a new drawer.
+        let first = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(first.drawersWritten == 1, "first import must write the drawer")
+        #expect(first.drawersUpdated == 0)
+
+        // Capture the drawer UUID before the second import.
+        let drawersBefore = try await currentDrawers(kit, handle)
+        let uuidBefore = try #require(drawersBefore.first?.id)
+
+        // Second import: SAME vault, UNCHANGED content.
+        // The idempotent guard must fire — UUID must not rotate, no supersession.
+        let second = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(second.drawersWritten == 0, "second import of identical content must not write a new drawer")
+        #expect(second.drawersUpdated == 0, "unchanged content must not trigger supersession")
+        #expect(second.drawersSkippedUnchanged == 1, "unchanged content must be counted as skipped-unchanged")
+
+        // Drawer count stable at 1.
+        let drawersAfter = try await currentDrawers(kit, handle)
+        #expect(drawersAfter.count == 1, "drawer count must remain stable at 1")
+
+        // UUID must be identical — no UUID rotation took place.
+        let uuidAfter = try #require(drawersAfter.first?.id)
+        #expect(uuidAfter == uuidBefore, "drawer UUID must not rotate when content is unchanged (FINDING-1a)")
+    }
+
+    @Test("re-importing a note whose drawer was withdrawn does NOT resurrect it (FINDING-1b)")
+    func reimportAfterWithdrawDoesNotResurrect() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = try seedVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let now = Date()
+
+        // First import: note lands as a new drawer.
+        let first = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(first.drawersWritten == 1, "first import must write the drawer")
+
+        // Retrieve the drawer and withdraw it (moves to cluster B / usedToBelieve).
+        // Withdraw is the vault-operator mechanism for "this note must not resurface."
+        // (Expunge/tombstone uses tombstonedAt != nil and is invisible to recall;
+        // withdrawn drawers have tombstonedAt == nil and ARE detectable by the
+        // import guard via Filter.usedToBelieve.)
+        let drawers = try await currentDrawers(kit, handle)
+        let drawer = try #require(drawers.first)
+        try await kit.withdraw(handle, WithdrawFrame(rowID: drawer.id, reason: "test-withdrawal"))
+
+        // Verify the estate is now empty of active (believed) drawers.
+        let afterWithdraw = try await currentDrawers(kit, handle)
+        #expect(afterWithdraw.isEmpty, "estate must have no active drawers after withdraw")
+
+        // Re-import the SAME vault. The note's lineage is in the withdrawn set.
+        // The import must NOT resurrect it — must skip and count as tombstoned.
+        let second = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(second.drawersWritten == 0, "withdrawn note must NOT be resurrected on re-import (FINDING-1b)")
+        #expect(second.drawersUpdated == 0)
+        #expect(second.drawersSkippedTombstoned == 1, "withdrawn lineage must be counted as skipped-tombstoned")
+
+        // Estate must remain empty — resurrection did not happen.
+        let afterReimport = try await currentDrawers(kit, handle)
+        #expect(afterReimport.isEmpty, "estate must remain empty after re-import of withdrawn lineage")
+    }
+
+    /// FINDING-1b cluster C: A note whose drawer was ERASED via `moot_erase_memory`
+    /// (the `expunge` verb, which sets `tombstonedAt != nil`) must NOT be
+    /// resurrected on re-import. This is the gap the prior fix left open: the
+    /// cluster B guard (`usedToBelieve`) catches withdrawn drawers but misses
+    /// expunged/tombstoned ones because `liveRows` pre-filters `tombstonedAt == nil`
+    /// — making cluster C invisible to all recall-based queries.
+    ///
+    /// The fix adds `GeniusLocusKit.tombstonedLineageIDs(_:)`, which uses
+    /// `Estate.allDrawers()` — the only corpus scan that includes tombstoned rows —
+    /// and unions the erased set with the withdrawn set so both clusters are blocked.
+    @Test("re-importing a note whose drawer was ERASED (expunged/tombstoned) does NOT resurrect it (FINDING-1b cluster C)")
+    func reimportAfterExpungeDoesNotResurrect() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = try seedVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let now = Date()
+
+        // First import: note lands as a new drawer.
+        let first = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(first.drawersWritten == 1, "first import must write the drawer")
+
+        // Retrieve the drawer and EXPUNGE it (cluster C: tombstonedAt is set,
+        // content blob zeroed). This mirrors `moot_erase_memory` — the verb that
+        // triggered the resurrection bug in the original transcript.
+        let drawers = try await currentDrawers(kit, handle)
+        let drawer = try #require(drawers.first)
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id,
+            reason: "test-expunge",
+            confirmation: true
+        ))
+
+        // Verify the estate is now empty of active (believed) drawers.
+        // NOTE: recall only sees non-tombstoned rows, so this is expected to be empty
+        // regardless — the critical assertion is the re-import behaviour below.
+        let afterExpunge = try await currentDrawers(kit, handle)
+        #expect(afterExpunge.isEmpty, "estate must have no active drawers after expunge")
+
+        // Re-import the SAME vault. The note's lineage is in the erased (cluster C)
+        // set. The import must NOT resurrect it — must skip and count as tombstoned.
+        // Before the fix, this would write a new drawer (resurrection bug).
+        let second = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(second.drawersWritten == 0,
+                "erased note must NOT be resurrected on re-import — cluster C gap (moot_erase_memory)")
+        #expect(second.drawersUpdated == 0)
+        #expect(second.drawersSkippedTombstoned == 1,
+                "erased lineage must be counted as skipped-tombstoned")
+
+        // Estate must remain empty — resurrection did not happen.
+        let afterReimport = try await currentDrawers(kit, handle)
+        #expect(afterReimport.isEmpty,
+                "estate must remain empty after re-import of erased (expunged) lineage")
     }
 }
