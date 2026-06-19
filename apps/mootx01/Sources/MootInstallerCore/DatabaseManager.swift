@@ -81,7 +81,11 @@ public enum DatabaseManager {
     // MARK: - CRUD
 
     /// Create a named estate directory structure. Does not initialise the
-    /// SQLite schema — the substrate does that on first open.
+    /// SQLite schema — the substrate does that on first `serve` open.
+    ///
+    /// After creation the estate is immediately discoverable by `listEstates`
+    /// and `db open`, which both test for the estate directory rather than the
+    /// SQLite file (the file is written lazily by the substrate on first serve).
     ///
     /// - Parameters:
     ///   - name: must be a valid directory-name component (no slashes).
@@ -103,26 +107,33 @@ public enum DatabaseManager {
     /// List all known estate names, including "default" when the legacy
     /// estate file is present.
     ///
+    /// Named estates are detected by the presence of the estate DIRECTORY
+    /// (`databases/<name>/`), not the SQLite file inside it. The SQLite file
+    /// is written lazily by the substrate on first `serve`, so testing for the
+    /// directory is the correct existence check — consistent with `createEstate`
+    /// (which creates the directory) and `db open` (which checks the directory).
+    ///
     /// - Parameter dataDirectory: resolved data directory.
     /// - Returns: sorted list of estate names. Never nil; may be empty.
     public static func listEstates(in dataDirectory: URL) -> [String] {
         var names: [String] = []
 
-        // Default estate: flat path.
+        // Default estate: flat path — present when serve has been run at least once.
         if FileManager.default.fileExists(
             atPath: MootPaths.estateURL(in: dataDirectory).path
         ) {
             names.append("default")
         }
 
-        // Named estates: entries under databases/.
+        // Named estates: any subdirectory under databases/ is a registered estate.
+        // The SQLite file does not need to exist yet — it is created on first serve.
         let databasesDir = dataDirectory.appendingPathComponent("databases", isDirectory: true)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: databasesDir.path) {
+            var isDir: ObjCBool = false
             let valid = entries.filter { name in
-                let estateFile = databasesDir
-                    .appendingPathComponent(name)
-                    .appendingPathComponent("estate.sqlite")
-                return FileManager.default.fileExists(atPath: estateFile.path)
+                let entryPath = databasesDir.appendingPathComponent(name).path
+                return FileManager.default.fileExists(atPath: entryPath, isDirectory: &isDir)
+                    && isDir.boolValue
             }
             names.append(contentsOf: valid.sorted())
         }

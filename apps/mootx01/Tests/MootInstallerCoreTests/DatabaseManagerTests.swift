@@ -102,7 +102,7 @@ struct DatabaseManagerTests {
         #expect(names.isEmpty)
     }
 
-    @Test("listEstates includes named estates after createEstate")
+    @Test("listEstates includes named estates immediately after createEstate")
     func listEstatesIncludesCreated() throws {
         let dataDir = try makeTempDir()
         defer { cleanupTempDir(dataDir) }
@@ -110,11 +110,39 @@ struct DatabaseManagerTests {
         try DatabaseManager.createEstate(name: "alpha", in: dataDir)
         try DatabaseManager.createEstate(name: "beta", in: dataDir)
         let names = DatabaseManager.listEstates(in: dataDir)
-        // Directories exist but sqlite file is absent → not listed.
-        // The list only includes estates with an estate.sqlite file.
-        // createEstate only makes the directory, not the DB file.
-        // So we expect empty here — the CRUD test verifies list with a real file.
-        #expect(names.isEmpty || names.contains("alpha") == false)
+        // listEstates detects estates by directory presence — the SQLite file is
+        // written lazily by the substrate on first serve, so it may not exist yet.
+        // db create creates the directory; that is sufficient to make the estate
+        // discoverable by db list and db open.
+        #expect(names == ["alpha", "beta"])
+    }
+
+    @Test("create → list → open round-trip: estate is discoverable before first serve")
+    func createListOpenRoundTrip() throws {
+        let dataDir = try makeTempDir()
+        defer { cleanupTempDir(dataDir) }
+
+        // Create an estate — no sqlite file yet (substrate writes it on first serve).
+        try DatabaseManager.createEstate(name: "driver", in: dataDir)
+
+        // list must find it even though estate.sqlite does not exist.
+        let listed = DatabaseManager.listEstates(in: dataDir)
+        #expect(listed.contains("driver"), "db list must show estate after db create")
+
+        // The estate directory must exist.
+        let estateDir = DatabaseManager.estateURL(for: "driver", in: dataDir)
+            .deletingLastPathComponent()
+        var isDir: ObjCBool = false
+        #expect(
+            FileManager.default.fileExists(atPath: estateDir.path, isDirectory: &isDir)
+                && isDir.boolValue,
+            "estate directory must exist at databases/driver/"
+        )
+
+        // db open: set active estate must succeed — directory exists, file need not.
+        try DatabaseManager.setActiveEstate("driver", in: dataDir)
+        let active = try DatabaseManager.activeEstateName(in: dataDir)
+        #expect(active == "driver", "active estate must be 'driver' after db open")
     }
 
     @Test("listEstates includes default when estate.sqlite exists")
