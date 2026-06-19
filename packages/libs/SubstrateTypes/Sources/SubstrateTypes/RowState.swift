@@ -142,7 +142,25 @@ public enum RowStateError: Error, Sendable, Equatable {
 extension RowState: CustomStringConvertible {
     /// English lowercase name matching RowVerb.rawValue casing.
     /// Parity with Rust RowState::Display (lowercase English).
-    public var description: String { String(describing: self) }
+    ///
+    /// Explicit switch rather than String(describing:) because
+    /// String(describing: self) calls back into CustomStringConvertible.description
+    /// causing infinite recursion. The explicit switch is the only safe pattern
+    /// for CustomStringConvertible on an enum without String raw value.
+    public var description: String {
+        switch self {
+        case .active:     return "active"
+        case .pending:    return "pending"
+        case .contested:  return "contested"
+        case .accepted:   return "accepted"
+        case .superseded: return "superseded"
+        case .decayed:    return "decayed"
+        case .withdrawn:  return "withdrawn"
+        case .expired:    return "expired"
+        case .rejected:   return "rejected"
+        case .tombstoned: return "tombstoned"
+        }
+    }
 }
 
 extension RowStateError: CustomStringConvertible {
