@@ -633,8 +633,12 @@ impl DrawerStoreCore {
             changed_by,
         )
         .map_err(|v| {
+            // Use Display ({}) not Debug ({:?}) so internal Rust type names
+            // (BasisViolation, IllegalTransition) do not leak into user-visible
+            // error messages at the ARIA boundary. GateViolation::Display
+            // produces clean English text.
             LocusKitError::InvalidContent(format!(
-                "{:?} mutation rejected by gate: {:?}",
+                "{:?} mutation rejected by gate: {}",
                 column, v
             ))
         })?;
@@ -720,7 +724,9 @@ impl DrawerStoreCore {
             stamp,
             &drawer.added_by,
         )
-        .map_err(|v| LocusKitError::InvalidContent(format!("capture rejected by gate: {:?}", v)))?;
+        // Use Display ({}) not Debug ({:?}) at all gate boundaries so internal
+        // Rust type names never reach user-visible error messages.
+        .map_err(|v| LocusKitError::InvalidContent(format!("capture rejected by gate: {}", v)))?;
 
         // Materialized projection row + sealed genesis event.
         self.storage
@@ -1333,7 +1339,10 @@ impl DrawerStore for DrawerStoreCore {
             changed_by,
         )
         .map_err(|v| {
-            LocusKitError::InvalidContent(format!("state mutation rejected by gate: {:?}", v))
+            // Use Display ({}) not Debug ({:?}) so GateViolation's internal type
+            // chain (BasisViolation(IllegalTransition(...))) does not appear in
+            // user-visible error text. GateViolation::Display emits clean English.
+            LocusKitError::InvalidContent(format!("state mutation rejected by gate: {}", v))
         })?;
 
         // Materialized projection: write the merged snapshot to the live
@@ -1436,7 +1445,7 @@ impl DrawerStore for DrawerStoreCore {
             stamp,
             changed_by,
         )
-        .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {:?}", v)))?;
+        .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {}", v)))?;
 
         // Materialized projection: write the merged adjective snapshot,
         // zero the content blob, stamp tombstonedAt — all in the same
@@ -1653,7 +1662,7 @@ impl DrawerStore for DrawerStoreCore {
             changed_by,
         )
         .map_err(|v| {
-            LocusKitError::InvalidContent(format!("reanchor rejected by gate: {:?}", v))
+            LocusKitError::InvalidContent(format!("reanchor rejected by gate: {}", v))
         })?;
 
         // Materialized projection: update placement columns + append the
@@ -5265,9 +5274,12 @@ mod tests {
             .unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
+                // After the Display fix, the message uses English names rather
+                // than the Debug variant name "IllegalTransition". Assert on the
+                // semantic substring that survives the change.
                 assert!(
-                    msg.contains("IllegalTransition"),
-                    "expected gate IllegalTransition, got: {}",
+                    msg.contains("illegal state transition"),
+                    "expected gate-rejection message containing 'illegal state transition', got: {}",
                     msg
                 );
             }
@@ -5852,11 +5864,13 @@ mod tests {
             .unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
+                // After the Display fix, messages use English words rather than
+                // Rust Debug variant names. "illegal state transition" is the
+                // canonical text from GateViolation::Display → RowStateError::Display.
                 assert!(
-                    msg.contains("IllegalTransition")
-                        || msg.contains("illegalTransition")
-                        || msg.contains("basisViolation"),
-                    "expected gate rejection from S-3, got: {}",
+                    msg.contains("illegal state transition")
+                        || msg.contains("safety invariant violation"),
+                    "expected gate-rejection message from S-3, got: {}",
                     msg
                 );
             }
