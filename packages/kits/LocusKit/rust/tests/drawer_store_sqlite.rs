@@ -347,7 +347,13 @@ fn mutate_state_rejects_illegal_transition() {
         .unwrap_err();
     match err {
         LocusKitError::InvalidContent(msg) => {
-            assert!(msg.contains("IllegalTransition"), "got: {}", msg);
+            // After the Display fix, the gate uses English names rather than
+            // the Debug variant name "IllegalTransition".
+            assert!(
+                msg.contains("illegal state transition"),
+                "expected gate-rejection text, got: {}",
+                msg
+            );
         }
         other => panic!("expected InvalidContent, got {:?}", other),
     }
