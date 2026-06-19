@@ -5,6 +5,44 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.4-beta — 2026-06-19
+
+Fifth beta of the 1.0 line. A large drive-test hardening campaign across the ARIA
+MCP surface plus a full timestamp-unit sweep. Both ports move together.
+
+### ARIA MCP surface — drive-test repairs
+
+- **Data fidelity** — `file_memory` now persists `kind` and `sensitivity`
+  (Rust port had dropped them), and records the correct capture channel
+  (`actuator`, not `importedFile`).
+- **Validation** — `link_memories` validates tunnel `kind` + rejects self-loops;
+  `lens_complexity` rejects unknown fields; `lens_overlap`/`lens_divergence`
+  reject self-comparison; `synthesize` filters stopwords.
+- **Recall** — `recall_precise` gains an exact-token containment gate and an
+  honest discrimination signal (computed on the composition re-rank, not the
+  coarse score); the dense-lane status no longer falsely reads `active` when the
+  lane was never attempted; `anti_redundant` actually suppresses near-duplicates.
+- **Lenses** — the lexical-outlier lens renamed `lens_cohesion`; a genuine
+  `lens_contradiction` (contradicts-tunnels + conflicting KG facts) added;
+  temporal `drift`/`precedence` honor `event_time`; `drift` KL divergence is
+  non-negative (Laplace smoothing); KG facts carry evaluation fields.
+- **Vault** — OKF v0.1 superset export/import (Obsidian-compatible); idempotent
+  re-import (no `BasisViolation` leak); `confirm_migration` encodes promoted
+  memories so they are immediately searchable.
+
+### Timestamp-unit sweep (Rust)
+
+- Closed a class of epoch seconds-vs-milliseconds bugs: vault export `1970`,
+  vault import year-9999 clamp, the HLC feed (8 sites), Corpus ingest (both
+  paths), and the all-estates topology snapshot now picks the true newest.
+- Rust grant store converted off Apple reference date to Unix epoch.
+
+### Install
+
+- Integration-depth installer (`--mode` + guided depth; Server/Skills/Plugin
+  with plugin→skills fallback) and the embedded install bundle.
+- Claude Desktop proxy bridge emits bare `proxy` (self-resolves the daemon port).
+
 ## v1.0.3-beta — 2026-06-18
 
 Fourth beta of the 1.0 line. A drive-test hardening pass over the ARIA MCP
