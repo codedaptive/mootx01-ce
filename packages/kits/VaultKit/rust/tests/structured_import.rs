@@ -211,6 +211,50 @@ fn structured_import_hierarchy_as_full_room_path() {
     );
 }
 
+/// Regression: a vault import must store `filed_at` in epoch SECONDS, not the
+/// epoch-MILLISECONDS `now` the bridge receives. The bridge passes `NOW` (ms)
+/// into `capture_with_mode`, which stores `now` directly into the seconds-typed
+/// `filed_at` column — so the import path must divide by 1000. Before the fix the
+/// drawer carried a millisecond magnitude that PersistenceKit's `iso8601()`
+/// clamped to the RFC-3339 max year (9999), corrupting the date.
+#[test]
+fn import_filed_at_is_epoch_seconds_not_millis() {
+    let (mut coord, handle) = open_one();
+    let note = structured_note();
+    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+
+    import_structured(&mapping, &note, &mut coord, &handle);
+
+    let drawers = coord
+        .recall(
+            &handle,
+            locus_kit::filter::RecallFrame {
+                filter_chain: vec![locus_kit::filter::Filter::Unconfirmed],
+                hydration_level: locus_kit::filter::HydrationLevel::Structured,
+                limit: Some(100),
+                ordering: locus_kit::filter::Ordering::ByCaptureTimeDesc,
+                as_of: None,
+                trace_limit: None,
+            },
+            NOW,
+        )
+        .expect("recall");
+    assert_eq!(drawers.len(), 1, "exactly one drawer must be created");
+    let drawer = &drawers[0];
+    // NOW is ms (1_765_000_000_000); filed_at must be the seconds value.
+    assert_eq!(
+        drawer.filed_at,
+        NOW / 1000,
+        "filed_at must be epoch SECONDS (NOW/1000), not the millisecond NOW or a clamped value"
+    );
+    // And it must be well below the RFC-3339 year-9999 clamp boundary.
+    assert!(
+        drawer.filed_at < 253_402_300_799,
+        "filed_at {} must not be a clamped/millisecond magnitude",
+        drawer.filed_at
+    );
+}
+
 /// facts and scope must not appear in fields_dropped after import.
 /// Mirrors Swift `structuredImportFactsNotInFieldsDropped` and the updated
 /// ExchangeAdapterTests.droppedFieldsAreRecorded.
