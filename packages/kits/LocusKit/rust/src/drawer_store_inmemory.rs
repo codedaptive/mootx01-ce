@@ -617,7 +617,7 @@ impl DrawerStoreCore {
         };
         let udc = self.read_drawer_udc(drawer_id)?;
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
 
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
@@ -709,7 +709,7 @@ impl DrawerStoreCore {
         }
 
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&drawer.udc_code);
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
 
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
@@ -1321,7 +1321,7 @@ impl DrawerStore for DrawerStoreCore {
             &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33],
         );
         // One tick per logical mutation.
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -1422,7 +1422,7 @@ impl DrawerStore for DrawerStoreCore {
         let new_flags_value = (prior_flags_value & 0b011) | 0b100;
 
         // One tick per logical mutation.
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -1459,9 +1459,10 @@ impl DrawerStore for DrawerStoreCore {
             TypedValue::Bitmap(event.after_bitmaps.0),
         );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
-        // tombstonedAt is a Timestamp column (i64 millis since epoch);
-        // opt_int_value_of accepts TypedValue::Timestamp. Writing as
-        // TypedValue::Text would silently parse back to None.
+        // tombstonedAt is a Timestamp column (i64 epoch seconds);
+        // TypedValue::Timestamp carries seconds (PersistenceKit converts to
+        // TEXT ISO8601 via iso8601(secs)). Writing as TypedValue::Text would
+        // silently parse back to None.
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
         row_store
             .update(
@@ -1525,7 +1526,7 @@ impl DrawerStore for DrawerStoreCore {
         // consumers see the storage-level expunge without requiring a
         // distinct ARIA verb.
         let _ = drawer_id; // rowId is carried by success_event.row_id
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
         let event_id = substrate_lib::audit_gate::content_id(
             success_event.estate_uuid,
             success_event.row_id,
@@ -1577,7 +1578,7 @@ impl DrawerStore for DrawerStoreCore {
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
         let after_bitmaps: (i64, i64, i64) = (adj_bitmap, op_bitmap, prov_bitmap);
 
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
         let event_id = substrate_lib::audit_gate::content_id(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -1647,7 +1648,7 @@ impl DrawerStore for DrawerStoreCore {
         // Reanchor is a placement move — no FieldWrites. The gate records the
         // anchor delta via prior/after anchor and validates verb=Mutate
         // (active→active self-loop). Empty writes slice is correct here.
-        let stamp = self.hlc.lock().unwrap().send(now);
+        let stamp = self.hlc.lock().unwrap().send(now * 1000);
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -5998,5 +5999,100 @@ mod tests {
         // filed_at ascending: f_active (NOW) before f_retired (NOW+1).
         assert_eq!(timeline[0].subject, "carol");
         assert_eq!(timeline[1].subject, "eve");
+    }
+
+    // -----------------------------------------------------------------
+    // HLC unit contract — physical_time must be milliseconds
+    //
+    // Swift feeds HLCGenerator::send() in milliseconds (DrawerStore.swift:
+    // `let nowMillis = Int64(now.timeIntervalSince1970 * 1000)`).
+    // Rust callers pass epoch-seconds; the fix multiplies by 1000 at each
+    // send() site. These tests verify the contract post-fix so a future
+    // regression is caught at CI rather than at federation time.
+    //
+    // Implementation note: we read the HLC back from the audit log via
+    // `store.storage().audit_log().events_for_row(uuid)` — the same
+    // pattern used by existing audit-log tests in this module.
+    // -----------------------------------------------------------------
+
+    /// After add_drawer with a known `now` in epoch seconds, the HLC
+    /// physical_time in the genesis audit event must be the millisecond
+    /// magnitude (now * 1000), and physical_seconds_since_epoch() must
+    /// round-trip back to the original seconds value.
+    #[test]
+    fn hlc_physical_time_is_milliseconds_after_capture() {
+        // A concrete epoch-seconds value (2025-12-01 ~00:00 UTC).
+        const CAPTURE_SECS: i64 = 1_765_000_000;
+        const CAPTURE_MILLIS: i64 = CAPTURE_SECS * 1000;
+
+        let store = open_store_at(CAPTURE_SECS);
+        let d = sample_drawer("hlc-ms-d1", "wing", "room", "content");
+        store.add_drawer(&d, CAPTURE_SECS).unwrap();
+
+        let row_uuid = Uuid::parse_str(&tid("hlc-ms-d1")).unwrap();
+        let events = store
+            .storage()
+            .audit_log()
+            .events_for_row(row_uuid)
+            .unwrap();
+        assert!(!events.is_empty(), "capture must emit a genesis audit event");
+
+        let hlc = events[0].hlc;
+        // physical_time MUST be milliseconds — matching Swift's contract.
+        assert_eq!(
+            hlc.physical_time,
+            CAPTURE_MILLIS,
+            "HLC physical_time must be epoch milliseconds (now * 1000 = {}), \
+             got {} — a value near zero indicates the unit bug (seconds fed \
+             instead of milliseconds)",
+            CAPTURE_MILLIS,
+            hlc.physical_time
+        );
+
+        // physical_seconds_since_epoch() divides by 1000; must return
+        // the original seconds value — not 1970.
+        assert_eq!(
+            hlc.physical_seconds_since_epoch(),
+            CAPTURE_SECS,
+            "physical_seconds_since_epoch() must return original epoch seconds {}, \
+             got {} (near zero = 1970-era indicates unit mismatch)",
+            CAPTURE_SECS,
+            hlc.physical_seconds_since_epoch()
+        );
+    }
+
+    /// Two add_drawer calls at the same `now` must produce monotonically
+    /// increasing HLCs (logical counter bumps when physical doesn't advance).
+    /// This validates the HLC generator works correctly with millis as input.
+    #[test]
+    fn hlc_monotonic_within_same_second() {
+        const CAPTURE_SECS: i64 = 1_765_000_000;
+
+        let store = open_store_at(CAPTURE_SECS);
+        let d1 = sample_drawer("hlc-mono-d1", "wing", "room", "alpha");
+        let d2 = sample_drawer("hlc-mono-d2", "wing", "room", "beta");
+        store.add_drawer(&d1, CAPTURE_SECS).unwrap();
+        store.add_drawer(&d2, CAPTURE_SECS).unwrap();
+
+        let row1 = Uuid::parse_str(&tid("hlc-mono-d1")).unwrap();
+        let row2 = Uuid::parse_str(&tid("hlc-mono-d2")).unwrap();
+        let hlc1 = store.storage().audit_log().events_for_row(row1).unwrap()[0].hlc;
+        let hlc2 = store.storage().audit_log().events_for_row(row2).unwrap()[0].hlc;
+
+        assert!(
+            hlc1 < hlc2,
+            "HLCs must be strictly increasing: {:?} should be < {:?}",
+            hlc1, hlc2
+        );
+        // Both share the same physical ms since wall clock didn't advance.
+        assert_eq!(hlc1.physical_time, CAPTURE_SECS * 1000);
+        assert_eq!(hlc2.physical_time, CAPTURE_SECS * 1000);
+        // Logical counter must have bumped.
+        assert_eq!(hlc2.logical_count, hlc1.logical_count + 1);
+    }
+
+    // Helper: open a store seeded with a specific `now`.
+    fn open_store_at(now: i64) -> InMemoryDrawerStore {
+        InMemoryDrawerStore::new(now, None).unwrap()
     }
 }
