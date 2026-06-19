@@ -138,3 +138,28 @@ public enum RowStateError: Error, Sendable, Equatable {
     case illegalTransition(RowState, RowVerb)
     case violatesInvariant(String)
 }
+
+extension RowState: CustomStringConvertible {
+    /// English lowercase name matching RowVerb.rawValue casing.
+    /// Parity with Rust RowState::Display (lowercase English).
+    public var description: String { String(describing: self) }
+}
+
+extension RowStateError: CustomStringConvertible {
+    /// Compact state-and-verb descriptor without "illegal" prefix.
+    /// GateViolation.description wraps this as "illegal state transition: {self}"
+    /// to produce the canonical form the AriaMcpKit describe_gate_rejection
+    /// parser expects: "illegal state transition: active --reject-->".
+    ///
+    /// Parity with Rust RowStateError::Display for the IllegalTransition arm.
+    public var description: String {
+        switch self {
+        case .illegalTransition(let state, let verb):
+            // English lowercase via RowState.description and RowVerb.rawValue,
+            // matching the ARIA verb surface tokens.
+            return "\(state) --\(verb.rawValue)-->"
+        case .violatesInvariant(let msg):
+            return "safety invariant violation: \(msg)"
+        }
+    }
+}
