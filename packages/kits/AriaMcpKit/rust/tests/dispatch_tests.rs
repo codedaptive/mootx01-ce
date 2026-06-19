@@ -2725,6 +2725,111 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
     );
 }
 
+/// FIX 4: vault_job import result must surface drawersSkippedUnchanged and
+/// drawersSkippedTombstoned from ImportReport.
+///
+/// Before this fix `ImportJobResult` only tracked drawersWritten / drawersUpdated /
+/// fdcClassified — the idempotency skip counters were silently dropped at the
+/// job-record boundary. An idempotent re-import showed all-zeros for the activity
+/// that happened, hiding real skip activity from the ARIA surface.
+///
+/// This test exports one memory then imports the vault twice: the second import
+/// is a known-idempotent run, so drawersSkippedUnchanged must be ≥ 1 while
+/// drawersWritten must be 0. Parity with Swift VaultToolsTests.import_job_surfaces_skip_counts.
+#[test]
+fn vault_import_job_surfaces_skip_counts() {
+    use aria_mcp::{
+        dispatch::dispatch_tool_with_vault_ledger,
+        vault_tools::VaultJobLedger,
+    };
+
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+    let ledger = VaultJobLedger::new();
+    let recall_ledger = SurfacedRecallLedger::new();
+
+    // File one memory, export it to vault.
+    file_one_memory(&registry, "Idempotent re-import test fixture.", "fix4/room");
+    dispatch_tool_with_vault_ledger(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &recall_ledger,
+        &ledger,
+    )
+    .expect("export must succeed");
+
+    // First import: writes the row.
+    dispatch_tool_with_vault_ledger(
+        "moot_vault_import",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &recall_ledger,
+        &ledger,
+    )
+    .expect("first import must not throw");
+
+    // Second import: the row is unchanged → drawersSkippedUnchanged ≥ 1.
+    let import_result = dispatch_tool_with_vault_ledger(
+        "moot_vault_import",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &recall_ledger,
+        &ledger,
+    )
+    .expect("second import must not throw");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&import_result),
+        "second import must be isError:false; got: {import_result:?}"
+    );
+    let import_text = content_text(&import_result);
+
+    // Extract job_id and poll moot_vault_job for the completed record.
+    let job_id = import_text
+        .lines()
+        .find(|l| l.starts_with("job_id: "))
+        .and_then(|l| l.strip_prefix("job_id: "))
+        .expect("import response must contain 'job_id: <uuid>'")
+        .to_owned();
+
+    let job_result = dispatch_tool_with_vault_ledger(
+        "moot_vault_job",
+        &args!["job_id" => job_id.as_str()],
+        &registry,
+        &recall_ledger,
+        &ledger,
+    )
+    .expect("moot_vault_job must not throw");
+
+    let text = content_text(&job_result);
+
+    // Both skip-count fields must be present in the job record.
+    assert!(
+        text.contains("drawersSkippedUnchanged:"),
+        "import job result must contain drawersSkippedUnchanged; got: {text}"
+    );
+    assert!(
+        text.contains("drawersSkippedTombstoned:"),
+        "import job result must contain drawersSkippedTombstoned; got: {text}"
+    );
+
+    // The idempotent re-import must have skipped ≥ 1 unchanged drawer.
+    // Parse the count from "drawersSkippedUnchanged: N".
+    let skipped_unchanged: i64 = text
+        .lines()
+        .find(|l| l.contains("drawersSkippedUnchanged:"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    assert!(
+        skipped_unchanged >= 1,
+        "idempotent re-import must skip ≥ 1 unchanged drawer; got drawersSkippedUnchanged: {skipped_unchanged}; full text:\n{text}"
+    );
+}
+
 #[test]
 fn vault_job_unknown_id_returns_swift_identical_not_found_shape() {
     // Unknown job_id returns isError:true with the Swift-identical phrase

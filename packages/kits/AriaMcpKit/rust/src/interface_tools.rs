@@ -146,7 +146,13 @@ fn describe_verb_error(ve: &VerbError) -> String {
             if let Some(msg) = describe_gate_rejection(verb, reason) {
                 return msg;
             }
-            format!("{verb} failed: {reason}")
+            // Strip internal Rust type-name prefixes (e.g. "InvalidContent: room
+            // must not be empty") that the substrate error chain can prepend.
+            // These are implementation-private names that must not appear in
+            // AI-client-facing messages (B-6 describe-helper contract).
+            // Parity with Swift ToolDispatcher.stripEnumPrefix(from:).
+            let cleaned = strip_enum_prefix(reason);
+            format!("{verb} failed: {cleaned}")
         }
         VerbError::NotSupportedByEstate { verb } => {
             format!("verb '{verb}' is not callable on this estate: the estate refused the operation")
@@ -235,6 +241,27 @@ fn describe_gate_rejection(verb: &str, reason: &str) -> Option<String> {
             ),
     };
     Some(format!("{verb} failed: {body}"))
+}
+
+/// Strip a leading `EnumCaseName: ` prefix from a substrate error reason
+/// string, when present. The substrate error chain can prepend type/variant
+/// names like `"InvalidContent: "` that are internal implementation details
+/// and must not appear in AI-client-facing messages (B-6 describe-helper
+/// contract). Parity with Swift `ToolDispatcher.stripEnumPrefix(from:)`.
+///
+/// Strips at most one prefix. The pattern is a run of alphanumeric or
+/// underscore characters (no spaces) followed by `": "`. A plain English
+/// sentence fragment like "state mutation rejected" does NOT match.
+fn strip_enum_prefix(reason: &str) -> &str {
+    if let Some(sep) = reason.find(": ") {
+        let prefix = &reason[..sep];
+        let is_enum_like = !prefix.is_empty()
+            && prefix.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if is_enum_like {
+            return &reason[sep + 2..];
+        }
+    }
+    reason
 }
 
 /// Dispatch a Tier 1–5 interface tool call. Returns the MCP `tools/call`
@@ -517,6 +544,10 @@ fn run_memory_search(
         .map(|h| h.score.final_score as f64)
         .collect();
     let discrimination = crate::recall_discrimination::classify(&hit_scores);
+    // Dense-lane dark flag: true when Lane D (deterministic vector) did not
+    // contribute to this ranking. Used to cap the discrimination signal so
+    // "high — clear top result" is never reported on a lexical-only ranking.
+    let dense_lane_dark = result.dense_lane_status.is_some();
 
     let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
     for hit in result.hits.iter().take(50) {
@@ -531,7 +562,7 @@ fn run_memory_search(
             hit.id, room, preview, hit.score.final_score
         ));
     }
-    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    lines.push(crate::recall_discrimination::result_line_with_dense_dark(discrimination, dense_lane_dark));
     // Recall provenance: surface the dense-lane status and any degraded stages
     // so callers can distinguish retrieval quality (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
     //
@@ -1305,13 +1336,28 @@ fn run_estate_status(
         .sync_state_token(&estate.handle)
         .unwrap_or_else(|_| "local-only".to_string());
 
-    // Label mirrors Swift runEstateStatus: "memories: N active" so both ports
-    // use the same field name. The Rust recall with an empty filter chain
-    // defaults to CurrentlyBelieve (cluster A), matching Swift's
-    // `allDrawers().filter { $0.tombstonedAt == nil }` active count.
+    // "active" = cluster-A believed drawers only. `recall()` with an empty
+    // filter chain returns only currently-believed rows (RowState cluster A,
+    // where (state_raw >> 4) & 0x3 == 0). This matches the Swift fix that
+    // applies `RowState.cluster(ofRawState:) == .a` to filter out rejected/
+    // withdrawn drawers that were previously mis-counted as "active".
+    //
+    // "total" = all non-erased rows (tombstone = permanently erased).
+    // We call `all_drawers()` which includes tombstoned rows, then subtract.
+    // Best-effort: on error, report "unavailable" rather than fabricating 0
+    // or failing the status response.
+    let total_count: String = match coord.all_drawers(&estate.handle) {
+        Ok(all) => {
+            let non_erased = all.iter().filter(|d| d.tombstoned_at.is_none()).count();
+            non_erased.to_string()
+        }
+        Err(_) => "unavailable".to_string(),
+    };
+
     let body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active\nkg_facts: {}\nwings: {}\ntrace_rows: {}\nsync: {}\n{}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nkg_facts: {}\nwings: {}\ntrace_rows: {}\nsync: {}\n{}",
         drawers.len(),
+        total_count,
         kg_facts.len(),
         wings_list,
         trace_rows,

@@ -38,6 +38,7 @@ use aria_mcp::{
     dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
+    recall_discrimination::{classify, result_line_with_dense_dark, DiscriminationLevel},
     surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
@@ -251,5 +252,92 @@ fn provenance_line_present_on_zero_results() {
     assert!(
         provenance_line.contains("degraded_stages:"),
         "provenance line must carry degraded_stages: token even with 0 hits; got: {provenance_line}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX 1: dense-lane-dark cap — discrimination must NOT claim "high" when the
+// semantic vector lane was dark (dense_lane_status is Some(_)). Parity with
+// Swift RecallDiscriminationTests.highDiscriminationIsNotClaimedWhenDenseLaneIsDark.
+// ---------------------------------------------------------------------------
+
+/// Unit test: result_line_with_dense_dark caps High → Medium when dark.
+///
+/// This mirrors Swift `highDiscriminationIsNotClaimedWhenDenseLaneIsDark`.
+/// Scores [1.0, 0.5, 0.3] produce a topGap of 0.5 ≥ HIGH_MARGIN (0.25),
+/// so classify() returns High. With dense_lane_dark=true the surface line
+/// must NOT claim "high — clear top result" because the ranking is
+/// lexical-only and cannot be trusted as semantically ranked.
+#[test]
+fn high_discrimination_is_not_claimed_when_dense_lane_is_dark() {
+    let level = classify(&[1.0, 0.5, 0.3]);
+    assert_eq!(
+        level,
+        DiscriminationLevel::High,
+        "classify([1.0, 0.5, 0.3]) must return High; got: {level:?}"
+    );
+
+    // With dense_lane_dark=true the result line must cap to medium.
+    let line = result_line_with_dense_dark(level, true);
+    assert!(
+        !line.contains("discrimination: high"),
+        "dark lane must cap 'high' to 'medium'; got: {line}"
+    );
+    assert!(
+        line.contains("discrimination: medium"),
+        "dark lane cap must produce 'medium' signal; got: {line}"
+    );
+    assert!(
+        line.contains("semantic lane dark"),
+        "dark lane cap line must name the reason; got: {line}"
+    );
+    assert!(
+        line.contains("moot_recall_precise"),
+        "dark lane cap line must direct to precise recall; got: {line}"
+    );
+}
+
+/// Unit test: result_line_with_dense_dark does NOT cap High when lane is active.
+///
+/// When dense_lane_dark=false the high signal is unchanged.
+/// Parity with Swift `denseLaneDarkFalseDoesNotCapHigh`.
+#[test]
+fn dense_lane_dark_false_does_not_cap_high() {
+    let level = classify(&[1.0, 0.5, 0.3]);
+    let line = result_line_with_dense_dark(level, false);
+    assert!(
+        line.contains("discrimination: high"),
+        "active lane must not cap high; got: {line}"
+    );
+    assert!(
+        !line.contains("semantic lane dark"),
+        "active lane must not add dark-lane caveat; got: {line}"
+    );
+}
+
+/// Unit test: dense-lane-dark cap does NOT affect Medium or Low.
+///
+/// Only High is capped; Medium and Low are emitted as-is.
+/// Parity with Swift `denseLaneDarkDoesNotCapMediumOrLow`.
+#[test]
+fn dense_lane_dark_does_not_cap_medium_or_low() {
+    let medium_line = result_line_with_dense_dark(DiscriminationLevel::Medium, true);
+    assert!(
+        medium_line.contains("discrimination: medium"),
+        "medium must pass through dark cap unchanged; got: {medium_line}"
+    );
+    assert!(
+        !medium_line.contains("semantic lane dark"),
+        "dark cap caveat must not appear on medium; got: {medium_line}"
+    );
+
+    let low_line = result_line_with_dense_dark(DiscriminationLevel::Low, true);
+    assert!(
+        low_line.contains("discrimination: low"),
+        "low must pass through dark cap unchanged; got: {low_line}"
+    );
+    assert!(
+        !low_line.contains("semantic lane dark"),
+        "dark cap caveat must not appear on low; got: {low_line}"
     );
 }

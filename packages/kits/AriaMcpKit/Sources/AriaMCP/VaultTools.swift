@@ -308,7 +308,9 @@ enum VaultTools {
                         itemsSkipped: report.itemsSkipped,
                         tunnelsCreated: report.tunnelsCreated,
                         fdcClassified: report.fdcClassified,
-                        fdcUnclassified: report.fdcUnclassified)))
+                        fdcUnclassified: report.fdcUnclassified,
+                        drawersSkippedUnchanged: report.drawersSkippedUnchanged,
+                        drawersSkippedTombstoned: report.drawersSkippedTombstoned)))
             } catch {
                 await jobRegistry.fail(jobID: jobID, errorMsg: error.localizedDescription)
             }
@@ -417,6 +419,8 @@ enum VaultTools {
             lines.append("  tunnelsCreated: \(report.tunnelsCreated)")
             lines.append("  fdcClassified: \(report.fdcClassified)")
             lines.append("  fdcUnclassified: \(report.fdcUnclassified)")
+            lines.append("  drawersSkippedUnchanged: \(report.drawersSkippedUnchanged)")
+            lines.append("  drawersSkippedTombstoned: \(report.drawersSkippedTombstoned)")
         } else {
             // Dry-run mode: report candidates only, write nothing.
             lines.append("candidates (dry-run — pass apply=true to action):")
@@ -467,6 +471,8 @@ enum VaultTools {
                 tunnelsCreated: \(r.tunnelsCreated)
                 fdcClassified: \(r.fdcClassified)
                 fdcUnclassified: \(r.fdcUnclassified)
+                drawersSkippedUnchanged: \(r.drawersSkippedUnchanged)
+                drawersSkippedTombstoned: \(r.drawersSkippedTombstoned)
                 """)
             case .exported(let r):
                 return ToolDispatcher.textResult("""

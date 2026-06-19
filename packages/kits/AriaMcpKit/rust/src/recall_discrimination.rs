@@ -8,12 +8,24 @@
 //! so the calling AI can interpret low-discrimination results correctly (treat
 //! as effectively unranked, prefer lexical modes) rather than acting on noise.
 //!
+//! ## Dense-lane dark cap
+//!
+//! When the semantic vector lane (Lane D) is dark — i.e. the recall result
+//! carried `dense_lane_status = Some(reason)` — the ranking is lexical/BM25
+//! only. A pure-lexical ranking CAN produce a high score-gap (e.g. one memory
+//! contains the exact query token, others do not), but reporting
+//! "high — clear top result" while the semantic lane was unavailable violates
+//! the discrimination signal's own contract. When the dense lane is dark the
+//! result is capped at `Medium` and a caveat is appended to the result line.
+//! Apply via `result_line_with_dense_dark(level, dense_lane_dark)`.
+//! Parity with Swift `RecallDiscrimination.resultLine(for:denseLaneDark:)`.
+//!
 //! ## Parity contract
 //!
 //! Swift and Rust must produce identical [`DiscriminationLevel`] for the same
 //! score vector. The named threshold constants here are mirrored verbatim in
-//! `RecallDiscrimination.swift`. Any threshold change must be applied to both
-//! ports simultaneously.
+//! `RecallDiscrimination.swift`. The dense-lane-dark cap and caveat wording
+//! are also mirrored; any change must be applied to both ports simultaneously.
 //!
 //! ## Algorithm (scale-independent)
 //!
@@ -103,8 +115,31 @@ pub fn classify(scores: &[f64]) -> DiscriminationLevel {
 /// The AI-facing discrimination line to append to a ranked recall result.
 ///
 /// Wording is factual and action-oriented so the calling AI knows what to do,
-/// not just what the level is.
+/// not just what the level is. Use `result_line_with_dense_dark` when the
+/// dense-lane status is known (i.e. for `moot_memory_search`).
 pub fn result_line(level: DiscriminationLevel) -> &'static str {
+    result_line_base(level)
+}
+
+/// The AI-facing discrimination line, with optional dense-lane-dark capping.
+///
+/// When `dense_lane_dark` is `true` and `level` is `High`, the result is
+/// capped to `Medium` and a caveat is appended — "high — clear top result"
+/// is misleading on a lexical-only ranking. Parity with Swift
+/// `RecallDiscrimination.resultLine(for:denseLaneDark:)`.
+pub fn result_line_with_dense_dark(level: DiscriminationLevel, dense_lane_dark: bool) -> String {
+    if dense_lane_dark && level == DiscriminationLevel::High {
+        // Cap: "high" on a dark-lane ranking is untrustworthy. Return medium
+        // with a caveat so the calling AI prefers moot_recall_precise.
+        return format!(
+            "{} (semantic lane dark — ranking is lexical-only; prefer moot_recall_precise.)",
+            result_line_base(DiscriminationLevel::Medium)
+        );
+    }
+    result_line_base(level).to_string()
+}
+
+fn result_line_base(level: DiscriminationLevel) -> &'static str {
     match level {
         DiscriminationLevel::Single => "discrimination: n/a — single/zero results.",
         DiscriminationLevel::High => "discrimination: high — clear top result.",

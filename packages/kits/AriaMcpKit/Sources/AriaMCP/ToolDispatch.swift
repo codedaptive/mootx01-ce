@@ -610,7 +610,15 @@ public struct ToolDispatcher: Sendable {
             if let msg = describeGateRejection(verb: verb, reason: reason) {
                 return msg
             }
-            return "\(verb) failed: \(reason)"
+            // Strip internal Rust/Swift type-name prefixes that the substrate
+            // error chain can prepend (e.g. "InvalidContent: room must not be
+            // empty"). These are implementation-private names that must not
+            // appear in AI-client-facing messages (B-6 describe-helper contract).
+            // The pattern is "TypeName: message" where TypeName contains no
+            // spaces. Strip one such prefix if present; the stripped remainder
+            // is the plain English message from the underlying validator.
+            let cleanedReason = Self.stripEnumPrefix(from: reason)
+            return "\(verb) failed: \(cleanedReason)"
         case .rejectedByLexicon(let verb, let noun):
             return "verb \(verb) is not accepted on noun \(noun) by the AriaLexicon acceptance matrix."
         case .crossKitVectorDeleteFailed(let rowID, let reason):
@@ -682,6 +690,38 @@ public struct ToolDispatcher: Sendable {
             body = "the memory's current state (\(fromStr)) does not allow this mutation; check it with moot_memory_search"
         }
         return "\(verb) failed: \(body)"
+    }
+
+    /// Test-visible wrapper for `stripEnumPrefix(from:)`. Exposes the private
+    /// helper for unit testing without making it fully public.
+    /// `@testable import AriaMCP` gives the test target access to `internal`.
+    static func stripEnumPrefixForTest(_ reason: String) -> String {
+        stripEnumPrefix(from: reason)
+    }
+
+    /// Strip a leading `EnumCaseName: ` prefix from a substrate error reason
+    /// string, when present. The substrate error chain can prepend type/variant
+    /// names like "InvalidContent: " that are internal implementation details
+    /// and must not appear in AI-client-facing messages (B-6 describe-helper
+    /// contract). Parity with Rust `strip_enum_prefix` in `interface_tools.rs`.
+    ///
+    /// Strips at most one prefix. The pattern is: a run of non-space, non-colon
+    /// characters followed by ": ". If the prefix looks like an enum variant
+    /// name (no lowercase word boundary gap, no spaces) the remainder is
+    /// returned; otherwise the original is returned unchanged.
+    private static func stripEnumPrefix(from reason: String) -> String {
+        // Find the first ": " in the string.
+        guard let colonRange = reason.range(of: ": ") else { return reason }
+        let prefix = String(reason[..<colonRange.lowerBound])
+        // A valid enum-case prefix contains only alphanumeric characters and
+        // underscores — no spaces, no punctuation other than underscore.
+        // "InvalidContent", "BasisViolation", "StateError" all qualify.
+        // A plain English sentence fragment like "state mutation rejected by
+        // gate" does NOT qualify (it contains spaces).
+        let isEnumLike = prefix.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+        guard isEnumLike && !prefix.isEmpty else { return reason }
+        // Return the remainder after the ": " separator.
+        return String(reason[colonRange.upperBound...])
     }
 }
 
@@ -938,6 +978,11 @@ extension ToolDispatcher {
         // reflects the full ordered hit list, not just the displayed prefix.
         let hitScores = result.hits.map { Double($0.score.final) }
         let discriminationLevel = RecallDiscrimination.classify(hitScores)
+        // Dense-lane dark flag: true when the vector lane (Lane D) did not
+        // contribute to this ranking. Used to cap the discrimination signal so
+        // "high — clear top result" is never reported on a lexical-only ranking
+        // (which would violate the signal's trustworthiness contract).
+        let denseLaneDark = result.denseLaneStatus != nil
 
         var lines: [String] = ["found \(result.hits.count) memory(s)"]
         for hit in result.hits.prefix(50) {
@@ -958,7 +1003,7 @@ extension ToolDispatcher {
                 for line in hit.explanation { lines.append("  \(line)") }
             }
         }
-        lines.append(RecallDiscrimination.resultLine(for: discriminationLevel))
+        lines.append(RecallDiscrimination.resultLine(for: discriminationLevel, denseLaneDark: denseLaneDark))
         // Recall provenance: surface the dense-lane status and any degraded stages
         // so callers can distinguish retrieval quality (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
         //
@@ -1466,7 +1511,20 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
-        let active = drawers.filter { $0.tombstonedAt == nil }
+        // "active" means currently believed: RowState cluster A only.
+        // Cluster A is the partition where (stateRaw >> 4) & 0x3 == 0 — the
+        // set of states the substrate considers "live" (active, pending, etc.).
+        // `tombstonedAt == nil` is NOT sufficient: a rejected drawer has no
+        // tombstone timestamp but is NOT in cluster A and must not count as
+        // active. `memory_search` filters by cluster A; estate_status must agree.
+        // The cluster predicate is read from bits 0–5 of `adjectiveBitmap` via
+        // the same `RowState.cluster(ofRawState:)` used by fact-timeline tagging.
+        let active = drawers.filter {
+            let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
+            return RowState.cluster(ofRawState: stateRaw) == .some(.a)
+        }
+        // "total" counts all non-erased rows (tombstone = erased permanently).
+        let total = drawers.filter { $0.tombstonedAt == nil }
         let wings = Set(active.map { $0.wing }).sorted()
         let facts = try await kit.recallKGFacts(handle)
         // Trace row count — the reward pipeline's read log size. A read failure
@@ -1488,7 +1546,7 @@ extension ToolDispatcher {
         let syncToken = (try? await kit.syncStateToken(for: handle)) ?? "local-only"
         let stats = [
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
-            "memories: \(active.count) active (\(drawers.count) total)",
+            "memories: \(active.count) active (\(total.count) total)",
             "wings: \(wings.joined(separator: ", "))",
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",

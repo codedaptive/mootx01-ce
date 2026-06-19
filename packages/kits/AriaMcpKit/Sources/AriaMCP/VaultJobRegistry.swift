@@ -27,7 +27,9 @@ enum JobStatus: Sendable {
 /// Outcome counts from a completed vault import.
 ///
 /// Field names mirror `ImportReport` in VaultBridge so callers can map
-/// directly without a renaming step.
+/// directly without a renaming step. The two skip-count fields were added
+/// by the vault idempotency + cluster-C fixes and are surfaced in
+/// `moot_vault_job` results so an idempotent re-import is observable.
 struct ImportResult: Sendable {
     let drawersWritten: Int
     let drawersUpdated: Int
@@ -35,6 +37,12 @@ struct ImportResult: Sendable {
     let tunnelsCreated: Int
     let fdcClassified: Int
     let fdcUnclassified: Int
+    /// Drawers whose content was byte-identical to the existing stored copy
+    /// and were therefore skipped without a write (idempotent re-import).
+    let drawersSkippedUnchanged: Int
+    /// Drawers whose lineage was already tombstoned (erased) and were therefore
+    /// skipped to avoid resurrecting a permanently-deleted memory.
+    let drawersSkippedTombstoned: Int
 }
 
 /// Outcome of a completed vault export: note count and the ISO8601
