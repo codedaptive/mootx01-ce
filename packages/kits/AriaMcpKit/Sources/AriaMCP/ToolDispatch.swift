@@ -603,6 +603,11 @@ public struct ToolDispatcher: Sendable {
         case .emptyReanchor(let rowID):
             return "reanchor of \(rowID) requires at least one of toRoom or toUDC."
         case .underlyingEstateFailure(let verb, let reason):
+            // Intercept gate-rejection messages before falling through to the
+            // generic form. describeGateRejection returns nil for non-gate errors.
+            if let msg = describeGateRejection(verb: verb, reason: reason) {
+                return msg
+            }
             return "\(verb) failed: \(reason)"
         case .rejectedByLexicon(let verb, let noun):
             return "verb \(verb) is not accepted on noun \(noun) by the AriaLexicon acceptance matrix."
@@ -618,6 +623,63 @@ public struct ToolDispatcher: Sendable {
 
     private func describe(_ error: GeniusLocusKitError) -> String {
         "GeniusLocusKit error: \(error)"
+    }
+
+    /// Map an illegal-state-transition gate rejection to an actionable English
+    /// message, or return `nil` if `reason` does not encode a gate rejection.
+    ///
+    /// Parses the state and verb names out of the message text produced by
+    /// `GateViolation.description` → `RowStateError.description`. The canonical
+    /// pattern is "illegal state transition: <state> --<verb>-->". Conservative:
+    /// if parsing fails for any reason, returns `nil` so the caller falls
+    /// through to the generic "\(verb) failed: \(reason)" form.
+    ///
+    /// Parity with Rust `describe_gate_rejection` in AriaMcpKit/interface_tools.rs.
+    ///
+    /// Message table (same rows as the Rust impl):
+    ///
+    ///     active  + reject          → "cannot reject an active memory; contest or withdraw it first"
+    ///     active  + promote/accept  → "only pending memories can be accepted; this memory is already active"
+    ///     accepted + reject/contest → "accepted memories are audit-grade and cannot be rejected or
+    ///                                   contested; supersede or withdraw instead"
+    ///     rejected + reject         → "memory is already rejected"
+    ///     rejected + *              → "rejected memories cannot be mutated this way; re-file the
+    ///                                   content to start a new memory"
+    ///     pending  + supersede      → "cannot supersede a pending memory; confirm or reject it first"
+    ///     tombstoned + *            → "memory has been permanently erased and cannot be mutated"
+    ///     *        + *              → "the memory's current state (<state>) does not allow this
+    ///                                   mutation; check it with moot_memory_search"
+    private func describeGateRejection(verb: String, reason: String) -> String? {
+        let sentinel = "illegal state transition: "
+        guard let sentinelRange = reason.range(of: sentinel) else { return nil }
+        let tail = String(reason[sentinelRange.upperBound...])
+        // Parse "<state> --<verb>-->" out of tail.
+        guard let dashRange = tail.range(of: " --") else { return nil }
+        let fromStr = String(tail[..<dashRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+        let afterDash = String(tail[dashRange.upperBound...])
+        guard let endRange = afterDash.range(of: "-->") else { return nil }
+        let gateVerb = String(afterDash[..<endRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+
+        let body: String
+        switch (fromStr, gateVerb) {
+        case ("active", "reject"):
+            body = "cannot reject an active memory; contest or withdraw it first"
+        case ("active", "promote"), ("active", "accept"):
+            body = "only pending memories can be accepted; this memory is already active"
+        case ("accepted", "reject"), ("accepted", "contest"):
+            body = "accepted memories are audit-grade and cannot be rejected or contested; supersede or withdraw instead"
+        case ("rejected", "reject"):
+            body = "memory is already rejected"
+        case ("rejected", _):
+            body = "rejected memories cannot be mutated this way; re-file the content to start a new memory"
+        case ("pending", "supersede"):
+            body = "cannot supersede a pending memory; confirm or reject it first"
+        case ("tombstoned", _):
+            body = "memory has been permanently erased and cannot be mutated"
+        default:
+            body = "the memory's current state (\(fromStr)) does not allow this mutation; check it with moot_memory_search"
+        }
+        return "\(verb) failed: \(body)"
     }
 }
 
