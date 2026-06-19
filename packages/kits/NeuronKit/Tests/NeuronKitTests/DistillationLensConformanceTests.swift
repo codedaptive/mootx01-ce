@@ -12,6 +12,12 @@ import SubstrateML
 // M5 has no features. The capitalization-heuristic defaultExtractor produces
 // succeeded=true and confidence >= 0.7 on this fixture.
 //
+// All tests pass `DistillationPipeline.defaultExtractor` EXPLICITLY to both
+// `distillCluster` and `DistillationPipeline.run`. This decouples the lens
+// pass-through contract from whatever the production default extractor is.
+// The production default (NeuronKit.hmmFeatureExtractor) is tested separately
+// in HMMFeatureExtractorTests.swift.
+//
 // Cross-language parity: the identical cluster_5 fixture is driven through
 // distill_cluster in Rust (distillation_lens_conformance.rs). Both legs
 // assert the same field values, establishing Swift-Rust conformance.
@@ -37,21 +43,25 @@ struct DistillationLensConformanceTests {
 
     // drawerContent starts with "[DIST|" — DIST header format per DISTILLATION_DESIGN.md §1.
     // Both Swift and Rust conformance legs assert this same prefix.
+    // Uses defaultExtractor explicitly to decouple from the production default.
     @Test("cluster_5: drawerContent starts with [DIST| marker")
     func drawerContentPrefix() {
-        let result = NeuronKit.distillCluster(input: cluster5())
+        let result = NeuronKit.distillCluster(
+            input: cluster5(), extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(result.succeeded)
         #expect(result.drawerContent.hasPrefix("[DIST|"))
     }
 
     // confidence is passed through from DistillationOutput unchanged.
     // Running the pipeline directly and through the lens must yield identical confidence.
+    // Uses defaultExtractor explicitly on both sides to isolate the lens projection contract.
     @Test("cluster_5: confidence equals pipeline output (pass-through)")
     func confidencePassThrough() {
         let input = cluster5()
         let pipelineOutput = DistillationPipeline.run(
             input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        let lensResult = NeuronKit.distillCluster(input: input)
+        let lensResult = NeuronKit.distillCluster(
+            input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(lensResult.confidence == pipelineOutput.confidence)
     }
 
@@ -59,9 +69,11 @@ struct DistillationLensConformanceTests {
     // cluster_5 produces confidence >= 0.7 with defaultExtractor, placing it in
     // the factoidOnly range (conf >= 0.7) per InjectionDepth thresholds.
     // Rust leg asserts InjectionDepth::FactoidOnly for the same fixture.
+    // Uses defaultExtractor explicitly to decouple from the production default.
     @Test("cluster_5: injectionDepth is .factoidOnly (conf >= 0.7)")
     func injectionDepthFactoidOnly() {
-        let result = NeuronKit.distillCluster(input: cluster5())
+        let result = NeuronKit.distillCluster(
+            input: cluster5(), extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(result.confidence >= 0.7)
         #expect(result.injectionDepth == .factoidOnly)
     }

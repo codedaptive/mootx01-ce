@@ -38,13 +38,17 @@ struct DistillationLensTests {
     }
 
     // Pass-through: LensResult.drawerContent == DistillationOutput.drawerContent.
-    // Run both ports against the same input and compare the drawer content field.
+    // Verifies the lens projection contract: same extractor, same result shape.
+    // Uses the capitalization-heuristic stub so the test does not depend on the
+    // HMM model artifact; the lens pass-through contract is extractor-independent.
     @Test("pass-through: drawerContent equals pipeline output")
     func drawerContentPassThrough() {
         let input = makeSuccessInput()
         let pipelineOutput = DistillationPipeline.run(
             input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        let lensResult = NeuronKit.distillCluster(input: input)
+        // Pass the stub explicitly so both sides use the same extractor.
+        let lensResult = NeuronKit.distillCluster(
+            input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(lensResult.drawerContent == pipelineOutput.drawerContent)
     }
 
@@ -54,7 +58,9 @@ struct DistillationLensTests {
         let input = makeSuccessInput()
         let pipelineOutput = DistillationPipeline.run(
             input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        let lensResult = NeuronKit.distillCluster(input: input)
+        // Pass the stub explicitly so both sides use the same extractor.
+        let lensResult = NeuronKit.distillCluster(
+            input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(lensResult.confidence == pipelineOutput.confidence)
     }
 
@@ -115,12 +121,16 @@ struct DistillationLensTests {
     }
 
     // Failure path: distillCluster succeeds/fails in lockstep with pipeline.
+    // Uses the stub extractor explicitly on both sides so the test verifies
+    // the lens projection contract independent of which extractor is the default.
     @Test("succeeded field matches pipeline")
     func succeededMatchesPipeline() {
         let input = makeFailInput()
         let pipelineOutput = DistillationPipeline.run(
             input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        let lensResult = NeuronKit.distillCluster(input: input)
+        // Pass the stub explicitly so both sides use the same extractor.
+        let lensResult = NeuronKit.distillCluster(
+            input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(lensResult.succeeded == pipelineOutput.succeeded)
         #expect(lensResult.failureReason == pipelineOutput.failureReason)
     }

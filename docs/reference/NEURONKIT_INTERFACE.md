@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.0.0
+version: 1.1.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-06-19
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -72,6 +72,10 @@ and Rust legs.
 - `Sources/NeuronKit/Lenses/PartialRecall.swift` — `partialRecall`,
   `FingerprintBlock`, `PartialMatch`
 - `Sources/NeuronKit/Lenses/MindOverlap.swift` — `dpSummary`, `summaryOverlap`
+- `Sources/NeuronKit/Lenses/Distillation.swift` — `distillCluster`,
+  `DistillationLensResult`, `InjectionDepth`
+- `Sources/NeuronKit/Lenses/HMMFeatureExtractor.swift` — `hmmFeatureExtractor`
+  (the production HMM-tagger-backed `DistillationPipeline.FeatureExtractor`)
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -87,6 +91,8 @@ and Rust legs.
 - `src/lattice_anchor.rs`, `src/hybrid_recall.rs`,
   `src/context_synthesizer.rs`, `src/scenario_profile.rs`,
   `src/tournament.rs`
+- `src/hmm_feature_extractor.rs` — `hmm_feature_extractor()`, `hmm_extract`,
+  `is_year` (the production HMM-tagger-backed `FeatureExtractor` fn pointer)
 - the reasoning lenses: `src/keystones.rs`, `src/constellation.rs`,
   `src/spreading_activation.rs`, `src/theme_weather.rs`,
   `src/latent_themes.rs`, `src/bias.rs`, `src/anticipation.rs`,
@@ -1357,9 +1363,110 @@ legs ship; the aria-mcp handler computes real Louvain/centrality.
 
 ---
 
+## § Distillation lens
+
+NeuronKit owns the production feature extractor and the thin lens projection
+over `DistillationPipeline`. All production callers reach distillation through
+these two entry points.
+
+### `hmmFeatureExtractor`
+
+The canonical production `DistillationPipeline.FeatureExtractor`, backed by
+the LatticeLib HMM/Viterbi tagger. Byte-identical Swift↔Rust (integer Viterbi,
+no float rounding; UAX#29 tokenizer on both sides).
+
+**Swift:**
+
+```swift
+// Static closure on NeuronKit — pass as the extractFeatures argument.
+NeuronKit.hmmFeatureExtractor: DistillationPipeline.FeatureExtractor
+// FeatureExtractor == @Sendable (String, DistillationFeatureType) -> [ExtractedFeature]
+```
+
+Extraction rules (same both ports):
+
+- `.entity` (ENT) — tokens tagged `.noun` by the HMM tagger (lowercased).
+- `.relation` (REL) — tokens tagged `.verb` by the HMM tagger (lowercased).
+- `.numerical` (NUM) — tokens where every byte is an ASCII decimal digit
+  (0x30–0x39); pure byte-class scan, no regex.
+- `.temporal` (TMP) — 4-digit year tokens (YYYY, all ASCII digits, length 4);
+  pure byte-class scan. ISO dates are split by the UAX#29 tokenizer into
+  year/month/day tokens; only the year component satisfies the 4-digit check.
+
+`docFrequency` is 0.0 on every emitted feature — the pipeline sets the real
+value from the incidence matrix (Stage 2). Callers must not read `docFrequency`
+before the pipeline has set it.
+
+**Rust:**
+
+```rust
+pub fn hmm_feature_extractor() -> FeatureExtractor
+// FeatureExtractor == fn(&str, DistillationFeatureType) -> Vec<ExtractedFeature>
+```
+
+### `distillCluster`
+
+Lens projection of `DistillationPipeline.run` into a `DistillationLensResult`.
+Uses `hmmFeatureExtractor` as the default extractor; accepts an explicit
+`extractFeatures` override for test injection.
+
+**Swift:**
+
+```swift
+extension NeuronKit {
+    public static func distillCluster(
+        input: DistillationInput,
+        extractFeatures: DistillationPipeline.FeatureExtractor = NeuronKit.hmmFeatureExtractor
+    ) -> DistillationLensResult
+}
+```
+
+**Rust** (in `distillation.rs`):
+
+```rust
+pub fn distill_cluster(
+    input: &DistillationInput,
+    extract_features: Option<FeatureExtractor>,
+) -> DistillationLensResult
+// None → hmm_feature_extractor() is used.
+```
+
+### `DistillationLensResult`
+
+| Field | Swift type | Rust type | Note |
+|---|---|---|---|
+| `drawerContent` | `String` | `String` | DIST header content for the factoid drawer |
+| `confidence` | `Float32` | `f32` | 0…1; pass-through from pipeline |
+| `uncertain` | `Bool` | `bool` | computed; `confidence < 0.7` |
+| `snr` | `Float32` | `f32` | structuralSignal / episodicNoise |
+| `deltaType` | `String?` | `Option<String>` | pipeline-supplied or nil |
+| `succeeded` | `Bool` | `bool` | `true` iff pipeline reached the factoid stage |
+| `failureReason` | `String?` | `Option<String>` | set when `succeeded == false` |
+| `injectionDepth` | `InjectionDepth` | `InjectionDepth` | see enum below |
+
+### `InjectionDepth`
+
+Three cases keyed on `confidence`:
+
+| Case | Swift | Rust | Threshold |
+|---|---|---|---|
+| Full factoid only | `.factoidOnly` | `FactoidOnly` | `confidence ≥ 0.7` |
+| Factoid + meta | `.factoidWithMeta` | `FactoidWithMeta` | `0.4 ≤ confidence < 0.7` |
+| Factoid + provenance | `.factoidWithProvenance` | `FactoidWithProvenance` | `confidence < 0.4` |
+
+---
+
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-19
+Added distillation lens surface: `NeuronKit.hmmFeatureExtractor` (production
+HMM-tagger-backed `FeatureExtractor`, both ports), `NeuronKit.distillCluster`
+(lens projection with HMM default), `DistillationLensResult`, `InjectionDepth`.
+Added §Distillation lens section. Updated §1 package layout for both ports.
+Added Rust `src/hmm_feature_extractor.rs` entry. Feat:
+feat/distillation-hmm-extractor.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -17,6 +17,8 @@ use substrate_ml::delta_feature_extractor::DeltaType;
 use substrate_ml::distillation_pipeline::{
     DistillationInput, DistillationOutput, DistillationPipeline, FeatureExtractor,
 };
+// Production HMM feature extractor — the cross-port byte-identical extraction path.
+use crate::hmm_feature_extractor::hmm_feature_extractor;
 
 /// NeuronKit-layer result shape. Carries the SubstrateML output plus
 /// InjectionDepth, which is computed here from confidence for recipe convenience.
@@ -74,20 +76,24 @@ impl InjectionDepth {
 
 /// Thin wrapper: calls DistillationPipeline::run() and projects the result.
 ///
-/// `extract_features` is the feature extraction seam. Pass `None` to use
-/// a no-op stub (returns no features for every memory — suitable for tests
-/// that verify the pass-through fields without exercising the pipeline math).
+/// `extract_features` is the feature extraction seam. Defaults to
+/// `hmm_feature_extractor()` — the production HMM-tagger-backed extractor
+/// that produces byte-identical ENT/REL/NUM/TMP features (non-Apple path,
+/// cross-port parity guaranteed with the Swift `NeuronKit.hmmFeatureExtractor`).
 ///
-/// Production callers supply the EideticLib HMM tagger; test callers supply
-/// a stub or None. Mirrors Swift NeuronKit.distillCluster in Distillation.swift.
+/// Pass `Some(DistillationPipeline::default_extractor)` explicitly for tests
+/// that exercise the capitalization-heuristic stub without the HMM path.
+/// Pass `Some(stub_extractor)` for pure pass-through field tests that need the
+/// no-op (empty-feature) path.
+///
+/// Mirrors Swift NeuronKit.distillCluster in Distillation.swift.
 pub fn distill_cluster(
     input: &DistillationInput,
     extract_features: Option<FeatureExtractor>,
 ) -> DistillationLensResult {
-    // Use the provided extractor or fall back to a no-op stub for testing.
-    // The no-op returns empty feature lists, which causes the pipeline to
-    // produce a failure output — suitable for pass-through field tests.
-    let extractor: FeatureExtractor = extract_features.unwrap_or(stub_extractor);
+    // Default to the production HMM extractor (one door for all callers that
+    // need semantic features). Test callers pass an explicit extractor.
+    let extractor: FeatureExtractor = extract_features.unwrap_or_else(hmm_feature_extractor);
     let output: DistillationOutput = DistillationPipeline::run(input, extractor);
 
     let injection_depth = InjectionDepth::from_confidence(output.confidence);
@@ -105,10 +111,9 @@ pub fn distill_cluster(
 }
 
 /// No-op feature extractor stub. Returns an empty feature list for every
-/// (memory, feature_type) pair. Used when no extractor is supplied to
-/// distill_cluster — allows pass-through field assertions without pulling
-/// in the full EideticLib dependency path.
-fn stub_extractor(
+/// (memory, feature_type) pair. Pass explicitly to distill_cluster for tests
+/// that verify pass-through fields without exercising the HMM extraction path.
+pub fn noop_extractor(
     _memory: &str,
     _feature_type: substrate_ml::typed_decay_weighting::DistillationFeatureType,
 ) -> Vec<substrate_ml::distillation_scorer::ExtractedFeature> {
@@ -130,13 +135,15 @@ mod tests {
     }
 
     // pass-through: drawer_content from output reaches lens result unchanged.
-    // With the stub extractor the pipeline fails (no features), so
-    // drawer_content will be empty and succeeded = false — we assert both.
+    // Uses the no-op extractor explicitly so the pipeline produces a failure
+    // output (no features → no factoid). Verifies the lens pass-through contract.
     #[test]
     fn stub_pass_through_fields() {
         let input = make_input(vec!["memory one", "memory two", "memory three"]);
-        let result = distill_cluster(&input, None);
-        // Stub extractor produces no features → pipeline fails.
+        // Explicit no-op: noop_extractor returns empty feature lists, so the
+        // pipeline fails. Pass Some(noop_extractor) to bypass the HMM default.
+        let result = distill_cluster(&input, Some(noop_extractor));
+        // No-op extractor produces no features → pipeline fails.
         assert!(!result.succeeded);
         assert_eq!(result.drawer_content, "");
         assert_eq!(result.confidence, 0.0);

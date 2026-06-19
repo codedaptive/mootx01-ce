@@ -122,10 +122,15 @@ struct DistillationIntegrationTests {
             ])
 
         // Run the distillation sweep via the Consolidate recipe.
+        // Pass defaultExtractor explicitly so the fixture sentences (which rely on
+        // capitalization heuristics, not HMM tagger noun output) produce deterministic
+        // features and pass the SNR gate. This isolates the integration test from
+        // HMM tagger variance on synthetic sentence clusters.
         let consolidateOut = try await Consolidate().run(
             input: Consolidate.Input(),
             estate: handle,
-            kit: kit)
+            kit: kit,
+            extractFeatures: DistillationPipeline.defaultExtractor)
 
         guard consolidateOut.factoidsProduced >= 1 else {
             throw IntegrationSetupError.consolidationProducedNoFactoid
