@@ -491,8 +491,19 @@ private extension GeniusLocusKit {
     // MARK: - TypedValue extraction helpers
 
     func stringValue(_ v: TypedValue?) -> String? {
-        guard case .text(let s) = v else { return nil }
-        return s
+        // Tolerate both forms a string-bearing column can take after a round
+        // trip through storage. A column declared `.uuid` (e.g. memory_clusters
+        // `id`) is written as `.text` but the SQLite backend's schema-hinted
+        // read converts it back to `.uuid` — so a `.text`-only guard silently
+        // returns nil for the cluster id on a SQLite estate, which made
+        // findOpenCluster report "no cluster" on a real match and every capture
+        // seed a fresh singleton (distillation never reached the ≥3 gate). The
+        // InMemory backend returns `.text` and hid this. Accept both.
+        switch v {
+        case .text(let s): return s
+        case .uuid(let u): return u.uuidString
+        default: return nil
+        }
     }
 
     func int64Value(_ v: TypedValue?) -> Int64? {

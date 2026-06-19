@@ -107,8 +107,21 @@ struct ServeCommand: AsyncParsableCommand {
                 _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             }
             handle = try await kit.open(storage: storage, owner: owner)
+            // `open` admits a BARE estate — it does not register a Corpus or
+            // VectorStore, so dense vector recall and distillation are dark. Wire
+            // the GLK semantic layer (Corpus + VectorStore + encode queue) here so
+            // a served estate is fully live. Idempotent on reopen; does not
+            // re-stamp the manifest (which is why we wire rather than `provision`).
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            // Rebuild the in-memory derived accelerators (matrix tier) from the
+            // durable audit log so co-occurrence/temporal matrix recall is live
+            // from the first query on a reopened estate — a fresh process starts
+            // with matrixTiers[handle] = nil, so without this matrix score columns
+            // read 0.0 until the next in-process dreaming cycle. Deterministic
+            // rebuild from the same log; the dreaming cycle refreshes it later.
+            try await kit.rebuildDerivedAccelerators(for: handle)
         } catch {
-            Logging.stderr.log("mootx01 serve fatal: estate open failed: \(error)")
+            Logging.stderr.log("mootx01 serve fatal: estate open/wiring failed: \(error)")
             throw ExitCode.failure
         }
 

@@ -177,43 +177,13 @@ public extension GeniusLocusKit {
         // Step 3: Wire sub-stores based on kind.
         let backingStorage = corpusStorage ?? storage
         do {
-            switch params.kind {
-            case .glk:
-                // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
-                // Both are created on backingStorage. The Corpus.init call applies both
-                // BundleStore and VectorStore schema declarations to backingStorage.
-                let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
-                registerCorpus(corpus, for: handle)
-                // Wire a VectorStore pointing at the same backing storage so GLK's
-                // scored-recall vector lane can operate independently of Corpus's
-                // internal vector store.
-                let vectorStore = VectorStore(storage: backingStorage)
-                registerVectorStore(vectorStore, for: handle)
-                // Dual-Path Intake D-B: mount the estate's dedicated encode queue
-                // and start its drain worker alongside the corpus/vector wiring.
-                // The regular capture path enqueues here; the worker ingests into
-                // the Corpus above, lighting the semantic recall lanes.
-                try await mountEncodeQueue(for: handle)
-                Self.lifecycleLog.info(
-                    "provisioned GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue wired)"
-                )
-
-            case .corpusOnly:
-                // LocusKit core + Corpus. No standalone VectorStore registration.
-                let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
-                registerCorpus(corpus, for: handle)
-                // D-B: a CorpusOnly estate also feeds its Corpus from capture.
-                try await mountEncodeQueue(for: handle)
-                Self.lifecycleLog.info(
-                    "provisioned CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue wired)"
-                )
-
-            case .locusOnly:
-                // LocusKit only. No sub-store wiring needed.
-                Self.lifecycleLog.info(
-                    "provisioned LocusOnly estate \(handle.estateUUID, privacy: .public) (LocusKit only)"
-                )
-            }
+            // Wire via the shared seam (also called by the serve entry points so a
+            // bare-opened served estate gets the same Corpus + VectorStore + encode
+            // queue — the semantic recall + distillation lanes — without re-stamping
+            // the manifest).
+            try await wireSubstores(
+                for: handle, kind: params.kind,
+                backingStorage: backingStorage, embeddingModels: embeddingModels)
         } catch {
             // Sub-store wiring failed. The estate is open but partially wired.
             // Close it to avoid a half-wired zombie in the registry, then rethrow.
@@ -235,6 +205,110 @@ public extension GeniusLocusKit {
         ))
 
         return handle
+    }
+
+    // MARK: - wireSubstores(for:kind:backingStorage:embeddingModels:)
+
+    /// Wire an open estate's semantic sub-stores (Corpus + VectorStore + encode
+    /// queue) according to its composition kind.
+    ///
+    /// This is the single seam that lights an estate's semantic recall and
+    /// distillation lanes. `provision` calls it after stamping the manifest and
+    /// opening the estate; the serve entry points (`mootx01 serve`, `aria-mcp`)
+    /// call it after a bare `open(storage:owner:)` so a served estate gets the
+    /// same wiring without re-stamping the manifest. `open` alone admits a BARE
+    /// estate — LocusKit BM25/structural recall works, but `corpusKits` and
+    /// `vectorStores` stay empty, so dense/vector recall is dark and the
+    /// distillation cluster lane is inert. This call closes that gap.
+    ///
+    /// Idempotent: `registerCorpus`/`registerVectorStore` replace any existing
+    /// entry and `mountEncodeQueue` is a no-op when already mounted, so calling
+    /// it again on a reopened estate is safe.
+    ///
+    /// - Parameters:
+    ///   - handle: The open estate handle to wire. Must already be in the registry.
+    ///   - kind: The composition profile that decides which sub-stores to wire.
+    ///   - backingStorage: The storage the Corpus and VectorStore are built on —
+    ///     the estate's own storage for a served estate.
+    ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
+    ///     canonical 1.0 five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`).
+    /// - Throws: A storage/schema error if a sub-store cannot be opened.
+    func wireSubstores(
+        for handle: EstateHandle,
+        kind: EstateKind,
+        backingStorage: any Storage,
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
+    ) async throws {
+        switch kind {
+        case .glk:
+            // Apply the GLK composite schema so the GLK-only `memory_clusters`
+            // table (DG1, distillation staging) exists on backingStorage. The
+            // plain `open(storage:owner:)` path applies only the LocusKit /
+            // VectorKit / CorpusKit component schemas — it never registers the
+            // composite — so without this the distillation cluster lane has no
+            // table to write to and `consolidate` fails with "no such table:
+            // memory_clusters". Idempotent: CREATE TABLE IF NOT EXISTS for the
+            // already-present component tables, plus a migration-version record
+            // for "GeniusLocusKit". This is the same composite open the hydrate
+            // launch path performs in open(inMemory:hydrateFrom:).
+            try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
+            // Both are created on backingStorage. The Corpus.init call applies both
+            // BundleStore and VectorStore schema declarations to backingStorage.
+            let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
+            registerCorpus(corpus, for: handle)
+            // Wire a VectorStore pointing at the same backing storage so GLK's
+            // scored-recall vector lane can operate independently of Corpus's
+            // internal vector store.
+            let vectorStore = VectorStore(storage: backingStorage)
+            registerVectorStore(vectorStore, for: handle)
+            // Dual-Path Intake D-B: mount the estate's dedicated encode queue
+            // and start its drain worker alongside the corpus/vector wiring.
+            // The regular capture path enqueues here; the worker ingests into
+            // the Corpus above, lighting the semantic recall lanes.
+            try await mountEncodeQueue(for: handle)
+            Self.lifecycleLog.info(
+                "wired GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue)"
+            )
+
+        case .corpusOnly:
+            // LocusKit core + Corpus. No standalone VectorStore registration.
+            let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
+            registerCorpus(corpus, for: handle)
+            // D-B: a CorpusOnly estate also feeds its Corpus from capture.
+            try await mountEncodeQueue(for: handle)
+            Self.lifecycleLog.info(
+                "wired CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue)"
+            )
+
+        case .locusOnly:
+            // LocusKit only. No sub-store wiring needed.
+            Self.lifecycleLog.info(
+                "wired LocusOnly estate \(handle.estateUUID, privacy: .public) (LocusKit only)"
+            )
+        }
+    }
+
+    /// Convenience wrapper that wires a served estate as a full GLK composition.
+    ///
+    /// The serve entry points open a durable SQLite estate and want the complete
+    /// semantic layer (Corpus + VectorStore + encode queue) without needing to
+    /// reference `EstateKind`. Equivalent to `wireSubstores(for:kind: .glk …)`.
+    ///
+    /// - Parameters:
+    ///   - handle: The open estate handle to wire.
+    ///   - backingStorage: The estate's storage (Corpus + VectorStore are built on it).
+    ///   - embeddingModels: The recall ensemble. Defaults to the canonical 1.0
+    ///     five-signal ensemble.
+    /// - Throws: A storage/schema error if a sub-store cannot be opened.
+    func wireGLKSubstores(
+        for handle: EstateHandle,
+        backingStorage: any Storage,
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
+    ) async throws {
+        try await wireSubstores(
+            for: handle, kind: .glk,
+            backingStorage: backingStorage, embeddingModels: embeddingModels)
     }
 
     // MARK: - mountState(for:)

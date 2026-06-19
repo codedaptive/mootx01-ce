@@ -238,9 +238,11 @@ struct AriaMCPMain {
         // (estate name, kind-prefixed framework profile, zoom window) and is the
         // create-from-scratch surface. Re-running aria-mcp against an EXISTING
         // on-disk estate must remain idempotent — today's `Estate.create + open`
-        // is idempotent and we must not regress that. Instead we mirror exactly
-        // what `provision`'s `.glk` branch does AFTER open: build a Corpus and a
-        // standalone VectorStore on the same backing storage and register both.
+        // is idempotent and we must not regress that. Instead we call the shared
+        // `wireGLKSubstores` seam — the single canonical post-open wiring path that
+        // `provision` and `mootx01 serve` also use: build a Corpus and a standalone
+        // VectorStore on the same backing storage, register both, and mount the
+        // estate's encode queue.
         //
         // Backend-specific notes:
         // - SQLite: Corpus + VectorStore share the same storage instance as the
@@ -262,10 +264,9 @@ struct AriaMCPMain {
         // is dropped, no schema is rewritten. In-memory is not persistent so
         // idempotency across restarts is not applicable.
         //
-        // The encode queue is NOT mounted here: the mode-aware `capture` verb
-        // (EncodeIntake) mounts it on demand on the first regular write, and the
-        // gauntlet's impatient writes ingest into the Corpus inline. Registering
-        // the Corpus + VectorStore is the only wiring this entry point owes.
+        // The encode queue is mounted eagerly by `wireGLKSubstores` (idempotent
+        // with the mode-aware `capture` verb's lazy mount). The gauntlet's
+        // impatient writes still ingest into the Corpus inline.
         //
         // Embedding ensemble: `CorpusEnsemble.defaultEnsemble()` — the canonical
         // 1.0 five-signal recall default (RI / PPMI / LSA / NMF / FDC). The
@@ -276,10 +277,9 @@ struct AriaMCPMain {
         // capture on every backend.
         if wireSemanticRecall {
             do {
-                let corpus = try await Corpus(storage: storage, models: CorpusEnsemble.defaultEnsemble())
-                await kit.registerCorpus(corpus, for: handle)
-                let vectorStore = VectorStore(storage: storage)
-                await kit.registerVectorStore(vectorStore, for: handle)
+                // Shared seam: Corpus + VectorStore + encode queue, the same wiring
+                // `provision` and `mootx01 serve` perform. Idempotent on reopen.
+                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
                 // Rebuild + register the matrix tier from the persisted audit log
                 // so matrix-driven recall (co-occurrence/temporal scoring — the
                 // matrixAware scoring and the matrix/lattice/weighted-all

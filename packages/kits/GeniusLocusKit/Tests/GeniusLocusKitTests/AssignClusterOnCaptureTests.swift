@@ -63,10 +63,11 @@ private func provisionGLKWithClusterSchema(
         embeddingModels: [.deterministic]
     )
 
-    // Step 2: Apply the GLK composite schema so memory_clusters exists.
-    // provision does not apply GeniusLocusKitSchema (only LocusKit and
-    // Corpus/VectorStore component schemas). The composite schema open is
-    // idempotent against already-migrated tables.
+    // Step 2: Ensure the GLK composite schema is applied so memory_clusters
+    // exists. provision now applies it via the shared wireSubstores seam (the
+    // .glk branch opens GeniusLocusKitSchema.estateSchemaDeclaration), so this
+    // is a redundant, idempotent re-open kept to make the test's schema
+    // dependency explicit and self-contained.
     try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
 
     return (kit, handle, storage)
