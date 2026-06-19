@@ -132,13 +132,19 @@ struct RecallShapePresetTests {
         #expect(try #require(RecallShape.preset("preference")).weight(for: "preference") > 1.0)
     }
 
-    @Test("anti_redundant inverts the FDC lane without suppressing it")
+    @Test("anti_redundant inverts FDC and suppresses BM25/Hamming lexical duplicates")
     func antiRedundant() throws {
         let s = try #require(RecallShape.preset("anti_redundant"))
+        // FDC lane is anti-similar (farthest-neighbour direction).
         #expect(s.isAntiSimilar(RecallShape.DenseSignal.fdc))
         #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
-        // Distinct from a negative weight — the lane stays at the neutral default.
+        // FDC lane weight stays at 1.0 — the anti-similar flag flips direction, not magnitude.
         #expect(s.weight(for: RecallShape.DenseSignal.fdc) == 1.0)
+        // BM25 and Hamming are suppressed so lexical near-duplicates cannot dominate.
+        #expect(s.weight(for: "bm25") < 0)
+        #expect(s.weight(for: "hamming") < 0)
+        // Frontier narrowed to the floor so the engine does not haul a wide pool of duplicates.
+        #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
     }
 
     @Test("leave-one-out is reachable by zeroing one dense lane")

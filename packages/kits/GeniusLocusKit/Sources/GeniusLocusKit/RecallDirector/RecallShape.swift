@@ -386,10 +386,17 @@ public struct RecallShape: Sendable, Codable, Equatable {
 
         // Diversity: invert the FDC dense lane's objective to FARTHEST so it
         // surfaces the most DISSIMILAR sources, pulling the fused set away from
-        // near-duplicates of the query. The anti-redundancy shape (distinct from
-        // a negative weight — it changes WHICH candidates the store returns).
+        // near-duplicates of the query. BM25 and Hamming (Hamming vector lane) are
+        // suppressed (negative weight) so lexical near-duplicates cannot rank at
+        // the top via keyword or SimHash similarity alone — only FDC farthest and
+        // the remaining lanes contribute. The frontier is narrowed to frontierKFloor
+        // so the re-rank pool is tight and focused rather than a wide list where
+        // duplicates can still cluster.
         case "anti_redundant":
-            return RecallShape(antiSimilarLanes: [DenseSignal.fdc])
+            return RecallShape(
+                laneWeights: ["bm25": -0.5, "hamming": -0.5],
+                antiSimilarLanes: [DenseSignal.fdc],
+                frontierK: frontierKFloor)
 
         default:
             return nil
@@ -442,7 +449,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "preference":
             return "Preference-led — amplify the learned-preference column (matrixAware scoring only)."
         case "anti_redundant":
-            return "Diversity — invert the FDC dense lane to farthest (anti-similarity) so the set avoids near-duplicates."
+            return "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64."
         default:
             return ""
         }
