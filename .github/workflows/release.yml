@@ -36,12 +36,60 @@ jobs:
           swift build -c release --package-path apps/mootx01 --product mootx01
           swift build -c release --package-path apps/moot-mgr --product moot-mgr
 
+      - name: Import Developer ID Certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$CERT_P12_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign binaries
+        run: |
+          IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          MOOT_BIN="$(find apps/mootx01/.build -name mootx01 -path '*/release/mootx01' | head -1)"
+          MGR_BIN="$(find apps/moot-mgr/.build -name moot-mgr -path '*/release/moot-mgr' | head -1)"
+          codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
+          codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
+          codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
+          codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
+          echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
+          echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
+
+      - name: Notarize binaries
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p ~/.private_keys
+          echo "$APPLE_API_KEY_P8" | base64 --decode > \
+            ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          zip -j "$RUNNER_TEMP/binaries.zip" "$MOOT_BIN" "$MGR_BIN"
+          xcrun notarytool submit "$RUNNER_TEMP/binaries.zip" \
+            --key ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_KEY_ISSUER }}" \
+            --wait
+          rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+
       - name: Package binaries
         run: |
           VERSION="${{ github.ref_name }}"
           ASSET="mootx01-${VERSION}-macos-arm64.tar.gz"
-          cp apps/mootx01/.build/release/mootx01 mootx01
-          cp apps/moot-mgr/.build/release/moot-mgr moot-mgr
+          cp "$MOOT_BIN" mootx01
+          cp "$MGR_BIN" moot-mgr
           tar -czf "${ASSET}" mootx01 moot-mgr
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
@@ -73,12 +121,60 @@ jobs:
           swift build -c release --package-path apps/mootx01 --product mootx01 --arch x86_64
           swift build -c release --package-path apps/moot-mgr --product moot-mgr --arch x86_64
 
+      - name: Import Developer ID Certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$CERT_P12_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign binaries
+        run: |
+          IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          MOOT_BIN="$(find apps/mootx01/.build -name mootx01 -path '*/release/mootx01' | head -1)"
+          MGR_BIN="$(find apps/moot-mgr/.build -name moot-mgr -path '*/release/moot-mgr' | head -1)"
+          codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
+          codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
+          codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
+          codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
+          echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
+          echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
+
+      - name: Notarize binaries
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p ~/.private_keys
+          echo "$APPLE_API_KEY_P8" | base64 --decode > \
+            ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          zip -j "$RUNNER_TEMP/binaries.zip" "$MOOT_BIN" "$MGR_BIN"
+          xcrun notarytool submit "$RUNNER_TEMP/binaries.zip" \
+            --key ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_KEY_ISSUER }}" \
+            --wait
+          rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+
       - name: Package binaries
         run: |
           VERSION="${{ github.ref_name }}"
           ASSET="mootx01-${VERSION}-macos-x86_64.tar.gz"
-          cp apps/mootx01/.build/release/mootx01 mootx01
-          cp apps/moot-mgr/.build/release/moot-mgr moot-mgr
+          cp "$MOOT_BIN" mootx01
+          cp "$MGR_BIN" moot-mgr
           tar -czf "${ASSET}" mootx01 moot-mgr
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
