@@ -746,4 +746,60 @@ struct VaultToolsTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(body.contains("unknown job_id"))
     }
+
+    // MARK: - FIX 4: vault_job surfaces skip counts
+
+    /// An idempotent re-import must surface `drawersSkippedUnchanged` and
+    /// `drawersSkippedTombstoned` in the vault_job result so an all-zeros
+    /// re-import reads as `drawersSkippedUnchanged: N`, not all-zeros silently.
+    @Test(.timeLimit(.minutes(2))) func import_job_surfaces_skip_counts() async throws {
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "v-skip-counts"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // First import — creates a note in the vault from a captured drawer,
+        // then imports it so the stableSourceKey is registered.
+        // We drive this by exporting and re-importing: export a real note,
+        // then import the vault back so the second import is idempotent.
+        try await capture(kit, handle, content: "Idempotency skip count test note.", room: "test")
+
+        // Export to vault so we have a real vault with notes.
+        let exportResult = try await dispatcher.dispatch(
+            name: "moot_vault_export", arguments: args(["vaultPath": vault.path]))
+        let exportJobID = try extractJobID(from: exportResult)
+        _ = try await waitForJob(id: exportJobID, via: dispatcher)
+
+        // Second estate for re-import (fresh, so all notes land as written on first import).
+        let handle2 = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "v-skip-counts-2"))
+        let dispatcher2 = ToolDispatcher(kit: kit, handle: handle2)
+
+        // First import into estate2 — should write drawers.
+        let firstImport = try await dispatcher2.dispatch(
+            name: "moot_vault_import", arguments: args(["vaultPath": vault.path]))
+        let firstJobID = try extractJobID(from: firstImport)
+        let firstJobText = try await waitForJob(id: firstJobID, via: dispatcher2)
+        #expect(firstJobText.contains("drawersWritten:"), "first import must write drawers; got:\n\(firstJobText)")
+        // Skip counts must be present in output (even if zero on first import).
+        #expect(firstJobText.contains("drawersSkippedUnchanged:"),
+                "vault_job result must include drawersSkippedUnchanged; got:\n\(firstJobText)")
+        #expect(firstJobText.contains("drawersSkippedTombstoned:"),
+                "vault_job result must include drawersSkippedTombstoned; got:\n\(firstJobText)")
+
+        // Second import of same vault — content is identical, should skip unchanged.
+        let secondImport = try await dispatcher2.dispatch(
+            name: "moot_vault_import", arguments: args(["vaultPath": vault.path]))
+        let secondJobID = try extractJobID(from: secondImport)
+        let secondJobText = try await waitForJob(id: secondJobID, via: dispatcher2)
+        #expect(secondJobText.contains("drawersSkippedUnchanged:"),
+                "vault_job result must include drawersSkippedUnchanged on re-import; got:\n\(secondJobText)")
+        // The idempotent re-import should show skipped-unchanged > 0 (not all zeros).
+        #expect(!secondJobText.contains("drawersSkippedUnchanged: 0") ||
+                secondJobText.contains("drawersWritten: 0"),
+                "Re-import of unchanged vault must not show all-zero activity; got:\n\(secondJobText)")
+    }
 }

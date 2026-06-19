@@ -207,4 +207,65 @@ struct EstateStatusSyncTests {
         #expect(!body.contains("drawers:"),
                 "estate_status must not use deprecated 'drawers:' label; got:\n\(body)")
     }
+
+    // MARK: - FIX 2: believed-only active count
+
+    /// A rejected memory must NOT be counted as "active" in estate_status.
+    /// Before this fix, `allDrawers().filter { tombstonedAt == nil }` included
+    /// rejected drawers (no tombstone, but not cluster-A believed), causing the
+    /// active count to exceed `memory_search`'s belief-filtered count.
+    @Test func rejectedMemoryNotCountedAsActive() async throws {
+        let dispatcher = try await makeDispatcher(ownerID: "believed-count-test")
+
+        // File a memory and immediately reject it (moves out of cluster A).
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("believed-count test fixture"),
+                "location": .string("test/room")
+            ])
+        )
+        let fileText = text(of: fileResult)
+        // Extract drawer id from "filed memory <id>" prefix.
+        let drawerID = fileText
+            .components(separatedBy: "\n").first?
+            .replacingOccurrences(of: "filed memory ", with: "") ?? ""
+        #expect(!drawerID.isEmpty, "filed memory must return a drawer id; got:\n\(fileText)")
+
+        // Move to Contested first (Active → Contested is legal).
+        // Active → Reject is NOT legal per the gate automaton; contest must come first.
+        let contestResult = try await dispatcher.dispatch(
+            name: "moot_update_memory",
+            arguments: .object([
+                "id": .string(drawerID),
+                "mutation": .string("contest")
+            ])
+        )
+        let contestedIsSuccess = contestResult.objectValue?["isError"]?.boolValue == false
+        #expect(contestedIsSuccess, "contest must succeed on active row; got: \(contestResult)")
+
+        // Reject the memory (Contested → Rejected is legal) — moves it out of cluster A into cluster C.
+        let rejectResult = try await dispatcher.dispatch(
+            name: "moot_update_memory",
+            arguments: .object([
+                "id": .string(drawerID),
+                "mutation": .string("reject")
+            ])
+        )
+        let rejectedIsSuccess = rejectResult.objectValue?["isError"]?.boolValue == false
+        #expect(rejectedIsSuccess, "reject must succeed on contested row; got: \(rejectResult)")
+
+        // estate_status active count must be 0 (rejected drawer is not believed).
+        let statusResult = try await dispatcher.dispatch(
+            name: "moot_estate_status",
+            arguments: .object([:])
+        )
+        let body = text(of: statusResult)
+        // "memories: 0 active" — the rejected drawer must NOT be in the active count.
+        #expect(body.contains("memories: 0 active"),
+                "Rejected drawer must not count as active; got:\n\(body)")
+        // The total count must still be 1 (the row exists, just not believed).
+        #expect(body.contains("(1 total)"),
+                "Total non-erased count must be 1; got:\n\(body)")
+    }
 }

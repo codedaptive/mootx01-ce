@@ -114,6 +114,9 @@ impl VaultJobKind {
 
 /// Outcome counts from a completed vault import.
 /// Field names mirror Swift `ImportResult` from `VaultJobRegistry.swift`.
+/// The two skip-count fields were added by the vault idempotency + cluster-C
+/// fixes and are surfaced in `moot_vault_job` results so an idempotent
+/// re-import is observable. Mirrors Swift `ImportResult` exactly.
 #[derive(Debug, Clone)]
 pub struct ImportJobResult {
     pub drawers_written: i64,
@@ -122,6 +125,10 @@ pub struct ImportJobResult {
     pub tunnels_created: i64,
     pub fdc_classified: i64,
     pub fdc_unclassified: i64,
+    /// Drawers whose content was byte-identical and were skipped (idempotent re-import).
+    pub drawers_skipped_unchanged: i64,
+    /// Drawers whose lineage was tombstoned and were therefore skipped.
+    pub drawers_skipped_tombstoned: i64,
 }
 
 /// Outcome of a completed vault export.
@@ -465,17 +472,21 @@ fn run_import(
             tunnels_created: report.tunnels_created as i64,
             fdc_classified: report.fdc_classified as i64,
             fdc_unclassified: report.fdc_unclassified as i64,
+            drawers_skipped_unchanged: report.drawers_skipped_unchanged as i64,
+            drawers_skipped_tombstoned: report.drawers_skipped_tombstoned as i64,
         }),
     });
 
     Ok(text_result(&format!(
-        "vault_import: {} written, {} updated, {} skipped\ntunnels: {}\nfdc: {} classified, {} unclassified\njob_id: {}",
+        "vault_import: {} written, {} updated, {} skipped\ntunnels: {}\nfdc: {} classified, {} unclassified\nskippedUnchanged: {}\nskippedTombstoned: {}\njob_id: {}",
         report.drawers_written,
         report.drawers_updated,
         report.items_skipped,
         report.tunnels_created,
         report.fdc_classified,
         report.fdc_unclassified,
+        report.drawers_skipped_unchanged,
+        report.drawers_skipped_tombstoned,
         job_id,
     )))
 }
@@ -634,6 +645,8 @@ fn run_reconcile(
         lines.push(format!("  tunnelsCreated: {}", report.tunnels_created));
         lines.push(format!("  fdcClassified: {}", report.fdc_classified));
         lines.push(format!("  fdcUnclassified: {}", report.fdc_unclassified));
+        lines.push(format!("  drawersSkippedUnchanged: {}", report.drawers_skipped_unchanged));
+        lines.push(format!("  drawersSkippedTombstoned: {}", report.drawers_skipped_tombstoned));
     } else {
         // Dry-run mode: report candidates only, write nothing.
         let mut sorted_candidates: Vec<&String> = candidate_paths.iter().collect();
@@ -712,7 +725,7 @@ fn run_job(job_id: &str, ledger: &VaultJobLedger) -> serde_json::Value {
 
     match &record.result {
         VaultJobResult::Imported(r) => text_result(&format!(
-            "job_id: {}\nkind: {}\nvault: {}\nstatus: complete\nelapsed_s: {}\ndrawersWritten: {}\ndrawersUpdated: {}\nitemsSkipped: {}\ntunnelsCreated: {}\nfdcClassified: {}\nfdcUnclassified: {}",
+            "job_id: {}\nkind: {}\nvault: {}\nstatus: complete\nelapsed_s: {}\ndrawersWritten: {}\ndrawersUpdated: {}\nitemsSkipped: {}\ntunnelsCreated: {}\nfdcClassified: {}\nfdcUnclassified: {}\ndrawersSkippedUnchanged: {}\ndrawersSkippedTombstoned: {}",
             record.job_id,
             record.kind.as_str(),
             record.vault_path,
@@ -723,6 +736,8 @@ fn run_job(job_id: &str, ledger: &VaultJobLedger) -> serde_json::Value {
             r.tunnels_created,
             r.fdc_classified,
             r.fdc_unclassified,
+            r.drawers_skipped_unchanged,
+            r.drawers_skipped_tombstoned,
         )),
         VaultJobResult::Exported(r) => text_result(&format!(
             "job_id: {}\nkind: {}\nvault: {}\nstatus: complete\nelapsed_s: {}\nnoteCount: {}\nexportedAt: {}",

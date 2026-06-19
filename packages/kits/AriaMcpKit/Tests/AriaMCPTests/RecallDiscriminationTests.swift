@@ -114,6 +114,39 @@ struct RecallDiscriminationTests {
         #expect(RecallDiscrimination.classify([1.0, 0.9, 0.4]) == .medium)
     }
 
+    // MARK: - Dense-lane-dark cap (FIX 1)
+
+    @Test func highDiscriminationIsNotClaimedWhenDenseLaneIsDark() {
+        // A "high" discrimination score computed from scores alone must be
+        // capped to "medium" when the dense lane is dark — the ranking is
+        // lexical-only and cannot be trusted as semantically ranked.
+        // Scores give topGap ≥ HIGH_MARGIN (0.25), so classify() returns .high.
+        // But with denseLaneDark=true the resultLine must NOT contain "high".
+        let level = RecallDiscrimination.classify([1.0, 0.5, 0.3]) // topGap = 0.5 → .high
+        #expect(level == .high)  // confirm the raw level is high
+        let line = RecallDiscrimination.resultLine(for: level, denseLaneDark: true)
+        #expect(!line.contains("discrimination: high"), "dark lane must cap high to medium")
+        #expect(line.contains("discrimination: medium"), "dark lane cap produces medium signal")
+        #expect(line.contains("semantic lane dark"), "caveat must name the dark lane")
+        #expect(line.contains("moot_recall_precise"), "caveat must direct to precise recall")
+    }
+
+    @Test func denseLaneDarkFalseDoesNotCapHigh() {
+        // When the dense lane is active the high signal is unchanged.
+        let level = RecallDiscrimination.classify([1.0, 0.5, 0.3])
+        let line = RecallDiscrimination.resultLine(for: level, denseLaneDark: false)
+        #expect(line == "discrimination: high — clear top result.")
+    }
+
+    @Test func denseLaneDarkDoesNotCapMediumOrLow() {
+        // The cap only applies to .high — medium and low are unchanged.
+        let medium = RecallDiscrimination.resultLine(for: .medium, denseLaneDark: true)
+        #expect(medium == "discrimination: medium — partial separation.")
+        let low = RecallDiscrimination.resultLine(for: .low, denseLaneDark: true)
+        #expect(low.contains("discrimination: low"))
+        #expect(!low.contains("semantic lane dark"))
+    }
+
     // MARK: - Surface integration: low-discrimination result carries the signal
 
     /// An estate with near-identical memories produces a moot_memory_search

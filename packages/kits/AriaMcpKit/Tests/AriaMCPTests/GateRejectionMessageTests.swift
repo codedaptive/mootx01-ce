@@ -186,4 +186,46 @@ struct GateRejectionMessageTests {
             "non-gate error must not produce gate-rejection phrasing; got: \(msg)"
         )
     }
+
+    // MARK: - FIX 3: B-6 residual — internal enum-case prefix stripping
+
+    /// capture with an empty room must surface a plain English error, not a
+    /// "InvalidContent: room must not be empty" internal-variant prefix.
+    @Test func captureWithEmptyRoomStripsInvalidContentPrefix() async throws {
+        let dispatcher = try await makeDispatcher()
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("test content"),
+                "location": .string(""),  // empty location triggers InvalidContent from substrate
+            ])
+        )
+        let isError = result.objectValue?["isError"]?.boolValue == true
+        // If the error fires, the message must not contain the internal prefix.
+        if isError {
+            let msg = result.objectValue?["content"]?
+                .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+            #expect(!msg.contains("InvalidContent:"),
+                    "User-facing error must not expose 'InvalidContent:' prefix; got: \(msg)")
+            #expect(!msg.contains("BasisViolation:"),
+                    "User-facing error must not expose 'BasisViolation:' prefix; got: \(msg)")
+        }
+        // Whether or not it errors, the describe path must not expose internal types.
+    }
+
+    /// Unit test for the stripEnumPrefix helper: verifies the stripping logic
+    /// directly without going through the full dispatch path.
+    @Test func stripEnumPrefixRemovesTypeNamePrefix() {
+        // Enum-like prefix (alphanumeric, no spaces) → stripped.
+        let stripped = ToolDispatcher.stripEnumPrefixForTest("InvalidContent: room must not be empty")
+        #expect(stripped == "room must not be empty")
+
+        // Sentence (contains space before colon) → not stripped.
+        let unchanged = ToolDispatcher.stripEnumPrefixForTest("the memory's state does not allow this: check it")
+        #expect(unchanged == "the memory's state does not allow this: check it")
+
+        // No colon → unchanged.
+        let noColon = ToolDispatcher.stripEnumPrefixForTest("plain error message")
+        #expect(noColon == "plain error message")
+    }
 }

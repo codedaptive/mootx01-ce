@@ -260,3 +260,106 @@ fn format_sync_state_token_vocabulary_parity() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// FIX 2: believed-only active count — estate_status "memories: N active"
+// must count only cluster-A (believed) drawers, not rejected ones.
+// Parity with Swift EstateStatusSyncTests.rejectedMemoryNotCountedAsActive.
+// ---------------------------------------------------------------------------
+
+macro_rules! args {
+    () => { BTreeMap::new() };
+    ( $( $k:expr => $v:expr ),+ $(,)? ) => {{
+        let mut m = BTreeMap::new();
+        $( m.insert($k.to_string(), JsonValue::from(serde_json::json!($v))); )+
+        m
+    }};
+}
+
+/// A rejected drawer must NOT appear in the "memories: N active" count in
+/// estate_status. Before this fix, `recall()` active count included rejected
+/// drawers because the filtering was `tombstoned_at.is_none()` which is true
+/// for rejected rows (only tombstoned rows have a tombstone timestamp).
+///
+/// The fix changes the active count to use `recall()` (which applies the
+/// cluster-A filter in LocusKit/GeniusLocusKit) so only cluster-A believed
+/// drawers count. Rejected drawers are cluster C and must not appear.
+///
+/// The "(N total)" count still includes the rejected drawer (cluster C,
+/// not tombstoned), so total = 1 and active = 0.
+#[test]
+fn rejected_memory_not_counted_as_active() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // File a memory — lands in cluster A (active state).
+    let file_result = dispatch_tool(
+        "moot_file_memory",
+        &args!["content" => "believed-count test fixture", "location" => "test/room"],
+        &registry,
+        &ledger,
+    )
+    .expect("moot_file_memory must not throw");
+    assert!(
+        file_result["isError"] == serde_json::json!(false),
+        "file_memory must succeed; got: {file_result:?}"
+    );
+
+    // Extract drawer id from the first line "filed memory <id>".
+    let file_text = content_text(&file_result);
+    let drawer_id = file_text
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("filed memory "))
+        .expect("file_memory response must start with 'filed memory <id>'")
+        .trim()
+        .to_owned();
+    assert!(!drawer_id.is_empty(), "drawer id must not be empty");
+
+    // Move to Contested (Active → Contested is legal).
+    // Active → Reject is NOT legal per the gate automaton; contest must come first.
+    let contest = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => drawer_id.as_str(), "mutation" => "contest"],
+        &registry,
+        &ledger,
+    )
+    .expect("contest dispatch must not throw");
+    assert!(
+        contest["isError"] == serde_json::json!(false),
+        "contest must succeed on active row; got: {contest:?}"
+    );
+
+    // Reject the memory (Contested → Rejected is legal) — moves it to cluster C.
+    let reject = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => drawer_id.as_str(), "mutation" => "reject"],
+        &registry,
+        &ledger,
+    )
+    .expect("reject dispatch must not throw");
+    assert!(
+        reject["isError"] == serde_json::json!(false),
+        "reject must succeed on contested row; got: {reject:?}"
+    );
+
+    // estate_status active count must be 0 (rejected drawer is not believed).
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &empty_args(),
+        &registry,
+        &ledger,
+    )
+    .expect("estate_status must not throw");
+    let body = content_text(&status);
+
+    assert!(
+        body.contains("memories: 0 active"),
+        "Rejected drawer must not count as active; got:\n{body}"
+    );
+    // The total count must still be 1 (the row exists but is not believed).
+    assert!(
+        body.contains("(1 total)"),
+        "Total non-erased count must be 1; got:\n{body}"
+    );
+}

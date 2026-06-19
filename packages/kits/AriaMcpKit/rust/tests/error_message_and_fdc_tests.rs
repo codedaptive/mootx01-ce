@@ -183,6 +183,52 @@ fn file_memory_with_classifiable_content_sets_real_udc_code() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// FIX 3 (B-6 residual): strip_enum_prefix — internal enum-case prefixes like
+// "InvalidContent: " must not appear in user-facing error messages. Parity
+// with Swift GateRejectionMessageTests.captureWithEmptyRoomStripsInvalidContentPrefix
+// and GateRejectionMessageTests.stripEnumPrefixRemovesTypeNamePrefix.
+// ---------------------------------------------------------------------------
+
+/// An empty location error must NOT expose "InvalidContent:" in the message.
+///
+/// Before FIX 3 the describe_verb_dispatch_error for UnderlyingEstateFailure
+/// returned `"{verb} failed: {reason}"` where reason was the raw substrate
+/// string "InvalidContent: room must not be empty". The strip_enum_prefix
+/// helper in interface_tools.rs now strips the "InvalidContent: " prefix so
+/// the user sees "capture failed: room must not be empty" instead.
+#[test]
+fn empty_location_error_does_not_expose_invalid_content_prefix() {
+    let registry = EstateRegistry::new_inmemory();
+
+    let a = args![
+        "content"  => "some content",
+        "location" => ""   // empty room triggers InvalidContent from substrate
+    ];
+    let result =
+        dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
+            .expect("dispatch must not return a transport error on content-rejected call");
+
+    assert!(
+        is_tool_error(&result),
+        "empty location must produce a tool-level error; got: {result:?}"
+    );
+
+    let msg = content_text(&result);
+
+    // Must NOT contain the internal enum case prefix.
+    assert!(
+        !msg.contains("InvalidContent:"),
+        "error message must not expose 'InvalidContent:' prefix; got: {msg}"
+    );
+
+    // Must still contain the actionable reason (the stripping only removes the prefix).
+    assert!(
+        msg.contains("room must not be empty"),
+        "error message must still contain 'room must not be empty' after prefix strip; got: {msg}"
+    );
+}
+
 /// Filing a memory whose content is not classifiable (short noise text)
 /// falls back gracefully to "000.000" rather than failing.
 ///
