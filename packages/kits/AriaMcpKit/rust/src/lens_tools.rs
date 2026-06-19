@@ -46,6 +46,7 @@ use crate::dispatch::{
     text_result, wall_now,
 };
 use crate::estate_registry::EstateRegistry;
+use crate::interface_tools::epoch_to_iso8601;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
 /// The 22 lens tool names — 15 reasoning lenses (including the new genuine
@@ -314,9 +315,13 @@ pub fn dispatch(
                         parts.get(1).copied().unwrap_or("")
                     ));
                     for fact in *facts {
+                        // filed_at is epoch seconds; format as ISO8601 to match
+                        // the Swift contradiction lens and substrate-wide date
+                        // conventions (Wave A filed_at ISO8601 fix, Part 4).
                         lines.push(format!(
                             "    {}  object=[{}]  source={}  filed={}",
-                            fact.id, fact.object, fact.source_drawer_id, fact.filed_at
+                            fact.id, fact.object, fact.source_drawer_id,
+                            epoch_to_iso8601(fact.filed_at)
                         ));
                     }
                 }
@@ -658,16 +663,29 @@ pub fn dispatch(
             let target_field = require_string(args, "targetField")?;
             let target_value = require_string(args, "targetValue")?;
             let k = opt_integer(args, "k", 5)? as usize;
-            // Fold the audit trail: collect all drawers, gather their audit events,
-            // bridge to UnifiedAuditEntry, and filter to the window.
+            // Option A (Bob's ruling): filter drawers by eventTime BEFORE gathering
+            // audit entries — only drawers whose event_time (epoch seconds, resolved
+            // to filed_at when no explicit back-date was supplied) falls within
+            // [lower_ms/1000, upper_ms/1000] contribute causal pairs. The causality
+            // fold (HLC ordering inside the audit log) is unchanged; we are gating
+            // WHICH drawers participate, not how their entries are ordered.
+            // Drawers without an explicit eventTime use filed_at as the fallback
+            // (resolved eagerly at construction in LocusKit::Drawer::new, so
+            // event_time is always set — there is no None case).
             let drawers = estate.store.all_drawers().map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::INTERNAL_ERROR,
                     format!("all_drawers failed: {e:?}"),
                 )
             })?;
+            // Pre-filter by eventTime window (epoch seconds comparison).
+            let lower_secs = start_epoch;
+            let upper_secs = end_epoch;
             let mut unified: Vec<genius_locus_kit::UnifiedAuditEntry> = Vec::new();
-            for drawer in &drawers {
+            for drawer in drawers.iter().filter(|d| {
+                // event_time is epoch seconds; always set (falls back to filed_at).
+                d.event_time >= lower_secs && d.event_time <= upper_secs
+            }) {
                 let events = estate.store.audit_events_for_row(&drawer.id).map_err(|e| {
                     JSONRPCError::new(
                         JSONRPCErrorCode::INTERNAL_ERROR,

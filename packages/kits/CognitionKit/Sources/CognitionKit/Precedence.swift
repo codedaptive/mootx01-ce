@@ -48,6 +48,13 @@ public enum Precedence {
     /// Empty entry set, k ≤ 0, or no entry targeting `target` yields an
     /// empty antecedent list (B-8 total-over-edge-input posture).
     ///
+    /// Option A (Bob's ruling, Wave C): only drawers whose `eventTime` falls
+    /// within `window` contribute causal pairs. The causality fold (HLC
+    /// ordering inside the audit log) is unchanged — only WHICH drawers
+    /// participate is gated by eventTime. Drawers without an explicit
+    /// eventTime fall back to `filedAt` (resolved eagerly at capture time),
+    /// so the fallback is always non-nil.
+    ///
     /// - Parameters:
     ///   - kit: Open GeniusLocusKit instance.
     ///   - handle: Open estate handle.
@@ -63,7 +70,20 @@ public enum Precedence {
         k: Int,
         now: Date
     ) async throws -> PrecedenceOutput {
-        let entries = try await kit.glkEventLagPairs(in: handle, window: window)
+        // Option A: pre-filter drawers by eventTime before gathering audit entries.
+        // Only drawers whose eventTime falls within the window contribute causal pairs.
+        // Uses GeniusLocusKit.allDrawers(in:) — a dormant (read-only) GLK surface.
+        // Drawer.id is a String (UUID string representation); the audit log's
+        // UnifiedAuditEntry.rowID is a UUID. allowedRowIDs carries String IDs
+        // (lowercased) matched in glkEventLagPairs via entry.rowID.uuidString.
+        let allDrawers = try await kit.allDrawers(in: handle)
+        let allowedIDs: Set<String> = Set(
+            allDrawers
+                .filter { window.contains($0.eventTime) }
+                .map { $0.id.lowercased() }
+        )
+        let entries = try await kit.glkEventLagPairs(
+            in: handle, window: window, allowedRowIDs: allowedIDs)
         let entryCount = entries.count
 
         // Fold from watermark .zero so every entry in the window is treated

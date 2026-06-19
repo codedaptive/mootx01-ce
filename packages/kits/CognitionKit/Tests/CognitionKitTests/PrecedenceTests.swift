@@ -124,4 +124,38 @@ struct PrecedenceTests {
 
         #expect(out.antecedents.isEmpty)
     }
+
+    // CK-PR-4 (Wave C, Option A): drawer whose eventTime is outside the window
+    // must not contribute audit entries to the precedence fold. Bob's ruling:
+    // the window filter gates WHICH drawers participate by eventTime, not by
+    // HLC ingest time.
+    @Test("drawer outside eventTime window contributes zero entries")
+    func drawerOutsideEventTimeWindowContributesZeroEntries() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Use a window anchored far in the future; any normally-captured drawer
+        // (eventTime ≈ filedAt ≈ now) will be outside this range.
+        let futureStart = Date(timeIntervalSinceNow: 7200)  // +2h from now
+        let futureEnd   = Date(timeIntervalSinceNow: 10800) // +3h from now
+        let window = futureStart...futureEnd
+
+        // Capture a drawer — its eventTime defaults to filedAt (now), which is
+        // outside the future window.
+        _ = try await capture(kit, handle, content: "outside-window", room: "lab")
+
+        let target = TemporalFieldCoord(fieldPath: "room", valueRepr: "string:lab")
+        let out = try await Precedence.run(
+            kit: kit, handle: handle,
+            window: window,
+            target: target,
+            k: 5,
+            now: Date())
+
+        // The drawer is outside the eventTime window, so no entries flow to the
+        // fold. Entry count must be zero.
+        #expect(
+            out.entryCount == 0,
+            "drawer with eventTime outside the window must contribute 0 entries; got: \(out.entryCount)"
+        )
+    }
 }

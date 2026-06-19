@@ -55,12 +55,20 @@ public extension GeniusLocusKit {
     ///     Defaults to `MatrixTier.lagBuckets` ([1,2,4,8,16,32,64,128]).
     ///     The caller uses this value as the `windowMinutes` floor when
     ///     calling the fold; it does not change which entries are returned.
+    ///   - allowedRowIDs: When non-nil, only audit entries whose `rowID`
+    ///     is in this set contribute to the result. Used by the Precedence
+    ///     recipe to implement Option A — pre-filter drawers by `eventTime`
+    ///     before gathering their causal audit pairs (Bob's ruling, Wave C).
+    ///     Drawers without an explicit eventTime use `filedAt` as the
+    ///     fallback (resolved eagerly at capture time). Pass `nil` (the
+    ///     default) to include entries from all drawers.
     /// - Returns: HLC-ascending `[TemporalAuditEntry]` for the window.
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
     func glkEventLagPairs(
         in handle: EstateHandle,
         window: ClosedRange<Date>,
-        lagBuckets: [Int] = MatrixTier.lagBuckets
+        lagBuckets: [Int] = MatrixTier.lagBuckets,
+        allowedRowIDs: Set<String>? = nil
     ) async throws -> [TemporalAuditEntry] {
         guard registry[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
@@ -80,8 +88,19 @@ public extension GeniusLocusKit {
         // then logicalCount ASC, then nodeID ASC), so no re-sort needed.
         let temporalEntries: [TemporalAuditEntry] = log.orderedEntries
             .filter { entry in
-                entry.hlc.physicalTime >= lowerMs &&
-                entry.hlc.physicalTime <= upperMs
+                // HLC window gate: retain entries whose ingest clock falls
+                // within the requested window.
+                guard entry.hlc.physicalTime >= lowerMs &&
+                      entry.hlc.physicalTime <= upperMs else { return false }
+                // Drawer-level eventTime gate (Option A): when allowedRowIDs is
+                // provided, only entries from those drawers participate. Callers
+                // that do not supply the parameter get all-drawers behaviour.
+                if let allowed = allowedRowIDs {
+                    // Drawer.id is a String; UnifiedAuditEntry.rowID is a UUID.
+                    // Compare lowercased UUID strings for consistency.
+                    return allowed.contains(entry.rowID.uuidString.lowercased())
+                }
+                return true
             }
             .map { entry in
                 // Only capture and expunge verbs contribute field coordinates
