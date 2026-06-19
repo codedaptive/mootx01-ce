@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-19
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -795,6 +795,15 @@ is the designated successor and is specified in its own mission.
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-19
+Added: `NeuronKit.hmmFeatureExtractor` is now the production
+`DistillationPipeline.FeatureExtractor`, replacing the capitalization-heuristic
+stub as the default in `distillCluster`. `CognitionKit.Consolidate` routes
+through `hmmFeatureExtractor` via the one-door pattern. Both ports (Swift
+`HMMFeatureExtractor.swift` / Rust `hmm_feature_extractor.rs`) conform to
+byte-identical extraction rules: ENT/noun, REL/verb, NUM/all-digit, TMP/4-digit
+year. See NEURONKIT_INTERFACE.md § Distillation lens.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

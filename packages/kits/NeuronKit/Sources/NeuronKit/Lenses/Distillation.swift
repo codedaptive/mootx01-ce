@@ -58,16 +58,20 @@ extension NeuronKit {
     ///
     /// - Parameters:
     ///   - input: cluster memories, optional timestamps, cluster UUID, source IDs.
-    ///   - extractFeatures: feature extraction closure. Pass nil to use the
-    ///     capitalization-heuristic stub from DistillationPipeline.defaultExtractor
-    ///     (suitable for tests; not a semantic extractor).
-    ///     Production callers supply the EideticLib HMM tagger.
+    ///   - extractFeatures: feature extraction closure. Defaults to
+    ///     `NeuronKit.hmmFeatureExtractor` — the production HMM-tagger-backed
+    ///     extractor that produces byte-identical ENT/REL/NUM/TMP features on all
+    ///     platforms (HMM path, cross-port parity guaranteed).
+    ///     Pass `DistillationPipeline.defaultExtractor` explicitly for tests that
+    ///     exercise the capitalization-heuristic stub without pulling the HMM path.
     /// - Returns: DistillationLensResult with injectionDepth derived from confidence.
     public static func distillCluster(
         input: DistillationInput,
         extractFeatures: DistillationPipeline.FeatureExtractor? = nil
     ) -> DistillationLensResult {
-        let extractor = extractFeatures ?? DistillationPipeline.defaultExtractor
+        // Default to the production HMM extractor (one door: all callers route here).
+        // Test callers that need the stub pass DistillationPipeline.defaultExtractor.
+        let extractor = extractFeatures ?? NeuronKit.hmmFeatureExtractor
         let output = DistillationPipeline.run(input: input, extractFeatures: extractor)
         let depth = injectionDepth(from: output.confidence)
         return DistillationLensResult(

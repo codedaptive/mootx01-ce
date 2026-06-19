@@ -26,6 +26,7 @@
 
 import Foundation
 import GeniusLocusKit
+import NeuronKit
 import SubstrateML
 
 /// Compact working memory by distilling open clusters into factoids on demand.
@@ -99,8 +100,9 @@ public struct Consolidate: Recipe {
         "(member_count ≥ 3, status = open) and persists each factoid as a " +
         "drawer in room `_distilled`."
 
-    // The sweep uses DistillationPipeline (SubstrateML) directly — no NeuronKit
-    // reasoning calls. requiredCapabilities is empty.
+    // The sweep routes through NeuronKit.distillCluster (one door), which uses
+    // the production HMM-tagger feature extractor. requiredCapabilities is empty:
+    // the HMM extractor is deterministic and needs no external capability gate.
     public let requiredCapabilities: [NeuronKitCapability] = []
 
     public init() {}
@@ -112,14 +114,32 @@ public struct Consolidate: Recipe {
         estate: EstateHandle,
         kit: GeniusLocusKit
     ) async throws -> Output {
-        // The distillFn bridges CognitionKit to SubstrateML: wraps
-        // DistillationPipeline.run with the capitalization-heuristic stub
-        // extractor (test-safe, no EideticLib dependency). Production callers
-        // can supply the HMM tagger via Input in a future enhancement.
+        try await run(input: input, estate: estate, kit: kit,
+                      extractFeatures: NeuronKit.hmmFeatureExtractor)
+    }
+
+    /// Internal overload that accepts an explicit feature extractor.
+    ///
+    /// This seam exists for test isolation: CognitionKit integration tests inject
+    /// `DistillationPipeline.defaultExtractor` so their fixture sentences produce
+    /// deterministic outputs independent of the HMM tagger's SNR response to
+    /// synthetic sentences. Production callers always use the public `run` overload,
+    /// which wires `NeuronKit.hmmFeatureExtractor` and cannot be overridden.
+    func run(
+        input: Input,
+        estate: EstateHandle,
+        kit: GeniusLocusKit,
+        extractFeatures: @escaping DistillationPipeline.FeatureExtractor
+    ) async throws -> Output {
+        // One extractor, one door: the caller-supplied extractor (production:
+        // NeuronKit.hmmFeatureExtractor) is passed to DistillationPipeline.run.
+        // GLK requires a distillFn of type (DistillationInput → DistillationOutput).
+        //
+        // DistillationOutput does not expose a public initialiser, so we cannot
+        // construct it here from NeuronKit.distillCluster's lens result —
+        // DistillationPipeline.run is the correct seam for GLK integration.
         let distillFn: @Sendable (DistillationInput) -> DistillationOutput = {
-            DistillationPipeline.run(
-                input: $0,
-                extractFeatures: DistillationPipeline.defaultExtractor)
+            DistillationPipeline.run(input: $0, extractFeatures: extractFeatures)
         }
 
         // Operational recipe: `now` is the wall-clock time of this sweep.

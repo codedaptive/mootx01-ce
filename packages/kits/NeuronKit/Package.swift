@@ -41,6 +41,14 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../libs/EideticLib"),
+        // LatticeLib supplies Tokenizer.tokenize (UAX #29 word boundaries) and
+        // LatticeLib.wordClass(_:tagger:) with the .hmm choice, which is the
+        // deterministic HMM/Viterbi novel-token tagger whose output is
+        // byte-identical Swift↔Rust. HMMFeatureExtractor (the production
+        // distillation feature extractor in Lenses/HMMFeatureExtractor.swift)
+        // depends on both. Citation: Distillation.swift §1 design note; mission
+        // feat/distillation-hmm-extractor.
+        .package(path: "../../libs/LatticeLib"),
         // IntellectusLib is the zero-dependency telemetry leaf.
         // NeuronKit emits self-report metrics at hybrid recall, dreaming
         // cycle, and Bradley-Terry boundaries (MANAGER_1.0_PLAN §4 P2
@@ -92,6 +100,11 @@ let package = Package(
             name: "NeuronKit",
             dependencies: [
                 .product(name: "EideticLib", package: "EideticLib"),
+                // Tokenizer + HMM wordClass tagger for the production feature extractor
+                // (HMMFeatureExtractor.swift). Direct dep required: NeuronKit calls
+                // LatticeLib symbols directly; transitive access via EideticLib is not
+                // stable. Citation: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+                .product(name: "LatticeLib", package: "LatticeLib"),
                 // Telemetry leaf — see dependency note above.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
