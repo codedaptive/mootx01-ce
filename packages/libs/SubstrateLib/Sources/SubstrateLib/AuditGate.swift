@@ -279,6 +279,33 @@ public enum GateViolation: Error, Sendable {
     case stateInconsistentWithVerb(verb: String)
 }
 
+extension GateViolation: CustomStringConvertible {
+    /// English messages at the ARIA boundary. No Swift type-chain noise
+    /// (GateViolation case names, RowStateAutomaton case names) must appear
+    /// in user-visible error text. Parity with Rust GateViolation::Display.
+    ///
+    /// For basisViolation, the underlying error is surfaced via its own
+    /// description so RowStateAutomaton.illegalTransition produces
+    /// "illegal state transition: <state> --<verb>-->" — the canonical
+    /// form the describe_gate_rejection parser expects.
+    public var description: String {
+        switch self {
+        case .undeclaredField(let label):
+            return "undeclared field '\(label)' in write request"
+        case .illegalValue(let label, let value):
+            return "illegal value \(value) for field '\(label)'"
+        case .basisViolation(let error):
+            // RowStateAutomaton errors already carry English text via their
+            // description (or localizedDescription). Prefix with "illegal state
+            // transition: " to produce the canonical sentinel the Aria parser
+            // uses. This mirrors Rust's GateViolation::BasisViolation arm.
+            return "illegal state transition: \(error)"
+        case .stateInconsistentWithVerb(let verb):
+            return "state encoded in write is inconsistent with verb '\(verb)'"
+        }
+    }
+}
+
 // MARK: - The gate
 
 public enum AuditGate {
