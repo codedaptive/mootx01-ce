@@ -569,7 +569,8 @@ impl EstateCoordinator {
         // Stamp the submission on the estate's per-estate HLC. The HLC physical
         // clock is the drawer's capture instant in milliseconds (deterministic —
         // no clock read in the engine). Swift uses the same derivation.
-        let submitted_at = eq.hlc.send(drawer.filed_at);
+        // drawer.filed_at is epoch seconds; HLC.send() requires milliseconds.
+        let submitted_at = eq.hlc.send(drawer.filed_at * 1000);
         let stream_id = eq.stream_id.clone();
         let queue_job = job
             .to_job(stream_id, submitted_at)
