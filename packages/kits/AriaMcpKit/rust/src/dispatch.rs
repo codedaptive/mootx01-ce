@@ -316,7 +316,8 @@ fn run_federated_search(
             Err(e) => {
                 // Unexpected error — surface as an error result so the caller
                 // can see what went wrong without losing the call id.
-                return error_result(&format!("federated_search: GLK error: {e:?}"));
+                // Use `describe_glk_error` so no internal Rust type names leak.
+                return error_result(&format!("federated_search: {}", describe_glk_error(&e)));
             }
         }
     }
@@ -507,6 +508,57 @@ pub fn recall_frame(
     args: &BTreeMap<String, JsonValue>,
 ) -> Result<locus_kit::filter::RecallFrame, JSONRPCError> {
     Ok(locus_kit::filter::RecallFrame::new(decode_filter_chain(args)?))
+}
+
+/// Produce a user-facing English description of a `GeniusLocusKitError` at
+/// the ARIA boundary. No internal Rust type names or enum variant names appear
+/// in the output. Called from `federated_search` for unexpected GLK errors.
+pub(crate) fn describe_glk_error(e: &genius_locus_kit::GeniusLocusKitError) -> String {
+    use genius_locus_kit::GeniusLocusKitError;
+    match e {
+        GeniusLocusKitError::EstateNotOpen { estate_uuid } => {
+            format!("estate {:?} is not open", estate_uuid)
+        }
+        GeniusLocusKitError::DuplicateEstate { estate_uuid } => {
+            format!("estate {:?} is already open", estate_uuid)
+        }
+        GeniusLocusKitError::InvalidManifest { key, detail } => {
+            format!("invalid manifest key '{key}': {detail}")
+        }
+        GeniusLocusKitError::InvalidLatticeRegion { low, high } => {
+            format!("invalid lattice region: low={low} must not exceed high={high}")
+        }
+        GeniusLocusKitError::EstateOpenFailed { detail } => {
+            format!("estate could not be opened: {detail}")
+        }
+        GeniusLocusKitError::EstateQuiesced { estate_uuid } => {
+            format!("estate {:?} is quiesced and not accepting new work", estate_uuid)
+        }
+        GeniusLocusKitError::DestroyRequiresClose { estate_uuid } => {
+            format!("estate {:?} must be closed before it can be destroyed", estate_uuid)
+        }
+        GeniusLocusKitError::UnderlyingEstateFailure { reason } => {
+            format!("estate operation failed: {reason}")
+        }
+        GeniusLocusKitError::CrossEstateReadRefused { source, requester, reason } => {
+            use genius_locus_kit::coordinator::FederatedReadRefusalReason;
+            let why = match reason {
+                FederatedReadRefusalReason::NoActiveGrant =>
+                    "no active grant names the requester",
+                FederatedReadRefusalReason::GrantExpired =>
+                    "the grant has expired",
+                FederatedReadRefusalReason::BudgetExhausted =>
+                    "the read budget for this grant has been exhausted",
+                FederatedReadRefusalReason::CustodyRefused =>
+                    "the source estate's custody mode refused the read",
+                FederatedReadRefusalReason::GrantRevoked =>
+                    "the grant has been revoked",
+            };
+            format!(
+                "cross-estate read from {source} by {requester} refused: {why}"
+            )
+        }
+    }
 }
 
 /// Wall-clock seconds at the time of dispatch. Lenses that take `now: i64`

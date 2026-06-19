@@ -651,12 +651,14 @@ fn run_dream_tool(
     // dreaming reader takes its immutable borrow below.
     let now_iso = epoch_to_iso8601(now_epoch_secs);
     let mut coord = estate.coord.lock().unwrap();
+    // rebuild_derived_accelerators returns VerbDispatchError (no Display impl) —
+    // route through describe_verb_dispatch_error for a clean English reason.
     coord
         .rebuild_derived_accelerators(&estate.handle)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
-                format!("dream: matrix rebuild failed: {e:?}"),
+                format!("dream: matrix rebuild failed: {}", crate::interface_tools::describe_verb_dispatch_error(&e)),
             )
         })?;
 
@@ -665,11 +667,13 @@ fn run_dream_tool(
     // observations, existing tunnels) from the estate at construction time.
     // The since/now window uses the injected epoch as both bounds (single-instant
     // window), consistent with the B-10a contract: no recall-scored call is made.
+    // EstateDreamingReader::new returns VerbDispatchError (no Display impl) —
+    // route through describe_verb_dispatch_error for a clean English reason.
     let reader =
         EstateDreamingReader::new(&coord, &estate.handle, &now_iso, &now_iso).map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
-                format!("dream: failed to snapshot estate seams: {e:?}"),
+                format!("dream: failed to snapshot estate seams: {}", crate::interface_tools::describe_verb_dispatch_error(&e)),
             )
         })?;
 
@@ -904,6 +908,9 @@ fn decode_precise_filter(args: &BTreeMap<String, JsonValue>) -> Result<Filter, J
 /// failures. Recipe-level refusals (RecipeError) that are "expected" errors
 /// should be converted to `error_result` by the caller instead — this is
 /// for genuine substrate failures.
+///
+/// Uses `Display` (not `Debug`) so no internal Rust type names
+/// (RecipeRunError::Substrate, etc.) leak to the agent boundary.
 fn error_from_recipe(e: cognition_kit::RecipeRunError) -> JSONRPCError {
-    JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+    JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}"))
 }

@@ -518,11 +518,13 @@ fn wire_inmemory_semantic_recall(
     // signals train on-corpus and persist; FDC is stateless. Lane D (dense float
     // recall) fuses all five and is live from the first capture.
     let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for in-memory semantic recall: {e:?}"))?;
+        .map_err(|e| format!("Corpus::open_many for in-memory semantic recall: {e}"))?;
 
     // VectorStore: standalone vector lane; schema migration is idempotent.
+    // VectorKitError has no Display impl — use describe_vector_kit_error so no
+    // internal Rust enum variant name reaches the caller.
     let vector_store = VectorStore::open(Arc::clone(&storage))
-        .map_err(|e| format!("VectorStore::open for in-memory semantic recall: {e:?}"))?;
+        .map_err(|e| format!("VectorStore::open for in-memory semantic recall: {}", describe_vector_kit_error(&e)))?;
 
     // Register both with the coordinator.
     let mut guard = coord.lock().unwrap();
@@ -578,11 +580,13 @@ fn wire_postgres_semantic_recall(
     // Five-signal honest ensemble (default_ensemble()): trainable signals train
     // on-corpus and persist; FDC stateless. Lane D fused and live from first capture.
     let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for postgres semantic recall at {conn_str:?}: {e:?}"))?;
+        .map_err(|e| format!("Corpus::open_many for postgres semantic recall at {conn_str:?}: {e}"))?;
 
     // VectorStore: idempotent schema migration.
+    // VectorKitError has no Display impl — use describe_vector_kit_error so no
+    // internal Rust enum variant name reaches the caller.
     let vector_store = VectorStore::open(Arc::clone(&storage))
-        .map_err(|e| format!("VectorStore::open for postgres semantic recall at {conn_str:?}: {e:?}"))?;
+        .map_err(|e| format!("VectorStore::open for postgres semantic recall at {conn_str:?}: {}", describe_vector_kit_error(&e)))?;
 
     // Register both with the coordinator.
     let mut guard = coord.lock().unwrap();
@@ -637,11 +641,13 @@ fn wire_sqlite_semantic_recall(
     // Five-signal honest ensemble (default_ensemble()): Lane D fused, live from
     // first capture; trainable signals train on-corpus and persist their bases.
     let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for {path:?}: {e:?}"))?;
+        .map_err(|e| format!("Corpus::open_many for {path:?}: {e}"))?;
 
     // VectorStore: standalone vector lane; applies its own schema migration.
+    // VectorKitError has no Display impl — use describe_vector_kit_error so no
+    // internal Rust enum variant name reaches the caller.
     let vector_store = VectorStore::open(Arc::clone(&storage))
-        .map_err(|e| format!("VectorStore::open for {path:?}: {e:?}"))?;
+        .map_err(|e| format!("VectorStore::open for {path:?}: {}", describe_vector_kit_error(&e)))?;
 
     // Register both with the coordinator so recall_scored hybrid/corpus-only/
     // union-best modes route through the BM25 and vector lanes.
@@ -651,4 +657,33 @@ fn wire_sqlite_semantic_recall(
     drop(guard);
 
     Ok(())
+}
+
+/// Produce a human-readable English description of a `VectorKitError` for
+/// surfacing at the MCP boundary. `VectorKitError` does not implement
+/// `std::fmt::Display`, so we match exhaustively and extract the embedded
+/// payload string rather than leaking the internal Rust enum variant name.
+fn describe_vector_kit_error(e: &vectorkit::VectorKitError) -> String {
+    use vectorkit::VectorKitError;
+    match e {
+        VectorKitError::EmbeddingFailed(reason) => {
+            format!("embedding inference failed: {reason}")
+        }
+        VectorKitError::ModelUnavailable(model) => {
+            format!("embedding model '{model}' is not available on this platform")
+        }
+        VectorKitError::StoreUnavailable(reason) => {
+            format!("vector store could not be opened: {reason}")
+        }
+        VectorKitError::NotFound => "vector record not found".to_string(),
+        VectorKitError::InvalidPayload(reason) => {
+            format!("invalid vector payload: {reason}")
+        }
+        VectorKitError::DecodingFailure(reason) => {
+            format!("vector decoding failed: {reason}")
+        }
+        VectorKitError::Int8QuantizationPolicyUndefined(reason) => {
+            format!("int8 quantization policy is not yet defined: {reason}")
+        }
+    }
 }

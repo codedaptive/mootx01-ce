@@ -328,10 +328,12 @@ fn run_export(
     );
 
     let now_ms = wall_now_ms();
+    // VaultKitError implements Display with clean English messages — use it
+    // so no internal Rust enum variant names leak to the agent boundary.
     bridge.export(&open.handle, vault_path, now_ms, scope).map_err(|e| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
-            format!("vault_export: bridge export failed: {e:?}"),
+            format!("vault_export: bridge export failed: {e}"),
         )
     })?;
 
@@ -616,12 +618,13 @@ fn run_reconcile(
             DrawerMapping::default(),
         );
         let now_ms = wall_now_ms();
+        // VaultKitError has Display — use it so no internal type names leak.
         let report = bridge
             .import_vault_filtered(vault_path, &candidate_paths, &open.handle, now_ms)
             .map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::INTERNAL_ERROR,
-                    format!("vault_reconcile: apply import failed: {e:?}"),
+                    format!("vault_reconcile: apply import failed: {e}"),
                 )
             })?;
         lines.push("apply: true — candidates actioned via vault import".to_owned());

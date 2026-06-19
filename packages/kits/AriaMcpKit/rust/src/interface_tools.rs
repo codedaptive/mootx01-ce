@@ -22,7 +22,9 @@
 //!
 //! - `channel` = `CaptureChannel::Actuator` (cookbook §2.4: actuator-driven capture)
 //! - `added_by` = `"aria-mcp-server"`
-//! - `lattice_anchor` = `LatticeAnchor::udc("000.000")`
+//! - `lattice_anchor` = FDC classification via `Fdc::encode_anchor(content)` for
+//!   `moot_file_memory`; falls back to `LatticeAnchor::udc("000.000")` for
+//!   UNRESOLVED content. All other capture tools retain the "000.000" default.
 //! - `embedding_model_id` = `"default"` (selects the 1.0 default recall
 //!   ensemble — the five honest signals RI/PPMI/LSA/NMF/FDC fused in Lane D,
 //!   trained on-corpus and reproducible cross-port; NOT a learned model-weight
@@ -288,7 +290,10 @@ pub fn dispatch(
 ///
 /// `location` maps to `room`; wing is derived by the estate from its manifest
 /// owner identifier. Server owns infrastructure fields (channel, lattice,
-/// added_by, embeddingModelID). Mirrors Swift `runFileMemory`.
+/// added_by, embeddingModelID). The lattice anchor is determined by running
+/// the deterministic FDC encoder (`Fdc::encode_anchor`) on the content; when
+/// the encoder resolves a code the drawer is classified at that UDC position,
+/// otherwise it falls back to "000.000". Mirrors Swift `runFileMemory`.
 fn run_file_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -303,13 +308,36 @@ fn run_file_memory(
     let kind = decode_content_kind_arg(args.get("kind"))?;
     let sensitivity = decode_sensitivity_arg(args.get("sensitivity"))?;
 
+    // BUG-2 (FDC-on-capture): classify the content with the deterministic FDC
+    // encoder before building the frame. `Fdc::encode_anchor` is pure and
+    // deterministic over the pinned LatticeLib artifacts — the same engine
+    // that `DrawerMapping.makeCaptureFrame` uses via `EideticLib.lookup` in
+    // the Swift vault-import path. When the encoder returns a non-empty code
+    // the frame carries the real UDC so the capture lands classified, not at
+    // root "000.000". When the encoder returns no code (UNRESOLVED) the server
+    // falls back to the "000.000" default rather than failing the capture —
+    // the memory still files, it just lands at the generic root bucket.
+    // Mirrors the Swift port change in `runFileMemory` (same commit).
+    let lattice_anchor = {
+        let (code_opt, qid_opt) = lattice_lib::fdc_runtime::Fdc::encode_anchor(content);
+        match code_opt {
+            Some(code) if !code.is_empty() => locus_kit::estate_types::LatticeAnchor {
+                udc_code: code,
+                udc_facets: None,
+                wikidata_qid: qid_opt,
+                wikidata_qids_secondary: None,
+            },
+            _ => LatticeAnchor::udc(DEFAULT_LATTICE_CODE),
+        }
+    };
+
     let mut frame = CaptureFrame::new(
         content,
         // Actuator-driven capture (cookbook §2.4): file_memory is submitted by
         // an MCP AI agent (actuator), not a file import. Raw 5 per DrawerOperational.
         CaptureChannel::Actuator,
         location,
-        LatticeAnchor::udc(DEFAULT_LATTICE_CODE),
+        lattice_anchor,
         SERVER_ADDED_BY,
         DEFAULT_EMBEDDING_MODEL,
     );
@@ -361,7 +389,11 @@ fn run_file_memory(
             );
             Ok(text_result(&body))
         }
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        // Route the VerbDispatchError through the describe machinery so no
+        // internal Rust type names (UnderlyingEstateFailure, BasisViolation,
+        // etc.) leak to the agent. The helper also converts gate-rejection
+        // messages to actionable English phrasing.
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -468,7 +500,7 @@ fn run_memory_search(
 
     let result = coord
         .recall_scored(&estate.handle, request, now)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     // Record surfaced drawer ids in the session ledger so dereference verbs can
     // trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12.md §session-ledger).
@@ -763,7 +795,7 @@ fn run_link_memories(
     // Recall all drawers to resolve wing+room for source and target.
     let all = coord
         .recall(&estate.handle, RecallFrame::new(vec![]), now)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
         JSONRPCError::new(
@@ -793,8 +825,10 @@ fn run_link_memories(
 
     // Access the estate directly for tunnel capture (not via coordinator, which
     // has no capture_tunnel wrapper — the estate_verbs surface exposes it).
+    // coord.estate_for returns GeniusLocusKitError (not VerbDispatchError), so
+    // route through describe_glk_error to surface a clean English reason.
     let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
-        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
     })?;
 
     match locus_estate.capture_tunnel(frame, now) {
@@ -805,7 +839,9 @@ fn run_link_memories(
             );
             Ok(text_result(&body))
         }
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        // LocusKitError has Display — surface the English reason without
+        // leaking internal Rust enum variant names to the agent.
+        Err(e) => Ok(error_result(&format!("link_memories failed: {e}"))),
     }
 }
 
@@ -826,7 +862,7 @@ fn run_connection_search(
     // Recall all drawers to find the source drawer's wing.
     let all = coord
         .recall(&estate.handle, RecallFrame::new(vec![]), now)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
         JSONRPCError::new(
@@ -838,7 +874,7 @@ fn run_connection_search(
 
     let tunnels = coord
         .recall_tunnels(&estate.handle, &wing)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let outgoing: Vec<_> = tunnels
         .iter()
@@ -870,7 +906,7 @@ fn run_connection_map(
     // Recall all drawers to discover all wings in the estate.
     let all = coord
         .recall(&estate.handle, RecallFrame::new(vec![]), now)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let wings: std::collections::HashSet<&str> =
         all.iter().map(|d| d.wing.as_str()).collect();
@@ -880,7 +916,7 @@ fn run_connection_map(
     for wing in &wings {
         let tunnels = coord
             .recall_tunnels(&estate.handle, wing)
-            .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+            .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
         for t in tunnels {
             if t.target_drawer_id.as_deref() == Some(to_id) {
                 incoming.push(t);
@@ -944,7 +980,7 @@ fn run_fact_search(
     let coord = estate.coord.lock().unwrap();
     let facts = coord
         .recall_kg_facts(&estate.handle)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let matches: Vec<_> = facts
         .iter()
@@ -1119,7 +1155,7 @@ fn run_fact_timeline(
     let coord = estate.coord.lock().unwrap();
     let mut facts = coord
         .recall_kg_fact_timeline(&estate.handle, entity_ref)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     // Results are ordered by filed_at ascending from the storage layer.
     // Sort here to be defensive in case backends return unordered rows.
@@ -1196,7 +1232,7 @@ fn run_read_journal(
     let coord = estate.coord.lock().unwrap();
     let mut entries = coord
         .recall_diary_entries(&estate.handle)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     entries.retain(|e| e.agent_name == agent);
     // Sort by filed_at descending so most-recent entries come first.
@@ -1233,11 +1269,11 @@ fn run_estate_status(
 
     let drawers = coord
         .recall(&estate.handle, RecallFrame::new(vec![]), now)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let kg_facts = coord
         .recall_kg_facts(&estate.handle)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let wings: std::collections::BTreeSet<&str> =
         drawers.iter().map(|d| d.wing.as_str()).collect();
@@ -1305,7 +1341,7 @@ fn run_estate_map(
 
     let drawers = coord
         .recall(&estate.handle, RecallFrame::new(vec![]), now)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     // Group by wing then room.
     let mut tree: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, usize>> =
@@ -1340,12 +1376,14 @@ fn run_estate_ping(
     let estate = registry.resolve(args, "estateID")?;
     let coord = estate.coord.lock().unwrap();
 
+    // coord.estate_for returns GeniusLocusKitError (not VerbDispatchError), so
+    // route through describe_glk_error to surface a clean English reason.
     let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
-        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
     })?;
 
     let manifest = locus_estate.manifest().map_err(|e| {
-        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("estate_ping: manifest read failed: {e}"))
     })?;
 
     Ok(text_result(&format!(
