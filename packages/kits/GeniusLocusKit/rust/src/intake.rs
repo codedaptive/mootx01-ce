@@ -973,6 +973,71 @@ fn encode_drain_watch_loop(
 /// Enqueue a tiny wake marker job to release a parked `watch` at teardown. The
 /// marker carries empty content, so the worker drains-and-replies it without
 /// ingesting (then sees the stop flag and exits). Best-effort.
+/// The fixed model-lane ID for cluster-assignment vector storage.
+///
+/// This ID is training-independent and decoupled from the estate's primary
+/// Corpus model ID. The cluster-assignment path uses `content_deterministic_fingerprint`
+/// (FNV-1a → LCG → FloatSimHash, byte-identical to `EmbeddingModel.deterministic`)
+/// so clusters form correctly even on fresh/untrained estates where the trained
+/// recall providers (RI/PPMI/LSA/NMF) have not yet accumulated a basis.
+///
+/// Swift parity: `GeniusLocusKit.clusterModelID` in `EncodeIntake.swift`.
+pub(crate) const CLUSTER_MODEL_ID: &str = "corpus-deterministic-v1-cluster";
+
+/// The FloatSimHash projection seed for the cluster-assignment structural
+/// fingerprint. Must match `EmbeddingModel.deterministicSeed` in CorpusKit.swift
+/// (Swift: `0xC05B_D15C_A15D_1B00`) so the Swift and Rust cluster-assignment
+/// lanes produce byte-identical engrams for the same content text.
+const CLUSTER_FP_SEED: u64 = 0xC05B_D15C_A15D_1B00;
+
+/// Compute a training-independent structural fingerprint for `text`.
+///
+/// Uses FNV-1a → LCG → FloatSimHash — the exact same algorithm as
+/// `EmbeddingModel.deterministic`'s inference closure in CorpusKit — so the
+/// result is deterministic, network-free, training-free, and byte-identical to
+/// the `.deterministic` embedding provider's output (given the same text).
+///
+/// This replaces `corpus.embed(content)` in the cluster-assignment path so
+/// clusters form on fresh/untrained estates. On an untrained estate, trained
+/// providers (RI/PPMI/LSA/NMF) return a near-zero engram for every text
+/// (no accumulated basis), causing every capture to appear maximally distant
+/// from every other — which makes every drawer seed a fresh singleton cluster
+/// and `member_count` never reaches the ≥3 distillation gate.
+///
+/// Swift parity: `GeniusLocusKit.contentDeterministicFingerprint(_:)` in
+/// `EncodeIntake.swift`.
+fn content_deterministic_fingerprint(text: &str) -> substrate_types::fingerprint256::Fingerprint256 {
+    use substrate_ml::float_simhash;
+
+    if text.is_empty() {
+        return substrate_types::fingerprint256::Fingerprint256::ZERO;
+    }
+    // FNV-1a 64-bit over the text's UTF-8 bytes. Matches Swift exactly:
+    // `text.utf8.reduce(FNV_OFFSET) { ($0 ^ UInt64($1)) &* FNV_PRIME }`.
+    let fnv_prime: u64    = 1_099_511_628_211;
+    let fnv_offset: u64   = 14_695_981_039_346_656_037;
+    let mut h: u64 = fnv_offset;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(fnv_prime);
+    }
+    // LCG constants from the .deterministic provider's inference closure.
+    let lcg_multiplier: u64 = 6_364_136_223_846_793_005;
+    let lcg_increment: u64  = 1_442_695_040_888_963_407;
+    let floats: Vec<f32> = (0..32)
+        .map(|_| {
+            h = h.wrapping_mul(lcg_multiplier).wrapping_add(lcg_increment);
+            // High 24 bits as mantissa in [0, 1), scaled to [-1, 1].
+            let mantissa = (h >> 40) as f32 / (1u64 << 24) as f32;
+            mantissa * 2.0 - 1.0
+        })
+        .collect();
+    // FloatSimHash.project is the canonical signed-hyperplane projection,
+    // bit-identical to the Swift SubstrateML.FloatSimHash.project for the
+    // same (vector, seed) pair. The seed is CLUSTER_FP_SEED.
+    float_simhash::project(&floats, CLUSTER_FP_SEED)
+}
+
 /// Standalone cluster-assignment function that takes all needed components as
 /// parameters. Shares logic with `EstateCoordinator::assign_cluster_after_ingest`
 /// but runs without a `self` reference so it can be called from the background
@@ -989,7 +1054,7 @@ fn assign_cluster_standalone(
     drawer_id: &str,
     content: &str,
     now_secs: i64,
-    corpus: &Corpus,
+    _corpus: &Corpus,
     storage: Option<&Arc<dyn persistence_kit::storage::Storage>>,
     vector_store: Option<&Arc<VectorStore>>,
 ) {
@@ -998,22 +1063,19 @@ fn assign_cluster_standalone(
         _ => return, // non-GLK estate: no cluster assignment
     };
 
-    // Embed the drawer content with the corpus's primary model.
-    let engram = match corpus.embed(content) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!(
-                "[glk] assign_cluster_standalone: embed failed for drawer {drawer_id}: {e:?}"
-            );
-            return;
-        }
-    };
-
-    // Dedicated cluster-assignment lane — drawer-keyed only, never chunk IDs.
-    let cluster_model_id = format!("{}-cluster", corpus.model_id());
+    // Compute the training-independent structural fingerprint of the content.
+    // This replaces corpus.embed(content), which would delegate to the DEFAULT
+    // trained provider (RI on a production estate). On a fresh/untrained estate
+    // RI has no accumulated basis and returns a near-zero engram for every text,
+    // causing every drawer to appear maximally distant — every capture seeds a
+    // fresh singleton cluster and member_count never reaches the ≥3 gate.
+    let engram = content_deterministic_fingerprint(content);
 
     // Register this drawer's engram in the cluster-assignment lane.
-    if let Err(e) = vector_store.add_vector(drawer_id, &engram, &cluster_model_id, "1", now_secs) {
+    // Lane ID is CLUSTER_MODEL_ID — fixed, training-independent (not derived
+    // from corpus.model_id()) so the lane is stable regardless of which trained
+    // model is primary for this estate.
+    if let Err(e) = vector_store.add_vector(drawer_id, &engram, CLUSTER_MODEL_ID, "1", now_secs) {
         eprintln!(
             "[glk] assign_cluster_standalone: add_vector failed for drawer {drawer_id}: {e:?}"
         );
@@ -1022,7 +1084,7 @@ fn assign_cluster_standalone(
 
     // Find the nearest neighbor in the cluster-assignment lane (limit=2 to
     // handle a possible self-hit at distance 0).
-    let matches = match vector_store.find_nearest(&engram, &cluster_model_id, 2) {
+    let matches = match vector_store.find_nearest(&engram, CLUSTER_MODEL_ID, 2) {
         Ok(m) => m,
         Err(e) => {
             eprintln!(

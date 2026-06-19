@@ -107,6 +107,38 @@ private func decodeIDs(_ v: TypedValue?) -> [String] {
     return (try? JSONDecoder().decode([String].self, from: d)) ?? []
 }
 
+/// Provision a GLK estate with the PRODUCTION default 5-signal ensemble
+/// (RI / PPMI / LSA / NMF / FDC — all freshly constructed, zero training).
+/// Used by I4 to prove cluster assignment is training-independent.
+private func provisionGLKWithProductionEnsemble(
+) async throws -> (GeniusLocusKit, EstateHandle, InMemoryStorage) {
+    let kit = GeniusLocusKit()
+    let owner = OwnerCredentials(ownerIdentifier: "owner-i4-production-ensemble")
+    let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+    let storage = InMemoryStorage(configuration: config)
+
+    let params = EstateProvisionParams(
+        estateName: "I4 Production Ensemble Test Estate",
+        kind: .glk,
+        zoomWindowLow: 1,
+        zoomWindowHigh: 10,
+        frameworkProfile: "KnowledgeWork",
+        syncMode: .none
+    )
+    // No embeddingModels argument → defaults to CorpusEnsemble.defaultEnsemble()
+    // (RI / PPMI / LSA / NMF / FDC, all untrained). The fix must not depend on
+    // any of these being trained for cluster assignment to work.
+    let handle = try await kit.provision(
+        storage: storage,
+        owner: owner,
+        params: params
+    )
+
+    try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+
+    return (kit, handle, storage)
+}
+
 // MARK: - Tests
 
 @Suite("assignCluster write-path wiring (Dg5 integration)")
@@ -196,5 +228,47 @@ struct AssignClusterOnCaptureTests {
         }
         #expect(rows.count >= 1, "at least one open cluster must exist after two captures; got \(rows.count)")
         #expect(totalMembers == 2, "total member count across all open clusters must be 2; got \(totalMembers)")
+    }
+
+    // MARK: - I4: production default ensemble (untrained) still forms clusters
+
+    /// Three near-identical captures via the production default 5-signal ensemble
+    /// (RI / PPMI / LSA / NMF / FDC — all freshly constructed, zero training)
+    /// must still produce exactly ONE open cluster with member_count = 3.
+    ///
+    /// This is the regression test for the original bug: before the fix,
+    /// `assignClusterAfterIngest` called `corpus.embed(content)`, which on
+    /// an untrained estate (RI basis empty → near-zero engrams) caused cluster
+    /// joining to fail for every capture. After the fix, cluster assignment
+    /// uses `contentDeterministicFingerprint`, which is training-independent,
+    /// so identical texts produce the same structural fingerprint and cluster
+    /// correctly regardless of training state.
+    @Test("I4: production embedding (untrained estate) still forms clusters with member_count = 3")
+    func productionEnsembleUntrainedEstateFormsCluster() async throws {
+        let (kit, handle, storage) = try await provisionGLKWithProductionEnsemble()
+        defer { Task { try? await kit.close(handle) } }
+
+        let frame = clusterFrame(content: sameContent)
+
+        // Three captures with identical content on a FULLY UNTRAINED estate.
+        // The fix routes cluster assignment through contentDeterministicFingerprint,
+        // so near-identical texts must form a cluster even with zero RI training.
+        for _ in 0..<3 {
+            _ = try await kit.capture(handle, frame, mode: .impatient)
+        }
+
+        let rows = try await openClusterRows(storage: storage)
+        #expect(
+            rows.count == 1,
+            "three identical-content captures on untrained estate must form exactly one open cluster; got \(rows.count)"
+        )
+
+        if let row = rows.first {
+            let ids = decodeIDs(row["member_ids"])
+            #expect(
+                ids.count == 3,
+                "open cluster on untrained estate must have 3 members; got \(ids.count)"
+            )
+        }
     }
 }
