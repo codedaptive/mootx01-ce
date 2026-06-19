@@ -3766,3 +3766,151 @@ fn lens_contradiction_filed_is_iso8601() {
     // No contradiction found → lens returns an empty list, which is also valid.
     // The test passes either way — we only assert format when the field appears.
 }
+
+// ===========================================================================
+// Wave D: Illegal-state-transition error messages (parity fix)
+// ===========================================================================
+//
+// Verify that moot_update_memory returns actionable English messages (not
+// Rust Debug type chains like BasisViolation / IllegalTransition) when
+// the mutation is rejected by the gate automaton. Each test triggers a
+// specific illegal transition from the message table and asserts:
+//   1. The result is a tool-level error (isError == true).
+//   2. The message contains NO internal type name (BasisViolation,
+//      IllegalTransition, UnderlyingEstateFailure, InvalidContent).
+//   3. The message contains the expected actionable phrase.
+//
+// Parity requirement: the exact same phrase must appear in Swift's
+// ToolDispatch.describeGateRejection helper.
+
+/// Helper: file an active memory and return its id.
+fn file_active_memory(registry: &EstateRegistry) -> String {
+    file_one_memory(registry, "gate-rejection test fixture", "General")
+}
+
+/// Assert that a moot_update_memory result is a gate-rejection error
+/// containing `expected_phrase` and NO internal type names.
+fn assert_gate_rejection(result: &serde_json::Value, expected_phrase: &str) {
+    assert!(is_tool_error(result), "expected tool-level error, got: {result:?}");
+    let msg = content_text(result);
+    // No internal type names must appear.
+    assert!(
+        !msg.contains("BasisViolation"),
+        "error message must not contain 'BasisViolation'; got: {msg}"
+    );
+    assert!(
+        !msg.contains("IllegalTransition"),
+        "error message must not contain 'IllegalTransition'; got: {msg}"
+    );
+    assert!(
+        !msg.contains("UnderlyingEstateFailure"),
+        "error message must not contain 'UnderlyingEstateFailure'; got: {msg}"
+    );
+    assert!(
+        !msg.contains("InvalidContent("),
+        "error message must not contain 'InvalidContent('; got: {msg}"
+    );
+    assert!(
+        msg.contains(expected_phrase),
+        "expected phrase '{expected_phrase}' in error message; got: {msg}"
+    );
+}
+
+fn update_memory(registry: &EstateRegistry, id: &str, mutation: &str) -> serde_json::Value {
+    let ledger = SurfacedRecallLedger::new();
+    let a = args!["id" => id, "mutation" => mutation];
+    dispatch_tool("moot_update_memory", &a, registry, &ledger)
+        .expect("moot_update_memory dispatch must not return JSONRPCError")
+}
+
+/// active + reject → "cannot reject an active memory; contest or withdraw it first"
+#[test]
+fn illegal_transition_active_reject_emits_actionable_message() {
+    let registry = EstateRegistry::new_inmemory();
+    let id = file_active_memory(&registry);
+    let result = update_memory(&registry, &id, "reject");
+    assert_gate_rejection(
+        &result,
+        "cannot reject an active memory",
+    );
+}
+
+/// contested + reject → generic fallback (the memory's current state (contested) does not
+/// allow this mutation). Contested → Reject is not in the automaton table; only
+/// ResolveContest, Retract, and Tombstone are legal from Contested. The test also
+/// verifies that no internal type names appear in the fallback path.
+#[test]
+fn illegal_transition_contested_reject_emits_actionable_message() {
+    let registry = EstateRegistry::new_inmemory();
+    let id = file_active_memory(&registry);
+    // Move to Contested (Active → Contest is legal per automaton table).
+    let contest_result = update_memory(&registry, &id, "contest");
+    assert!(
+        is_success(&contest_result),
+        "contest must succeed on active row; got: {contest_result:?}"
+    );
+    // Contested → Reject is illegal; gate returns BasisViolation.
+    let result = update_memory(&registry, &id, "reject");
+    let msg = content_text(&result);
+    assert!(is_tool_error(&result), "expected error from contested→reject; got: {result:?}");
+    assert!(
+        !msg.contains("BasisViolation"),
+        "no internal type names in gate rejection; got: {msg}"
+    );
+    assert!(
+        !msg.contains("IllegalTransition"),
+        "no internal type names in gate rejection; got: {msg}"
+    );
+    assert!(
+        msg.contains("does not allow this mutation") || msg.contains("cannot reject"),
+        "expected actionable phrase in gate rejection; got: {msg}"
+    );
+}
+
+/// Tombstoned row + any mutation → "memory has been permanently erased"
+/// (We can't directly tombstone via update_memory, so we use moot_erase_memory
+/// with confirmation and then try to update the now-tombstoned row.)
+#[test]
+fn illegal_transition_tombstoned_emits_permanently_erased_message() {
+    let registry = EstateRegistry::new_inmemory();
+    let id = file_active_memory(&registry);
+    // Tombstone via expunge.
+    let ledger = SurfacedRecallLedger::new();
+    let erase_args = args!["id" => id.as_str(), "reason" => "test", "confirmed" => true];
+    let erase_result = dispatch_tool("moot_erase_memory", &erase_args, &registry, &ledger)
+        .expect("erase must dispatch");
+    assert!(is_success(&erase_result), "erase must succeed: {erase_result:?}");
+
+    // Now try to update the tombstoned row.
+    let result = update_memory(&registry, &id, "confirm");
+    let msg = content_text(&result);
+    assert!(is_tool_error(&result), "update of tombstoned row must fail");
+    assert!(
+        !msg.contains("BasisViolation") && !msg.contains("IllegalTransition"),
+        "no internal types in: {msg}"
+    );
+    assert!(
+        msg.contains("permanently erased") || msg.contains("does not allow"),
+        "expected actionable message for tombstoned row; got: {msg}"
+    );
+}
+
+/// Verify the describe_gate_rejection parser correctly returns None for a
+/// non-gate-rejection error (e.g. DrawerNotFound). The fallback message
+/// must be used, not a fabricated gate-rejection phrase.
+#[test]
+fn non_gate_error_does_not_produce_gate_rejection_phrase() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    // Use a non-existent id.
+    let a = args!["id" => "00000000-0000-0000-0000-000000000000", "mutation" => "confirm"];
+    let result = dispatch_tool("moot_update_memory", &a, &registry, &ledger)
+        .expect("dispatch must not err");
+    let msg = content_text(&result);
+    assert!(is_tool_error(&result), "update of missing row must fail");
+    // Must not produce false gate-rejection text.
+    assert!(
+        !msg.contains("cannot reject"),
+        "non-gate error must not look like gate rejection; got: {msg}"
+    );
+}
