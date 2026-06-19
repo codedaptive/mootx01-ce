@@ -40,7 +40,7 @@ use locus_kit::{
     provenance::Channel,
 };
 
-use genius_locus_kit::WriteMode;
+use genius_locus_kit::{VerbDispatchError, VerbError, WriteMode};
 
 use substrate_types::{RowState, RowStateCluster};
 
@@ -100,6 +100,139 @@ pub const INTERFACE_TOOLS: &[&str] = &[
 /// True when `name` is one of the 19 Tier 1–5 interface tools.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
+}
+
+// ---------------------------------------------------------------------------
+// Error formatting — verb dispatch errors
+// ---------------------------------------------------------------------------
+
+/// Produce a user-facing string for a `VerbDispatchError` at the ARIA boundary.
+///
+/// For illegal-state-transition gate rejections, returns an actionable message
+/// from the per-state/verb message table below (parity with Swift
+/// `ToolDispatch.describeGateRejection`). For all other errors, returns the
+/// English `{verb} failed: {reason}` form already used by the Swift `describe`
+/// overload. No internal Rust type names (BasisViolation, IllegalTransition,
+/// UnderlyingEstateFailure) appear in the output.
+///
+/// Called from every `Err(e) => Ok(error_result(...))` site in this module
+/// that handles a `VerbDispatchError`. Sites that return `JSONRPCError` for
+/// infrastructure failures (missing estate, bad JSON) are out-of-band and not
+/// routed here.
+pub(crate) fn describe_verb_dispatch_error(e: &VerbDispatchError) -> String {
+    match e {
+        VerbDispatchError::EstateNotOpen { estate_uuid } => {
+            format!("the addressed estate ({estate_uuid:?}) is not open; open it before issuing verbs")
+        }
+        VerbDispatchError::Verb(ve) => describe_verb_error(ve),
+    }
+}
+
+/// Produce a user-facing string for a `VerbError`.
+///
+/// For `UnderlyingEstateFailure` whose reason encodes an illegal state
+/// transition, emits an actionable message from the table.  All other
+/// variants fall through to their existing textual descriptions. Parity
+/// with Swift `ToolDispatch.describe(_: VerbError)`.
+fn describe_verb_error(ve: &VerbError) -> String {
+    match ve {
+        VerbError::UnderlyingEstateFailure { verb, reason } => {
+            // Detect illegal-state-transition gate rejections embedded in the
+            // InvalidContent message. The reason looks like:
+            //   "InvalidContent: state mutation rejected by gate: illegal state transition: <state> --<verb>-->"
+            // Parse out the "<state>" and "<verb>" to look up the clean message.
+            if let Some(msg) = describe_gate_rejection(verb, reason) {
+                return msg;
+            }
+            format!("{verb} failed: {reason}")
+        }
+        VerbError::NotSupportedByEstate { verb } => {
+            format!("verb '{verb}' is not callable on this estate: the estate refused the operation")
+        }
+        VerbError::RejectedByLexicon { verb, noun } => {
+            format!("verb '{verb}' is not accepted on noun '{noun}' by the AriaLexicon acceptance matrix")
+        }
+        VerbError::EmptyReanchor { row_id } => {
+            format!("reanchor of row {row_id:?} requires at least one of toRoom or toUDC")
+        }
+        VerbError::ExpungeNotConfirmed { row_id } => {
+            format!("expunge of row {row_id:?} requires confirmation=true")
+        }
+        VerbError::CrossKitVectorDeleteFailed { row_id, reason } => {
+            format!(
+                "expunge of row {row_id:?} is incomplete: the LocusKit content was removed but \
+                 the vector embedding survived ({reason}). Retry the expunge — do not report \
+                 this row as deleted."
+            )
+        }
+    }
+}
+
+/// Map an illegal-state-transition gate rejection to an actionable English
+/// message, or return `None` if the reason does not encode a gate rejection.
+///
+/// Parses the state and verb names out of the message text produced by
+/// `GateViolation::Display` → `RowStateError::Display`. The canonical pattern
+/// is "illegal state transition: <state> --<verb>-->".  The function is
+/// conservative: if parsing fails for any reason it returns `None` so the
+/// caller falls through to the generic "{verb} failed: {reason}" form. No
+/// panic, no unwrap.
+///
+/// **Message table** — parity with Swift `ToolDispatch.describeGateRejection`:
+/// ```text
+/// active  + reject          → "cannot reject an active memory; contest or withdraw it first"
+/// active  + promote/accept  → "only pending memories can be accepted; this memory is already active"
+/// accepted + reject/contest → "accepted memories are audit-grade and cannot be rejected or
+///                               contested; supersede or withdraw instead"
+/// rejected + reject         → "memory is already rejected"
+/// rejected + *              → "rejected memories cannot be mutated this way; re-file the content
+///                               to start a new memory"
+/// pending  + supersede      → "cannot supersede a pending memory; confirm or reject it first"
+/// tombstoned + *            → "memory has been permanently erased and cannot be mutated"
+/// *        + *              → "the memory's current state (<state>) does not allow this mutation;
+///                               check it with moot_memory_search"
+/// ```
+/// Each message is prefixed with the caller-supplied verb, e.g. "update failed: …", to
+/// be consistent with the existing describe format.
+fn describe_gate_rejection(verb: &str, reason: &str) -> Option<String> {
+    // The sentinel substring produced by GateViolation::Display on a BasisViolation
+    // wrapping a RowStateError::IllegalTransition.
+    const SENTINEL: &str = "illegal state transition: ";
+    let start = reason.find(SENTINEL)?;
+    let tail = &reason[start + SENTINEL.len()..];
+    // Parse "<state> --<verb>-->" out of tail.
+    let dash_pos = tail.find(" --")?;
+    let from_str = tail[..dash_pos].trim();
+    let after_dash = &tail[dash_pos + 3..];
+    let end_pos = after_dash.find("-->")?;
+    let gate_verb = after_dash[..end_pos].trim();
+
+    // Map (from_state_name, gate_verb_name) to a clean actionable message.
+    // The English state/verb names come from Display impls on RowState / RowVerb.
+    let body = match (from_str, gate_verb) {
+        ("active", "reject") =>
+            "cannot reject an active memory; contest or withdraw it first".to_string(),
+        ("active", "promote") | ("active", "accept") =>
+            "only pending memories can be accepted; this memory is already active".to_string(),
+        ("accepted", "reject") | ("accepted", "contest") =>
+            "accepted memories are audit-grade and cannot be rejected or contested; \
+             supersede or withdraw instead".to_string(),
+        ("rejected", "reject") =>
+            "memory is already rejected".to_string(),
+        ("rejected", _) =>
+            "rejected memories cannot be mutated this way; re-file the content to start \
+             a new memory".to_string(),
+        ("pending", "supersede") =>
+            "cannot supersede a pending memory; confirm or reject it first".to_string(),
+        ("tombstoned", _) =>
+            "memory has been permanently erased and cannot be mutated".to_string(),
+        _ =>
+            format!(
+                "the memory's current state ({from_str}) does not allow this mutation; \
+                 check it with moot_memory_search"
+            ),
+    };
+    Some(format!("{verb} failed: {body}"))
 }
 
 /// Dispatch a Tier 1–5 interface tool call. Returns the MCP `tools/call`
@@ -488,7 +621,7 @@ fn run_update_memory(
     let coord = estate.coord.lock().unwrap();
     match coord.mutate(&estate.handle, id, kind, None) {
         Ok(()) => Ok(text_result(&format!("updated memory {id} ({mutation_str})"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -511,7 +644,7 @@ fn run_withdraw_memory(
     let coord = estate.coord.lock().unwrap();
     match coord.withdraw(&estate.handle, id, reason, now) {
         Ok(()) => Ok(text_result(&format!("withdrew memory {id}"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -539,7 +672,7 @@ fn run_erase_memory(
     let now = wall_now();
     match coord.expunge(&estate.handle, id, reason, confirmed, now) {
         Ok(()) => Ok(text_result(&format!("erased memory {id}"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -559,7 +692,7 @@ fn run_confirm_memory(
     let coord = estate.coord.lock().unwrap();
     match coord.mutate(&estate.handle, id, MutationKind::Confirm, None) {
         Ok(()) => Ok(text_result(&format!("confirmed memory {id}"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -580,7 +713,7 @@ fn run_move_memory(
     let coord = estate.coord.lock().unwrap();
     match coord.reanchor(&estate.handle, id, Some(location), None) {
         Ok(()) => Ok(text_result(&format!("moved memory {id} to {location}"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -793,7 +926,7 @@ fn run_file_fact(
             "filed fact {}: [{subject}] {predicate} [{object}]",
             fact.id
         ))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -859,7 +992,7 @@ fn run_retire_fact(
     let coord = estate.coord.lock().unwrap();
     match coord.withdraw_kg_fact(&estate.handle, id, now) {
         Ok(()) => Ok(text_result(&format!("retired fact {id}"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -1041,7 +1174,7 @@ fn run_write_journal(
         now,
     ) {
         Ok(_) => Ok(text_result(&format!("wrote journal entry for {agent}"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
@@ -1240,7 +1373,7 @@ fn run_reindex(
     let now = wall_now();
     match coord.reindex_missing(&estate.handle, now) {
         Ok(enqueued) => Ok(text_result(&format!("reindex: enqueued {enqueued} drawers for encoding"))),
-        Err(e) => Ok(error_result(&format!("{e:?}"))),
+        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
 
