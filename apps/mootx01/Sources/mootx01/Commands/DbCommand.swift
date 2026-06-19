@@ -89,8 +89,14 @@ struct DbOpenCommand: AsyncParsableCommand {
         let env = ProcessInfo.processInfo.environment
         let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
 
-        let estateURL = DatabaseManager.estateURL(for: name, in: dataDir)
-        guard FileManager.default.fileExists(atPath: estateURL.path) else {
+        // Detect estate presence by the directory, not the SQLite file — the file
+        // is written lazily on first serve, but the directory is created by db create.
+        // This is consistent with listEstates and the Rust port's open implementation.
+        let estateDir = DatabaseManager.estateURL(for: name, in: dataDir)
+            .deletingLastPathComponent()
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: estateDir.path, isDirectory: &isDir),
+              isDir.boolValue else {
             print("Estate '\(name)' not found. Run `mootx01 db list` to see available estates.")
             throw ExitCode.failure
         }
