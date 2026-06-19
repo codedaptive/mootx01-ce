@@ -129,6 +129,20 @@ extension NeuronKit {
                 }
                 return (candidate, sum)
             }
+        // Stamp each candidate with its composition precision score so callers
+        // (e.g. PreciseRecall) can surface the re-rank score rather than the
+        // coarse fusion score (`score.final`). Discrimination classification and
+        // PreciseMatch.score should reflect the composition's correctness, not
+        // the coarse lane's spread.
+        let stamped: [ReductionCandidate] = scored.map { item in
+            ReductionCandidate(
+                id: item.candidate.id, content: item.candidate.content,
+                room: item.candidate.room, score: item.candidate.score,
+                udcCode: item.candidate.udcCode, udcFacets: item.candidate.udcFacets,
+                coarseRank: item.candidate.coarseRank, eventTime: item.candidate.eventTime,
+                isCurrentlyBelieved: item.candidate.isCurrentlyBelieved,
+                precisionScore: item.precision)
+        }
 
         // 2. STABLE SORT: precision desc, then a CONTENT-stable tie-break.
         //    Equal-precision near-duplicates are ordered by their content
@@ -142,13 +156,12 @@ extension NeuronKit {
         //    removes that dependence: identical content → identical reduce order,
         //    regardless of which run minted which id. Coarse rank remains the
         //    last resort for the (degenerate) identical-content case.
-        var ranked = scored.sorted { lhs, rhs in
-            if lhs.precision != rhs.precision { return lhs.precision > rhs.precision }
-            if lhs.candidate.content != rhs.candidate.content {
-                return lhs.candidate.content < rhs.candidate.content
-            }
-            return lhs.candidate.coarseRank < rhs.candidate.coarseRank
-        }.map(\.candidate)
+        // Sort on the stamped candidates (each carries its precisionScore).
+        var ranked = stamped.sorted { lhs, rhs in
+            if lhs.precisionScore != rhs.precisionScore { return lhs.precisionScore > rhs.precisionScore }
+            if lhs.content != rhs.content { return lhs.content < rhs.content }
+            return lhs.coarseRank < rhs.coarseRank
+        }
 
         // 3. MMR RE-RANK (optional, set-level): re-order the sorted pool to
         //    penalize content redundancy, λ-weighted against the position-derived
@@ -288,9 +301,14 @@ extension NeuronKit {
         let bodies = try await hydrate(candidates.map(\.id))
         return candidates.map { c in
             guard let body = bodies[c.id], body != c.content else { return c }
+            // Preserve precisionScore: it is set by the reduce fold AFTER
+            // hydration (for mixed compositions) or carried through unchanged
+            // (for pure-dense compositions). The hydrate step only fills bodies;
+            // it must not reset the precision score.
             return ReductionCandidate(
                 id: c.id, content: body, room: c.room, score: c.score,
-                udcCode: c.udcCode, udcFacets: c.udcFacets, coarseRank: c.coarseRank)
+                udcCode: c.udcCode, udcFacets: c.udcFacets, coarseRank: c.coarseRank,
+                precisionScore: c.precisionScore)
         }
     }
 

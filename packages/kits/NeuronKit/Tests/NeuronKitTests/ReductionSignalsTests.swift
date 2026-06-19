@@ -457,6 +457,89 @@ struct ReductionSignalsTests {
         #expect(result.first(where: { $0.id == "d1" })?.content.contains("350") == true)
     }
 
+    // MARK: - precisionScore stamping (Wave B, Part 1b)
+
+    @Test("reduce stamps precisionScore on each candidate from the weighted-sum fold")
+    func reducePrecisionScoreStamped() {
+        let q = NeuronKit.ReductionQuery(text: "the indemnity was 46 million marks")
+        let pool = [
+            candidate(id: "right", content: "the indemnity was 46 million marks", coarseRank: 0),
+            candidate(id: "wrong", content: "the indemnity was 11 million marks", coarseRank: 1),
+        ]
+        let comp = NeuronKit.CompositionGrid.named("text")
+        let ranked = NeuronKit.reduce(composition: comp, query: q, candidates: pool, limit: 10)
+        // All returned candidates must have a non-default precisionScore: the fold
+        // stamped the weighted-sum score onto each one.
+        for c in ranked {
+            #expect(c.precisionScore > 0, "precisionScore must be stamped by the fold for id=\(c.id)")
+        }
+        // The candidate that matches the distinctive token ranks first and carries
+        // the higher precision score.
+        #expect(ranked.first?.id == "right", "the matching candidate must rank first")
+        let rightScore = ranked.first(where: { $0.id == "right" })?.precisionScore ?? 0
+        let wrongScore = ranked.first(where: { $0.id == "wrong" })?.precisionScore ?? 0
+        #expect(rightScore > wrongScore, "the correct candidate must carry a higher precisionScore")
+    }
+
+    @Test("reduce sort is on precisionScore, not coarseRank — the worse-ranked coarse hit wins if it scores higher")
+    func reduceSortByPrecisionNotCoarseRank() {
+        let q = NeuronKit.ReductionQuery(text: "Versailles 1715")
+        // The coarse rank has the WRONG answer first (coarseRank 0).
+        let pool = [
+            candidate(id: "wrong", content: "Versailles is a commune",        coarseRank: 0),
+            candidate(id: "right", content: "Versailles was completed in 1715", coarseRank: 1),
+        ]
+        let comp = NeuronKit.CompositionGrid.named("text")
+        let ranked = NeuronKit.reduce(composition: comp, query: q, candidates: pool, limit: 10)
+        #expect(ranked.first?.id == "right", "the better-content candidate must win even if coarseRank is worse")
+    }
+
+    // MARK: - containment gate helpers (Wave B, Part 1a)
+
+    @Test("hasDistinctiveTokens: numbers and capitalised words are distinctive")
+    func hasDistinctiveTokensDetectsNumbersAndProperNouns() {
+        #expect(NeuronKit.hasDistinctiveTokens("the indemnity was 46 million marks"))
+        #expect(NeuronKit.hasDistinctiveTokens("the treaty of Versailles"))
+        #expect(NeuronKit.hasDistinctiveTokens("Q3 revenue report"))
+        // Plain lowercase words only — no distinctive tokens.
+        #expect(!NeuronKit.hasDistinctiveTokens("the quick brown fox"))
+        #expect(!NeuronKit.hasDistinctiveTokens("what is the indemnity"))
+        // Empty query.
+        #expect(!NeuronKit.hasDistinctiveTokens(""))
+    }
+
+    @Test("containmentSatisfied: true when no distinctive tokens (gate does not apply)")
+    func containmentSatisfiedNoDistinctive() {
+        // Generic query — gate cannot fire; result is always satisfied.
+        #expect(NeuronKit.containmentSatisfied(
+            query: "what is the indemnity",
+            candidateContents: ["anything at all", "another result"]))
+        // Empty candidates is also satisfied when no distinctive tokens.
+        #expect(NeuronKit.containmentSatisfied(
+            query: "what is the indemnity",
+            candidateContents: []))
+    }
+
+    @Test("containmentSatisfied: true when at least one candidate matches any distinctive token")
+    func containmentSatisfiedPartialMatch() {
+        // "46" is distinctive; one candidate contains it.
+        #expect(NeuronKit.containmentSatisfied(
+            query: "indemnity 46 million",
+            candidateContents: ["indemnity was 11 million", "indemnity was 46 million"]))
+    }
+
+    @Test("containmentSatisfied: false when distinctive tokens exist but no candidate matches any")
+    func containmentSatisfiedNoMatchFires() {
+        // "46" is distinctive; neither candidate contains it.
+        #expect(!NeuronKit.containmentSatisfied(
+            query: "indemnity 46 million",
+            candidateContents: ["indemnity was 11 million", "indemnity was 23 million"]))
+        // Empty candidates with a distinctive query also fires.
+        #expect(!NeuronKit.containmentSatisfied(
+            query: "Versailles treaty",
+            candidateContents: []))
+    }
+
     /// A content-only composition (the default `text`) has no dense term to
     /// narrow on, so reduceLate hydrates the whole pool and is bit-identical to
     /// `reduce` — the default recipe is unchanged (no regression).

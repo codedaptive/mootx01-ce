@@ -30,6 +30,9 @@ public enum DiscriminationLevel: Sendable, Equatable {
     case medium
     /// Top results are within epsilon — the list is effectively unranked.
     case low
+    /// Query had distinctive tokens (numbers or proper nouns) but no candidate
+    /// contained any of them — the recall set is a confident non-match.
+    case notFound
 }
 
 /// Compute the discrimination level for an ordered score list.
@@ -108,6 +111,14 @@ public enum RecallDiscrimination {
             return "discrimination: low — top results are within epsilon; treat as effectively unranked. "
                 + "Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for "
                 + "precision, or widen the query."
+        case .notFound:
+            // The query carried distinctive tokens (numbers or capitalised words)
+            // that are reliable identity markers — yet zero candidates matched
+            // any of them. Returning a ranked list here would be fabrication.
+            // Direct the AI to try a different query or confirm the content exists.
+            return "discrimination: not_found — query contains distinctive tokens but no stored memory "
+                + "matches them. The content may not exist in this estate. "
+                + "Try moot_memory_search to confirm, or rephrase the query."
         }
     }
 }

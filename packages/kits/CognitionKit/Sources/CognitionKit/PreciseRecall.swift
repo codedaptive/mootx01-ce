@@ -194,14 +194,14 @@ public enum PreciseRecall {
             hydrate: { ids in try await kit.hydrate(handle, ids: ids) })
 
         return ranked.map { candidate in
-            // The composition does not re-score after ranking; surface each
-            // candidate's final fused coarse score as the reported precision so
-            // the PreciseMatch shape (id/room/content/score) is preserved for
-            // the tool surface. Rank order is the composition's; the score field
-            // is informational.
+            // precisionScore is the weighted-sum composition score stamped onto
+            // the candidate during the reduce fold (ReductionComposition.reduce).
+            // It reflects the composition's re-rank signal, not the coarse fusion
+            // score, so discrimination classification downstream operates on the
+            // quality signal that actually drove the ordering.
             PreciseMatch(
                 id: candidate.id, room: candidate.room,
-                content: candidate.content, score: Double(candidate.score.final))
+                content: candidate.content, score: candidate.precisionScore)
         }
     }
 }

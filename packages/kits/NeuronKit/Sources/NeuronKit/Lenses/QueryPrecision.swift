@@ -98,6 +98,42 @@ extension NeuronKit {
         return min(contentMatch + bonus * distinctiveRate, 1)
     }
 
+    /// Whether `query` contains at least one distinctive token (a number or
+    /// a word with an uppercase letter). When true, the exact-token gate in
+    /// `moot_recall_precise` applies: any result set where NO candidate
+    /// contains any of those tokens should be suppressed (not_found) rather
+    /// than returned as a confident ranked list.
+    ///
+    /// Public so the access surface (`RecipeTools`) can inspect the gate
+    /// without re-implementing the tokenisation rule.
+    public static func hasDistinctiveTokens(_ query: String) -> Bool {
+        !distinctiveTokens(query).isEmpty
+    }
+
+    /// Whether at least one of `candidateContents` satisfies the distinctive-
+    /// token containment gate for `query`. Returns `true` when:
+    ///   - the query has no distinctive tokens (gate does not apply), OR
+    ///   - at least one candidate's content contains every distinctive token
+    ///     in the query (i.e. `tokenExactRate` for that candidate > 0).
+    ///
+    /// When this returns `false`, the recall set is a confident non-match and
+    /// the caller should suppress results with `not_found` discrimination rather
+    /// than returning the ranked list.
+    ///
+    /// Public so the access surface (`RecipeTools`) can apply the gate after
+    /// receiving the `PreciseMatch` list without re-implementing tokenisation.
+    public static func containmentSatisfied(query: String, candidateContents: [String]) -> Bool {
+        let distinctive = distinctiveTokens(query)
+        guard !distinctive.isEmpty else { return true }
+        for content in candidateContents {
+            let tokens = Set(wordTokens(content))
+            // Any match where at least one distinctive token is present passes
+            // the gate — the rate > 0 condition from tokenExactRate.
+            if !distinctive.isDisjoint(with: tokens) { return true }
+        }
+        return false
+    }
+
     /// Stopwords and question words dropped from the query before the
     /// content-word match, so the entity + attribute words carry the signal.
     /// A small closed ASCII list — locale-free, identical in the Rust port —

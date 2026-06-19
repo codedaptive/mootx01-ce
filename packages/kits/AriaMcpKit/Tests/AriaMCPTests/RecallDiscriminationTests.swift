@@ -81,6 +81,22 @@ struct RecallDiscriminationTests {
         #expect(line == "discrimination: n/a — single/zero results.")
     }
 
+    // MARK: - notFound level (Wave B, Part 1a)
+
+    @Test func notFoundResultLineContainsKeyGuidance() {
+        let line = RecallDiscrimination.resultLine(for: .notFound)
+        #expect(line.contains("discrimination: not_found"))
+        #expect(line.contains("distinctive tokens"))
+        #expect(line.contains("moot_memory_search"))
+    }
+
+    @Test func notFoundIsNotEqualToLow() {
+        // notFound and low are distinct levels — notFound means the token gate
+        // fired (definitive absence), not just that scores were flat.
+        #expect(DiscriminationLevel.notFound != DiscriminationLevel.low)
+        #expect(DiscriminationLevel.notFound != DiscriminationLevel.single)
+    }
+
     // MARK: - Parity vectors (must match Rust parity_vectors_match_swift)
 
     @Test func parityVectorHighSeparation() {
@@ -136,11 +152,12 @@ struct RecallDiscriminationTests {
 
         // Discrimination signal must always be present in the result.
         #expect(text.contains("discrimination:"))
-        // The signal must be one of the four known levels.
+        // The signal must be one of the known levels.
         let hasKnownLevel = text.contains("discrimination: low")
             || text.contains("discrimination: medium")
             || text.contains("discrimination: high")
             || text.contains("discrimination: n/a")
+            || text.contains("discrimination: not_found")
         #expect(hasKnownLevel)
     }
 }
