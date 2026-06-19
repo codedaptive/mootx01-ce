@@ -6,6 +6,7 @@
 
 pub mod clients;
 pub mod daemon_client;
+pub mod depth;
 pub mod merge;
 pub mod paths;
 pub mod permissions;

@@ -14,8 +14,9 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::cli::Location;
+use crate::cli::{InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
+use crate::core::depth::{self, DepthOutcome, InstallDepth};
 use crate::core::{merge, paths, permissions};
 use crate::exit;
 
@@ -27,6 +28,7 @@ pub fn run(
     no_mgr: bool,
     no_daemon: bool,
     vault_on: bool,
+    depth_arg: Option<InstallDepthArg>,
 ) -> ExitCode {
     let home = home_dir();
     let registry = clients::supported();
@@ -42,6 +44,19 @@ pub fn run(
         println!("Nothing selected.");
         return ExitCode::from(exit::OK);
     }
+
+    // Resolve the global integration depth (§4.4). Precedence:
+    //   --mode flag (honored in silent and guided modes)
+    //   → --yes default (plugin, no prompt)
+    //   → guided depth prompt (after the picker, before apply)
+    //   → default (plugin) when non-interactive.
+    let depth = match depth_arg {
+        Some(InstallDepthArg::Server) => InstallDepth::Server,
+        Some(InstallDepthArg::Skills) => InstallDepth::Skills,
+        Some(InstallDepthArg::Plugin) => InstallDepth::Plugin,
+        None if yes => InstallDepth::DEFAULT,
+        None => prompt_depth(),
+    };
 
     let binary_path = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -59,17 +74,52 @@ pub fn run(
     // will print their own "not available" skip message.
     let mut wired = Vec::new();
     let mut skipped = Vec::new();
+    // Client ids whose MCP wiring succeeded — depth payload applies only to these.
+    let mut wired_ids: Vec<&'static str> = Vec::new();
 
     for client in &selected {
         match install_one(client, &home, &binary_path, &daemon_url, location) {
             Ok(Some(p)) => {
                 println!("  ✓ wired {} ({})", client.display_name, p.display());
                 wired.push(client.display_name);
+                wired_ids.push(client.id);
             }
             Ok(None) => skipped.push(client.display_name),
             Err(e) => {
                 eprintln!("  ✗ {}: {e}", client.display_name);
                 skipped.push(client.display_name);
+            }
+        }
+    }
+
+    // Integration depth (§4.4): server = MCP only (done above); skills/plugin
+    // add the canonical SKILL.md / pre-generated package per client. The depth
+    // is a target — each client gets the most it supports, and any plugin→skills
+    // fallback is reported (the §4.4 ceiling). Applied only to clients whose MCP
+    // wiring succeeded.
+    if depth != InstallDepth::Server {
+        println!();
+        println!("Integration depth: {}", depth.as_str());
+        for client in &selected {
+            if !wired_ids.contains(&client.id) {
+                continue;
+            }
+            match depth::apply(client.id, depth, &home) {
+                Ok(DepthOutcome::Server) => println!(
+                    "  ⓘ {}: server only (no skill/plugin payload for this client)",
+                    client.display_name
+                ),
+                Ok(DepthOutcome::Skills(path)) => {
+                    println!("  ✓ {}: skill installed → {path}", client.display_name)
+                }
+                Ok(DepthOutcome::Plugin(path)) => {
+                    println!("  ✓ {}: plugin installed → {path}", client.display_name)
+                }
+                Ok(DepthOutcome::PluginFellBackToSkills(path, reason)) => println!(
+                    "  ✓ {}: skill installed (plugin → skills: {reason}) → {path}",
+                    client.display_name
+                ),
+                Err(e) => eprintln!("  ✗ {}: depth install failed: {e}", client.display_name),
             }
         }
     }
@@ -272,6 +322,30 @@ pub(crate) fn resolve_targets(
         return Ok(registry.iter().filter(|c| c.detected(home)).cloned().collect());
     }
     Ok(prompt_select(registry, home))
+}
+
+/// Guided depth prompt (§4.4). Shown only when `--mode` was not supplied AND
+/// not `--yes` (the caller enforces that). Placed AFTER the client picker and
+/// BEFORE apply. Default = Full Plugin (option 3); an empty line, a
+/// non-recognised entry, or a closed stdin returns the default.
+fn prompt_depth() -> InstallDepth {
+    println!();
+    println!("Integration depth?");
+    println!("  1) Server only      — MCP tools (moot_*)");
+    println!("  2) Server + Skills  — tools + mootx01-memory skill (auto-loads)");
+    println!("  3) Full Plugin      — native plugin per tool                 [default]");
+    print!("Choice [3]: ");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    if io::stdin().lock().read_line(&mut line).is_err() {
+        return InstallDepth::DEFAULT;
+    }
+    match line.trim() {
+        "1" => InstallDepth::Server,
+        "2" => InstallDepth::Skills,
+        "3" => InstallDepth::Plugin,
+        _ => InstallDepth::DEFAULT,
+    }
 }
 
 /// Numbered-prompt selection (the spec'd fallback interactive mode).

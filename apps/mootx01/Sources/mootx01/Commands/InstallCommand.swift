@@ -19,6 +19,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Config scope: 'global' (default) or 'local' (project .mcp.json for Claude Code).")
     var location: String = "global"
 
+    @Option(name: .long, help: "Integration depth applied to every selected client: 'server' (MCP only), 'skills' (server + mootx01-memory skill), or 'plugin' (server + native plugin). Default: prompt when interactive, else 'plugin'. Plugin falls back to skills on hosts without a plugin format.")
+    var mode: String?
+
     @Flag(name: .shortAndLong, help: "Skip prompts; auto-detect and install all present clients.")
     var yes: Bool = false
 
@@ -55,6 +58,23 @@ struct InstallCommand: AsyncParsableCommand {
         guard !clients.isEmpty else {
             print("No clients selected. Run `mootx01 install --target <id>` to install a specific client.")
             return
+        }
+
+        // Resolve the global integration depth (§4.4). Order of precedence:
+        //   --mode flag (honored in both silent and guided modes)
+        //   → --yes default (plugin, no prompt)
+        //   → guided depth prompt (after the client picker, before apply)
+        //   → default (plugin) when the prompt is non-interactive.
+        let depth: InstallDepth
+        if let mode {
+            guard let parsed = InstallDepth(modeFlag: mode) else {
+                throw ValidationError("--mode must be 'server', 'skills', or 'plugin' (got '\(mode)').")
+            }
+            depth = parsed
+        } else if yes {
+            depth = .default
+        } else {
+            depth = AgentPicker.pickDepth()
         }
 
         // Place the binary FIRST and use its installed absolute path as the
@@ -119,6 +139,37 @@ struct InstallCommand: AsyncParsableCommand {
         }
         if !skipped.isEmpty {
             print("Skipped (errors): \(skipped.joined(separator: ", "))")
+        }
+
+        // Integration depth (§4.4): server = MCP only (done above); skills/plugin
+        // add the canonical SKILL.md / pre-generated package per client. The
+        // depth is a target — each client gets the most it supports, and any
+        // plugin→skills fallback is reported (the §4.4 ceiling table). Applied
+        // only to clients whose MCP wiring succeeded.
+        if depth != .server {
+            print("")
+            print("Integration depth: \(depth.rawValue)")
+            for client in clients where installed.contains(client.displayName) {
+                do {
+                    let outcome = try DepthInstaller.apply(
+                        clientID: client.id,
+                        depth: depth,
+                        homeDirectory: home
+                    )
+                    switch outcome {
+                    case .server:
+                        print("  ⓘ \(client.displayName): server only (no skill/plugin payload for this client)")
+                    case let .skills(path):
+                        print("  ✓ \(client.displayName): skill installed → \(path)")
+                    case let .plugin(path):
+                        print("  ✓ \(client.displayName): plugin installed → \(path)")
+                    case let .pluginFellBackToSkills(path, reason):
+                        print("  ✓ \(client.displayName): skill installed (plugin → skills: \(reason)) → \(path)")
+                    }
+                } catch {
+                    print("  ✗ \(client.displayName): depth install failed: \(error)")
+                }
+            }
         }
 
         // Install + launch the moot-mgr management console as a background

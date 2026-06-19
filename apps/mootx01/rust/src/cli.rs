@@ -17,6 +17,7 @@ pub enum Command {
     /// §4.1 serve [--db <name>] [--http <port|auto>]
     Serve { db: Option<String>, http: Option<HttpMode> },
     /// §4.2 install [--target <ids>] [--location global|local] [--yes]
+    ///              [--mode server|skills|plugin]
     ///              [--no-permissions] [--no-mgr] [--no-daemon]
     ///              [--vault-on | --vault-off]
     Install {
@@ -31,6 +32,10 @@ pub enum Command {
         /// symmetry and to let users be explicit. If both flags are given,
         /// vault_on=false (--vault-off wins — the safer choice) per ADR-015.
         vault_on: bool,
+        /// Integration depth (§4.4). None when `--mode` was not supplied — the
+        /// command then prompts (interactive) or defaults to plugin (`--yes` /
+        /// non-interactive). Some(_) when `--mode server|skills|plugin` is given.
+        depth: Option<InstallDepthArg>,
     },
     /// §4.3 uninstall [--target <ids>] [--yes] [--purge]
     Uninstall { target: Option<Vec<String>>, yes: bool, purge: bool },
@@ -73,6 +78,16 @@ pub enum DbCommand {
 pub enum Location {
     Global,
     Local,
+}
+
+/// §4.4 `--mode` value: integration depth. Parse-layer mirror of
+/// core::depth::InstallDepth (kept here so cli.rs stays pure and
+/// dependency-light; install.rs maps it to the core type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallDepthArg {
+    Server,
+    Skills,
+    Plugin,
 }
 
 /// A usage error: carries the message printed to stderr. Exit code is
@@ -178,6 +193,8 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
     // symmetry. If both appear, --vault-off wins (last-write wins in the loop,
     // but --vault-off always sets false regardless of order, so it dominates).
     let mut vault_on = true;
+    // §4.4 integration depth. None until --mode is seen.
+    let mut depth: Option<InstallDepthArg> = None;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--target" => {
@@ -196,6 +213,20 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
                     }
                 };
             }
+            // §4.4: integration depth. Honored in both silent and guided modes.
+            "--mode" => {
+                let v = take_value(it, "--mode")?;
+                depth = Some(match v.as_str() {
+                    "server" => InstallDepthArg::Server,
+                    "skills" => InstallDepthArg::Skills,
+                    "plugin" => InstallDepthArg::Plugin,
+                    other => {
+                        return Err(UsageError(format!(
+                            "Error: '--mode' must be 'server', 'skills', or 'plugin', got '{other}'."
+                        )))
+                    }
+                });
+            }
             "--yes" | "-y" => yes = true,
             "--no-permissions" => no_permissions = true,
             "--no-mgr" => no_mgr = true,
@@ -209,7 +240,7 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
             other => return Err(unexpected(other, "install")),
         }
     }
-    Ok(Command::Install { target, location, yes, no_permissions, no_mgr, no_daemon, vault_on })
+    Ok(Command::Install { target, location, yes, no_permissions, no_mgr, no_daemon, vault_on, depth })
 }
 
 fn parse_uninstall(it: &mut Args) -> Result<Command, UsageError> {
@@ -383,11 +414,12 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + Brain pump + telemetry) instead of stdio.".into(),
         "install" => "Wire mootx01 into MCP clients and grant tool permissions.\n\
             \n\
-            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--yes] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off]\n\
+            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off]\n\
             \n\
             OPTIONS:\n\
             \x20 --target <ids>          Comma-separated client ids to install (e.g. claude,cursor). Default: interactive picker.\n\
             \x20 --location <scope>      Config scope: 'global' (default) or 'local' (project .mcp.json for Claude Code).\n\
+            \x20 --mode <depth>          Integration depth for every selected client: 'server' (MCP only), 'skills' (server + mootx01-memory skill), or 'plugin' (server + native plugin). Default: prompt when interactive, else 'plugin'. Plugin falls back to skills on hosts without a plugin format.\n\
             \x20 -y, --yes               Skip prompts; auto-detect and install all present clients.\n\
             \x20 --no-permissions        Skip writing to settings.json (do not grant tool permissions).\n\
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
@@ -498,8 +530,40 @@ mod tests {
                 no_mgr: true,
                 no_daemon: true,
                 vault_on: true, // default when neither --vault-on nor --vault-off is passed
+                depth: None,    // default when --mode is not passed
             }
         );
+    }
+
+    #[test]
+    fn install_mode_flag() {
+        // §4.4: --mode parses the three depth values.
+        for (flag, want) in [
+            ("server", InstallDepthArg::Server),
+            ("skills", InstallDepthArg::Skills),
+            ("plugin", InstallDepthArg::Plugin),
+        ] {
+            assert_eq!(
+                p(&["install", "--mode", flag]).unwrap(),
+                Command::Install {
+                    target: None,
+                    location: Location::Global,
+                    yes: false,
+                    no_permissions: false,
+                    no_mgr: false,
+                    no_daemon: false,
+                    vault_on: true,
+                    depth: Some(want),
+                }
+            );
+        }
+        // No --mode → depth None (the command prompts or defaults to plugin).
+        assert!(matches!(
+            p(&["install"]).unwrap(),
+            Command::Install { depth: None, .. }
+        ));
+        // Unrecognised value is a usage error.
+        assert!(p(&["install", "--mode", "bogus"]).is_err());
     }
 
     #[test]
@@ -515,6 +579,7 @@ mod tests {
                 no_mgr: false,
                 no_daemon: false,
                 vault_on: false,
+                depth: None,
             }
         );
         // --vault-on is explicit opt-in to the default
@@ -528,6 +593,7 @@ mod tests {
                 no_mgr: false,
                 no_daemon: false,
                 vault_on: true,
+                depth: None,
             }
         );
         // default (neither flag) is vault-on
@@ -541,6 +607,7 @@ mod tests {
                 no_mgr: false,
                 no_daemon: false,
                 vault_on: true,
+                depth: None,
             }
         );
     }

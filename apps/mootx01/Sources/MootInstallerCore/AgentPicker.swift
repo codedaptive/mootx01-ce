@@ -236,6 +236,36 @@ public enum AgentPicker {
         return all.filter { checked.contains($0.id) }
     }
 
+    // MARK: - Depth prompt (§4.4)
+
+    /// Prompt for the global integration depth. Shown only when `--mode` was
+    /// not supplied AND not `--yes` (the caller enforces that). Placed AFTER
+    /// the client picker and BEFORE apply. Default = Full Plugin (option 3);
+    /// an empty line or a non-TTY returns the default.
+    ///
+    /// Numbered prompt (not the raw-mode multiselect) — depth is a single
+    /// choice, so a numbered read keeps it simple and TTY-robust.
+    public static func pickDepth() -> InstallDepth {
+        guard isInteractiveTerminal() else { return .default }
+        print("")
+        print("Integration depth?")
+        print("  1) Server only      — MCP tools (moot_*)")
+        print("  2) Server + Skills  — tools + mootx01-memory skill (auto-loads)")
+        print("  3) Full Plugin      — native plugin per tool                 [default]")
+        print("Choice [3]: ", terminator: "")
+
+        guard let line = readLine()?.trimmingCharacters(in: .whitespaces),
+              !line.isEmpty else {
+            return .default
+        }
+        switch line {
+        case "1": return .server
+        case "2": return .skills
+        case "3": return .plugin
+        default:  return .default   // unrecognised → default (Full Plugin)
+        }
+    }
+
     // MARK: - Terminal detection
 
     private static func isInteractiveTerminal() -> Bool {
