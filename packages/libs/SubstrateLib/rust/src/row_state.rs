@@ -73,6 +73,11 @@ fn transitions() -> &'static HashMap<TransitionKey, RowState> {
 
         // ---- from Contested ----
         m.insert(TransitionKey::new(Contested, ResolveContest), Active);
+        // A contested memory judged false is terminally rejectable. The
+        // verb-string table (verbs.rs, §10 vocabulary) has always carried
+        // this edge; this entry aligns the canonical §9 lifecycle table to
+        // match. Cookbook §9.2: Contested → Reject → Rejected.
+        m.insert(TransitionKey::new(Contested, Reject), Rejected);
         m.insert(TransitionKey::new(Contested, Retract), Withdrawn);
         m.insert(TransitionKey::new(Contested, Tombstone), Tombstoned);
 
@@ -397,6 +402,24 @@ mod tests {
         // Pending --Promote--> is illegal (must Observe first).
         let r = validate(RowState::Pending, RowVerb::Promote, fields);
         assert!(matches!(r, Err(RowStateError::IllegalTransition(_, _))));
+    }
+
+    // ---- contested → rejected (the fix) ----
+
+    #[test]
+    fn contested_can_be_rejected() {
+        // Cookbook §9.2: Contested --Reject--> Rejected is legal.
+        // A contested memory judged false must be terminally rejectable.
+        let next = transition(RowState::Contested, RowVerb::Reject);
+        assert_eq!(next, Some(RowState::Rejected));
+    }
+
+    #[test]
+    fn accepted_cannot_be_rejected() {
+        // Accepted is an audit-grade terminal state. Rejection from Accepted
+        // is not in the cookbook §9.2 transition table and must be blocked.
+        let next = transition(RowState::Accepted, RowVerb::Reject);
+        assert_eq!(next, None);
     }
 }
 

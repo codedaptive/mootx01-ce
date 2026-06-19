@@ -1320,7 +1320,14 @@ impl Estate {
                 self.store.get_drawer(row_id)?.ok_or_else(|| LocusKitError::DrawerNotFound {
                     id: row_id.to_string(),
                 })?;
-                // pending → reject → rejected per automaton §9.2.
+                // Pending → reject → Rejected and Contested → reject → Rejected
+                // per automaton §9.2. A contested memory judged false must be
+                // terminally rejectable; the automaton now admits both source
+                // states via the same verb. The DrawerStore write gate consults
+                // SubstrateLib's transition table and returns
+                // `InvalidContent(disciplineViolation)` if the current state is
+                // anything else (e.g. Active, Accepted), so no extra guard is
+                // needed here.
                 let changed_by = self.changed_by_or_estate();
                 let now = Self::now_millis();
                 self.store.mutate_state(
@@ -2355,14 +2362,71 @@ mod tests {
 
     #[test]
     fn mutate_reject_from_active_throws_gate_violation() {
-        // Reject is implemented but automaton only permits it from Pending.
-        // Active → reject is an illegal transition; the gate throws InvalidContent.
+        // The automaton permits reject from Pending and Contested (§9.2).
+        // Active → reject is still an illegal transition; the gate throws InvalidContent.
         let estate = make_estate();
         let drawer = basic_capture(&estate, "x", "r");
         let err = estate
             .mutate(&drawer.id, MutationKind::Reject, None)
             .unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    #[test]
+    fn mutate_reject_from_contested_becomes_rejected() {
+        // Cookbook §9.2: a contested memory judged false is terminally
+        // rejectable via Contested → Reject → Rejected.
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "contested-reject target", "study");
+        // Move to Contested first.
+        estate
+            .mutate(&drawer.id, MutationKind::Contest, None)
+            .unwrap();
+        let mid = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(mid.adjective_bitmap & 0x3F),
+            State::Contested,
+            "state should be Contested before reject"
+        );
+        // Now reject from Contested — must land Rejected.
+        estate
+            .mutate(&drawer.id, MutationKind::Reject, None)
+            .unwrap();
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(after.adjective_bitmap & 0x3F),
+            State::Rejected,
+            "contested → reject must land Rejected"
+        );
+    }
+
+    #[test]
+    fn mutate_reject_from_accepted_throws_gate_violation() {
+        // Accepted is an audit-grade terminal state. Reject from Accepted is
+        // illegal per §9.2; the gate must block it (audit-grade coverage).
+        use substrate_kernel::bit_field;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "accepted-reject target", "study");
+        // Lift trust to Canonical so the Accept guard passes.
+        estate
+            .mutate(&drawer.id, MutationKind::CorrectTrust(Trust::Canonical), None)
+            .unwrap();
+        estate
+            .mutate(&drawer.id, MutationKind::Accept, None)
+            .unwrap();
+        let accepted = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(bit_field::extract_field(accepted.adjective_bitmap, 0, 6)),
+            State::Accepted
+        );
+        // Now try to reject — must fail.
+        let err = estate
+            .mutate(&drawer.id, MutationKind::Reject, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "accepted → reject must be blocked by the gate: {err:?}"
+        );
     }
 
     // --- MutationKind round-trip tests (parity with Swift MutateMutationKindTests) ---

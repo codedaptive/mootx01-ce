@@ -488,5 +488,103 @@ struct StateTransitionTests {
         #expect(after?.state == .accepted)
         #expect(after?.trust == .canonical)
     }
+
+    // MARK: - contested → rejected (the fix, cookbook §9.2)
+
+    @Test("legal: contested → rejected via reject")
+    func legalContestedToRejectedReject() throws {
+        // Cookbook §9.2: a contested memory judged false must be terminally
+        // rejectable. Both Pending and Contested are legal sources for .reject.
+        try DrawerStateValidator.validate(from: .contested, to: .rejected, via: .reject)
+    }
+
+    @Test("illegal: active → rejected (only pending and contested may reject)")
+    func illegalActiveToRejectedReject() {
+        // Active → Reject is not in the §9.2 transition table;
+        // only Pending and Contested are legal reject sources.
+        #expect(throws: LocusKitError.self) {
+            try DrawerStateValidator.validate(from: .active, to: .rejected, via: .reject)
+        }
+    }
+
+    @Test("illegal: accepted → rejected (audit-grade terminal; reject is blocked)")
+    func illegalAcceptedToRejectedReject() {
+        // Accepted is an audit-grade terminal. Reject from Accepted must fail;
+        // the gate enforces this via the absence of the entry in §9.2's table.
+        #expect(throws: LocusKitError.self) {
+            try DrawerStateValidator.validate(from: .accepted, to: .rejected, via: .reject)
+        }
+    }
+
+    @Test("mutateState: contested → rejected persists and writes audit event")
+    func mutateStateContestedToRejectedPersistsAndAudits() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+        try await store.addDrawer(sampleDrawer(id: Self.idD1, adjectiveBitmap: 0)) // .active
+
+        // Move to contested first (active → contest → contested).
+        try await store.mutateState(
+            drawerId: Self.idD1,
+            to: .contested,
+            via: .contest,
+            changedBy: "test",
+            now: t(1_700_000_400)
+        )
+        let contested = try await store.getDrawer(id: Self.idD1)
+        #expect(contested?.state == .contested)
+
+        // Now reject from contested (contested → reject → rejected).
+        try await store.mutateState(
+            drawerId: Self.idD1,
+            to: .rejected,
+            via: .reject,
+            changedBy: "test",
+            now: t(1_700_000_500)
+        )
+
+        let rejected = try await store.getDrawer(id: Self.idD1)
+        #expect(rejected?.state == .rejected)
+
+        // Three audit events: genesis capture, contest, then reject.
+        let count = try await auditEventCount(store, Self.idD1)
+        #expect(count == 3)
+        let events = try await store.auditEventsForRow(UUID(uuidString: Self.idD1)!)
+        // The final event must record the rejected state in its afterBitmaps.
+        #expect((events.last?.afterBitmaps.adjective ?? -1) & 0x3F
+                == Int64(State.rejected.rawValue))
+    }
+
+    @Test("mutateState: accepted → reject is blocked (audit-grade terminal)")
+    func mutateStateAcceptedToRejectedIsBlocked() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+        // Canonical trust so the promote guard and S-1 gate both pass.
+        let canonicalTrust: Int64 = (3 << 18)
+        try await store.addDrawer(sampleDrawer(id: Self.idD2, adjectiveBitmap: canonicalTrust))
+
+        try await store.mutateState(
+            drawerId: Self.idD2,
+            to: .accepted,
+            via: .promote,
+            changedBy: "test",
+            now: t(1_700_000_600)
+        )
+        #expect((try await store.getDrawer(id: Self.idD2))?.state == .accepted)
+
+        // Attempt to reject an accepted row must be blocked at the gate.
+        await #expect(throws: LocusKitError.self) {
+            try await store.mutateState(
+                drawerId: Self.idD2,
+                to: .rejected,
+                via: .reject,
+                changedBy: "test",
+                now: t(1_700_000_700)
+            )
+        }
+        // State must not have changed.
+        #expect((try await store.getDrawer(id: Self.idD2))?.state == .accepted)
+    }
 }
 
