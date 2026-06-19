@@ -859,10 +859,15 @@ impl StatsStore {
             None,
         )?;
         // PRIMARY KEY lookup yields ≤1 row; the None-estate path picks the
-        // newest generated_at across estates. Absent values sort oldest.
+        // newest generated_at across estates. The column is written as TEXT
+        // ISO-8601 but the storage backend parses it back to `Timestamp(secs)`
+        // on read; tolerate BOTH representations (InMemory and SQLite can differ
+        // on read-back type) and normalise to epoch seconds so the comparison is
+        // numeric. Absent/unparseable sorts oldest.
         fn generated_at(row: &persistence_kit::StorageRow) -> i64 {
             match row.values.get(StatsStoreSchema::GENERATED_AT_COLUMN) {
                 Some(TypedValue::Timestamp(t)) => *t,
+                Some(TypedValue::Text(s)) => iso8601_to_epoch(s) as i64,
                 _ => i64::MIN,
             }
         }

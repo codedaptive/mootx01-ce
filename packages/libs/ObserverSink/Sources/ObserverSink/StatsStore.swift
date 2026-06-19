@@ -586,10 +586,14 @@ public final class StatsStore: Sendable {
             where: predicate
         )
         // PRIMARY KEY lookup yields ≤1 row; the nil-estate path picks the
-        // newest generated_at across estates.
+        // newest generated_at across estates. The column is written as
+        // `.timestamp`, but the storage backend's read-back type differs:
+        // InMemory returns `.timestamp`, SQLite returns `.text` (ISO-8601).
+        // tolerate BOTH (otherwise SQLite ties every row and an arbitrary one
+        // wins — a bug InMemory tests hide).
         let newest = rows.max { a, b in
-            timestampValue(a[StatsStoreSchema.generatedAtColumn])
-                < timestampValue(b[StatsStoreSchema.generatedAtColumn])
+            generatedAtInstant(a[StatsStoreSchema.generatedAtColumn])
+                < generatedAtInstant(b[StatsStoreSchema.generatedAtColumn])
         }
         guard let row = newest,
               let payloadTyped = row[StatsStoreSchema.payloadColumn],
@@ -598,11 +602,17 @@ public final class StatsStore: Sendable {
         return payloadStr.data(using: .utf8)
     }
 
-    /// Decode a `generated_at` cell to a comparable instant. The write path
-    /// stores `.timestamp`; tolerate absent values by sorting them oldest.
-    private func timestampValue(_ value: TypedValue?) -> Date {
-        if case let .timestamp(d)? = value { return d }
-        return .distantPast
+    /// The `generated_at` cell as a comparable instant, tolerating both
+    /// read-back representations: InMemory returns `.timestamp(Date)`; SQLite
+    /// returns `.text` (ISO-8601 UTC). The old code matched only `.timestamp`,
+    /// so under SQLite every row tied at `.distantPast` and an arbitrary one
+    /// won — a bug InMemory tests hide. Absent / unparseable sorts oldest.
+    private func generatedAtInstant(_ value: TypedValue?) -> Date {
+        switch value {
+        case let .timestamp(d)?: return d
+        case let .text(s)?: return Self.iso8601Formatter.date(from: s) ?? .distantPast
+        default: return .distantPast
+        }
     }
 
     // MARK: - Read: metric samples

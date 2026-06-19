@@ -508,6 +508,27 @@ struct ObserverSinkConformanceTests {
                 "nil estate must return the newest generated_at across estates")
     }
 
+    @Test("nil estate: newest wins regardless of write order (regression)")
+    func topologySnapshotNilEstateNewestWinsRegardlessOfOrder() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        // Newer written FIRST: the generated_at tie-break bug (read matched only
+        // .timestamp, but the column is TEXT ISO-8601, so all rows tied at
+        // .distantPast) would wrongly return the older row. The fix compares the
+        // ISO-8601 strings, so the newest wins regardless of order.
+        try await store.writeTopologySnapshot(
+            estate: "estate-newer", generatedAt: Date(timeIntervalSince1970: 2_000_000.0),
+            payload: Data("payload-newer".utf8))
+        try await store.writeTopologySnapshot(
+            estate: "estate-older", generatedAt: Date(timeIntervalSince1970: 1_000_000.0),
+            payload: Data("payload-older".utf8))
+
+        let got = try await store.latestTopologySnapshot(estate: nil)
+        #expect(try #require(got) == Data("payload-newer".utf8),
+                "newest generated_at must win even when the newer row is written first")
+    }
+
     @Test("nil estate returns nil when no snapshots exist")
     func topologySnapshotNilEstateEmptyStore() async throws {
         let store = try await makeStore()
