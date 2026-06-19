@@ -104,7 +104,7 @@ public extension GeniusLocusKit {
 
     // MARK: - runDistillationSweep
 
-    /// Query all open clusters with member_count ≥ 3 and run the injected
+    /// Query open clusters with member_count ≥ 3 and run the injected
     /// distillation function on each. Returns the count of produced factoids.
     ///
     /// Wired into DistillationSignal.spec(distillationCycle:) via the
@@ -123,11 +123,19 @@ public extension GeniusLocusKit {
     ///   - handle: the estate. Must be open.
     ///   - distillFn: pure distillation function injected by the app layer.
     ///   - now: deterministic clock.
+    ///   - clusterID: when non-nil, sweep only the cluster with this UUID.
+    ///     When nil (default), sweep all eligible clusters.
+    ///   - includeHeld: when true, include clusters with `status = 'held'`
+    ///     alongside `status = 'open'` clusters so SNR-gated clusters get
+    ///     another distillation attempt now that more members may have arrived.
+    ///     Defaults to false (only open clusters are swept).
     /// - Returns: count of factoids produced this sweep.
     func runDistillationSweep(
         handle: EstateHandle,
         distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
-        now: Date
+        now: Date,
+        clusterID: String? = nil,
+        includeHeld: Bool = false
     ) async throws -> Int {
         guard let storage = storages[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
@@ -137,19 +145,32 @@ public extension GeniusLocusKit {
         }
         let estate = try estate(for: handle)
 
-        // Query open clusters with member_count >= 3.
+        // Build the status filter: always include 'open'; optionally also
+        // 'held' when the caller wants another attempt on SNR-gated clusters.
+        let eligibleStatuses: [TypedValue] = includeHeld
+            ? [.text("open"), .text("held")]
+            : [.text("open")]
+
+        // Build the WHERE clause, optionally narrowing to a single cluster.
+        let baseCondition: StoragePredicate = .and([
+            .in(Column(table: "memory_clusters", name: "status"), eligibleStatuses),
+            .gte(
+                Column(table: "memory_clusters", name: "member_count"),
+                .int(3)
+            )
+        ])
+        let whereClause: StoragePredicate = if let targetID = clusterID {
+            .and([
+                baseCondition,
+                .eq(Column(table: "memory_clusters", name: "id"), .text(targetID))
+            ])
+        } else {
+            baseCondition
+        }
+
         let rows = try await storage.rowStore.query(
             table: "memory_clusters",
-            where: .and([
-                .eq(
-                    Column(table: "memory_clusters", name: "status"),
-                    .text("open")
-                ),
-                .gte(
-                    Column(table: "memory_clusters", name: "member_count"),
-                    .int(3)
-                )
-            ]),
+            where: whereClause,
             orderBy: [],
             limit: nil,
             offset: nil

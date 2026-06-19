@@ -7,20 +7,15 @@
 // GeniusLocusKit.runDistillationSweep, which owns the cluster query, the
 // per-cluster distillation loop, and all storage mutations.
 //
-// GLK call sequence (one call):
-//   1. kit.runDistillationSweep(handle:distillFn:now:)
-//      → queries open clusters with member_count ≥ 3, runs distillFn per
-//        cluster, captures factoid drawers, writes _distilled_from tunnels,
-//        updates cluster status rows.
-//      → returns factoid count (Int)
-//
-// API gap note: the spec references runDistillationCycle(estate:clusterID:
-// includeHeld:). DG5 implemented runDistillationSweep(handle:distillFn:now:),
-// which sweeps all eligible open clusters and does not accept per-cluster
-// filtering or includeHeld. The Input fields clusterID and includeHeld are
-// accepted but cannot be forwarded until a future GLK enhancement surfaces
-// that capability. heldClusterIDs and failedClusterIDs are not queryable via
-// the current public GLK API and return [] until that surface lands.
+// GLK call sequence:
+//   1. kit.runDistillationSweep(handle:distillFn:now:clusterID:includeHeld:)
+//      → queries clusters by status (open; optionally also held), optionally
+//        filtered to a single clusterID. Runs distillFn per eligible cluster,
+//        captures factoid drawers, writes _distilled_from tunnels, updates
+//        cluster status rows. Returns factoid count (Int).
+//   2. kit.heldClusterIDs(handle:)   — queries memory_clusters status='held'
+//   3. kit.failedClusterIDs(handle:) — queries memory_clusters status='failed'
+//      → populate Output.heldClusterIDs and Output.failedClusterIDs.
 //
 // RecipeCatalog registration: deferred to the Dc4 mission.
 
@@ -31,9 +26,10 @@ import SubstrateML
 
 /// Compact working memory by distilling open clusters into factoids on demand.
 ///
-/// Calls GeniusLocusKit's distillation sweep, which processes all open clusters
-/// with member_count ≥ 3, runs the distillation pipeline per cluster, and
-/// persists produced factoids as ordinary drawers in room `_distilled`.
+/// Calls GeniusLocusKit's distillation sweep, which processes eligible clusters
+/// (member_count ≥ 3, status = open; or also held when `includeHeld` is true),
+/// runs the distillation pipeline per cluster, and persists produced factoids as
+/// ordinary drawers in room `_distilled`.
 ///
 /// Named `consolidate` for use as `moot_consolidate` in AriaMcpKit.
 public struct Consolidate: Recipe {
@@ -43,16 +39,10 @@ public struct Consolidate: Recipe {
     /// Parameters controlling the consolidation sweep.
     public struct Input: Sendable {
         /// Target a specific cluster by UUID. `nil` sweeps all ready clusters.
-        ///
-        /// Note: per-cluster targeting is accepted as input but the current GLK
-        /// sweep API processes all eligible open clusters. Single-cluster
-        /// targeting requires a future GLK API enhancement.
         public let clusterID: String?
 
-        /// When `true`, include SNR-gated held clusters in the sweep.
-        ///
-        /// Note: GLK's runDistillationSweep currently sweeps only `status = open`
-        /// clusters. includeHeld is accepted but does not yet alter GLK behaviour.
+        /// When `true`, include SNR-gated held clusters in the sweep so they
+        /// get another distillation attempt now that more members may have arrived.
         public let includeHeld: Bool
 
         public init(clusterID: String? = nil, includeHeld: Bool = false) {
@@ -68,15 +58,12 @@ public struct Consolidate: Recipe {
         /// Number of distilled factoid drawers produced this sweep.
         public let factoidsProduced: Int
 
-        /// Cluster UUIDs that were gated by the SNR threshold (status = held).
-        ///
-        /// Returned as [] until GLK exposes a public cluster status query API.
+        /// Cluster UUIDs with `status = 'held'` after the sweep — those that
+        /// were gated by the SNR threshold (SNR < 2.0).
         public let heldClusterIDs: [String]
 
-        /// Cluster UUIDs that failed distillation (confidence below threshold
-        /// or pipeline error).
-        ///
-        /// Returned as [] until GLK exposes a public cluster status query API.
+        /// Cluster UUIDs with `status = 'failed'` after the sweep — those where
+        /// confidence fell below the 0.4 threshold or a pipeline error occurred.
         public let failedClusterIDs: [String]
 
         public init(
@@ -115,21 +102,27 @@ public struct Consolidate: Recipe {
         kit: GeniusLocusKit
     ) async throws -> Output {
         try await run(input: input, estate: estate, kit: kit,
-                      extractFeatures: NeuronKit.hmmFeatureExtractor)
+                      extractFeatures: NeuronKit.hmmFeatureExtractor,
+                      now: Date())
     }
 
-    /// Internal overload that accepts an explicit feature extractor.
+    /// Internal overload that accepts an explicit feature extractor and optional clock value.
+    ///
+    /// `now` is threaded in as a parameter so the sweep's `filed_at` and
+    /// `updated_at` timestamps are deterministic in tests. Defaults to `Date()`
+    /// when callers (e.g. integration tests) do not need deterministic timestamps.
     ///
     /// This seam exists for test isolation: CognitionKit integration tests inject
-    /// `DistillationPipeline.defaultExtractor` so their fixture sentences produce
-    /// deterministic outputs independent of the HMM tagger's SNR response to
-    /// synthetic sentences. Production callers always use the public `run` overload,
-    /// which wires `NeuronKit.hmmFeatureExtractor` and cannot be overridden.
+    /// `DistillationPipeline.defaultExtractor` and a fixed `now` so their fixture
+    /// sentences produce deterministic outputs independent of the HMM tagger's SNR
+    /// response to synthetic sentences. Production callers always use the public
+    /// `run` overload, which wires `NeuronKit.hmmFeatureExtractor` and `Date()`.
     func run(
         input: Input,
         estate: EstateHandle,
         kit: GeniusLocusKit,
-        extractFeatures: @escaping DistillationPipeline.FeatureExtractor
+        extractFeatures: @escaping DistillationPipeline.FeatureExtractor,
+        now: Date = Date()
     ) async throws -> Output {
         // One extractor, one door: the caller-supplied extractor (production:
         // NeuronKit.hmmFeatureExtractor) is passed to DistillationPipeline.run.
@@ -142,21 +135,27 @@ public struct Consolidate: Recipe {
             DistillationPipeline.run(input: $0, extractFeatures: extractFeatures)
         }
 
-        // Operational recipe: `now` is the wall-clock time of this sweep.
-        // Correct semantic — factoid filed_at and cluster updated_at should
-        // reflect when the sweep actually ran, not a caller-supplied timestamp.
-        let now = Date()
-
+        // Forward per-cluster targeting and held-inclusion into the sweep.
+        // GLK's runDistillationSweep handles the status filter and optional
+        // single-cluster narrowing.
         let factoidsProduced = try await kit.runDistillationSweep(
             handle: estate,
             distillFn: distillFn,
-            now: now)
+            now: now,
+            clusterID: input.clusterID,
+            includeHeld: input.includeHeld
+        )
 
-        // heldClusterIDs and failedClusterIDs cannot be queried via the current
-        // public GLK API; returned as [] until GLK surfaces cluster status reads.
+        // Read back the current held and failed cluster IDs from GLK's
+        // memory_clusters table. The sweep has already updated statuses, so
+        // these reads reflect the post-sweep state.
+        let heldIDs = try await kit.heldClusterIDs(handle: estate)
+        let failedIDs = try await kit.failedClusterIDs(handle: estate)
+
         return Output(
             factoidsProduced: factoidsProduced,
-            heldClusterIDs: [],
-            failedClusterIDs: [])
+            heldClusterIDs: heldIDs,
+            failedClusterIDs: failedIDs
+        )
     }
 }

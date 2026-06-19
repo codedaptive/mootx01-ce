@@ -77,6 +77,13 @@ pub use audit::{
 // Re-export for NeuronKit B-1 constraint: event_lag_pairs is the estate-
 // surface entry point for converting UnifiedAuditEntry → TemporalAuditEntry.
 pub use brain::event_lag_pairs::event_lag_pairs;
+// cluster_status.rs — pure sweep-targeting and status-mapping helpers that
+// mirror ClusterStatusReads.swift and the extended runDistillationSweep
+// targeting parameters. Storage I/O remains at the coordinator level.
+pub use brain::cluster_status::{
+    filter_cluster_for_sweep, status_from_outcome, SweepTargetingParams,
+    STATUS_DISTILLED, STATUS_FAILED, STATUS_HELD, STATUS_OPEN,
+};
 pub use brain::scheduler::{
     trigger_tag as scheduler_trigger_tag, AssociationFrame as SchedulerAssociationFrame,
     ConcurrencyPolicy as SchedulerConcurrencyPolicy,

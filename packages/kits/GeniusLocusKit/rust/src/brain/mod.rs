@@ -17,6 +17,7 @@
 // submission order. Parity is on the surface vocabulary and drain
 // ordering semantics, not the storage substrate.
 
+pub mod cluster_status;
 pub mod distillation_cycle;
 pub mod event_lag_pairs;
 pub mod scheduler;
