@@ -461,8 +461,37 @@ enum RecipeTools {
             kit: kit, handle: handle, query: query,
             filter: filter, limit: limit, pool: pool, composition: composition)
 
-        // Discrimination is computed over the full ordered list before the
-        // display prefix so the signal reflects all returned scores.
+        // Part 1a — distinctive-token containment gate.
+        //
+        // When the query carries distinctive tokens (numbers or proper nouns)
+        // but NO returned candidate's content contains any of those tokens, the
+        // result set is a confident NON-match: the re-ranker produced a ranked
+        // list of things that are definitively NOT the queried entity. Returning
+        // that list as-is would cause the calling AI to confidently report the
+        // wrong answer. Instead: suppress results and emit not_found so the
+        // caller knows to widen the search or confirm the content exists.
+        //
+        // When the query has NO distinctive tokens we cannot apply the gate
+        // (every word is a stopword / generic term that cannot be required to be
+        // present) — but we emit a coaching hint so the calling AI knows the
+        // recall may be indiscriminate.
+        let candidateContents = matches.map { $0.content }
+        let hasDistinctive = NeuronKit.hasDistinctiveTokens(query)
+        let satisfied = NeuronKit.containmentSatisfied(query: query, candidateContents: candidateContents)
+
+        if hasDistinctive && !satisfied {
+            // Containment gate fired — return zero results with not_found.
+            let lines: [String] = [
+                "found 0 memory(s)",
+                RecallDiscrimination.resultLine(for: .notFound),
+            ]
+            return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        }
+
+        // Part 1b — discrimination is computed over composition precision
+        // scores (PreciseMatch.score = candidate.precisionScore from the
+        // weighted-sum fold), not the coarse fusion score, so the level
+        // reflects re-rank quality rather than coarse-grab noise.
         let preciseScores = matches.map { $0.score }
         let preciseDiscrimination = RecallDiscrimination.classify(preciseScores)
 
@@ -474,6 +503,15 @@ enum RecipeTools {
             lines.append("\(match.id)  [\(room)]  \(preview)")
         }
         lines.append(RecallDiscrimination.resultLine(for: preciseDiscrimination))
+        if !hasDistinctive {
+            // Coaching hint: query has no distinctive tokens (numbers or proper
+            // nouns), so exact containment cannot be verified. The result set
+            // may include near-duplicates that are semantically close but not
+            // the specific record the user wants. Encourage narrowing the query
+            // with specific numbers or proper nouns for higher precision.
+            lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
+                + "results may be imprecise. Refine with specific identifiers for higher confidence.")
+        }
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 

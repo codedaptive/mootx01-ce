@@ -66,12 +66,24 @@ extension NeuronKit {
         /// bitmap. The temporal signal prefers a currently-believed record over
         /// a superseded one — the structural, dream-independent half of T3.
         public let isCurrentlyBelieved: Bool
+        /// The composition precision score assigned during the weighted-sum fold
+        /// (the re-rank step of `reduce` / `reduceLate`). Populated by the
+        /// reduction composition fold and carried on each returned candidate so
+        /// callers (e.g. `PreciseRecall`) can surface the COMPOSITION score, not
+        /// the coarse fusion score (`score.final`), as the `PreciseMatch.score`.
+        /// Discrimination classification should run over precision scores, not
+        /// coarse scores, so that "high — clear top result" reflects the
+        /// re-rank's correctness.
+        /// Defaults to 0 when a candidate has not been scored by a composition
+        /// (e.g. when building from a raw hit before the reduce step).
+        public let precisionScore: Double
 
         /// Memberwise initializer.
         public init(
             id: String, content: String, room: String,
             score: RecallScoreVector, udcCode: String, udcFacets: String?,
-            coarseRank: Int, eventTime: Date? = nil, isCurrentlyBelieved: Bool = true
+            coarseRank: Int, eventTime: Date? = nil, isCurrentlyBelieved: Bool = true,
+            precisionScore: Double = 0
         ) {
             self.id = id
             self.content = content
@@ -82,6 +94,7 @@ extension NeuronKit {
             self.coarseRank = coarseRank
             self.eventTime = eventTime
             self.isCurrentlyBelieved = isCurrentlyBelieved
+            self.precisionScore = precisionScore
         }
 
         /// Build a reduction candidate from a GLK recall hit at coarse-pool
