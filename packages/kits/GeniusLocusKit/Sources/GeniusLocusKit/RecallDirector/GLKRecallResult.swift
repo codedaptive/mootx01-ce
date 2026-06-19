@@ -14,15 +14,23 @@ public struct GLKRecallResult: Sendable {
 
     /// Dense float lane (Lane D) status for this query. Non-nil when the lane
     /// was dark (did not contribute hits), carrying the observable reason as a
-    /// short string. Nil when the lane ran and returned hits, or when no corpus
-    /// was registered for the estate (lane was never attempted).
+    /// short string. Nil ONLY when the lane ran and returned hits — every other
+    /// case now carries an explicit dark tag so callers can distinguish "active"
+    /// from "never attempted".
     ///
     /// Values follow the `dark:<reason>` convention:
     /// - `"dark:providerOptOut"` — the corpus's embedding provider has no float lane.
     /// - `"dark:noFloatRows"` — no float vectors are stored (corpus ingested with a
     ///   non-float provider, or no documents ingested yet).
     /// - `"dark:storeError"` — the vector store threw; error already logged by CorpusKit.
-    /// - `"dark:emptyQuery"` — query was empty (guard fired before lane attempted).
+    /// - `"dark:emptyQuery"` — query text is nil or empty; the float index cannot
+    ///   be queried without a query string. Set by the outer guard (no corpus entry
+    ///   attempted) or by the per-signal `emptyQuery` outcome (corpus present, text
+    ///   guard fired inside the dense block).
+    /// - `"dark:noCorpus"` — no CorpusKit is registered for this estate handle;
+    ///   the dense lane was never attempted. Previously serialized as nil (indistinguishable
+    ///   from "active"), now always carries this explicit tag so the consumer can
+    ///   distinguish "corpus not configured" from "lane ran and returned hits".
     ///
     /// Callers that consume this result (e.g. the quality optimizer, NeuronKit
     /// reductions) use this field to detect misconfigured estates where the dense

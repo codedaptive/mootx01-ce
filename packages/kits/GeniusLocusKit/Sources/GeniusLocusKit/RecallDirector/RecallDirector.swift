@@ -1233,6 +1233,18 @@ public extension GeniusLocusKit {
                 denseHits.append(RecallHit(id: id, drawer: nil, sources: [.vectorDense],
                                            score: sv, explanation: ["vectorDense"]))
             }
+        } else if corpusKits[handle] == nil {
+            // Part 2 — dense_lane dark:noCorpus. No CorpusKit is registered for
+            // this handle: the dense lane was never attempted. Distinguished from
+            // "lane ran and returned hits" (nil tag → active) by an explicit tag
+            // so GLKRecallResult.denseLaneStatus is unambiguous.
+            denseLaneExplainerTag = "dark:noCorpus"
+        } else {
+            // Part 2 — dense_lane dark:emptyQuery. A CorpusKit exists but the
+            // sketch query text is nil or empty: the float index cannot be queried
+            // without a query string. Structurally impossible for the dense lane
+            // to return hits, so tag it explicitly rather than leaving nil.
+            denseLaneExplainerTag = "dark:emptyQuery"
         }
 
         // Count how many lanes actually contributed hits (for signalAgreement normaliser).
