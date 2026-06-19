@@ -118,6 +118,12 @@ corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
 # tests/expunge_vector_orphan.rs E8. The production dependency above carries
 # no features, so this remains test-only wiring.
 locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
+# I4 test: provision with the production default ensemble (5 untrained signals)
+# to prove cluster assignment works on a fresh estate. The real providers live
+# in corpus-kit-providers (the factory layer above corpus-kit core). dev-dep
+# only; not linked into the production binary. Layering: GLK → corpus-kit-providers
+# is acyclic — providers depend on corpus-kit core, not on GLK.
+corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
 
 # These integration-test binaries call EstateCoordinator seams gated behind
 # `#[cfg(any(test, feature = "test-seams"))]`: recall_scored_parity uses

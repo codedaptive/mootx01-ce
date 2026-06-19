@@ -34,6 +34,7 @@ import OSLog
 import PersistenceKit
 import PersistenceKitInMemory
 import QueueKit
+import SubstrateML
 import SubstrateTypes
 
 /// The execution mode for a write verb (D-A).
@@ -370,9 +371,66 @@ public extension GeniusLocusKit {
         )
     }
 
-    /// Embed `content` via `corpus`, register the drawer's engram in a
-    /// dedicated cluster-assignment VectorKit lane, then call `assignCluster`
-    /// (Dg5).
+    /// The fixed model-lane ID used for cluster-assignment vector storage.
+    ///
+    /// This ID is deliberately training-independent and decoupled from the
+    /// estate's primary Corpus modelID. The cluster-assignment path uses a
+    /// deterministic structural fingerprint (FNV-1a → LCG → FloatSimHash,
+    /// the same algorithm as `EmbeddingModel.deterministic`) so clusters form
+    /// correctly even on fresh/untrained estates where the trained recall
+    /// providers (RI/PPMI/LSA/NMF) have not yet accumulated a basis.
+    ///
+    /// The lane suffix "-cluster" distinguishes these rows from any
+    /// corpus-ingest rows (which live under the corpus's primary modelID)
+    /// so the nearest-neighbor search for cluster assignment sees ONLY
+    /// drawer-keyed structural fingerprints — never chunk IDs from
+    /// corpus.ingest. Rust parity: `CLUSTER_MODEL_ID` in `intake.rs`.
+    static let clusterModelID: String = "corpus-deterministic-v1-cluster"
+
+    /// Compute a training-independent structural fingerprint for `text`.
+    ///
+    /// Uses FNV-1a → LCG → FloatSimHash — the exact same algorithm as
+    /// `EmbeddingModel.deterministic`'s inference closure — so the result
+    /// is deterministic, network-free, training-free, and byte-identical
+    /// to the `.deterministic` embedding provider's output.
+    ///
+    /// This is the canonical fingerprint for cluster assignment. Using it
+    /// instead of `corpus.embed(content)` ensures clusters form on fresh/
+    /// untrained estates where the trained providers (RI/PPMI/LSA/NMF) have
+    /// not yet accumulated a corpus basis. `corpus.embed` on an untrained
+    /// estate returns a near-zero engram (every document maps to nearly the
+    /// same point), which causes the Hamming distance to be below the join
+    /// threshold — every capture seeds a fresh cluster instead of joining.
+    ///
+    /// Determinism guarantee: identical text → identical engram, across calls,
+    /// across runs, and (per the substrate conformance harness) across the
+    /// Swift and Rust ports. Rust parity: `content_deterministic_fingerprint`
+    /// in `intake.rs`.
+    private static func contentDeterministicFingerprint(_ text: String) -> Fingerprint256 {
+        guard !text.isEmpty else { return .zero }
+        // FNV-1a 64-bit over the text's UTF-8 bytes.
+        let fnvPrime: UInt64    = 1_099_511_628_211
+        let fnvOffset: UInt64   = 14_695_981_039_346_656_037
+        // LCG constants (same as the .deterministic provider's inference closure).
+        let lcgMultiplier: UInt64 = 6_364_136_223_846_793_005
+        let lcgIncrement: UInt64  = 1_442_695_040_888_963_407
+        var h = text.utf8.reduce(fnvOffset) { ($0 ^ UInt64($1)) &* fnvPrime }
+        let floats: [Float] = (0..<32).map { _ in
+            h = h &* lcgMultiplier &+ lcgIncrement
+            // High 24 bits as mantissa in [0, 1), scaled to [-1, 1].
+            let mantissa = Float(h >> 40) / Float(1 << 24)
+            return mantissa * 2.0 - 1.0
+        }
+        // FloatSimHash.project is the canonical signed-hyperplane projection
+        // from SubstrateML, bit-identical to the Rust substrate_ml::float_simhash::project
+        // for the same (vector, seed) pair. The seed matches EmbeddingModel.deterministicSeed
+        // (0xC05BD15CA15D1B00) so the fingerprint is byte-identical to what
+        // EmbeddingModel.deterministic produces for the same text.
+        return FloatSimHash.project(vector: floats, seed: 0xC05B_D15C_A15D_1B00)
+    }
+
+    /// Register the drawer's structural fingerprint in the cluster-assignment
+    /// VectorKit lane, then call `assignCluster` (Dg5).
     ///
     /// Called immediately after a successful `corpus.ingest` so the prose
     /// engram is guaranteed to be in the Corpus when this helper runs. Errors
@@ -388,19 +446,27 @@ public extension GeniusLocusKit {
     /// a drawer ID, `findOpenCluster(containing: chunk_id)` returns nil and
     /// every capture seeds a fresh cluster rather than joining an existing one.
     ///
-    /// By storing the drawer's engram under a SEPARATE modelID
-    /// (`<corpus_modelID>-cluster`), the cluster-assignment `findNearest` call
-    /// sees ONLY drawer-keyed rows — the chunk-ID rows live under the base
-    /// modelID and are not mixed in. This means `nearest.itemID` is always a
-    /// drawer ID, and `findOpenCluster(containing: drawer_id)` correctly finds
-    /// the cluster seeded by the first capture with that content.
+    /// By storing the drawer's engram under `clusterModelID` (a fixed,
+    /// training-independent lane), the cluster-assignment `findNearest` call
+    /// sees ONLY drawer-keyed structural fingerprints — the chunk-ID rows
+    /// live under the base modelID and are not mixed in. This means
+    /// `nearest.itemID` is always a drawer ID, and
+    /// `findOpenCluster(containing: drawer_id)` correctly finds the cluster
+    /// seeded by the first capture with that content.
     ///
-    /// `assignCluster` is called with the cluster-lane modelID, not the base
-    /// corpus modelID, for the same reason.
+    /// WHY `contentDeterministicFingerprint` instead of `corpus.embed`:
+    /// `corpus.embed` delegates to the DEFAULT trained provider (RI on a
+    /// production estate). On a fresh/untrained estate that provider has no
+    /// accumulated basis and returns a near-zero engram for every text, so
+    /// every drawer's Hamming distance is below the join threshold — every
+    /// capture seeds a fresh singleton cluster and `member_count` never reaches
+    /// the ≥3 gate. The deterministic fingerprint is always well-conditioned
+    /// (FNV-1a hash of the content, not a learned projection), so similar text
+    /// always produces nearby fingerprints regardless of training state.
     ///
     /// - Parameters:
     ///   - handle: The estate the drawer belongs to.
-    ///   - corpus: The Corpus that just completed ingest (used to embed).
+    ///   - corpus: The Corpus that just completed ingest (for context only).
     ///   - drawerID: UUID string of the captured drawer.
     ///   - content: The drawer's text content (same text that was ingested).
     ///   - now: Capture instant — passed through to `assignCluster` unchanged.
@@ -412,20 +478,19 @@ public extension GeniusLocusKit {
         now: Date
     ) async {
         do {
-            let engram = try await corpus.embed(content)
-            let baseModelID = await corpus.modelID
-            // Use a dedicated model lane for cluster assignment so the
-            // nearest-neighbor search sees only drawer-keyed rows (not chunk
-            // IDs from corpus.ingest). The lane suffix "-cluster" is a fixed
-            // convention shared between the write path here and assignCluster
-            // (via the clusterModelID passed below). This lane never participates
-            // in recall — it exists solely to drive cluster formation.
-            let clusterModelID = baseModelID + "-cluster"
+            // Compute the training-independent structural fingerprint of the
+            // content. This is the same FNV-1a → LCG → FloatSimHash path as
+            // EmbeddingModel.deterministic — deterministic, network-free,
+            // training-free, and byte-identical across ports.
+            let engram = Self.contentDeterministicFingerprint(content)
+            // Store the drawer's structural fingerprint in the dedicated
+            // cluster-assignment lane so the nearest-neighbor search below
+            // sees only drawer-keyed rows (never corpus chunk IDs).
             if let vectorStore = vectorStores[handle] {
                 try await vectorStore.addVector(
                     itemID: drawerID,
                     engram: engram,
-                    modelID: clusterModelID,
+                    modelID: Self.clusterModelID,
                     modelVersion: "1",
                     filedAt: now
                 )
@@ -434,7 +499,7 @@ public extension GeniusLocusKit {
                 handle: handle,
                 engram: engram,
                 drawerID: drawerID,
-                modelID: clusterModelID,
+                modelID: Self.clusterModelID,
                 now: now
             )
         } catch {

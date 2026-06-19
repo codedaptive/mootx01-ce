@@ -198,6 +198,89 @@ fn i2_regular_drain_path_forms_cluster() {
     );
 }
 
+// MARK: - I4: production default ensemble (untrained) still forms clusters
+
+/// Three near-identical captures via the production default 5-signal ensemble
+/// (RI / PPMI / LSA / NMF / FDC — all freshly constructed, zero training)
+/// must still produce exactly ONE open cluster with member_count = 3.
+///
+/// This is the regression test for the original bug: before the fix,
+/// `assign_cluster_standalone` called `corpus.embed(content)`, which on an
+/// untrained estate (RI basis empty → all near-zero engrams) caused every
+/// capture to fail cluster comparison correctly. After the fix, cluster
+/// assignment uses `content_deterministic_fingerprint`, which is
+/// training-independent, so near-identical texts produce structurally
+/// similar fingerprints and cluster correctly even with zero training.
+///
+/// Parity of Swift I4: "production embedding (untrained estate) still forms
+/// clusters with member_count = 3".
+#[test]
+fn i4_production_ensemble_untrained_still_forms_cluster() {
+    use corpus_kit_providers::default_ensemble;
+
+    let storage = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+    let store: Arc<dyn locus_kit::drawer_store::DrawerStore> = Arc::new(
+        locus_kit::drawer_store_inmemory::InMemoryDrawerStore::with_storage(
+            Arc::clone(&storage),
+            NOW_MILLIS,
+            None,
+        )
+        .unwrap(),
+    );
+    let storage_dyn: Arc<dyn persistence_kit::storage::Storage> =
+        Arc::clone(&storage) as Arc<dyn persistence_kit::storage::Storage>;
+
+    let mut coord = genius_locus_kit::coordinator::EstateCoordinator::new();
+    let params = genius_locus_kit::coordinator::EstateProvisionParams {
+        estate_name: "I4 Production Ensemble Test Estate".to_string(),
+        kind: genius_locus_kit::coordinator::EstateKind::Glk,
+        zoom_window_low: 1,
+        zoom_window_high: 10,
+        framework_profile: "KnowledgeWork".to_string(),
+        sync_mode: genius_locus_kit::coordinator::SyncMode::None,
+    };
+    // Production default: 5 untrained signals (RI/PPMI/LSA/NMF/FDC).
+    // cluster assignment must not depend on these being trained.
+    let handle = coord
+        .provision(
+            store,
+            storage_dyn,
+            None,
+            locus_kit::estate_types::OwnerCredentials::new("owner-i4-production-ensemble"),
+            params,
+            default_ensemble(),
+        )
+        .expect("provision GLK estate with production ensemble");
+
+    let frame = cluster_frame("The mitochondria is the powerhouse of the cell quantum entanglement");
+
+    // Three captures with identical content on a FULLY UNTRAINED estate.
+    for _ in 0..3 {
+        coord
+            .capture_with_mode(&handle, frame.clone(), NOW_MILLIS, WriteMode::Impatient)
+            .expect("capture with untrained production ensemble");
+    }
+
+    // One open cluster must exist with member_count = 3.
+    // The fix routes cluster assignment through content_deterministic_fingerprint,
+    // so near-identical texts form a cluster regardless of training state.
+    let rows = open_cluster_rows(&storage);
+    assert_eq!(
+        rows.len(),
+        1,
+        "three identical-content captures on untrained estate must form one open cluster; got {}",
+        rows.len()
+    );
+
+    let ids = decode_member_ids(&rows[0]);
+    assert_eq!(
+        ids.len(),
+        3,
+        "open cluster on untrained estate must have 3 members; got {}",
+        ids.len()
+    );
+}
+
 // MARK: - I3: dissimilar captures seed independent clusters
 
 /// Two captures with dissimilar content each seed their own cluster.
