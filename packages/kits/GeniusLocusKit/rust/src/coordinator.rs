@@ -360,7 +360,11 @@ fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError {
     }
     VerbError::UnderlyingEstateFailure {
         verb: verb.to_string(),
-        reason: format!("{error:?}"),
+        // Use Display (not Debug) so LocusKitError's human-readable description
+        // surfaces rather than the internal Rust type chain. LocusKitError
+        // implements Display; the gate-rejection message already contains
+        // clean English (set by drawer_store_inmemory's map_err above).
+        reason: format!("{error}"),
     }
 }
 
