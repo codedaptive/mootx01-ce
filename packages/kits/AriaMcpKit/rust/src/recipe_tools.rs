@@ -104,6 +104,13 @@ const RECALL_PRECISE: &str = "moot_recall_precise";
 const RECALL_SHAPED: &str = "moot_recall_shaped";
 /// On-demand dream tool — mirrors Swift `RecipeTools.dreamToolName`.
 const DREAM: &str = "moot_dream";
+/// Intra-item distillation sweep — mirrors Swift `RecipeTools.consolidateToolName`.
+const CONSOLIDATE: &str = "moot_consolidate";
+/// Distilled recall via Hamming NN — mirrors Swift `RecipeTools.recallDistilledToolName`.
+const RECALL_DISTILLED: &str = "moot_recall_distilled";
+/// Expand a distilled factoid to its source drawers — mirrors Swift
+/// `RecipeTools.expandMemoryToolName`.
+const EXPAND_MEMORY: &str = "moot_expand_memory";
 
 /// True when `name` is one of the recipe tools.
 pub fn is_recipe_tool(name: &str) -> bool {
@@ -117,6 +124,9 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RECALL_PRECISE
             | RECALL_SHAPED
             | DREAM
+            | CONSOLIDATE
+            | RECALL_DISTILLED
+            | EXPAND_MEMORY
     )
 }
 
@@ -135,6 +145,9 @@ pub fn dispatch(
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
+        CONSOLIDATE => run_consolidate_tool(args, registry),
+        RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
+        EXPAND_MEMORY => run_expand_memory_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -817,6 +830,222 @@ fn parse_uuid_array(
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// moot_consolidate
+// ---------------------------------------------------------------------------
+
+/// Run one intra-item distillation sweep via `EstateCoordinator::distill_items_sweep`.
+///
+/// Mirrors Swift `RecipeTools.runConsolidate`. Drives the GLK sweep entry point
+/// directly — CognitionKit Rust `ConsolidateInput` is the parameter type but the
+/// sweep I/O is owned by the coordinator.
+///
+/// Returns text in the same format as the Swift handler:
+///   "moot_consolidate: sweep complete\nfactoidsProduced: N"
+fn run_consolidate_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve(args, "estateID")?;
+    let now = crate::dispatch::wall_now();
+    let coord = estate.coord.lock().unwrap();
+    let produced = coord
+        .distill_items_sweep(&estate.handle, now, None)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "moot_consolidate: sweep failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            )
+        })?;
+    Ok(text_result(&format!(
+        "moot_consolidate: sweep complete\nfactoidsProduced: {produced}"
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// moot_recall_distilled
+// ---------------------------------------------------------------------------
+
+/// Recall distilled factoids for `query` via Hamming NN on the
+/// `distillation-features-v1` VectorKit lane.
+///
+/// Mirrors Swift `RecipeTools.runRecallDistilled`. Produces the query
+/// fingerprint via `DistillationPipeline::query_fingerprint`, dispatches to
+/// `EstateCoordinator::find_nearest_distilled`, and reads the matching factoid
+/// drawers from the estate. Returns a discrimination signal.
+fn run_recall_distilled_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    use substrate_ml::distillation_pipeline::{DistilledHeader, DistillationPipeline};
+
+    let estate = registry.resolve(args, "estateID")?;
+    let query = require_string(args, "query")?;
+    let limit = optional_integer(args, "limit")?
+        .map(|i| i as usize)
+        .unwrap_or(10);
+
+    // Build the search Engram (= Fingerprint256) from the query text —
+    // no embedding model inference required. `Engram` is a type alias for
+    // `Fingerprint256` (engram_lib::lib.rs line 47), so the return value
+    // from query_fingerprint is already the correct type for find_nearest_distilled.
+    let engram = DistillationPipeline::query_fingerprint(
+        query,
+        DistillationPipeline::default_extractor,
+    );
+
+    let coord = estate.coord.lock().unwrap();
+    let matches = coord
+        .find_nearest_distilled(&estate.handle, &engram, limit)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "moot_recall_distilled: search failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            )
+        })?;
+
+    if matches.is_empty() {
+        return Ok(text_result(&format!(
+            "found 0 distilled factoid(s) for: {query}\ndiscrimination: not_found"
+        )));
+    }
+
+    // Fetch the actual factoid drawers by reading all drawers and filtering by id.
+    // (RecallFrame has no row_ids field; all_drawers + local filter is the correct path.)
+    let all = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let match_ids: std::collections::HashSet<&str> =
+        matches.iter().map(|m| m.item_id.as_str()).collect();
+    let factoid_map: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> = all
+        .iter()
+        .filter(|d| match_ids.contains(d.id.as_str()))
+        .map(|d| (d.id.as_str(), d))
+        .collect();
+
+    let mut lines = vec![format!("found {} distilled factoid(s) for: {}", matches.len(), query)];
+    for hit in &matches {
+        if let Some(drawer) = factoid_map.get(hit.item_id.as_str()) {
+            let parsed = DistilledHeader::parse(&drawer.content);
+            match parsed {
+                Some(h) => {
+                    lines.push(format!(
+                        "{}  conf={:.2} | src={} | {}",
+                        drawer.id,
+                        h.confidence,
+                        h.source_count,
+                        h.prose,
+                    ));
+                }
+                None => {
+                    // Content present but not a DIST header — show raw preview.
+                    let preview: String = drawer.content.chars().take(120).collect();
+                    lines.push(format!("{}  {}", drawer.id, preview));
+                }
+            }
+        }
+    }
+
+    // Discrimination over Hamming distances. Lower distance = better match.
+    // Use simple score based on whether any hit has distance <= 64 bits apart.
+    let best_distance = matches.first().map(|m| m.distance).unwrap_or(i32::MAX);
+    let discrimination = if best_distance <= 32 {
+        "high"
+    } else if best_distance <= 96 {
+        "medium"
+    } else {
+        "low"
+    };
+    lines.push(format!("discrimination: {discrimination}"));
+
+    Ok(text_result(&lines.join("\n")))
+}
+
+// ---------------------------------------------------------------------------
+// moot_expand_memory
+// ---------------------------------------------------------------------------
+
+/// Expand a distilled factoid drawer back to its source drawers.
+///
+/// Mirrors Swift `RecipeTools.runExpandMemory`. Reads the factoid drawer,
+/// follows `_distilled_from` tunnels to the source drawer(s), and returns a
+/// summary including the factoid text and source previews.
+fn run_expand_memory_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    use substrate_ml::distillation_pipeline::DistilledHeader;
+    use genius_locus_kit::brain::distillation_cycle::DISTILLED_FROM_LABEL;
+
+    let estate = registry.resolve(args, "estateID")?;
+    let drawer_id = require_string(args, "drawer_id")?;
+
+    // Resolve the factoid drawer by reading all drawers and finding by id.
+    // (RecallFrame has no row_ids field; all_drawers + local filter is correct.)
+    let coord = estate.coord.lock().unwrap();
+    let all = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let factoid = match all.into_iter().find(|d| d.id == drawer_id) {
+        Some(d) => d,
+        None => {
+            return Ok(error_result(&format!(
+                "expand: drawer not found: {drawer_id}"
+            )));
+        }
+    };
+
+    // Parse the DIST header for the factoid prose and metadata.
+    let (prose, conf_str, src_count) = match DistilledHeader::parse(&factoid.content) {
+        Some(h) => (
+            h.prose.clone(),
+            format!("{:.2}", h.confidence),
+            h.source_count,
+        ),
+        None => (factoid.content.clone(), "?".to_string(), 0),
+    };
+
+    // Recall _distilled_from tunnels: tunnels where source_drawer_id = factoid id.
+    // GLK recall_tunnels reads from the factoid's wing. Try the actual factoid wing.
+    let tunnels = coord
+        .recall_tunnels(&estate.handle, &factoid.wing)
+        .unwrap_or_default();
+
+    let source_tunnel_ids: Vec<String> = tunnels
+        .iter()
+        .filter(|t| {
+            t.label == DISTILLED_FROM_LABEL
+                && t.source_drawer_id.as_deref() == Some(drawer_id)
+        })
+        .filter_map(|t| t.target_drawer_id.clone())
+        .collect();
+
+    // Fetch source drawers by id from the full drawer list.
+    let all_for_sources = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let source_set: std::collections::HashSet<&str> =
+        source_tunnel_ids.iter().map(String::as_str).collect();
+    let mut source_lines: Vec<String> = Vec::new();
+    for sd in all_for_sources.iter().filter(|d| source_set.contains(d.id.as_str())) {
+        let preview: String = sd.content.chars().take(120).collect();
+        source_lines.push(format!("  {} [{}] {}", sd.id, sd.room, preview));
+    }
+
+    let mut lines = vec![
+        format!("expand: {drawer_id}"),
+        format!("factoid: {prose}"),
+        format!("confidence: {conf_str} | sources: {src_count}"),
+    ];
+    if source_lines.is_empty() {
+        lines.push("sources: none found".to_string());
+    } else {
+        lines.push("sources:".to_string());
+        lines.extend(source_lines);
+    }
+    Ok(text_result(&lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------

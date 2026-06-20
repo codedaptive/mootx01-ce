@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition. Produces exactly
-//! 57 tools in this order:
+//! 60 tools in this order:
 //!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
@@ -10,12 +10,14 @@
 //!   Tier 5 (3)  — estate: status, map, ping
 //!   Maintenance (1) — moot_reindex
 //!   Federation (1) — moot_federated_search
-//!   Recipe (8)  — list_lenses, list_recipes, synthesize, run_migration, confirm_migration, recall_precise, recall_shaped, dream
+//!   Recipe (11) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
+//!                 recall_precise, recall_shaped, dream,
+//!                 consolidate, recall_distilled, expand_memory
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Tool count 57 = 56 (prior surface) + 1 (moot_lens_node_motion, the diffusion
-//! node-layer lens added per ADR-DIFFUSION-001).
+//! Tool count 60 = 57 (prior surface) + 3 (moot_consolidate, moot_recall_distilled,
+//! moot_expand_memory — distillation tools added for Rust parity with Swift).
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -55,7 +57,7 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    let capacity = if vault_on { 56 } else { 51 };
+    let capacity = if vault_on { 60 } else { 55 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Tier 1 — Core memory (7)
@@ -93,7 +95,7 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // Federation (1)
     tools.push(federated_search_tool());
 
-    // Recipe (7)
+    // Recipe (11)
     tools.push(list_lenses_tool());
     tools.push(list_recipes_catalog_tool());
     tools.push(synthesize_tool());
@@ -108,6 +110,13 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // ports but are governor-driven resident-scheduler concerns, not ARIA tool
     // arguments; no mode field is surfaced here.
     tools.push(dream_tool());
+    // Distillation tools — Rust parity with Swift RecipeTools.swift.
+    // moot_consolidate: run one intra-item distillation sweep across the estate.
+    // moot_recall_distilled: query the _distilled room via Hamming NN search.
+    // moot_expand_memory: expand a distilled factoid back to its source drawers.
+    tools.push(consolidate_tool());
+    tools.push(recall_distilled_tool());
+    tools.push(expand_memory_tool());
 
     // Lens (23)
     for lens_name in crate::lens_tools::LENS_TOOLS {
@@ -593,6 +602,62 @@ fn dream_tool() -> serde_json::Value {
                 "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock.")
             }),
             json!([])
+        )))
+    })
+}
+
+/// Distillation consolidation tool — mirrors Swift `RecipeTools.consolidateTool()`.
+/// Runs one intra-item distillation sweep across the estate: for each drawer
+/// that has ≥3 sentences and has not yet been distilled, produces a `[DIST|…]`
+/// factoid in the `_distilled` room and links it back via a `_distilled_from`
+/// tunnel. Optional `cluster_id` scopes the sweep to one cluster. Idempotent:
+/// already-distilled drawers are skipped.
+fn consolidate_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_consolidate",
+        "description": "Run one intra-item distillation sweep. Produces distilled factoids ([DIST|…] format) in the _distilled room for each eligible drawer (≥3 sentences, not already distilled). Optional cluster_id scopes to one cluster. Returns the count of factoids produced.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "cluster_id": string_schema("Optional cluster UUID to scope the sweep to a single cluster. Omit to sweep all clusters."),
+                "include_held": boolean_schema("When true, also distil drawers that are currently held (withdrawn). Default false.")
+            }),
+            json!([])
+        )))
+    })
+}
+
+/// Distilled recall tool — mirrors Swift `RecipeTools.recallDistilledTool()`.
+/// Queries the `_distilled` room via Hamming nearest-neighbour search using the
+/// `distillation-features-v1` VectorKit lane. Returns factoids sorted by
+/// Hamming distance from the query fingerprint. Includes a discrimination
+/// signal.
+fn recall_distilled_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_recall_distilled",
+        "description": "Query the distilled factoid layer via Hamming NN search on the distillation-features-v1 vector lane. Returns [DIST|conf=…|src=N|snr=…|delta=TYPE] factoids ranked by relevance. Use after moot_consolidate has run to populate the distilled layer.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("Natural-language query to recall distilled factoids for."),
+                "limit": integer_schema("Max factoids to return (default 10)."),
+                "filter": filter_schema()
+            }),
+            json!(["query"])
+        )))
+    })
+}
+
+/// Expand memory tool — mirrors Swift `RecipeTools.expandMemoryTool()`.
+/// Given a distilled factoid drawer UUID, returns the factoid content and
+/// links back to the source drawers (via `_distilled_from` tunnels).
+fn expand_memory_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_expand_memory",
+        "description": "Expand a distilled factoid back to its source drawers. Given a factoid drawer UUID (from moot_recall_distilled), returns the factoid text plus the IDs and previews of the N source drawers that were distilled into it.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "drawer_id": string_schema("UUID of the distilled factoid drawer to expand.")
+            }),
+            json!(["drawer_id"])
         )))
     })
 }

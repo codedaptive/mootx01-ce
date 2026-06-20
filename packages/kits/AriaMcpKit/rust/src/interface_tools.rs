@@ -1399,13 +1399,20 @@ fn run_estate_status(
     // applies `RowState.cluster(ofRawState:) == .a` to filter out rejected/
     // withdrawn drawers that were previously mis-counted as "active".
     //
-    // "total" = all non-erased rows (tombstone = permanently erased).
-    // We call `all_drawers()` which includes tombstoned rows, then subtract.
-    // Best-effort: on error, report "unavailable" rather than fabricating 0
-    // or failing the status response.
+    // "total" = all non-erased user content rows (tombstone = permanently
+    // erased). Charter drawers (room == "_charter") are wing metadata seeded
+    // at provision time — they are not user content and are excluded from the
+    // total so the count reflects what the user actually filed, matching the
+    // active count's behaviour (recall already excludes charter drawers via the
+    // RECALL-HYGIENE filter in estate_verbs.rs). Best-effort: on error, report
+    // "unavailable" rather than fabricating 0 or failing the status response.
     let total_count: String = match coord.all_drawers(&estate.handle) {
         Ok(all) => {
-            let non_erased = all.iter().filter(|d| d.tombstoned_at.is_none()).count();
+            let non_erased = all
+                .iter()
+                .filter(|d| d.tombstoned_at.is_none())
+                .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
+                .count();
             non_erased.to_string()
         }
         Err(_) => "unavailable".to_string(),

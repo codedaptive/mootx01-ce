@@ -77,25 +77,28 @@ fn tools_list_count_is_57() {
     //   19  interface tools (Tier 1–5)
     //    1  federation tool (moot_federated_search)
     //    8  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
-    //                     confirm_migration, recall_precise, recall_shaped, dream)
+    //                     confirm_migration, recall_precise, recall_shaped, dream,
+    //                     consolidate, recall_distilled, expand_memory)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
     //    1  maintenance tool (moot_reindex — backfill the corpus/vector index)
-    //   57  total (matches Swift surface exactly)
+    //   60  total (matches Swift surface exactly)
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 57, "expected 57 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 60, "expected 60 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_57_names() {
-    // Gate: all 57 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_60_names() {
+    // Gate: all 60 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_vault_job is a vault tool (Bob's ruling 2026-06-12: tool-surface
     // parity matters even when the Rust backend is synchronous).
     // moot_recall_shaped is the named RecallShape preset surface.
+    // moot_consolidate, moot_recall_distilled, moot_expand_memory are the
+    // distillation tools added for parity with Swift (R1 fix, 2026-06-20).
     let expected: std::collections::HashSet<&str> = [
         // Tier 1 — Core memory (7)
         "moot_file_memory",
@@ -123,8 +126,9 @@ fn tools_list_name_set_matches_expected_57_names() {
         "moot_estate_ping",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (8) — list_lenses + list_recipes + synthesize + run_migration
-        //              + confirm_migration + recall_precise + recall_shaped + dream
+        // Recipe (11) — list_lenses + list_recipes + synthesize + run_migration
+        //               + confirm_migration + recall_precise + recall_shaped + dream
+        //               + consolidate + recall_distilled + expand_memory
         "moot_list_lenses",
         "moot_list_recipes",
         "moot_synthesize",
@@ -133,6 +137,9 @@ fn tools_list_name_set_matches_expected_57_names() {
         "moot_recall_precise",
         "moot_recall_shaped",
         "moot_dream",
+        "moot_consolidate",
+        "moot_recall_distilled",
+        "moot_expand_memory",
         "moot_reindex",
         // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
@@ -3854,7 +3861,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 57, "vault-on must produce 57 tools");
+    assert_eq!(arr.len(), 60, "vault-on must produce 60 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -3869,7 +3876,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 52, "vault-off must produce 52 tools (57 − 5 vault)");
+    assert_eq!(arr.len(), 55, "vault-off must produce 55 tools (60 − 5 vault)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

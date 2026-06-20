@@ -2564,14 +2564,28 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
-        // COUNT(*) on the drawers table — bypasses all row-decode logic so
-        // corrupt rows (e.g. a poison timestamp) are still counted. Used by
-        // the vault-export fail-loud path: a non-zero count when recall returns
-        // 0 means the corpus is bricked, not empty. Mirrors Swift
-        // `DrawerStore.countDrawerRows()`.
+        // COUNT(*) on the drawers table excluding charter-room rows — bypasses
+        // all row-decode logic so corrupt rows (e.g. a poison timestamp) are
+        // still counted. Used by the vault-export fail-loud path: a non-zero
+        // count when recall returns 0 means the corpus is bricked, not empty.
+        //
+        // Charter drawers (room == "_charter") are wing metadata seeded at
+        // provision time, not recallable user content. Recall already excludes
+        // them (RECALL-HYGIENE filter in estate_verbs.rs). Counting charter rows
+        // here would trigger the bricked-estate guard on estates that have ONLY
+        // charter rows (e.g. freshly seeded estates before any user content is
+        // captured), because the guard interprets "rows in storage, 0 from recall"
+        // as corruption rather than "all rows are metadata, not user content."
+        //
+        // Mirrors Swift `DrawerStore.countDrawerRows()` — the Swift port
+        // excludes the same charter-room rows in its equivalent query.
+        let predicate = StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "room"),
+            TypedValue::Text(crate::default_wings::CHARTER_ROOM.to_string()),
+        );
         self.storage
             .row_store()
-            .count(T_DRAWERS, None)
+            .count(T_DRAWERS, Some(&predicate))
             .map_err(map_storage_err)
     }
 
