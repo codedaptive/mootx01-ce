@@ -63,33 +63,35 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 56 tools exact
+// 1. tools/list surface assertions — 57 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_56() {
+fn tools_list_count_is_57() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
     // moot_recall_shaped (named RecallShape preset surface) +
-    // moot_lens_contradiction (genuine contradiction detector, Part 5):
+    // moot_lens_contradiction (genuine contradiction detector, Part 5) +
+    // moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001):
     //   19  interface tools (Tier 1–5)
     //    1  federation tool (moot_federated_search)
     //    8  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream)
-    //   22  lens tools (moot_lens_* prefix; cohesion renamed + contradiction added)
+    //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
+    //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
     //    1  maintenance tool (moot_reindex — backfill the corpus/vector index)
-    //   56  total (matches Swift surface exactly)
+    //   57  total (matches Swift surface exactly)
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 56, "expected 56 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 57, "expected 57 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_56_names() {
-    // Gate: all 56 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_57_names() {
+    // Gate: all 57 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_vault_job is a vault tool (Bob's ruling 2026-06-12: tool-surface
     // parity matters even when the Rust backend is synchronous).
@@ -132,7 +134,7 @@ fn tools_list_name_set_matches_expected_56_names() {
         "moot_recall_shaped",
         "moot_dream",
         "moot_reindex",
-        // Lens tools (22) — names from lens_tools.rs LENS_TOOLS constant
+        // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
         "moot_lens_constellation",
         "moot_lens_free_association",
@@ -140,6 +142,7 @@ fn tools_list_name_set_matches_expected_56_names() {
         "moot_lens_latent_themes",
         "moot_lens_bias",
         "moot_lens_drift",
+        "moot_lens_node_motion",
         "moot_lens_cohesion",
         "moot_lens_contradiction",
         "moot_lens_trust_synthesis",
@@ -180,16 +183,17 @@ fn tools_list_name_set_matches_expected_56_names() {
 }
 
 // ---------------------------------------------------------------------------
-// 1b. Lens tool name set — 16 canonical names, sorted literal list
+// 1b. Lens tool name set — 23 canonical names, sorted literal list
 // ---------------------------------------------------------------------------
 
 #[test]
-fn lens_tool_name_set_is_exactly_21_canonical_names() {
+fn lens_tool_name_set_is_exactly_23_canonical_names() {
     // Parity gate: the Rust server's advertised lens tool name set must match
     // the Swift server's lensToolNames set (LensTools.swift) exactly.
     // Written as a sorted literal so any divergence surfaces as a readable diff.
     // Both ports must be updated in lock-step when the lens catalog changes.
-    // 22 = 15 reasoning (14 + lens_contradiction) + 3 analytics (FCA + Apriori) + 4 temporal/complexity.
+    // 23 = 16 reasoning (14 + lens_contradiction + lens_node_motion) +
+    //      3 analytics (FCA + Apriori) + 4 temporal/complexity.
     let expected: Vec<&str> = vec![
         "moot_lens_anticipate",
         "moot_lens_apriori",
@@ -206,6 +210,7 @@ fn lens_tool_name_set_is_exactly_21_canonical_names() {
         "moot_lens_keystones",
         "moot_lens_latent_themes",
         "moot_lens_moment",
+        "moot_lens_node_motion",
         "moot_lens_overlap",
         "moot_lens_partial_cue",
         "moot_lens_precedence",
@@ -226,7 +231,7 @@ fn lens_tool_name_set_is_exactly_21_canonical_names() {
 
     assert_eq!(
         actual, expected,
-        "advertised lens tool names must match the 21 canonical names exactly"
+        "advertised lens tool names must match the 23 canonical names exactly"
     );
 }
 
@@ -3653,7 +3658,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 56, "vault-on must produce 56 tools");
+    assert_eq!(arr.len(), 57, "vault-on must produce 57 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -3663,12 +3668,12 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 }
 
 /// With vault_on=false (MOOTX01_VAULT=0), all five vault tools are absent.
-/// Non-vault surface (51 tools) is unchanged.
+/// Non-vault surface (52 tools) is unchanged.
 #[test]
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 51, "vault-off must produce 51 tools (56 − 5 vault)");
+    assert_eq!(arr.len(), 52, "vault-off must produce 52 tools (57 − 5 vault)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

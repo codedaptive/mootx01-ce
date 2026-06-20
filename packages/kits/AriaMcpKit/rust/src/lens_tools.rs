@@ -1,12 +1,13 @@
-//! Reasoning-lens tool surface — the 22 hard-bound lens tools.
+//! Reasoning-lens tool surface — the 23 hard-bound lens tools.
 //!
 //! Mirrors Swift `LensTools.swift`. One arm per cataloged lens recipe;
 //! each arm calls its `run_*` function directly (no generic run-by-name
 //! dispatcher). Tool names use the `moot_lens_` prefix (e.g. `moot_lens_keystones`).
 //!
-//! Includes the 15 reasoning lenses (structure, topic, preference, surprise,
-//! grounding/trust, associative, prediction, federated, plus the new genuine
-//! moot_lens_contradiction), the 3 analytics lenses (moot_lens_associations,
+//! Includes the 16 reasoning lenses (structure, topic, preference, surprise,
+//! grounding/trust, associative, prediction, federated, the new genuine
+//! moot_lens_contradiction, and the diffusion node lens moot_lens_node_motion),
+//! the 3 analytics lenses (moot_lens_associations,
 //! moot_lens_concepts, moot_lens_apriori) cataloged by AR_FCA_CAPABILITY_001,
 //! and the 4 temporal/information-theoretic lenses (moot_lens_moment,
 //! moot_lens_rhythm, moot_lens_precedence, moot_lens_complexity) added by
@@ -49,9 +50,9 @@ use crate::estate_registry::EstateRegistry;
 use crate::interface_tools::epoch_to_iso8601;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
-/// The 22 lens tool names — 15 reasoning lenses (including the new genuine
-/// moot_lens_contradiction), 3 analytics lenses, and 4 temporal/information-
-/// theoretic lenses.
+/// The 23 lens tool names — 16 reasoning lenses (including the new genuine
+/// moot_lens_contradiction and the diffusion node lens moot_lens_node_motion),
+/// 3 analytics lenses, and 4 temporal/information-theoretic lenses.
 /// All names use the `moot_lens_` prefix to match Swift `LensTools.swift`.
 pub const LENS_TOOLS: &[&str] = &[
     "moot_lens_keystones",
@@ -61,6 +62,8 @@ pub const LENS_TOOLS: &[&str] = &[
     "moot_lens_latent_themes",
     "moot_lens_bias",
     "moot_lens_drift",
+    // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+    "moot_lens_node_motion",
     // moot_lens_cohesion: content-cohesion outlier detector (renamed from
     // moot_lens_contradiction; backed by CognitionKit run_contradiction).
     "moot_lens_cohesion",
@@ -224,6 +227,86 @@ pub fn dispatch(
                 out.after_count,
                 out.drift.jensen_shannon,
                 out.drift.kl_divergence
+            )))
+        }
+
+        "moot_lens_node_motion" => {
+            // Diffusion, node layer (ADR-DIFFUSION-001): fold a single memory's
+            // fresh audit history into its motion model — decay-weighted churn
+            // volatility, UDC-anchor trajectory, reanchor flag — then classify a
+            // write-time anomaly verdict. Mirrors Swift LensTools moot_lens_node_motion
+            // (NodeMotionLens.run + classify over GeniusLocusKit.nodeAuditEntries).
+            let row_id = require_string(args, "rowID")?;
+
+            // Read the memory's audit events and bridge them to unified entries —
+            // the same accessor + bridge the precedence lens uses. audit_events_for_row
+            // returns this row's events (genesis included for a real drawer).
+            let events = estate.store.audit_events_for_row(row_id).map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INTERNAL_ERROR,
+                    format!("audit_events_for_row failed: {e}"),
+                )
+            })?;
+            let mut entries: Vec<genius_locus_kit::UnifiedAuditEntry> = Vec::new();
+            for event in &events {
+                entries.extend(bridge_audit_event(event));
+            }
+
+            // fold filters by the row's EntryUUID; every bridged entry for this row
+            // carries the same one (derived from the drawer UUID), so read it off the
+            // first entry. No history => fold over the empty slice returns zero motion
+            // (the EntryUUID is never displayed — the result echoes the caller's rowID
+            // string, matching the Swift port). wall_now() is epoch SECONDS while the
+            // fold's HLC time base is epoch MS — scale up.
+            let row_uuid = entries
+                .first()
+                .map(|e| e.row_id)
+                .unwrap_or(genius_locus_kit::audit::log::EntryUUID([0u8; 16]));
+            let now_ms = now * 1000;
+            let motion = neuron_kit::diffusion::node_motion::fold(
+                &entries,
+                row_uuid,
+                now_ms,
+                neuron_kit::diffusion::node_motion::DEFAULT_NODE_LAMBDA,
+            );
+            let anomaly = neuron_kit::diffusion::node_anomaly::classify(
+                &motion,
+                neuron_kit::diffusion::node_anomaly::DEFAULT_CHURN_THRESHOLD,
+            );
+
+            let trajectory = motion
+                .anchor_trajectory
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" → ");
+            let verdict = if anomaly.is_churning {
+                "churning"
+            } else if anomaly.reanchored {
+                "reanchored"
+            } else {
+                "stable"
+            };
+            let current_anchor = motion
+                .current_anchor()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let warn = if anomaly.is_anomalous() { "  ⚠" } else { "" };
+            Ok(text_result(&format!(
+                "node_motion: {row_id}\n  \
+                 volatility: {:.3} over {} event(s)\n  \
+                 topic trajectory: {}\n  \
+                 reanchored: {}  current_anchor: {}\n  \
+                 anomaly: {verdict}{warn}",
+                motion.volatility,
+                motion.event_count,
+                if trajectory.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    trajectory
+                },
+                motion.reanchored(),
+                current_anchor,
             )))
         }
 

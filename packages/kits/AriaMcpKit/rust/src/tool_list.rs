@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition. Produces exactly
-//! 56 tools in this order:
+//! 57 tools in this order:
 //!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
@@ -11,11 +11,11 @@
 //!   Maintenance (1) — moot_reindex
 //!   Federation (1) — moot_federated_search
 //!   Recipe (8)  — list_lenses, list_recipes, synthesize, run_migration, confirm_migration, recall_precise, recall_shaped, dream
-//!   Lens (22)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_cohesion, moot_lens_contradiction)
+//!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Tool count 56 = 55 (prior surface) + 1 (moot_lens_contradiction, genuine
-//! semantic contradiction detector added in Wave A drive-test fixes).
+//! Tool count 57 = 56 (prior surface) + 1 (moot_lens_node_motion, the diffusion
+//! node-layer lens added per ADR-DIFFUSION-001).
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -42,7 +42,7 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 56 tools when vault is enabled (the default) or 51 tools when
+/// Produces 57 tools when vault is enabled (the default) or 52 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). All non-vault tiers
 /// are always present. See ADR-015.
 pub fn build_tool_list() -> serde_json::Value {
@@ -55,7 +55,7 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    let capacity = if vault_on { 55 } else { 50 };
+    let capacity = if vault_on { 56 } else { 51 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Tier 1 — Core memory (7)
@@ -109,7 +109,7 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // arguments; no mode field is surfaced here.
     tools.push(dream_tool());
 
-    // Lens (21)
+    // Lens (23)
     for lens_name in crate::lens_tools::LENS_TOOLS {
         tools.push(lens_tool(lens_name));
     }
@@ -638,6 +638,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_latent_themes" => "Reasoning lens: extract latent topic clusters via matrix factorization.",
         "moot_lens_bias" => "Reasoning lens: detect over/under-representation relative to a reference distribution.",
         "moot_lens_drift" => "Reasoning lens: measure distribution drift across a temporal split point.",
+        "moot_lens_node_motion" => "Reasoning lens (diffusion, node layer): how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history.",
         "moot_lens_cohesion" => "Reasoning lens: surface drawers that are statistical outliers in content cohesion with their peers (the odd-ones-out).",
         "moot_lens_contradiction" => "Reasoning lens: surface genuine semantic contradictions — drawer pairs linked by a contradicts tunnel and KG facts with conflicting objects for the same subject+predicate key.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
@@ -738,6 +739,14 @@ fn lens_schema(name: &str) -> serde_json::Value {
                 "teachme": teachme
             }),
             json!(["splitAt"]),
+        ),
+        "moot_lens_node_motion" => object_schema(
+            json!({
+                "rowID": string_schema("UUID of the memory (drawer) to read motion for."),
+                "estateID": estate_id,
+                "teachme": teachme
+            }),
+            json!(["rowID"]),
         ),
         "moot_lens_cohesion" => object_schema(
             json!({
