@@ -1422,7 +1422,6 @@ fn run_estate_map(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
     // Resolve estate name for the header — mirrors Swift `handle.estateName`.
@@ -1432,15 +1431,19 @@ fn run_estate_map(
         .map(|m| m.estate_name)
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Full hydration required so charter drawer content bodies are available.
-    // The default Structured hydration uses a no-blob projection that zeroes the
-    // content field — charter text would be empty. Full forces the blob load.
-    // Mirrors Swift runEstateMap which uses estate.allDrawers() (always full).
-    let mut map_frame = RecallFrame::new(vec![]);
-    map_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
-    let drawers = coord
-        .recall(&estate.handle, map_frame, now)
+    // Use all_drawers (unfiltered) so charter drawers are visible for the per-wing
+    // charter map below. Mirrors Swift runEstateMap which calls estate.allDrawers()
+    // directly, bypassing liveRows() and its charter exclusion filter. The recall()
+    // path strips CHARTER_ROOM drawers from its candidate stream (recall-hygiene fix),
+    // which is correct for scored recall but wrong here — estate_map NEEDS charters
+    // to emit "charter: <text>" inline for each wing (ADR-016 §3).
+    //
+    // Then filter to active (non-tombstoned) rows only, mirroring Swift's
+    //   let active = drawers.filter { $0.tombstonedAt == nil }
+    let all = coord
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+    let drawers: Vec<_> = all.into_iter().filter(|d| d.tombstoned_at.is_none()).collect();
 
     // Build a per-wing charter map: wing → charter text (from CHARTER_ROOM drawers).
     // ADR-016 §3: each wing's charter is surfaced inline so callers can orient to each
