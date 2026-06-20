@@ -16,12 +16,30 @@ struct FDCLookupTests {
     // 1. A topical term grounds to a well-formed FDC code, never a
     //    guess. (Which specific code — exact-match accuracy — is
     //    governed by STOP_THRESHOLD tuning, not this contract test.)
+    //
+    // The honest-classification guard (tie-count) means that single-word
+    // lookups for broad terms like "philosophy", "chemistry", or "history"
+    // correctly return UNRESOLVED: each of those words maps to a Q-ID present
+    // in 100–800+ signatures, producing a large tied-winner set with no
+    // discriminating signal. The guard was added to prevent those from
+    // returning confidently-wrong specific codes via an arbitrary tie-break.
+    //
+    // To test the resolving path, use a multi-term input with distinctive
+    // subject vocabulary that the v1.0 frame can discriminate. The biology
+    // text (used by FDCRuntimeTests.encodesTopical) is the canonical example:
+    // it contains rare, domain-specific Q-IDs (physiology, molecular biology,
+    // evolution) that produce ≤4 tied candidates.
     @Test("lookup resolves to a well-formed code")
     func lookupResolvesToWellFormedCode() throws {
-        let anchor = EideticLib.lookup("philosophy")
+        // Full biology sentence with distinctive vocabulary — resolves to a
+        // natural-sciences FDC code under the honest-classification guard.
+        let topicalText = "Biology is the scientific study of life and living organisms, " +
+            "including their physical structure, chemical processes, molecular " +
+            "interactions, physiological mechanisms, and evolution."
+        let anchor = EideticLib.lookup(topicalText)
         #expect(
             !anchor.code.isEmpty,
-            "philosophy must resolve to an FDC code"
+            "topical text with distinctive subject vocabulary must resolve to an FDC code; got: '\(anchor.code)'"
         )
         #expect(
             Code.isWellFormed(anchor.code),
@@ -33,10 +51,13 @@ struct FDCLookupTests {
     //    (the highest-weighted Q-ID in the term's concept bag).
     @Test("lookup carries dominant concept QID")
     func lookupCarriesDominantConceptQID() throws {
-        let anchor = EideticLib.lookup("philosophy")
+        let topicalText = "Biology is the scientific study of life and living organisms, " +
+            "including their physical structure, chemical processes, molecular " +
+            "interactions, physiological mechanisms, and evolution."
+        let anchor = EideticLib.lookup(topicalText)
         let qid = try #require(
             anchor.wikidataQID,
-            "a topical term must carry a dominant concept Q-ID"
+            "topical text with distinctive vocabulary must carry a dominant concept Q-ID"
         )
         #expect(qid.hasPrefix("Q"), "the concept identity is a Wikidata Q-ID")
     }
@@ -73,6 +94,8 @@ struct FDCLookupTests {
     // 5. Anchor shape: exposes code and no udcCode.
     @Test("anchor exposes lattice code and no UDC code")
     func anchorExposesLatticeCodeAndNoUDCCode() {
+        // Use an UNRESOLVED lookup to test the anchor shape — shape invariants
+        // hold regardless of whether the lookup resolved to a code.
         let anchor = EideticLib.lookup("chemistry")
         let mirror = Mirror(reflecting: anchor)
         let labels = mirror.children.compactMap { $0.label }

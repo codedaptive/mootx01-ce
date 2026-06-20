@@ -403,3 +403,82 @@ fn explicit_udc_code_on_capture_frame_is_preserved_by_seam() {
         expected: '{explicit_code}', got: '{stored_code}'"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Honest-classification guard: no confidently-wrong specific codes for
+// high-frequency cross-domain jargon.
+// ---------------------------------------------------------------------------
+
+/// Generic high-frequency jargon must NOT produce a confidently-wrong specific
+/// UDC code. The FdcMatcher tie-count guard (MAX_TIED_WINNERS_FOR_CLASSIFICATION)
+/// detects when a large set of codes are tied at the top IDF score — signalling
+/// that the bag is dominated by common cross-domain vocabulary rather than
+/// subject-specific terms — and returns UNRESOLVED. The capture seam then
+/// preserves the "000" unclassified sentinel.
+///
+/// Real examples of the pre-fix bug (raw-scoring tie-break accidents):
+///   "computer software programming" → UDC 235 (angels/devotional) WRONG
+///   "network protocol internet"     → UDC 621.2 (hydraulic engineering) WRONG
+///
+/// After the fix: cross-domain jargon with many tied candidates correctly
+/// lands at "000" rather than an arbitrary tie-broken code.
+///
+/// Note: some software/technical phrases contain incidental high-IDF Q-IDs
+/// (e.g. "architecture" → Q12271, which appears in building-architecture
+/// signatures) that produce a confident result under IDF scoring. Those
+/// cases are classifier-quality limitations — the v1.0 frame has no
+/// software-domain vocabulary. The tie-count guard does not prevent
+/// accidental wins from incidental high-IDF Q-IDs; the embedding encoder
+/// (future) handles those. This test proves the guard works for its target
+/// class: high-frequency cross-domain jargon with many tied candidates.
+///
+/// Parity with Swift AriaMCPTests.FdcCaptureTests.highFrequencyJargonProducesHonestUnclassifiedAnchor.
+#[test]
+fn high_frequency_jargon_produces_honest_unclassified_anchor() {
+    // These phrases consist entirely of high-frequency Q-IDs shared across
+    // hundreds of UDC signatures. The tie-count guard fires and the capture
+    // seam preserves "000". These are the inputs that produced UDC 235
+    // (angels/devotional) and UDC 621.2 (hydraulic engineering) before the fix.
+    let high_frequency_items = [
+        ("computer software programming and information science", "cs-room"),
+        ("internet network protocol server client communication system", "net-room"),
+    ];
+
+    for (content, location) in &high_frequency_items {
+        let registry = EstateRegistry::new_inmemory();
+        let a = args!["content" => *content, "location" => *location];
+        let result =
+            dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
+                .expect("file_memory must succeed for high-frequency content");
+
+        assert!(
+            result["isError"] == serde_json::json!(false),
+            "file_memory must succeed for high-frequency content '{content}'; got: {result:?}"
+        );
+
+        let estate = registry
+            .resolve(&BTreeMap::new(), "estateID")
+            .expect("estate must resolve");
+        let coord = estate.coord.lock().expect("coord lock");
+        let now: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time must be after UNIX epoch")
+            .as_secs() as i64;
+        let drawers = coord
+            .recall(&estate.handle, RecallFrame::new(vec![]), now)
+            .expect("recall must succeed");
+
+        assert_eq!(drawers.len(), 1, "one drawer per content item");
+
+        let udc = &drawers[0].udc_code;
+        // The honest-classification guard ensures that high-frequency jargon
+        // is stored as "000" (unclassified) rather than an arbitrary code
+        // selected from a degenerate tie. "000" is the correct honest
+        // representation when the bag carries no discriminating signal.
+        assert!(
+            udc == "000" || udc.is_empty(),
+            "high-frequency jargon with many tied candidates must land at '000', \
+            not a confidently-wrong code; content='{content}', got: '{udc}'"
+        );
+    }
+}

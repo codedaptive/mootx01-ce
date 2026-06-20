@@ -184,6 +184,80 @@ struct FdcCaptureTests {
         )
     }
 
+    // MARK: - Honest-classification guard: no confidently-wrong specific codes
+
+    /// Generic high-frequency jargon must NOT produce a confidently-wrong
+    /// specific UDC code. The FDCMatcher tie-count guard
+    /// (maximumTiedWinnersForClassification) detects when a large set of codes
+    /// are tied at the top IDF score — signalling that the bag is dominated by
+    /// common cross-domain vocabulary rather than subject-specific terms — and
+    /// returns UNRESOLVED. The capture seam then preserves the "000" unclassified
+    /// sentinel.
+    ///
+    /// Real examples of the pre-fix bug (raw-scoring tie-break accidents):
+    ///   "computer software programming" → UDC 235 (angels/devotional) WRONG
+    ///   "network protocol internet"     → UDC 621.2 (hydraulic engineering) WRONG
+    ///
+    /// After the fix: cross-domain jargon with many tied candidates correctly
+    /// lands at "000" rather than an arbitrary tie-broken code.
+    ///
+    /// Note: some software/technical phrases contain incidental high-IDF Q-IDs
+    /// (e.g. "architecture" → Q12271, which appears in building-architecture
+    /// signatures) that produce a confident result under IDF scoring. Those
+    /// cases are classifier-quality limitations — the v1.0 frame has no
+    /// software-domain vocabulary. The tie-count guard does not prevent
+    /// accidental wins from incidental high-IDF Q-IDs; the embedding encoder
+    /// (future) handles those. This test proves the guard works for its target
+    /// class: high-frequency cross-domain jargon with many tied candidates.
+    @Test func highFrequencyJargonProducesHonestUnclassifiedAnchor() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+
+        // These phrases consist entirely of high-frequency Q-IDs shared across
+        // hundreds of UDC signatures ("software", "programming", "computer",
+        // "information", "science" → Q-IDs each present in 100–400+ codes).
+        // The tie-count guard fires (> 4 codes share the argmax IDF score) and
+        // the capture seam preserves "000". No specific code is returned.
+        //
+        // These were the inputs that produced UDC 235 (angels/devotional) and
+        // UDC 621.2 (hydraulic engineering) before the fix.
+        let highFrequencyItems = [
+            ("computer software programming and information science",
+             "cs-room"),
+            ("internet network protocol server client communication system",
+             "net-room"),
+        ]
+
+        for (content, location) in highFrequencyItems {
+            let result = try await dispatcher.dispatch(
+                name: "moot_file_memory",
+                arguments: .object([
+                    "content":  .string(content),
+                    "location": .string(location),
+                ])
+            )
+            #expect(!isError(result), "file_memory must succeed for high-frequency content; got: \(result)")
+        }
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [], hydrationLevel: .structured, limit: nil, ordering: .byCaptureTimeDesc)
+        )
+
+        #expect(drawers.count == highFrequencyItems.count, "one drawer per filed item")
+
+        for drawer in drawers {
+            let udc = drawer.udcCode
+            // The honest-classification guard ensures that high-frequency jargon
+            // is stored as "000" (unclassified) rather than an arbitrary code
+            // selected from a degenerate tie. "000" is the correct honest
+            // representation when the bag carries no discriminating signal.
+            #expect(
+                udc == "000" || udc.isEmpty,
+                "high-frequency jargon with many tied candidates must land at '000', not a confidently-wrong code; got: '\(udc)'"
+            )
+        }
+    }
+
     // MARK: - Cross-door parity: file_memory and direct capture share ONE seam
 
     /// Filing the SAME classifiable content through `moot_file_memory` (the MCP

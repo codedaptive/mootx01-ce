@@ -100,26 +100,41 @@ mod tests {
     // These tests assert the behavioral contract (non-empty code for a
     // topical term, empty code for nonsense/empty, determinism, confidence
     // values) without asserting exact code selections. Exact-code
-    // conformance against Tests/SharedVectors/lookup_vectors.json requires
-    // the LatticeLib Rust single-token accuracy fix (see FINDINGS below).
+    // conformance against Tests/SharedVectors/lookup_vectors.json is
+    // handled by the lookup_conformance_test.rs integration tests.
+    //
+    // The honest-classification guard (tie-count) means single-word inputs
+    // for broad terms like "chemistry" or "philosophy" correctly return
+    // UNRESOLVED: each maps to a Q-ID in 100–800+ signatures → large tied
+    // winner set → guard fires. Use multi-term biology text with distinctive
+    // Q-IDs (physiology, molecular biology, evolution) that produce ≤4 tied
+    // candidates to exercise the resolving path.
 
     #[test]
     fn lookup_resolves_topical_term_to_nonempty_code() {
-        // Mirrors Swift `lookupChemistryResolvesToCode` and
-        // `lookupResolvesToWellFormedCode`. A topical multi-token term
-        // that appears in the LatticeLib conformance fixture resolves
-        // to a non-empty FDC code.
-        let anchor = lookup("organic chemistry reactions molecules");
+        // Full biology sentence with distinctive vocabulary — resolves to a
+        // natural-sciences FDC code under the honest-classification guard.
+        // Mirrors Swift `lookupTopicalTextResolvesToCode` in EideticLibTests.
+        let anchor = lookup(
+            "Biology is the scientific study of life and living organisms, \
+             including their physical structure, chemical processes, molecular \
+             interactions, physiological mechanisms, and evolution.",
+        );
         assert!(
             !anchor.code.is_empty(),
-            "a topical phrase must resolve to an FDC code"
+            "topical text with distinctive subject vocabulary must resolve to an FDC code; got empty"
         );
     }
 
     #[test]
     fn lookup_carries_medium_confidence_for_resolved_code() {
         // Resolved codes carry confidence = 32 (medium), matching Swift.
-        let anchor = lookup("organic chemistry reactions molecules");
+        // Uses same biology text that reliably resolves after the tie-count guard.
+        let anchor = lookup(
+            "Biology is the scientific study of life and living organisms, \
+             including their physical structure, chemical processes, molecular \
+             interactions, physiological mechanisms, and evolution.",
+        );
         if !anchor.code.is_empty() {
             assert_eq!(
                 anchor.confidence, 32,

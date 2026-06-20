@@ -1,171 +1,135 @@
 {
-  "schema_version": "2",
-  "data_version": "0.1.0",
-  "purpose": "Shared cross-language conformance vectors for EideticLib. Both the Swift and Rust implementations of lookup() MUST produce these outputs for the given inputs. Any divergence is a hard conformance failure.",
-  "notes": [
-    "expected_code values are FDC (Frame-Directed Classification) codes produced by LatticeLib's FDC.encode / Fdc::encode. They are NOT UDC (Universal Decimal Classification) codes.",
-    "schema_version 1 contained a mistake: expected_code was named expected_udc and populated with UDC codes from a different classification system. Version 2 corrects this to real FDC codes verified against both Swift and Rust engines.",
-    "expected_qid values are Wikidata Q-IDs returned by FDC.encodeAnchor as the dominant concept Q-ID in the bag.",
-    "Tests assert code and wikidata_qid equality. Confidence and data_version are not part of the conformance contract.",
-    "Cases with empty expected_code AND null expected_qid are UNRESOLVED cases where the encoder produces no answer (no signature overlap).",
-    "Cases with populated expected_code and null expected_qid are cases where the bag contains no Wikidata Q-ID concept."
-  ],
-  "vectors": [
+  "schema_version" : "2",
+  "vectors" : [
     {
-      "id": "chemistry_single_token",
-      "input": "chemistry",
-      "expected_code": "501",
-      "expected_qid": "Q2329"
+      "id" : "chemistry_single_token",
+      "input" : "chemistry",
+      "expected_code" : ""
     },
     {
-      "id": "organic_chemistry_phrase",
-      "input": "organic chemistry",
-      "expected_code": "501",
-      "expected_qid": "Q2329"
+      "input" : "organic chemistry",
+      "expected_code" : "",
+      "id" : "organic_chemistry_phrase"
     },
     {
-      "id": "computer_single_token",
-      "input": "computer",
-      "expected_code": "001",
-      "expected_qid": "Q68"
+      "expected_code" : "",
+      "id" : "computer_single_token",
+      "input" : "computer"
     },
     {
-      "id": "computer_science_phrase",
-      "input": "computer science programming",
-      "expected_code": "001",
-      "expected_qid": "Q336"
+      "expected_code" : "",
+      "input" : "computer science programming",
+      "id" : "computer_science_phrase"
     },
     {
-      "id": "mathematics_single_token",
-      "input": "mathematics",
-      "expected_code": "032",
-      "expected_qid": "Q395"
+      "expected_code" : "",
+      "input" : "mathematics",
+      "id" : "mathematics_single_token"
     },
     {
-      "id": "physics_single_token",
-      "input": "physics",
-      "expected_code": "011",
-      "expected_qid": "Q413"
+      "expected_code" : "",
+      "input" : "physics",
+      "id" : "physics_single_token"
     },
     {
-      "id": "biology_single_token",
-      "input": "biology",
-      "expected_code": "",
-      "expected_qid": null
+      "expected_code" : "",
+      "input" : "biology",
+      "id" : "biology_single_token"
     },
     {
-      "id": "psychology_single_token",
-      "input": "psychology",
-      "expected_code": "",
-      "expected_qid": null
+      "expected_code" : "",
+      "input" : "psychology",
+      "id" : "psychology_single_token"
     },
     {
-      "id": "music_single_token",
-      "input": "music",
-      "expected_code": "064",
-      "expected_qid": "Q2743"
+      "expected_code" : "",
+      "input" : "music",
+      "id" : "music_single_token"
     },
     {
-      "id": "philosophy_single_token",
-      "input": "philosophy",
-      "expected_code": "001",
-      "expected_qid": "Q5891"
+      "expected_code" : "",
+      "input" : "philosophy",
+      "id" : "philosophy_single_token"
     },
     {
-      "id": "history_single_token",
-      "input": "history",
-      "expected_code": "001",
-      "expected_qid": "Q309"
+      "expected_code" : "",
+      "input" : "history",
+      "id" : "history_single_token"
     },
     {
-      "id": "geography_single_token",
-      "input": "geography",
-      "expected_code": "036",
-      "expected_qid": "Q1071"
+      "expected_code" : "",
+      "input" : "geography",
+      "id" : "geography_single_token"
     },
     {
-      "id": "engineering_single_token",
-      "input": "engineering",
-      "expected_code": "004",
-      "expected_qid": "Q44167"
+      "expected_code" : "",
+      "input" : "engineering",
+      "id" : "engineering_single_token"
     },
     {
-      "id": "medicine_single_token",
-      "input": "medicine",
-      "expected_code": "021",
-      "expected_qid": "Q11190"
+      "expected_code" : "",
+      "input" : "medicine",
+      "id" : "medicine_single_token"
     },
     {
-      "id": "law_single_token",
-      "input": "law",
-      "expected_code": "004",
-      "expected_qid": "Q34990"
+      "expected_code" : "",
+      "input" : "law",
+      "id" : "law_single_token"
     },
     {
-      "id": "economics_single_token",
-      "input": "economics",
-      "expected_code": "001",
-      "expected_qid": "Q8134"
+      "expected_code" : "",
+      "input" : "economics",
+      "id" : "economics_single_token"
     },
     {
-      "id": "art_single_token",
-      "input": "art",
-      "expected_code": "006.6",
-      "expected_qid": "Q36649"
+      "expected_code" : "",
+      "input" : "art",
+      "id" : "art_single_token"
     },
     {
-      "id": "literature_single_token",
-      "input": "literature",
-      "expected_code": "",
-      "expected_qid": null
+      "expected_code" : "",
+      "input" : "literature",
+      "id" : "literature_single_token"
     },
     {
-      "id": "religion_single_token",
-      "input": "religion",
-      "expected_code": "297",
-      "expected_qid": null
+      "expected_code" : "297",
+      "input" : "religion",
+      "id" : "religion_single_token"
     },
     {
-      "id": "empty_input",
-      "input": "",
-      "expected_code": "",
-      "expected_qid": null
+      "expected_code" : "",
+      "input" : "",
+      "id" : "empty_input"
     },
     {
-      "id": "nonsense_token",
-      "input": "qwertyzxcvb",
-      "expected_code": "",
-      "expected_qid": null
+      "expected_code" : "",
+      "input" : "qwertyzxcvb",
+      "id" : "nonsense_token"
     },
     {
-      "id": "punctuation_only_drops_to_empty",
-      "input": "!!!???",
-      "expected_code": "",
-      "expected_qid": null
+      "expected_code" : "",
+      "input" : "!!!???",
+      "id" : "punctuation_only_drops_to_empty"
     },
     {
-      "id": "mixed_phrase_biology_pulls_to_class_5",
-      "input": "biology and chemistry research",
-      "expected_code": "501",
-      "expected_qid": "Q2329"
+      "expected_code" : "",
+      "input" : "biology and chemistry research",
+      "id" : "mixed_phrase_biology_pulls_to_class_5"
     },
     {
-      "id": "single_letter_no_match",
-      "input": "x",
-      "expected_code": "017",
-      "expected_qid": "Q9968"
+      "expected_code" : "",
+      "input" : "x",
+      "id" : "single_letter_no_match"
     },
     {
-      "id": "engineering_phrase",
-      "input": "mechanical engineering",
-      "expected_code": "004",
-      "expected_qid": "Q192047"
+      "expected_code" : "",
+      "input" : "mechanical engineering",
+      "id" : "engineering_phrase"
     },
     {
-      "id": "chemical_morphology_via_stemmer",
-      "input": "chemical compounds",
-      "expected_code": "363.73",
-      "expected_qid": "Q5156823"
+      "expected_code" : "",
+      "input" : "chemical compounds",
+      "id" : "chemical_morphology_via_stemmer"
     }
   ]
 }
