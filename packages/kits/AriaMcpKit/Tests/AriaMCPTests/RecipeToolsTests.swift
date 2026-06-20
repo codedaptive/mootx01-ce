@@ -50,6 +50,8 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
+        // 34 total: 11 recipe tools + 23 lens tools (moot_lens_node_motion added by
+        // ADR-DIFFUSION-001 diffusion node-layer lens).
         #expect(recipeNames == [
             "moot_confirm_migration",
             "moot_consolidate",
@@ -70,6 +72,7 @@ struct RecipeToolsTests {
             "moot_lens_keystones",
             "moot_lens_latent_themes",
             "moot_lens_moment",
+            "moot_lens_node_motion",
             "moot_lens_overlap",
             "moot_lens_partial_cue",
             "moot_lens_precedence",
@@ -105,7 +108,7 @@ struct RecipeToolsTests {
         // Migration tools are Tier 7 and intentionally absent from the cognition menu.
         #expect(!text.contains("moot_run_migration"))
         #expect(!text.contains("moot_confirm_migration"))
-        #expect(text.contains("26 cognition tools"))
+        #expect(text.contains("27 cognition tools"))
     }
 
     @Test func testRecipeToolNamesDoNotCollideWithInterfaceToolNames() {

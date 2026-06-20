@@ -16,13 +16,13 @@ struct RecipeCatalogTests {
     func catalogListsAllShippedRecipes() {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
-        // plus the 15 reasoning lenses (14 + lens_contradiction added Part 5)
+        // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence,
         // complexity) plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
         // plus the 3 distillation-family recipes (Dc1–Dc3, registered Dc4)
-        // = 29 total.
+        // = 30 total.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
             "apriori_rules",
@@ -45,6 +45,7 @@ struct RecipeCatalogTests {
             "migration_benchmark",
             "mind_overlap",
             "moment",
+            "node_motion",
             "partial_cue_recall",
             "precedence",
             "recall_exploratory",
@@ -94,10 +95,10 @@ struct RecipeCatalogTests {
         #expect(descriptor.requiredCapabilities == [.deriveBranch, .benchmark, .promoteBranch])
     }
 
-    @Test("catalog names match catalog.rs declaration order — 29 entries")
+    @Test("catalog names match catalog.rs declaration order — 30 entries")
     func catalogNamesMatchRustDeclarationOrder() {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
-        // All 29 entries are registered in both Swift and Rust. The three
+        // All 30 entries are registered in both Swift and Rust. The three
         // distillation-family entries (consolidate, distilled_recall,
         // expand_memory) carry descriptor metadata in Rust; their full Rust
         // implementations ship in a future mission. Any reordering on either
@@ -113,6 +114,7 @@ struct RecipeCatalogTests {
             "latent_themes",
             "bias",
             "drift",
+            "node_motion",
             "cohesion",
             "lens_contradiction",
             "trust_grounded_synthesis",

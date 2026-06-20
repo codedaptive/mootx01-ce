@@ -154,12 +154,11 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 59 = 19 core ARIA + 1 federation + 11 recipe + 22 lens + 5 vault + 1
+        // 60 = 19 core ARIA + 1 federation + 11 recipe + 23 lens + 5 vault + 1
         // maintenance (moot_reindex). 3 new distillation recipe tools added (DA1):
         // moot_consolidate, moot_recall_distilled, moot_expand_memory.
-        // 22nd lens = moot_lens_contradiction (genuine contradiction detector added
-        // alongside renamed moot_lens_cohesion).
-        #expect(tools.count == 59, "tools/list must return exactly 59 tools; got \(tools.count)")
+        // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
+        #expect(tools.count == 60, "tools/list must return exactly 60 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

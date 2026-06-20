@@ -115,6 +115,15 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
+        // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+        RecipeDescriptor {
+            name: "node_motion".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens (diffusion, node layer): how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history."
+                    .into(),
+            required_capabilities: vec![],
+        },
         RecipeDescriptor {
             name: "cohesion".into(),
             version: "1.0.0".into(),
@@ -325,13 +334,13 @@ mod tests {
     fn catalog_lists_all_shipped_recipes() {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
-        // plus the 15 reasoning lenses (14 + lens_contradiction added Part 5)
+        // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
         // plus the 3 distillation-family recipes (Dc1–Dc3, registered Dc4)
-        // = 29 total.
+        // = 30 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -358,6 +367,7 @@ mod tests {
                 "migration_benchmark",
                 "mind_overlap",
                 "moment",
+                "node_motion",
                 "partial_cue_recall",
                 "precedence",
                 "recall_exploratory",

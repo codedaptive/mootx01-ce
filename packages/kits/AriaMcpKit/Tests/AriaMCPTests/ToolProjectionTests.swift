@@ -22,17 +22,17 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 59.
-    /// 19 interface + 1 federation + 11 recipe + 22 lens + 5 vault + 1 maintenance.
-    /// The 22nd lens tool is moot_lens_contradiction (genuine semantic contradiction
-    /// detector added alongside the renamed moot_lens_cohesion).
+    /// Hard contract gate: the total tool count must be exactly 60.
+    /// 19 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 1 maintenance.
+    /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
+    /// ADR-DIFFUSION-001) added alongside moot_lens_contradiction.
     /// The 11th recipe tool is moot_expand_memory (DA1 — three distillation tools:
     /// moot_consolidate, moot_recall_distilled, moot_expand_memory); the maintenance
     /// tool is moot_reindex (corpus/vector backfill).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools().count == 59,
-                "tools() must return exactly 59 tools; got \(ToolProjection.tools().count)")
+        #expect(ToolProjection.tools().count == 60,
+                "tools() must return exactly 60 tools; got \(ToolProjection.tools().count)")
     }
 
     /// All 19 interface tools must be present.

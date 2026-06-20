@@ -106,8 +106,8 @@ struct VaultToolsTests {
         #expect(!names.contains("moot_vault_status"))
         #expect(!names.contains("moot_vault_reconcile"))
         #expect(!names.contains("moot_vault_job"))
-        // Non-vault surface is unaffected: 54 tools (59 − 5 vault).
-        #expect(toolsOff.count == 54)
+        // Non-vault surface is unaffected: 55 tools (60 − 5 vault).
+        #expect(toolsOff.count == 55)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -115,7 +115,7 @@ struct VaultToolsTests {
         let toolsNoEnv = ToolProjection.tools(environment: [:])
         let names = Set(toolsNoEnv.map(\.name))
         #expect(names.contains("moot_vault_export"))
-        #expect(toolsNoEnv.count == 59)
+        #expect(toolsNoEnv.count == 60)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.
