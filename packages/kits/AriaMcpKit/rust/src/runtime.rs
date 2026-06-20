@@ -57,7 +57,12 @@ pub fn run(banner: &str) {
     // from_env reads ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH and applies
     // the four-state precedence ladder. Exits with a nonzero code on ambiguous
     // config or an unusable path/URL (unreachable PostgreSQL fails fast here).
-    let config = ServerConfig::from_env();
+    let mut config = ServerConfig::from_env();
+    // Inject the host identity so rows filed by this server are stamped with
+    // the correct source. The banner ("aria-mcp" or "mootx01") is the
+    // canonical name for whichever binary is hosting the runtime. Mirrors
+    // Swift's `ToolDispatcher(serverIdentity:)` injection pattern.
+    config.registry.server_identity = banner.to_owned();
 
     // Telemetry wiring (durable default for resident mode, opt-in for stdio).
     //

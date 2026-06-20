@@ -157,4 +157,52 @@ struct ToolProjectionTests {
             )
         }
     }
+
+    /// `moot_reindex` must pass the `InterfaceTools.isInterfaceTool` membership
+    /// gate so the serve host routes it to `runReindex` instead of throwing
+    /// "Unknown tool" (-32601).
+    ///
+    /// Regression gate: the `names` Set in `InterfaceTools` previously omitted
+    /// `moot_reindex`, causing the outer dispatcher to fall through to the
+    /// unknown-tool throw even though the dispatch switch already had the case.
+    @Test func testMootReindexPassesMembershipGate() {
+        // The gate that the serve host evaluates before reaching the dispatch switch.
+        #expect(
+            InterfaceTools.isInterfaceTool("moot_reindex"),
+            "moot_reindex must be in the InterfaceTools membership gate"
+        )
+    }
+
+    /// Every tool in the `InterfaceTools` dispatch switch must also be in the
+    /// membership gate — the two sets must stay in sync. This catches the class
+    /// of bug where a case is added to the switch but omitted from `names`.
+    ///
+    /// The expected set is the canonical 19 Tier 1–5 tools plus `moot_reindex`
+    /// (Maintenance). If a new tool is added to the switch, add it here too.
+    @Test func testMembershipGateCoversAllDispatchCases() {
+        // All tools that appear in the InterfaceTools dispatch switch.
+        let dispatchCases: [String] = [
+            // Tier 1
+            "moot_file_memory", "moot_memory_search", "moot_update_memory",
+            "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
+            "moot_move_memory",
+            // Tier 2
+            "moot_link_memories", "moot_connection_search", "moot_connection_map",
+            // Tier 3
+            "moot_file_fact", "moot_fact_search", "moot_retire_fact",
+            "moot_fact_timeline",
+            // Tier 4
+            "moot_write_journal", "moot_read_journal",
+            // Tier 5
+            "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+            // Maintenance / admin
+            "moot_reindex",
+        ]
+        for name in dispatchCases {
+            #expect(
+                InterfaceTools.isInterfaceTool(name),
+                "\(name) is in the dispatch switch but missing from the membership gate"
+            )
+        }
+    }
 }

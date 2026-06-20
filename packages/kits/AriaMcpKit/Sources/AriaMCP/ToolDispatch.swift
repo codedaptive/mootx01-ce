@@ -77,6 +77,14 @@ public struct ToolDispatcher: Sendable {
     /// recomputed on every ping call.
     public let buildSerial: String
 
+    /// The host identity written into rows this dispatcher files (memories,
+    /// tunnels, facts). Injected at construction rather than hardcoded so the
+    /// shared `ToolDispatcher` implementation correctly stamps provenance for
+    /// whichever binary is hosting it — "aria-mcp-server" for the standalone
+    /// reference server, "mootx01" for `mootx01 serve`, etc. Callers that do
+    /// not pass an explicit value receive the default "aria-mcp-server".
+    public let serverIdentity: String
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
@@ -86,14 +94,21 @@ public struct ToolDispatcher: Sendable {
     /// not need to know the derivation — pass an explicit value only in
     /// tests or when `MOOTX01_BUILD_SERIAL` is already resolved at a
     /// higher level.
+    ///
+    /// `serverIdentity` defaults to "aria-mcp-server" so existing call sites
+    /// that do not supply an identity are unaffected. Production hosts should
+    /// pass their own identity string so rows are stamped with the correct
+    /// source (e.g. "mootx01" for `mootx01 serve`).
     public init(kit: GeniusLocusKit, handle: EstateHandle,
-                buildSerial: String = Self.deriveBuildSerial()) {
+                buildSerial: String = Self.deriveBuildSerial(),
+                serverIdentity: String = "aria-mcp-server") {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
         self.jobRegistry = VaultJobRegistry()
         self.recallLedger = SurfacedRecallLedger()
         self.buildSerial = buildSerial
+        self.serverIdentity = serverIdentity
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -109,17 +124,19 @@ public struct ToolDispatcher: Sendable {
         next[additional.estateUUID] = additional
         return ToolDispatcher(kit: kit, handle: handle, estates: next,
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
-                              buildSerial: buildSerial)
+                              buildSerial: buildSerial, serverIdentity: serverIdentity)
     }
 
     /// Private designated initializer carrying an explicit estate map,
-    /// a shared job registry, a shared recall ledger, and the build
-    /// serial. Used by `registering(_:)`; the public `init(kit:handle:)`
-    /// is the only construction path external callers use.
+    /// a shared job registry, a shared recall ledger, the build serial,
+    /// and the server identity. Used by `registering(_:)`; the public
+    /// `init(kit:handle:buildSerial:serverIdentity:)` is the only
+    /// construction path external callers use.
     private init(
         kit: GeniusLocusKit, handle: EstateHandle,
         estates: [UUID: EstateHandle], jobRegistry: VaultJobRegistry,
-        recallLedger: SurfacedRecallLedger, buildSerial: String
+        recallLedger: SurfacedRecallLedger, buildSerial: String,
+        serverIdentity: String
     ) {
         self.kit = kit
         self.handle = handle
@@ -127,6 +144,7 @@ public struct ToolDispatcher: Sendable {
         self.jobRegistry = jobRegistry
         self.recallLedger = recallLedger
         self.buildSerial = buildSerial
+        self.serverIdentity = serverIdentity
     }
 
     // MARK: - Build serial derivation
@@ -831,11 +849,13 @@ extension ToolDispatcher {
 
 // MARK: - InterfaceTools
 
-/// Static dispatch table for the five-tier AI-client interface tools.
+/// Static dispatch table for the five-tier AI-client interface tools plus the
+/// Maintenance tier.
 ///
-/// Each of the 19 interface tools has a named `run*` function on
-/// `ToolDispatcher`; this type routes from name to function, isolating
-/// the dispatch logic from the tool-name string constants.
+/// Each of the 19 Tier 1–5 interface tools plus 1 Maintenance tool (20 total)
+/// has a named `run*` function on `ToolDispatcher`; this type routes from name
+/// to function, isolating the dispatch logic from the tool-name string
+/// constants. Mirrors the Rust `INTERFACE_TOOLS` constant in `interface_tools.rs`.
 enum InterfaceTools {
 
     private static let names: Set<String> = [
@@ -852,6 +872,8 @@ enum InterfaceTools {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        // Maintenance / admin
+        "moot_reindex",
     ]
 
     static func isInterfaceTool(_ name: String) -> Bool {
@@ -909,7 +931,7 @@ extension ToolDispatcher {
     /// The seam classifies via EideticLib.lookup; falls back to UDC "000" for UNRESOLVED content),
     /// embedding model ("default"), capture channel (.actuator, cookbook §2.4 —
     /// actuator-driven capture by an MCP AI agent), source type (.imported),
-    /// and addedBy ("aria-mcp-server"). The caller supplies content, location,
+    /// and addedBy (the dispatcher's `serverIdentity`). The caller supplies content, location,
     /// and optional adjectives (kind, sensitivity, exportability).
     func runFileMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
@@ -956,7 +978,7 @@ extension ToolDispatcher {
             channel: Self.defaultChannel,
             room: room,
             latticeAnchor: Self.defaultLatticeAnchor,
-            addedBy: Self.serverAddedBy,
+            addedBy: serverIdentity,
             embeddingModelID: Self.defaultEmbeddingModelID,
             sensitivity: sensitivity,
             kind: kind,
@@ -1326,7 +1348,7 @@ extension ToolDispatcher {
             targetWing: target.wing,
             targetRoom: target.room,
             label: label,
-            addedBy: Self.serverAddedBy,
+            addedBy: serverIdentity,
             sourceDrawerId: fromID,
             targetDrawerId: toID,
             kind: kind,
@@ -1392,7 +1414,7 @@ extension ToolDispatcher {
         // a source). When the caller omits it, infer the source as the ingest
         // channel that asserted it, so a fact is never stored unanchored.
         let providedSource = try optionalString(args["source_id"], argument: "source_id") ?? ""
-        let sourceDrawerID = providedSource.isEmpty ? Self.serverAddedBy : providedSource
+        let sourceDrawerID = providedSource.isEmpty ? serverIdentity : providedSource
         let fact = try await kit.captureKGFact(
             handle,
             subject: subject,
@@ -1405,6 +1427,18 @@ extension ToolDispatcher {
     }
 
     /// `moot_fact_search` — retrieve all currently-active KG facts.
+    ///
+    /// Fact storage is independent of the memory recall pipeline — facts are
+    /// filed as LocusKit KGFact rows, not as Drawer rows, so the dense vector
+    /// lane (Lane D) does not participate in fact retrieval. When the caller
+    /// supplies a query, matching is a case-insensitive substring scan across
+    /// subject, predicate, and object.
+    ///
+    /// When a query is present and the dense lane is dark, a `recall_provenance:`
+    /// hint is appended so the AI caller can distinguish "no lexical match" from
+    /// "semantic search was not consulted". This mirrors the honest-lane-state
+    /// reporting that `moot_memory_search` and `moot_recall_shaped` emit, keeping
+    /// the ARIA surface consistent (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
     func runFactSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let allFacts = try await kit.recallKGFacts(handle)
@@ -1430,7 +1464,39 @@ extension ToolDispatcher {
         let header = query != nil
             ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
             : "facts: \(facts.count)"
-        return Self.textResult(([header] + lines).joined(separator: "\n"))
+        var outputLines = [header] + Array(lines)
+        // Dark-lane hint: when the caller supplied a query, probe the dense
+        // recall lane to determine its status. If dark, append a recall_provenance
+        // line so the AI caller knows the match was lexical-only (0 results means
+        // "no lexical match found", not "this fact does not exist in semantic
+        // space"). Reuses the same probe recall path as moot_memory_search to
+        // ensure wording/shape is consistent. The probe is minimal (limit=1, no
+        // filter, .unionBest mode) — we only need the denseLaneStatus, not hits.
+        if query != nil {
+            // Probe the dense lane state with a minimal recall request (limit=1,
+            // no filter, bitmapOnly hydration — no blob reads needed). We only
+            // use denseLaneStatus from the result, not the hits themselves.
+            // queryText is the raw (non-lowercased) form so the embedding path
+            // sees unaltered text.
+            let probeRequest = GLKRecallRequest(
+                frame: RecallFrame(filterChain: [], hydrationLevel: .bitmapOnly,
+                                   limit: 1, ordering: .byCaptureTimeDesc),
+                mode: .unionBest,
+                scoring: .matrixAware,
+                limit: 1,
+                fallback: .allowDegraded,
+                queryText: queryRaw,  // pass original (not lowercased) for embedding
+                origin: .external
+            )
+            let probeResult = try await kit.recall(handle, probeRequest)
+            if let darkReason = probeResult.denseLaneStatus {
+                // Dense lane was dark — the query above was lexical-only.
+                // Surface the same recall_provenance format as moot_memory_search
+                // so AI callers receive a consistent signal across all search tools.
+                outputLines.append("recall_provenance: dense_lane:\(darkReason) degraded_stages:none")
+            }
+        }
+        return Self.textResult(outputLines.joined(separator: "\n"))
     }
 
     /// `moot_retire_fact` — invalidate a KG fact by row ID.
@@ -1746,9 +1812,10 @@ private extension ToolDispatcher {
     /// (actuator-driven capture), not a file import and not typed by a user.
     static let defaultChannel: CaptureChannel = .actuator
 
-    /// Actor identifier the server writes into rows it files. Uses a stable
-    /// constant so the source is identifiable in the audit trail.
-    static let serverAddedBy = "aria-mcp-server"
+    // NOTE: `serverAddedBy` was removed. The host identity now lives in the
+    // `serverIdentity` instance property, injected at construction so the
+    // shared dispatcher correctly stamps provenance for whichever binary
+    // is hosting it (aria-mcp-server, mootx01 serve, etc.).
 }
 
 // MARK: - Injection depth formatting

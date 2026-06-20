@@ -183,7 +183,60 @@ fn tools_list_name_set_matches_expected_57_names() {
 }
 
 // ---------------------------------------------------------------------------
-// 1b. Lens tool name set — 23 canonical names, sorted literal list
+// 1b. Interface-tool membership gate — moot_reindex regression gate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn moot_reindex_passes_membership_gate() {
+    // Regression gate: `moot_reindex` must pass `is_interface_tool` so the
+    // dispatch routing branches to the reindex handler rather than falling
+    // through to an "Unknown tool" error.
+    //
+    // The equivalent Swift bug was that `moot_reindex` was omitted from
+    // `InterfaceTools.names` while already present in the dispatch switch,
+    // causing -32601 "Unknown tool" on the serve host. This test confirms the
+    // Rust port stays correct: `moot_reindex` is in `INTERFACE_TOOLS`.
+    assert!(
+        aria_mcp::interface_tools::is_interface_tool("moot_reindex"),
+        "moot_reindex must pass is_interface_tool — omitting it causes -32601 Unknown tool"
+    );
+}
+
+#[test]
+fn all_interface_dispatch_cases_pass_membership_gate() {
+    // Every tool name in the Rust `interface_tools::dispatch` match arms must
+    // also be in `INTERFACE_TOOLS` (the gate checked before dispatch is called).
+    // If a case is added to the switch but omitted from the constant, callers
+    // receive -32601 "Unknown tool" because the gate fires first.
+    //
+    // Mirrors the Swift `testMembershipGateCoversAllDispatchCases` test.
+    let dispatch_cases = [
+        // Tier 1 — Core memory (7)
+        "moot_file_memory", "moot_memory_search", "moot_update_memory",
+        "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
+        "moot_move_memory",
+        // Tier 2 — Connections (3)
+        "moot_link_memories", "moot_connection_search", "moot_connection_map",
+        // Tier 3 — Knowledge graph (4)
+        "moot_file_fact", "moot_fact_search", "moot_retire_fact",
+        "moot_fact_timeline",
+        // Tier 4 — Journal (2)
+        "moot_write_journal", "moot_read_journal",
+        // Tier 5 — Estate (3)
+        "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        // Maintenance / admin (1)
+        "moot_reindex",
+    ];
+    for name in &dispatch_cases {
+        assert!(
+            aria_mcp::interface_tools::is_interface_tool(name),
+            "{name} is in the dispatch switch but missing from the membership gate"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1d. Lens tool name set — 23 canonical names, sorted literal list
 // ---------------------------------------------------------------------------
 
 #[test]
