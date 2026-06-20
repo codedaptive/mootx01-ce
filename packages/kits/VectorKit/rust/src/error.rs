@@ -41,4 +41,18 @@ pub enum VectorKitError {
     /// policy is ratified, remove this error case and the guards that
     /// return it.
     Int8QuantizationPolicyUndefined(String),
+
+    /// Trained distributional provider's `embed_float` returned no vector
+    /// because all query tokens are out-of-vocabulary (OOV). The provider
+    /// HAS a trained basis (vocab is non-empty) but none of the query's
+    /// tokens appear in it.
+    ///
+    /// Distinct from `EmbeddingFailed` (structural opt-out — provider
+    /// structurally cannot produce float vectors). Thrown by RI, PPMI, LSA,
+    /// NMF providers when vocab is non-empty but zero query tokens match.
+    ///
+    /// The corpus layer catches this and maps it to
+    /// `FloatLaneOutcome::UnavailableNoVocabHit`. Payload describes which
+    /// provider threw and how many tokens were OOV.
+    EmbedFloatVocabMiss(String),
 }

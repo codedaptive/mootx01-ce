@@ -76,11 +76,20 @@ struct LsaProviderTests {
         #expect(abs(norm2.squareRoot() - 1) < 1e-5, "embedFloat must return a unit vector")
     }
 
-    @Test("all-OOV text returns empty float vector")
-    func allOovTextReturnsEmpty() async throws {
+    @Test("all-OOV text throws embedFloatVocabMiss (trained provider, zero vocab hits)")
+    func allOovTextThrowsVocabMiss() async throws {
+        // Post Bug-A fix: trained distributional providers throw embedFloatVocabMiss
+        // for OOV queries instead of returning []. The corpus layer maps this to
+        // FloatLaneOutcome.unavailableNoVocabHit so the dark reason is truthful.
         let p = trainedProvider()
-        let v = try await p.embedFloat("xyz999 qqq111")
-        #expect(v.isEmpty, "all-OOV query must return empty vector")
+        do {
+            let v = try await p.embedFloat("xyz999 qqq111")
+            Issue.record("expected embedFloatVocabMiss throw for all-OOV query; got \(v)")
+        } catch VectorKitError.embedFloatVocabMiss {
+            // Expected — trained provider + all-OOV query → vocabMiss.
+        } catch {
+            Issue.record("expected embedFloatVocabMiss but got unexpected error: \(error)")
+        }
     }
 
     @Test("empty text returns Engram.zero")

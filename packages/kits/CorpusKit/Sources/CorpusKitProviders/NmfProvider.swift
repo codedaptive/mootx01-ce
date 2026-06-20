@@ -308,8 +308,26 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
 
     /// Return the k-dimensional L2-normalised NMF float vector for `text`.
     ///
-    /// Returns `[]` if finalize() has not been called or all terms are OOV.
+    /// Returns `[]` when finalize() has not been called (no basis).
+    ///
+    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// finalized basis and non-empty vocabulary, but all query tokens are
+    /// OOV — distinguishing a vocabulary coverage gap from a structural
+    /// opt-out so `Corpus.floatNearest` maps to the correct dark-lane reason.
     public func embedFloat(_ text: String) async throws -> [Float] {
+        // No finalized basis: return [] (structural no-basis → providerOptOut).
+        guard nmf != nil, counts.vocabularySize > 0 else { return [] }
+        guard !text.isEmpty else { return [] }
+        let terms = defaultKeywordTokens(text)
+        guard !terms.isEmpty else { return [] }
+        // OOV check before full projection: throw embedFloatVocabMiss when
+        // the basis is trained but none of the query tokens hit the vocab.
+        let hasInVocab = terms.contains { counts.vocab[$0] != nil }
+        guard hasInVocab else {
+            throw VectorKitError.embedFloatVocabMiss(
+                "nmf: vocab size \(counts.vocabularySize), but 0 of \(terms.count) query token(s) matched"
+            )
+        }
         return nmfVector(for: text) ?? []
     }
 

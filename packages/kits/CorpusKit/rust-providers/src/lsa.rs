@@ -464,9 +464,37 @@ impl EmbeddingProvider for LsaProvider {
 
     /// Return the k-dimensional L2-normalised LSA float vector for `text`.
     ///
-    /// Returns an empty Vec if finalize() was not called, text is empty,
-    /// or all tokens are OOV.
+    /// - Not finalized / no basis: returns `Ok(vec![])` — structural opt-out.
+    /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
+    /// - Trained basis, all query tokens OOV: returns
+    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit`.
+    /// - Degenerate SVD (all-zero result): returns `Ok(vec![])` — basis quality
+    ///   issue, not a vocabulary miss.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        // No finalized basis or empty input: structural opt-out.
+        if !self.is_finalized() || self.counts.vocabulary_size() == 0 {
+            return Ok(vec![]);
+        }
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+        let terms = default_keyword_tokens(text);
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        // OOV check before full projection: throw vocabMiss when basis is
+        // trained but query hits nothing in the vocab.
+        let has_in_vocab = terms.iter().any(|t| self.counts.vocab.contains_key(t.as_str()));
+        if !has_in_vocab {
+            return Err(VectorKitError::EmbedFloatVocabMiss(format!(
+                "lsa: vocab size {}, but 0 of {} query token(s) matched",
+                self.counts.vocabulary_size(),
+                terms.len()
+            )));
+        }
+        // Degenerate SVD or all-zero fold-in: return [] (basis quality issue,
+        // not OOV — the corpus layer maps this to UnavailableProviderOptOut).
         Ok(LsaProvider::embed_float(self, text).unwrap_or_default())
     }
 }

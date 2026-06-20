@@ -1,21 +1,25 @@
 //! CoachingEngine — hint injection for non-error tool results.
 //!
-//! Mirrors Swift `CoachingEngine.swift`. Nine trigger conditions append a
+//! Mirrors Swift `CoachingEngine.swift`. Eleven trigger conditions append a
 //! `hint:` line to non-error results to guide the AI client toward better
 //! usage patterns. The first matching trigger wins; the rest are skipped.
 //!
 //! # Trigger table
 //!
-//! 1. `long_query`          — moot_memory_search with query > 200 chars
-//! 2. `no_results_search`   — moot_memory_search returns "found 0 memory(s)"
-//! 3. `filed_memory`        — moot_file_memory success — prompt to confirm
-//! 4. `empty_estate_status` — moot_estate_status with "drawers: 0"
-//! 5. `journal_empty`       — moot_read_journal returns "0 entry(s)"
-//! 6. `connection_empty`    — moot_connection_search returns ": 0"
-//! 7. `facts_empty`         — moot_fact_search returns ": 0" and no query
-//! 8. `many_facts`          — moot_fact_timeline returns ≥20 facts
-//! 9. `search_after_empty`  — moot_memory_search after estate_status with
-//!                            zero drawers (detected from result pattern)
+//! 1.  `long_query`          — moot_memory_search with query > 200 chars
+//! 2.  `no_results_search`   — moot_memory_search returns "found 0 memory(s)"
+//! 3.  `filed_memory`        — moot_file_memory success — prompt to confirm
+//! 4.  `empty_estate_status` — moot_estate_status with "drawers: 0"
+//! 5.  `journal_empty`       — moot_read_journal returns "0 entry(s)"
+//! 6.  `connection_empty`    — moot_connection_search returns ": 0"
+//! 7.  `facts_empty`         — moot_fact_search returns ": 0" and no query
+//! 8.  `many_facts`          — moot_fact_timeline returns ≥20 facts
+//! 9.  `search_after_empty`  — moot_memory_search after estate_status with
+//!                             zero drawers (detected from result pattern)
+//! 10. `tunnel_graph_lens`   — moot_lens_keystones / moot_lens_constellation
+//!                             returns "0 result" — names missing tunnel edges,
+//!                             never claims "0 memories" (Bug-L fix)
+//! 11. `generic_lens`        — any other moot_lens_* tool returns "0 result"
 
 use std::collections::BTreeMap;
 
@@ -113,6 +117,29 @@ pub fn hint(
         return Some(
             "no incoming connections found — use moot_link_memories to \
              build the association graph",
+        );
+    }
+
+    // Trigger 10: tunnel-graph lens 0 results — keystones/constellation operate
+    // on drawer-to-drawer edges; "0 result" means no tunnel edges exist in the
+    // wing, not 0 memories. The message must name the real reason and must not
+    // claim "0 memories" or suggest scope:active (scope does not affect tunnel
+    // topology). Mirrors Swift CoachingEngine.tunnelGraphLensHint.
+    if (name == "moot_lens_keystones" || name == "moot_lens_constellation")
+        && result_text.contains("0 result")
+    {
+        return Some(
+            "no tunnel connections found in this wing — these lenses require \
+             linked memories; use moot_link_memories to connect memories and \
+             then re-run this lens",
+        );
+    }
+
+    // Trigger 11: generic lens tool 0 results — any other moot_lens_* tool.
+    // Fires when the result text contains "0 result(s)" (the list() helper format).
+    if name.starts_with("moot_lens_") && result_text.contains("0 result") {
+        return Some(
+            "lens results are thin — try scope: active for a broader search",
         );
     }
 

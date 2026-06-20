@@ -246,8 +246,36 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
     /// masquerading as a semantic embedding.
     ///
     /// Empty input returns `[]` (EmbeddingProvider.embedFloat contract).
+    ///
+    /// When the provider HAS a trained basis (vocab non-empty) but all query
+    /// tokens are OOV, throws `VectorKitError.embedFloatVocabMiss` so the
+    /// corpus layer can surface `FloatLaneOutcome.unavailableNoVocabHit`
+    /// instead of misclassifying the miss as a structural opt-out.
     public func embedFloat(_ text: String) async throws -> [Float] {
-        return await contextVector(for: text)
+        // Untrained provider (empty vocab): return [] so the corpus layer
+        // uses the structural opt-out path (unavailableProviderOptOut),
+        // which is the correct signal — no basis exists at all.
+        if vocab.isEmpty {
+            return []
+        }
+        // Empty or token-free input: return [] without a vocab-miss throw.
+        // The corpus layer's Corpus.floatNearest guards limit==0 and empty
+        // query before calling embedFloat, but callers can bypass that guard
+        // by calling embedFloat directly. Empty is structurally "no query",
+        // not a vocabulary miss — emit no float vector, no error.
+        let terms = defaultKeywordTokens(text)
+        guard !terms.isEmpty else { return [] }
+
+        let result = await contextVector(for: text)
+        if result.isEmpty {
+            // Trained provider, non-empty query, but all query terms OOV:
+            // throw a vocab-miss error so the corpus layer maps to
+            // unavailableNoVocabHit instead of the misleading providerOptOut.
+            throw VectorKitError.embedFloatVocabMiss(
+                "random-indexing: vocab size \(vocab.count), but 0 of \(terms.count) query token(s) matched"
+            )
+        }
+        return result
     }
 
     // MARK: Private helpers

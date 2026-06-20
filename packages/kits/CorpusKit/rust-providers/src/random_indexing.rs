@@ -355,11 +355,38 @@ impl EmbeddingProvider for RandomIndexingProvider {
 
     /// Return the D-dimensional normalised context vector for `text`.
     ///
-    /// This is the honest semantic vector: a point in the RI space where
-    /// nearby terms share context. Empty input or all-OOV input returns
-    /// an empty `Vec<f32>` (EmbeddingProvider.embed_float contract).
+    /// - Untrained provider (empty vocab): returns `Ok(vec![])` — structural
+    ///   opt-out, no basis exists yet.
+    /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
+    /// - Trained provider, all query tokens OOV: returns
+    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit` rather than the
+    ///   misleading `UnavailableProviderOptOut`.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
-        Ok(self.context_vector(text).unwrap_or_default())
+        // Untrained provider: return [] (structural opt-out, not vocabMiss).
+        if self.vocab.is_empty() {
+            return Ok(vec![]);
+        }
+        // Empty or non-tokenisable input: return [] without a vocab-miss throw.
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+        let terms = corpus_kit::default_keyword_tokens(text);
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        match self.context_vector(text) {
+            Some(v) => Ok(v),
+            None => {
+                // context_vector returns None only when hit_count == 0 (all OOV),
+                // because we already guarded empty text and empty tokens above.
+                Err(VectorKitError::EmbedFloatVocabMiss(format!(
+                    "random-indexing: vocab size {}, but 0 of {} query token(s) matched",
+                    self.vocab.len(),
+                    terms.len()
+                )))
+            }
+        }
     }
 }
 

@@ -308,4 +308,78 @@ struct TeachmeTests {
         )
         #expect(!isError(eraseResult), "erase with confirmed:true must succeed; got: \(text(of: eraseResult))")
     }
+
+    // MARK: - Bug-L regression: tunnel-graph lens empty-result message
+
+    /// When `moot_lens_keystones` returns "0 result(s)" because the wing has
+    /// no tunnel edges (not because there are no memories), the coaching hint
+    /// must:
+    ///   1. Name the real reason — no tunnel connections, not "0 memories".
+    ///   2. NOT claim "Only 0 memories matched" (memories may exist).
+    ///   3. NOT suggest `scope: active` (scope does not affect tunnel topology).
+    ///   4. Guide the user to `moot_link_memories`.
+    @Test("keystones 0-result hint names tunnel edges, not 0 memories")
+    func keystonesZeroResultHintNamesTunnelEdges() {
+        // Simulate the result text that keystones produces when the wing has no
+        // tunnel edges: the list() helper formats it as "keystones: 0 result(s)".
+        let resultText = "keystones: 0 result(s)"
+        let hint = CoachingEngine.hint(
+            name: "moot_lens_keystones",
+            args: [:],
+            resultText: resultText)
+
+        #expect(hint != nil, "keystones with 0 results must produce a coaching hint")
+        let h = hint ?? ""
+
+        // Must name tunnel connections, not memories.
+        #expect(h.lowercased().contains("tunnel"),
+            "hint must mention tunnel connections; got: \(h)")
+        #expect(h.contains("moot_link_memories"),
+            "hint must guide user to moot_link_memories; got: \(h)")
+
+        // Must NOT claim 0 memories — the wing may have memories but no tunnels.
+        #expect(!h.lowercased().contains("0 memor"),
+            "hint must NOT claim '0 memories'; got: \(h)")
+
+        // Must NOT suggest scope:active — scope does not change tunnel topology.
+        #expect(!h.contains("scope: active"),
+            "hint must NOT suggest scope: active for tunnel-graph lens; got: \(h)")
+    }
+
+    /// Same contract for `moot_lens_constellation`.
+    @Test("constellation 0-result hint names tunnel edges, not 0 memories")
+    func constellationZeroResultHintNamesTunnelEdges() {
+        let resultText = "constellation: 0 result(s)"
+        let hint = CoachingEngine.hint(
+            name: "moot_lens_constellation",
+            args: [:],
+            resultText: resultText)
+
+        #expect(hint != nil, "constellation with 0 results must produce a coaching hint")
+        let h = hint ?? ""
+
+        #expect(h.lowercased().contains("tunnel"),
+            "hint must mention tunnel connections; got: \(h)")
+        #expect(h.contains("moot_link_memories"),
+            "hint must guide user to moot_link_memories; got: \(h)")
+        #expect(!h.lowercased().contains("0 memor"),
+            "hint must NOT claim '0 memories'; got: \(h)")
+        #expect(!h.contains("scope: active"),
+            "hint must NOT suggest scope: active for tunnel-graph lens; got: \(h)")
+    }
+
+    /// Non-tunnel lenses still get the generic lensHint when 0 results.
+    @Test("non-tunnel lens 0-result hint fires generic lensHint")
+    func nonTunnelLensGetsGenericHint() {
+        // moot_lens_successors is a non-tunnel lens.
+        let resultText = "successors: 0 result(s)"
+        let hint = CoachingEngine.hint(
+            name: "moot_lens_successors",
+            args: [:],
+            resultText: resultText)
+        #expect(hint != nil, "non-tunnel lens with 0 results must produce a coaching hint")
+        let h = hint ?? ""
+        // Generic hint does NOT need to mention tunnel — that's the tunnel-specific path.
+        #expect(!h.isEmpty, "generic hint must be non-empty; got: \(h)")
+    }
 }

@@ -129,6 +129,9 @@ fn encode_outcome(outcome: &FloatLaneOutcome) -> (String, Vec<String>) {
         ),
         FloatLaneOutcome::UnavailableProviderOptOut => ("dark_provider".to_string(), vec![]),
         FloatLaneOutcome::UnavailableNoFloatRows => ("dark_no_rows".to_string(), vec![]),
+        // Trained distributional provider, all query tokens OOV — truthful relabel
+        // added by the Bug-A fix (vocabMiss != providerOptOut).
+        FloatLaneOutcome::UnavailableNoVocabHit => ("dark_vocab_miss".to_string(), vec![]),
         FloatLaneOutcome::EmptyQuery => ("empty_query".to_string(), vec![]),
         FloatLaneOutcome::StoreError(_) => ("store_error".to_string(), vec![]),
     }

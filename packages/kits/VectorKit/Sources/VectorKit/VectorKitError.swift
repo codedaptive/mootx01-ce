@@ -40,4 +40,19 @@ public enum VectorKitError: Error, Sendable, Equatable {
     /// policy is ratified, remove this error case and the guards that
     /// throw it.
     case int8QuantizationPolicyUndefined(String)
+
+    /// A trained distributional provider's `embedFloat` returned no vector
+    /// because all query tokens are out-of-vocabulary (OOV) — the provider
+    /// HAS a trained basis but the query's vocabulary does not intersect it.
+    ///
+    /// This is distinct from `embeddingFailed` (structural opt-out: the
+    /// provider has no float lane at all). Thrown by distributional providers
+    /// (RandomIndexing, PPMI, LSA, NMF) when their vocab is non-empty but
+    /// no query token hits. `Corpus.floatNearest` catches this and maps it
+    /// to `FloatLaneOutcome.unavailableNoVocabHit` so callers observe the
+    /// correct dark-lane reason.
+    ///
+    /// - Parameter description: Human-readable detail (e.g. "vocab size N,
+    ///   but 0 of M query tokens matched").
+    case embedFloatVocabMiss(String)
 }
