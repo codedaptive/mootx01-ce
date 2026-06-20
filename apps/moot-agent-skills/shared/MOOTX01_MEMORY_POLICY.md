@@ -40,13 +40,43 @@ Good memory:
 - Separates evidence from inference.
 - Preserves important dates, paths, versions, names, and identifiers.
 
-Good locations:
+Good locations (the `location` argument is the room/topic path):
 
 - `project/importer/decisions`
 - `user/preferences/codex`
 - `mootx01/architecture`
 - `wwdc2026/swiftui/drag-drop`
 - `repo/harnesses/cursor`
+
+## Wings — file by role
+
+Every estate is organized along two independent axes: the **wing** (what role
+a memory plays / where it came from) and the **location** (its room/topic path).
+Subject classification is handled separately by the estate itself, so your job
+is to pick the right wing.
+
+Orient first: call `moot_estate_map`. It lists each wing inline with its
+**charter** — a short memory stating what that wing is for. A fresh estate seeds
+seven default wings:
+
+- **Agentic Memory** (the default) — your own observations, inferences,
+  decisions, and session learnings.
+- **User Canon** — the user's explicit directives, preferences, corrections, and
+  standing orders. Authoritative: weight these above your own inferences and do
+  not silently overwrite them.
+- **Source Corpus** — imported or ingested documents and reference material;
+  external grounding, not your beliefs.
+- **Personal** — the user's personal-life domain.
+- **Professional** — the user's work domain.
+- **Projects** — active project or workspace context.
+- **Temp** — scratch and ephemeral notes.
+
+File by role using the `wing` argument on `moot_file_memory`. Omit it and a
+memory lands in Agentic Memory. The wing set is a suggestion, not a constraint —
+create a new wing (and write its charter) when a role genuinely needs one.
+
+Recall spans all wings by default. Pass `wing` to scope deliberately — for
+example, answer from User Canon only, or exclude Source Corpus from synthesis.
 
 ## Facts
 
