@@ -76,7 +76,7 @@ use locus_kit::recall_trace_item::RecallTraceItem;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::RecallFrame;
-use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame};
+use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame, TunnelCaptureFrame};
 use locus_kit::tunnel::Tunnel;
 
 use crate::grants::{
@@ -1238,6 +1238,180 @@ impl EstateCoordinator {
                     reason: format!("{e:?}"),
                 })
             })
+    }
+
+    // MARK: - distill_items_sweep
+
+    /// Per-item distillation sweep — distill every active, not-yet-distilled
+    /// item that is long enough to chunk into a usable matrix (≥3 sentences).
+    ///
+    /// Rust parity of Swift `GeniusLocusKit.distillItemsSweep(handle:distillFn:now:limit:)`.
+    ///
+    /// For each eligible drawer this method:
+    ///   1. Segments the content into sentences (split on `. ` boundary).
+    ///   2. Skips items with fewer than 3 sentences (`MIN_INTRA_ITEM_UNITS`).
+    ///   3. Runs `DistillationPipeline::run` with `intra_item = true`.
+    ///   4. Captures a factoid drawer in `_distilled` when the pipeline emits a
+    ///      non-zero feature fingerprint (`should_produce_intra_item_factoid`).
+    ///   5. Stores the structural fingerprint in the `distillation-features-v1`
+    ///      VectorKit lane (`add_vector`).
+    ///   6. Writes one `_distilled_from` tunnel from the factoid to the source drawer.
+    ///
+    /// Idempotent: a factoid's `lineage_id` equals its source drawer's UUID,
+    /// so re-running the sweep skips items whose UUID already appears as a
+    /// `lineage_id` in `_distilled` drawers.
+    ///
+    /// `now` is epoch seconds — deterministic clock, mirrors Swift's `Date`
+    /// parameter. `limit` caps the number of factoids produced this sweep
+    /// (`None` = all eligible items, matching the Swift `limit: Int? = nil`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `VerbDispatchError` for stale handles or VectorStore I/O errors.
+    /// Individual item failures (pipeline yields no factoid) are silent — only
+    /// items that actually produce a factoid increment the returned count.
+    /// VectorStore absence is not an error: an estate without a VectorStore
+    /// registered skips the `add_vector` step (structural fingerprints are lost;
+    /// `find_nearest_distilled` queries against nothing and returns empty, which
+    /// is correct behaviour for an estate without the semantic recall tier wired).
+    pub fn distill_items_sweep(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+        limit: Option<usize>,
+    ) -> Result<usize, VerbDispatchError> {
+        use crate::brain::distillation_cycle::{
+            DISTILLATION_DAEMON_ACTOR, DISTILLATION_LANE_MODEL_ID,
+            DISTILLED_DRAWER_UDC_CODE, DISTILLED_FROM_LABEL, DISTILLED_ROOM,
+            item_is_distillable, should_produce_intra_item_factoid,
+        };
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::provenance::SourceType;
+        use locus_kit::tunnel_operational::TunnelOriginClass;
+        use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
+
+        // Validate handle and collect the full drawer list.
+        let estate = self.estate_for_verb(handle)?;
+        let all_drawers: Vec<locus_kit::drawer::Drawer> =
+            estate.all_drawers().map_err(|e| remap("distill_items_sweep", "", e))?;
+
+        // Build the set of source drawer UUIDs that already have a factoid:
+        // a factoid's lineage_id equals its source item's UUID (see captureFactoid
+        // in DistillationCycle.swift). Skip any candidate whose UUID is in this set.
+        let already_distilled: std::collections::HashSet<String> = all_drawers
+            .iter()
+            .filter(|d| d.room == DISTILLED_ROOM)
+            .map(|d| d.lineage_id.to_string())
+            .collect();
+
+        // Default wing for factoid capture — ADR-016 "Agentic Memory" matches Swift.
+        let factoid_wing = locus_kit::default_wings::DEFAULT_WING_NAME;
+
+        // Optional VectorStore reference for fingerprint storage. Absence is non-fatal:
+        // the sweep proceeds and captures factoid drawers; Hamming NN is simply dark.
+        let vector_store_opt = self.vector_store_for(handle);
+
+        let mut produced: usize = 0;
+
+        for drawer in &all_drawers {
+            if let Some(cap) = limit {
+                if produced >= cap {
+                    break;
+                }
+            }
+            // Skip tombstoned, empty, or already-distilled-source drawers.
+            if drawer.tombstoned_at.is_some() { continue; }
+            if drawer.content.is_empty() { continue; }
+            if drawer.room == DISTILLED_ROOM { continue; }
+            if already_distilled.contains(&drawer.id) { continue; }
+
+            // Simple sentence segmentation: split on ". " boundaries.
+            // This mirrors Swift's EideticLib.sentences() at the functional level
+            // (exact segmenter is unavailable in Rust; period-space split is the
+            // structural approximation used across the Rust distillation surface).
+            let sentences: Vec<String> = drawer.content
+                .split(". ")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !item_is_distillable(sentences.len()) {
+                continue;
+            }
+
+            let input = DistillationInput::new(
+                sentences,
+                None, // no per-sentence timestamps for intra-item sweep
+                drawer.id.clone(), // clusterID = source drawer UUID (intra-item model)
+                vec![drawer.id.clone()], // single source
+            );
+
+            let output = DistillationPipeline::run(
+                &input,
+                DistillationPipeline::default_extractor,
+                true, // intra_item = true
+            );
+
+            if !should_produce_intra_item_factoid(&output) {
+                continue;
+            }
+
+            // Capture factoid drawer in "_distilled".
+            let lineage_id = Uuid::parse_str(&drawer.id).unwrap_or_else(|_| Uuid::new_v4());
+            let mut factoid_frame = CaptureFrame::new(
+                output.drawer_content.clone(),
+                CaptureChannel::Actuator, // daemon-generated content (cookbook §2.4)
+                DISTILLED_ROOM,
+                LatticeAnchor::udc(DISTILLED_DRAWER_UDC_CODE),
+                DISTILLATION_DAEMON_ACTOR,
+                DISTILLATION_LANE_MODEL_ID,
+            );
+            factoid_frame.source_type = SourceType::Derived;
+            factoid_frame.lineage_id = Some(lineage_id);
+            factoid_frame.wing = Some(factoid_wing.to_string());
+
+            // estate is the &Estate held from estate_for_verb above. Capture via
+            // the estate directly — all borrows here are shared (&self), so no
+            // re-acquisition is needed and NLL keeps the borrow live through the loop.
+            let factoid_drawer = match estate.capture(factoid_frame, now) {
+                Ok(d) => d,
+                Err(_) => continue, // individual item failure is non-fatal; skip
+            };
+            let factoid_id = factoid_drawer.id.clone();
+
+            // Store structural fingerprint in the distillation VectorKit lane.
+            if let Some(vs) = &vector_store_opt {
+                // add_vector failure is non-fatal — the factoid drawer is captured;
+                // only the Hamming NN lane is affected.
+                let _ = vs.add_vector(
+                    &factoid_id,
+                    &output.feature_fingerprint,
+                    DISTILLATION_LANE_MODEL_ID,
+                    "1",
+                    now,
+                );
+            }
+
+            // Write one _distilled_from tunnel: factoid → source drawer.
+            let mut tunnel_frame = TunnelCaptureFrame::new(
+                factoid_wing,
+                DISTILLED_ROOM,
+                &drawer.wing,
+                &drawer.room,
+                DISTILLED_FROM_LABEL,
+                DISTILLATION_DAEMON_ACTOR,
+            );
+            tunnel_frame.source_drawer_id = Some(factoid_id);
+            tunnel_frame.target_drawer_id = Some(drawer.id.clone());
+            tunnel_frame.origin_class = TunnelOriginClass::Derived;
+            // Tunnel capture failure is non-fatal — the factoid drawer is already
+            // written; the _distilled_from provenance link is advisory.
+            let _ = estate.capture_tunnel(tunnel_frame, now);
+
+            produced += 1;
+        }
+
+        Ok(produced)
     }
 
     // MARK: - mutate

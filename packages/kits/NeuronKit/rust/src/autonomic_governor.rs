@@ -1217,9 +1217,19 @@ fn graph_centrality_duty(
     // Reads through the coordinator verb surface (same active-only KGFact
     // filter the Swift `recallKGFacts` applies, so both ports score the same
     // fact set).
+    //
+    // Charter drawers (room == "_charter") are wing metadata seeded at
+    // provision time, not user content. Excluding them here keeps the
+    // centrality graph focused on user-content nodes and their edges —
+    // charter drawers are standalone with no tunnels and would inflate
+    // node count while adding no structural information. Mirrors the
+    // RECALL-HYGIENE charter exclusion in estate_verbs.rs liveRows().
     let drawers = coord
         .all_drawers(handle)
-        .map_err(|e| format!("all_drawers failed: {e:?}"))?;
+        .map_err(|e| format!("all_drawers failed: {e:?}"))?
+        .into_iter()
+        .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
+        .collect::<Vec<_>>();
     let tunnels = coord
         .all_tunnels(handle)
         .map_err(|e| format!("all_tunnels failed: {e:?}"))?;

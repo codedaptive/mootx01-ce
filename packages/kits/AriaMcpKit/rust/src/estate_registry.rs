@@ -151,6 +151,10 @@ impl EstateRegistry {
         // fail in a correct build; the InMemory backend never returns I/O errors.
         wire_inmemory_semantic_recall(&handle, &coord)
             .expect("in-memory semantic recall wiring must succeed");
+        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // failure logs and continues — the estate is open and functional.
+        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
+        seed_wings_non_fatal(&coord, &handle, "in-memory");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
@@ -283,6 +287,10 @@ impl EstateRegistry {
         // no CoreML required. Matches the Swift leg's `model: .deterministic`.
         wire_sqlite_semantic_recall(path, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
+        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // failure logs and continues — the estate is open and functional.
+        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
+        seed_wings_non_fatal(&coord, &handle, path);
 
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
@@ -419,6 +427,10 @@ impl EstateRegistry {
         // Uses a separate PostgresStorage handle on the same connection string.
         wire_postgres_semantic_recall(conn_str, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for postgres: {e}"))?;
+        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // failure logs and continues — the estate is open and functional.
+        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
+        seed_wings_non_fatal(&coord, &handle, "postgres");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
@@ -521,6 +533,36 @@ impl EstateRegistry {
                 format!("Unknown {key}: {raw}"),
             )
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default wing seeding helper
+// ---------------------------------------------------------------------------
+
+/// Idempotently seed the seven ADR-016 default wings for `handle`.
+///
+/// Reads existing `_charter` drawers and skips wings that are already
+/// present — safe to call on re-opens of an existing estate. Failure is
+/// non-fatal: a warning is printed to stderr and the caller continues.
+/// This matches the Swift `ServeCommand` seeding policy (error.log + continue).
+///
+/// `estate_label` is a short description for the warning message (e.g. the
+/// SQLite path, "in-memory", or "postgres") — it does not affect behaviour.
+fn seed_wings_non_fatal(
+    coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
+    handle: &EstateHandle,
+    estate_label: &str,
+) {
+    // wall_now as epoch seconds — same precision as the Swift Date().
+    let seed_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(INIT_NOW);
+    if let Err(e) = coord.lock().unwrap().seed_default_wings(handle, seed_now) {
+        eprintln!(
+            "aria-mcp: default wing seeding failed for {estate_label}: {e:?} — continuing"
+        );
     }
 }
 

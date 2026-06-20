@@ -87,7 +87,15 @@ fn build_star(registry: &EstateRegistry, spoke_count: usize) -> (String, Vec<Str
 fn produced_cache(registry: &EstateRegistry) -> (GraphCentralityCache, Vec<String>) {
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
-    let drawers = coord.all_drawers(h).expect("all_drawers");
+    // Exclude charter drawers (room == "_charter") — wing metadata, not user
+    // content. Mirrors the production graph_centrality_duty filter so the test
+    // proves the same contract the governor enforces.
+    let drawers: Vec<_> = coord
+        .all_drawers(h)
+        .expect("all_drawers")
+        .into_iter()
+        .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
+        .collect();
     let tunnels = coord.all_tunnels(h).expect("all_tunnels");
     let facts = coord.recall_kg_facts(h).expect("recall_kg_facts");
     let graph = build_centrality_graph(&drawers, &tunnels, &facts);
@@ -111,9 +119,16 @@ fn producer_equals_direct_keystones() {
     let (cache, node_ids) = produced_cache(&registry);
 
     // Direct oracle call on the producer's graph.
+    // Charter drawers are excluded here (same filter as produced_cache)
+    // so the oracle and the producer operate on the same node set.
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
-    let drawers = coord.all_drawers(h).unwrap();
+    let drawers: Vec<_> = coord
+        .all_drawers(h)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
+        .collect();
     let tunnels = coord.all_tunnels(h).unwrap();
     let facts = coord.recall_kg_facts(h).unwrap();
     let graph = build_centrality_graph(&drawers, &tunnels, &facts);
