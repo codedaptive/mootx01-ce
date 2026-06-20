@@ -74,8 +74,8 @@ struct DistillationScorerTests {
     // MARK: - computeSNR
 
     @Test func computeSNR_pureStructuralCluster_readyToDistill() {
-        // M=3, all 3 features appear in all 3 memories (df=1.0)
-        // σ(1.0) = 1.0 × (1 − H(1.0)) = 1.0; structuralSignal = 3.0; noise ≈ 0
+        // M=3, all 3 features appear in all 3 memories (df=1.0).
+        // structuralSignal = Σ df = 3.0 (raw df, spec §1); episodicNoise = 0.
         let features = [
             ExtractedFeature(type: .entity,   value: "A", docFrequency: 1.0),
             ExtractedFeature(type: .entity,   value: "B", docFrequency: 1.0),
@@ -89,8 +89,8 @@ struct DistillationScorerTests {
     }
 
     @Test func computeSNR_allNoiseCluster_notReadyToDistill() {
-        // M=5, threshold=0.6; all features at df=0.2 (each in 1 of 5 memories)
-        // No structural signal; all episodic
+        // M=5, τ_struct = 2/5 = 0.4; all features at df=0.2 (each in 1 of 5
+        // memories), below threshold → no structural signal, all episodic.
         let features = [
             ExtractedFeature(type: .entity,    value: "A", docFrequency: 0.2),
             ExtractedFeature(type: .temporal,  value: "B", docFrequency: 0.2),
@@ -101,6 +101,25 @@ struct DistillationScorerTests {
         #expect(snr.snr < 2.0)
         #expect(snr.structuralSignal == 0)
         #expect(snr.episodicNoise > 0)
+    }
+
+    @Test func computeSNR_rawDfValueConformance() {
+        // Cross-port anti-drift pin: SNR uses RAW df on BOTH terms (spec §1),
+        // identical to Rust distillation_scorer::tests::compute_snr_raw_df_value_conformance.
+        // M=4 → τ_struct = 2/4 = 0.5. Structural {1.0, 0.75, 0.5} → Σ = 2.25;
+        // episodic {0.25, 0.25} → Σ = 0.5; snr = 2.25 / 0.5 = 4.5.
+        let features = [
+            ExtractedFeature(type: .entity, value: "a", docFrequency: 1.0),
+            ExtractedFeature(type: .entity, value: "b", docFrequency: 0.75),
+            ExtractedFeature(type: .entity, value: "c", docFrequency: 0.5),
+            ExtractedFeature(type: .entity, value: "d", docFrequency: 0.25),
+            ExtractedFeature(type: .entity, value: "e", docFrequency: 0.25),
+        ]
+        let snr = DistillationScorer.computeSNR(features: features, M: 4)
+        #expect(snr.structuralSignal == 2.25)
+        #expect(snr.episodicNoise == 0.5)
+        #expect(snr.snr == 4.5)
+        #expect(snr.readyToDistill == true)
     }
 
     // MARK: - computeStructuralScores

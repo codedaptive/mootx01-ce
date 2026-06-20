@@ -183,15 +183,20 @@ impl DistillationScorer {
 
     // MARK: - SNR Gate
 
-    /// Compute cluster SNR per §3 to gate distillation readiness.
+    /// Compute cluster SNR per §1 to gate distillation readiness.
     ///
-    /// structural_signal = Σ σ(f) for features with df ≥ τ_struct (recurring).
-    /// episodic_noise    = Σ (1 − df(f)) for features below threshold (one-off tail).
+    /// structural_signal = Σ df(f) for features with df ≥ τ_struct (recurring).
+    /// episodic_noise    = Σ df(f) for features below threshold (one-off tail).
     /// snr               = structural_signal / max(episodic_noise, 1e-6)
     /// ready_to_distill  = snr ≥ 2.0
     ///
-    /// The 1e-6 floor prevents division by zero when all features are structural
-    /// (no episodic features in the cluster).
+    /// Raw df accumulation is intentional and matches the spec and the Swift
+    /// port: σ(f) is reserved for confidence weighting (compute_structural_scores
+    /// / compute_confidence), NOT the SNR gate. (Prior to this fix the Rust port
+    /// accumulated σ for the numerator and (1 − df) for the denominator, which
+    /// diverged from Swift on BOTH terms — a cross-port SNR-gate parity break in
+    /// the cross-memory path.) The 1e-6 floor prevents division by zero when all
+    /// features are structural.
     pub fn compute_snr(features: &[ExtractedFeature], m: usize) -> DistillationSNR {
         let tau = Self::structural_threshold(m);
         let mut structural_signal: f32 = 0.0;
@@ -199,12 +204,11 @@ impl DistillationScorer {
 
         for f in features {
             if f.doc_frequency >= tau {
-                // σ(f) = df × (1 − H(df)) — structural weight contribution
-                let sigma = f.doc_frequency * (1.0 - Self::binary_entropy(f.doc_frequency));
-                structural_signal += sigma;
+                // df — raw document frequency as structural weight
+                structural_signal += f.doc_frequency;
             } else {
-                // (1 − df) — episodic noise contribution from sub-threshold feature
-                episodic_noise += 1.0 - f.doc_frequency;
+                // df — sub-threshold feature frequency as noise contribution
+                episodic_noise += f.doc_frequency;
             }
         }
 
@@ -461,8 +465,8 @@ mod tests {
 
     #[test]
     fn compute_snr_pure_structural_cluster_ready_to_distill() {
-        // M=3, all 3 features appear in all 3 memories (df=1.0)
-        // σ(1.0) = 1.0 × (1 − H(1.0)) = 1.0; structuralSignal = 3.0; noise ≈ 0
+        // M=3, all 3 features appear in all 3 memories (df=1.0).
+        // structuralSignal = Σ df = 3.0 (raw df, spec §1); episodicNoise = 0.
         let features = vec![
             ExtractedFeature::new(DistillationFeatureType::Entity,   "A", 1.0),
             ExtractedFeature::new(DistillationFeatureType::Entity,   "B", 1.0),
@@ -477,8 +481,8 @@ mod tests {
 
     #[test]
     fn compute_snr_all_noise_cluster_not_ready_to_distill() {
-        // M=5, threshold=0.6; all features at df=0.2 (each in 1 of 5 memories)
-        // No structural signal; all episodic
+        // M=5, τ_struct = 2/5 = 0.4; all features at df=0.2 (each in 1 of 5
+        // memories), below threshold → no structural signal, all episodic.
         let features = vec![
             ExtractedFeature::new(DistillationFeatureType::Entity,    "A", 0.2),
             ExtractedFeature::new(DistillationFeatureType::Temporal,  "B", 0.2),
@@ -489,6 +493,26 @@ mod tests {
         assert!(snr.snr < 2.0);
         assert_eq!(snr.structural_signal, 0.0);
         assert!(snr.episodic_noise > 0.0);
+    }
+
+    #[test]
+    fn compute_snr_raw_df_value_conformance() {
+        // Cross-port anti-drift pin: SNR uses RAW df on BOTH terms (spec §1),
+        // identical to Swift DistillationScorerTests.computeSNR_rawDfValueConformance.
+        // M=4 → τ_struct = 2/4 = 0.5. Structural {1.0, 0.75, 0.5} → Σ = 2.25;
+        // episodic {0.25, 0.25} → Σ = 0.5; snr = 2.25 / 0.5 = 4.5.
+        let features = vec![
+            ExtractedFeature::new(DistillationFeatureType::Entity, "a", 1.0),
+            ExtractedFeature::new(DistillationFeatureType::Entity, "b", 0.75),
+            ExtractedFeature::new(DistillationFeatureType::Entity, "c", 0.5),
+            ExtractedFeature::new(DistillationFeatureType::Entity, "d", 0.25),
+            ExtractedFeature::new(DistillationFeatureType::Entity, "e", 0.25),
+        ];
+        let snr = DistillationScorer::compute_snr(&features, 4);
+        assert_eq!(snr.structural_signal, 2.25);
+        assert_eq!(snr.episodic_noise, 0.5);
+        assert_eq!(snr.snr, 4.5);
+        assert!(snr.ready_to_distill);
     }
 
     // MARK: - compute_structural_scores
