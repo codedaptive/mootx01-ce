@@ -721,6 +721,21 @@ impl Estate {
                 }
             };
 
+        // RECALL-HYGIENE: exclude charter drawers from scored content recall.
+        //
+        // Charter drawers (room == CHARTER_ROOM, embedding_model_id == "none") are
+        // wing metadata seeded at provision time — they describe the purpose of each
+        // wing, not recallable user content. Excluding them here keeps them out of
+        // every recall lane (locus bitmap, BM25, vector) without removing them from
+        // the estate: they remain accessible via all_drawers and estate-map paths.
+        //
+        // Parity with Swift EstateVerbs.liveRows() charter filter (fix/recall-hygiene-charters-ghosts).
+        // CHARTER_ROOM == "_charter" (crate::default_wings::CHARTER_ROOM).
+        let candidates: Vec<Drawer> = candidates
+            .into_iter()
+            .filter(|d| d.room != crate::default_wings::CHARTER_ROOM)
+            .collect();
+
         // Run the four-tier bitmap evaluator pipeline. A failure is SURFACED as
         // a named degraded stage rather than masquerading as a genuine-empty
         // result — recall is non-throwing per spec § 7.8.1, so the stream's
@@ -4298,5 +4313,117 @@ mod tests {
         let (rows, stages) = stream.collect_all_with_degraded();
         assert_eq!(rows.len(), 1);
         assert!(stages.is_empty(), "a clean trace write records no degraded stage");
+    }
+
+    // --- Recall hygiene: charter exclusion (fix/recall-hygiene-charters-ghosts) ---
+
+    /// Charter drawers seeded via seed_wing must never surface in scored recall.
+    ///
+    /// After seeding one charter wing and capturing two content drawers,
+    /// recall (CurrentlyBelieve) must return exactly the two content drawers
+    /// and zero charter drawers.
+    ///
+    /// Parity with Swift RecallHygieneTests H1, H3, H8 — verifies that
+    /// the Rust candidate filter `d.room != CHARTER_ROOM` applies.
+    #[test]
+    fn recall_excludes_charter_drawers_and_returns_only_content() {
+        let estate = make_estate();
+        let now = 1_700_000_000_i64;
+
+        // Seed one wing — produces a charter drawer in room "_charter".
+        estate
+            .seed_wing("Agentic Memory", "AI observations and inferences.", now)
+            .expect("seed_wing must succeed");
+
+        // Capture two content drawers in a normal room.
+        let content_a = basic_capture(&estate, "content alpha — hygiene test", "hygiene-room");
+        let content_b = basic_capture(&estate, "content beta — hygiene test", "hygiene-room");
+
+        // Recall with CurrentlyBelieve — should surface content drawers only.
+        let frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+        let rows = estate.recall(frame, now + 10).collect_all();
+
+        // Verify charter drawers are excluded.
+        let charter_hits: Vec<_> = rows
+            .iter()
+            .filter(|d| d.room == crate::default_wings::CHARTER_ROOM)
+            .collect();
+        assert!(
+            charter_hits.is_empty(),
+            "recall must return zero charter drawers; got {} (rooms: {:?})",
+            charter_hits.len(),
+            charter_hits.iter().map(|d| &d.room).collect::<Vec<_>>()
+        );
+
+        // Verify the content drawers ARE returned.
+        let content_ids: std::collections::HashSet<&str> =
+            rows.iter().map(|d| d.id.as_str()).collect();
+        assert!(
+            content_ids.contains(content_a.id.as_str()),
+            "recall must return content drawer A"
+        );
+        assert!(
+            content_ids.contains(content_b.id.as_str()),
+            "recall must return content drawer B"
+        );
+
+        // Exact count: 2 content drawers, no charters.
+        assert_eq!(
+            rows.len(),
+            2,
+            "recall must return exactly 2 content drawers; got {}",
+            rows.len()
+        );
+    }
+
+    /// Charter drawers excluded from recall must still be accessible via
+    /// store reads (they are not deleted, just filtered from scored recall).
+    ///
+    /// Parity with Swift RecallHygieneTests H7.
+    #[test]
+    fn charter_drawers_exist_in_store_but_not_in_recall() {
+        let estate = make_estate();
+        let now = 1_700_000_000_i64;
+
+        // Seed two wings → two charter drawers in "_charter".
+        estate
+            .seed_wing("Wing One", "First wing charter.", now)
+            .expect("seed_wing one");
+        estate
+            .seed_wing("Wing Two", "Second wing charter.", now + 1)
+            .expect("seed_wing two");
+
+        // Capture one content drawer.
+        let _content = basic_capture(&estate, "user content — charter hygiene", "content-room");
+
+        // Recall must not surface charter drawers.
+        let frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+        let recall_rows = estate.recall(frame, now + 10).collect_all();
+        let recalled_charter: Vec<_> = recall_rows
+            .iter()
+            .filter(|d| d.room == crate::default_wings::CHARTER_ROOM)
+            .collect();
+        assert!(
+            recalled_charter.is_empty(),
+            "recall must exclude charter drawers; got {}",
+            recalled_charter.len()
+        );
+
+        // Charter drawers must still exist in the store (not deleted).
+        // Access via all_drawers_bounded — the raw store path bypasses the recall filter.
+        let all_drawers = estate
+            .store
+            .all_drawers_bounded(None)
+            .expect("all_drawers_bounded must succeed");
+        let stored_charters: Vec<_> = all_drawers
+            .iter()
+            .filter(|d| d.room == crate::default_wings::CHARTER_ROOM)
+            .collect();
+        assert_eq!(
+            stored_charters.len(),
+            2,
+            "store must still contain both charter drawers after recall exclusion; got {}",
+            stored_charters.len()
+        );
     }
 }

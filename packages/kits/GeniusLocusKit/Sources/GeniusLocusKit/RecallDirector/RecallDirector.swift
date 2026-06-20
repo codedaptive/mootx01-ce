@@ -1310,6 +1310,10 @@ public extension GeniusLocusKit {
         _testForcePoolGetDrawersError = nil
         let drawerIndex: [String: LocusKit.Drawer]
         let poolLoadedIDs: Set<String>
+        // Tracks whether the pool load succeeded so step 11 can distinguish
+        // ghost IDs (pool succeeded, ID absent) from degraded-mode hits
+        // (pool failed, drawerIndex = [:] — preserve those for graceful survival).
+        let poolLoadSucceeded: Bool
         let poolGetDrawersResult: Result<LocusKit.FrameFilteredDrawers, Error>
         if let forcedError = forcedPoolError {
             poolGetDrawersResult = .failure(forcedError)
@@ -1326,11 +1330,15 @@ public extension GeniusLocusKit {
         }
         switch poolGetDrawersResult {
         case .success(let filtered):
+            poolLoadSucceeded = true
             drawerIndex = Dictionary(uniqueKeysWithValues: filtered.admissible.map { ($0.id, $0) })
             poolLoadedIDs = filtered.loadedIDs
         case .failure(let error):
             // Pool load DEGRADED — matrix/graph/preference scoring will be zero.
             // The query continues on lane-rank signals only (locus + BM25 + vector).
+            // poolLoadSucceeded = false signals step 11 to preserve nil-drawer hits
+            // rather than dropping them as ghosts — degraded survival over empty result.
+            poolLoadSucceeded = false
             Self.recallLog.error(
                 "RecallDirector unionBest: pool.getDrawers degraded: \(error, privacy: .public)")
             glkEmit(
@@ -1699,15 +1707,32 @@ public extension GeniusLocusKit {
         hits.reserveCapacity(selected.count)
         for idx in selected {
             let id = buffer.ids[idx]
-            // FRAME-FAITHFUL DROP (parity with Rust `.filter(drawer_index.contains_key)`):
-            // drop an id that physically loaded but is ABSENT from the frame-filtered
-            // drawerIndex — it failed the frame's state/structured/content filter
-            // (e.g. a withdrawn drawer under the default `.currentlyBelieve`), so it
-            // must NOT surface as a nil-drawer phantom. GATED on load success: an id
-            // that did not load (transient/partial read; absent from poolLoadedIDs)
-            // is DEGRADED gracefully — kept with a nil drawer — never dropped, so a
-            // valid ACTIVE drawer not-yet-joined is preserved (the ~10% burst guard).
-            if poolLoadedIDs.contains(id) && drawerIndex[id] == nil { continue }
+            // RECALL-HYGIENE DROP — three cases, two actions:
+            //
+            //   (a) Frame-faithful: id loaded (in poolLoadedIDs) but absent from
+            //       drawerIndex — it failed the frame's state/content filter (e.g.
+            //       a withdrawn drawer under `.currentlyBelieve`). Always drop.
+            //       Parity with Rust `.filter(drawer_index.contains_key)`.
+            //
+            //   (b) Ghost-ID guard: id NOT in poolLoadedIDs AND pool load
+            //       SUCCEEDED. The id has no backing row in the drawers table —
+            //       it is a ghost from a stale BM25/vector/dense lane entry.
+            //       Drop it: every returned hit must resolve to a live hydratable
+            //       content drawer (recall-hygiene contract). The prior ~10% burst
+            //       guard kept these to survive transient partial reads; the hygiene
+            //       mandate supersedes that tolerance. A ghost cannot hydrate; a
+            //       transiently-missed active drawer surfaces on the next recall.
+            //
+            //   (c) Degraded survival: id NOT in poolLoadedIDs AND pool load
+            //       FAILED (poolLoadSucceeded == false). Keep the hit — the nil
+            //       drawer is expected on the degraded path (drawerIndex = [:]).
+            //       The locus lane's structural scores still contribute and the
+            //       result degrades gracefully rather than returning nothing.
+            if drawerIndex[id] == nil {
+                let isFrameFiltered = poolLoadedIDs.contains(id)
+                let isGhost = !isFrameFiltered && poolLoadSucceeded
+                if isFrameFiltered || isGhost { continue }
+            }
             // Re-materialize the late-hydrated body onto the structured pool
             // drawer, then apply the caller-requested hydration level. The pool
             // drawer carries `content == ""` (body-free load); the returned set
