@@ -683,6 +683,22 @@ public extension Estate {
             }
         }
 
+        // Exclude charter drawers from scored content recall candidates.
+        //
+        // Charter drawers (room == charterRoom, embeddingModelID == "none") are
+        // wing metadata seeded at provision time — they describe the purpose of each
+        // wing, not recallable user content. Excluding them here keeps them out of
+        // every recall lane (locus bitmap, BM25, vector) without removing them from
+        // the estate: they remain accessible via allDrawers() and estate-map paths.
+        //
+        // The charterRoom constant ("_charter") is the canonical reserved room name
+        // from DefaultWings.swift. Checking room == charterRoom is sufficient because
+        // no non-charter content may be captured into "_charter" by the capture verb
+        // (seedWing is the only writer of that room; the capture verb does not accept
+        // it as a caller-supplied room by convention, not by a hard guard — and this
+        // exclusion ensures any such row is still filtered from recall).
+        candidates = candidates.filter { $0.room != charterRoom }
+
         // Re-fetch at .full only when the filter pass ran no-blob AND the
         // caller is a .full caller who needs content bodies. .structured and
         // .bitmapOnly callers get the no-blob rows directly — content = ""
