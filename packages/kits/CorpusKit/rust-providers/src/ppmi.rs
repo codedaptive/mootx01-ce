@@ -436,8 +436,32 @@ impl EmbeddingProvider for PpmiProvider {
 
     /// Return the D-dimensional L2-normalised PPMI context vector for `text`.
     ///
-    /// Empty or all-OOV input returns an empty `Vec<f32>`.
+    /// - No trained basis (ppmi_vectors empty): returns `Ok(vec![])` — structural opt-out.
+    /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
+    /// - Trained basis, all query tokens OOV: returns
+    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit`.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        // No trained basis: structural opt-out, not vocabMiss.
+        if self.ppmi_vectors.is_empty() {
+            return Ok(vec![]);
+        }
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+        let terms = corpus_kit::default_keyword_tokens(text);
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        // OOV check: throw vocabMiss when basis is trained but no query term hits.
+        let has_in_vocab = terms.iter().any(|t| self.ppmi_vectors.contains_key(t.as_str()));
+        if !has_in_vocab {
+            return Err(VectorKitError::EmbedFloatVocabMiss(format!(
+                "ppmi: vocab size {}, but 0 of {} query token(s) matched",
+                self.ppmi_vectors.len(),
+                terms.len()
+            )));
+        }
         Ok(self.ppmi_context_vector(text).unwrap_or_default())
     }
 }

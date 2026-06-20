@@ -1140,6 +1140,21 @@ public extension GeniusLocusKit {
                         now: Date()
                     )
 
+                case .unavailableNoVocabHit:
+                    // Trained distributional provider, but all query tokens were
+                    // OOV — the vocabulary does not cover this query's terms.
+                    // The dense lane is dark for this query; other lanes continue.
+                    // Surface as "dark:vocabMiss" so AI consumers know the lane
+                    // is dark due to vocabulary coverage, NOT a disabled provider.
+                    if idx == 0 { denseLaneExplainerTag = "dark:vocabMiss" }
+                    glkEmit(
+                        name: GLKMetricName.denseLaneDark,
+                        value: 1.0,
+                        tags: ["estate_id": handle.estateUUID.uuidString,
+                               "reason": "vocabMiss", "model_id": modelID],
+                        now: Date()
+                    )
+
                 case .emptyQuery:
                     // Guard above (text.isEmpty) prevents this in practice; handle
                     // defensively so the enum switch is exhaustive without a `default`.

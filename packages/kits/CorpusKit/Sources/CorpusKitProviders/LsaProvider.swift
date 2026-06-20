@@ -324,8 +324,35 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
 
     /// Return the k-dimensional L2-normalised LSA float vector for `text`.
     ///
-    /// Returns `[]` if finalize() has not been called or all terms are OOV.
+    /// Returns `[]` when finalize() has not been called (no basis) or when
+    /// the projection produces an all-zero result (e.g. all-zero SVD from a
+    /// 1-doc corpus — a basis quality issue, not a vocabulary miss).
+    ///
+    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// finalized basis and non-empty vocabulary, but all query tokens are
+    /// OOV — distinguishing a vocabulary coverage gap from a structural
+    /// opt-out so `Corpus.floatNearest` maps to the correct dark-lane reason.
     public func embedFloat(_ text: String) async throws -> [Float] {
+        // No finalized basis: return [] (structural no-basis → providerOptOut
+        // is the correct dark-lane signal, not vocabMiss).
+        guard svd != nil, counts.vocabularySize > 0 else { return [] }
+        // Empty or non-tokenisable input: return [] (emptyQuery guard fires
+        // in Corpus.floatNearest before this path is reached in practice).
+        guard !text.isEmpty else { return [] }
+        let terms = defaultKeywordTokens(text)
+        guard !terms.isEmpty else { return [] }
+        // Check OOV before computing the full LSA projection.
+        // When vocab is non-empty but the query hits none of it, throw
+        // embedFloatVocabMiss so the corpus layer surfaces the correct reason.
+        let hasInVocab = terms.contains { counts.vocab[$0] != nil }
+        guard hasInVocab else {
+            throw VectorKitError.embedFloatVocabMiss(
+                "lsa: vocab size \(counts.vocabularySize), but 0 of \(terms.count) query token(s) matched"
+            )
+        }
+        // Projection may still return nil (e.g. all singular values near zero,
+        // meaning the basis is degenerate). That is a basis quality issue, not
+        // a vocabulary miss — return [] to signal providerOptOut.
         return lsaVector(for: text) ?? []
     }
 

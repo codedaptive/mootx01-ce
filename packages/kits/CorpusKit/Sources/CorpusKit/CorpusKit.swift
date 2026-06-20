@@ -53,11 +53,31 @@ public enum FloatLaneOutcome: Sendable {
     /// Provider opted out of the float lane — expected, not an error.
     ///
     /// The configured `EmbeddingProvider` threw `VectorKitError.embeddingFailed`
-    /// on the embed call, indicating it has no float lane. This is the normal
-    /// outcome for the default `.deterministic` provider and for any provider
-    /// that does not override `embedFloat`. The dense lane is dark for this
-    /// corpus; all other lanes are unaffected.
+    /// on the embed call, indicating it has no float lane at all (structural
+    /// opt-out). This is the normal outcome for the default `.deterministic`
+    /// provider and for any provider that does not override `embedFloat`. The
+    /// dense lane is dark for this corpus; all other lanes are unaffected.
+    ///
+    /// Distinct from `.unavailableNoVocabHit`: that case indicates a TRAINED
+    /// distributional provider where this specific query's tokens are all
+    /// out-of-vocabulary. Both produce no float candidates, but the cause
+    /// differs — a structural opt-out vs a vocabulary coverage gap.
     case unavailableProviderOptOut
+
+    /// Trained distributional provider returned no float vector because all
+    /// query tokens are out-of-vocabulary (OOV) — expected, not an error.
+    ///
+    /// The provider HAS a trained basis (vocab is non-empty) but none of the
+    /// query's tokens appear in it. This is the normal outcome for a query on
+    /// a thinly-trained estate or a query using vocabulary the corpus never saw.
+    /// The dense lane is dark for this query; recall continues on other lanes.
+    ///
+    /// Distinct from `.unavailableProviderOptOut` (provider has no float lane
+    /// at all) and from `.unavailableNoFloatRows` (provider supports float but
+    /// ingest has not run yet or stored no rows).
+    ///
+    /// Surface string: `dense_lane:dark:vocabMiss`.
+    case unavailableNoVocabHit
 
     /// No float rows are stored — expected when ingest has not run yet or the
     /// provider opted out during ingest. Dense lane is dark; other lanes are
@@ -1171,15 +1191,30 @@ public actor Corpus {
         limit: Int,
         direction: SearchDirection = .nearest
     ) async -> FloatLaneOutcome {
-        // Attempt to embed the query text via the float lane. A throw here
-        // means the provider has no float lane (expected opt-out). This is NOT
-        // a store error — no log, no store_error counter. Emit the dark_provider
-        // counter so the caller can observe the lane was dark.
+        // Attempt to embed the query text via the float lane.
+        //
+        // Three distinct paths:
+        //   1. Result is non-empty → proceed with the probe vector.
+        //   2. Result is empty ([] from an untrained provider, or text that
+        //      tokenises to nothing) → structural opt-out. Emit the
+        //      dark_provider counter and return .unavailableProviderOptOut.
+        //   3. Throw VectorKitError.embedFloatVocabMiss → the provider HAS a
+        //      trained basis but all query tokens are OOV. This is a vocabulary
+        //      coverage miss, not a structural opt-out. Return
+        //      .unavailableNoVocabHit with its own counter so callers observe
+        //      the correct dark-lane reason.
+        //   4. Any other throw → structural opt-out (same as path 2).
+        //
+        // Path 2 and 4 share the dark_provider counter. Path 3 has its own
+        // dark_vocabMiss counter (corpus.float_lane.dark_vocab_miss).
         let probe: [Float]
         do {
             let result = try await provider.embedFloat(query)
             guard !result.isEmpty else {
-                // Provider returned an empty vector — treat as opt-out.
+                // Provider returned an empty vector (untrained distributional
+                // provider, or text that produces no tokens). Classify as
+                // structural opt-out: the provider cannot produce a float vector
+                // for structural reasons, not because of vocabulary coverage.
                 Intellectus.report(.metric(
                     name: "corpus.float_lane.dark_provider",
                     value: 1.0,
@@ -1189,8 +1224,20 @@ public actor Corpus {
                 return .unavailableProviderOptOut
             }
             probe = result
+        } catch VectorKitError.embedFloatVocabMiss {
+            // Trained distributional provider: basis exists but query tokens
+            // are all OOV. This is a vocabulary coverage miss — truthfully
+            // distinct from a structural opt-out. Emit a separate counter
+            // so telemetry surfaces vocabulary coverage vs. lane availability.
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.dark_vocab_miss",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            return .unavailableNoVocabHit
         } catch {
-            // Provider threw — this is the expected opt-out path (e.g.
+            // Provider threw a non-vocabMiss error — structural opt-out (e.g.
             // the deterministic provider, or any provider without a float lane).
             // Log nothing; emit the dark_provider counter only.
             Intellectus.report(.metric(

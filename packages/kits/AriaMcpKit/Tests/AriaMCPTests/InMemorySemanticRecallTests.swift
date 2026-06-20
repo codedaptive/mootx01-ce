@@ -181,8 +181,10 @@ struct InMemorySemanticRecallTests {
         try await corpus.ingest(content, sourceID: "eagles/golden-eagle", now: Date())
 
         // floatNearest must return .hits — proving Lane D is live.
-        // .unavailableProviderOptOut would mean embedFloat threw (provider opts out).
+        // .unavailableProviderOptOut would mean embedFloat threw (structural opt-out, no float lane).
         // .unavailableNoFloatRows would mean embedFloat returned [] or ingest skipped float.
+        // .unavailableNoVocabHit would mean the provider has a trained basis but the query
+        //   tokens are all OOV — unexpected here since the deterministic provider is not vocabulary-based.
         let outcome = await corpus.floatNearest(query: "golden eagle thermal", limit: 5)
         switch outcome {
         case .hits(let results):
@@ -192,6 +194,8 @@ struct InMemorySemanticRecallTests {
             Issue.record("Lane D DARK — deterministic provider threw embedFloat (opt-out). The beta default must have a live float lane (no deferrals).")
         case .unavailableNoFloatRows:
             Issue.record("Lane D DARK — no float rows stored after ingest. The deterministic provider must write Lane D rows during ingest.")
+        case .unavailableNoVocabHit:
+            Issue.record("Lane D DARK — vocabMiss on a deterministic provider is unexpected; the deterministic provider does not use a vocabulary.")
         case .emptyQuery:
             Issue.record("floatNearest returned .emptyQuery — query was non-empty, this is a bug.")
         case .storeError(let e):

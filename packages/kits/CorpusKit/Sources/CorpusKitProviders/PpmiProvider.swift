@@ -350,9 +350,26 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// Stopword-like co-occurrences shrink toward zero because their
     /// PMI is near zero or negative.
     ///
-    /// Empty input or all-OOV input returns `[]` (EmbeddingProvider
-    /// contract).
+    /// Returns `[]` when the provider has no trained basis (ppmiVectors empty).
+    ///
+    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// trained basis (ppmiVectors non-empty) but all query tokens are OOV —
+    /// distinguishing a vocabulary coverage gap from a structural opt-out so
+    /// `Corpus.floatNearest` maps to the correct dark-lane reason.
     public func embedFloat(_ text: String) async throws -> [Float] {
+        // No trained basis: return [] (structural no-basis → providerOptOut).
+        if ppmiVectors.isEmpty { return [] }
+        guard !text.isEmpty else { return [] }
+        let terms = defaultKeywordTokens(text)
+        guard !terms.isEmpty else { return [] }
+        // OOV check: throw embedFloatVocabMiss when the basis is trained but
+        // none of the query tokens appear in the PPMI vector table.
+        let hasInVocab = terms.contains { ppmiVectors[$0.lowercased()] != nil }
+        guard hasInVocab else {
+            throw VectorKitError.embedFloatVocabMiss(
+                "ppmi: vocab size \(ppmiVectors.count), but 0 of \(terms.count) query token(s) matched"
+            )
+        }
         return await ppmiContextVector(for: text)
     }
 

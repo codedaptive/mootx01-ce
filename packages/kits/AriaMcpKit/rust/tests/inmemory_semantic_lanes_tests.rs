@@ -213,6 +213,15 @@ fn lane_d_live_under_deterministic_provider() {
         corpus_kit::FloatLaneOutcome::EmptyQuery => {
             panic!("floatNearest returned EmptyQuery — query was non-empty, this is a bug.");
         }
+        corpus_kit::FloatLaneOutcome::UnavailableNoVocabHit => {
+            // Trained distributional provider + all-OOV query. Not expected
+            // here — the deterministic provider does not use vocabulary-based
+            // embedding, so this variant should not appear in this test.
+            panic!(
+                "floatNearest returned UnavailableNoVocabHit — unexpected for the \
+                 deterministic provider (Bug-A: vocabMiss path should not fire here)."
+            );
+        }
         corpus_kit::FloatLaneOutcome::StoreError(e) => {
             panic!("Lane D store error (unexpected): {e:?}");
         }

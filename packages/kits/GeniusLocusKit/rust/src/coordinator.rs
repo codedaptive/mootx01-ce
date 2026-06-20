@@ -4032,6 +4032,22 @@ impl EstateCoordinator {
                                         .into_iter().collect::<std::collections::HashMap<_, _>>()
                                 );
                             }
+                            FloatLaneOutcome::UnavailableNoVocabHit => {
+                                // Trained distributional provider, all query tokens OOV.
+                                // Truthful relabel: provider HAS a basis, query misses vocab.
+                                // Surface string: "dark:vocabMiss". Mirrors Swift RecallDirector.
+                                if idx == 0 {
+                                    dense_lane_status = Some("dark:vocabMiss".to_string());
+                                }
+                                glk_emit!(
+                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                    1.0,
+                                    [("estate_id".to_string(), estate_tag.clone()),
+                                     ("reason".to_string(), "vocabMiss".to_string()),
+                                     ("model_id".to_string(), model_id.clone())]
+                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                );
+                            }
                             FloatLaneOutcome::EmptyQuery => {
                                 // Guard above (query_str.is_empty()) prevents this;
                                 // handle defensively for exhaustive match.

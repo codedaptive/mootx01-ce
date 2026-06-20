@@ -199,6 +199,9 @@ struct NProviderTests {
             return .init(kind: "dark_provider", rankedItemIDs: [])
         case .unavailableNoFloatRows:
             return .init(kind: "dark_no_rows", rankedItemIDs: [])
+        case .unavailableNoVocabHit:
+            // Trained distributional provider, all query tokens OOV.
+            return .init(kind: "dark_vocab_miss", rankedItemIDs: [])
         case .emptyQuery:
             return .init(kind: "empty_query", rankedItemIDs: [])
         case .storeError:
@@ -256,6 +259,7 @@ private func floatOutcomeBits(_ outcome: FloatLaneOutcome) -> [String] {
         return ["hits"] + pairs.map { "\($0.itemID):\($0.similarity.bitPattern)" }
     case .unavailableProviderOptOut: return ["dark_provider"]
     case .unavailableNoFloatRows: return ["dark_no_rows"]
+    case .unavailableNoVocabHit: return ["dark_vocab_miss"]
     case .emptyQuery: return ["empty_query"]
     case .storeError: return ["store_error"]
     }

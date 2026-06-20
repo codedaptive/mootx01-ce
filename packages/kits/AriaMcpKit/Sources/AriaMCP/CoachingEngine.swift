@@ -32,8 +32,14 @@ enum CoachingEngine {
             return confirmMigrationHint(resultText: resultText)
         case "moot_link_memories":
             return linkMemoriesHint(resultText: resultText)
+        case "moot_lens_keystones", "moot_lens_constellation":
+            // These lenses operate on the tunnel graph (drawer-to-drawer edges),
+            // not on memory count. "0 result" here means no tunnel edges exist
+            // — not 0 memories. The generic lensHint message is wrong for this
+            // case, so we provide a tunnel-specific message instead.
+            return tunnelGraphLensHint(name: name, resultText: resultText)
         default:
-            // Any lens tool with a thin result.
+            // Any other lens tool with a thin result.
             if LensTools.isLensTool(name) {
                 return lensHint(resultText: resultText)
             }
@@ -121,6 +127,22 @@ enum CoachingEngine {
     private static func lensHint(resultText: String) -> String? {
         if resultText.contains("0 result") {
             return "Only 0 memories matched this scope — lens results may be thin. Try `scope: active` for a fuller picture."
+        }
+        return nil
+    }
+
+    /// Coaching hint for tunnel-graph lenses (keystones, constellation).
+    ///
+    /// These lenses operate on the drawer-to-drawer tunnel graph, NOT on
+    /// memory count. "0 result" means no tunnel edges exist in this wing —
+    /// the wing may have memories but lacks connections between them.
+    ///
+    /// The generic lensHint message is wrong here because:
+    ///   1. It claims "Only 0 memories" — the wing may have many memories.
+    ///   2. It suggests `scope: active` — scope does not affect tunnel topology.
+    private static func tunnelGraphLensHint(name: String, resultText: String) -> String? {
+        if resultText.contains("0 result") {
+            return "No tunnel connections found in this wing. \(name.contains("keystones") ? "Keystones" : "Constellation") requires linked memories — use `moot_link_memories` to connect memories and then re-run this lens."
         }
         return nil
     }

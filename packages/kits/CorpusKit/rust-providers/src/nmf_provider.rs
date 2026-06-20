@@ -467,9 +467,33 @@ impl EmbeddingProvider for NmfProvider {
 
     /// Return the k-dimensional L2-normalised NMF float vector for `text`.
     ///
-    /// Returns an empty Vec if finalize() was not called, text is empty,
-    /// or all tokens are OOV.
+    /// - Not finalized / no basis: returns `Ok(vec![])` — structural opt-out.
+    /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
+    /// - Trained basis, all query tokens OOV: returns
+    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit`.
+    /// - Degenerate projection (all-zero result): returns `Ok(vec![])`.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        // No finalized basis: structural opt-out, not vocabMiss.
+        if !self.is_finalized() || self.counts.vocabulary_size() == 0 {
+            return Ok(vec![]);
+        }
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+        let terms = default_keyword_tokens(text);
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        // OOV check before full NMF fold-in projection.
+        let has_in_vocab = terms.iter().any(|t| self.counts.vocab.contains_key(t.as_str()));
+        if !has_in_vocab {
+            return Err(VectorKitError::EmbedFloatVocabMiss(format!(
+                "nmf: vocab size {}, but 0 of {} query token(s) matched",
+                self.counts.vocabulary_size(),
+                terms.len()
+            )));
+        }
         Ok(NmfProvider::embed_float_nmf(self, text).unwrap_or_default())
     }
 }

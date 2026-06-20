@@ -711,3 +711,168 @@ struct FloatLaneFarthestTests {
         }
     }
 }
+
+// MARK: - §8 VocabMiss — trained distributional provider with all-OOV query
+
+// Tests for FloatLaneOutcome.unavailableNoVocabHit, added in the Bug-A fix:
+//
+//   • A trained RandomIndexing provider + an all-OOV query → .unavailableNoVocabHit
+//     and corpus.float_lane.dark_vocab_miss counter fires.
+//   • An untrained RandomIndexing provider (empty vocab) + any query → .unavailableProviderOptOut
+//     (structural opt-out, NOT vocabMiss — provider has no basis at all).
+//   • dark_provider must be 0 on the vocabMiss path (provider did not structurally opt out).
+//   • dark_vocab_miss must be 0 on the untrained path (wrong reason — it's providerOptOut).
+
+@Suite("§8 FloatLaneOutcome — vocabMiss (trained distributional provider, all-OOV query)", .serialized)
+struct FloatLaneVocabMissTests {
+
+    /// Corpus trained on vehicle-domain text; queried with tokens guaranteed
+    /// absent from that vocabulary. Expected: .unavailableNoVocabHit.
+    ///
+    /// The OOV tokens are synthetic UUIDs — they cannot appear in any English
+    /// training corpus, so the "zero hits" condition is structurally guaranteed
+    /// rather than probabilistic.
+    @Test("trained RI provider + all-OOV query → .unavailableNoVocabHit")
+    func trainedRIWithOOVQueryYieldsVocabMiss() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
+            defer {
+                Intellectus.setEnabled(false)
+                Intellectus.install(sink: NoOpSink.shared)
+            }
+
+            // Build corpus with RandomIndexing provider trained on a fixed domain.
+            let storage = try makeScratchStorage()
+            let corpus = try await Corpus(
+                storage: storage,
+                model: .randomIndexing(provider: RandomIndexingProvider()))
+
+            // Ingest five vehicle-domain documents so the RI provider trains a
+            // non-empty vocab (vocabulary: car, engine, road, fuel, vehicle, …).
+            let trainingDocs = [
+                "car engine drive road vehicle",
+                "vehicle road transport car fuel",
+                "engine fuel combustion power car",
+                "driver seat wheel dashboard mirror",
+                "road highway bridge tunnel overpass"
+            ]
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            for (i, doc) in trainingDocs.enumerated() {
+                try await corpus.ingest(doc, sourceID: "vehicle-\(i)", now: now)
+            }
+            // reindex trains the RI model on the ingested corpus.
+            try await corpus.reindex(now: now)
+
+            // Query with tokens that are structurally absent from the training
+            // vocabulary — synthetic tokens that cannot appear in English text.
+            let oovQuery = "zxqvmlkj99 wvbnrqxp88 qqzxcvbnm77"
+            let outcome = await corpus.floatNearest(query: oovQuery, limit: 5)
+
+            // Trained provider, all-OOV query → vocabMiss (not providerOptOut).
+            if case .unavailableNoVocabHit = outcome {
+                // Expected — pass.
+            } else {
+                Issue.record(
+                    "expected .unavailableNoVocabHit for OOV query on trained RI corpus, got \(outcome); query='\(oovQuery)'")
+            }
+
+            // dark_vocab_miss counter must have moved.
+            let vocabMiss = sink.count(name: "corpus.float_lane.dark_vocab_miss")
+            #expect(vocabMiss == 1,
+                "corpus.float_lane.dark_vocab_miss must be emitted once; got \(vocabMiss)")
+
+            // dark_provider must NOT move — provider did not structurally opt out.
+            #expect(sink.count(name: "corpus.float_lane.dark_provider") == 0,
+                "dark_provider must be 0 on vocabMiss path (provider has a basis, query is OOV)")
+
+            // dark_no_rows must NOT move — we never reached the store search.
+            #expect(sink.count(name: "corpus.float_lane.dark_no_rows") == 0,
+                "dark_no_rows must be 0 on vocabMiss path")
+
+            // hit must NOT move.
+            #expect(sink.count(name: "corpus.float_lane.hit") == 0,
+                "hit must not move on vocabMiss path")
+        }
+    }
+
+    /// A brand-new, never-trained RandomIndexingProvider (empty vocab) injected
+    /// directly through the Corpus internal test seam → .unavailableProviderOptOut.
+    ///
+    /// An untrained provider's vocab is empty — `embedFloat` returns `[]` without
+    /// throwing, so Corpus classifies it as a structural opt-out (dark_provider),
+    /// NOT as vocabMiss (dark_vocab_miss). The two dark reasons must be distinct.
+    @Test("never-trained RI provider (empty vocab) → .unavailableProviderOptOut (not vocabMiss)")
+    func neverTrainedRIProviderYieldsProviderOptOut() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
+            defer {
+                Intellectus.setEnabled(false)
+                Intellectus.install(sink: NoOpSink.shared)
+            }
+
+            // Inject a brand-new, never-trained RandomIndexingProvider through
+            // the internal test seam. vocab is empty; embedFloat returns [] without
+            // throwing → Corpus sees an empty vector → structural opt-out.
+            let storage = try makeScratchStorage()
+            let corpus = try await Corpus(storage: storage, provider: RandomIndexingProvider())
+
+            let outcome = await corpus.floatNearest(query: "car engine", limit: 5)
+
+            // Empty vocab → structural opt-out, NOT vocabMiss.
+            if case .unavailableProviderOptOut = outcome {
+                // Expected — pass.
+            } else {
+                Issue.record(
+                    "expected .unavailableProviderOptOut for never-trained RI provider, got \(outcome)")
+            }
+
+            // dark_provider fires; dark_vocab_miss must NOT fire (wrong reason).
+            #expect(sink.count(name: "corpus.float_lane.dark_provider") == 1,
+                "dark_provider must be emitted once for never-trained RI (empty vocab)")
+            #expect(sink.count(name: "corpus.float_lane.dark_vocab_miss") == 0,
+                "dark_vocab_miss must be 0 for untrained RI — it is a structural opt-out")
+        }
+    }
+
+    /// When monitoring is disabled, dark_vocab_miss must NOT be emitted even
+    /// though the vocabMiss outcome still fires correctly.
+    @Test("dark_vocab_miss not emitted when monitoring disabled")
+    func vocabMissCounterSilentWhenMonitoringOff() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(false)  // monitoring OFF
+            defer {
+                Intellectus.install(sink: NoOpSink.shared)
+            }
+
+            let storage = try makeScratchStorage()
+            let corpus = try await Corpus(
+                storage: storage,
+                model: .randomIndexing(provider: RandomIndexingProvider()))
+
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            for (i, doc) in ["car engine road", "vehicle fuel transport"].enumerated() {
+                try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
+            }
+            try await corpus.reindex(now: now)
+
+            // OOV query — outcome must still be vocabMiss but counter suppressed.
+            let outcome = await corpus.floatNearest(query: "zxqvmlkj99 wvbnrqxp88", limit: 5)
+
+            if case .unavailableNoVocabHit = outcome {
+                // Outcome correct even without monitoring.
+            } else {
+                Issue.record("expected .unavailableNoVocabHit, got \(outcome)")
+            }
+
+            // No telemetry emitted when monitoring is off.
+            #expect(sink.count(name: "corpus.float_lane.dark_vocab_miss") == 0,
+                "dark_vocab_miss must not be emitted when monitoring is disabled")
+        }
+    }
+}

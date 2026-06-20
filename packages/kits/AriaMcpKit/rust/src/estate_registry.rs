@@ -736,5 +736,11 @@ fn describe_vector_kit_error(e: &vectorkit::VectorKitError) -> String {
         VectorKitError::Int8QuantizationPolicyUndefined(reason) => {
             format!("int8 quantization policy is not yet defined: {reason}")
         }
+        VectorKitError::EmbedFloatVocabMiss(reason) => {
+            // Trained distributional provider, all query tokens OOV. This is an
+            // expected degradation (dark lane, not a hard error), but when it
+            // surfaces at the MCP boundary describe it clearly for observability.
+            format!("embed_float vocabulary miss: {reason}")
+        }
     }
 }

@@ -87,6 +87,18 @@ pub enum FloatLaneOutcome {
     /// float-capable provider. Dense lane is dark; other lanes unaffected.
     UnavailableNoFloatRows,
 
+    /// Trained distributional provider, but all query tokens were
+    /// out-of-vocabulary (OOV) — expected, not an error.
+    ///
+    /// The provider HAS a trained basis (vocab is non-empty) but none of
+    /// the query's tokens appear in it. The recall result is identical to
+    /// `UnavailableProviderOptOut` (empty dense lane), but the reason is
+    /// different: the provider CAN produce float vectors; the query simply
+    /// did not hit the vocabulary.
+    ///
+    /// Surface string: `dense_lane:dark:vocabMiss`.
+    UnavailableNoVocabHit,
+
     /// Query was empty or `limit` was zero — the call was a no-op.
     ///
     /// No telemetry emitted: the guard fired before any store access.
@@ -1268,7 +1280,8 @@ impl Corpus {
         let probe = match probe_result {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
-                // Provider returned an empty vector — treat as opt-out.
+                // Provider returned an empty vector without throwing — structural
+                // opt-out (provider has no float lane or no trained basis).
                 report!(StatSample::metric(
                     "corpus.float_lane.dark_provider".to_string(),
                     1.0,
@@ -1282,9 +1295,25 @@ impl Corpus {
                 ));
                 return FloatLaneOutcome::UnavailableProviderOptOut;
             }
+            Err(VectorKitError::EmbedFloatVocabMiss(_)) => {
+                // Trained distributional provider: all query tokens were OOV.
+                // Truthful relabel: the provider HAS a basis but none of the
+                // query terms are in it — this is vocabMiss, not providerOptOut.
+                report!(StatSample::metric(
+                    "corpus.float_lane.dark_vocab_miss".to_string(),
+                    1.0,
+                    [("kit".to_string(), "CorpusKit".to_string())]
+                        .into_iter().collect(),
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now().duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                    },
+                ));
+                return FloatLaneOutcome::UnavailableNoVocabHit;
+            }
             Err(_) => {
-                // Provider threw — expected opt-out (no float lane).
-                // Log nothing; emit the dark_provider counter only.
+                // Any other error — structural opt-out (no float lane).
                 report!(StatSample::metric(
                     "corpus.float_lane.dark_provider".to_string(),
                     1.0,
