@@ -45,7 +45,6 @@ pub mod audit;
 pub mod brain;
 pub mod branches;
 pub mod coordinator;
-pub mod diffusion;
 // telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name
 // constants and the `glk_emit!` macro. Emit sites live in coordinator.rs at
 // open/close/provision/quiesce/drain and the verb-error remap boundary.

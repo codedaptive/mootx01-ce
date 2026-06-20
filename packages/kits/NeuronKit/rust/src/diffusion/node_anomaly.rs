@@ -8,7 +8,7 @@
 // `classify` is pure and deterministic. The live read surface (folding the fresh
 // per-row audit trail) is Swift-side glue (storage orchestration), not ported.
 
-use crate::audit::log::EntryUUID;
+use genius_locus_kit::audit::log::EntryUUID;
 use crate::diffusion::node_motion::NodeMotion;
 
 /// Volatility at/above which a node is "churning". Ablate (ADR §12).

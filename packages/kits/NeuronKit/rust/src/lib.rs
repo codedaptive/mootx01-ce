@@ -31,6 +31,7 @@
 
 pub mod anomaly_scan;
 pub mod anticipation;
+pub mod diffusion;
 pub mod composition_grid;
 pub mod benchmark_live;
 pub mod benchmark_scoring;

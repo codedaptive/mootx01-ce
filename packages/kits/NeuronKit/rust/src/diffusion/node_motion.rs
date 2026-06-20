@@ -14,7 +14,7 @@
 // last_event_physical_ms) are exact across ports; volatility is an exp()/f64
 // computation, reproducible-within-config (arch spec §6), asserted to tolerance.
 
-use crate::audit::log::{EntryUUID, UnifiedAuditEntry, UnifiedAuditValue};
+use genius_locus_kit::audit::log::{EntryUUID, UnifiedAuditEntry, UnifiedAuditValue};
 use std::collections::HashSet;
 
 const MS_PER_DAY: f64 = 86_400_000.0;
@@ -97,7 +97,7 @@ pub fn fold(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::log::{AuditTier, UnifiedAuditVerb};
+    use genius_locus_kit::audit::log::{AuditTier, UnifiedAuditVerb};
     use substrate_types::hlc::HLC;
     use substrate_types::lattice_anchor::LatticeAnchor;
 
