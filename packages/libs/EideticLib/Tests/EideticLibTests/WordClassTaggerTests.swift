@@ -92,13 +92,15 @@ struct WordClassSharedVectorTests {
         #expect(LatticeLib.wordClass("run") == .verb)
     }
 
-    /// A preposition that must NOT be in the table falls to the tagger
-    /// and resolves to .other.
-    @Test("table preposition falls to tagger as other")
-    func tablePrepositionFallsToTaggerAsOther() {
-        #expect(!WordClassTableCache.nounSet.contains("with"))
-        #expect(!WordClassTableCache.verbSet.contains("with"))
-        #expect(LatticeLib.wordClass("with") == .other)
+    /// A digit-bearing token that is NOT in the table falls to the HMM
+    /// tagger and resolves to .other (HMM's NonAlpha observation class).
+    /// HMM is the default on all platforms; NLTagger is opt-in only.
+    @Test("novel digit-bearing token falls to HMM as other")
+    func novelTokenFallsToHMMAsOther() {
+        // "z0rp" has a digit, so the HMM NonAlpha observation fires → .other.
+        #expect(!WordClassTableCache.nounSet.contains("z0rp"))
+        #expect(!WordClassTableCache.verbSet.contains("z0rp"))
+        #expect(LatticeLib.wordClass("z0rp") == .other)
     }
 
     @Test("empty token is other")

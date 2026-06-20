@@ -7,14 +7,20 @@
 //
 // Two tiers, per the encoder contract:
 //   1. Fast path — static-table membership (constant time, no tagger).
-//   2. Fallback — platform tagger for novel tokens. On Apple this is
-//      NLTagger with .lexicalClass; elsewhere the deterministic
-//      HMM/Viterbi tagger in HMMTagger (integer-scored, byte-identical
-//      Swift↔Rust). The platform boundary is contract-bearing
-//      (cookbook §2.2): table-resident tokens are bit-identical across
-//      ALL platforms; novel-token tagging is platform-specific (Apple's
-//      NLTagger and the HMM are different engines and need not agree),
-//      but the non-Apple HMM path is itself bit-identical across ports.
+//   2. Novel-token fallback — the deterministic HMM/Viterbi tagger
+//      (`HMMTagger.tag`) on ALL platforms, including Apple. The HMM
+//      is integer-scored and byte-identical across the Swift and Rust
+//      ports (cookbook §2.2, §8). This is the cross-port conformance
+//      baseline.
+//
+// NLTagger is the opt-in Apple-only path: it is only invoked when the
+// estate is explicitly configured with `NovelTokenTaggerChoice.nlTagger`
+// and the caller threads that choice via the `wordClass(_:tagger:)`
+// overload. The no-tagger-choice overload `wordClass(_:)` ALWAYS uses
+// HMM, regardless of platform. This ensures Swift and Rust produce
+// bit-identical UDC classification for every call that goes through the
+// default path (FDC runtime, build-time tooling, or any call site
+// without a concrete estate tagger preference).
 //
 // Step 1 operates on the raw lowercased token. It does NOT lemmatize:
 // lemmatization is Step 2 (cookbook §2.1 step 1 vs §3.2).
@@ -33,8 +39,16 @@ public extension LatticeLib {
     /// in the LIVE word-class table snapshot resolves in constant time
     /// with no tagger invoked (cookbook §2.1). The verb set is checked
     /// before the noun set, so a token listed under both resolves to
-    /// `.verb` (mission Part 2). A token absent from the table falls
-    /// to the platform tagger; an empty token is `.other`.
+    /// `.verb` (mission Part 2). A token absent from the table is
+    /// classified via the deterministic HMM/Viterbi tagger (the
+    /// cross-port baseline); an empty token is `.other`.
+    ///
+    /// HMM is the default for novel tokens on ALL platforms, including
+    /// Apple. NLTagger is opt-in only: pass `taggerChoice: .nlTagger`
+    /// to the estate-choice overload `wordClass(_:tagger:)` when the
+    /// estate is configured for it. This ensures bit-identical output
+    /// between the Swift and Rust ports on every call site that does not
+    /// have an estate-level override.
     ///
     /// Reads the table through `WordClassTableCache` (the process-wide
     /// LIVE-SWAPPABLE holder, cookbook §1.3/§2.2): a token merged into the
@@ -45,11 +59,7 @@ public extension LatticeLib {
     ///
     /// Deterministic given (input, table-version): for a fixed table
     /// version the same token yields the same `WordClass` on every
-    /// platform for any table-resident token. A live swap advances the
-    /// table version (`WordClassTableCache.version`); within one version
-    /// the classification is stable. Novel-token results depend on the
-    /// platform tagger and are not cross-platform guaranteed
-    /// (cookbook §2.2, §8).
+    /// platform on every call to this overload (HMM is cross-platform).
     ///
     /// - Parameter token: a single raw token (not a phrase). Callers
     ///   with a phrase tokenize first via `Tokenizer`.
@@ -73,7 +83,8 @@ public extension LatticeLib {
             return .noun
         }
 
-        // Novel token: fall to the platform tagger.
+        // Novel token: always HMM (the cross-port baseline). NLTagger
+        // is only reached via the explicit tagger-choice overload.
         return tagNovelToken(lowered)
     }
 
@@ -123,6 +134,9 @@ public extension LatticeLib {
 
     /// The platform string for the pool wire format (cookbook §2.3):
     /// `"apple"` where `NaturalLanguage` is available, else `"other"`.
+    /// This records the hardware/OS platform for provenance; it does
+    /// NOT imply NLTagger is the active tagger (HMM is the default on
+    /// all platforms, including Apple).
     internal static var currentPlatform: String {
         #if canImport(NaturalLanguage)
         return "apple"
@@ -131,55 +145,35 @@ public extension LatticeLib {
         #endif
     }
 
-    /// The tagger version string for the pool wire format (cookbook
-    /// §2.3): the running NLTagger OS version on Apple, else the
-    /// deterministic HMM/Viterbi artifact version.
+    /// The tagger version string for the pool wire format (cookbook §2.3).
+    ///
+    /// The default novel-token path uses the deterministic HMM/Viterbi
+    /// tagger on ALL platforms — so the pool entries written by the default
+    /// cache carry the HMM artifact version everywhere. This mirrors the
+    /// Rust port's `HMM_VITERBI_VERSION` constant.
+    ///
+    /// hmm-viterbi-3: trained on MASC 3.0.0 Penn Treebank constituency
+    /// data, estimated from rare (hapax) words so the unknown-word prior
+    /// is content-noun-dominant (A-15).
     internal static var currentTaggerVersion: String {
-        #if canImport(NaturalLanguage)
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
-        #else
-        // The non-Apple HMM/Viterbi model version. Mirrors the Rust port's
-        // HMM_VITERBI_VERSION. hmm-viterbi-3: trained on MASC 3.0.0 Penn
-        // Treebank constituency data, estimated from rare (hapax) words so the
-        // unknown-word prior is content-noun-dominant (A-15).
+        // HMM is the default on all platforms — no platform branch needed.
         return "hmm-viterbi-3"
-        #endif
     }
 
-    /// Tags a novel (non-table) token via the platform tagger and
-    /// records the result into the shared pool cache (cookbook §2.2).
+    /// Tags a novel (non-table) token via the deterministic HMM/Viterbi
+    /// tagger and records the result into the shared pool cache (cookbook §2.2).
     ///
-    /// Apple: `NLTagger` with `.lexicalClass`, gated by
-    /// `taggerEnabled`. Non-Apple: the deterministic HMM/Viterbi tagger
-    /// (`HMMTagger.tag`) — an integer-scored 3-state HMM that is
-    /// byte-identical across the Swift and Rust ports (cookbook §2.2).
-    /// The two engines (Apple NLTagger vs the HMM) are not expected to
-    /// agree with each other; the HMM's guarantee is cross-platform
-    /// self-consistency of the non-Apple path.
+    /// HMM is the default on ALL platforms, including Apple. NLTagger is the
+    /// opt-in Apple-only path activated only when the estate is configured with
+    /// `NovelTokenTaggerChoice.nlTagger`; that choice is threaded explicitly via
+    /// `tagNovelToken(_:tagger:)`. Calling this no-choice overload always
+    /// produces the deterministic HMM result — bit-identical to the Rust port.
     ///
-    /// When the min_os_version gate disables the tagger, no tagging
-    /// occurs and nothing is recorded — the table-only path returns
-    /// `.other` without polluting the pool with an untagged token.
-    ///
-    /// Internal so tests can exercise it directly under
-    /// `@testable import`.
+    /// Internal so tests can exercise it directly under `@testable import`.
     internal static func tagNovelToken(_ lowered: String) -> WordClass {
-        #if canImport(NaturalLanguage)
-        // min_os_version gate: below the table's pinned NLTagger
-        // version, use the table only (return .other) rather than an
-        // older tagger. No tagging means no pool record.
-        let minOS = WordClassTableCache.table?.minOSVersion ?? ""
-        guard taggerEnabled(
-            osVersion: ProcessInfo.processInfo.operatingSystemVersion,
-            minOSVersion: minOS
-        ) else {
-            return .other
-        }
-        let tagged = appleLexicalClass(lowered)
-        #else
+        // Always HMM: the cross-port conformance baseline. NLTagger is
+        // opt-in only via the tagger-choice overload below.
         let tagged = hmmViterbiTag(lowered)
-        #endif
 
         // Fire-and-forget accumulation toward the 50-entry pool
         // submission. Does not affect the returned WordClass.

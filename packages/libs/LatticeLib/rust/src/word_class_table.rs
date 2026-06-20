@@ -3,22 +3,23 @@
 // Port of WordClassTable.swift and WordClassTagger.swift's fast-path.
 //
 // NOVEL-TOKEN FALLBACK
-// The Swift `LatticeLib.wordClass` has two paths for novel (non-table) tokens:
-//   1. Apple: NLTagger with .lexicalClass (cookbook §2.2, platform-bound)
-//   2. Non-Apple: the deterministic HMM/Viterbi tagger `HMMTagger.tag`
+// The Swift `LatticeLib.wordClass(_:)` default overload uses the deterministic
+// HMM/Viterbi tagger (`HMMTagger.tag`) on ALL platforms, including Apple.
+// This is the cross-port baseline and the default for the FDC runtime.
+//
+// NLTagger is the opt-in Apple-only path: it is only used when the estate is
+// configured with `NovelTokenTaggerChoice.nlTagger` and the caller explicitly
+// threads that choice via `wordClass(_:tagger:)`. It has no Rust counterpart
+// (Apple platform binding) and is not part of the cross-port conformance gate.
 //
 // Rust runs exclusively on non-Apple (Linux/Windows). For novel tokens (not in
 // the table), the Rust path calls `word_class::hmm_tag` — the byte-identical
 // port of Swift's `HMMTagger.tag` (integer Viterbi, no floating point, tables
-// mirrored verbatim from HMMTagger.swift). The cross-port conformance guarantee
-// is: Swift non-Apple HMM == Rust HMM (byte-identical).
-// NLTagger is the Apple-only optional path in Swift; it is NOT required to agree
-// with the HMM and has no Rust counterpart (platform binding).
+// mirrored verbatim from HMMTagger.swift). The cross-port conformance guarantee:
+// Swift HMM (all platforms, default path) == Rust HMM (byte-identical).
 //
-// The FDC conformance fixture (`fdc_conformance.json`) exercises only
-// table-resident tokens, so it is unaffected by the novel-token path.
-// The HMM byte-identity gate is `tag_conformance.json` /
-// `lattice_conformance_test.rs`.
+// The FDC conformance fixture (`fdc_conformance.json`) and the HMM byte-identity
+// gate (`tag_conformance.json` / `lattice_conformance_test.rs`) both verify this.
 //
 // NOVEL-TOKEN RECORDING
 // After classifying a novel token via `hmm_tag`, the result is recorded into
@@ -289,11 +290,10 @@ pub fn swap_global_table_from_precedence(artifact_path: &Path) -> Option<u64> {
 /// Classify a single token table-first against the LIVE process-global table
 /// (cookbook §2.1). Verb set before noun set, matching Swift `LatticeLib.
 /// wordClass` ordering; novel tokens (table miss) are classified via the
-/// deterministic HMM/Viterbi tagger (the non-Apple novel-token path, mirroring
-/// Swift `hmmViterbiTag`) and recorded into the novel-token cache. This is the
-/// public table-first surface paralleling Swift's `LatticeLib.wordClass(_:)` on
-/// non-Apple platforms; it reads through the live holder so a post-reduce
-/// swap is observed in-session.
+/// deterministic HMM/Viterbi tagger and recorded into the novel-token cache.
+/// This is the public table-first surface paralleling Swift's
+/// `LatticeLib.wordClass(_:)` on all platforms (HMM is the default everywhere);
+/// it reads through the live holder so a post-reduce swap is observed in-session.
 pub fn word_class(token: &str) -> WordClass {
     global_table().word_class(token)
 }

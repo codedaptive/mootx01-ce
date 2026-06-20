@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "description": "Cross-port conformance vectors for EideticLib.wordClass(_:) / gnomon_kit::word_class (FDC encoder Step 1, cookbook §2.1). 'path' is documentation only: 'table' = resolved by the static fast-path table (bit-identical across ports, the conformance contract per cookbook §8); 'tagger' = a token absent from the table that both ports resolve to the same WordClass (Apple NLTagger and the Rust HMM/Viterbi stub agree on a preposition being .other); 'empty' = the empty-token short-circuit.",
+  "description": "Cross-port conformance vectors for EideticLib.wordClass(_:) / gnomon_kit::word_class (FDC encoder Step 1, cookbook §2.1). 'path' is documentation only: 'table' = resolved by the static fast-path table (bit-identical across ports, the conformance contract per cookbook §8); 'tagger' = a token absent from the table, classified via the deterministic HMM on all platforms (HMM is the default; NLTagger is opt-in only); 'empty' = the empty-token short-circuit.",
   "vectors": [
     { "id": "noun-dinner",        "input": "dinner",    "expected": "noun",  "path": "table" },
     { "id": "noun-wife",          "input": "wife",      "expected": "noun",  "path": "table" },
@@ -9,7 +9,7 @@
     { "id": "verb-encode",        "input": "encode",    "expected": "verb",  "path": "table" },
     { "id": "verb-run-precedence","input": "run",       "expected": "verb",  "path": "table" },
     { "id": "noun-uppercased",    "input": "Dinner",    "expected": "noun",  "path": "table" },
-    { "id": "other-preposition",  "input": "with",      "expected": "other", "path": "tagger" },
+    { "id": "other-digit-token",  "input": "z0rp",      "expected": "other", "path": "tagger" },
     { "id": "other-empty",        "input": "",          "expected": "other", "path": "empty" }
   ]
 }

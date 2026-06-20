@@ -4,12 +4,16 @@
 // produces the values recorded in `fdc_conformance.json` for every fixture
 // vector. The baseline in that fixture is the deterministic HMM path: novel
 // tokens are classified via the integer-Viterbi HMM (`word_class::hmm_tag`),
-// byte-identical to Swift's explicit HMM path on every platform. Apple's
-// optional NLTagger path is outside this conformance gate and is NOT exercised
-// or treated as an alternate baseline here.
+// byte-identical to Swift's HMM path on every platform (including Apple).
+//
+// HMM is the default novel-token path on ALL platforms in Swift. The Apple
+// NLTagger path is opt-in only (requires explicit `NovelTokenTaggerChoice.nlTagger`
+// via the estate tagger-choice overload) and is NOT exercised or treated as a
+// baseline here. The production `FDC.encode` / `FDC.encodeAnchor` path uses HMM
+// everywhere, so this conformance gate covers the production path on all platforms.
 //
 // Conformance scope:
-//   Rust-HMM scalar (self-consistent) + byte-identity with Swift-HMM.
+//   Rust-HMM scalar (self-consistent) + byte-identity with Swift-HMM (all platforms).
 //
 // The four-way conformance matrix (Swift-scalar, Swift-Metal, Rust-scalar,
 // Rust-BLAS/NEON) does NOT apply here: FDC is a pure string/bag computation

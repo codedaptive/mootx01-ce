@@ -9,12 +9,14 @@
 //
 // Conformance structure:
 //
-//   * Every vector is a Rust-HMM baseline vector. The Swift leg MUST exercise
+//   * Every vector is an HMM baseline vector. The Swift leg exercises
 //     the deterministic HMM path on every platform, including Apple.
+//     This matches the production `FDC.encode` / `FDC.encodeAnchor` path,
+//     which uses HMM everywhere (HMM is the default; NLTagger is opt-in only).
 //
-//   * Apple NLTagger is optional product behaviour outside this conformance
-//     gate. This test does not exercise it, skip for it, or treat it as an
-//     alternate baseline.
+//   * Apple NLTagger is the opt-in path activated only when an estate is
+//     configured with `NovelTokenTaggerChoice.nlTagger`. It is outside this
+//     conformance gate and is NOT exercised or treated as a baseline here.
 //
 // Seed: N/A (determinism comes from the pinned artifacts and algorithm,
 // not from a hash-family seed).

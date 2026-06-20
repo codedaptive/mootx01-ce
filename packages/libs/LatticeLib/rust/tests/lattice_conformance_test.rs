@@ -8,8 +8,9 @@
 //   * normalize_conformance.json — Normalizer::normalize == Normalizer.normalize
 //   * tag_conformance.json       — word_class::hmm_tag == HMMTagger.tag
 //
-// The HMM tagger is NOT expected to match Apple's NLTagger; its guarantee is
-// cross-platform self-consistency of the non-Apple path. See HMMTagger.swift.
+// The HMM tagger is the default on ALL platforms, including Apple (NLTagger
+// is opt-in only via explicit estate configuration). The guarantee here is
+// cross-platform bit-identity: Swift HMM == Rust HMM. See HMMTagger.swift.
 
 use lattice_lib::normalizer::normalize;
 use lattice_lib::word_class::{hmm_tag, WordClass};
