@@ -32,7 +32,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Named estate to serve. Default: active estate.")
     var db: String?
 
-    @Option(name: .long, help: "Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + Brain pump + telemetry) instead of stdio.")
+    @Option(name: .long, help: "Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
     var http: Int?
 
     func run() async throws {
@@ -62,7 +62,7 @@ struct ServeCommand: AsyncParsableCommand {
         // PID file written at start, removed on exit so status/query can detect us.
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
         // Single-writer guard (resident only): the estate has exactly one writer —
-        // the resident BrainPump (see ADR-LOOPBACKHTTP-001). Refuse to start the resident
+        // the resident AutonomicGovernor (see ADR-LOOPBACKHTTP-001). Refuse to start the resident
         // daemon if another LIVE process already holds this estate's PID file.
         // stdio is ephemeral and does not pump, so it is not guarded here; a
         // different binary (e.g. the aria-mcp dev build) pointed at the same estate
@@ -151,7 +151,7 @@ struct ServeCommand: AsyncParsableCommand {
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
         if let port = residentPort {
-            // Resident daemon: HTTP transport + Brain pump + telemetry/monitoring
+            // Resident daemon: HTTP transport + autonomic governor + telemetry/monitoring
             // gate via the shared AriaResident runner (identical wiring to
             // aria-mcp). The estate is the durable SQLite opened above, so dreaming
             // persists. Telemetry store from ARIA_MCP_STATS_STORE (set by the

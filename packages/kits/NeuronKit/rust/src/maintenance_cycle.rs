@@ -661,7 +661,7 @@ qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"
         assert_eq!(store.load_policy(), Some(updated), "second save overwrites first");
     }
 
-    // ─── Pump cadence tests (mirror Swift BrainPumpTests cadence suite) ───
+    // ─── Pump cadence tests (mirror Swift MaintenanceDaemonTests cadence suite) ───
 
     fn empty_reader() -> FakeReader {
         FakeReader { scan: MaintenanceScan::default() }

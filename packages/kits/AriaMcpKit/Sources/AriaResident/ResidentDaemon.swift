@@ -38,7 +38,7 @@ public enum AriaResident {
         return value
     }
 
-    /// Brain pump base tick (ms) from `MOOTX01_BRAIN_TICK_MS` (default 5000).
+    /// Autonomic governor base tick (ms) from `MOOTX01_BRAIN_TICK_MS` (default 5000).
     /// The loop's sampling resolution, not a cadence — each daemon self-gates on
     /// its own (longer) interval. Clamped to a sane ceiling (1 h).
     public static func brainTickMs(env: [String: String] = ProcessInfo.processInfo.environment) -> Int {

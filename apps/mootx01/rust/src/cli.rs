@@ -411,7 +411,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \n\
             OPTIONS:\n\
             \x20 --db <name>             Named estate to serve. Default: active estate.\n\
-            \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + Brain pump + telemetry) instead of stdio.".into(),
+            \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.".into(),
         "install" => "Wire mootx01 into MCP clients and grant tool permissions.\n\
             \n\
             USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off]\n\
@@ -423,7 +423,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 -y, --yes               Skip prompts; auto-detect and install all present clients.\n\
             \x20 --no-permissions        Skip writing to settings.json (do not grant tool permissions).\n\
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
-            \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + Brain pump) as a background service.\n\
+            \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background service.\n\
             \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\
             \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.".into(),
         "uninstall" => "Remove mootx01 from MCP clients.\n\

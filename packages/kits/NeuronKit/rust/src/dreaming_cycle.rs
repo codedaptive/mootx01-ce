@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(report.proposals_emitted.len(), 0);
     }
 
-    // ─── Pump cadence tests (mirror Swift BrainPumpTests cadence suite) ───
+    // ─── Pump cadence tests (mirror Swift DreamingDaemonTests cadence suite) ───
 
     // PC-D1: first pump call always fires regardless of interval (no prior
     // fire timestamp). Mirrors Swift `testDreamingPumpFirstCallAlwaysFires`.

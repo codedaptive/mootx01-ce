@@ -332,7 +332,7 @@ struct AriaMCPMain {
                 statsStorePath: statsStorePath
             )
             let gateSuffix = (statsStorePath != nil) ? " + monitoring gate" : ""
-            Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, HTTP transport + Brain pump\(gateSuffix))")
+            Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, HTTP transport + autonomic governor\(gateSuffix))")
             do {
                 // Resident: returns only on bind failure (the runner otherwise
                 // never returns; launchd/SIGTERM ends the process). The runner

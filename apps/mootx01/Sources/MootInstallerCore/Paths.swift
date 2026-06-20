@@ -230,7 +230,7 @@ public enum MootPaths {
     }
 
     /// launchd job label for the resident mootx01 daemon (the headless HTTP MCP
-    /// server + Brain pump). Distinct from the moot-mgr agent so the two services
+    /// server + autonomic governor). Distinct from the moot-mgr agent so the two services
     /// load independently.
     public static let daemonLabel: String = "com.mootx01.daemon"
 
@@ -265,7 +265,7 @@ public enum MootPaths {
     public static let defaultResidentPort: Int = 4242
 
     /// The resident daemon's MCP endpoint URL that HTTP-capable clients are wired
-    /// to (so they share the one running daemon + its Brain pump, rather than
+    /// to (so they share the one running daemon + its autonomic governor, rather than
     /// spawning their own stdio instance). The server accepts POST at any path.
     public static var residentEndpointURL: String {
         "http://127.0.0.1:\(defaultResidentPort)"
