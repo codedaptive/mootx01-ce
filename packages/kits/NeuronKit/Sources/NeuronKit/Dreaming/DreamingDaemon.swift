@@ -184,6 +184,18 @@ public actor DreamingDaemon {
     private let rewardSource: RewardSource
     private let policyStore: DreamingPolicyStore
 
+    /// Optional corpus growth probe for the auto-reindex step. When non-nil,
+    /// the daemon measures corpus growth at the end of each cycle and triggers
+    /// `CorpusGrowthProbe.reindex(now:)` when growth since the last retrain
+    /// exceeds `reindexGrowthThreshold`. Nil disables auto-reindex (correct
+    /// for test environments that do not wire a live Corpus).
+    private let growthProbe: (any CorpusGrowthProbe)?
+
+    /// Growth threshold (in chunks) above which the daemon triggers a corpus
+    /// basis retrain. Defaults to `autoReindexGrowthThreshold` (25 chunks).
+    /// See `autoReindexGrowthThreshold` for the vocabulary-coverage rationale.
+    private let reindexGrowthThreshold: Int
+
     // MARK: - Mutable state (actor-isolated)
 
     /// Current discovery parameters. Mutated by `registerDreamingPolicy`,
@@ -211,6 +223,13 @@ public actor DreamingDaemon {
     /// memory (B-4): a key here is never proposed again.
     private var proposedKeys: Set<String> = []
 
+    /// Chunk count at the time of the most recent corpus basis retrain (or
+    /// at daemon initialisation, whichever is later). The auto-reindex gate
+    /// fires when `liveChunkCount − lastReindexChunkCount >= reindexGrowthThreshold`.
+    /// Initialised to −1 (sentinel) so the first cycle always reads the live
+    /// count and establishes the baseline before any threshold comparison.
+    private var lastReindexChunkCount: Int = -1
+
     /// EWC++ consolidated confidence by candidate key (step 4).
     private var consolidated: [String: Float] = [:]
 
@@ -230,6 +249,15 @@ public actor DreamingDaemon {
     ///   - triggerMode: trigger seam. Defaults to `.timer`.
     ///   - policy: initial in-memory policy. Defaults to the spec
     ///     defaults; `loadPersistedPolicy()` overrides it from the store.
+    ///   - growthProbe: optional corpus-growth probe for the auto-reindex
+    ///     step. When non-nil, each cycle measures corpus growth and
+    ///     triggers a basis retrain when growth exceeds `reindexGrowthThreshold`.
+    ///     Defaults to nil (auto-reindex disabled). Production callers pass
+    ///     an `EstateCorpusGrowthProbe` to light the auto-reindex lane.
+    ///   - reindexGrowthThreshold: chunk-count delta above which a corpus
+    ///     basis retrain is triggered. Defaults to `autoReindexGrowthThreshold`
+    ///     (25 chunks). Override for estates with very dense or very sparse
+    ///     ingestion patterns.
     public init(
         reader: DreamingSubstrateReader,
         sink: DreamingProposalSink,
@@ -237,7 +265,9 @@ public actor DreamingDaemon {
         policyStore: DreamingPolicyStore,
         triggerMode: DreamingTriggerMode = .default,
         bandit: SolverBandit = SolverBandit(),
-        policy: DreamingPolicy = .default
+        policy: DreamingPolicy = .default,
+        growthProbe: (any CorpusGrowthProbe)? = nil,
+        reindexGrowthThreshold: Int = autoReindexGrowthThreshold
     ) {
         self.reader = reader
         self.sink = sink
@@ -246,6 +276,8 @@ public actor DreamingDaemon {
         self.triggerMode = triggerMode
         self.bandit = bandit
         self.policy = policy
+        self.growthProbe = growthProbe
+        self.reindexGrowthThreshold = reindexGrowthThreshold
     }
 
     // MARK: - Policy registration (§ 3.1 registration API)
@@ -526,6 +558,65 @@ public actor DreamingDaemon {
             ],
             ts: now.timeIntervalSince1970
         ))
+
+        // ── Auto-reindex step: trigger corpus basis retrain on growth ──────
+        // Distributional embedding providers (RI / PPMI / LSA / NMF) freeze
+        // their vocabulary at training time. Content ingested after the last
+        // retrain is OOV and produces zero-vectors in the dense lane, silently
+        // missing novel terms. The growth probe measures the live chunk count
+        // and fires a full `Corpus.reindex(now:)` when growth since the last
+        // retrain crosses `reindexGrowthThreshold` (default 25 chunks).
+        //
+        // Idempotency / safety:
+        //   • On the first cycle, `lastReindexChunkCount == -1` (sentinel).
+        //     We read the live count and store it as the baseline WITHOUT firing
+        //     a retrain — the corpus was just trained on first ingest, or it was
+        //     opened from a persisted basis. Firing on the first cycle would
+        //     unconditionally retrain on every daemon restart, which is wasteful.
+        //   • After baseline is set, the gate fires when delta >= threshold.
+        //     After firing, `lastReindexChunkCount` advances to the post-reindex
+        //     live count so the next window resets correctly.
+        //   • Reindex failures are caught and logged (OSLog) but do not abort
+        //     the cycle — a stale basis is better than a broken dreaming daemon.
+        //   • When no probe is injected (nil), this block is a no-op.
+        if let probe = growthProbe {
+            do {
+                let liveCount = try await probe.chunkCount()
+                if lastReindexChunkCount == -1 {
+                    // First cycle: establish baseline. No retrain.
+                    lastReindexChunkCount = liveCount
+                } else if liveCount - lastReindexChunkCount >= reindexGrowthThreshold {
+                    // Growth threshold crossed — retrain the basis so dense recall
+                    // vocabulary stays current with ingested content.
+                    Intellectus.report(.metric(
+                        name: "neuronkit.dream.auto_reindex",
+                        value: Double(liveCount - lastReindexChunkCount),
+                        tags: [
+                            "cycle": "\(cycleCount)",
+                            "live_chunks": "\(liveCount)",
+                            "since_last_reindex": "\(liveCount - lastReindexChunkCount)",
+                            "threshold": "\(reindexGrowthThreshold)",
+                        ],
+                        ts: now.timeIntervalSince1970
+                    ))
+                    try await probe.reindex(now: now)
+                    // Advance baseline to the count at retrain time so the next
+                    // window measures growth from this retrain, not the original.
+                    lastReindexChunkCount = liveCount
+                }
+            } catch {
+                // Reindex failure (storage error, stale handle, etc.) is non-fatal.
+                // Log at error level so operators can investigate, but the cycle
+                // continues — a stale basis degrades recall, it does not break the
+                // daemon's proposal and diary functions.
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.auto_reindex_error",
+                    value: 1.0,
+                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            }
+        }
 
         // ── Bandit reward observation and re-selection (NEURONKIT_SPEC § 3.4) ─
         // Reward is the mean recall-trace reward this cycle: high when callers
