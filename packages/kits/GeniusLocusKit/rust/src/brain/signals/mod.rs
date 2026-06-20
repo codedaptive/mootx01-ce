@@ -1,6 +1,8 @@
 // brain/signals/mod.rs — Rust mirror of the standing signals.
 //
-// Mission GLK-05 (six v1 signals) + DG2 (DistillationSignal, signal 8).
+// Mission GLK-05 (six v1 signals) + DG2 (DistillationSignal, signal 8)
+// + ADR-017 F1 (TemporalCausalitySignal signal 7, TrainingSignal signal 9).
+//
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The
 // conformance gate in `tests/standing_signals_parity.rs` feeds shared
@@ -21,6 +23,8 @@ pub mod distillation;
 pub mod dreaming;
 pub mod end_of_day_tournament;
 pub mod maintenance;
+pub mod temporal_causality;
+pub mod training;
 pub mod vector_similarity;
 
 pub use by_reference_validity::ByReferenceValiditySignal;
@@ -30,4 +34,6 @@ pub use distillation::DistillationSignal;
 pub use dreaming::DreamingSignal;
 pub use end_of_day_tournament::EndOfDayTournamentSignal;
 pub use maintenance::MaintenanceSignal;
+pub use temporal_causality::TemporalCausalitySignal;
+pub use training::TrainingSignal;
 pub use vector_similarity::VectorSimilaritySignal;

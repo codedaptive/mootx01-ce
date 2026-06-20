@@ -7,8 +7,8 @@ import PersistenceKitInMemory
 import SubstrateTypes
 @testable import GeniusLocusKit
 
-/// Firing tests for the eight default standing signals — architecture
-/// spec §11.2 / mission GLK-05.
+/// Firing tests for the nine default standing signals — architecture
+/// spec §11.2 / mission GLK-05 + ADR-017 F1 (TrainingSignal).
 ///
 /// Every test follows the same template:
 ///
@@ -311,21 +311,104 @@ struct StandingSignalsTests {
         #expect(report.recentDiagnostics.first?.title == "tournament.end_of_day.summary")
     }
 
+    // MARK: - Training signal
+
+    /// Assert that the training signal is in the default name set (ADR-017 F1)
+    /// and that a tick invokes TrainingDaemon.runOnce. The daemon is configured
+    /// with a zero threshold so the gate is always open; the test verifies the
+    /// pipeline ran (liveRowCount > 0 after a capture log) even though the
+    /// signal was fired through the scheduler rather than called directly.
+    @Test
+    func trainingSignalFiresTrainingDaemonRunOnce() async throws {
+        let (kit, handle) = try await openOneEstate()
+
+        // Assert the signal name is in the canonical default set so the test
+        // would fail if the signal were ever removed from the registry.
+        #expect(GeniusLocusKit.defaultStandingSignalNames.contains(TrainingSignal.signalName),
+            "TrainingSignal must be in the default standing signal names (ADR-017 F1)")
+
+        // Set up mutable boxes — the spec closure must be @Sendable so it
+        // captures reference-typed boxes, not inout bindings.
+        let logBox = TrainingSignalAuditLogBox(
+            log: makeCaptureDaemonLog(count: 12))
+        let tierBox = TrainingSignalMatrixTierBox()
+        let calibrationBox = TrainingSignalCalibrationBox()
+        let daemon = TrainingDaemon(
+            gate: TrainingThresholdGate(transitionThreshold: 0))
+
+        // Build a live spec that invokes runOnce on each tick. The detail
+        // string encodes the tick outcome for diagnostic observability.
+        let spec = TrainingSignal.spec { now in
+            let tick = await daemon.runOnce(
+                log: logBox.read(),
+                tier: &tierBox.value,
+                calibration: &calibrationBox.value)
+            return "active=\(tick.decision.isActive) " +
+                   "transitions=\(tick.decision.transitionCount) " +
+                   "considered=\(tick.passResult.transitionsConsidered)"
+        }
+
+        // Register the signal and tick past its hourly cadence.
+        let id = try await kit.registerStandingSignal(spec, in: handle, now: t0)
+        try await kit.signalTick(
+            in: handle,
+            now: firstFireTime(after: TrainingSignal.defaultCadenceSeconds))
+
+        // The signal should have fired exactly once and emitted one diagnostic.
+        let reports = try await kit.signalStatus(in: handle)
+        let report = try #require(
+            reports.first(where: { $0.signalID == id }),
+            "training-daemon signal must appear in the signal status report")
+        #expect(report.name == TrainingSignal.signalName)
+        #expect(report.emissionCount == 1,
+            "training signal emits one diagnostic per tick regardless of gate state")
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "training-daemon.tick",
+            "live spec emits training-daemon.tick title on every fire")
+
+        // The daemon's gate was zero-threshold, so the pipeline ran and the
+        // matrix tier has data. This is the primary correctness assertion:
+        // runOnce was invoked, not no-op'd.
+        #expect(tierBox.value.liveRowCount == 12,
+            "training daemon must enrich when gate is open (threshold=0, 12 captures)")
+    }
+
+    /// Synthesise a capture audit log for training signal tests.
+    private func makeCaptureDaemonLog(count n: Int) -> UnifiedAuditLog {
+        var log = UnifiedAuditLog()
+        for i in 0..<n {
+            let hlc = HLC(
+                physicalTime: 1_000 + Int64(i),
+                logicalCount: 0, nodeID: 1)
+            let entry = UnifiedAuditEntry(
+                tier: .locus, hlc: hlc,
+                verb: .capture,
+                rowID: UUID(),
+                fieldPath: "tag_bits",
+                beforeValue: .null,
+                afterValue: .bitmap(UInt64(1) << (i % 8)))
+            log.add(entry)
+        }
+        return log
+    }
+
     // MARK: - Registration helper
 
     @Test
-    func registerDefaultStandingSignalsRegistersAllEight() async throws {
+    func registerDefaultStandingSignalsRegistersAllNine() async throws {
         let (kit, handle) = try await openOneEstate()
         let emptyStore = try await makeEmptyVectorStore()
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        #expect(registered.count == 8, "all eight v1 signals register")
+        // ADR-017 F1 added TrainingSignal as signal 9. Any future addition
+        // must update this count and extend defaultStandingSignalNames.
+        #expect(registered.count == 9, "all nine v1 signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 8)
+        #expect(reports.count == 9)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
@@ -363,6 +446,10 @@ struct StandingSignalsTests {
         // architecture spec §11.2, signal 8.
         #expect(DistillationSignal.defaultCadenceSeconds == 3_600,
             "distillation sweep runs hourly per architecture spec §11.2")
+        // Added 2026-06-20 (ADR-017 F1): training-daemon signal runs hourly
+        // matching the distillation-sweep and temporal-causality-fold rhythm.
+        #expect(TrainingSignal.defaultCadenceSeconds == 3_600,
+            "training-daemon signal runs hourly per ADR-017 F1")
     }
 
     // MARK: - T-population end-to-end
@@ -448,4 +535,28 @@ struct StandingSignalsTests {
         #expect(decodedOld.temporalWatermarkHLC == HLC.zero,
             "missing temporalWatermarkHLC key must decode to .zero (backward compat)")
     }
+}
+
+// MARK: - Training signal test scaffolding
+
+/// Mutable box around an audit log for the training signal test. The
+/// spec closure (which is @Sendable) captures the box by reference so
+/// it can observe log changes across ticks without an inout binding.
+private final class TrainingSignalAuditLogBox: @unchecked Sendable {
+    private var current: UnifiedAuditLog
+    init(log: UnifiedAuditLog) { self.current = log }
+    func read() -> UnifiedAuditLog { current }
+}
+
+/// Mutable box around a `MatrixTier` for the training signal test.
+/// The `&tierBox.value` syntax in the closure requires a settable
+/// stored property; `inout` is not legal across a class boundary.
+private final class TrainingSignalMatrixTierBox: @unchecked Sendable {
+    var value: MatrixTier = MatrixTier()
+}
+
+/// Mutable box around a `MatrixCalibrationRegistry` for the training
+/// signal test. Same pattern as `TrainingSignalMatrixTierBox`.
+private final class TrainingSignalCalibrationBox: @unchecked Sendable {
+    var value: MatrixCalibrationRegistry = MatrixCalibrationRegistry()
 }
