@@ -99,7 +99,7 @@ pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
     DecaySweepSignal, DistillationSignal, DreamingSignal, EndOfDayTournamentSignal,
-    MaintenanceSignal, VectorSimilaritySignal,
+    MaintenanceSignal, TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
 pub use migration::{ExternalCorpus, ExternalEntry};
 // Dual-Path Intake (G7) public surface: the write mode and the encode-job

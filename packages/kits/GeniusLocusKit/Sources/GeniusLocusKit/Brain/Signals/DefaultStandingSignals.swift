@@ -2,11 +2,11 @@ import Foundation
 import LocusKit
 import VectorKit
 
-/// Registration helper for the eight v1 standing signals — architecture
+/// Registration helper for the nine v1 standing signals — architecture
 /// spec §11.2.
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// eight default signal specs against the addressed estate's scheduler
+/// nine default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -25,9 +25,17 @@ import VectorKit
 /// Signal 8 (DistillationSignal) was wired in DG5. Production callers
 /// supply a `distillationCycle` closure that runs the per-item
 /// distillation sweep and returns the count of factoids produced.
+///
+/// Signal 9 (TrainingSignal) was wired per ADR-017 F1. Production
+/// callers supply a `trainingCycle` closure that invokes
+/// `TrainingDaemon.runOnce` against the estate's audit log, matrix
+/// tier, and calibration registry. The daemon's own threshold gate
+/// (DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21) handles the
+/// dormant/active decision; the signal fires the daemon unconditionally
+/// and the gate short-circuits below the threshold.
 public extension GeniusLocusKit {
 
-    /// Names of the eight v1 standing signals, in the order they are
+    /// Names of the nine v1 standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -41,6 +49,7 @@ public extension GeniusLocusKit {
             EndOfDayTournamentSignal.signalName,
             TemporalCausalitySignal.signalName,
             DistillationSignal.signalName,
+            TrainingSignal.signalName,
         ]
     }
 
@@ -65,6 +74,14 @@ public extension GeniusLocusKit {
     ///     the estate handle and a NeuronKit-backed `distillFn` closure here.
     ///     Defaults to a no-op that returns zero factoids — correct for
     ///     test registration where no live distillation engine is available.
+    ///   - trainingCycle: async closure forwarded to
+    ///     `TrainingSignal.spec(trainingCycle:)`. The caller wraps
+    ///     `TrainingDaemon.runOnce` with the estate's audit log, matrix
+    ///     tier, and calibration registry here. The daemon's threshold
+    ///     gate decides whether to enrich on each invocation; below the
+    ///     threshold the daemon is dormant and no matrix work runs.
+    ///     Defaults to a no-op that returns an empty detail string —
+    ///     correct for test registration where no live daemon is available.
     ///   - modelID: the embedding model whose stored vectors are scanned
     ///     by the vector-similarity signal. Default `"minilm-v6"`.
     ///   - now: the deterministic clock — flowed through to the
@@ -79,6 +96,7 @@ public extension GeniusLocusKit {
         vectorStore: VectorStore,
         dreamingCycle: @escaping @Sendable (Date) async throws -> [ProposeFrame] = { _ in [] },
         distillationCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
+        trainingCycle: @escaping @Sendable (Date) async throws -> String = { _ in "" },
         modelID: String = "minilm-v6",
         now: Date
     ) async throws -> [String: SignalID] {
@@ -102,6 +120,14 @@ public extension GeniusLocusKit {
             // a closure that runs the per-item distillation sweep; the default
             // no-op (returns 0) is appropriate for tests without a live sweep engine.
             DistillationSignal.spec(distillationCycle: distillationCycle),
+            // TrainingSignal wired with the injected trainingCycle closure per
+            // ADR-017 F1. The caller wraps TrainingDaemon.runOnce against the
+            // estate's audit log, matrix tier, and calibration registry. The
+            // daemon's threshold gate (DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21)
+            // decides whether to actually enrich on each hourly fire; the signal
+            // invokes runOnce unconditionally. The default no-op is appropriate
+            // for tests without a live daemon instance.
+            TrainingSignal.spec(trainingCycle: trainingCycle),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {

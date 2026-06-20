@@ -1,23 +1,26 @@
 // standing_signals_parity.rs — conformance gate for the Rust mirror
-// of the six v1 standing signals (GLK-05 / GLK_RAG_WIRING_001).
+// of the nine v1 standing signals (GLK-05 + ADR-017 F1).
 //
 // Mirrors `StandingSignalsTests.swift`. The gate asserts:
 //
 // 1. Each signal's stable name and cadence match the Swift reference.
 // 2. Each signal's spec produces the expected emission classes when
 //    fired through a `SerialLaneScheduler` instance.
-// 3. The default-set helper registers all six in the canonical order.
+// 3. The default-set helper registers all nine in the canonical order.
 // 4. VectorSimilaritySignal with an empty VectorStore emits only the
 //    scan-summary diagnostic (zero associate emissions) — parity with
 //    the Swift empty-store test.
+// 5. TrainingSignal fires TrainingDaemon::run_once and emits exactly
+//    one diagnostic per tick regardless of gate state (ADR-017 F1).
 
 use std::sync::Arc;
 
 use genius_locus_kit::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
-    DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
-    SchedulerNoopDispatcher, SchedulerSignalRouteOutcome as SignalRouteOutcome,
-    SchedulerSignalTrigger as SignalTrigger, SerialLaneScheduler, VectorSimilaritySignal,
+    DecaySweepSignal, DistillationSignal, DreamingSignal, EndOfDayTournamentSignal,
+    MaintenanceSignal, SchedulerNoopDispatcher, SchedulerSignalRouteOutcome as SignalRouteOutcome,
+    SchedulerSignalTrigger as SignalTrigger, SerialLaneScheduler, TemporalCausalitySignal,
+    TrainingSignal, VectorSimilaritySignal,
 };
 use persistence_kit::inmemory::InMemoryStorage;
 use vectorkit::VectorStore;
@@ -69,10 +72,31 @@ fn default_signal_names_and_cadences_match_swift_reference() {
         "end-of-day-tournament"
     );
     assert_eq!(EndOfDayTournamentSignal::DEFAULT_CADENCE_SECONDS, 86_400);
+
+    // Signal 7 — added 2026-06-20 per ADR-017 F1 (mirrors DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04).
+    assert_eq!(
+        TemporalCausalitySignal::SIGNAL_NAME,
+        "temporal-causality-fold"
+    );
+    assert_eq!(TemporalCausalitySignal::DEFAULT_CADENCE_SECONDS, 3_600,
+        "temporal-causality-fold runs hourly per design-council 2026-06-04 decision");
+
+    // Signal 8 — added 2026-06-20 per ADR-017 F1.
+    assert_eq!(DistillationSignal::SIGNAL_NAME, "distillation-sweep");
+    assert_eq!(DistillationSignal::DEFAULT_CADENCE_SECONDS, 3_600,
+        "distillation sweep runs hourly per architecture spec §11.2");
+
+    // Signal 9 — wired per ADR-017 F1 (training daemon was an orphan before).
+    assert_eq!(TrainingSignal::SIGNAL_NAME, "training-daemon");
+    assert_eq!(TrainingSignal::DEFAULT_CADENCE_SECONDS, 3_600,
+        "training-daemon runs hourly matching distillation and temporal-causality rhythm");
 }
 
 #[test]
 fn default_standing_signal_names_helper_returns_canonical_order() {
+    // ADR-017 F1 added signals 7–9: TemporalCausalitySignal, DistillationSignal,
+    // TrainingSignal. Any future addition must update this assertion and
+    // extend default_standing_signal_names() in default_set.rs.
     let names = default_standing_signal_names();
     assert_eq!(
         names,
@@ -83,15 +107,19 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
             "decay-sweep",
             "by-reference-validity",
             "end-of-day-tournament",
+            "temporal-causality-fold",
+            "distillation-sweep",
+            "training-daemon",
         ]
     );
 }
 
 #[test]
-fn default_standing_signal_specs_returns_six_specs_with_interval_triggers() {
+fn default_standing_signal_specs_returns_nine_specs_with_interval_triggers() {
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(store, "test-model");
-    assert_eq!(specs.len(), 6);
+    // ADR-017 F1 added signals 7–9; any future addition must update this count.
+    assert_eq!(specs.len(), 9);
     for spec in &specs {
         match spec.trigger {
             SignalTrigger::Interval { .. } => {}
@@ -287,14 +315,15 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 }
 
 #[test]
-fn registering_all_six_default_specs_produces_six_reports() {
+fn registering_all_nine_default_specs_produces_nine_reports() {
+    // ADR-017 F1: nine signals now. Any future addition must update this count.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
     for spec in default_standing_signal_specs(store, "test-model") {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();
-    assert_eq!(reports.len(), 6);
+    assert_eq!(reports.len(), 9);
     let mut names: Vec<String> = reports.iter().map(|r| r.name.clone()).collect();
     names.sort();
     let mut expected: Vec<String> = default_standing_signal_names()
@@ -307,4 +336,124 @@ fn registering_all_six_default_specs_produces_six_reports() {
         assert_eq!(r.trigger_tag, "interval");
         assert_eq!(r.emission_count, 0);
     }
+}
+
+// ─── ADR-017 F1: TrainingSignal parity tests ─────────────────────────────────
+
+/// Parity with Swift's `trainingSignalFiresTrainingDaemonRunOnce`.
+/// The training signal's live spec must invoke `TrainingDaemon::run_once`
+/// on each fire and emit exactly one diagnostic per tick regardless of
+/// the gate state (dormant or active).
+#[test]
+fn training_signal_fires_training_daemon_run_once() {
+    use genius_locus_kit::audit::{AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
+    use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
+    use genius_locus_kit::training::{TrainingDaemon, TrainingThresholdGate};
+    use std::sync::Mutex;
+    use substrate_types::hlc::HLC;
+
+    // Build a 12-entry capture log so the pipeline has work to do.
+    let mut log = UnifiedAuditLog::new();
+    for i in 0usize..12 {
+        let mut bytes = [0u8; 16];
+        bytes[0] = (i & 0xFF) as u8;
+        log.add(UnifiedAuditEntry::new(
+            AuditTier::Locus,
+            HLC::new(1_000 + i as i64, 0, 1),
+            UnifiedAuditVerb::Capture,
+            EntryUUID(bytes),
+            "tag_bits".to_string(),
+            UnifiedAuditValue::Null,
+            UnifiedAuditValue::Bitmap(1u64 << (i % 8)),
+            None,
+        ));
+    }
+
+    // Shared mutable state wrapped in Mutex for the Fn closure.
+    // Zero threshold so the gate is always open and the pipeline runs.
+    let daemon = Arc::new(Mutex::new(
+        TrainingDaemon::new(TrainingThresholdGate::new(0))
+    ));
+    let tier = Arc::new(Mutex::new(MatrixTier::new()));
+    let calibration = Arc::new(Mutex::new(MatrixCalibrationRegistry::default()));
+    let audit_log = Arc::new(log);
+
+    let daemon_c = daemon.clone();
+    let tier_c = tier.clone();
+    let calibration_c = calibration.clone();
+    let log_c = audit_log.clone();
+
+    let spec = TrainingSignal::spec(Arc::new(move || {
+        let mut d = daemon_c.lock().unwrap();
+        let mut t = tier_c.lock().unwrap();
+        let mut cal = calibration_c.lock().unwrap();
+        let tick = d.run_once(&log_c, &mut t, &mut cal);
+        Ok(format!(
+            "active={} transitions={} considered={}",
+            tick.decision.is_active(),
+            tick.decision.transition_count(),
+            tick.pass_result.transitions_considered
+        ))
+    }));
+
+    let cadence = TrainingSignal::DEFAULT_CADENCE_SECONDS;
+    let mut scheduler = make_scheduler();
+    let id = scheduler.register(spec, T0_NANOS);
+    scheduler.tick(first_fire_nanos(cadence));
+
+    let report = scheduler
+        .report()
+        .into_iter()
+        .find(|r| r.signal_id == id)
+        .expect("training-daemon signal must appear in the report");
+
+    assert_eq!(report.name, "training-daemon");
+    assert_eq!(
+        report.emission_count, 1,
+        "training signal emits one diagnostic per tick regardless of gate state"
+    );
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "training-daemon.tick",
+        "live spec must emit training-daemon.tick title on every fire"
+    );
+
+    // Gate was zero-threshold → pipeline ran. Primary correctness assertion:
+    // run_once was invoked, not no-op'd.
+    let live_row_count = tier.lock().unwrap().live_row_count;
+    assert_eq!(
+        live_row_count, 12,
+        "training daemon must enrich when gate is open (threshold=0, 12 captures)"
+    );
+}
+
+/// Parity with Swift's `TrainingSignal.defaultSpec()` diagnostic emission.
+/// The no-op spec fires a "training-daemon.fired" diagnostic on each tick.
+#[test]
+fn training_signal_default_spec_emits_fired_diagnostic() {
+    let spec = TrainingSignal::default_spec();
+    let report = fire(spec);
+    assert_eq!(report.name, "training-daemon");
+    assert_eq!(report.emission_count, 1,
+        "default spec emits one diagnostic per tick");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "training-daemon.fired",
+        "no-op spec must emit training-daemon.fired title"
+    );
+}
+
+/// Parity with the TemporalCausalitySignal diagnostic-only default spec.
+#[test]
+fn temporal_causality_signal_default_spec_emits_fired_diagnostic() {
+    let spec = TemporalCausalitySignal::default_spec();
+    let report = fire(spec);
+    assert_eq!(report.name, "temporal-causality-fold");
+    assert_eq!(report.emission_count, 1,
+        "default spec emits one diagnostic per tick");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "temporal-causality-fold.fired",
+        "no-op spec must emit temporal-causality-fold.fired title"
+    );
 }

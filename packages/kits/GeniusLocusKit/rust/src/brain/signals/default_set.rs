@@ -1,26 +1,41 @@
-// brain/signals/default_set.rs — registration helper for the six v1
+// brain/signals/default_set.rs — registration helper for the nine v1
 // standing signals. Mirrors `DefaultStandingSignals.swift`.
 //
-// The VectorSimilaritySignal spec is now parameterized on a VectorStore
-// (to query real row embeddings on each fire). All other five signals
-// remain parameter-free. The Rust port returns the specs as a Vec; the
-// conformance gate inspects the names and cadences against the Swift
-// reference. There is no `GeniusLocusKit` actor in the Rust scaffold, so
-// the helper hands the specs to the caller (the conformance test) which
-// then registers them against a `SerialLaneScheduler` instance directly.
+// Signal history:
+//   Signals 1–6  GLK-05: original six v1 signals.
+//   Signal 7     ADR-017 F1 / 2026-06-20: TemporalCausalitySignal (hourly
+//                T-population fold per DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04).
+//   Signal 8     DG2 / 2026-06-19: DistillationSignal (hourly distillation sweep).
+//   Signal 9     ADR-017 F1 / 2026-06-20: TrainingSignal (hourly training daemon,
+//                previously orphaned — zero production callers before this wire).
+//
+// The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
+// real row embeddings on each fire). Signals 7–9 use their `default_spec()`
+// no-op variants here because the helper cannot supply estate-specific context
+// (audit log, mutable MatrixTier, daemon instance) without breaking its
+// generic signature. Production callers that want live closures register the
+// signals individually via `SerialLaneScheduler::register` with the
+// appropriate `spec(…)` factory.
+//
+// The Rust port returns the specs as a Vec; the conformance gate inspects the
+// names and cadences against the Swift reference. There is no `GeniusLocusKit`
+// actor in the Rust scaffold, so the helper hands the specs to the caller
+// (the conformance test) which then registers them against a
+// `SerialLaneScheduler` instance directly.
 
 use std::sync::Arc;
 use vectorkit::VectorStore;
 
 use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
-    ByReferenceValiditySignal, DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal,
-    MaintenanceSignal, VectorSimilaritySignal,
+    ByReferenceValiditySignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
+    EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal, TrainingSignal,
+    VectorSimilaritySignal,
 };
 
-/// Stable names of the six v1 standing signals, in registration
+/// Stable names of the nine v1 standing signals, in registration
 /// order. Mirrors Swift's `GeniusLocusKit.defaultStandingSignalNames`.
-pub fn default_standing_signal_names() -> [&'static str; 6] {
+pub fn default_standing_signal_names() -> [&'static str; 9] {
     [
         DreamingSignal::SIGNAL_NAME,
         MaintenanceSignal::SIGNAL_NAME,
@@ -28,6 +43,9 @@ pub fn default_standing_signal_names() -> [&'static str; 6] {
         DecaySweepSignal::SIGNAL_NAME,
         ByReferenceValiditySignal::SIGNAL_NAME,
         EndOfDayTournamentSignal::SIGNAL_NAME,
+        TemporalCausalitySignal::SIGNAL_NAME,
+        DistillationSignal::SIGNAL_NAME,
+        TrainingSignal::SIGNAL_NAME,
     ]
 }
 
@@ -36,6 +54,13 @@ pub fn default_standing_signal_names() -> [&'static str; 6] {
 /// `vector_store` and `model_id` are forwarded to
 /// `VectorSimilaritySignal::spec` so the signal can query real row
 /// embeddings on each five-minute fire.
+///
+/// Signals 7–9 (TemporalCausalitySignal, DistillationSignal,
+/// TrainingSignal) use their `default_spec()` no-op variants because
+/// this helper cannot supply estate-specific closures (fold cycle,
+/// distillation cycle, training daemon) without breaking its generic
+/// signature. Production callers wire live closures via the individual
+/// `spec(…)` factories.
 ///
 /// Each call mints new `Arc<dyn Fn>` closures so the conformance gate
 /// can register them against multiple scheduler instances independently.
@@ -56,5 +81,23 @@ pub fn default_standing_signal_specs(
         DecaySweepSignal::default_spec(),
         ByReferenceValiditySignal::default_spec(),
         EndOfDayTournamentSignal::default_spec(),
+        // Signal 7: TemporalCausalitySignal registered with its diagnostic
+        // no-op spec. Production callers wire a live fold closure via
+        // TemporalCausalitySignal::spec(fold_cycle) to run the hourly
+        // T-population pass against the estate's MatrixTier and audit log.
+        TemporalCausalitySignal::default_spec(),
+        // Signal 8: DistillationSignal registered with its diagnostic no-op
+        // spec. Production callers wire a live distillation_cycle closure via
+        // DistillationSignal::spec(distillation_cycle) to run the per-item
+        // distillation sweep on each hourly fire.
+        DistillationSignal::default_spec(),
+        // Signal 9: TrainingSignal registered with its diagnostic no-op spec
+        // per ADR-017 F1. Production callers wire a live training_cycle closure
+        // via TrainingSignal::spec(training_cycle) to invoke
+        // TrainingDaemon::run_once against the estate's audit log, matrix tier,
+        // and calibration registry. The daemon's threshold gate handles the
+        // dormant/active decision; below the threshold the gate short-circuits
+        // and no matrix work occurs.
+        TrainingSignal::default_spec(),
     ]
 }
