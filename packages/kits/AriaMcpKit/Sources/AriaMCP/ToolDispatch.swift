@@ -849,11 +849,13 @@ extension ToolDispatcher {
 
 // MARK: - InterfaceTools
 
-/// Static dispatch table for the five-tier AI-client interface tools.
+/// Static dispatch table for the five-tier AI-client interface tools plus the
+/// Maintenance tier.
 ///
-/// Each of the 19 interface tools has a named `run*` function on
-/// `ToolDispatcher`; this type routes from name to function, isolating
-/// the dispatch logic from the tool-name string constants.
+/// Each of the 19 Tier 1–5 interface tools plus 1 Maintenance tool (20 total)
+/// has a named `run*` function on `ToolDispatcher`; this type routes from name
+/// to function, isolating the dispatch logic from the tool-name string
+/// constants. Mirrors the Rust `INTERFACE_TOOLS` constant in `interface_tools.rs`.
 enum InterfaceTools {
 
     private static let names: Set<String> = [
@@ -870,6 +872,8 @@ enum InterfaceTools {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        // Maintenance / admin
+        "moot_reindex",
     ]
 
     static func isInterfaceTool(_ name: String) -> Bool {

@@ -113,7 +113,8 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_reindex",
 ];
 
-/// True when `name` is one of the 19 Tier 1–5 interface tools.
+/// True when `name` is one of the 19 Tier 1–5 interface tools or the 1
+/// Maintenance tool (`moot_reindex`). Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
 }
