@@ -12,6 +12,18 @@ name = "genius_locus_kit"
 path = "src/lib.rs"
 
 [dependencies]
+# R10 (2026-06-20): EideticLib provides the canonical cross-leg sentence
+# segmenter (eidetic_lib::segmenter::sentences). The distill_items_sweep
+# in coordinator.rs previously used an ad-hoc split(". ") approximation;
+# replacing it with the real segmenter aligns Rust intra-item distillation
+# eligibility with Swift's EideticLib.sentencesByDelimiter path, fixing
+# the parity gap where identical content produced 0 factoids on Rust but 1
+# on Swift. Layering: genius-locus-kit (composition) → eidetic-lib
+# (sentence utility lib) does NOT invert — eidetic-lib has no dependency
+# on GeniusLocusKit. eidetic-lib already depends on lattice-lib, which
+# GLK also depends on, so this adds no new transitive external crate.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 # F18.3 (2026-05-27): GLK now depends on SubstrateLib so the unified
 # audit log can consume the canonical SHA-256 content-hash and HLC
 # rather than hold byte-compatible local mirrors. The GLK-01/03 missions

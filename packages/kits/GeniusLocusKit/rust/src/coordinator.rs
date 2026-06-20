@@ -1325,15 +1325,19 @@ impl EstateCoordinator {
             if drawer.room == DISTILLED_ROOM { continue; }
             if already_distilled.contains(&drawer.id) { continue; }
 
-            // Simple sentence segmentation: split on ". " boundaries.
-            // This mirrors Swift's EideticLib.sentences() at the functional level
-            // (exact segmenter is unavailable in Rust; period-space split is the
-            // structural approximation used across the Rust distillation surface).
-            let sentences: Vec<String> = drawer.content
-                .split(". ")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            // Sentence segmentation via the canonical cross-leg delimiter
+            // algorithm (eidetic_lib::segmenter::sentences). This is the Rust
+            // counterpart of Swift's EideticLib.sentencesByDelimiter(_:): splits
+            // on `.`, `!`, `?`, and `\n`, preserving the terminator at the end of
+            // each segment and guaranteeing total coverage (segments concatenate
+            // back to the original input with no gaps).
+            //
+            // Previously this used a hand-rolled `split(". ")` approximation
+            // which produced wrong sentence counts for inputs that end with a
+            // bare period (no trailing space) or use `!`/`?`/`\n` as sentence
+            // terminators — causing identical content to yield 0 factoids on Rust
+            // while Swift produced 1 (parity gap fixed by R10, 2026-06-20).
+            let sentences: Vec<String> = eidetic_lib::segmenter::sentences(&drawer.content);
 
             if !item_is_distillable(sentences.len()) {
                 continue;

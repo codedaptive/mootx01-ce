@@ -179,6 +179,35 @@ mod tests {
         assert_eq!(rejoined, text);
     }
 
+    // ── Distillation eligibility (R10, 2026-06-20) ──────────────────────
+
+    /// The R10 parity probe text: the exact content used in the head-to-head
+    /// live test that revealed the Rust/Swift distillation divergence (Swift
+    /// produced 1 factoid, Rust produced 0 factoids). The delimiter segmenter
+    /// must yield ≥3 segments so the item meets `MIN_INTRA_ITEM_UNITS` = 3
+    /// and is considered eligible for intra-item distillation.
+    ///
+    /// Mirrors the distillation eligibility assertion on the Swift path:
+    /// `guard sentences.count >= 3` in `GeniusLocusKit.distillItem`.
+    #[test]
+    fn r10_probe_text_yields_at_least_three_segments_for_distillation_eligibility() {
+        let probe = "Head to head parity probe: the same content filed on both \
+the Swift and Rust servers to diff capture, recall, distillation, and lens \
+output byte for byte. Distillation needs several sentences. This memory has \
+enough sentences to distill. The ports should agree.";
+        let segs = sentences(probe);
+        // Total coverage invariant
+        let rejoined: String = segs.join("");
+        assert_eq!(rejoined, probe, "total-coverage invariant must hold on probe text");
+        // Distillation eligibility: ≥3 segments
+        assert!(
+            segs.len() >= 3,
+            "R10 probe text must segment into ≥3 units for distillation eligibility \
+             (got {}) — parity gate that caused Swift=1 factoid, Rust=0 factoid",
+            segs.len()
+        );
+    }
+
     // ── UTF-8 multibyte correctness ──────────────────────────────────
 
     /// Not in Swift tests (Swift Substring slicing is char-safe), but
