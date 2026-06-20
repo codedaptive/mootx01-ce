@@ -637,15 +637,18 @@ pub fn dispatch(
             let out = run_apriori_rules(&coord, &estate.handle, thresholds).map_err(lens_error)?;
             let mut lines = vec![format!("apriori_rules: {} rule(s)", out.rules.len())];
             for rule in &out.rules {
-                // Item has no Display impl; render as field:value to mirror
-                // the packed key structure for human readability.
+                // Render each Item as "Item(field: F, value: V)" to mirror Swift's
+                // default struct interpolation "\($0)" on AprioriRule.antecedent
+                // (Swift Item has no custom description; the compiler synthesises
+                // "Item(field: F, value: V)"). This matches the Swift live-drive output
+                // that reads the audit log: e.g. "[Item(field: 1, value: 145)] → Item(field: 2, value: 0)".
                 let ant = rule
                     .antecedent
                     .iter()
-                    .map(|i| format!("{}:{}", i.field, i.value))
+                    .map(|i| format!("Item(field: {}, value: {})", i.field, i.value))
                     .collect::<Vec<_>>()
                     .join(" & ");
-                let cons = format!("{}:{}", rule.consequent.field, rule.consequent.value);
+                let cons = format!("Item(field: {}, value: {})", rule.consequent.field, rule.consequent.value);
                 lines.push(format!(
                     "  [{ant}] → {cons}: sup={:.3} conf={:.3} lift={:.3}",
                     rule.support, rule.confidence, rule.lift

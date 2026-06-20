@@ -41,16 +41,16 @@
 //!
 //! ## AprioriRules
 //!
-//! Multi-antecedent association-rule mining over the estate's drawer bitmap
-//! state. Rust port of the Swift `AprioriRules` recipe
-//! (`AssociationRules.swift:205`).
+//! Multi-antecedent association-rule mining over the estate's audit log.
+//! Rust port of the Swift `AprioriRules` recipe (`AssociationRules.swift:205`).
 //!
 //! Delegates entirely to `EstateCoordinator::mine_apriori_rules` which
-//! synthesises `RowAttributeView` rows from each drawer's current bitmap
-//! columns (adjective / operational / provenance) and runs
-//! `SubstrateML::mine_apriori_rules`. No label projection is needed: the
-//! engine works on raw bitmap bit-position `Item` attributes derived from
-//! the `RowAttributeView` factory.
+//! replays the estate's LocusKit audit trail into a `UnifiedAuditLog`,
+//! converts each `UnifiedAuditEntry` to a `RowAuditEntry` (same value
+//! mapping as Swift's `toRowAuditEntry`), builds `RowAttributeView` rows,
+//! and runs `SubstrateML::mine_apriori_rules`. No label projection is
+//! needed: the engine works on `Item` attributes derived from the
+//! `RowAttributeView` factory.
 //!
 //! The recipe's output preserves the engine's `AprioriRule` values verbatim
 //! so callers can inspect all five metrics and the full multi-item antecedent
@@ -199,14 +199,14 @@ pub struct AprioriRulesOutput {
     pub rules: Vec<AprioriRule>,
 }
 
-/// Run the AprioriRules recipe: retrieve the estate's drawers, synthesise
-/// `RowAttributeView` rows from their bitmap columns, and mine multi-
+/// Run the AprioriRules recipe: read the estate's audit log, build
+/// `RowAttributeView` rows from the audit entries, and mine multi-
 /// antecedent association rules via the Apriori algorithm.
 ///
 /// Mirrors Swift `AprioriRules.run(input:estate:kit:)`
-/// (`AssociationRules.swift:235`). Both versions delegate to the shared
-/// Apriori engine in SubstrateML (`mine_apriori_rules` /
-/// `AprioriMining.mine`).
+/// (`AssociationRules.swift:235`). Both ports read the estate audit log
+/// and delegate to the shared Apriori engine in SubstrateML
+/// (`mine_apriori_rules` / `AprioriMining.mine`).
 ///
 /// Capability gate: `AssociationRuleMining` is verified before any estate
 /// touch (spec B-5, I-3).
@@ -222,8 +222,10 @@ pub fn run_apriori_rules(
     )
     .map_err(|e| SubstrateError::new("capability_gate", format!("{e:?}")))?;
 
-    // Delegate to EstateCoordinator::mine_apriori_rules which synthesises
-    // RowAttributeView rows from each drawer's current bitmap state.
+    // Delegate to EstateCoordinator::mine_apriori_rules which replays
+    // the estate's audit log and builds RowAttributeView rows from the
+    // entries, matching the Swift `mineAprioriRules(estate:thresholds:)`
+    // path through `currentAuditLog(in:)`.
     let rules = coord
         .mine_apriori_rules(handle, thresholds)
         .map_err(|e| SubstrateError::new("mine_apriori_rules", format!("{e:?}")))?;

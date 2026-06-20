@@ -3656,6 +3656,74 @@ fn lens_apriori_over_captured_drawers_succeeds() {
     );
 }
 
+// R6 parity: apriori mines the estate AUDIT LOG (not drawer bitmaps)
+// and renders items in the verbose Swift-matching format "Item(field: F, value: V)".
+//
+// When rules are produced the format must match Swift's default struct
+// interpolation of `AprioriRule.antecedent[n]` ("\(item)" → "Item(field: F, value: V)").
+// The old Rust compact format "F:V" must never appear in rules output.
+
+#[test]
+fn lens_apriori_renders_verbose_item_format_matching_swift() {
+    // Capture identical drawers so the audit log has repeating field-value
+    // patterns. With min thresholds at 0 the engine will mine rules from
+    // whatever audit-log items it finds. We only need at least one rule to
+    // assert the rendering format.
+    let registry = EstateRegistry::new_inmemory();
+    for _ in 0..4 {
+        file_one_memory(&registry, "audit log apriori parity fixture", "lab");
+    }
+    let result = dispatch_tool(
+        "moot_lens_apriori",
+        &args!["minSupport" => 0.0, "minConfidence" => 0.0, "minLift" => 0.0, "maxK" => 2],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_lens_apriori must succeed");
+    assert!(is_success(&result), "moot_lens_apriori must be isError:false; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("apriori_rules:"),
+        "result must start with 'apriori_rules:'; got: {text}"
+    );
+
+    // When rules are emitted, each item must use the verbose format that
+    // mirrors Swift's synthesised struct description: "Item(field: N, value: N)".
+    // The old compact format "field:value" (e.g. "1:0") must not appear in any
+    // rule line. Shape-only assertions are safe when 0 rules are returned.
+    for line in text.lines().skip(1) {
+        // Rule lines start with "  [". Skip summary and empty lines.
+        if !line.trim_start().starts_with('[') {
+            continue;
+        }
+        assert!(
+            line.contains("Item(field:"),
+            "each rule must render items as 'Item(field: F, value: V)' to match Swift; got: {line}"
+        );
+    }
+}
+
+#[test]
+fn lens_apriori_description_matches_swift_spec() {
+    // The tool_list description for moot_lens_apriori must state audit log,
+    // not bitmap fingerprints — matching the Swift LensTools description.
+    let tools = build_tool_list();
+    let arr = tools.as_array().expect("build_tool_list must return an array");
+    let apriori_desc = arr
+        .iter()
+        .find(|t| t["name"].as_str() == Some("moot_lens_apriori"))
+        .and_then(|t| t["description"].as_str())
+        .unwrap_or("");
+    assert!(
+        apriori_desc.contains("audit log"),
+        "moot_lens_apriori description must mention 'audit log' (matching Swift spec); got: {apriori_desc}"
+    );
+    assert!(
+        !apriori_desc.contains("bitmap fingerprints"),
+        "moot_lens_apriori description must not mention 'bitmap fingerprints' (old wrong source); got: {apriori_desc}"
+    );
+}
+
 #[test]
 fn lens_moment_over_estate_succeeds() {
     let registry = EstateRegistry::new_inmemory();

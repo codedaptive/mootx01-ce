@@ -719,7 +719,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_divergence" => "Reasoning lens: measure topic divergence between two estates.",
         "moot_lens_associations" => "Analytics lens: mine pairwise association rules from categorical facets.",
         "moot_lens_concepts" => "Analytics lens: mine formal concepts from the categorical feature matrix.",
-        "moot_lens_apriori" => "Analytics lens: mine multi-antecedent Apriori association rules from bitmap fingerprints.",
+        "moot_lens_apriori" => "Read the estate's audit log and mine multi-antecedent association rules via the Apriori algorithm.",
         "moot_lens_moment" => "Temporal lens: measure fingerprint-set similarity across a primary window and optional comparison windows.",
         "moot_lens_rhythm" => "Temporal lens: detect capture-rhythm patterns from fingerprint bit-series data.",
         "moot_lens_precedence" => "Temporal lens: discover temporal precedence (causal ordering) between drawers via audit event lag analysis.",

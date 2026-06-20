@@ -2453,104 +2453,93 @@ impl EstateCoordinator {
     // MARK: - mine_apriori_rules
 
     /// Mine multi-antecedent Apriori association rules from the estate's
-    /// current drawer state.
+    /// audit log.
     ///
     /// Mirrors `mineAprioriRules(estate:thresholds:)` on the Swift
     /// `GeniusLocusKit` actor (`EstateAssociationRuleMining.swift:93`).
     ///
-    /// Implementation note — Rust vs Swift audit-log difference (sanctioned):
+    /// Both ports read the same logical data source: the estate's audit log.
     ///
-    ///   The Swift version reads `currentAuditLog(in:)` (an in-memory
-    ///   `UnifiedAuditLog` maintained by the actor through every verb call)
-    ///   and converts each `UnifiedAuditEntry` to a `RowAuditEntry` for
-    ///   `RowAttributeView::from`. The Rust `EstateCoordinator` does not
-    ///   maintain an equivalent in-memory audit log per estate — it delegates
-    ///   every verb directly to the LocusKit `Estate` layer.
+    ///   Swift: `currentAuditLog(in:)` — an in-memory `UnifiedAuditLog`
+    ///   maintained by the actor through every verb call; snapshotted then
+    ///   converted entry-by-entry via `toRowAuditEntry`.
     ///
-    ///   The Rust port synthesises equivalent `RowAuditEntry` values from
-    ///   each drawer's current bitmap columns (`adjective_bitmap`,
-    ///   `operational_bitmap`, `provenance`): each non-zero bitmap field
-    ///   produces one `RowAuditEntry` with `RowAuditValue::Bitmap(bits)`,
-    ///   using `field_path` strings that match the Swift field-path
-    ///   vocabulary used by the actor's `toRowAuditEntry` helper
-    ///   ("adjective_bitmap" / "operational_bitmap" / "provenance").
-    ///   `RowAttributeView::from()` then decomposes each bitmap into
-    ///   per-bit-position `Item` attributes — identical to what the audit
-    ///   log projection would produce for a drawer captured once with no
-    ///   subsequent mutations. For mutated drawers the synthesised view
-    ///   reflects the current state, matching the last-write-wins projection
-    ///   that `RowAttributeView::from()` applies to audit entries anyway.
+    ///   Rust: `feed_audit_log_from_estate` — replays the LocusKit audit
+    ///   trail (same underlying data) into a fresh `UnifiedAuditLog`, then
+    ///   converts each `UnifiedAuditEntry` to `RowAuditEntry` using the
+    ///   same value-mapping as Swift's `toRowAuditEntry`:
+    ///     - `.Null` → `RowAuditValue::Null` (dropped, no categorical content)
+    ///     - `.Bitmap(v)` → `RowAuditValue::Bitmap(v)`
+    ///     - `.Integer(n)` → `RowAuditValue::Integer(n)`
+    ///     - `.StringValue` → `RowAuditValue::Null` (no canonical 6-bit encoding)
+    ///     - `.Bytes` → `RowAuditValue::Null` (no canonical 6-bit encoding)
     ///
-    /// - `now` — current Unix epoch seconds (used only for the error path; the
-    ///   drawer retrieval is a direct all-drawers snapshot).
+    ///   `RowAttributeView::from` then decomposes each entry into per-field-path
+    ///   `Item` attributes using last-HLC-wins deduplication per (tier, row, field),
+    ///   identical to the Swift path.
+    ///
     /// - Returns rules sorted by lift DESC, confidence DESC, evidence_count DESC.
     pub fn mine_apriori_rules(
         &self,
         handle: &EstateHandle,
         thresholds: substrate_ml::apriori_mining::AprioriThresholds,
     ) -> Result<Vec<substrate_ml::apriori_mining::AprioriRule>, VerbDispatchError> {
+        use crate::audit::UnifiedAuditValue;
         use substrate_ml::row_attribute_view::{RowAuditEntry, RowAuditValue, RowAttributeView};
-        use substrate_types::hlc::HLC;
 
         let estate = self.estate_for_verb(handle)?;
-        let drawers = estate
-            .all_drawers()
-            .map_err(|e| VerbDispatchError::from(remap("all_drawers", "", e)))?;
 
-        if drawers.is_empty() {
+        // Replay the estate's LocusKit audit trail into a UnifiedAuditLog.
+        // Uses the same read-only path as `verify_audit_chain` so this function
+        // can take `&self` rather than `&mut self`. The resulting log contains
+        // the same entries that the Swift actor's in-memory `currentAuditLog`
+        // would return after the same captures.
+        let log = crate::hydration::feed_audit_log_from_estate(estate)
+            .map_err(|e| VerbDispatchError::from(remap("mine_apriori_rules", "", e)))?;
+
+        let ordered = log.ordered_entries();
+
+        if ordered.is_empty() {
             return Ok(vec![]);
         }
 
-        // Build RowAuditEntry values from each drawer's current bitmap state.
-        // Three bitmap columns per drawer; non-zero bitmaps are emitted as
-        // Bitmap entries; zero bitmaps produce Null (no categorical content).
-        //
-        // The field_path strings match the Swift audit-log vocabulary so
-        // cross-version vocabulary indices are consistent
-        // ("adjective_bitmap" / "operational_bitmap" / "provenance").
-        //
-        // A stable but synthetic HLC is constructed from the drawer's index
-        // (monotonically increasing, deterministic). `RowAttributeView::from`
-        // uses HLC only for last-write-wins deduplication within a row — with
-        // exactly one entry per field per row there is no ambiguity and the
-        // HLC value does not affect output.
-        let mut audit_entries: Vec<RowAuditEntry> = Vec::with_capacity(drawers.len() * 3);
-        for (idx, drawer) in drawers.iter().enumerate() {
-            // Parse the drawer id (UUID string) into u128 for RowAuditEntry.
-            let row_id: u128 = uuid::Uuid::parse_str(&drawer.id)
-                .map(|u| u.as_u128())
-                .unwrap_or(idx as u128); // fallback: positional index
+        // Convert each UnifiedAuditEntry to RowAuditEntry using the same
+        // value mapping as Swift's `toRowAuditEntry` helper
+        // (EstateAssociationRuleMining.swift, private extension GeniusLocusKit).
+        // String and Bytes values have no canonical 6-bit Item encoding and
+        // are mapped to Null so RowAttributeView drops them, exactly as Swift.
+        let audit_entries: Vec<RowAuditEntry> = ordered
+            .iter()
+            .map(|entry| {
+                // row_id.0 is a [u8; 16] UUID byte sequence; interpret as u128
+                // big-endian to match UUID canonical order (network byte order).
+                let row_id = u128::from_be_bytes(entry.row_id.0);
 
-            let hlc = HLC::new(idx as i64, 0, 0);
+                let value = match &entry.after_value {
+                    UnifiedAuditValue::Null => RowAuditValue::Null,
+                    UnifiedAuditValue::Bitmap(v) => RowAuditValue::Bitmap(*v),
+                    UnifiedAuditValue::Integer(n) => RowAuditValue::Integer(*n),
+                    // String and Bytes have no canonical 6-bit Item encoding;
+                    // map to Null so RowAttributeView drops the entry.
+                    // Mirrors Swift toRowAuditEntry (EstateAssociationRuleMining.swift).
+                    UnifiedAuditValue::StringValue(_) | UnifiedAuditValue::Bytes(_) => {
+                        RowAuditValue::Null
+                    }
+                };
 
-            let adj = drawer.adjective_bitmap;
-            let op  = drawer.operational_bitmap;
-            let prov = drawer.provenance;
+                RowAuditEntry::new(
+                    row_id,
+                    entry.tier.raw_value(),
+                    &entry.field_path,
+                    entry.hlc,
+                    value,
+                )
+            })
+            .collect();
 
-            audit_entries.push(RowAuditEntry::new(
-                row_id,
-                "locus",
-                "adjective_bitmap",
-                hlc,
-                if adj == 0 { RowAuditValue::Null } else { RowAuditValue::Bitmap(adj as u64) },
-            ));
-            audit_entries.push(RowAuditEntry::new(
-                row_id,
-                "locus",
-                "operational_bitmap",
-                hlc,
-                if op == 0 { RowAuditValue::Null } else { RowAuditValue::Bitmap(op as u64) },
-            ));
-            audit_entries.push(RowAuditEntry::new(
-                row_id,
-                "locus",
-                "provenance",
-                hlc,
-                if prov == 0 { RowAuditValue::Null } else { RowAuditValue::Bitmap(prov as u64) },
-            ));
-        }
-
-        // Build RowAttributeView rows and run the Apriori engine.
+        // Build RowAttributeView rows (last-HLC-wins per (tier, row, field))
+        // and run the Apriori engine. Mirrors Swift's
+        // `let rows = RowAttributeView.from(auditEntries: auditEntries)`.
         let views = RowAttributeView::from(&audit_entries);
         let rows: Vec<Vec<substrate_ml::association_rule_mining::Item>> = views
             .iter()
