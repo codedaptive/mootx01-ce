@@ -955,3 +955,169 @@ fn adr016_all_estate_kinds_seed_default_wings() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T19–T21: Serve-path wing seeding via seed_default_wings (ADR-016 + serve fix)
+//
+// Parity of Swift `ServePathWingSeedingTests` in EstateProvisionLifecycleTests.swift.
+//
+// Background: `mootx01 serve` opens estates via coord.open (not provision).
+// Before this fix, a bare-opened estate had zero wings. The fix adds
+// `seed_default_wings` to EstateCoordinator and calls it from the serve open
+// path. These tests prove the method works and is idempotent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// T19: Serve-style open (coord.open, no provision) + seed_default_wings produces
+/// exactly 7 wings each with one _charter drawer.
+///
+/// Mirrors Swift T19: `serveStyleOpenThenSeedDefaultWingsYieldsSevenWings`.
+#[test]
+fn t19_serve_style_open_seed_default_wings_yields_seven_wings() {
+    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+
+    let mut coord = EstateCoordinator::new();
+    // Bare open — no provision, no wing seeding.
+    let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let handle = coord
+        .open(Arc::clone(&store), OwnerCredentials::new("serve-test"), 0, 100)
+        .expect("bare open must succeed");
+
+    // Before seeding: the bare opened estate must have zero drawers.
+    let estate = coord.estate_for(&handle).expect("estate must be open");
+    let drawers_before = estate.all_drawers().expect("all_drawers must succeed");
+    assert!(
+        drawers_before.is_empty(),
+        "bare open (no provision) must produce zero drawers — wings are absent; got {}",
+        drawers_before.len()
+    );
+
+    // The fix: seed_default_wings seeds the 7 default wings idempotently.
+    coord
+        .seed_default_wings(&handle, NOW)
+        .expect("seed_default_wings must succeed");
+
+    // After seeding: exactly 7 wings each with one _charter drawer.
+    let estate = coord.estate_for(&handle).expect("estate must be open after seeding");
+    let all_drawers = estate.all_drawers().expect("all_drawers must succeed");
+    let charters: Vec<_> = all_drawers.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+
+    let wing_names: std::collections::HashSet<String> = charters.iter().map(|d| d.wing.clone()).collect();
+    let expected: std::collections::HashSet<String> = DEFAULT_WINGS.iter().map(|w| w.name.to_string()).collect();
+    assert_eq!(
+        wing_names, expected,
+        "seed_default_wings must produce exactly the 7 default wing names; got {:?}",
+        wing_names
+    );
+    assert_eq!(
+        charters.len(),
+        DEFAULT_WINGS.len(),
+        "must have exactly one charter drawer per wing; got {}",
+        charters.len()
+    );
+
+    // Each wing has exactly one charter.
+    for wing in DEFAULT_WINGS {
+        let wing_charters: Vec<_> = charters.iter().filter(|d| d.wing == wing.name).collect();
+        assert_eq!(
+            wing_charters.len(), 1,
+            "wing '{}' must have exactly 1 charter after seed_default_wings; got {}",
+            wing.name, wing_charters.len()
+        );
+    }
+}
+
+/// T20: Calling seed_default_wings twice is idempotent — no duplicate charters.
+///
+/// Mirrors Swift T20: `seedDefaultWingsTwiceIsIdempotentNoDuplicateCharters`.
+/// Simulates the serve restart scenario: process exits, estate is re-opened,
+/// seed_default_wings is called again — must be a no-op on the second call.
+#[test]
+fn t20_seed_default_wings_twice_is_idempotent() {
+    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+
+    let mut coord = EstateCoordinator::new();
+    let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let handle = coord
+        .open(Arc::clone(&store), OwnerCredentials::new("serve-test"), 0, 100)
+        .expect("bare open must succeed");
+
+    // First call seeds 7 wings.
+    coord.seed_default_wings(&handle, NOW).expect("first seed_default_wings must succeed");
+
+    // Second call must be a no-op (no additional charters inserted).
+    coord.seed_default_wings(&handle, NOW).expect("second seed_default_wings must succeed");
+
+    let estate = coord.estate_for(&handle).expect("estate must still be open");
+    let all_drawers = estate.all_drawers().expect("all_drawers must succeed");
+    let charters: Vec<_> = all_drawers.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+
+    // Still exactly 7 wing charters — no duplicates from the second call.
+    assert_eq!(
+        charters.len(),
+        DEFAULT_WINGS.len(),
+        "seed_default_wings called twice must not produce duplicate charters; got {}",
+        charters.len()
+    );
+
+    for wing in DEFAULT_WINGS {
+        let wing_charters: Vec<_> = charters.iter().filter(|d| d.wing == wing.name).collect();
+        assert_eq!(
+            wing_charters.len(), 1,
+            "wing '{}' must still have exactly 1 charter after second seed_default_wings; got {}",
+            wing.name, wing_charters.len()
+        );
+    }
+}
+
+/// T21: seed_default_wings on a provisioned estate is a no-op — all 7 wings
+/// already present; no duplicate charters are added.
+///
+/// Mirrors Swift T21: `seedDefaultWingsOnProvisionedEstateIsNoOp`.
+/// Proves that calling seed_default_wings from the serve path on an estate that
+/// was provisioned (and then re-opened by a subsequent serve invocation) is safe.
+#[test]
+fn t21_seed_default_wings_on_provisioned_estate_is_no_op() {
+    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+
+    let mut coord = EstateCoordinator::new();
+    let (store, storage) = make_stores();
+
+    // Provision seeds 7 wings as part of its flow.
+    let handle = coord
+        .provision(
+            store,
+            storage,
+            None,
+            OwnerCredentials::new("serve-test"),
+            glk_params("T21-Provisioned"),
+            vec![EmbeddingModelConfig::Deterministic],
+        )
+        .expect("provision must succeed");
+
+    let estate = coord.estate_for(&handle).expect("estate must be open");
+    let drawers_before = estate.all_drawers().expect("all_drawers must succeed");
+    let charters_before: Vec<_> = drawers_before.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    assert_eq!(
+        charters_before.len(),
+        DEFAULT_WINGS.len(),
+        "provision must have seeded exactly {} charters; got {}",
+        DEFAULT_WINGS.len(), charters_before.len()
+    );
+
+    // Calling seed_default_wings on a fully-seeded estate must be a complete no-op.
+    coord
+        .seed_default_wings(&handle, NOW)
+        .expect("seed_default_wings on provisioned estate must not fail");
+
+    let estate = coord.estate_for(&handle).expect("estate must still be open");
+    let drawers_after = estate.all_drawers().expect("all_drawers must succeed");
+    let charters_after: Vec<_> = drawers_after.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+
+    // Charter count must be unchanged.
+    assert_eq!(
+        charters_after.len(),
+        charters_before.len(),
+        "seed_default_wings on a provisioned estate must add 0 charters; before={}, after={}",
+        charters_before.len(), charters_after.len()
+    );
+}

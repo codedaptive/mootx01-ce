@@ -868,3 +868,143 @@ struct ADR016DefaultWingSeedingTests {
         }
     }
 }
+
+// MARK: - T19–T21: serve-path wing seeding via seedDefaultWings (ADR-016 + serve-wires-corpus fix)
+
+/// Tests proving that the SERVE-STYLE open path (bare Estate.create → kit.open →
+/// kit.seedDefaultWings) produces the same seven wings as the provision path.
+///
+/// Background: `mootx01 serve` opens estates via `Estate.create` + `kit.open` +
+/// `kit.wireGLKSubstores` — it does NOT call `provision`. Before this fix, served
+/// estates had NO wings (verified: `estate_map` on a fresh served estate returned
+/// "estate map:" empty). The fix adds `seedDefaultWings` — a public, idempotent
+/// method on GeniusLocusKit — and calls it from ServeCommand after `wireGLKSubstores`.
+///
+/// T19: Serve-style open + seedDefaultWings yields exactly 7 wings each with a _charter.
+/// T20: Calling seedDefaultWings twice (idempotency) still yields exactly 7 wings.
+/// T21: seedDefaultWings on a provision-created estate is a no-op (still 7 wings, no duplicates).
+@Suite("ADR-016 — Serve-Path Wing Seeding (seedDefaultWings)")
+struct ServePathWingSeedingTests {
+
+    // MARK: - T19: bare open + seedDefaultWings produces 7 wings
+
+    /// A serve-style open (Estate.create → kit.open) followed by seedDefaultWings
+    /// must produce exactly 7 wings, each with one `_charter` drawer.
+    ///
+    /// This is the exact flow that `mootx01 serve` executes after this fix:
+    ///   1. LocusKit.Estate.create (raw create — no provision, no wing seeding)
+    ///   2. kit.open (admits estate to registry, issues handle)
+    ///   3. kit.seedDefaultWings (seeds missing wings idempotently)
+    @Test
+    func serveStyleOpenThenSeedDefaultWingsYieldsSevenWings() async throws {
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+        // Serve-style open: create + open (not provision — this is the gap).
+        _ = try await LocusKit.Estate.create(storage: storage, owner: testOwner)
+        let handle = try await kit.open(storage: storage, owner: testOwner)
+        defer { Task { try? await kit.close(handle) } }
+
+        // Before seeding: the bare opened estate must have NO wing drawers.
+        let estateBefore = try await kit.estate(for: handle)
+        let drawersBefore = try await estateBefore.allDrawers()
+        #expect(drawersBefore.isEmpty,
+            "bare open (no provision) must produce zero drawers — wings are absent")
+
+        // The fix: seedDefaultWings seeds the 7 default wings idempotently.
+        try await kit.seedDefaultWings(for: handle, now: now)
+
+        // After seeding: exactly 7 wings each with one _charter drawer.
+        let estateAfter = try await kit.estate(for: handle)
+        let allDrawers = try await estateAfter.allDrawers()
+        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+
+        let wingNames = Set(charters.map(\.wing))
+        let expectedWings = Set(LocusKit.defaultWings.map(\.name))
+        #expect(wingNames == expectedWings,
+            "seedDefaultWings must produce exactly the 7 default wing names; got \(wingNames)")
+        #expect(charters.count == LocusKit.defaultWings.count,
+            "must have exactly one charter drawer per wing; got \(charters.count)")
+
+        // Verify each wing has exactly one charter.
+        for wing in LocusKit.defaultWings {
+            let wingCharters = charters.filter { $0.wing == wing.name }
+            #expect(wingCharters.count == 1,
+                "wing '\(wing.name)' must have exactly 1 charter after seedDefaultWings; got \(wingCharters.count)")
+        }
+    }
+
+    // MARK: - T20: idempotency — calling seedDefaultWings twice does not duplicate charters
+
+    /// Calling seedDefaultWings twice on the same estate must NOT produce duplicate
+    /// charter drawers. After two calls: still exactly 7 wings, one charter each.
+    ///
+    /// This is the serve restart scenario: process exits, restarts, opens the same
+    /// estate, calls seedDefaultWings again — must be a no-op on the second call.
+    @Test
+    func seedDefaultWingsTwiceIsIdempotentNoDuplicateCharters() async throws {
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+        _ = try await LocusKit.Estate.create(storage: storage, owner: testOwner)
+        let handle = try await kit.open(storage: storage, owner: testOwner)
+        defer { Task { try? await kit.close(handle) } }
+
+        // First call seeds 7 wings.
+        try await kit.seedDefaultWings(for: handle, now: now)
+
+        // Second call must be a no-op (no additional drawers inserted).
+        try await kit.seedDefaultWings(for: handle, now: now)
+
+        let estate = try await kit.estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+
+        // Still exactly 7 wings — no duplicates from the second call.
+        #expect(charters.count == LocusKit.defaultWings.count,
+            "seedDefaultWings called twice must not produce duplicate charters; got \(charters.count)")
+
+        for wing in LocusKit.defaultWings {
+            let wingCharters = charters.filter { $0.wing == wing.name }
+            #expect(wingCharters.count == 1,
+                "wing '\(wing.name)' must still have exactly 1 charter after second seedDefaultWings; got \(wingCharters.count)")
+        }
+    }
+
+    // MARK: - T21: seedDefaultWings on a provisioned estate is a no-op
+
+    /// `provision` already seeds 7 wings. Calling `seedDefaultWings` on a
+    /// provisioned estate must add zero new drawers — all wings are already present.
+    ///
+    /// This proves that calling seedDefaultWings from the serve path on an estate
+    /// that was provisioned via `provision` (and then re-opened via serve) is safe.
+    @Test
+    func seedDefaultWingsOnProvisionedEstateIsNoOp() async throws {
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+        // Provision seeds 7 wings as part of its flow.
+        let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
+        defer { Task { try? await kit.close(handle) } }
+
+        let estateBefore = try await kit.estate(for: handle)
+        let drawersBefore = try await estateBefore.allDrawers()
+        let chartersBefore = drawersBefore.filter { $0.room == LocusKit.charterRoom }
+        #expect(chartersBefore.count == LocusKit.defaultWings.count,
+            "provision must have seeded exactly 7 charters")
+
+        // Calling seedDefaultWings on a fully-seeded estate must be a complete no-op.
+        try await kit.seedDefaultWings(for: handle, now: now)
+
+        let estateAfter = try await kit.estate(for: handle)
+        let drawersAfter = try await estateAfter.allDrawers()
+        let chartersAfter = drawersAfter.filter { $0.room == LocusKit.charterRoom }
+
+        // Charter count must be unchanged — no duplicates added.
+        #expect(chartersAfter.count == chartersBefore.count,
+            "seedDefaultWings on a provisioned estate must add 0 charters; before=\(chartersBefore.count), after=\(chartersAfter.count)")
+    }
+}

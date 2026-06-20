@@ -550,7 +550,9 @@ version = "0.35.0"
 dependencies = [
  "convergence-kit",
  "corpus-kit",
+ "engram-lib",
  "intellectus-lib",
+ "lattice-lib",
  "locus-kit",
  "persistence-kit",
  "queuekit",
@@ -845,6 +847,7 @@ dependencies = [
  "engram-lib",
  "genius-locus-kit",
  "intellectus-lib",
+ "lattice-lib",
  "locus-kit",
  "serde",
  "serde_json",

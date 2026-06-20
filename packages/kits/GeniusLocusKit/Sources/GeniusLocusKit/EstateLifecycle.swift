@@ -175,11 +175,12 @@ public extension GeniusLocusKit {
         let handle = try await open(storage: storage, owner: owner)
 
         // Step 2b: Seed the seven default wings (ADR-016 §1 and §2).
-        // Each wing gets a `_charter` memory in its reserved `_charter` room so
-        // a fresh agent can orient from the store itself via `estate_map`. Seeded
-        // once at provision with a deterministic `now` threaded from this call.
-        // The `estate(for:)` accessor returns the live LocusKit.Estate actor so
-        // `seedWing` runs inside the actor's serial isolation.
+        // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
+        // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
+        // the serve open path calls the same method unconditionally so bare estates
+        // opened via `mootx01 serve` receive the same wings without re-stamping
+        // the manifest. The method skips wings whose `_charter` drawer already
+        // exists so calling it again on a pre-seeded estate is a safe no-op.
         //
         // Implementation note: `wireSubstores` (step 3) wires Corpus + VectorStore
         // and mounts the encode queue AFTER this step. Charters captured here are
@@ -193,19 +194,7 @@ public extension GeniusLocusKit {
         // and an `underlyingEstateFailure` is thrown so the caller sees the error
         // rather than silently receiving an un-seeded estate.
         do {
-            let locusEstate = try estate(for: handle)
-            let provisionNow = Date()
-            for wing in LocusKit.defaultWings {
-                try await locusEstate.seedWing(
-                    wing.name,
-                    charter: wing.charter,
-                    addedBy: LocusKit.charterAddedBy,
-                    now: provisionNow
-                )
-            }
-            Self.lifecycleLog.info(
-                "seeded \(LocusKit.defaultWings.count, privacy: .public) default wings for \(handle.estateUUID, privacy: .public)"
-            )
+            try await seedDefaultWings(for: handle, now: Date())
         } catch {
             // Close the half-seeded estate to avoid a zombie in the registry.
             try? await close(handle)
@@ -245,6 +234,74 @@ public extension GeniusLocusKit {
         ))
 
         return handle
+    }
+
+    // MARK: - seedDefaultWings(for:now:)
+
+    /// Idempotently seed the seven ADR-016 default wings on an open estate.
+    ///
+    /// This is the single seam that owns the default-wing seeding loop. Both the
+    /// `provision` path (fresh estate) and the `mootx01 serve` open path (bare
+    /// re-open of an existing estate) call this method so every served estate
+    /// always has its wings, regardless of whether it was created via `provision`
+    /// or by the older bare `Estate.create` + `open` path.
+    ///
+    /// **Idempotency contract:** for each wing, the method reads the estate's
+    /// existing `_charter` drawers once before the loop. Wings whose charter
+    /// drawer already exists are skipped silently. Calling this method multiple
+    /// times on the same estate — even concurrently across process restarts — is
+    /// therefore safe: at most one charter drawer per wing will ever exist.
+    ///
+    /// The method delegates per-wing filing to `LocusKit.Estate.seedWing`, which
+    /// inserts unconditionally (not idempotent by itself). The outer check here
+    /// provides the idempotency boundary.
+    ///
+    /// - Parameters:
+    ///   - handle: An open estate handle in the coordinator's registry.
+    ///   - now: Write timestamp for any charters that are seeded. Pass `Date()`
+    ///     from the serve open path (an app entry point — calling `Date()` here
+    ///     is acceptable). Pass a specific value in tests for determinism.
+    /// - Throws: `GeniusLocusKitError.estateNotFound` if `handle` is stale;
+    ///   substrate errors if a `seedWing` write fails.
+    public func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
+        let locusEstate = try estate(for: handle)
+
+        // Read the existing charter drawers once — `allDrawers()` is a full corpus
+        // scan but estates are typically small (7 charters + user content) and this
+        // is called once per open, not per request. Collect the set of wing names
+        // that already have a charter so the loop can skip them without a second
+        // query per wing.
+        let existing = try await locusEstate.allDrawers()
+        let seededWings = Set(
+            existing
+                .filter { $0.room == LocusKit.charterRoom }
+                .map(\.wing)
+        )
+
+        // Seed each wing that is not yet present. Missing wings emerge when an
+        // estate was created via the bare `Estate.create` + `open` path that
+        // predates ADR-016 (e.g. the `mootx01 serve` first-run path before this
+        // fix). For estates already seeded via `provision`, this loop is a no-op.
+        var seededCount = 0
+        for wing in LocusKit.defaultWings where !seededWings.contains(wing.name) {
+            try await locusEstate.seedWing(
+                wing.name,
+                charter: wing.charter,
+                addedBy: LocusKit.charterAddedBy,
+                now: now
+            )
+            seededCount += 1
+        }
+
+        if seededCount > 0 {
+            Self.lifecycleLog.info(
+                "seedDefaultWings: seeded \(seededCount, privacy: .public) wings for \(handle.estateUUID, privacy: .public) (\(LocusKit.defaultWings.count - seededCount, privacy: .public) already present)"
+            )
+        } else {
+            Self.lifecycleLog.debug(
+                "seedDefaultWings: all \(LocusKit.defaultWings.count, privacy: .public) wings already present for \(handle.estateUUID, privacy: .public) — no-op"
+            )
+        }
     }
 
     // MARK: - wireSubstores(for:kind:backingStorage:embeddingModels:)

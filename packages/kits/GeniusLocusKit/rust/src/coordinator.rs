@@ -2888,6 +2888,76 @@ impl EstateCoordinator {
         self.mount_states.get(handle).copied()
     }
 
+    /// Idempotently seed the seven ADR-016 default wings on an open estate.
+    ///
+    /// This is the single seam that owns the default-wing seeding loop.
+    /// Both the `provision` path (fresh estate) and the serve open path (bare
+    /// re-open of an existing estate) call this method so every served estate
+    /// always has its wings, regardless of how it was originally created.
+    ///
+    /// **Idempotency:** reads all existing `_charter` drawers from the estate
+    /// once. Wings whose charter drawer already exists are skipped. Wings that
+    /// are absent are seeded with their canonical charter text via `seed_wing`.
+    /// Calling this multiple times on the same estate is a safe no-op once all
+    /// seven wings are present.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.seedDefaultWings(for:now:)`.
+    ///
+    /// - `handle`: An open estate handle in the coordinator's registry.
+    /// - `now`:    Write timestamp (epoch seconds) for any charters seeded.
+    ///             Pass `SystemTime::now()` from serve entry points (acceptable
+    ///             at an app boundary). Pass a fixed value in tests for determinism.
+    /// - Returns: `Ok(())` on success, or a `GeniusLocusKitError` if the estate
+    ///   is not in the registry or a `seed_wing` write fails.
+    pub fn seed_default_wings(
+        &mut self,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        let estate = self
+            .estate_for(handle)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("seed_default_wings: estate_for failed: {:?}", e),
+            })?;
+
+        // Read existing charter drawers to compute which wings are already present.
+        // `all_drawers()` is a full corpus scan; estates are small at this stage
+        // (7 charters + user content) and this is called once per open, not per request.
+        let existing_drawers = estate
+            .all_drawers()
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("seed_default_wings: all_drawers failed: {:?}", e),
+            })?;
+        let seeded_wings: std::collections::HashSet<String> = existing_drawers
+            .into_iter()
+            .filter(|d| d.room == locus_kit::default_wings::CHARTER_ROOM)
+            .map(|d| d.wing)
+            .collect();
+
+        // Seed each wing whose charter drawer does not yet exist.
+        // For estates already provisioned via `provision`, this loop is a no-op.
+        let mut seeded_count = 0usize;
+        for wing in DEFAULT_WINGS {
+            if seeded_wings.contains(wing.name) {
+                continue;
+            }
+            estate
+                .seed_wing(wing.name, wing.charter, now)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!(
+                        "seed_default_wings: seed_wing failed for '{}': {:?}",
+                        wing.name, e
+                    ),
+                })?;
+            seeded_count += 1;
+        }
+
+        // Suppress unused-variable warning in release builds where log is a no-op.
+        let _ = seeded_count;
+
+        Ok(())
+    }
+
     /// Provision a new estate: create, open, wire sub-stores, and record kind metadata.
     ///
     /// This is the Rust parity of Swift
@@ -3037,38 +3107,22 @@ impl EstateCoordinator {
         )?;
 
         // Step 2b: Seed the seven default wings (ADR-016 §1 and §2).
-        // Each wing gets a `_charter` drawer that defines its role. Wings emerge
-        // from SELECT DISTINCT wing — filing a charter drawer IS creating the wing.
-        // Mirrors Swift EstateLifecycle.swift provision Step 2b.
+        // Delegates to `seed_default_wings` — the single seam that owns the
+        // idempotent seeding loop. The serve open path also calls this method
+        // unconditionally so bare estates opened via `mootx01 serve` receive
+        // the same wings without re-stamping the manifest.
         // Seeding failure closes the estate (no half-provisioned zombie estates).
         {
             // Provision-time wall clock (epoch seconds). Charter drawers are
-            // structural metadata, not AI-generated content, so calling the
-            // system clock here mirrors Swift's `let provisionNow = Date()` at
-            // the same provision boundary.
+            // structural metadata; calling the system clock at the provision
+            // boundary mirrors Swift's `let provisionNow = Date()` at the same
+            // boundary. The engine interior never calls the clock (determinism
+            // rule); provision is the app boundary where Date() is acceptable.
             let seed_now: i64 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let seed_result = self
-                .estate_for(&handle)
-                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                    reason: format!("estate_for during wing seed: {:?}", e),
-                })
-                .and_then(|estate| {
-                    for wing in DEFAULT_WINGS {
-                        estate
-                            .seed_wing(wing.name, wing.charter, seed_now)
-                            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                                reason: format!(
-                                    "default wing seeding failed for '{}': {:?}",
-                                    wing.name, e
-                                ),
-                            })?;
-                    }
-                    Ok(())
-                });
-            if let Err(e) = seed_result {
+            if let Err(e) = self.seed_default_wings(&handle, seed_now) {
                 let _ = self.close(&handle);
                 return Err(e);
             }

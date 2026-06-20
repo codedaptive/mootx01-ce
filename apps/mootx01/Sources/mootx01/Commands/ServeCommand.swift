@@ -113,6 +113,22 @@ struct ServeCommand: AsyncParsableCommand {
             // a served estate is fully live. Idempotent on reopen; does not
             // re-stamp the manifest (which is why we wire rather than `provision`).
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            // Seed the seven ADR-016 default wings if they are not already present.
+            // `seedDefaultWings` is idempotent: it reads existing charter drawers
+            // and skips wings that are already seeded, so calling it on every open
+            // is safe for both fresh estates (wings missing) and previously-served
+            // estates (wings present). `Date()` is acceptable here — this is an app
+            // entry point, not a deterministic engine.
+            do {
+                try await kit.seedDefaultWings(for: handle, now: Date())
+            } catch {
+                // Seeding failure is non-fatal for a running serve: the estate is
+                // open and functional; worst case a fresh agent sees no charter map.
+                // Log the failure and continue. (Provision failure IS fatal because
+                // a provision that produces a wing-less estate is malformed; a serve
+                // open of an existing estate is not.)
+                Logging.stderr.log("mootx01 serve warning: default wing seeding failed: \(error) — continuing")
+            }
             // Rebuild the in-memory derived accelerators (matrix tier) from the
             // durable audit log so co-occurrence/temporal matrix recall is live
             // from the first query on a reopened estate — a fresh process starts
