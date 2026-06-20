@@ -16,7 +16,7 @@
 //
 // Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): HTTP clients are
 // wired to the resident daemon's loopback endpoint so concurrent clients share
-// the one running daemon + Brain pump. Claude Desktop uses the native proxy
+// the one running daemon + autonomic governor. Claude Desktop uses the native proxy
 // subcommand (`mootx01 proxy`) so its calls execute inside
 // the resident daemon with full telemetry and single-writer semantics;
 // the installed binary is reused, no Node.js or npx required.
@@ -62,7 +62,7 @@ public struct MCPClient: Sendable, Equatable {
 
     /// Whether this client accepts a LOCAL HTTP MCP endpoint in its config, so
     /// the installer wires it to the resident daemon over HTTP (sharing the one
-    /// running daemon + Brain pump) instead of a stdio `command` entry.
+    /// running daemon + autonomic governor) instead of a stdio `command` entry.
     /// `false` → stdio command entry (e.g. Claude Desktop, whose config schema
     /// requires a command/args entry — the proxy bridge handles daemon routing).
     /// See ADR-LOOPBACKHTTP-001.
@@ -248,7 +248,7 @@ public enum MCPClients {
     public static let supported: [MCPClient] = [
         // Transport per client (see ADR-LOOPBACKHTTP-001): clients are wired to the resident
         // daemon over HTTP where their config schema accepts a local HTTP/url entry, so
-        // concurrent clients share the one running daemon + Brain pump. Claude Desktop
+        // concurrent clients share the one running daemon + autonomic governor. Claude Desktop
         // uses the native proxy subcommand (`mootx01 proxy`) — its
         // config schema requires a stdio command entry, and the proxy routes each
         // JSON-RPC frame through the resident daemon so telemetry fires and a single

@@ -86,7 +86,7 @@ fn dreaming_proposal_operational(kind: &str) -> i64 {
 /// The `?Sized` bound on `S` allows `Arc<dyn DrawerStore>` to be used as the
 /// store type — `Arc<dyn DrawerStore>` implements `DrawerStore` via the blanket
 /// impl in `locus_kit::drawer_store`, so callers that hold a type-erased store
-/// (e.g. the BrainPump, which receives the registry's `Arc<dyn DrawerStore>`)
+/// (e.g. the AutonomicGovernor, which receives the registry's `Arc<dyn DrawerStore>`)
 /// can pass it directly without a double-Arc wrapper.
 pub struct EstateDreamingSink<S: DrawerStore + ?Sized> {
     store: Arc<S>,

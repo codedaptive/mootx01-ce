@@ -514,7 +514,7 @@ public struct HTTPServer: Sendable {
     ///
     /// The loop exits when a write fails (client disconnected or TCP reset) or
     /// when the calling Task is cancelled, after which `serve()` closes the fd
-    /// via its defer block. Future notification events from the Brain pump will be
+    /// via its defer block. Future notification events from the autonomic governor will be
     /// pushed into this loop by extending the function to accept a notification
     /// `AsyncStream`; the heartbeat loop already forms the correct scaffolding.
     ///

@@ -428,9 +428,10 @@ Those live in LocusKit. CorpusKit is content-for-retrieval, not content-for-memo
 
 ### GeniusLocusKit
 
-**Role:** The Spirit of the Place. The autonomous orchestrator.
-Composes LocusKit, VectorKit, and CorpusKit into unified estates and runs
-the Brain layer — the autonomous intelligence beneath the reasoning layers.
+**Role:** The Spirit of the Place. The composition layer.
+Composes LocusKit, VectorKit, and CorpusKit into unified estates and defines
+the Brain layer types (standing-signal registry, matrix tier, training-daemon) — emitting signals
+the AutonomicGovernor (in NeuronKit, started by the AriaResident host) drives.
 
 **Provides:**
 

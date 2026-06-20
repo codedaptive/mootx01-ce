@@ -155,7 +155,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     // §3: whatever port the daemon binds is written to daemon.port and
     // removed on clean shutdown. The resident daemon also writes mootx01.pid
     // (status reports it) and enforces the single-writer rule: one resident
-    // BrainPump per estate (ADR-LOOPBACKHTTP-001). Liveness is the recorded
+    // AutonomicGovernor per estate (ADR-LOOPBACKHTTP-001). Liveness is the recorded
     // port answering on loopback — portable where kill(pid, 0) is not.
     // stdio serves are ephemeral, do not pump, and are not guarded or filed.
     let port_file = paths::daemon_port_file(&data);

@@ -182,7 +182,7 @@ pub fn daemon_unit(binary_path: &str, data_dir_override: Option<&str>, vault_on:
     let vault_val = if vault_on { "1" } else { "0" };
     format!(
         "[Unit]\n\
-         Description=mootx01 resident daemon (ARIA MCP server + Brain pump)\n\
+         Description=mootx01 resident daemon (ARIA MCP server + autonomic governor)\n\
          After=default.target\n\
          \n\
          [Service]\n\

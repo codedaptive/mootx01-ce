@@ -1409,7 +1409,7 @@ pub trait DrawerStore: Send + Sync {
 //
 // Allows callers that hold a type-erased `Arc<dyn DrawerStore>` to pass it
 // directly into generic functions and types that require `S: DrawerStore`.
-// The `BrainPump` in ARIA_MCP uses this: it receives the registry's
+// The `AutonomicGovernor` in ARIA_MCP uses this: it receives the registry's
 // `Arc<dyn DrawerStore>` at construction and passes it to `EstateDreamingSink`
 // and `EstateMaintenanceSink`, both of which are generic over `S: DrawerStore`.
 // Every method delegates to the inner trait object via `self.as_ref()`.

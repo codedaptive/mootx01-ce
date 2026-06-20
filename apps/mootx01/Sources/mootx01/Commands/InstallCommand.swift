@@ -31,7 +31,7 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
     var noManager: Bool = false
 
-    @Flag(name: .long, help: "Skip registering the resident mootx01 daemon (HTTP MCP server + Brain pump) as a background launchd service (macOS).")
+    @Flag(name: .long, help: "Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background launchd service (macOS).")
     var noDaemon: Bool = false
 
     @Flag(name: .long, help: "Enable Vault MCP tools (moot_vault_*): expose export/import/status/reconcile/job on the MCP surface. Default behavior when neither --vault-on nor --vault-off is specified.")
@@ -213,7 +213,7 @@ struct InstallCommand: AsyncParsableCommand {
         }
         #endif
 
-        // Register the resident mootx01 daemon (HTTP MCP server + Brain pump +
+        // Register the resident mootx01 daemon (HTTP MCP server + autonomic governor +
         // telemetry) as a launchd LaunchAgent so it runs at login and restarts on
         // exit — this is the headless daemon the wired clients connect to over
         // HTTP. The plist env switches `mootx01 serve` into resident mode
