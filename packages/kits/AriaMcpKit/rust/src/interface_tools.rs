@@ -584,9 +584,12 @@ fn run_memory_search(
             .map(|d| d.content.chars().take(120).collect())
             .unwrap_or_else(|| "(not hydrated)".to_string());
         let room = hit.drawer.as_ref().map(|d| d.room.as_str()).unwrap_or("");
+        // Row format matches Swift: "<id>  [<room>]  <preview>" — no score suffix.
+        // Swift runMemorySearch emits the score only via the discrimination line,
+        // not per-row, so per-row score annotation is removed for output parity.
         lines.push(format!(
-            "{}  [{}]  {}  (score: {:.4})",
-            hit.id, room, preview, hit.score.final_score
+            "{}  [{}]  {}",
+            hit.id, room, preview
         ));
     }
     lines.push(crate::recall_discrimination::result_line_with_dense_dark(discrimination, dense_lane_dark));
@@ -1086,8 +1089,10 @@ fn run_fact_search(
     let mut lines = vec![header];
     for f in &matches {
         let filed_iso = epoch_to_iso8601(f.filed_at);
+        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<id>".
+        // Double space after id, no leading indent, no dash separator — matches Swift exactly.
         lines.push(format!(
-            "  {} — [{}] {} [{}]  filed={}  source={}",
+            "{}  [{}] {} [{}]  filed={}  source={}",
             f.id, f.subject, f.predicate, f.object, filed_iso, f.source_drawer_id
         ));
     }
@@ -1307,6 +1312,20 @@ fn run_write_journal(
 /// Reads all diary entries via `coordinator.recall_diary_entries`, filters by
 /// agent_name if specified, returns the most-recent `last_n`. Mirrors Swift
 /// `runReadJournal`.
+///
+/// # Timestamp unit
+///
+/// `DiaryEntry.filed_at` is stored as epoch **seconds** (matching the SQLite
+/// TEXT ISO8601 round-trip in LocusKit's persistence layer — the column stores
+/// TEXT but the Rust struct holds the i64 seconds value decoded from that text).
+/// `epoch_to_iso8601` converts seconds to an ISO8601 UTC string.
+///
+/// # Row format
+///
+/// Mirrors Swift `runReadJournal`:
+///   `[\(ISO8601)]  \(entry.prefix(200))`
+/// The timestamp is bracketed and double-spaced before the entry text, matching
+/// `ISO8601DateFormatter().string(from: e.filedAt)` in the Swift port.
 fn run_read_journal(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -1329,8 +1348,11 @@ fn run_read_journal(
 
     let mut lines = vec![format!("journal for {agent}: {} entry(s)", entries.len())];
     for e in &entries {
-        let preview: String = e.entry.chars().take(80).collect();
-        lines.push(format!("  {} | {}", e.filed_at, preview));
+        // filed_at is epoch seconds. Convert to ISO8601 to match Swift's
+        // ISO8601DateFormatter output: "[2026-06-20T17:06:29Z]  <entry text>".
+        let filed_iso = epoch_to_iso8601(e.filed_at);
+        let preview: String = e.entry.chars().take(200).collect();
+        lines.push(format!("[{}]  {}", filed_iso, preview));
     }
     Ok(text_result(&lines.join("\n")))
 }
@@ -1411,12 +1433,15 @@ fn run_estate_status(
         Err(_) => "unavailable".to_string(),
     };
 
+    // Field order and wording mirror Swift runEstateStatus exactly:
+    //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
+    // Swift uses "kg facts: N active" (space not underscore, "active" suffix).
     let body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nkg_facts: {}\nwings: {}\ntrace_rows: {}\nsync: {}\n{}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\n{}",
         drawers.len(),
         total_count,
-        kg_facts.len(),
         wings_list,
+        kg_facts.len(),
         trace_rows,
         sync_token,
         ARIA_SESSION_PROTOCOL

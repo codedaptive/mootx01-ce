@@ -853,6 +853,7 @@ dependencies = [
  "serde_json",
  "substrate-ml",
  "substrate-types",
+ "uuid",
 ]
 
 [[package]]

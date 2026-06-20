@@ -838,14 +838,22 @@ pub fn dispatch(
             let out =
                 run_complexity(&coord, &estate.handle, frame, field_a, field_b, now)
                     .map_err(lens_error)?;
+            // Normalize -0.0 to 0.0 before formatting. Rust's f32 Display renders
+            // -0.0f32 as "-0", while Swift's Double interpolation renders -0.0 as
+            // "-0.0". Neither matches the canonical "0" Swift outputs for the
+            // degenerate/empty case. Normalise: if the value is zero (positive or
+            // negative), render as "0" to match Swift's output.
+            let entropy_a = if out.result.entropy_a == 0.0 { 0.0f32 } else { out.result.entropy_a };
             let mut lines = vec![
                 format!("complexity: totalCount={}", out.total_count),
-                format!("entropyA={}", out.result.entropy_a),
+                format!("entropyA={entropy_a}"),
             ];
             if let Some(eb) = out.result.entropy_b {
+                let eb = if eb == 0.0 { 0.0f32 } else { eb };
                 lines.push(format!("entropyB={eb}"));
             }
             if let Some(mi) = out.result.mutual_information {
+                let mi = if mi == 0.0 { 0.0f32 } else { mi };
                 lines.push(format!("mutualInformation={mi}"));
             }
             Ok(text_result(&lines.join("\n")))

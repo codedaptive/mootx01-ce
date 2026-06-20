@@ -568,11 +568,16 @@ fn memory_search_with_scoring_arg_rrf_succeeds() {
         text.contains("found 1 memory(s)"),
         "must find the filed memory; got: {text}"
     );
-    // The score format "(score: 0.xxxx)" appears in the output, proving
-    // the recall_scored path ran, not plain recall+substring.
+    // Per-row score annotation was removed for Swift output parity.
+    // Swift runMemorySearch emits scores only via the discrimination summary line,
+    // not per-row. Verify scored recall ran via recall_provenance line instead.
     assert!(
-        text.contains("(score:"),
-        "recall_scored output must include score annotation; got: {text}"
+        text.contains("recall_provenance:"),
+        "recall_scored output must include recall_provenance line; got: {text}"
+    );
+    assert!(
+        !text.contains("(score:"),
+        "per-row score annotation must not appear (Swift parity); got: {text}"
     );
 }
 
@@ -594,9 +599,14 @@ fn memory_search_with_scoring_arg_matrix_aware_succeeds() {
         text.contains("found 1 memory(s)"),
         "must find the filed memory; got: {text}"
     );
+    // Per-row score annotation removed for Swift parity. Verify via recall_provenance.
     assert!(
-        text.contains("(score:"),
-        "recall_scored output must include score annotation; got: {text}"
+        text.contains("recall_provenance:"),
+        "recall_scored output must include recall_provenance line; got: {text}"
+    );
+    assert!(
+        !text.contains("(score:"),
+        "per-row score annotation must not appear (Swift parity); got: {text}"
     );
 }
 
@@ -731,11 +741,15 @@ fn memory_search_ordering_by_relevance_desc_succeeds_and_finds_memory() {
         text.contains("found 1 memory(s)"),
         "byRelevanceDesc must find the filed memory; got: {text}"
     );
-    // The scored path emits "(score: ...)" in each result line, proving
-    // the request went through recall_scored (not plain recall+filter).
+    // Per-row score annotation removed for Swift parity. Verify the scored path
+    // ran via the recall_provenance line (always present in recall_scored output).
     assert!(
-        text.contains("(score:"),
-        "byRelevanceDesc must route through recall_scored (score annotation expected); got: {text}"
+        text.contains("recall_provenance:"),
+        "byRelevanceDesc must route through recall_scored (recall_provenance expected); got: {text}"
+    );
+    assert!(
+        !text.contains("(score:"),
+        "per-row score annotation must not appear (Swift parity); got: {text}"
     );
 }
 
@@ -1404,6 +1418,50 @@ fn read_journal_on_empty_estate_returns_zero_entries() {
     );
 }
 
+#[test]
+fn read_journal_row_uses_iso8601_bracketed_timestamp() {
+    // R4 parity fix: read_journal rows must use the ISO8601 bracketed format
+    // "[2026-06-20T17:06:29Z]  <entry>" matching Swift runReadJournal exactly.
+    // Previously: "  1781975814 | <entry>" (raw epoch seconds, pipe separator).
+    let registry = EstateRegistry::new_inmemory();
+
+    // Write an entry so there is a row to inspect.
+    dispatch_tool(
+        "moot_write_journal",
+        &args!["entry" => "ISO8601 timestamp parity test"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("write_journal must not throw");
+
+    let read = dispatch_tool(
+        "moot_read_journal",
+        &args!["agent" => "mcp-agent"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("read_journal must not throw");
+    assert!(is_success(&read), "read_journal must succeed; got: {read:?}");
+    let text = content_text(&read);
+
+    // Must contain the entry text — basic round-trip.
+    assert!(
+        text.contains("ISO8601 timestamp parity test"),
+        "written entry must appear in read_journal output; got: {text}"
+    );
+    // The timestamp must be bracketed ISO8601, not a raw epoch integer.
+    // Look for the "[YYYY-" opening pattern that uniquely identifies ISO8601.
+    assert!(
+        text.contains("[20"), // e.g. "[2026-"
+        "read_journal row must use ISO8601-bracketed timestamp (e.g. '[2026-...T...Z]'); got: {text}"
+    );
+    // Must NOT contain the old pipe-separated epoch format.
+    assert!(
+        !text.lines().any(|l| l.contains(" | ") && l.trim_start().starts_with(|c: char| c.is_ascii_digit())),
+        "read_journal must not use old pipe-epoch format; got: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 8. Tier 5 — Estate
 // ---------------------------------------------------------------------------
@@ -1480,6 +1538,29 @@ fn estate_status_includes_aria_session_protocol() {
     assert!(
         text.contains("memories:"),
         "estate_status must include memories count; got: {text}"
+    );
+}
+
+#[test]
+fn estate_status_kg_facts_field_matches_swift_format() {
+    // Parity fix: estate_status must emit "kg facts: N active" (space, "active"
+    // suffix) to match Swift runEstateStatus, not "kg_facts: N" (underscore, no suffix).
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool("moot_estate_status", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("estate_status must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains("kg facts:"),
+        "estate_status must use 'kg facts:' (space, not underscore) to match Swift; got: {text}"
+    );
+    assert!(
+        text.contains("kg facts:") && text.lines().any(|l| l.starts_with("kg facts:") && l.contains("active")),
+        "estate_status 'kg facts' line must include 'active' suffix to match Swift; got: {text}"
+    );
+    assert!(
+        !text.contains("kg_facts:"),
+        "estate_status must not use underscore 'kg_facts:' (old Rust format); got: {text}"
     );
 }
 
@@ -2249,18 +2330,17 @@ fn vault_export_stamps_manifest_then_status_reports_it() {
         is_success(&export_result),
         "moot_vault_export must be isError:false; got: {export_result:?}"
     );
+    // Response shape now mirrors Swift async model: job_id / vault / scope / poll.
     assert!(
-        export_text.contains("vault_export:"),
-        "export text must contain 'vault_export:'; got: {export_text}"
+        export_text.contains("job_id:"),
+        "export text must contain 'job_id:' (async job shape); got: {export_text}"
     );
     assert!(
-        export_text.contains("note(s)"),
-        "export text must report note count; got: {export_text}"
+        export_text.contains("poll: moot_vault_job to check status"),
+        "export text must include poll hint (async job shape); got: {export_text}"
     );
-    assert!(
-        export_text.contains("manifest:"),
-        "export text must confirm manifest was stamped; got: {export_text}"
-    );
+    // Manifest is still stamped on disk; the response shape has changed but the
+    // export correctness is verifiable via moot_vault_status after the call.
 }
 
 #[test]
@@ -2298,9 +2378,14 @@ fn vault_export_then_import_round_trips() {
         "moot_vault_import must be isError:false; got: {import_result:?}"
     );
     let text = content_text(&import_result);
+    // Response shape now mirrors Swift async model: job_id / vault / note_count / poll.
     assert!(
-        text.contains("vault_import:"),
-        "import text must start with 'vault_import:'; got: {text}"
+        text.contains("job_id:"),
+        "import text must contain 'job_id:' (async job shape); got: {text}"
+    );
+    assert!(
+        text.contains("poll: moot_vault_job to check status"),
+        "import text must include poll hint (async job shape); got: {text}"
     );
 }
 

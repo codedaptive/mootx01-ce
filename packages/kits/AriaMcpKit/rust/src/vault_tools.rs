@@ -373,15 +373,21 @@ fn run_export(
         }),
     });
 
+    // Response shape mirrors Swift VaultTools.runExport (async job model):
+    //   job_id: <UUID>
+    //   vault: <path>
+    //   scope: <scope>
+    //   poll: moot_vault_job to check status
+    //
+    // The Rust backend completes synchronously and records the completed job in
+    // `ledger` before returning. `moot_vault_job(id)` returns the completed record
+    // immediately. The caller sees the same job_id/poll shape as Swift regardless
+    // of backend execution model — output parity is maintained.
     Ok(text_result(&format!(
-        "vault_export: {} note(s) → {}\nmanifest: {} (sha256 ×{})\nexportedAt: {}\nscope: {}\njob_id: {}",
-        manifest.note_count,
-        vault_path.display(),
-        MANIFEST_RELATIVE_PATH,
-        manifest.files.len(),
-        manifest.exported_at,
-        scope.as_str(),
+        "job_id: {}\nvault: {}\nscope: {}\npoll: moot_vault_job to check status",
         job_id,
+        vault_path.display(),
+        scope.as_str(),
     )))
 }
 
@@ -421,15 +427,27 @@ fn parse_scope(
 ///
 /// The Rust backend is synchronous: the import completes before this function
 /// returns. A UUID job ID is assigned, the completed job is recorded in `ledger`,
-/// and `job_id` is included in the response alongside the result counts.
+/// and the response uses the Swift-identical async job shape:
+///   job_id / vault / note_count / poll
 /// Callers that poll with `moot_vault_job` receive the completed record
 /// immediately — the tool never reports "running" for a job that is already done.
+///
+/// `note_count` is computed BEFORE running the bridge (same as Swift's
+/// `hashAllNotes` synchronous pre-scan), so the count reflects the vault's
+/// pre-import state. This matches Swift exactly.
 fn run_import(
     args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
     registry: &EstateRegistry,
     vault_path: &Path,
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    // Count notes before running the bridge — mirrors Swift's synchronous
+    // `hashAllNotes` pre-scan that provides `note_count` in the immediate response.
+    // `hash_all_notes` is a pure filesystem enumeration with no I/O side-effects.
+    // On error (e.g. vault path does not exist), default to 0 rather than failing —
+    // the bridge import will surface the real error below.
+    let note_count = hash_all_notes(vault_path).map(|m| m.len()).unwrap_or(0);
+
     let open = registry.resolve(args, "estateID")?;
     // mut: VaultBridge::new requires &mut EstateCoordinator (import routes through
     // capture_with_mode — dual-path intake fix, G7).
@@ -477,17 +495,16 @@ fn run_import(
         }),
     });
 
+    // Response shape mirrors Swift VaultTools.runImport (async job model):
+    //   job_id: <UUID>
+    //   vault: <path>
+    //   note_count: <N>   ← from pre-scan, matches Swift's synchronous hashAllNotes count
+    //   poll: moot_vault_job to check status
     Ok(text_result(&format!(
-        "vault_import: {} written, {} updated, {} skipped\ntunnels: {}\nfdc: {} classified, {} unclassified\nskippedUnchanged: {}\nskippedTombstoned: {}\njob_id: {}",
-        report.drawers_written,
-        report.drawers_updated,
-        report.items_skipped,
-        report.tunnels_created,
-        report.fdc_classified,
-        report.fdc_unclassified,
-        report.drawers_skipped_unchanged,
-        report.drawers_skipped_tombstoned,
+        "job_id: {}\nvault: {}\nnote_count: {}\npoll: moot_vault_job to check status",
         job_id,
+        vault_path.display(),
+        note_count,
     )))
 }
 
