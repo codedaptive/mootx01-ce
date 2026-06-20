@@ -89,8 +89,9 @@ struct DrawerMappingTests {
         )
 
         let note = DrawerMapping.noteIR(from: drawer, references: [tunnel])
-        // Path: room/slug.md — wing prefix dropped; slug from first heading.
-        #expect(note.stableSourceKey == "research/aromatics")
+        // Path: <wing>/<room>/<slug>.md — ADR-016 vault layout; wing is the
+        // top-level vault folder. Slug derived from first heading.
+        #expect(note.stableSourceKey == "wing_owner/research/aromatics")
         #expect(note.flattenedBody.contains("A study of arene rings."))
         #expect(note.frontmatter["udc"] == "004")
         #expect(note.frontmatter["wing"] == "wing_owner")
@@ -98,7 +99,7 @@ struct DrawerMappingTests {
         // moot_id is the STABLE lineage UUID, not drawer.id.
         #expect(note.frontmatter["moot_id"] == knownLineage.uuidString)
         #expect(note.mootID == knownLineage)
-        // originalPath is the room only — no wing prefix.
+        // originalPath is the substrate room (not the vault path).
         #expect(note.originalPath == "research")
         #expect(note.links == [WikiLink(target: "Benzene", alias: nil, raw: "Benzene")])
     }

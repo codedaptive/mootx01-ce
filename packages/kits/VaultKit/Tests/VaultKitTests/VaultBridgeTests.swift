@@ -1032,4 +1032,149 @@ struct VaultBridgeTests {
         #expect(afterReimport.isEmpty,
                 "estate must remain empty after re-import of erased (expunged) lineage")
     }
+
+    // MARK: - ADR-016 Wing vault layout round-trip
+
+    /// ADR-016 Consequences: "wing = top folder; each folder ships its own `_charter`".
+    ///
+    /// This test verifies the full round-trip export → vault layout → import:
+    ///   1. Export: vault top-level folders == distinct wing names in the estate.
+    ///   2. Charter drawers (`_charter` room) export under `<wing>/_charter/`.
+    ///   3. Non-charter drawers export under `<wing>/<room>/`.
+    ///   4. Import: drawer content is preserved; room round-trips via frontmatter.
+    ///   5. Wing is restored: each re-imported drawer lands in its original wing,
+    ///      not in "Agentic Memory" (the round-trip wiring via CaptureFrame.wing).
+    ///   6. Idempotency and tombstone-awareness are preserved (regression guard).
+    ///
+    /// The multi-wing assertion in Phase 4 is the proof that CaptureFrame.wing is
+    /// wired end-to-end: a drawer captured in "User Canon" must re-import into
+    /// "User Canon", and a drawer captured in "Personal" must re-import into
+    /// "Personal", not both into the default wing.
+    @Test("ADR-016: export uses wing as top-level vault folder; import restores non-default wings")
+    func wingVaultLayoutRoundTrip() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+        // Capture two drawers in DIFFERENT wings via the GLK capture seam.
+        // CaptureFrame.wing routes each drawer into its named wing at capture time
+        // (ADR-016). Content is distinct so slug derivation produces stable slugs.
+        let userCanonFrame = CaptureFrame(
+            content: "# Research Note\nOrganic chemistry primer.",
+            channel: .typed,
+            room: "chemistry",
+            latticeAnchor: LatticeAnchor(udcCode: "540"),
+            addedBy: "test",
+            embeddingModelID: "none",
+            eventTime: now,
+            wing: "User Canon"
+        )
+        let personalFrame = CaptureFrame(
+            content: "# Project Plan\nQuarterly roadmap.",
+            channel: .typed,
+            room: "roadmap",
+            latticeAnchor: LatticeAnchor(udcCode: "658"),
+            addedBy: "test",
+            embeddingModelID: "none",
+            eventTime: now,
+            wing: "Personal"
+        )
+        _ = try await kit.capture(handle, userCanonFrame)
+        _ = try await kit.capture(handle, personalFrame)
+
+        // Precondition: verify drawers landed in their respective wings.
+        let capturedDrawers = try await currentDrawers(kit, handle)
+        let capturedWings = Set(capturedDrawers.map(\.wing))
+        #expect(capturedWings.contains("User Canon"), "precondition: drawer must land in 'User Canon' wing")
+        #expect(capturedWings.contains("Personal"), "precondition: drawer must land in 'Personal' wing")
+
+        // Export the estate. Two distinct wings → two top-level vault folders.
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let exportReport = try await bridge.export(estate: handle, to: vault, now: now)
+        #expect(exportReport.notesExported == 2, "both drawers must be exported")
+
+        // --- Vault layout assertions (ADR-016) ---
+        //
+        // Each wing must appear as a top-level folder in the vault.
+        let fm = FileManager.default
+        let topContents = try fm.contentsOfDirectory(
+            at: vault, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        let topDirs = try topContents.filter {
+            let v = try $0.resourceValues(forKeys: [.isDirectoryKey])
+            return v.isDirectory == true
+        }.map { $0.lastPathComponent }
+
+        #expect(topDirs.contains("User Canon"),
+                "ADR-016: vault must have a top-level 'User Canon' folder (wing = top-level folder)")
+        #expect(topDirs.contains("Personal"),
+                "ADR-016: vault must have a top-level 'Personal' folder (wing = top-level folder)")
+
+        // Root-level MD files must only be OKF nav files (index.md, log.md) — no notes.
+        let allMD = try fm.contentsOfDirectory(
+            at: vault, includingPropertiesForKeys: nil, options: [])
+            .filter { $0.pathExtension == "md" }
+        let rootNotes = allMD.map { $0.deletingPathExtension().lastPathComponent }
+            .filter { $0 != "index" && $0 != "log" }
+        #expect(rootNotes.isEmpty, "ADR-016: no note files at vault root — all notes must live under a wing folder")
+
+        // Notes under each wing folder sit in <wing>/<room>/ subfolders.
+        let userCanonURL = vault.appendingPathComponent("User Canon", isDirectory: true)
+        let userCanonSubdirs = try fm.contentsOfDirectory(
+            at: userCanonURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map { $0.lastPathComponent }
+        #expect(userCanonSubdirs.contains("chemistry"),
+                "room 'chemistry' must be a subfolder under 'User Canon'")
+
+        let personalURL = vault.appendingPathComponent("Personal", isDirectory: true)
+        let personalSubdirs = try fm.contentsOfDirectory(
+            at: personalURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map { $0.lastPathComponent }
+        #expect(personalSubdirs.contains("roadmap"),
+                "room 'roadmap' must be a subfolder under 'Personal'")
+
+        // --- Multi-wing import round-trip (the proof CaptureFrame.wing is wired) ---
+        //
+        // Import the vault into a FRESH estate. Each drawer must land in its
+        // original wing — not in "Agentic Memory" (the defaultWingName).
+        let (kit2, handle2) = try await openEstate()
+        let bridge2 = VaultBridge(kit: kit2, mapping: mapping)
+        let importReport = try await bridge2.importVault(at: vault, into: handle2, now: now)
+        #expect(importReport.drawersWritten == 2, "import must write both drawers from the wing-layout vault")
+        #expect(importReport.drawersUpdated == 0)
+        #expect(importReport.itemsSkipped == 0)
+
+        // THE CRITICAL ASSERTION: each drawer must be in its ORIGINAL wing.
+        // Before CaptureFrame.wing was wired through makeCaptureFrame, both
+        // drawers would land in "Agentic Memory" regardless of the vault folder.
+        let drawers2 = try await currentDrawers(kit2, handle2)
+        let importedWings = Set(drawers2.map(\.wing))
+        #expect(importedWings.contains("User Canon"),
+                "wing round-trip: 'User Canon' drawer must re-import into 'User Canon', not defaultWingName")
+        #expect(importedWings.contains("Personal"),
+                "wing round-trip: 'Personal' drawer must re-import into 'Personal', not defaultWingName")
+        #expect(!importedWings.contains("Agentic Memory"),
+                "wing round-trip: no drawer must land in 'Agentic Memory' — each has an explicit wing")
+
+        // Room round-trips via frontmatter `room:` key (priority 1 in makeCaptureFrame).
+        let rooms2 = Set(drawers2.map(\.room))
+        #expect(rooms2.contains("chemistry"), "round-trip: room 'chemistry' must be preserved via frontmatter")
+        #expect(rooms2.contains("roadmap"), "round-trip: room 'roadmap' must be preserved via frontmatter")
+
+        // Content is preserved across the round-trip.
+        let contents2 = drawers2.map(\.content)
+        #expect(contents2.contains { $0.contains("Research Note") },
+                "round-trip: User Canon drawer content must be preserved")
+        #expect(contents2.contains { $0.contains("Project Plan") },
+                "round-trip: Personal drawer content must be preserved")
+
+        // --- Idempotency: re-import must be a no-op (skippedUnchanged) ---
+        let reimportReport = try await bridge2.importVault(at: vault, into: handle2, now: now)
+        #expect(reimportReport.drawersWritten == 0, "re-import into same estate must not write new drawers (idempotency)")
+        #expect(reimportReport.drawersSkippedUnchanged == 2, "re-import must count both drawers as skipped-unchanged")
+    }
 }

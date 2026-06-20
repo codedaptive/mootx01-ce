@@ -237,15 +237,19 @@ public struct DrawerMapping: Sendable {
     ///   - A fact with `subject == "record:kind"` and `predicate == "is"`
     ///     becomes the drawer's kind discriminator (hard-close #29-B round-trip).
     ///
-    /// ## Filename / path (Decision cp-vault-bidir)
+    /// ## Filename / path (ADR-016, Decision cp-vault-bidir)
     ///
-    /// The vault path is `"<room>/<slug>.md"` — the wing prefix is dropped
-    /// because one vault has one owner (wing rides frontmatter). The slug
-    /// is derived from the first markdown heading or the first non-empty
-    /// content line, sanitized to a safe filename character set. On
-    /// collision within the caller's export set, a short suffix derived
-    /// from `drawer.lineageID` is appended. The result is deterministic
-    /// given the drawer.
+    /// The vault path is `"<wing>/<room>/<slug>.md"` — the wing is the
+    /// top-level folder so the vault tree mirrors the estate's wing structure
+    /// and export/import is wing-scopable (ADR-016 Consequences). Charter
+    /// memories (`_charter` room) export as `<wing>/_charter/<slug>.md` so
+    /// each wing folder ships its own charter alongside its content drawers.
+    ///
+    /// The slug is derived from the first markdown heading or the first
+    /// non-empty content line, sanitized to a safe filename character set. On
+    /// collision within the caller's export set, a short suffix derived from
+    /// `drawer.lineageID` is appended. The result is deterministic given the
+    /// drawer.
     ///
     /// ## `moot_id` frontmatter (Decision cp-vault-bidir)
     ///
@@ -253,11 +257,22 @@ public struct DrawerMapping: Sendable {
     /// `drawer.id`, which the supersession cascade re-mints on every
     /// write. Re-importing an exported note with `moot_id` maps back to
     /// the same substrate lineage regardless of filename changes.
+    ///
+    /// ## Wing round-trip note (ADR-016)
+    ///
+    /// The wing value is preserved in the vault folder path AND in the
+    /// `wing` frontmatter key. On re-import, `makeCaptureFrame` reads the
+    /// wing from `frontmatter["wing"]` and (a) strips it from the path
+    /// components used for the `room` value and (b) sets `CaptureFrame.wing`
+    /// so the capture verb routes the drawer into the correct named wing.
+    /// The round-trip is fully faithful: a drawer exported from "User Canon"
+    /// re-imports into "User Canon", not into `defaultWingName`.
     static func noteIR(from drawer: Drawer, references: [Tunnel], kgFacts: [KGFact] = []) -> NoteIR {
-        // Path: room/slug.md — wing prefix dropped (one vault, one owner;
-        // wing rides frontmatter). The stable key carries NO wing prefix.
+        // Path: <wing>/<room>/<slug>.md — wing is the top-level vault folder.
+        // ADR-016 Consequences: "wing = top folder; each folder ships its own
+        // `_charter`". This makes the vault layout wing-aware and wing-scopable.
         let slug = Self.slug(from: drawer.content, id: drawer.lineageID)
-        let stableKey = "\(drawer.room)/\(slug)"
+        let stableKey = "\(drawer.wing)/\(drawer.room)/\(slug)"
 
         var frontmatter: [String: String] = [
             "wing": drawer.wing,
@@ -289,6 +304,9 @@ public struct DrawerMapping: Sendable {
 
         // Each `.references` tunnel's label carries the raw wikilink text
         // that produced it on import, so export renders it back verbatim.
+        // Tunnel signatures use the source wing from the drawer — these are
+        // stable post-ADR-016 because the drawer.wing is now the actual wing
+        // the drawer lives in (no longer always defaultWingName for new drawers).
         let links = references.map { WikiLink(target: $0.label, alias: nil, raw: $0.label) }
 
         // Reconstruct tags from KG facts (hard-close #29-A round-trip).
@@ -670,22 +688,57 @@ public struct DrawerMapping: Sendable {
     func makeCaptureFrame(for note: NoteIR, content: String) -> (CaptureFrame, classified: Bool) {
         // Room resolution — priority order:
         //   1. Explicit frontmatter `room` (round-trip identity; always wins).
-        //   2. Full hierarchy from `pathComponents` joined with "/" when more than
+        //      For exports produced by VaultKit after ADR-016, the `room`
+        //      frontmatter key carries the substrate room verbatim, so re-imports
+        //      of VaultKit-exported notes always land in the correct room.
+        //   2. Wing-stripped pathComponents: if the vault path's first component
+        //      matches the `wing` frontmatter key (ADR-016 layout: top-level
+        //      folder IS the wing), strip it from pathComponents before joining.
+        //      This handles human-authored notes placed under a wing folder in the
+        //      vault where the frontmatter `room` key is absent. E.g., a note at
+        //      "Professional/consulting/note.md" with `wing: Professional` in
+        //      frontmatter maps to room = "consulting".
+        //   3. Full hierarchy from `pathComponents` joined with "/" when more than
         //      one component is present (e.g. ["projects","alpha","notes"] →
         //      "projects/alpha/notes"). This maps vault hierarchy to room depth so
         //      the substrate reflects the source structure without loss.
-        //   3. The leaf of `originalPath` (back-compat for callers that supply
+        //   4. The leaf of `originalPath` (back-compat for callers that supply
         //      only originalPath).
-        //   4. Hard default "imported" so I-5's non-empty room guard always holds.
+        //   5. Hard default "imported" so I-5's non-empty room guard always holds.
+        //
+        // Wing resolution (ADR-016): `CaptureFrame.wing` routes the drawer into
+        // a named wing at capture time. Priority order:
+        //   1. Frontmatter `wing` key — always written by VaultKit on export, so
+        //      a round-trip import restores the original wing faithfully.
+        //   2. The first component of pathComponents when it matches no explicit
+        //      frontmatter wing key — for human-authored notes placed in vault
+        //      folders that follow the ADR-016 <wing>/<room>/<file>.md layout.
+        //   3. nil — falls through to the estate's `defaultWingName` ("Agentic
+        //      Memory") at the substrate capture seam. Human notes without any
+        //      wing context land in the default wing and are not misassigned.
         let roomCandidate: String
         if let explicit = note.frontmatter["room"], !explicit.isEmpty {
             roomCandidate = explicit
-        } else if note.pathComponents.count > 1 {
-            roomCandidate = note.pathComponents.joined(separator: "/")
         } else {
-            roomCandidate = note.pathComponents.first
-                ?? note.originalPath.split(separator: "/").last.map(String.init)
-                ?? ""
+            // Determine pathComponents, stripping the wing prefix if the first
+            // component matches the `wing` frontmatter value (ADR-016 vault layout).
+            let components = note.pathComponents
+            let wingKey = note.frontmatter["wing"] ?? ""
+            let contentComponents: [String]
+            if !wingKey.isEmpty, components.first == wingKey, components.count > 1 {
+                // First component is the wing folder — strip it; the rest is the room path.
+                contentComponents = Array(components.dropFirst())
+            } else {
+                contentComponents = components
+            }
+
+            if contentComponents.count > 1 {
+                roomCandidate = contentComponents.joined(separator: "/")
+            } else {
+                roomCandidate = contentComponents.first
+                    ?? note.originalPath.split(separator: "/").last.map(String.init)
+                    ?? ""
+            }
         }
         let room = roomCandidate.isEmpty ? "imported" : roomCandidate
 
@@ -720,7 +773,13 @@ public struct DrawerMapping: Sendable {
             ?? nonEmpty(note.frontmatter["moot_id"]).flatMap { UUID(uuidString: $0) }
             ?? Self.lineageID(forStableSourceKey: note.stableSourceKey)
 
-        let frame = CaptureFrame(
+        // Wing resolution (ADR-016, see comment above for full priority order).
+        // Frontmatter `wing` was written by VaultKit on export and is the
+        // authoritative source for round-trip import. Human-authored notes with
+        // no frontmatter wing are assigned nil → defaultWingName at the seam.
+        let resolvedWing: String? = nonEmpty(note.frontmatter["wing"])
+
+        var frame = CaptureFrame(
             content: content,
             channel: .importedFile,
             room: room,
@@ -764,6 +823,9 @@ public struct DrawerMapping: Sendable {
             },
             featureFlags: flags
         )
+        // Wire the wing into the frame so the capture verb routes the drawer into
+        // the correct wing at write time (ADR-016). nil → defaultWingName at seam.
+        frame.wing = resolvedWing
         return (frame, classified: classified)
     }
 
