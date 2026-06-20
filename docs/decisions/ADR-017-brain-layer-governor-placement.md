@@ -56,7 +56,7 @@ Both binaries build; NeuronKit/AriaMcpKit/GLK green on swift + cargo; resident d
 
 These are read-only or owner-only and must be updated by the custodian / owner, not in this branch:
 1. **CLAUDE.md** GLK bullet — change "runs the Brain layer / autonomous orchestrator" to "GLK *defines* the standing-signal scheduler, matrix tier, and training-daemon types and *emits* signals; the `AutonomicGovernor` (NeuronKit, started by the AriaResident host) *drives* them." (Owner: Bob.)
-2. **docs/concepts/topology-assets/mootx01_topology_v1.0.svg** + **TOPOLOGY.md** — redraw per the corrected-diagram spec below. (Read-only; promote via Nagatha. Draft at `docs_internal/analysis/mootx01_topology_corrected_draft.svg`.)
+2. **docs/concepts/topology-assets/** — `mootx01_topology_v1.1.svg` placed (full original source preserved, only the corrections applied; supersedes `v1.0`). The other assets (`mootx01_taxonomy_v1.0.svg`, the prose `TOPOLOGY.md`) were reviewed and **left unchanged** per owner decision (2026-06-20): they describe aspects that have not changed.
 3. **docs/reference/GENIUSLOCUSKIT_SPEC.md / _INTERFACE.md** — align the "coordinates / standing-signal scheduler / training daemon" prose to "defines + emits, driven by the governor" (governed-doc edit, version bump per VERSIONING.md §5).
 
 ## Corrected-diagram spec (for the redraw)
