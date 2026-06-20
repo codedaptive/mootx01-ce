@@ -110,6 +110,13 @@ pub struct EstateRegistry {
     /// The shared coordinator (same Arc as in every OpenEstate — single
     /// coordinator for all estates so the federated lenses can cross-address).
     pub coord: Arc<std::sync::Mutex<EstateCoordinator>>,
+    /// The host identity written into rows filed by this server (memories,
+    /// tunnels, facts). Set to "aria-mcp-server" by all constructors; the
+    /// production entry point (`runtime::run`) overrides it with the banner
+    /// ("aria-mcp" or "mootx01") so the shared dispatcher stamps the correct
+    /// provenance for whichever binary is hosting it. Mirrors Swift
+    /// `ToolDispatcher.serverIdentity`.
+    pub server_identity: String,
 }
 
 impl EstateRegistry {
@@ -156,6 +163,46 @@ impl EstateRegistry {
             default: default_estate,
             extras,
             coord,
+            // Default identity; production entry point overrides via server_identity.
+            server_identity: "aria-mcp-server".to_owned(),
+        }
+    }
+
+    /// Construct a registry with one in-memory estate and NO corpus or vector
+    /// store registered — the dense recall lane is intentionally dark.
+    ///
+    /// Use this in tests that need to verify dark-lane behaviour (e.g. the
+    /// `recall_provenance:` hint in `moot_fact_search` when no semantic index
+    /// is present). For tests that require semantic recall to be live, use
+    /// `new_inmemory()` instead.
+    ///
+    /// Also used to verify that `server_identity` overrides take effect: the
+    /// field is `pub`, so callers can set `registry.server_identity =
+    /// "mootx01".to_owned()` after construction.
+    pub fn new_inmemory_bare() -> Self {
+        let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
+        let estate_id = Uuid::new_v4();
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(INIT_NOW, None).unwrap());
+        let handle = coord
+            .lock()
+            .unwrap()
+            .open(Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100)
+            .expect("default bare estate open must succeed");
+        // Intentionally skip wire_inmemory_semantic_recall — dense lane is dark.
+        let default_estate = OpenEstate {
+            coord: Arc::clone(&coord),
+            handle,
+            estate_id,
+            store,
+        };
+        let mut extras = HashMap::new();
+        extras.insert(estate_id, default_estate.clone());
+        EstateRegistry {
+            default: default_estate,
+            extras,
+            coord,
+            server_identity: "aria-mcp-server".to_owned(),
         }
     }
 
@@ -249,6 +296,8 @@ impl EstateRegistry {
             default: default_estate,
             extras,
             coord,
+            // Default identity; production entry point overrides via server_identity.
+            server_identity: "aria-mcp-server".to_owned(),
         })
     }
 
@@ -382,6 +431,8 @@ impl EstateRegistry {
             default: default_estate,
             extras,
             coord,
+            // Default identity; production entry point overrides via server_identity.
+            server_identity: "aria-mcp-server".to_owned(),
         })
     }
 

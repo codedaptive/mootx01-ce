@@ -89,7 +89,9 @@ public actor MootBridge {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner)
         let info = ARIA_MCPDispatcher.ServerInfo(name: serverName, version: "0.1.0")
-        let tooling = ToolDispatcher(kit: kit, handle: handle)
+        // Forward serverName as the host identity so facts/memories filed
+        // through this bridge are stamped with the correct source.
+        let tooling = ToolDispatcher(kit: kit, handle: handle, serverIdentity: serverName)
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
     }
 

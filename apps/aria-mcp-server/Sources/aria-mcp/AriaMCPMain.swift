@@ -302,7 +302,9 @@ struct AriaMCPMain {
         }
 
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "0.1.0")
-        let tooling = ToolDispatcher(kit: kit, handle: handle)
+        // Server identity injected so facts/memories filed via this host are
+        // stamped "aria-mcp-server" — the standalone reference MCP server.
+        let tooling = ToolDispatcher(kit: kit, handle: handle, serverIdentity: "aria-mcp-server")
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
         // Transport select. stdio is the default (testing, migrations, PoC). When

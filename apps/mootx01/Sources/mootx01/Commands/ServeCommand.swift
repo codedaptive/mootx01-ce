@@ -129,7 +129,9 @@ struct ServeCommand: AsyncParsableCommand {
             name: "mootx01",
             version: "1.0.0"
         )
-        let tooling = ToolDispatcher(kit: kit, handle: handle)
+        // Server identity injected so facts/memories filed via this host are
+        // stamped "mootx01" — the product binary running mootx01 serve.
+        let tooling = ToolDispatcher(kit: kit, handle: handle, serverIdentity: "mootx01")
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
         if let port = residentPort {

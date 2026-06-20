@@ -21,7 +21,7 @@
 //! # Server defaults (mirrors Swift `ToolDispatch.swift` constants)
 //!
 //! - `channel` = `CaptureChannel::Actuator` (cookbook §2.4: actuator-driven capture)
-//! - `added_by` = `"aria-mcp-server"`
+//! - `added_by` = `registry.server_identity` (injected at runtime startup — "aria-mcp" or "mootx01")
 //! - `lattice_anchor` = `LatticeAnchor::udc("000")` (the unclassified sentinel)
 //!   for all capture paths. The GeniusLocusKit seam (`capture_with_mode`)
 //!   classifies the sentinel via `Fdc::encode_anchor` on the way in — one
@@ -64,7 +64,10 @@ use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 // Server defaults — mirrors Swift ToolDispatch.swift constants
 // ---------------------------------------------------------------------------
 
-const SERVER_ADDED_BY: &str = "aria-mcp-server";
+// NOTE: SERVER_ADDED_BY has been removed. The host identity is now carried in
+// `EstateRegistry::server_identity`, injected at runtime startup so the shared
+// dispatcher correctly stamps provenance for whichever binary is hosting it
+// ("aria-mcp" or "mootx01"). Mirrors Swift `ToolDispatcher.serverIdentity`.
 const DEFAULT_EMBEDDING_MODEL: &str = "default";
 /// The canonical unclassified-content sentinel passed to the capture seam.
 /// Matches `GeniusLocusKit::UNCLASSIFIED_SENTINEL` and the Swift
@@ -367,7 +370,9 @@ fn run_file_memory(
         CaptureChannel::Actuator,
         location,
         LatticeAnchor::udc(DEFAULT_LATTICE_CODE),
-        SERVER_ADDED_BY,
+        // Injected host identity: stamps provenance for the running binary
+        // ("aria-mcp" or "mootx01") rather than a hardcoded constant.
+        registry.server_identity.as_str(),
         DEFAULT_EMBEDDING_MODEL,
     );
     // Apply exportability at capture time (DEBT-1 write path). Default is
@@ -866,7 +871,8 @@ fn run_link_memories(
         target.wing.clone(),
         target.room.clone(),
         kind_str,
-        SERVER_ADDED_BY,
+        // Injected host identity: stamps provenance for the running binary.
+        registry.server_identity.as_str(),
     );
     frame.source_drawer_id = Some(from_id.to_string());
     frame.target_drawer_id = Some(to_id.to_string());
@@ -999,10 +1005,11 @@ fn run_file_fact(
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
     // source_id grounds the fact (provenance — KGFact: every fact traces back to a
-    // source). When the caller omits it, infer the source as the ingest channel
-    // that asserted it, so a fact is never stored unanchored.
+    // source). When the caller omits it, infer the source as the injected host
+    // identity so a fact is never stored unanchored and provenance reflects the
+    // actual binary filing it ("aria-mcp" or "mootx01").
     let provided = optional_string(args, "source_id")?.unwrap_or("");
-    let source_id = if provided.is_empty() { SERVER_ADDED_BY } else { provided };
+    let source_id = if provided.is_empty() { registry.server_identity.as_str() } else { provided };
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
@@ -1018,6 +1025,13 @@ fn run_file_fact(
 /// Search knowledge-graph facts. Optional `query` for substring filtering.
 ///
 /// Reads all facts via `coordinator.recall_kg_facts` and filters in-memory.
+/// Fact retrieval is a KGFact row scan — the dense vector lane (Lane D) does
+/// not participate. When a query is present and no corpus is registered (dense
+/// lane dark), a `recall_provenance:` hint is appended so the AI caller can
+/// distinguish "no lexical match" from "semantic search was not consulted".
+/// This mirrors the honest-lane-state reporting that `moot_memory_search`
+/// emits (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+///
 /// Mirrors Swift `runFactSearch`.
 fn run_fact_search(
     args: &BTreeMap<String, JsonValue>,
@@ -1027,6 +1041,10 @@ fn run_fact_search(
     let query = optional_string(args, "query")?;
 
     let coord = estate.coord.lock().unwrap();
+    // Capture dense-lane availability before consuming the lock via recall_kg_facts.
+    // `has_corpus` is a cheap registry lookup — no I/O — so it is safe to call
+    // under the same lock acquisition before the recall call.
+    let dense_lane_dark = !coord.has_corpus(&estate.handle);
     let facts = coord
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
@@ -1058,6 +1076,13 @@ fn run_fact_search(
             "  {} — [{}] {} [{}]  filed={}  source={}",
             f.id, f.subject, f.predicate, f.object, filed_iso, f.source_drawer_id
         ));
+    }
+    // Dark-lane hint: when a query was supplied and the dense lane is dark (no
+    // corpus registered), append a recall_provenance line using the same format
+    // as moot_memory_search so AI callers receive a consistent signal. "0 results"
+    // then means "no lexical match", not "this fact does not exist semantically".
+    if query.is_some() && dense_lane_dark {
+        lines.push("recall_provenance: dense_lane:dark:noCorpus degraded_stages:none".to_owned());
     }
     Ok(text_result(&lines.join("\n")))
 }
