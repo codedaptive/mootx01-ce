@@ -57,7 +57,7 @@ fn cluster_5_drawer_content_starts_with_dist_marker() {
 #[test]
 fn cluster_5_confidence_pass_through() {
     let input = cluster_5();
-    let pipeline_output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+    let pipeline_output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
     let lens_result = distill_cluster(&input, Some(DistillationPipeline::default_extractor));
     assert!(
         (lens_result.confidence - pipeline_output.confidence).abs() < 1e-6,

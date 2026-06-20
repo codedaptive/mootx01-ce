@@ -258,12 +258,27 @@ public enum DistillationPipeline {
     /// Execute the five-stage distillation pipeline on a memory cluster.
     ///
     /// - Parameters:
-    ///   - input: cluster memories, optional timestamps, cluster ID, source IDs.
+    ///   - input: the reduction units (one item's sentences for intra-item
+    ///     distillation), optional timestamps, source id, source IDs.
     ///   - extractFeatures: feature extraction function (injected by caller).
+    ///   - intraItem: distill a SINGLE item from its own units (sentences) rather
+    ///     than a cross-memory cluster. This turns off the pipeline's cross-memory
+    ///     consensus machinery, which otherwise discards a single item's signal:
+    ///       • SNR hold — a single item never grows, so the "wait for the cluster
+    ///         to accumulate more members" hold does not apply; the item is reduced
+    ///         now from whatever recurring structure it carries (confidence
+    ///         annotates quality / injection depth rather than blocking).
+    ///       • PMI dominant-component pruning — a single document is ONE coherent
+    ///         thing, so EVERY recurring feature is its content. "Pick the single
+    ///         shared theme across memories" splits the item and drops real content
+    ///         (the Falcon doc lost database/tables/shadow to a non-dominant
+    ///         component). Intra-item keeps all structural features.
+    ///     Default false preserves the cross-memory cluster behaviour.
     /// - Returns: DistillationOutput with drawerContent, confidence, featureFingerprint.
     public static func run(
         input: DistillationInput,
-        extractFeatures: FeatureExtractor
+        extractFeatures: FeatureExtractor,
+        intraItem: Bool = false
     ) -> DistillationOutput {
         // Five pipeline stages share the incidence matrix, vocabulary, and feature array.
         // Extracting sub-functions would require threading these large structures through
@@ -284,11 +299,14 @@ public enum DistillationPipeline {
             return features
         }
 
-        // Build vocabulary (unique feature values in encounter order)
+        // Build vocabulary (unique feature values in encounter order). The key is
+        // the stemmed `value`; the first surface form seen for each stem is kept
+        // as the display form for the factoid prose.
         var vocabOrder: [String] = []
         var vocabIndex: [String: Int] = [:]
-        // Also track the feature type for each vocab entry
+        // Also track the feature type and display surface for each vocab entry.
         var vocabTypes: [DistillationFeatureType] = []
+        var vocabDisplay: [String] = []
 
         for features in perMemoryFeatures {
             for feature in features {
@@ -296,6 +314,7 @@ public enum DistillationPipeline {
                     vocabIndex[feature.value] = vocabOrder.count
                     vocabOrder.append(feature.value)
                     vocabTypes.append(feature.type)
+                    vocabDisplay.append(feature.display)
                 }
             }
         }
@@ -313,9 +332,11 @@ public enum DistillationPipeline {
 
         // ── Stage 2: Frequency scoring, SNR gate, majority threshold ──────────
 
-        // Compute doc frequencies for each feature
+        // Compute doc frequencies for each feature. Carry the display surface
+        // form so the factoid prose renders readable words, not stems.
         var allFeatures: [ExtractedFeature] = vocabOrder.enumerated().map { j, value in
-            ExtractedFeature(type: vocabTypes[j], value: value, docFrequency: 0)
+            ExtractedFeature(type: vocabTypes[j], value: value, docFrequency: 0,
+                             display: vocabDisplay[j])
         }
 
         let timestamps = input.memoryTimestamps
@@ -347,14 +368,15 @@ public enum DistillationPipeline {
 
         // SNR gate: check cluster quality before running full distillation
         let snrResult = DistillationScorer.computeSNR(features: allFeatures, M: M)
-        if !snrResult.readyToDistill {
+        if !intraItem && !snrResult.readyToDistill {
             return .failure(
                 snr: snrResult.snr,
                 reason: "SNR \(snrResult.snr) < 2.0: cluster is episodically dense, not ready")
         }
 
-        // Apply majority threshold
-        var (passing, failing) = DistillationScorer.applyMajorityThreshold(
+        // Apply the structural (recurrence) threshold: keep features that recur
+        // across ≥2 of the item's units; the one-off tail is episodic.
+        var (passing, failing) = DistillationScorer.applyStructuralThreshold(
             features: allFeatures, M: M)
 
         // ── Stage 2.5: Delta pre-pass ─────────────────────────────────────────
@@ -441,7 +463,29 @@ public enum DistillationPipeline {
             incidenceMatrix: restrictedIncidence,
             M: M
         )
-        var selected = DistillationScorer.selectDominantComponent(graph: graph)
+        var selected: [ExtractedFeature]
+        if intraItem {
+            // Intra-item: the item is ONE coherent thing — every recurring,
+            // non-stopword feature is its content. Keep them all (the PMI graph
+            // is the cross-memory "single shared theme" pruner and would split
+            // the document and drop real content).
+            selected = passing
+        } else {
+            selected = DistillationScorer.selectDominantComponent(graph: graph)
+            // Ubiquity inclusion: a feature present in (near) ALL members is the
+            // spine — yet PMI isolates it. A feature in every member has
+            // p(f∧x) = p(x), so PMI(f,x) = log₂(1) = 0 with EVERY other feature,
+            // giving it no positive edges, so selectDominantComponent drops it,
+            // silently discarding the most central feature. Re-add any passing
+            // feature in ≥ M-1 of the M members not already selected: core by
+            // ubiquity, not frequent-but-independent noise.
+            let ubiquityThreshold = Float32(M - 1) / Float32(M)
+            let selectedValues = Set(selected.map { $0.value })
+            for f in passing where f.docFrequency >= ubiquityThreshold
+                && !selectedValues.contains(f.value) {
+                selected.append(f)
+            }
+        }
 
         guard !selected.isEmpty else {
             return .failure(snr: snrResult.snr, reason: "PMI graph produced no dominant component")
@@ -462,10 +506,11 @@ public enum DistillationPipeline {
         let deltaStr = deltaTypeForFactoid?.rawValue ?? DeltaType.static.rawValue
         let uncertainFlag = uncertain ? "|uncertain" : ""
 
-        // Prose: top feature values joined by space
+        // Prose: top features by structural score, rendered as readable surface
+        // forms (display), not stems.
         let prose = selected
             .sorted { $0.structuralScore > $1.structuralScore }
-            .map { $0.value }
+            .map { $0.display }
             .joined(separator: " ")
 
         let drawerContent = "[DIST|conf=\(confStr)|src=\(M)|snr=\(snrStr)|delta=\(deltaStr)\(uncertainFlag)] \(prose)"

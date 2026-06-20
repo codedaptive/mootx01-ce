@@ -6,8 +6,8 @@
 // Per DISTILLATION_MATH_SSA.md §1–7 and DISTILLATION_MATH_DIFFUSION.md §1–8.
 //
 // Stage 1: Build feature incidence matrix from extract_features.
-// Stage 2: Apply typed decay weighting (if timestamps), compute SNR gate,
-//          apply majority threshold.
+// Stage 2: Apply typed decay weighting (if timestamps), compute SNR gate
+//          (skipped under intra_item), apply structural (recurrence) threshold.
 // Stage 2.5: DeltaFeatureExtractor pass on failing features; rescue
 //             CONVERGENT/MONOTONE sequences.
 // Stage 3: Build PMI coherence graph, select dominant component (F*).
@@ -325,11 +325,31 @@ impl DistillationPipeline {
     /// `incidence`, and `vocab_*` state that cannot be extracted into helpers without
     /// expensive cloning. Each stage is clearly marked with a "── Stage N:" banner.
     ///
-    /// - `input`: cluster memories, optional timestamps, cluster ID, source IDs.
+    /// - `input`: the reduction units (one item's sentences for intra-item
+    ///   distillation), optional timestamps, source id, source IDs.
     /// - `extract_features`: feature extraction function (injected by caller).
+    /// - `intra_item`: distill a SINGLE item from its own units (sentences) rather
+    ///   than a cross-memory cluster. This turns off the pipeline's cross-memory
+    ///   consensus machinery, which otherwise discards a single item's signal:
+    ///     • SNR hold — a single item never grows, so the "wait for the cluster
+    ///       to accumulate more members" hold does not apply; the item is reduced
+    ///       now from whatever recurring structure it carries (confidence
+    ///       annotates quality / injection depth rather than blocking).
+    ///     • PMI dominant-component pruning — a single document is ONE coherent
+    ///       thing, so EVERY recurring feature is its content. "Pick the single
+    ///       shared theme across memories" splits the item and drops real content
+    ///       (the Falcon doc lost database/tables/shadow to a non-dominant
+    ///       component). Intra-item keeps all structural features.
+    ///   Default false (caller passes `false`) preserves the cross-memory cluster
+    ///   behaviour. Swift gives this an `= false` default; Rust has no default
+    ///   params, so every call site passes the flag explicitly.
     ///
     /// Returns DistillationOutput with drawer_content, confidence, feature_fingerprint.
-    pub fn run(input: &DistillationInput, extract_features: FeatureExtractor) -> DistillationOutput {
+    pub fn run(
+        input: &DistillationInput,
+        extract_features: FeatureExtractor,
+        intra_item: bool,
+    ) -> DistillationOutput {
         let m = input.m();
         if m == 0 {
             return DistillationOutput::failure(0.0, "Empty cluster");
@@ -352,10 +372,13 @@ impl DistillationPipeline {
             features
         }).collect();
 
-        // Build vocabulary in encounter order; track type per entry
+        // Build vocabulary in encounter order. The key is the stemmed `value`;
+        // the first surface form seen for each stem is kept as the display form
+        // for the factoid prose. Track type and display per entry.
         let mut vocab_order: Vec<String> = Vec::new();
         let mut vocab_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut vocab_types: Vec<DistillationFeatureType> = Vec::new();
+        let mut vocab_display: Vec<String> = Vec::new();
 
         for features in &per_memory_features {
             for feature in features {
@@ -364,6 +387,7 @@ impl DistillationPipeline {
                     vocab_index.insert(feature.value.clone(), idx);
                     vocab_order.push(feature.value.clone());
                     vocab_types.push(feature.feature_type.clone());
+                    vocab_display.push(feature.display.clone());
                 }
             }
         }
@@ -382,8 +406,15 @@ impl DistillationPipeline {
 
         // ── Stage 2: Frequency scoring, SNR gate, majority threshold ──────────
 
+        // Carry the display surface form so the factoid prose renders readable
+        // words, not stems.
         let mut all_features: Vec<ExtractedFeature> = vocab_order.iter().enumerate().map(|(j, value)| {
-            ExtractedFeature::new(vocab_types[j].clone(), value.as_str(), 0.0)
+            ExtractedFeature::new_with_display(
+                vocab_types[j].clone(),
+                value.as_str(),
+                0.0,
+                vocab_display[j].as_str(),
+            )
         }).collect();
 
         if let Some(ref ts) = input.memory_timestamps {
@@ -414,17 +445,22 @@ impl DistillationPipeline {
             Self::compute_uniform_frequencies(&mut all_features, &incidence, m, v);
         }
 
-        // SNR gate: check cluster quality before running full distillation
+        // SNR gate: check cluster quality before running full distillation.
+        // Intra-item distillation never SNR-holds — a single item never grows,
+        // so the "wait for the cluster to accumulate more members" hold does not
+        // apply; the item is reduced now from whatever recurring structure it
+        // carries (confidence annotates quality, it does not block).
         let snr_result = DistillationScorer::compute_snr(&all_features, m);
-        if !snr_result.ready_to_distill {
+        if !intra_item && !snr_result.ready_to_distill {
             return DistillationOutput::failure(
                 snr_result.snr,
                 format!("SNR {:.4} < 2.0: cluster is episodically dense, not ready", snr_result.snr),
             );
         }
 
-        // Apply majority threshold (uses weighted_doc_frequency for the test)
-        let (mut passing, failing) = DistillationScorer::apply_majority_threshold(&all_features, m);
+        // Apply the structural (recurrence) threshold: keep features that recur
+        // across ≥2 of the item's units; the one-off tail is episodic.
+        let (mut passing, failing) = DistillationScorer::apply_structural_threshold(&all_features, m);
 
         // ── Stage 2.5: Delta pre-pass ─────────────────────────────────────────
         //
@@ -523,7 +559,32 @@ impl DistillationPipeline {
         }).collect();
 
         let graph = DistillationScorer::build_pmi_graph(&passing, &restricted_incidence, m);
-        let mut selected = DistillationScorer::select_dominant_component(&graph);
+        let mut selected: Vec<ExtractedFeature> = if intra_item {
+            // Intra-item: the item is ONE coherent thing — every recurring,
+            // non-stopword feature is its content. Keep them all (the PMI graph
+            // is the cross-memory "single shared theme" pruner and would split
+            // the document and drop real content).
+            passing.clone()
+        } else {
+            let mut sel = DistillationScorer::select_dominant_component(&graph);
+            // Ubiquity inclusion: a feature present in (near) ALL members is the
+            // spine — yet PMI isolates it. A feature in every member has
+            // p(f∧x) = p(x), so PMI(f,x) = log₂(1) = 0 with EVERY other feature,
+            // giving it no positive edges, so select_dominant_component drops it,
+            // silently discarding the most central feature. Re-add any passing
+            // feature in ≥ M-1 of the M members not already selected: core by
+            // ubiquity, not frequent-but-independent noise.
+            let ubiquity_threshold = (m - 1) as f32 / m as f32;
+            let selected_values: std::collections::HashSet<&str> =
+                sel.iter().map(|f| f.value.as_str()).collect();
+            let mut to_add: Vec<ExtractedFeature> = passing.iter()
+                .filter(|f| f.doc_frequency >= ubiquity_threshold
+                    && !selected_values.contains(f.value.as_str()))
+                .cloned()
+                .collect();
+            sel.append(&mut to_add);
+            sel
+        };
 
         if selected.is_empty() {
             return DistillationOutput::failure(
@@ -546,13 +607,14 @@ impl DistillationPipeline {
         let delta_str = delta_type_for_factoid.as_ref().map(|d| d.as_str()).unwrap_or("STATIC");
         let uncertain_flag = if uncertain { "|uncertain" } else { "" };
 
-        // Prose: top feature values joined by space, sorted by descending structural score
+        // Prose: top features by structural score, rendered as readable surface
+        // forms (display), not stems.
         let mut sorted_selected = selected.clone();
         sorted_selected.sort_by(|a, b| {
             b.structural_score.partial_cmp(&a.structural_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let prose: String = sorted_selected.iter().map(|f| f.value.as_str()).collect::<Vec<_>>().join(" ");
+        let prose: String = sorted_selected.iter().map(|f| f.display.as_str()).collect::<Vec<_>>().join(" ");
 
         let drawer_content = format!(
             "[DIST|conf={conf_str}|src={m}|snr={snr_str}|delta={delta_str}{uncertain_flag}] {prose}"
@@ -749,7 +811,7 @@ mod tests {
     #[test]
     fn full_pipeline_on_five_memory_cluster_succeeds_with_conf_gt_0_6() {
         let input = five_memory_cluster();
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         assert!(output.succeeded, "pipeline should succeed; failure_reason={:?}", output.failure_reason);
         assert!(output.confidence > 0.6, "confidence should exceed 0.6, got {}", output.confidence);
         assert_ne!(output.feature_fingerprint, Fingerprint256::ZERO);
@@ -758,7 +820,7 @@ mod tests {
     #[test]
     fn dist_header_format_is_correct() {
         let input = five_memory_cluster();
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
             return;
         }
@@ -773,7 +835,7 @@ mod tests {
     #[test]
     fn distilled_header_parse_round_trip() {
         let input = five_memory_cluster();
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
             return;
         }
@@ -802,23 +864,27 @@ mod tests {
             "test-cluster-snr",
             vec!["s0".into(), "s1".into(), "s2".into()],
         );
-        let output = DistillationPipeline::run(&disjoint, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&disjoint, DistillationPipeline::default_extractor, false);
         assert!(!output.succeeded, "disjoint cluster should fail SNR gate");
     }
 
     #[test]
     fn delta_pre_pass_rescues_convergent_feature() {
-        // Design (M=10, τ=0.6):
+        // Design (M=10, τ_struct = 2/10 = 0.2):
         //   Structural (df=9/10=0.9 ≥ τ): cern, physics, research, lab, data, particle,
         //     matter, experiment (8 features). sigma per = 0.478, structural = 3.824.
-        //   Failing (df < τ): status:pending(1/10=0.1), status:approved(2/10=0.2).
-        //   Episodic noise = (1-0.1)+(1-0.2) = 1.7. SNR = 3.824/1.7 = 2.25 > 2.0 ✓
+        //   Failing (df < τ): status:pending(1/10=0.1), status:approved(1/10=0.1).
+        //     Both are one-off under the structural (recurrence) threshold.
+        //   Episodic noise = (1-0.1)+(1-0.1) = 1.8. SNR = 3.824/1.8 = 2.12 > 2.0 ✓
         //
-        //   status key CONVERGENT trajectory [pending→approved→approved]:
-        //     terminal="status:approved", k=2, C=2/3≈0.667 ≥ 0.5 → CONVERGENT.
-        //     status:approved is promoted to passing set.
+        //   status key CONVERGENT trajectory [pending(M1)→approved(M2)]:
+        //     terminal="status:approved", m=2, k=1, C=1/2=0.5 ≥ 0.5 → CONVERGENT.
+        //     status:approved (df=0.1, one-off) is promoted to the passing set by
+        //     the delta pre-pass. The terminal must be below τ_struct to need the
+        //     rescue — at exactly one occurrence it is episodic by recurrence but
+        //     structural by convergence.
         //
-        // Note: Swift computeSNR sums raw df (structural=8×0.9=7.2, episodic=0.3);
+        // Note: Swift computeSNR sums raw df (structural=8×0.9=7.2, episodic=0.2);
         //   Rust uses sigma formula (more conservative). This cluster is designed to
         //   pass the Rust gate. Parity verification is in Dp1.
         //
@@ -842,13 +908,13 @@ mod tests {
         }
 
         // 8 structural ENT features in M0-M8 (9/10), status:pending in M1 only,
-        // status:approved in M2 and M3 only. M9 has no features.
+        // status:approved in M2 only (each one-off, df=0.1). M9 has no features.
         let ent = "E:cern|E:physics|E:research|E:lab|E:data|E:particle|E:matter|E:experiment";
         let memories = vec![
             ent.to_string(),
             format!("{ent}|R:status:pending"),
             format!("{ent}|R:status:approved"),
-            format!("{ent}|R:status:approved"),
+            ent.to_string(),
             ent.to_string(),
             ent.to_string(),
             ent.to_string(),
@@ -863,7 +929,7 @@ mod tests {
             "test-cluster-delta",
             (0..10).map(|i| format!("src-{i}")).collect(),
         );
-        let output = DistillationPipeline::run(&input, pipe_extractor);
+        let output = DistillationPipeline::run(&input, pipe_extractor, false);
         assert!(output.succeeded, "delta pre-pass should rescue CONVERGENT feature; failure={:?}", output.failure_reason);
         assert_eq!(output.delta_type, Some(DeltaType::Convergent));
         assert_ne!(output.feature_fingerprint, Fingerprint256::ZERO);
@@ -877,7 +943,7 @@ mod tests {
             "test-cluster-fail",
             vec!["s1".into(), "s2".into(), "s3".into()],
         );
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
             assert!(output.drawer_content.is_empty());
             assert!(output.failure_reason.is_some());
@@ -888,7 +954,7 @@ mod tests {
     #[test]
     fn feature_fingerprint_is_or_union_idempotent() {
         let input = five_memory_cluster();
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
             return;
         }
@@ -902,7 +968,7 @@ mod tests {
     #[test]
     fn empty_cluster_returns_failure() {
         let input = DistillationInput::new(vec![], None, "test-cluster-empty", vec![]);
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         assert!(!output.succeeded);
         assert!(output.failure_reason.is_some());
     }
@@ -915,12 +981,163 @@ mod tests {
             "test-cluster-single",
             vec!["s1".into()],
         );
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if output.succeeded {
             assert!(output.confidence >= 0.4);
             assert!(!output.drawer_content.is_empty());
         } else {
             assert_eq!(output.confidence, 0.0);
         }
+    }
+
+    // MARK: - Intra-item distillation
+
+    /// Controlled extractor: every word starting with "E:" is an ENT feature
+    /// with value = stem-stand-in (the text after "E:") and display = the same.
+    /// Words without the prefix are ignored. Lets a test place exact features in
+    /// exact units so the intra-item selection is deterministic.
+    fn marked_ent_extractor(text: &str, feature_type: DistillationFeatureType) -> Vec<ExtractedFeature> {
+        if feature_type != DistillationFeatureType::Entity {
+            return vec![];
+        }
+        text.split_whitespace()
+            .filter(|w| w.starts_with("E:"))
+            .map(|w| {
+                let body = &w[2..];
+                // value = stem-stand-in (before '/' if present), display = after '/'.
+                if let Some(slash) = body.find('/') {
+                    ExtractedFeature::new_with_display(
+                        DistillationFeatureType::Entity,
+                        &body[..slash],
+                        0.0,
+                        &body[slash + 1..],
+                    )
+                } else {
+                    ExtractedFeature::new(DistillationFeatureType::Entity, body, 0.0)
+                }
+            })
+            .collect()
+    }
+
+    // intra_item keeps ALL structural (recurring) features, not just the PMI
+    // dominant component. The Falcon-style document: a spine entity recurs across
+    // a minority of sentences alongside several co-recurring entities; the PMI
+    // pruner would split them, intra-item keeps every recurring one.
+    #[test]
+    fn intra_item_keeps_all_passing_features() {
+        // 4 sentences. database+tables recur (2/4 each), shadow recurs (2/4),
+        // and migration recurs (2/4) — all ≥ τ_struct(4)=0.5. Each pair co-occurs
+        // in different sentences, so PMI would fragment them into small
+        // components; intra-item keeps them all.
+        let input = DistillationInput::new(
+            vec![
+                "E:databas/database E:tabl/tables".to_string(),
+                "E:databas/database E:shadow/shadow".to_string(),
+                "E:tabl/tables E:migrat/migration".to_string(),
+                "E:shadow/shadow E:migrat/migration".to_string(),
+            ],
+            None,
+            "item-falcon",
+            vec!["item-falcon".to_string()],
+        );
+        let output = DistillationPipeline::run(&input, marked_ent_extractor, true);
+        assert!(output.succeeded, "intra-item must succeed; failure={:?}", output.failure_reason);
+        // All four recurring stems must appear in the prose as their display forms.
+        for surface in ["database", "tables", "shadow", "migration"] {
+            assert!(
+                output.drawer_content.contains(surface),
+                "prose must contain '{surface}'; got {}",
+                output.drawer_content
+            );
+        }
+    }
+
+    // intra_item NEVER SNR-holds: a single sparse item whose SNR would fail the
+    // cross-memory gate still distills under intra_item.
+    #[test]
+    fn intra_item_does_not_snr_hold() {
+        // 3 sentences, each a distinct entity recurring only once (df=1/3 each)
+        // plus one shared entity in 2 of 3 (df=2/3). Under cross-memory rules the
+        // episodic tail would hold this; intra_item reduces it now.
+        let input = DistillationInput::new(
+            vec![
+                "E:spine E:one".to_string(),
+                "E:spine E:two".to_string(),
+                "E:three E:four".to_string(),
+            ],
+            None,
+            "item-sparse",
+            vec!["item-sparse".to_string()],
+        );
+        let cross = DistillationPipeline::run(&input, marked_ent_extractor, false);
+        let intra = DistillationPipeline::run(&input, marked_ent_extractor, true);
+        // The cross-memory path may hold (SNR gate); the intra-item path must not
+        // fail for SNR reasons — it produces from the recurring 'spine'.
+        assert!(intra.succeeded, "intra-item must not SNR-hold; failure={:?}", intra.failure_reason);
+        assert!(intra.drawer_content.contains("spine"));
+        // Document the cross-memory behaviour for traceability: it does not crash
+        // and is a well-formed output regardless of succeeded.
+        let _ = cross.succeeded;
+    }
+
+    // Ubiquity re-add (cross-memory path): a feature present in ALL members has
+    // PMI = 0 with every other feature and is dropped by the dominant-component
+    // selector — the re-add restores it when df ≥ (M-1)/M.
+    #[test]
+    fn cross_memory_ubiquity_readd_restores_spine() {
+        // M=4, no episodic tail (every feature recurs ≥ τ_struct=0.5 → SNR ready).
+        // 'spine' in all 4 (df=1.0 ≥ (4-1)/4=0.75) but co-occurs with EVERYTHING,
+        // so PMI(spine,*) = log₂(1) = 0 → no positive edges → isolated singleton
+        // (component weight = its wdf = 1.0). alpha+beta co-occur in 3 of 4
+        // (df=0.75 each → component weight 1.5 > 1.0) and are the DOMINANT
+        // component; gamma+delta co-occur in 2 of 4 (weight 1.0). spine, dropped
+        // by dominant-component selection, is restored by the ubiquity re-add.
+        let input = DistillationInput::new(
+            vec![
+                "E:spine E:alpha E:beta E:gamma E:delta".to_string(),
+                "E:spine E:alpha E:beta E:gamma E:delta".to_string(),
+                "E:spine E:alpha E:beta".to_string(),
+                "E:spine".to_string(),
+            ],
+            None,
+            "cluster-ubiquity",
+            (0..4).map(|i| format!("src-{i}")).collect(),
+        );
+        let output = DistillationPipeline::run(&input, marked_ent_extractor, false);
+        assert!(output.succeeded, "ubiquity cluster must succeed; failure={:?}", output.failure_reason);
+        assert!(
+            output.drawer_content.contains("spine"),
+            "ubiquity re-add must restore the spine feature; got {}",
+            output.drawer_content
+        );
+    }
+
+    // Prose renders the display surface form, not the stemmed grouping value.
+    #[test]
+    fn prose_renders_display_not_stem() {
+        let input = DistillationInput::new(
+            vec![
+                "E:migrat/migration".to_string(),
+                "E:migrat/migrations".to_string(),
+                "E:migrat/migrating".to_string(),
+            ],
+            None,
+            "item-stem",
+            vec!["item-stem".to_string()],
+        );
+        let output = DistillationPipeline::run(&input, marked_ent_extractor, true);
+        assert!(output.succeeded, "failure={:?}", output.failure_reason);
+        // value is the stem "migrat" (one df bit); display is the FIRST surface
+        // form encountered ("migration"). Prose must show the surface, not the stem.
+        assert!(
+            output.drawer_content.contains("migration"),
+            "prose must render display surface; got {}",
+            output.drawer_content
+        );
+        assert!(
+            !output.drawer_content.contains("migrat ") && !output.drawer_content.ends_with("migrat"),
+            "prose must not render the bare stem 'migrat'; got {}",
+            output.drawer_content
+        );
     }
 }

@@ -94,7 +94,7 @@ pub fn distill_cluster(
     // Default to the production HMM extractor (one door for all callers that
     // need semantic features). Test callers pass an explicit extractor.
     let extractor: FeatureExtractor = extract_features.unwrap_or_else(hmm_feature_extractor);
-    let output: DistillationOutput = DistillationPipeline::run(input, extractor);
+    let output: DistillationOutput = DistillationPipeline::run(input, extractor, false);
 
     let injection_depth = InjectionDepth::from_confidence(output.confidence);
 

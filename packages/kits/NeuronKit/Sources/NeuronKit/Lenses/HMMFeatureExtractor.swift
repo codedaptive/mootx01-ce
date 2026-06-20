@@ -34,6 +34,45 @@ import SubstrateML
 
 extension NeuronKit {
 
+    /// Function-word stop list for distillation feature extraction. Tokens in
+    /// this set are NEVER emitted as ENT/REL features: they recur across an
+    /// item's sentences (so they clear the recurrence threshold) but carry no
+    /// topical signal — they are scaffolding, not "the words that matter". The
+    /// HMM tagger tags many of them as nouns ("the"/"to"/"by" came back .noun),
+    /// so the filter is applied independently of the tag.
+    ///
+    /// CONFORMANCE: this exact set is mirrored byte-for-byte in the Rust port
+    /// (`hmm_feature_extractor.rs` `DISTILLATION_STOPWORDS`). Keep the two in
+    /// lockstep — a divergence breaks cross-port factoid parity.
+    static let distillationStopwords: Set<String> = [
+        // articles & determiners
+        "a", "an", "the", "this", "that", "these", "those", "each", "every",
+        "all", "any", "some", "no", "such", "both", "either", "neither",
+        "much", "many", "more", "most", "other", "another", "same", "own",
+        // prepositions
+        "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
+        "into", "onto", "upon", "about", "above", "below", "under", "over",
+        "between", "among", "through", "during", "before", "after", "since",
+        "until", "without", "within", "against", "toward", "towards", "across",
+        "behind", "beyond", "near",
+        // conjunctions
+        "and", "or", "but", "nor", "so", "yet", "if", "then", "than",
+        "because", "although", "though", "while", "whereas", "unless",
+        // pronouns
+        "i", "me", "my", "mine", "we", "us", "our", "ours", "you", "your",
+        "yours", "he", "him", "his", "she", "her", "hers", "it", "its",
+        "they", "them", "their", "theirs", "who", "whom", "whose", "which",
+        "what",
+        // be / have / do / modals
+        "is", "am", "are", "was", "were", "be", "been", "being", "has",
+        "have", "had", "having", "do", "does", "did", "doing", "will",
+        "would", "shall", "should", "can", "could", "may", "might", "must",
+        // common adverbs / particles
+        "not", "very", "too", "also", "just", "only", "even", "still",
+        "again", "ever", "never", "now", "here", "there", "when", "where",
+        "why", "how", "once", "up", "down", "out", "off", "back",
+    ]
+
     /// Production FeatureExtractor backed by the LatticeLib HMM/Viterbi tagger.
     ///
     /// Tokenises the input with `Tokenizer.tokenize`, then classifies each token
@@ -66,28 +105,40 @@ extension NeuronKit {
         switch featureType {
 
         case .entity:
-            // ENT: tokens tagged .noun by the HMM tagger.
+            // ENT: tokens tagged .noun by the HMM tagger, minus function words.
             // The HMM path is mandatory for cross-port byte-identity.
             for token in tokens {
-                let wc = LatticeLib.wordClass(token.lowercased(), tagger: .hmm)
+                let lower = token.lowercased()
+                // Drop function words: they recur but are scaffolding, and the
+                // HMM tagger mis-tags several of them ("the"/"by") as nouns.
+                if distillationStopwords.contains(lower) { continue }
+                let wc = LatticeLib.wordClass(lower, tagger: .hmm)
                 if wc == .noun {
+                    // value = Snowball stem (groups migration/migrations into one
+                    // df + one fingerprint bit); display = surface form for the
+                    // factoid prose. Stemmer is bit-identical Swift↔Rust.
                     results.append(ExtractedFeature(
                         type: .entity,
-                        value: token.lowercased(),
-                        docFrequency: 0
+                        value: Stemmer.stem(lower),
+                        docFrequency: 0,
+                        display: lower
                     ))
                 }
             }
 
         case .relation:
-            // REL: tokens tagged .verb by the HMM tagger.
+            // REL: tokens tagged .verb by the HMM tagger, minus function words.
             for token in tokens {
-                let wc = LatticeLib.wordClass(token.lowercased(), tagger: .hmm)
+                let lower = token.lowercased()
+                if distillationStopwords.contains(lower) { continue }
+                let wc = LatticeLib.wordClass(lower, tagger: .hmm)
                 if wc == .verb {
+                    // value = stem (unifies migrate/migrates); display = surface.
                     results.append(ExtractedFeature(
                         type: .relation,
-                        value: token.lowercased(),
-                        docFrequency: 0
+                        value: Stemmer.stem(lower),
+                        docFrequency: 0,
+                        display: lower
                     ))
                 }
             }

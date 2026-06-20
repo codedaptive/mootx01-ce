@@ -255,6 +255,7 @@ fn single_word_extractor(text: &str, feature_type: substrate_ml::typed_decay_wei
     vec![ExtractedFeature {
         feature_type: DistillationFeatureType::Entity,
         value: "provenance".to_string(),
+        display: "provenance".to_string(),
         doc_frequency: 0.0,
         weighted_doc_frequency: 0.0,
         structural_score: 0.0,
@@ -265,7 +266,7 @@ fn single_word_extractor(text: &str, feature_type: substrate_ml::typed_decay_wei
 // 5 identical memories: "provenance is invariant in ingestion"
 // Extractor: single_word_extractor (extracts "provenance" from each memory)
 // M=5, V={"provenance"}, df("provenance")=5/5=1.0
-// τ_maj(M=5) = ⌈(5+1)/2⌉/5 = 3/5 = 0.6, so df=1.0 ≥ 0.6 → passes majority vote
+// τ_struct(M=5) = 2/5 = 0.4, so df=1.0 ≥ 0.4 → passes the structural threshold
 // succeeded=true, confidence>0.6, featureFingerprint≠zero
 #[test]
 fn cluster_5_succeeded() {
@@ -279,7 +280,7 @@ fn cluster_5_succeeded() {
         "cluster-5-fixture",
         source_ids,
     );
-    let output = DistillationPipeline::run(&input, single_word_extractor);
+    let output = DistillationPipeline::run(&input, single_word_extractor, false);
     assert!(output.succeeded, "cluster_5 must succeed");
     assert!(output.confidence > 0.6,
         "cluster_5 confidence must be >0.6, got {}", output.confidence);
@@ -303,7 +304,7 @@ fn cluster_5_fingerprint_equals_provenance_hash() {
         "cluster-5-fixture",
         source_ids,
     );
-    let output = DistillationPipeline::run(&input, single_word_extractor);
+    let output = DistillationPipeline::run(&input, single_word_extractor, false);
     let expected = DistillationPipeline::feature_hash("provenance");
     assert_eq!(output.feature_fingerprint.block0, expected.block0, "block0 mismatch");
     assert_eq!(output.feature_fingerprint.block1, expected.block1, "block1 mismatch");
@@ -327,6 +328,6 @@ fn cluster_noise_failure() {
         "cluster-noise-fixture",
         vec!["src-0".to_string(), "src-1".to_string(), "src-2".to_string()],
     );
-    let output = DistillationPipeline::run(&input, single_word_extractor);
+    let output = DistillationPipeline::run(&input, single_word_extractor, false);
     assert!(!output.succeeded, "cluster_noise must not succeed");
 }

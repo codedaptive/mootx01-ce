@@ -5,10 +5,14 @@
 //! for the production distillation extractor.
 //!
 //! Shared fixture: "Project Apollo adopted PostgreSQL in 2021"
-//!   ENT -> must include "apollo" and "postgresql"
-//!   REL -> must include "adopted"
+//!   ENT -> display surfaces must include "apollo" and "postgresql"
+//!   REL -> display surface must include "adopted" (value = stem "adopt")
 //!   TMP -> must include "2021"
 //!   NUM -> "42" in a separate fixture sentence
+//!
+//! ENT/REL features now carry a stemmed grouping `value` and a `display`
+//! surface form. Surface assertions key off `display`; the grouping key is
+//! `stem(display)`, byte-identical Swift↔Rust via the Snowball stemmer.
 //!
 //! Cross-port parity:
 //!   Both ports use the same HMMTaggerModel.json artifact (loaded via include_bytes!
@@ -16,6 +20,7 @@
 //!   so the two ports must agree on every token classification for table-resident tokens
 //!   (identical via the static word-class table) and for novel tokens (same HMM model).
 
+use lattice_lib::stemmer::stem;
 use neuron_kit::hmm_feature_extractor::hmm_feature_extractor;
 use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
 use substrate_ml::typed_decay_weighting::DistillationFeatureType;
@@ -24,29 +29,32 @@ const APOLLO_SENTENCE: &str = "Project Apollo adopted PostgreSQL in 2021";
 
 // ── ENT tests ────────────────────────────────────────────────────────────────
 
-// "apollo" must appear as an ENT feature — mirrors Swift "ENT: 'apollo' is extracted".
+// "apollo" must appear as an ENT feature surface — mirrors Swift "ENT: 'apollo'".
 #[test]
 fn ent_apollo_present() {
     let extractor = hmm_feature_extractor();
     let features = extractor(APOLLO_SENTENCE, DistillationFeatureType::Entity);
-    let values: Vec<&str> = features.iter().map(|f| f.value.as_str()).collect();
+    let displays: Vec<&str> = features.iter().map(|f| f.display.as_str()).collect();
     assert!(
-        values.contains(&"apollo"),
-        "expected 'apollo' in ENT features; got {:?}",
-        values
+        displays.contains(&"apollo"),
+        "expected 'apollo' surface in ENT features; got {:?}",
+        displays
     );
+    // The grouping value is the Snowball stem of the surface form.
+    let apollo = features.iter().find(|f| f.display == "apollo").unwrap();
+    assert_eq!(apollo.value, stem("apollo"));
 }
 
-// "postgresql" must appear as an ENT feature — mirrors Swift "ENT: 'postgresql'...".
+// "postgresql" must appear as an ENT feature surface — mirrors Swift.
 #[test]
 fn ent_postgresql_present() {
     let extractor = hmm_feature_extractor();
     let features = extractor(APOLLO_SENTENCE, DistillationFeatureType::Entity);
-    let values: Vec<&str> = features.iter().map(|f| f.value.as_str()).collect();
+    let displays: Vec<&str> = features.iter().map(|f| f.display.as_str()).collect();
     assert!(
-        values.contains(&"postgresql"),
-        "expected 'postgresql' in ENT features; got {:?}",
-        values
+        displays.contains(&"postgresql"),
+        "expected 'postgresql' surface in ENT features; got {:?}",
+        displays
     );
 }
 
@@ -68,17 +76,19 @@ fn ent_features_have_correct_type() {
 
 // ── REL tests ────────────────────────────────────────────────────────────────
 
-// "adopted" must appear as a REL feature.
+// "adopted" must appear as a REL feature surface; value is its stem.
 #[test]
 fn rel_adopted_present() {
     let extractor = hmm_feature_extractor();
     let features = extractor(APOLLO_SENTENCE, DistillationFeatureType::Relation);
-    let values: Vec<&str> = features.iter().map(|f| f.value.as_str()).collect();
+    let displays: Vec<&str> = features.iter().map(|f| f.display.as_str()).collect();
     assert!(
-        values.contains(&"adopted"),
-        "expected 'adopted' in REL features; got {:?}",
-        values
+        displays.contains(&"adopted"),
+        "expected 'adopted' surface in REL features; got {:?}",
+        displays
     );
+    let adopted = features.iter().find(|f| f.display == "adopted").unwrap();
+    assert_eq!(adopted.value, stem("adopted"));
 }
 
 // ── TMP tests ────────────────────────────────────────────────────────────────
@@ -181,7 +191,7 @@ fn pipeline_produces_features_with_hmm_extractor() {
         "hmm-extractor-integration-cluster",
         vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
     );
-    let output = DistillationPipeline::run(&input, hmm_feature_extractor());
+    let output = DistillationPipeline::run(&input, hmm_feature_extractor(), false);
     // With the HMM extractor, the pipeline must NOT fail with "No features extracted"
     // — it must extract ENT features (apollo) from every memory. The pipeline may
     // still fail the SNR gate (cluster-quality property), but the "No features

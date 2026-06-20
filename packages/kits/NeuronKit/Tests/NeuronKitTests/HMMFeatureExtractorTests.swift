@@ -12,6 +12,7 @@
 
 import Testing
 import Foundation
+import LatticeLib
 @testable import NeuronKit
 import SubstrateML
 
@@ -22,27 +23,33 @@ struct HMMFeatureExtractorTests {
 
     // Canonical fixture shared with the Rust port:
     // "Project Apollo adopted PostgreSQL in 2021"
-    //   ENT: apollo, postgresql (nouns via HMM; "project" may also be included)
-    //   REL: adopted (verb via HMM)
-    //   TMP: 2021 (4-digit year)
+    //   ENT: apollo, postgresql surfaces (nouns via HMM; "project" may also be
+    //        included). value = Snowball stem, display = surface form.
+    //   REL: adopted surface (verb via HMM); value = stem "adopt".
+    //   TMP: 2021 (4-digit year; no stem, value == display)
     //   NUM: 2021 (all-digit token; appears in both NUM and TMP since each type
     //              is queried separately by the pipeline)
     private let apolloSentence = "Project Apollo adopted PostgreSQL in 2021"
 
     // MARK: - Entity extraction
 
-    @Test("ENT: 'apollo' is extracted as an entity")
+    @Test("ENT: 'apollo' surface is extracted as an entity, value is its stem")
     func entityApollo() {
         let features = NeuronKit.hmmFeatureExtractor(apolloSentence, .entity)
-        let values = features.map(\.value)
-        #expect(values.contains("apollo"), "expected 'apollo' in ENT features; got \(values)")
+        let displays = features.map(\.display)
+        #expect(displays.contains("apollo"), "expected 'apollo' surface in ENT features; got \(displays)")
+        // Every ENT feature's value is the Snowball stem of its display surface.
+        for f in features {
+            #expect(f.value == Stemmer.stem(f.display),
+                    "value must be stem of display (\(f.display))")
+        }
     }
 
-    @Test("ENT: 'postgresql' is extracted as an entity")
+    @Test("ENT: 'postgresql' surface is extracted as an entity")
     func entityPostgresQL() {
         let features = NeuronKit.hmmFeatureExtractor(apolloSentence, .entity)
-        let values = features.map(\.value)
-        #expect(values.contains("postgresql"), "expected 'postgresql' in ENT features; got \(values)")
+        let displays = features.map(\.display)
+        #expect(displays.contains("postgresql"), "expected 'postgresql' surface in ENT features; got \(displays)")
     }
 
     @Test("ENT: all extracted features have type .entity")
@@ -55,11 +62,42 @@ struct HMMFeatureExtractorTests {
 
     // MARK: - Relation extraction
 
-    @Test("REL: 'adopted' is extracted as a relation")
+    @Test("REL: 'adopted' surface is extracted as a relation, value is its stem")
     func relationAdopted() {
         let features = NeuronKit.hmmFeatureExtractor(apolloSentence, .relation)
-        let values = features.map(\.value)
-        #expect(values.contains("adopted"), "expected 'adopted' in REL features; got \(values)")
+        let displays = features.map(\.display)
+        #expect(displays.contains("adopted"), "expected 'adopted' surface in REL features; got \(displays)")
+        if let adopted = features.first(where: { $0.display == "adopted" }) {
+            #expect(adopted.value == Stemmer.stem("adopted"))
+        }
+    }
+
+    // MARK: - Stopword filtering
+
+    @Test("ENT: distillation stopwords are never emitted as entities")
+    func stopwordsDroppedFromEntities() {
+        let text = "the database in the system was migrated by the team to the cloud"
+        let features = NeuronKit.hmmFeatureExtractor(text, .entity)
+        for f in features {
+            #expect(!NeuronKit.distillationStopwords.contains(f.display),
+                    "stopword '\(f.display)' must not appear as an ENT feature")
+        }
+    }
+
+    @Test("REL: distillation stopwords are never emitted as relations")
+    func stopwordsDroppedFromRelations() {
+        let text = "the team has to migrate and they will be doing it by friday"
+        let features = NeuronKit.hmmFeatureExtractor(text, .relation)
+        for f in features {
+            #expect(!NeuronKit.distillationStopwords.contains(f.display),
+                    "stopword '\(f.display)' must not appear as a REL feature")
+        }
+    }
+
+    @Test("Stopword set has the conformance-pinned element count")
+    func stopwordCountMatchesRust() {
+        // 152 words, byte-for-byte identical to the Rust DISTILLATION_STOPWORDS.
+        #expect(NeuronKit.distillationStopwords.count == 152)
     }
 
     @Test("REL: all extracted features have type .relation")

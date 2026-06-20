@@ -233,7 +233,7 @@ struct DistillationPipelineRunConformanceTests {
     // 5 identical memories: "provenance is invariant in ingestion"
     // Extractor: singleWordExtractor (extracts "provenance" from each memory)
     // M=5, V={"provenance"}, df("provenance")=5/5=1.0
-    // τ_maj(M=5) = ⌈(5+1)/2⌉/5 = 3/5 = 0.6, so df=1.0 ≥ 0.6 → passes majority vote
+    // τ_struct(M=5) = 2/5 = 0.4, so df=1.0 ≥ 0.4 → passes the structural threshold
     // Single-node PMI graph: F*={"provenance"}, |F*|=1, |Vthresh|=1
     // confidence = meanDf × (|F*|/|Vthresh|) = 1.0 × 1.0 = 1.0
     // SNR: structuralSignal=1 node in dominant component/|V|=1 → signal>>noise → passes
@@ -275,7 +275,7 @@ struct DistillationPipelineRunConformanceTests {
     }
 
     // Fixture: cluster_noise
-    // 3 memories with no overlapping features → no feature reaches majority
+    // 3 memories with no overlapping features → no feature reaches the threshold
     // Using singleWordExtractor: none of the texts contain "provenance" → V=0
     // Empty vocabulary → "No features extracted" → succeeded=false
     @Test func clusterNoiseFailure() {

@@ -92,36 +92,36 @@ struct DistilledHeaderParseTests {
     }
 }
 
-// MARK: - majorityThreshold
+// MARK: - structuralThreshold
 
-@Suite("majorityThreshold")
-struct MajorityThresholdTests {
+@Suite("structuralThreshold")
+struct StructuralThresholdTests {
 
     @Test("threshold for M=1")
     func m1() {
-        // ceil((1+1)/2)/1 = 1.0
-        #expect(abs(DistillationScorer.majorityThreshold(M: 1) - 1.0) < 0.001)
+        // 2/1 = 2.0 — nothing recurs; a single un-chunked unit is not distillable.
+        #expect(abs(DistillationScorer.structuralThreshold(M: 1) - 2.0) < 0.001)
     }
 
     @Test("threshold for M=3")
     func m3() {
-        // ceil(4/2)/3 = 2/3 ≈ 0.667
-        let t = DistillationScorer.majorityThreshold(M: 3)
+        // 2/3 ≈ 0.667 — recurs in ≥2 of 3 units.
+        let t = DistillationScorer.structuralThreshold(M: 3)
         #expect(abs(t - 2.0/3.0) < 0.001)
     }
 
     @Test("threshold for M=5")
     func m5() {
-        // ceil(6/2)/5 = 3/5 = 0.6
-        let t = DistillationScorer.majorityThreshold(M: 5)
-        #expect(abs(t - 0.6) < 0.001)
+        // 2/5 = 0.4 — recurs in ≥2 of 5 units.
+        let t = DistillationScorer.structuralThreshold(M: 5)
+        #expect(abs(t - 0.4) < 0.001)
     }
 
     @Test("threshold for M=4")
     func m4() {
-        // ceil(5/2)/4 = 3/4 = 0.75
-        let t = DistillationScorer.majorityThreshold(M: 4)
-        #expect(abs(t - 0.75) < 0.001)
+        // 2/4 = 0.5 — recurs in ≥2 of 4 units.
+        let t = DistillationScorer.structuralThreshold(M: 4)
+        #expect(abs(t - 0.5) < 0.001)
     }
 }
 
@@ -132,7 +132,7 @@ struct ComputeSNRTests {
 
     @Test("SNR gate blocks cluster with no structural overlap")
     func noOverlapFails() {
-        // Each feature appears in 1 of 3 memories (df=0.33 < τ_maj=0.67 for M=3) → episodic
+        // Each feature appears in 1 of 3 memories (df=0.33 < τ_struct(3)=0.667) → episodic
         let features: [ExtractedFeature] = [
             ExtractedFeature(type: .entity, value: "UniqueA", docFrequency: Float32(1)/3),
             ExtractedFeature(type: .entity, value: "UniqueB", docFrequency: Float32(1)/3),
@@ -144,7 +144,7 @@ struct ComputeSNRTests {
 
     @Test("SNR gate passes cluster with high structural overlap")
     func highOverlapPasses() {
-        // Features appear in 5/6 memories each (df=0.83 > τ_maj=0.67 for M=6) → structural
+        // Features appear in 5/6 memories each (df=0.83 ≥ τ_struct(6)≈0.333) → structural
         let features: [ExtractedFeature] = [
             ExtractedFeature(type: .entity, value: "Alice", docFrequency: Float32(5)/6),
             ExtractedFeature(type: .entity, value: "CERN", docFrequency: Float32(5)/6),
@@ -193,8 +193,8 @@ struct QueryFingerprintTests {
 struct DistillationPipelineRunTests {
 
     // Cluster where Alice and CERN appear as capitalized non-first-word entities
-    // in 4 of 6 memories (df=0.667 == τ_maj for M=6), co-occurring in all 4 → PMI>0.
-    // Two neutral memories contribute no features. Design ensures conf > 0.6.
+    // in 4 of 6 memories (df=0.667 ≥ τ_struct(6)=2/6≈0.333), co-occurring in all
+    // 4 → PMI>0. Two neutral memories contribute no features. Design ensures conf > 0.6.
     let memories = [
         "Research by Alice at CERN on particle physics",
         "The lab where Alice works is CERN in Switzerland",
@@ -277,30 +277,36 @@ struct DistillationPipelineRunTests {
         #expect(output.succeeded == false)
     }
 
-    @Test("Delta pre-pass rescues CONVERGENT feature from majority-vote failure")
+    @Test("Delta pre-pass rescues CONVERGENT feature from structural-threshold failure")
     func deltaPrePassRescue() {
-        // Design (M=5):
-        //   Structural (df >= τ=0.6): CERN(4/5=0.8), Physics(4/5=0.8), Research(4/5=0.8)
-        //   Failing (df < τ): status:pending(1/5=0.2), status:approved(2/5=0.4)
+        // Design (M=5, τ_struct = 2/5 = 0.4):
+        //   Structural (df ≥ τ): CERN(4/5=0.8), Physics(4/5=0.8), Research(4/5=0.8)
+        //   Failing (df < τ): status:pending(1/5=0.2), status:approved(1/5=0.2),
+        //     Alice(1/5=0.2). All one-off under the recurrence threshold.
         //
         // The "status" predicate key has a CONVERGENT trajectory:
-        //   M1→status:pending, M2→status:approved, M3→status:approved
-        //   k=2, C=2/3≈0.667 ≥ 0.5 → CONVERGENT, terminal="status:approved" promoted.
+        //   M1→status:pending, M2→status:approved
+        //   m=2, k=1, C=1/2=0.5 ≥ 0.5 → CONVERGENT, terminal="status:approved"
+        //   (df=0.2, one-off) is promoted to the passing set. The terminal must be
+        //   below τ_struct to need the rescue.
         //
         // After promotion, PMI graph on [CERN, Physics, Research, status:approved]:
-        //   All pairs appear in M2+M3, all pairs have PMI>0 → single component.
-        //   conf = mean_df(F*) × 1.0 ≥ 0.4 → succeeded=true, deltaType=.convergent.
+        //   status:approved co-occurs with CERN/Physics/Research in M2 → PMI>0 →
+        //   one component. conf = mean_df(F*) × 1.0 ≥ 0.4 → succeeded, .convergent.
         //
-        // SNR = structural(0.8×3=2.4) / episodic(0.2+0.4=0.6+Alice_if_any) ≥ 2.0.
+        // Swift SNR sums RAW df: structural = 0.8×3 = 2.4; episodic = 0.2(pending)
+        //   + 0.2(approved) + 0.2(Alice) = 0.6. SNR = 2.4/0.6 = 4.0 ≥ 2.0 ✓.
+        //   (The Rust port uses the σ-based SNR formula — see the Rust delta test;
+        //   the computeSNR formulas differ by port, a pre-existing documented split.)
         let memories: [String] = [
             // M0: entity=[Alice, CERN, Physics, Research]; relation=[]
             "Lab by Alice at CERN studies Physics Research",
             // M1: entity=[CERN, Physics, Research]; relation=[status:pending]
-            "Alice at CERN conducts Physics Research status:pending",
+            "Team at CERN conducts Physics Research status:pending",
             // M2: entity=[CERN, Physics, Research]; relation=[status:approved]
-            "The team at CERN advances Physics Research status:approved",
-            // M3: entity=[CERN, Physics, Research]; relation=[status:approved]
-            "Results confirm CERN Physics Research status:approved",
+            "The group at CERN advances Physics Research status:approved",
+            // M3: entity=[CERN, Physics, Research]; relation=[]
+            "Results confirm CERN Physics Research today",
             // M4: no features
             "Maintenance completed this morning",
         ]
@@ -377,9 +383,10 @@ struct DistillationPipelineRunTests {
             clusterID: "test-cluster-single",
             sourceIDs: ["s1"]
         )
-        // Single memory: M=1, τ_maj=1.0 so all features must appear in all memories
-        // SNR with single memory: structural_signal/episodic_noise — will typically fail
-        // Just verify it doesn't crash
+        // Single memory: M=1, τ_struct=2/1=2.0 so nothing recurs (no feature can
+        // reach df=2.0) — an un-chunked single unit is correctly not distillable.
+        // SNR with single memory: structural_signal/episodic_noise — will typically fail.
+        // Just verify it doesn't crash.
         let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         // Verify struct is coherent
         if output.succeeded {

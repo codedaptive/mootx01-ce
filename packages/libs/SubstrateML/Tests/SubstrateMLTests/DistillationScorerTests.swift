@@ -1,6 +1,6 @@
 // DistillationScorerTests.swift
 //
-// Tests for DistillationScorer: majority threshold, SNR gate, PMI graph,
+// Tests for DistillationScorer: structural (recurrence) threshold, SNR gate, PMI graph,
 // connected components, dominant component selection, and confidence scoring.
 //
 // Wave-1 isolation note: ExtractedFeature depends on DistillationFeatureType
@@ -26,37 +26,43 @@ struct DistillationScorerTests {
         #expect(abs(DistillationScorer.binaryEntropy(0.5) - 1.0) < 1e-5)
     }
 
-    // MARK: - majorityThreshold
+    // MARK: - structuralThreshold (τ_struct = 2 / M)
 
-    @Test func majorityThreshold_M3() {
-        // ⌈(3+1)/2⌉/3 = 2/3 ≈ 0.667
-        let τ = DistillationScorer.majorityThreshold(M: 3)
+    @Test func structuralThreshold_M3() {
+        // 2/3 ≈ 0.667 — a feature recurring in ≥2 of 3 units passes.
+        let τ = DistillationScorer.structuralThreshold(M: 3)
         #expect(abs(τ - Float32(2) / Float32(3)) < 1e-5)
     }
 
-    @Test func majorityThreshold_M4() {
-        // ⌈(4+1)/2⌉/4 = ⌈2.5⌉/4 = 3/4 = 0.750 per §3.2 table
-        let τ = DistillationScorer.majorityThreshold(M: 4)
-        #expect(abs(τ - 0.75) < 1e-5)
+    @Test func structuralThreshold_M4() {
+        // 2/4 = 0.5 — recurs in ≥2 of 4 units.
+        let τ = DistillationScorer.structuralThreshold(M: 4)
+        #expect(abs(τ - 0.5) < 1e-5)
     }
 
-    @Test func majorityThreshold_M5() {
-        // ⌈(5+1)/2⌉/5 = 3/5 = 0.600
-        let τ = DistillationScorer.majorityThreshold(M: 5)
-        #expect(abs(τ - 0.6) < 1e-5)
+    @Test func structuralThreshold_M5() {
+        // 2/5 = 0.4 — recurs in ≥2 of 5 units.
+        let τ = DistillationScorer.structuralThreshold(M: 5)
+        #expect(abs(τ - 0.4) < 1e-5)
     }
 
-    // MARK: - applyMajorityThreshold
+    @Test func structuralThreshold_M1_isTwo() {
+        // M=1 → τ=2.0: nothing recurs, a single un-chunked unit is not distillable.
+        let τ = DistillationScorer.structuralThreshold(M: 1)
+        #expect(abs(τ - 2.0) < 1e-5)
+    }
 
-    @Test func applyMajorityThreshold_splitsCorrectly() {
+    // MARK: - applyStructuralThreshold
+
+    @Test func applyStructuralThreshold_splitsCorrectly() {
         let M = 5
-        let τ = DistillationScorer.majorityThreshold(M: M)  // 0.6
+        let τ = DistillationScorer.structuralThreshold(M: M)  // 0.4
         let features = [
             ExtractedFeature(type: .entity,   value: "A", docFrequency: 0.8),  // passes
-            ExtractedFeature(type: .relation, value: "B", docFrequency: 0.4),  // fails
-            ExtractedFeature(type: .temporal, value: "C", docFrequency: 0.6),  // passes (== τ)
+            ExtractedFeature(type: .relation, value: "B", docFrequency: 0.2),  // fails (1 of 5)
+            ExtractedFeature(type: .temporal, value: "C", docFrequency: 0.4),  // passes (== τ, 2 of 5)
         ]
-        let (passing, failing) = DistillationScorer.applyMajorityThreshold(
+        let (passing, failing) = DistillationScorer.applyStructuralThreshold(
             features: features, M: M
         )
         #expect(passing.count == 2)

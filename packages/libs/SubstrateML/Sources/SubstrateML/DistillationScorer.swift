@@ -17,8 +17,16 @@ import Foundation
 public struct ExtractedFeature: Sendable, Equatable {
     /// Semantic type of the feature (entity, relation, temporal, numerical).
     public let type: DistillationFeatureType
-    /// Canonical string representation of the extracted feature value.
+    /// Canonical grouping key — the STEMMED feature value. Morphological variants
+    /// (migrate / migrates / migration) share one stem, so they accumulate one df
+    /// and one fingerprint bit. Vocabulary dedup, the incidence matrix, df/PMI,
+    /// and the feature fingerprint all key off `value`.
     public let value: String
+    /// Human-readable surface form rendered in the factoid prose (the original
+    /// lowercased token, e.g. "migration" for the stem "migrat"). When several
+    /// surface forms share a stem, the first-encountered surface is used. Defaults
+    /// to `value` when no distinct surface is supplied.
+    public let display: String
     /// Fraction of cluster memories that contain this feature: df(f) = (1/M) × Σ X_{ij}.
     public var docFrequency: Float32
     /// Temporally-weighted document frequency df_w, per §5. Equals docFrequency
@@ -30,9 +38,16 @@ public struct ExtractedFeature: Sendable, Equatable {
 
     /// Initialize with a document frequency; weightedDocFrequency defaults to docFrequency
     /// and structuralScore defaults to 0 (populated by computeStructuralScores).
-    public init(type: DistillationFeatureType, value: String, docFrequency: Float32) {
+    /// `display` defaults to `value` when no distinct surface form is supplied.
+    public init(
+        type: DistillationFeatureType,
+        value: String,
+        docFrequency: Float32,
+        display: String? = nil
+    ) {
         self.type = type
         self.value = value
+        self.display = display ?? value
         self.docFrequency = docFrequency
         self.weightedDocFrequency = docFrequency
         self.structuralScore = 0
@@ -82,27 +97,33 @@ public enum DistillationScorer {
         return -(p * log2(p)) - ((1 - p) * log2(1 - p))
     }
 
-    // MARK: - Stage 2: Majority Threshold
+    // MARK: - Stage 2: Structural (recurrence) Threshold
 
-    /// Majority vote threshold per §3.2: τ_maj = ⌈(M+1)/2⌉ / M.
-    /// A feature survives the majority vote iff it appears in strictly more
-    /// than half the cluster's memories.
+    /// Structural threshold for INTRA-ITEM distillation: a feature is structural
+    /// iff it RECURS — appears in at least 2 of the item's M units (sentences).
+    /// τ_struct = 2 / M, i.e. `df ≥ 2/M` ⟺ count ≥ 2.
     ///
-    /// Values: M=3 → 2/3 ≈ 0.667, M=4 → 3/4 = 0.750, M=5 → 3/5 = 0.600.
-    public static func majorityThreshold(M: Int) -> Float32 {
-        // Ceiling integer arithmetic: ⌈a/b⌉ = (a + b - 1) / b
-        // ⌈(M+1)/2⌉ = (M + 1 + 2 - 1) / 2 = (M + 2) / 2
-        let numerator = (M + 2) / 2
-        return Float32(numerator) / Float32(M)
+    /// This replaces the cross-memory majority vote (⌈(M+1)/2⌉/M). Distillation
+    /// is intra-item: a single document is reduced from its own sentences, where
+    /// the central entities recur across a MINORITY of sentences but dominate the
+    /// one-off scaffolding tail. Requiring a majority discards the real core
+    /// (`falcon` clears it; `database`/`migration`/`tables` do not) and the SNR
+    /// gate then holds every prose item. "Recurs at least twice" is the correct
+    /// intra-item rule — for one item, repetition is significance. Scale is
+    /// handled upstream by the multi-level tree (bounded section units), so
+    /// `count ≥ 2` never degrades to noise. (M=1 → τ=2.0, nothing recurs — an
+    /// un-chunked single unit is correctly not distillable.)
+    public static func structuralThreshold(M: Int) -> Float32 {
+        Float32(2) / Float32(M)
     }
 
-    /// Split features into those that pass and those that fail the majority vote threshold.
-    /// Passing features form V_thresh — the input to the PMI coherence stage.
-    public static func applyMajorityThreshold(
+    /// Split features into structural (recurring) and episodic (one-off) sets.
+    /// The structural set forms V_thresh — the input to the PMI coherence stage.
+    public static func applyStructuralThreshold(
         features: [ExtractedFeature],
         M: Int
     ) -> (passing: [ExtractedFeature], failing: [ExtractedFeature]) {
-        let τ = majorityThreshold(M: M)
+        let τ = structuralThreshold(M: M)
         var passing: [ExtractedFeature] = []
         var failing: [ExtractedFeature] = []
         for f in features {
@@ -115,8 +136,8 @@ public enum DistillationScorer {
 
     /// Compute cluster SNR to gate distillation readiness.
     ///
-    /// structuralSignal = Σ df(f) for features with df ≥ τ_maj (majority-passing).
-    /// episodicNoise    = Σ df(f) for features below threshold.
+    /// structuralSignal = Σ df(f) for features with df ≥ τ_struct (recurring).
+    /// episodicNoise    = Σ df(f) for features below threshold (one-off tail).
     /// snr              = structuralSignal / max(episodicNoise, 1e-6)
     /// readyToDistill   = snr ≥ 2.0
     ///
@@ -124,7 +145,7 @@ public enum DistillationScorer {
     /// (computeStructuralScores / computeConfidence), not for the SNR gate.
     /// The 1e-6 floor prevents division by zero when all features are structural.
     public static func computeSNR(features: [ExtractedFeature], M: Int) -> DistillationSNR {
-        let τ = majorityThreshold(M: M)
+        let τ = structuralThreshold(M: M)
         var structuralSignal: Float32 = 0
         var episodicNoise: Float32 = 0
 

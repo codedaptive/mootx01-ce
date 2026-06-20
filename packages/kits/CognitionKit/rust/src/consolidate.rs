@@ -4,24 +4,35 @@
 // output fields. Mirrors `Consolidate.Input` and `Consolidate.Output`
 // from the Swift port.
 //
+// INTRA-ITEM distillation (the corrected model): the Swift `Consolidate.run`
+// now drives the PER-ITEM sweep `GeniusLocusKit.distillItemsSweep` (each stored
+// item is reduced from its OWN sentences with `intra_item = true`), NOT the
+// cross-memory `runDistillationSweep`. Cross-memory clustering is no longer the
+// distillation grain, so held/failed CLUSTER lists no longer apply — Swift now
+// returns them empty. `ConsolidateOutput::held_cluster_ids` /
+// `failed_cluster_ids` are therefore always empty under this model; the fields
+// remain to mirror `Consolidate.Output`'s shape (the struct is unchanged in
+// Swift).
+//
 // The Rust port does not run a live distillation sweep (EstateCoordinator
 // lives in GeniusLocusKit Rust and owns the storage I/O). This module
 // defines:
 //
-//   1. `ConsolidateInput`  — per-call sweep parameters, mirrors
-//      `Consolidate.Input` (clusterID, includeHeld).
+//   1. `ConsolidateInput`  — per-call parameters, mirrors `Consolidate.Input`
+//      (clusterID, includeHeld). `Consolidate.Input` is unchanged in Swift, so
+//      the data type is preserved; under the intra-item model the per-item
+//      sweep does not consult these cluster-targeting fields.
 //
 //   2. `ConsolidateOutput` — sweep result, mirrors `Consolidate.Output`
 //      (factoidsProduced, heldClusterIDs, failedClusterIDs).
 //
 //   3. `consolidate_input_to_sweep_params` — maps a `ConsolidateInput`
-//      to the `SweepTargetingParams` that `run_distillation_sweep` (or
-//      the coordinator's equivalent) expects. This pure mapping keeps
-//      the recipe layer decoupled from the storage layer.
+//      to the `SweepTargetingParams` the cross-memory sweep accepts. Retained
+//      for the cross-memory path; the intra-item sweep ignores targeting.
 //
 // The coordinator-level sweep is not called from here — Rust callers
 // that want to run a live sweep instantiate `EstateCoordinator` from
-// GeniusLocusKit Rust and pass `SweepTargetingParams` directly.
+// GeniusLocusKit Rust.
 
 use genius_locus_kit::brain::cluster_status::SweepTargetingParams;
 
@@ -67,21 +78,22 @@ impl Default for ConsolidateInput {
 /// Mirrors `Consolidate.Output` in the Swift port.
 ///
 /// - `factoids_produced`: count of distilled factoid drawers produced
-///   this sweep.
-/// - `held_cluster_ids`: cluster UUIDs with `status = 'held'` after the
-///   sweep — those gated by the SNR threshold (SNR < 2.0).
-/// - `failed_cluster_ids`: cluster UUIDs with `status = 'failed'` after
-///   the sweep — those where confidence fell below 0.4 or a pipeline
-///   error occurred.
+///   this sweep (one per intra-item-distilled item).
+/// - `held_cluster_ids`: always empty under the intra-item model — held is a
+///   cross-memory CLUSTER status that the per-item sweep does not produce.
+/// - `failed_cluster_ids`: always empty under the intra-item model — failed is
+///   likewise a cross-memory CLUSTER status the per-item sweep does not produce.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsolidateOutput {
     /// Number of distilled factoid drawers produced this sweep.
     pub factoids_produced: usize,
 
-    /// Cluster UUIDs with `status = 'held'` after the sweep.
+    /// Held cluster UUIDs. Always empty under the intra-item model (kept to
+    /// mirror `Consolidate.Output`'s shape, which is unchanged in Swift).
     pub held_cluster_ids: Vec<String>,
 
-    /// Cluster UUIDs with `status = 'failed'` after the sweep.
+    /// Failed cluster UUIDs. Always empty under the intra-item model (kept to
+    /// mirror `Consolidate.Output`'s shape, which is unchanged in Swift).
     pub failed_cluster_ids: Vec<String>,
 }
 

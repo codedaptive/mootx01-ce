@@ -23,6 +23,20 @@
 // lives at the Coordinator level where the storage handle is available.
 // This module defines the pure algorithmic types and decision functions
 // that the Coordinator delegates to.
+//
+// INTRA-ITEM distillation (the corrected model): a single item is reduced
+// from its OWN sentences — no cross-memory cluster, no member_count ≥ 3.
+// The Swift `GeniusLocusKit.distillItem` / `distillItemsSweep` carry the
+// storage orchestration for this (sentence-segment the item, ≥3 guard, build
+// a DistillationInput over the item's own sentences, call the pipeline with
+// intra_item = true, capture the factoid). The Rust port keeps that storage
+// orchestration at the Coordinator level — the same boundary as the existing
+// cross-memory `runDistillationSweep`/`captureFactoid`, which were likewise
+// never given a Rust coordinator implementation (only the pure decision
+// surface here is ported). This module supplies the PURE intra-item decision
+// the coordinator delegates to: `should_produce_intra_item_factoid` and the
+// `MIN_INTRA_ITEM_UNITS` guard, mirroring `distillItem`'s production gate and
+// its ≥3-sentence requirement exactly.
 
 use substrate_ml::distillation_pipeline::DistillationOutput;
 use substrate_types::fingerprint256::Fingerprint256;
@@ -146,6 +160,40 @@ pub fn classify_sweep_output(output: &DistillationOutput) -> SweepOutcome {
             failure_reason: output.failure_reason.clone(),
         }
     }
+}
+
+// MARK: - Intra-item distillation decision
+
+/// Minimum number of reduction units (sentences) an item needs to be
+/// distillable intra-item. With M < 3 every feature has df = 1.0, so every
+/// pairwise PMI = 0, the coherence graph fragments, and no honest factoid can
+/// form — a too-short item is simply not distilled.
+///
+/// Mirrors the `guard sentences.count >= 3` in Swift `distillItem`.
+pub const MIN_INTRA_ITEM_UNITS: usize = 3;
+
+/// Decide whether an intra-item `DistillationOutput` should be captured as a
+/// factoid.
+///
+/// Unlike the cross-memory sweep (which gates on confidence ≥ 0.4 and the SNR
+/// hold), intra-item distillation produces a factoid whenever the pipeline
+/// computed a real dominant component F* — i.e. whenever the feature
+/// fingerprint is non-zero. For a single item the factoid is always emitted
+/// from the item's recurring core; confidence rides along as metadata (the
+/// `uncertain` flag / injection depth), it does NOT gate production. The
+/// early-failure paths (no features, empty F*) yield a zero fingerprint and
+/// are correctly skipped.
+///
+/// Mirrors the `guard output.featureFingerprint != .zero else { return nil }`
+/// production gate in Swift `distillItem`. Pure function — no I/O.
+pub fn should_produce_intra_item_factoid(output: &DistillationOutput) -> bool {
+    output.feature_fingerprint != Fingerprint256::ZERO
+}
+
+/// Whether an item with `unit_count` reduction units (sentences) is long enough
+/// to attempt intra-item distillation. Mirrors the Swift `≥ 3` guard.
+pub fn item_is_distillable(unit_count: usize) -> bool {
+    unit_count >= MIN_INTRA_ITEM_UNITS
 }
 
 // MARK: - Distillation lane constants
@@ -289,7 +337,7 @@ mod tests {
             "test-cluster-rust-dc",
             vec!["src-1".to_string(), "src-2".to_string(), "src-3".to_string()],
         );
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor);
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         let outcome = classify_sweep_output(&output);
         // The outcome may be Succeeded, Held, or Failed depending on pipeline
         // internals. The contract is that classify_sweep_output covers all
@@ -299,6 +347,41 @@ mod tests {
             | SweepOutcome::Held { .. }
             | SweepOutcome::Failed { .. } => {}
         }
+    }
+
+    // MARK: - intra-item decision tests
+
+    #[test]
+    fn intra_item_produces_when_fingerprint_non_zero() {
+        let mut output = make_output(true, 0.85, 4.0, None);
+        output.feature_fingerprint = Fingerprint256::new(1, 0, 0, 0);
+        assert!(should_produce_intra_item_factoid(&output));
+    }
+
+    #[test]
+    fn intra_item_produces_even_when_confidence_below_cross_memory_gate() {
+        // Confidence 0.2 would FAIL the cross-memory gate (≥ 0.4), but intra-item
+        // produces whenever F* is non-zero — confidence is metadata, not a gate.
+        let mut output = make_output(false, 0.2, 0.5, Some("low conf".to_string()));
+        output.feature_fingerprint = Fingerprint256::new(0, 0, 0, 7);
+        assert!(should_produce_intra_item_factoid(&output));
+    }
+
+    #[test]
+    fn intra_item_skips_when_fingerprint_zero() {
+        // No dominant component (empty F*) → zero fingerprint → not produced.
+        let output = make_output(false, 0.0, 0.0, Some("PMI graph produced no dominant component".to_string()));
+        assert!(!should_produce_intra_item_factoid(&output));
+    }
+
+    #[test]
+    fn item_distillable_requires_three_units() {
+        assert!(!item_is_distillable(0));
+        assert!(!item_is_distillable(1));
+        assert!(!item_is_distillable(2));
+        assert!(item_is_distillable(3));
+        assert!(item_is_distillable(10));
+        assert_eq!(MIN_INTRA_ITEM_UNITS, 3);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

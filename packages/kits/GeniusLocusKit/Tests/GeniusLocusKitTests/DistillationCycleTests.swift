@@ -346,6 +346,149 @@ struct DistillationCycleTests {
         #expect(status == "failed", "cluster with !succeeded and SNR >= 2.0 must be marked 'failed'")
     }
 
+    // MARK: - Intra-item distillation stubs
+
+    /// Stub that returns a successful intra-item DistillationOutput with a
+    /// NON-ZERO fingerprint (intra-item produces whenever the fingerprint is
+    /// non-zero, regardless of confidence). The source count echoes the number
+    /// of sentences (M) the pipeline was given.
+    private func intraItemFn(
+        fingerprint: Engram
+    ) -> @Sendable (DistillationInput) -> DistillationOutput {
+        return { input in
+            let m = input.memoryContents.count
+            return DistillationOutput(
+                drawerContent: "[DIST|conf=0.30|src=\(m)|snr=4.00|delta=STATIC] item factoid",
+                confidence: 0.30,           // below the cross-memory 0.4 gate on purpose
+                uncertain: false,
+                snr: 4.0,
+                deltaType: nil,
+                succeeded: false,           // intra-item ignores succeeded; gate is fingerprint
+                failureReason: nil,
+                featureFingerprint: fingerprint
+            )
+        }
+    }
+
+    /// Stub that returns a ZERO fingerprint — intra-item must NOT produce a factoid.
+    private var intraItemZeroFn: @Sendable (DistillationInput) -> DistillationOutput {
+        return { _ in
+            DistillationOutput(
+                drawerContent: "",
+                confidence: 0.0,
+                uncertain: false,
+                snr: 0.0,
+                deltaType: nil,
+                succeeded: false,
+                failureReason: "PMI graph produced no dominant component",
+                featureFingerprint: Engram.zero
+            )
+        }
+    }
+
+    // A non-zero engram for intra-item fingerprint stubs.
+    private var nonZeroEngram: Engram {
+        DistillationPipeline.featureHash("provenance")
+    }
+
+    /// Capture one multi-sentence item and return its drawer id.
+    private func captureItem(
+        body: String,
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> String {
+        let frame = CaptureFrame(
+            content: body,
+            channel: .typed,
+            room: "inbox",
+            latticeAnchor: LatticeAnchor.udc("000"),
+            addedBy: "test-dg5",
+            embeddingModelID: modelID
+        )
+        let drawer = try await kit.capture(handle, frame)
+        return drawer.id
+    }
+
+    // A three-sentence body — clears the M ≥ 3 intra-item guard.
+    private let threeSentenceBody = "First fact holds. Second fact holds. Third fact holds."
+
+    // MARK: - T8: distillItem produces a factoid when fingerprint is non-zero
+
+    @Test("distillItem produces a factoid (non-zero fingerprint) even when confidence < 0.4")
+    func distillItemProducesFactoid() async throws {
+        let (kit, handle, _, _) = try await openEstate()
+        let itemID = try await captureItem(body: threeSentenceBody, kit: kit, handle: handle)
+
+        let factoidID = try await kit.distillItem(
+            handle: handle,
+            drawerID: itemID,
+            content: threeSentenceBody,
+            distillFn: intraItemFn(fingerprint: nonZeroEngram),
+            now: t0
+        )
+        #expect(factoidID != nil, "a non-zero fingerprint must produce a factoid for intra-item")
+    }
+
+    // MARK: - T9: distillItem skips a too-short item (< 3 sentences)
+
+    @Test("distillItem returns nil for an item with fewer than 3 sentences")
+    func distillItemSkipsShortItem() async throws {
+        let (kit, handle, _, _) = try await openEstate()
+        let shortBody = "Only one sentence here."
+        let itemID = try await captureItem(body: shortBody, kit: kit, handle: handle)
+
+        let factoidID = try await kit.distillItem(
+            handle: handle,
+            drawerID: itemID,
+            content: shortBody,
+            distillFn: intraItemFn(fingerprint: nonZeroEngram),
+            now: t0
+        )
+        #expect(factoidID == nil, "an item with < 3 sentences must not distill")
+    }
+
+    // MARK: - T10: distillItem skips when the fingerprint is zero
+
+    @Test("distillItem returns nil when the pipeline yields a zero fingerprint")
+    func distillItemSkipsZeroFingerprint() async throws {
+        let (kit, handle, _, _) = try await openEstate()
+        let itemID = try await captureItem(body: threeSentenceBody, kit: kit, handle: handle)
+
+        let factoidID = try await kit.distillItem(
+            handle: handle,
+            drawerID: itemID,
+            content: threeSentenceBody,
+            distillFn: intraItemZeroFn,
+            now: t0
+        )
+        #expect(factoidID == nil, "a zero fingerprint (empty F*) must not produce a factoid")
+    }
+
+    // MARK: - T11: distillItemsSweep is idempotent
+
+    @Test("distillItemsSweep distills each eligible item once and is idempotent on re-run")
+    func distillItemsSweepIdempotent() async throws {
+        let (kit, handle, _, _) = try await openEstate()
+        _ = try await captureItem(body: threeSentenceBody, kit: kit, handle: handle)
+        _ = try await captureItem(body: threeSentenceBody, kit: kit, handle: handle)
+
+        let first = try await kit.distillItemsSweep(
+            handle: handle,
+            distillFn: intraItemFn(fingerprint: nonZeroEngram),
+            now: t0,
+            limit: nil
+        )
+        #expect(first == 2, "both eligible items must distill on the first sweep")
+
+        let second = try await kit.distillItemsSweep(
+            handle: handle,
+            distillFn: intraItemFn(fingerprint: nonZeroEngram),
+            now: t0,
+            limit: nil
+        )
+        #expect(second == 0, "already-distilled items (lineageID == source id) must be skipped")
+    }
+
     // MARK: - TypedValue extraction helpers
 
     private func stringValue(_ v: TypedValue?) -> String? {

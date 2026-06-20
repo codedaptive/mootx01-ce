@@ -24,11 +24,59 @@
 //
 // Layer discipline: pure function, no I/O, no state, no substrate.
 
+use lattice_lib::stemmer::stem;
 use lattice_lib::tokenizer::tokenize;
 use lattice_lib::word_class::{WordClass, hmm_tag};
 use substrate_ml::distillation_pipeline::FeatureExtractor;
 use substrate_ml::typed_decay_weighting::DistillationFeatureType;
 use substrate_ml::distillation_scorer::ExtractedFeature;
+
+/// Function-word stop list for distillation feature extraction. Tokens in this
+/// set are NEVER emitted as ENT/REL features: they recur across an item's
+/// sentences (so they clear the recurrence threshold) but carry no topical
+/// signal — they are scaffolding, not "the words that matter". The HMM tagger
+/// tags many of them as nouns ("the"/"to"/"by" came back Noun), so the filter
+/// is applied independently of the tag.
+///
+/// CONFORMANCE: this exact set is mirrored byte-for-byte from the Swift port
+/// (`HMMFeatureExtractor.swift` `distillationStopwords`). Keep the two in
+/// lockstep — a divergence breaks cross-port factoid parity. The membership
+/// test uses the lowercased surface token.
+pub const DISTILLATION_STOPWORDS: &[&str] = &[
+    // articles & determiners
+    "a", "an", "the", "this", "that", "these", "those", "each", "every",
+    "all", "any", "some", "no", "such", "both", "either", "neither",
+    "much", "many", "more", "most", "other", "another", "same", "own",
+    // prepositions
+    "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
+    "into", "onto", "upon", "about", "above", "below", "under", "over",
+    "between", "among", "through", "during", "before", "after", "since",
+    "until", "without", "within", "against", "toward", "towards", "across",
+    "behind", "beyond", "near",
+    // conjunctions
+    "and", "or", "but", "nor", "so", "yet", "if", "then", "than",
+    "because", "although", "though", "while", "whereas", "unless",
+    // pronouns
+    "i", "me", "my", "mine", "we", "us", "our", "ours", "you", "your",
+    "yours", "he", "him", "his", "she", "her", "hers", "it", "its",
+    "they", "them", "their", "theirs", "who", "whom", "whose", "which",
+    "what",
+    // be / have / do / modals
+    "is", "am", "are", "was", "were", "be", "been", "being", "has",
+    "have", "had", "having", "do", "does", "did", "doing", "will",
+    "would", "shall", "should", "can", "could", "may", "might", "must",
+    // common adverbs / particles
+    "not", "very", "too", "also", "just", "only", "even", "still",
+    "again", "ever", "never", "now", "here", "there", "when", "where",
+    "why", "how", "once", "up", "down", "out", "off", "back",
+];
+
+/// Returns true iff `lower` (an already-lowercased token) is a distillation
+/// stopword. Linear scan over the fixed set — the set is small and the scan
+/// runs once per token; mirrors Swift's `Set.contains`.
+fn is_distillation_stopword(lower: &str) -> bool {
+    DISTILLATION_STOPWORDS.contains(&lower)
+}
 
 /// Returns a FeatureExtractor function pointer backed by the deterministic
 /// HMM/Viterbi tagger. This is the production extractor — identical mapping
@@ -63,28 +111,42 @@ fn hmm_extract(
 
     match feature_type {
         DistillationFeatureType::Entity => {
-            // ENT: tokens classified as Noun by the HMM tagger.
+            // ENT: tokens classified as Noun by the HMM tagger, minus function
+            // words. Function words recur but are scaffolding, and the HMM tagger
+            // mis-tags several of them ("the"/"by") as nouns, so drop them first.
             for token in &tokens {
                 let lowered = token.to_lowercase();
+                if is_distillation_stopword(&lowered) {
+                    continue;
+                }
                 if hmm_tag(&lowered) == WordClass::Noun {
-                    results.push(ExtractedFeature::new(
+                    // value = Snowball stem (groups migration/migrations into one
+                    // df + one fingerprint bit); display = surface form for the
+                    // factoid prose. The stemmer is bit-identical Swift↔Rust.
+                    results.push(ExtractedFeature::new_with_display(
                         DistillationFeatureType::Entity,
-                        lowered,
+                        stem(&lowered),
                         0.0,
+                        lowered,
                     ));
                 }
             }
         }
 
         DistillationFeatureType::Relation => {
-            // REL: tokens classified as Verb by the HMM tagger.
+            // REL: tokens classified as Verb by the HMM tagger, minus function words.
             for token in &tokens {
                 let lowered = token.to_lowercase();
+                if is_distillation_stopword(&lowered) {
+                    continue;
+                }
                 if hmm_tag(&lowered) == WordClass::Verb {
-                    results.push(ExtractedFeature::new(
+                    // value = stem (unifies migrate/migrates); display = surface.
+                    results.push(ExtractedFeature::new_with_display(
                         DistillationFeatureType::Relation,
-                        lowered,
+                        stem(&lowered),
                         0.0,
+                        lowered,
                     ));
                 }
             }
@@ -161,30 +223,100 @@ mod tests {
     #[test]
     fn entity_extraction_apollo() {
         let features = hmm_extract(APOLLO_SENTENCE, DistillationFeatureType::Entity);
-        let values: Vec<&str> = features.iter().map(|f| f.value.as_str()).collect();
-        // "project", "apollo", "postgresql" are expected nouns from the HMM.
-        // At minimum, apollo and postgresql must be in the result.
+        // value is the stem; display is the surface form. Assert on the surface
+        // forms (display) — "apollo" and "postgresql" must appear as entities.
+        let displays: Vec<&str> = features.iter().map(|f| f.display.as_str()).collect();
         assert!(
-            values.contains(&"apollo"),
-            "expected 'apollo' in ENT features; got {:?}",
-            values
+            displays.contains(&"apollo"),
+            "expected 'apollo' surface in ENT features; got {:?}",
+            displays
         );
         assert!(
-            values.contains(&"postgresql"),
-            "expected 'postgresql' in ENT features; got {:?}",
-            values
+            displays.contains(&"postgresql"),
+            "expected 'postgresql' surface in ENT features; got {:?}",
+            displays
         );
+        // Every feature's value must equal the Snowball stem of its display.
+        for f in &features {
+            assert_eq!(
+                f.value,
+                stem(&f.display),
+                "value must be the stem of display ({})",
+                f.display
+            );
+        }
     }
 
     #[test]
     fn relation_extraction_adopted() {
         let features = hmm_extract(APOLLO_SENTENCE, DistillationFeatureType::Relation);
-        let values: Vec<&str> = features.iter().map(|f| f.value.as_str()).collect();
+        let displays: Vec<&str> = features.iter().map(|f| f.display.as_str()).collect();
         assert!(
-            values.contains(&"adopted"),
-            "expected 'adopted' in REL features; got {:?}",
-            values
+            displays.contains(&"adopted"),
+            "expected 'adopted' surface in REL features; got {:?}",
+            displays
         );
+        // "adopted" stems to "adopt"; the grouping value is the stem.
+        let adopted = features.iter().find(|f| f.display == "adopted").unwrap();
+        assert_eq!(adopted.value, stem("adopted"));
+    }
+
+    // Stopword filtering: function words tagged Noun/Verb by the HMM are dropped
+    // from ENT/REL features. "the", "to", "by" are common HMM-noun mis-tags.
+    #[test]
+    fn stopwords_dropped_from_entities() {
+        // Every distillation stopword must be filtered regardless of HMM tag.
+        let text = "the database in the system was migrated by the team to the cloud";
+        let features = hmm_extract(text, DistillationFeatureType::Entity);
+        for f in &features {
+            assert!(
+                !is_distillation_stopword(&f.display),
+                "stopword '{}' must not appear as an ENT feature",
+                f.display
+            );
+        }
+    }
+
+    #[test]
+    fn stopwords_dropped_from_relations() {
+        let text = "the team has to migrate and they will be doing it by friday";
+        let features = hmm_extract(text, DistillationFeatureType::Relation);
+        for f in &features {
+            assert!(
+                !is_distillation_stopword(&f.display),
+                "stopword '{}' must not appear as a REL feature",
+                f.display
+            );
+        }
+    }
+
+    // Stemming groups morphological variants: migration/migrations share a stem,
+    // so the value (grouping key) is identical while the display surfaces differ.
+    #[test]
+    fn morphological_variants_share_stem_value() {
+        // Force the same lemma in two surface forms through the noun path.
+        // Use a sentence that the HMM tags the target tokens as nouns.
+        let a = hmm_extract("the migration finished", DistillationFeatureType::Entity);
+        let b = hmm_extract("the migrations finished", DistillationFeatureType::Entity);
+        let mig_a = a.iter().find(|f| f.display == "migration");
+        let mig_b = b.iter().find(|f| f.display == "migrations");
+        if let (Some(fa), Some(fb)) = (mig_a, mig_b) {
+            assert_eq!(fa.value, fb.value, "migration/migrations must share one stem");
+            assert_ne!(fa.display, fb.display, "surfaces must differ");
+            assert_eq!(fa.value, stem("migration"));
+        }
+        // Independently assert the stemmer groups them (extractor-agnostic).
+        assert_eq!(stem("migration"), stem("migrations"));
+    }
+
+    // The stopword constant must match the Swift set's element count exactly.
+    // Swift `distillationStopwords` has the same words; the count is a cheap
+    // byte-for-byte drift detector across the two ports.
+    #[test]
+    fn stopword_set_count_matches_swift() {
+        // Count of words in HMMFeatureExtractor.swift `distillationStopwords`
+        // (152 unique words, same spelling, same order).
+        assert_eq!(DISTILLATION_STOPWORDS.len(), 152);
     }
 
     #[test]

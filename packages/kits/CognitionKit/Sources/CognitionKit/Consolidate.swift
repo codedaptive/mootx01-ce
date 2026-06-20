@@ -131,31 +131,32 @@ public struct Consolidate: Recipe {
         // DistillationOutput does not expose a public initialiser, so we cannot
         // construct it here from NeuronKit.distillCluster's lens result —
         // DistillationPipeline.run is the correct seam for GLK integration.
+        // Intra-item distillation: each stored item is reduced from its own
+        // sentences. intraItem:true turns off the cross-memory consensus
+        // machinery (SNR "wait for growth" hold, PMI single-theme pruning) that
+        // would otherwise discard a single item's recurring content.
         let distillFn: @Sendable (DistillationInput) -> DistillationOutput = {
-            DistillationPipeline.run(input: $0, extractFeatures: extractFeatures)
+            DistillationPipeline.run(input: $0, extractFeatures: extractFeatures, intraItem: true)
         }
 
-        // Forward per-cluster targeting and held-inclusion into the sweep.
-        // GLK's runDistillationSweep handles the status filter and optional
-        // single-cluster narrowing.
-        let factoidsProduced = try await kit.runDistillationSweep(
+        // Per-item distillation: each stored item is reduced from its OWN chunks
+        // (the corrected intra-item model — distillation §1, sub-quadratic sparse
+        // selection over one corpus). This does NOT read memory_clusters; it
+        // sweeps active, not-yet-distilled items and produces one factoid per
+        // item that carries enough intra-item recurrence. Cross-memory clustering
+        // is not the distillation grain — held/failed cluster lists no longer
+        // apply, so they are empty.
+        let factoidsProduced = try await kit.distillItemsSweep(
             handle: estate,
             distillFn: distillFn,
             now: now,
-            clusterID: input.clusterID,
-            includeHeld: input.includeHeld
+            limit: nil
         )
-
-        // Read back the current held and failed cluster IDs from GLK's
-        // memory_clusters table. The sweep has already updated statuses, so
-        // these reads reflect the post-sweep state.
-        let heldIDs = try await kit.heldClusterIDs(handle: estate)
-        let failedIDs = try await kit.failedClusterIDs(handle: estate)
 
         return Output(
             factoidsProduced: factoidsProduced,
-            heldClusterIDs: heldIDs,
-            failedClusterIDs: failedIDs
+            heldClusterIDs: [],
+            failedClusterIDs: []
         )
     }
 }

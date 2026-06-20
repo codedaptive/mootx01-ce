@@ -1,20 +1,21 @@
 // DistillationIntegrationTests.swift
 //
-// End-to-end integration test for the full distillation pipeline (Dp3 final).
+// End-to-end integration test for the full INTRA-ITEM distillation pipeline.
 //
 // Four test cases exercising the complete write-path → dense recall → expand
 // → search injection depth sequence against a real in-memory estate.
 //
 // Test IDs: CK-INT-1..4
 //
-// Layer discipline: estates opened via the public GeniusLocusKit API.
-// Clusters seeded directly via storage.rowStore (public PersistenceKit API)
-// following the ConsolidateTests / DistillationCycleTests pattern.
+// Layer discipline: estates opened via the public GeniusLocusKit API. A single
+// multi-sentence item is captured; Consolidate runs the per-item sweep, which
+// reduces the item from its OWN sentences (intraItem: true) into one factoid.
 //
-// Content determinism: memories use "The Provenance record confirms…"
-// so defaultExtractor always extracts "Provenance" (capitalized, non-first word).
-// Five identical features → docFrequency=1.0 → confidence=1.0 → succeeded=true.
-// featureFingerprint = featureHash("Provenance"), non-zero, deterministic.
+// Content determinism: the item's five sentences each repeat "Provenance"
+// (capitalized, non-first word) so defaultExtractor extracts the same entity
+// from every sentence. Recurrence across the item's sentences → docFrequency=1.0
+// → confidence=1.0 → factoid produced. featureFingerprint = featureHash of the
+// stem of "provenance", non-zero, deterministic.
 
 import Testing
 import Foundation
@@ -32,29 +33,26 @@ import PersistenceKitInMemory
 
 private enum IntegrationSetupError: Error {
     case consolidationProducedNoFactoid
-    case noDistilledClusterRow
-    case missingFactoidIDColumn
+    case noDistilledDrawer
 }
 
 // MARK: - Test suite
 
-@Suite("DistillationIntegrationTests — end-to-end distillation pipeline (Dp3)")
+@Suite("DistillationIntegrationTests — end-to-end intra-item distillation")
 struct DistillationIntegrationTests {
 
     private static let ownerID = "distillation-integration-tests"
     private let t0 = Date(timeIntervalSince1970: 1_750_000_000)
 
-    // Five memories sharing "Provenance" at position 1 (capitalized, non-first word)
-    // so defaultExtractor extracts the same entity from every memory.
-    // The repeated entity across all five memories drives docFrequency=1.0 →
-    // confidence=1.0 (mean_df × coherence_ratio = 1.0 × 1.0) → succeeded=true.
-    private static let memoryContents: [String] = [
-        "The Provenance record confirms memory zero was filed",
-        "The Provenance record confirms memory one was filed",
-        "The Provenance record confirms memory two was filed",
-        "The Provenance record confirms memory three was filed",
-        "The Provenance record confirms memory four was filed",
-    ]
+    // One item whose five sentences each repeat "Provenance" at a non-first,
+    // capitalized position so defaultExtractor extracts the same entity from
+    // every sentence. Recurrence across the item's own sentences drives
+    // docFrequency=1.0 → confidence=1.0 → a factoid is produced. The item is
+    // segmented into M=5 sentences (src=5 in the DIST header).
+    private static let itemBody: String =
+        "Records exist. The Provenance record confirms zero. " +
+        "The Provenance record confirms one. The Provenance record confirms two. " +
+        "The Provenance record confirms three."
 
     // MARK: - Shared fixture
 
@@ -64,12 +62,13 @@ struct DistillationIntegrationTests {
         let storage: InMemoryStorage
         let vectorStore: VectorStore
         let factoidID: String
-        let sourceIDs: [String]
+        let sourceID: String
     }
 
-    /// Open an estate with a registered VectorStore, capture 5 source memories,
-    /// seed an open cluster, and run Consolidate so the estate contains exactly
-    /// one factoid drawer in room `_distilled` with 5 `_distilled_from` tunnels.
+    /// Open an estate with a registered VectorStore, capture ONE multi-sentence
+    /// item, and run Consolidate so the estate contains exactly one factoid drawer
+    /// in room `_distilled` linked back to the source item by a `_distilled_from`
+    /// tunnel. The factoid's lineageID equals the source item's id.
     ///
     /// Throws `IntegrationSetupError` if consolidation does not produce a factoid.
     private func setUpDistilledEstate() async throws -> DistilledEstate {
@@ -79,8 +78,6 @@ struct DistillationIntegrationTests {
         let estateStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: estateStorage, owner: owner)
-        // Apply the GLK composite schema so memory_clusters exists before we insert.
-        // Mirrors ConsolidateTests.openEstateWithVectorStore.
         try await estateStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
         let handle = try await kit.open(storage: estateStorage, owner: owner)
 
@@ -90,82 +87,59 @@ struct DistillationIntegrationTests {
         let vectorStore = VectorStore(storage: vsStorage)
         await kit.registerVectorStore(vectorStore, for: handle)
 
-        // Capture 5 source memories in sequence (oldest → newest for filedAt ordering).
-        var sourceIDs: [String] = []
-        for content in Self.memoryContents {
-            let frame = CaptureFrame(
-                content: content,
-                channel: .typed,
-                room: "inbox",
-                latticeAnchor: LatticeAnchor.udc("000"),
-                addedBy: "dp3-integration-test",
-                embeddingModelID: "test-v1")
-            let drawer = try await kit.capture(handle, frame)
-            sourceIDs.append(drawer.id)
-        }
+        // Capture ONE multi-sentence source item.
+        let frame = CaptureFrame(
+            content: Self.itemBody,
+            channel: .typed,
+            room: "inbox",
+            latticeAnchor: LatticeAnchor.udc("000"),
+            addedBy: "dp3-integration-test",
+            embeddingModelID: "test-v1")
+        let sourceDrawer = try await kit.capture(handle, frame)
+        let sourceID = sourceDrawer.id
 
-        // Seed one open cluster containing all 5 drawer IDs.
-        // Direct rowStore insertion mirrors ConsolidateTests.seedOpenCluster.
-        let memberData = try JSONEncoder().encode(sourceIDs)
-        _ = try await estateStorage.rowStore.insert(
-            table: "memory_clusters",
-            values: [
-                "id": .text(UUID().uuidString),
-                "status": .text("open"),
-                "snr": .null,
-                "member_ids": .json(memberData),
-                "member_count": .int(5),
-                "factoid_id": .null,
-                "held_reason": .null,
-                "filed_at": .timestamp(t0),
-                "updated_at": .timestamp(t0)
-            ])
-
-        // Run the distillation sweep via the Consolidate recipe.
-        // Pass defaultExtractor explicitly so the fixture sentences (which rely on
-        // capitalization heuristics, not HMM tagger noun output) produce deterministic
-        // features and pass the SNR gate. This isolates the integration test from
-        // HMM tagger variance on synthetic sentence clusters.
+        // Run the per-item distillation sweep via the Consolidate recipe. Pass
+        // defaultExtractor explicitly so the fixture sentences (capitalization
+        // heuristic, not HMM tagger output) produce deterministic features.
         let consolidateOut = try await Consolidate().run(
             input: Consolidate.Input(),
             estate: handle,
             kit: kit,
-            extractFeatures: DistillationPipeline.defaultExtractor)
+            extractFeatures: DistillationPipeline.defaultExtractor,
+            now: t0)
 
         guard consolidateOut.factoidsProduced >= 1 else {
             throw IntegrationSetupError.consolidationProducedNoFactoid
         }
 
-        // Resolve factoidID by reading the distilled cluster row in the database.
-        // StoragePredicate.eq requires a Column(table:name:) reference.
-        let clusterRows = try await estateStorage.rowStore.query(
-            table: "memory_clusters",
-            where: .eq(Column(table: "memory_clusters", name: "status"), .text("distilled")))
-        guard let row = clusterRows.first else {
-            throw IntegrationSetupError.noDistilledClusterRow
-        }
-        guard case .text(let factoidID) = row["factoid_id"] else {
-            throw IntegrationSetupError.missingFactoidIDColumn
+        // Resolve the factoid: the only drawer in room "_distilled" whose
+        // lineageID is the source item's id. The intra-item path does NOT write
+        // memory_clusters — the factoid is found directly by its room + lineage.
+        let allDrawers = try await kit.allDrawers(in: handle)
+        guard let factoid = allDrawers.first(where: {
+            $0.room == "_distilled" && $0.lineageID.uuidString == sourceID
+        }) else {
+            throw IntegrationSetupError.noDistilledDrawer
         }
 
         return DistilledEstate(
             kit: kit, handle: handle, storage: estateStorage,
-            vectorStore: vectorStore, factoidID: factoidID, sourceIDs: sourceIDs)
+            vectorStore: vectorStore, factoidID: factoid.id, sourceID: sourceID)
     }
 
     // MARK: - CK-INT-1: Full write path
 
-    /// CK-INT-1: 5 overlapping captures → Consolidate → 1 factoid + 5 tunnels +
-    /// cluster.status = 'distilled'.
+    /// CK-INT-1: one multi-sentence item → Consolidate → 1 factoid + 1
+    /// `_distilled_from` tunnel back to the source item.
     ///
-    /// Verifies the complete distillation write path from capture to factoid
-    /// drawer capture, VectorStore fingerprint storage, and tunnel graph wiring.
-    @Test("CK-INT-1: full write path — 5 captures → Consolidate → 1 factoid + 5 tunnels")
+    /// Verifies the complete intra-item distillation write path from capture to
+    /// factoid drawer capture, VectorStore fingerprint storage, and tunnel wiring.
+    @Test("CK-INT-1: full write path — one item → Consolidate → 1 factoid + 1 tunnel")
     func fullWritePath() async throws {
         try await withCognitionLock {
             let estate = try await setUpDistilledEstate()
 
-            // Factoid drawer must exist (factoidID resolves from the cluster row above).
+            // Factoid drawer must exist and carry a DIST header.
             let factoidContent = try await estate.kit.hydrate(
                 estate.handle, ids: [estate.factoidID])
             let content = try #require(
@@ -174,19 +148,20 @@ struct DistillationIntegrationTests {
             #expect(content.hasPrefix("[DIST|"),
                 "factoid content must start with a DIST header")
 
-            // Verify 5 _distilled_from tunnels wired from factoid to each source.
+            // Verify a single _distilled_from tunnel wired from factoid to the
+            // source item (intra-item provenance: one source = the item itself).
             let wing = "wing_\(Self.ownerID)"
             let allTunnels = try await estate.kit.recallTunnels(estate.handle, wing: wing)
             let distilledFromTunnels = allTunnels.filter {
                 $0.label == "_distilled_from" && $0.sourceDrawerId == estate.factoidID
             }
-            #expect(distilledFromTunnels.count == 5,
-                "runDistillationSweep must write 5 _distilled_from tunnels (one per source memory)")
+            #expect(distilledFromTunnels.count == 1,
+                "intra-item distillation writes one _distilled_from tunnel to the source item")
 
-            // All 5 source IDs must appear as tunnel targets.
-            let targetIDs = Set(distilledFromTunnels.map(\.targetDrawerId))
-            #expect(targetIDs == Set(estate.sourceIDs),
-                "each of the 5 source drawer IDs must appear as a tunnel target")
+            // The single source item ID must appear as the tunnel target.
+            let targetIDs = Set(distilledFromTunnels.compactMap(\.targetDrawerId))
+            #expect(targetIDs == Set([estate.sourceID]),
+                "the source item ID must appear as the tunnel target")
         }
     }
 
@@ -229,11 +204,12 @@ struct DistillationIntegrationTests {
 
     // MARK: - CK-INT-3: Expand memory
 
-    /// CK-INT-3: moot_expand_memory(factoidID) → 5 ExpandedSources, oldest-first.
+    /// CK-INT-3: moot_expand_memory(factoidID) → the single source item.
     ///
     /// Verifies the expand path: factoid hydration → DIST header validation →
-    /// tunnel graph traversal → source hydration.
-    @Test("CK-INT-3: expand memory returns 5 ExpandedSources with source IDs present")
+    /// tunnel graph traversal → source hydration. Under the intra-item model the
+    /// factoid links back to exactly one source (the item it was distilled from).
+    @Test("CK-INT-3: expand memory returns the single source item")
     func expandMemory() async throws {
         try await withCognitionLock {
             let estate = try await setUpDistilledEstate()
@@ -244,13 +220,13 @@ struct DistillationIntegrationTests {
 
             #expect(out.factoidID == estate.factoidID,
                 "ExpandMemory.Output.factoidID must match the requested factoid drawer ID")
-            #expect(out.sources.count == 5,
-                "expand must return all 5 source memories linked by _distilled_from tunnels")
+            #expect(out.sources.count == 1,
+                "expand must return the single source item linked by the _distilled_from tunnel")
 
-            // All 5 source IDs must appear in the expansion (order may vary by tunnel filedAt).
+            // The source item ID must appear in the expansion.
             let expandedIDs = Set(out.sources.map(\.id))
-            #expect(expandedIDs == Set(estate.sourceIDs),
-                "all 5 original source drawer IDs must appear in ExpandMemory output")
+            #expect(expandedIDs == Set([estate.sourceID]),
+                "the original source item ID must appear in ExpandMemory output")
 
             // Prose is the dominant feature extracted by the pipeline.
             #expect(!out.prose.isEmpty,
@@ -292,9 +268,9 @@ struct DistillationIntegrationTests {
             #expect(header.confidence > 0.4,
                 "parsed confidence must exceed 0.4 — pipeline gate ensures this")
             #expect(header.sourceCount == 5,
-                "DIST header src= field must record the 5 source memories")
+                "DIST header src= field must record M = 5 reduction units (the item's sentences)")
             #expect(header.deltaType == .static,
-                "5 identical feature sequences yield deltaType=STATIC")
+                "identical recurring feature across sentences yields deltaType=STATIC")
 
             // Verify InjectionDepth classification using the same thresholds as ToolDispatch.
             // conf ≥ 0.7 → .factoidOnly (prose only, no annotation suffix).

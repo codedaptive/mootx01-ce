@@ -1,6 +1,6 @@
 // distillation_scorer.rs
 //
-// Core distillation scoring: SNR gate, majority vote, PMI graph,
+// Core distillation scoring: SNR gate, structural (recurrence) threshold, PMI graph,
 // dominant component selection, confidence score.
 // Rust port of DistillationScorer.swift (Ds3). Parity conformance verified in Dp1.
 //
@@ -23,8 +23,16 @@ use crate::typed_decay_weighting::DistillationFeatureType;
 pub struct ExtractedFeature {
     /// Semantic type of the feature (entity, relation, temporal, numerical).
     pub feature_type: DistillationFeatureType,
-    /// Canonical string representation of the extracted feature value.
+    /// Canonical grouping key — the STEMMED feature value. Morphological variants
+    /// (migrate / migrates / migration) share one stem, so they accumulate one df
+    /// and one fingerprint bit. Vocabulary dedup, the incidence matrix, df/PMI,
+    /// and the feature fingerprint all key off `value`.
     pub value: String,
+    /// Human-readable surface form rendered in the factoid prose (the original
+    /// lowercased token, e.g. "migration" for the stem "migrat"). When several
+    /// surface forms share a stem, the first-encountered surface is used. Defaults
+    /// to `value` when no distinct surface is supplied.
+    pub display: String,
     /// Fraction of cluster memories that contain this feature: df(f) = (1/M) × Σ X_{ij}.
     pub doc_frequency: f32,
     /// Temporally-weighted document frequency df_w, per §5. Equals doc_frequency
@@ -38,11 +46,39 @@ pub struct ExtractedFeature {
 impl ExtractedFeature {
     /// Initialize with a document frequency; weighted_doc_frequency defaults to
     /// doc_frequency and structural_score defaults to 0 (populated by
-    /// compute_structural_scores).
+    /// compute_structural_scores). `display` defaults to `value` — the surface
+    /// form equals the grouping key when no distinct surface is supplied.
+    ///
+    /// Mirrors Swift `ExtractedFeature(type:value:docFrequency:)` (the
+    /// `display: String? = nil` → `display ?? value` default).
     pub fn new(feature_type: DistillationFeatureType, value: impl Into<String>, doc_frequency: f32) -> Self {
+        let value = value.into();
+        let display = value.clone();
+        Self {
+            feature_type,
+            value,
+            display,
+            doc_frequency,
+            weighted_doc_frequency: doc_frequency,
+            structural_score: 0.0,
+        }
+    }
+
+    /// Initialize with a distinct human-readable `display` surface form that
+    /// differs from the stemmed grouping `value`. Used by the HMM feature
+    /// extractor: `value = stem(token)`, `display = lowercased token`.
+    ///
+    /// Mirrors Swift `ExtractedFeature(type:value:docFrequency:display:)`.
+    pub fn new_with_display(
+        feature_type: DistillationFeatureType,
+        value: impl Into<String>,
+        doc_frequency: f32,
+        display: impl Into<String>,
+    ) -> Self {
         Self {
             feature_type,
             value: value.into(),
+            display: display.into(),
             doc_frequency,
             weighted_doc_frequency: doc_frequency,
             structural_score: 0.0,
@@ -58,7 +94,7 @@ impl ExtractedFeature {
 pub struct DistillationSNR {
     /// Ratio of structural signal to episodic noise. Distillation proceeds when snr >= 2.0.
     pub snr: f32,
-    /// Total structural weight from majority-threshold-passing features: Σ σ(f) for f in V_thresh.
+    /// Total structural weight from threshold-passing (recurring) features: Σ σ(f) for f in V_thresh.
     pub structural_signal: f32,
     /// Total noise energy from sub-threshold features: Σ (1 − df(f)) for f not in V_thresh.
     pub episodic_noise: f32,
@@ -66,7 +102,7 @@ pub struct DistillationSNR {
     pub ready_to_distill: bool,
 }
 
-/// PMI-based feature coherence graph over the set of majority-threshold-passing features.
+/// PMI-based feature coherence graph over the set of structural-threshold-passing features.
 /// Edges exist between feature pairs whose PMI > 0 (co-occur more than chance).
 ///
 /// Mirrors Swift FeatureGraph in DistillationScorer.swift.
@@ -104,28 +140,35 @@ impl DistillationScorer {
         -(p * p.log2()) - ((1.0 - p) * (1.0 - p).log2())
     }
 
-    // MARK: - Stage 2: Majority Threshold
+    // MARK: - Stage 2: Structural (recurrence) Threshold
 
-    /// Majority vote threshold per §3.2: τ_maj = ⌈(M+1)/2⌉ / M.
-    /// A feature survives the majority vote iff it appears in strictly more
-    /// than half the cluster's memories.
+    /// Structural threshold for INTRA-ITEM distillation: a feature is structural
+    /// iff it RECURS — appears in at least 2 of the item's M units (sentences).
+    /// τ_struct = 2 / M, i.e. `df ≥ 2/M` ⟺ count ≥ 2.
     ///
-    /// Values: M=3 → 2/3 ≈ 0.667, M=4 → 3/4 = 0.750, M=5 → 3/5 = 0.600.
+    /// This replaces the cross-memory majority vote (⌈(M+1)/2⌉/M). Distillation
+    /// is intra-item: a single document is reduced from its own sentences, where
+    /// the central entities recur across a MINORITY of sentences but dominate the
+    /// one-off scaffolding tail. Requiring a majority discards the real core
+    /// (`falcon` clears it; `database`/`migration`/`tables` do not) and the SNR
+    /// gate then holds every prose item. "Recurs at least twice" is the correct
+    /// intra-item rule — for one item, repetition is significance. Scale is
+    /// handled upstream by the multi-level tree (bounded section units), so
+    /// `count ≥ 2` never degrades to noise. (M=1 → τ=2.0, nothing recurs — an
+    /// un-chunked single unit is correctly not distillable.)
     ///
-    /// Ceiling integer arithmetic: ⌈(M+1)/2⌉ = (M + 1 + 2 - 1) / 2 = (M + 2) / 2.
-    pub fn majority_threshold(m: usize) -> f32 {
-        // ⌈(M+1)/2⌉ via integer division: (M + 2) / 2
-        let numerator = (m + 2) / 2;
-        numerator as f32 / m as f32
+    /// Mirrors Swift `DistillationScorer.structuralThreshold(M:)` exactly.
+    pub fn structural_threshold(m: usize) -> f32 {
+        2.0_f32 / m as f32
     }
 
-    /// Split features into those that pass and those that fail the majority vote threshold.
-    /// Passing features form V_thresh — the input to the PMI coherence stage.
-    pub fn apply_majority_threshold(
+    /// Split features into structural (recurring) and episodic (one-off) sets.
+    /// The structural set forms V_thresh — the input to the PMI coherence stage.
+    pub fn apply_structural_threshold(
         features: &[ExtractedFeature],
         m: usize,
     ) -> (Vec<ExtractedFeature>, Vec<ExtractedFeature>) {
-        let tau = Self::majority_threshold(m);
+        let tau = Self::structural_threshold(m);
         let mut passing = Vec::new();
         let mut failing = Vec::new();
         for f in features {
@@ -142,15 +185,15 @@ impl DistillationScorer {
 
     /// Compute cluster SNR per §3 to gate distillation readiness.
     ///
-    /// structural_signal = Σ σ(f) for features with df ≥ τ_maj (majority-passing).
-    /// episodic_noise    = Σ (1 − df(f)) for features below threshold.
+    /// structural_signal = Σ σ(f) for features with df ≥ τ_struct (recurring).
+    /// episodic_noise    = Σ (1 − df(f)) for features below threshold (one-off tail).
     /// snr               = structural_signal / max(episodic_noise, 1e-6)
     /// ready_to_distill  = snr ≥ 2.0
     ///
     /// The 1e-6 floor prevents division by zero when all features are structural
     /// (no episodic features in the cluster).
     pub fn compute_snr(features: &[ExtractedFeature], m: usize) -> DistillationSNR {
-        let tau = Self::majority_threshold(m);
+        let tau = Self::structural_threshold(m);
         let mut structural_signal: f32 = 0.0;
         let mut episodic_noise: f32 = 0.0;
 
@@ -195,7 +238,7 @@ impl DistillationScorer {
     /// Connected components are sorted by total weighted doc_frequency descending
     /// so components[0] is always the dominant semantic cluster.
     ///
-    /// - `threshold_features`: V_thresh — features that passed the majority vote.
+    /// - `threshold_features`: V_thresh — features that passed the structural (recurrence) threshold.
     /// - `incidence_matrix`: Row i column j is true iff threshold_features[j] ∈ memory i.
     /// - `m`: Number of memories in the cluster.
     pub fn build_pmi_graph(
@@ -365,42 +408,49 @@ mod tests {
         assert!((h - 1.0).abs() < 1e-5, "got {h}");
     }
 
-    // MARK: - majority_threshold
+    // MARK: - structural_threshold (τ_struct = 2 / M)
 
     #[test]
-    fn majority_threshold_m3() {
-        // ⌈(3+1)/2⌉/3 = 2/3 ≈ 0.667
-        let tau = DistillationScorer::majority_threshold(3);
+    fn structural_threshold_m3() {
+        // 2/3 ≈ 0.667 — a feature recurring in ≥2 of 3 units passes.
+        let tau = DistillationScorer::structural_threshold(3);
         let expected = 2.0_f32 / 3.0_f32;
         assert!((tau - expected).abs() < 1e-5, "got {tau}");
     }
 
     #[test]
-    fn majority_threshold_m4() {
-        // ⌈(4+1)/2⌉/4 = ⌈2.5⌉/4 = 3/4 = 0.750 per §3.2 table
-        let tau = DistillationScorer::majority_threshold(4);
-        assert!((tau - 0.75_f32).abs() < 1e-5, "got {tau}");
+    fn structural_threshold_m4() {
+        // 2/4 = 0.5 — recurs in ≥2 of 4 units.
+        let tau = DistillationScorer::structural_threshold(4);
+        assert!((tau - 0.5_f32).abs() < 1e-5, "got {tau}");
     }
 
     #[test]
-    fn majority_threshold_m5() {
-        // ⌈(5+1)/2⌉/5 = 3/5 = 0.600
-        let tau = DistillationScorer::majority_threshold(5);
-        assert!((tau - 0.6_f32).abs() < 1e-5, "got {tau}");
+    fn structural_threshold_m5() {
+        // 2/5 = 0.4 — recurs in ≥2 of 5 units.
+        let tau = DistillationScorer::structural_threshold(5);
+        assert!((tau - 0.4_f32).abs() < 1e-5, "got {tau}");
     }
 
-    // MARK: - apply_majority_threshold
+    #[test]
+    fn structural_threshold_m1_is_two() {
+        // M=1 → τ=2.0: nothing recurs, a single un-chunked unit is not distillable.
+        let tau = DistillationScorer::structural_threshold(1);
+        assert!((tau - 2.0_f32).abs() < 1e-5, "got {tau}");
+    }
+
+    // MARK: - apply_structural_threshold
 
     #[test]
-    fn apply_majority_threshold_splits_correctly() {
+    fn apply_structural_threshold_splits_correctly() {
         let m = 5;
-        let tau = DistillationScorer::majority_threshold(m); // 0.6
+        let tau = DistillationScorer::structural_threshold(m); // 0.4
         let features = vec![
             ExtractedFeature::new(DistillationFeatureType::Entity,   "A", 0.8), // passes
-            ExtractedFeature::new(DistillationFeatureType::Relation, "B", 0.4), // fails
-            ExtractedFeature::new(DistillationFeatureType::Temporal, "C", 0.6), // passes (== τ)
+            ExtractedFeature::new(DistillationFeatureType::Relation, "B", 0.2), // fails (1 of 5)
+            ExtractedFeature::new(DistillationFeatureType::Temporal, "C", 0.4), // passes (== τ, 2 of 5)
         ];
-        let (passing, failing) = DistillationScorer::apply_majority_threshold(&features, m);
+        let (passing, failing) = DistillationScorer::apply_structural_threshold(&features, m);
         assert_eq!(passing.len(), 2);
         assert_eq!(failing.len(), 1);
         assert!(passing.iter().all(|f| f.doc_frequency >= tau));
