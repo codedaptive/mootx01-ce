@@ -183,7 +183,10 @@ fn describe_verb_error(ve: &VerbError) -> String {
             format!("reanchor of row {row_id} requires at least one of toRoom or toUDC")
         }
         VerbError::ExpungeNotConfirmed { row_id } => {
-            format!("expunge of row {row_id} requires confirmation=true")
+            // The caller-facing field is "confirmed" — name it exactly so AI consumers
+            // can retry with the correct argument rather than dead-ending on a
+            // field name mismatch between this message and the tool schema.
+            format!("expunge of row {row_id} requires confirmed=true")
         }
         VerbError::CrossKitVectorDeleteFailed { row_id, reason } => {
             format!(
