@@ -520,14 +520,18 @@ pub fn recall_frame(
 /// Produce a user-facing English description of a `GeniusLocusKitError` at
 /// the ARIA boundary. No internal Rust type names or enum variant names appear
 /// in the output. Called from `federated_search` for unexpected GLK errors.
+///
+/// `estate_uuid` fields are `[u8; 16]` — format via `uuid::Uuid::from_bytes`
+/// to produce a canonical UUID string (e.g. `"3f2504e0-4f89-11d3-9a0c-0305e82c3301"`)
+/// rather than a raw byte-array debug dump that leaks nothing useful to a caller.
 pub(crate) fn describe_glk_error(e: &genius_locus_kit::GeniusLocusKitError) -> String {
     use genius_locus_kit::GeniusLocusKitError;
     match e {
         GeniusLocusKitError::EstateNotOpen { estate_uuid } => {
-            format!("estate {:?} is not open", estate_uuid)
+            format!("estate {} is not open", uuid::Uuid::from_bytes(*estate_uuid))
         }
         GeniusLocusKitError::DuplicateEstate { estate_uuid } => {
-            format!("estate {:?} is already open", estate_uuid)
+            format!("estate {} is already open", uuid::Uuid::from_bytes(*estate_uuid))
         }
         GeniusLocusKitError::InvalidManifest { key, detail } => {
             format!("invalid manifest key '{key}': {detail}")
@@ -539,10 +543,10 @@ pub(crate) fn describe_glk_error(e: &genius_locus_kit::GeniusLocusKitError) -> S
             format!("estate could not be opened: {detail}")
         }
         GeniusLocusKitError::EstateQuiesced { estate_uuid } => {
-            format!("estate {:?} is quiesced and not accepting new work", estate_uuid)
+            format!("estate {} is quiesced and not accepting new work", uuid::Uuid::from_bytes(*estate_uuid))
         }
         GeniusLocusKitError::DestroyRequiresClose { estate_uuid } => {
-            format!("estate {:?} must be closed before it can be destroyed", estate_uuid)
+            format!("estate {} must be closed before it can be destroyed", uuid::Uuid::from_bytes(*estate_uuid))
         }
         GeniusLocusKitError::UnderlyingEstateFailure { reason } => {
             format!("estate operation failed: {reason}")

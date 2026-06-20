@@ -34,6 +34,8 @@
 
 use std::collections::BTreeMap;
 
+use uuid::Uuid;
+
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     estate_types::LatticeAnchor,
@@ -132,7 +134,10 @@ pub fn is_interface_tool(name: &str) -> bool {
 pub(crate) fn describe_verb_dispatch_error(e: &VerbDispatchError) -> String {
     match e {
         VerbDispatchError::EstateNotOpen { estate_uuid } => {
-            format!("the addressed estate ({estate_uuid:?}) is not open; open it before issuing verbs")
+            // estate_uuid is [u8; 16] — format via Uuid::from_bytes to produce a
+            // canonical UUID string instead of a raw byte-array debug dump.
+            format!("the addressed estate ({}) is not open; open it before issuing verbs",
+                Uuid::from_bytes(*estate_uuid))
         }
         VerbDispatchError::Verb(ve) => describe_verb_error(ve),
     }
@@ -169,14 +174,15 @@ fn describe_verb_error(ve: &VerbError) -> String {
             format!("verb '{verb}' is not accepted on noun '{noun}' by the AriaLexicon acceptance matrix")
         }
         VerbError::EmptyReanchor { row_id } => {
-            format!("reanchor of row {row_id:?} requires at least one of toRoom or toUDC")
+            // row_id is String — use Display ({}) not Debug ({:?}) to omit the Debug quotes.
+            format!("reanchor of row {row_id} requires at least one of toRoom or toUDC")
         }
         VerbError::ExpungeNotConfirmed { row_id } => {
-            format!("expunge of row {row_id:?} requires confirmation=true")
+            format!("expunge of row {row_id} requires confirmation=true")
         }
         VerbError::CrossKitVectorDeleteFailed { row_id, reason } => {
             format!(
-                "expunge of row {row_id:?} is incomplete: the LocusKit content was removed but \
+                "expunge of row {row_id} is incomplete: the LocusKit content was removed but \
                  the vector embedding survived ({reason}). Retry the expunge — do not report \
                  this row as deleted."
             )
