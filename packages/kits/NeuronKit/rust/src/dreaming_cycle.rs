@@ -337,6 +337,76 @@ pub fn tunnel_key(link: &TunnelLink) -> Option<String> {
     }
 }
 
+// ─── Corpus growth probe (auto-reindex) ─────────────────────────────────────
+
+/// Chunk-count-and-retrain seam for the auto-reindex step. Mirrors the Swift
+/// `CorpusGrowthProbe` protocol (NeuronKit/Sources/NeuronKit/Dreaming/CorpusGrowthProbe.swift).
+///
+/// Distributional embedding providers (RI / PPMI / LSA / NMF) freeze their
+/// vocabulary at training time. Terms ingested after the last retrain are
+/// OOV and produce zero-vectors, silently missing novel content in dense
+/// recall. The daemon calls this trait after each cycle to measure growth
+/// and fire a retrain when the growth threshold is crossed.
+pub trait CorpusGrowthProbe {
+    /// Current chunk count in the probe's Corpus. Returns 0 for un-wired
+    /// estates (no Corpus) so the growth gate never fires on those.
+    fn chunk_count(&self) -> i64;
+
+    /// Trigger a full basis retrain.
+    ///
+    /// `now_epoch_secs` is the injected cycle timestamp (deterministic; the
+    /// probe must not read the system clock). Infallible at the trait level —
+    /// the Rust sync-port convention; implementations capture errors out-of-band.
+    fn reindex(&mut self, now_epoch_secs: f64);
+}
+
+/// In-memory `CorpusGrowthProbe` for tests. Records reindex calls; does not
+/// touch a live Corpus. Mirrors the test-only `FakeGrowthProbe` in the Swift
+/// test suite.
+#[derive(Default)]
+pub struct InMemoryCorpusGrowthProbe {
+    /// The count returned by `chunk_count()`. Tests set this to simulate growth.
+    pub count: i64,
+    /// Timestamps (epoch-seconds) of `reindex()` calls, in call order.
+    pub reindex_calls: Vec<f64>,
+    /// When true, `reindex()` is a no-op that records nothing — simulates a
+    /// storage error without panicking (the trait is infallible).
+    pub error_on_reindex: bool,
+}
+
+impl InMemoryCorpusGrowthProbe {
+    /// Construct a probe with the given initial chunk count.
+    pub fn new(count: i64) -> Self {
+        Self { count, ..Default::default() }
+    }
+}
+
+impl CorpusGrowthProbe for InMemoryCorpusGrowthProbe {
+    fn chunk_count(&self) -> i64 {
+        self.count
+    }
+
+    fn reindex(&mut self, now_epoch_secs: f64) {
+        if !self.error_on_reindex {
+            self.reindex_calls.push(now_epoch_secs);
+        }
+        // When error_on_reindex is true: drop the call silently, mirroring the
+        // Swift daemon's non-fatal error handling (cycle continues, no panic).
+    }
+}
+
+/// Corpus growth required to trigger an auto-reindex. Mirrors the Swift
+/// `autoReindexGrowthThreshold` constant (25 chunks).
+///
+/// Vocabulary coverage rationale: distributional embeddings train on the full
+/// vocabulary at training time. 25 new chunks represents enough vocabulary
+/// drift to make a full retrain worthwhile without retraining too frequently.
+/// Callers with very dense or very sparse ingestion can override via
+/// `DreamingDaemon::with_growth_probe`.
+pub const AUTO_REINDEX_GROWTH_THRESHOLD: i64 = 25;
+
+// ─── DreamingDaemon ──────────────────────────────────────────────────────────
+
 /// The dreaming daemon's across-cycle state and cycle driver — the Rust
 /// parity of the Swift `DreamingDaemon` actor (without the async/timer
 /// machinery, which is the runtime's concern, not the algorithm's).
@@ -353,17 +423,27 @@ pub struct DreamingDaemon {
     /// independent. The daemon never reads the system clock; the caller
     /// injects `now`.
     last_timer_fire_epoch_secs: Option<f64>,
+    /// Chunk count at the most recent corpus basis retrain (or at daemon
+    /// construction). Sentinel value -1 means "not yet initialised": the
+    /// first cycle reads the live count and stores it as the baseline WITHOUT
+    /// firing a retrain (the corpus was just trained on first ingest or opened
+    /// from a persisted basis). Mirrors Swift `lastReindexChunkCount`.
+    last_reindex_chunk_count: i64,
+    /// Growth delta (in chunks) that triggers an auto-reindex. Defaults to
+    /// `AUTO_REINDEX_GROWTH_THRESHOLD`. Mirrors Swift `reindexGrowthThreshold`.
+    reindex_growth_threshold: i64,
 }
 
 impl DreamingDaemon {
-    /// Construct a daemon with the given policy and trigger mode.
+    /// Construct a daemon with the given policy and timer trigger mode.
+    /// Auto-reindex is disabled (no growth probe).
     pub fn new(policy: DreamingPolicy) -> Self {
         Self::with_trigger_mode(policy, DreamingTriggerMode::Timer)
     }
 
-    /// Construct a daemon with an explicit trigger mode. Prefer `new` for
-    /// `.timer`-mode daemons; use this when the bandit has selected a
-    /// non-default mode.
+    /// Construct a daemon with an explicit trigger mode. Auto-reindex disabled.
+    /// Prefer `new` for `.timer`-mode daemons; use this when the bandit has
+    /// selected a non-default mode.
     pub fn with_trigger_mode(policy: DreamingPolicy, trigger_mode: DreamingTriggerMode) -> Self {
         Self {
             policy,
@@ -372,7 +452,15 @@ impl DreamingDaemon {
             proposed_keys: BTreeSet::new(),
             cycle_count: 0,
             last_timer_fire_epoch_secs: None,
+            last_reindex_chunk_count: -1, // sentinel: not yet initialised
+            reindex_growth_threshold: AUTO_REINDEX_GROWTH_THRESHOLD,
         }
+    }
+
+    /// Override the auto-reindex growth threshold. Use when the default 25-chunk
+    /// threshold is inappropriate for the estate's ingestion rate.
+    pub fn set_reindex_growth_threshold(&mut self, threshold: i64) {
+        self.reindex_growth_threshold = threshold;
     }
 
     /// Interval-gated pump — the timer-path entry point for the resident loop.
@@ -617,7 +705,25 @@ impl DreamingDaemon {
         };
         sink.record_cycle_diary(entry.clone());
 
-        DreamingCycleReport {
+        // ── Auto-reindex step: trigger corpus basis retrain on growth ──────
+        // Mirrors Swift `DreamingDaemon.runCycle` auto-reindex block.
+        // The probe is passed in by the caller via `run_cycle_with_probe`; when
+        // `run_cycle` is called without a probe the block is a no-op.
+        // Probe logic is intentionally post-diary so a reindex error does not
+        // prevent the diary from being written (the diary write is step 7 in the
+        // spec, and the reindex is an extension step, not a numbered spec step).
+        //
+        // Infallibility: the Rust sync-port trait is infallible. Implementations
+        // are expected to capture errors out-of-band (log them, return 0 from
+        // `chunk_count()`, skip `reindex_calls` on error_on_reindex). This mirrors
+        // the Swift daemon's non-fatal reindex-error handling (cycle continues).
+        //
+        // Baseline sentinel: `last_reindex_chunk_count == -1` on the first cycle.
+        // We read the live count and store it WITHOUT firing a retrain — the corpus
+        // was just trained on first ingest or opened from a persisted basis.
+        // See `autoReindexGrowthThreshold` in Swift for the vocabulary rationale.
+
+        let report = DreamingCycleReport {
             candidates_considered,
             proposals_emitted,
             suppressed_duplicates: outcome.suppressed_duplicates,
@@ -625,7 +731,51 @@ impl DreamingDaemon {
             candidate_scores: outcome.scores,
             reward_by_target,
             diary_entry: entry,
+        };
+        report
+    }
+
+    /// Run one dreaming cycle with an optional corpus growth probe. The probe
+    /// is checked after step 7 (diary write) to gate auto-reindex on corpus
+    /// growth. Mirrors the auto-reindex block in Swift `DreamingDaemon.runCycle`.
+    ///
+    /// Pass `probe: None` to skip auto-reindex (equivalent to `run_cycle`).
+    ///
+    /// DETERMINISM: `now_epoch_secs` is passed to `probe.reindex()` — the probe
+    /// must not read the system clock internally.
+    pub fn run_cycle_with_probe<R, Q, S, P>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        reward_source: &Q,
+        sink: &mut S,
+        probe: Option<&mut P>,
+    ) -> DreamingCycleReport
+    where
+        R: DreamingSubstrateReader,
+        Q: RewardSource,
+        S: DreamingProposalSink,
+        P: CorpusGrowthProbe,
+    {
+        let report = self.run_cycle(now_epoch_secs, reader, reward_source, sink);
+
+        if let Some(p) = probe {
+            let live_count = p.chunk_count();
+            if self.last_reindex_chunk_count == -1 {
+                // First cycle: establish baseline, do not retrain.
+                self.last_reindex_chunk_count = live_count;
+            } else if live_count - self.last_reindex_chunk_count >= self.reindex_growth_threshold {
+                // Growth threshold crossed — retrain.
+                p.reindex(now_epoch_secs);
+                // Advance baseline to live count at retrain time. Even when reindex
+                // is a no-op (error_on_reindex), the baseline advances so the gate
+                // does not re-fire every subsequent cycle — mirrors Swift's always-
+                // advance-after-threshold-check semantics.
+                self.last_reindex_chunk_count = live_count;
+            }
         }
+
+        report
     }
 }
 
@@ -1074,5 +1224,151 @@ mod tests {
         store.save_policy(custom);
         let loaded = store.load_policy().unwrap();
         assert_eq!(loaded.event_observation_threshold, 7, "event_observation_threshold must round-trip");
+    }
+
+    // ─── Auto-reindex tests (mirror Swift AutoReindexTests) ─────────────────
+    // Tests for the CorpusGrowthProbe seam and the auto-reindex gate in
+    // `run_cycle_with_probe`. Coverage mirrors AR-1 through AR-6 in Swift.
+
+    fn empty_reader() -> FakeReader {
+        FakeReader { traces: vec![], observations: vec![], tunnels: vec![] }
+    }
+
+    // AR-1: First cycle establishes baseline without firing reindex.
+    #[test]
+    fn ar1_first_cycle_establishes_baseline_without_reindex() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut probe = InMemoryCorpusGrowthProbe::new(10);
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+
+        d.run_cycle_with_probe(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        assert_eq!(probe.reindex_calls.len(), 0, "first cycle must not trigger reindex");
+        // Baseline was read (probe.count was consulted) and stored internally.
+        // We verify it indirectly via AR-2 (no reindex below threshold from this baseline).
+    }
+
+    // AR-2: Growth below threshold — reindex must NOT fire.
+    #[test]
+    fn ar2_below_threshold_no_reindex() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        // threshold = 25; start at 10.
+        let mut probe = InMemoryCorpusGrowthProbe::new(10);
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        // d.reindex_growth_threshold is already AUTO_REINDEX_GROWTH_THRESHOLD (25).
+
+        // Cycle 1: baseline = 10.
+        d.run_cycle_with_probe(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        // Grow by 24 (below threshold 25).
+        probe.count = 34;
+        d.run_cycle_with_probe(1_030_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        assert_eq!(probe.reindex_calls.len(), 0, "growth of 24 (< 25) must not trigger reindex");
+    }
+
+    // AR-3: Growth at threshold triggers reindex; timestamp is the cycle's now.
+    #[test]
+    fn ar3_at_threshold_reindex_fires() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut probe = InMemoryCorpusGrowthProbe::new(10);
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        d.set_reindex_growth_threshold(25);
+
+        // Cycle 1: baseline = 10.
+        d.run_cycle_with_probe(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        // Grow by exactly 25 (10 + 25 = 35).
+        probe.count = 35;
+        let t1 = 1_060_000.0_f64;
+        d.run_cycle_with_probe(t1, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        assert_eq!(probe.reindex_calls.len(), 1, "growth == threshold must trigger reindex");
+        assert!((probe.reindex_calls[0] - t1).abs() < 1e-6, "reindex must receive cycle's now");
+    }
+
+    // AR-3b: After reindex, baseline advances; sub-threshold growth does not re-fire.
+    #[test]
+    fn ar3b_baseline_advances_after_reindex() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut probe = InMemoryCorpusGrowthProbe::new(10);
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        d.set_reindex_growth_threshold(25);
+
+        // Cycle 1: baseline = 10.
+        d.run_cycle_with_probe(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        // Grow to 35 (delta 25 == threshold): reindex fires, baseline advances to 35.
+        probe.count = 35;
+        d.run_cycle_with_probe(1_060_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+        assert_eq!(probe.reindex_calls.len(), 1, "reindex must fire on first threshold crossing");
+
+        // Grow by 5 more (35 → 40): delta 5 < 25, no reindex.
+        probe.count = 40;
+        d.run_cycle_with_probe(1_120_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+        assert_eq!(probe.reindex_calls.len(), 1, "sub-threshold growth after baseline advance must not re-fire");
+    }
+
+    // AR-4: No probe → no auto-reindex; daemon runs normally.
+    #[test]
+    fn ar4_no_probe_no_reindex() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+
+        // Pass None for probe — must not panic and must produce a valid report.
+        let report = d.run_cycle_with_probe::<_, _, _, InMemoryCorpusGrowthProbe>(
+            1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, None,
+        );
+        assert_eq!(report.candidates_considered, 0);
+    }
+
+    // AR-5: Two successive growth windows both fire independently.
+    #[test]
+    fn ar5_two_successive_windows_fire() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut probe = InMemoryCorpusGrowthProbe::new(0);
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        d.set_reindex_growth_threshold(10); // small threshold for this test
+
+        // Cycle 1: baseline = 0.
+        d.run_cycle_with_probe(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        // First window: grow by 10 → reindex, baseline → 10.
+        probe.count = 10;
+        d.run_cycle_with_probe(1_030_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+        assert_eq!(probe.reindex_calls.len(), 1, "first threshold crossing must fire");
+
+        // Second window: grow by 10 more (10 → 20) → reindex, baseline → 20.
+        probe.count = 20;
+        d.run_cycle_with_probe(1_060_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+        assert_eq!(probe.reindex_calls.len(), 2, "second threshold crossing must fire independently");
+    }
+
+    // AR-6: Reindex error (error_on_reindex) is non-fatal; baseline still advances.
+    #[test]
+    fn ar6_reindex_error_is_non_fatal() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut probe = InMemoryCorpusGrowthProbe { count: 10, error_on_reindex: true, ..Default::default() };
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        d.set_reindex_growth_threshold(1); // fire immediately after first cycle
+
+        // Cycle 1: baseline = 10.
+        d.run_cycle_with_probe(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        // Grow by 1 (threshold = 1): reindex called but error_on_reindex suppresses it.
+        probe.count = 11;
+        let report = d.run_cycle_with_probe(1_030_000.0, &reader, &RecallTraceRewardSource, &mut sink, Some(&mut probe));
+
+        // Must not panic. Report is valid.
+        assert_eq!(report.candidates_considered, 0);
+        // reindex_calls is empty because error_on_reindex swallows the call.
+        assert_eq!(probe.reindex_calls.len(), 0, "error_on_reindex suppresses the call record");
     }
 }

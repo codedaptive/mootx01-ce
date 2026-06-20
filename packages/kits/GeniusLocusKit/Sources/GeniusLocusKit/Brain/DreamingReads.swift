@@ -85,4 +85,63 @@ public extension GeniusLocusKit {
         let estate = try estate(for: handle)
         return try await estate.pruneRecallTraces(olderThan: cutoff)
     }
+
+    // MARK: - Corpus growth probe (auto-reindex support)
+
+    /// Return the current chunk count for the Corpus registered against `handle`.
+    ///
+    /// Called by the dreaming daemon's `CorpusGrowthProbe` adapter to measure
+    /// corpus growth since the last basis retrain. Returns 0 when no Corpus is
+    /// registered (e.g. a `.locusOnly` estate), so the growth gate never fires
+    /// on un-wired estates — a safe and correct default.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale;
+    ///   a `CorpusKitError` if the `Corpus.count()` query fails.
+    func corpusChunkCount(handle: EstateHandle) async throws -> Int {
+        guard registry[handle] != nil else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        guard let corpus = corpusKits[handle] else {
+            // No Corpus registered for this estate (LocusOnly kind) — growth
+            // gate should never fire; return 0 so the threshold delta stays zero.
+            return 0
+        }
+        return try await corpus.count()
+    }
+
+    /// Trigger a full Corpus basis retrain for the estate addressed by `handle`.
+    ///
+    /// Called by the dreaming daemon's `CorpusGrowthProbe` adapter when corpus
+    /// growth since the last retrain crosses the auto-reindex threshold. Delegates
+    /// to `Corpus.reindex(now:)`, which retrains every trainable provider on the
+    /// full corpus snapshot and re-embeds all chunks so dense vocabulary stays
+    /// current.
+    ///
+    /// This is a Brain-layer operation: the daemon triggers it through the
+    /// `CorpusGrowthProbe` seam (B-1 compliant), never by calling CorpusKit
+    /// directly. The operation is intentionally synchronous from the daemon's
+    /// perspective — the daemon awaits it, so it runs to completion before the
+    /// cycle returns. This is appropriate because reindex is expensive and must
+    /// not race with a concurrent ingest drain; actor isolation serialises the
+    /// GLK actor's accesses.
+    ///
+    /// A no-op when no Corpus is registered for `handle` (`.locusOnly` estates).
+    ///
+    /// - Parameters:
+    ///   - handle: The open estate whose Corpus to retrain. Must be in the registry.
+    ///   - now: Deterministic timestamp for the basis `trained_at` stamp and
+    ///     re-embedded vector filing timestamps. Must be passed by the caller;
+    ///     never call `Date()` inside the engine (CLAUDE.md determinism rule).
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale;
+    ///   a `CorpusKitError` if the retrain or re-embed fails.
+    func reindexCorpus(handle: EstateHandle, now: Date) async throws {
+        guard registry[handle] != nil else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        guard let corpus = corpusKits[handle] else {
+            // No Corpus registered — LocusOnly estate; nothing to reindex.
+            return
+        }
+        try await corpus.reindex(now: now)
+    }
 }
