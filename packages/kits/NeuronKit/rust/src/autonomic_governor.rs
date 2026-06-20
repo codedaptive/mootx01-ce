@@ -1,9 +1,17 @@
 //! Resident Autonomic Governor (see ADR-LOOPBACKHTTP-001 §17).
 //!
 //! The Rust vertical's parity of the Swift `AutonomicGovernor` actor
-//! (packages/kits/AriaMcpKit/Sources/AriaMCP/AutonomicGovernor.swift). Drives the Brain's
-//! cadence work — dreaming (NeuronKit) and maintenance (NeuronKit) — on each
-//! daemon's own interval.
+//! (packages/kits/NeuronKit/Sources/NeuronKit/Governor/AutonomicGovernor.swift).
+//! Drives the Brain's cadence work — dreaming (NeuronKit) and maintenance
+//! (NeuronKit) — on each daemon's own interval.
+//!
+//! # Layering
+//!
+//! The governor lives in NeuronKit. AriaMcpKit is the HOST that starts it and
+//! injects host-coupled concerns as abstractions so NeuronKit never imports
+//! AriaMcpKit or observer-sink. The topology snapshot write is injected via the
+//! `GovernorTopologySink` trait (this crate); the AriaMcpKit host provides an
+//! implementation backed by `observer_sink::StatsStore`.
 //!
 //! # Live estate wiring
 //!
@@ -140,13 +148,13 @@ use genius_locus_kit::{
 use intellectus_lib::{report, EventKind, StatSample};
 use uuid::Uuid;
 use locus_kit::drawer_store::DrawerStore;
-use neuron_kit::{
+use crate::{
     DreamingDaemon, DreamingPolicy, DreamingPolicyStore, EstateDreamingReader,
     EstateDreamingSink, EstateMaintenanceReader, EstateMaintenanceSink,
     InMemoryDreamingPolicyStore, InMemoryMaintenancePolicyStore, MaintenanceDaemon,
     MaintenancePolicy, MaintenancePolicyStore, RecallTraceRewardSource,
 };
-use observer_sink::StatsStore;
+use crate::governor_topology_sink::GovernorTopologySink;
 
 // ── Default constants ─────────────────────────────────────────────────────────
 
@@ -249,8 +257,8 @@ pub struct GovernorReport {
     /// correct).
     pub preference_fired: bool,
     /// Topology snapshot duty fired this tick. True when the cadence elapsed
-    /// and `stats_store` is Some (or cadence elapsed and store is None — the
-    /// field reflects cadence gate only, not store presence, matching Swift).
+    /// regardless of whether `topology_sink` is Some — the field reflects the
+    /// cadence gate only, not sink presence (matching Swift's contract).
     pub topology_snapshot_fired: bool,
     /// Encode queue drain BACKSTOP fired this tick. True when
     /// `drain_encode_queue_once` was called (regardless of jobs processed — an
@@ -314,10 +322,12 @@ pub struct AutonomicGovernor {
     /// Cancellation flag. `stop()` sets this; `run_loop` checks it between
     /// ticks. Set from any thread (AtomicBool).
     stop_flag: Arc<AtomicBool>,
-    /// Optional stats store for writing topology snapshots. None = no write
-    /// (telemetry disabled). Wired from main.rs when ARIA_MCP_STATS_STORE is
-    /// set. The cadence gate fires regardless of whether the store is present.
-    stats_store: Option<Arc<StatsStore>>,
+    /// Host-injected topology snapshot sink. None = no write (telemetry
+    /// disabled). The AriaMcpKit host provides an implementation backed by
+    /// `observer_sink::StatsStore` when `ARIA_MCP_STATS_STORE` is configured.
+    /// The cadence gate fires regardless of whether the sink is present —
+    /// topology_snapshot_fired reflects cadence only, not sink presence.
+    topology_sink: Option<Box<dyn GovernorTopologySink>>,
     /// Topology snapshot cadence in milliseconds (default 300 000 = 5 min).
     /// Overridden by MOOTX01_TOPOLOGY_CADENCE_SECONDS at construction.
     topology_cadence_ms: u64,
@@ -403,8 +413,8 @@ impl AutonomicGovernor {
     ///
     /// Base tick is read from `MOOTX01_BRAIN_TICK_MS` (default 5000 ms).
     /// Topology cadence is read from `MOOTX01_TOPOLOGY_CADENCE_SECONDS` (default 300 s).
-    /// No stats store — telemetry writes are skipped. Use `new_with_stats_store`
-    /// when `ARIA_MCP_STATS_STORE` is configured.
+    /// No topology sink — topology snapshot writes are skipped. Use
+    /// `new_with_topology_sink` when a sink is available (production mode).
     pub fn new(
         coord: Arc<Mutex<EstateCoordinator>>,
         handle: EstateHandle,
@@ -413,15 +423,20 @@ impl AutonomicGovernor {
         Self::build(coord, handle, store, Arc::new(AtomicBool::new(false)), None)
     }
 
-    /// Construct with an optional stats store for topology snapshot writes.
-    /// Called from `main.rs` when `ARIA_MCP_STATS_STORE` is configured.
-    pub fn new_with_stats_store(
+    /// Construct with a host-injected topology sink for topology snapshot writes.
+    ///
+    /// The sink implements `GovernorTopologySink` — AriaMcpKit passes a
+    /// `StatsStoreTopologySink` wrapping `Arc<observer_sink::StatsStore>`.
+    /// NeuronKit never imports observer-sink directly; the sink is the injection
+    /// seam that keeps NeuronKit free of host-layer telemetry. Called from
+    /// `runtime.rs` when `ARIA_MCP_STATS_STORE` is configured.
+    pub fn new_with_topology_sink(
         coord: Arc<Mutex<EstateCoordinator>>,
         handle: EstateHandle,
         store: Arc<dyn DrawerStore>,
-        stats_store: Option<Arc<StatsStore>>,
+        topology_sink: Option<Box<dyn GovernorTopologySink>>,
     ) -> Self {
-        Self::build(coord, handle, store, Arc::new(AtomicBool::new(false)), stats_store)
+        Self::build(coord, handle, store, Arc::new(AtomicBool::new(false)), topology_sink)
     }
 
     /// Construct with a caller-supplied stop flag. Used by tests to stop the
@@ -467,14 +482,14 @@ impl AutonomicGovernor {
         handle: EstateHandle,
         store: Arc<dyn DrawerStore>,
         stop_flag: Arc<AtomicBool>,
-        stats_store: Option<Arc<StatsStore>>,
+        topology_sink: Option<Box<dyn GovernorTopologySink>>,
     ) -> Self {
         let base_tick_ms = parse_tick_ms();
         let topology_cadence_ms = parse_topology_cadence_ms();
         // Pool paths use the SAME LatticeLib convention the novel-token submitter
         // writes to, so the read side (this reducer) and the write side agree.
         Self::build_inner(
-            coord, handle, store, stop_flag, stats_store, base_tick_ms, topology_cadence_ms,
+            coord, handle, store, stop_flag, topology_sink, base_tick_ms, topology_cadence_ms,
             parse_pool_reduce_cadence_ms(), lattice_lib::default_pool_dir(),
             lattice_lib::default_table_artifact(),
         )
@@ -483,18 +498,19 @@ impl AutonomicGovernor {
     /// Construct with explicit cadences — avoids env-var pollution across
     /// parallel test threads. The `topology_cadence_ms` is passed directly
     /// rather than read from `MOOTX01_TOPOLOGY_CADENCE_SECONDS`.
-    /// Use in integration tests; production code uses `new` or `new_with_stats_store`.
+    /// Use in integration tests; production code uses `new` or
+    /// `new_with_topology_sink`.
     pub fn new_for_testing(
         coord: Arc<Mutex<EstateCoordinator>>,
         handle: EstateHandle,
         store: Arc<dyn DrawerStore>,
         topology_cadence_ms: u64,
-        stats_store: Option<Arc<StatsStore>>,
+        topology_sink: Option<Box<dyn GovernorTopologySink>>,
     ) -> Self {
         let base_tick_ms = parse_tick_ms();
         // Production pool paths/cadence (resolved from env/platform default).
         Self::build_inner(
-            coord, handle, store, Arc::new(AtomicBool::new(false)), stats_store,
+            coord, handle, store, Arc::new(AtomicBool::new(false)), topology_sink,
             base_tick_ms, topology_cadence_ms,
             parse_pool_reduce_cadence_ms(), lattice_lib::default_pool_dir(),
             lattice_lib::default_table_artifact(),
@@ -511,14 +527,14 @@ impl AutonomicGovernor {
         handle: EstateHandle,
         store: Arc<dyn DrawerStore>,
         topology_cadence_ms: u64,
-        stats_store: Option<Arc<StatsStore>>,
+        topology_sink: Option<Box<dyn GovernorTopologySink>>,
         pool_reduce_cadence_ms: u64,
         pool_dir: PathBuf,
         pool_table_artifact: PathBuf,
     ) -> Self {
         let base_tick_ms = parse_tick_ms();
         Self::build_inner(
-            coord, handle, store, Arc::new(AtomicBool::new(false)), stats_store,
+            coord, handle, store, Arc::new(AtomicBool::new(false)), topology_sink,
             base_tick_ms, topology_cadence_ms,
             pool_reduce_cadence_ms, pool_dir, pool_table_artifact,
         )
@@ -531,7 +547,7 @@ impl AutonomicGovernor {
         handle: EstateHandle,
         store: Arc<dyn DrawerStore>,
         stop_flag: Arc<AtomicBool>,
-        stats_store: Option<Arc<StatsStore>>,
+        topology_sink: Option<Box<dyn GovernorTopologySink>>,
         base_tick_ms: u64,
         topology_cadence_ms: u64,
         pool_reduce_cadence_ms: u64,
@@ -558,7 +574,7 @@ impl AutonomicGovernor {
             store,
             base_tick_ms,
             stop_flag,
-            stats_store,
+            topology_sink,
             topology_cadence_ms,
             last_topology_snapshot_secs: None,
             last_topology_inputs_token: None,
@@ -951,9 +967,9 @@ impl AutonomicGovernor {
         //
         // Cadence gating mirrors Swift: fire when elapsed >= cadence_ms or never
         // fired (last_topology_snapshot_secs == None). The `topology_snapshot_fired`
-        // flag reflects the cadence gate; the store write only happens when
-        // `stats_store` is Some. This is intentional — it lets tests drive cadence
-        // logic without wiring a real SQLite store.
+        // flag reflects the cadence gate; the sink write only happens when
+        // `topology_sink` is Some. This is intentional — it lets tests drive cadence
+        // logic without wiring a real SQLite store or telemetry backend.
         let topology_elapsed_ms = self.last_topology_snapshot_secs.map(|last| {
             ((now_epoch_secs - last) * 1000.0) as u64
         });
@@ -963,18 +979,17 @@ impl AutonomicGovernor {
         };
         if topology_snapshot_fired {
             self.last_topology_snapshot_secs = Some(now_epoch_secs);
-            if let Some(ref stats) = self.stats_store {
-                // Monitoring gate: live store flag read at each due cadence,
-                // BEFORE any estate read or compute — "off is free". Fails
-                // OPEN on store errors (a transient read failure must not
-                // silently freeze topology).
-                let monitoring_on = stats.is_monitoring_enabled().unwrap_or(true);
-                if monitoring_on {
+            if let Some(ref sink) = self.topology_sink {
+                // Monitoring gate: live sink flag read at each due cadence,
+                // BEFORE any estate read or compute — "off is free". The trait
+                // method returns true on any read failure (fail-open) so a
+                // transient error never silently freezes topology.
+                if sink.is_monitoring_enabled() {
                     let estate_id = Uuid::from_bytes(self.handle.estate_uuid).to_string();
                     self.last_topology_inputs_token = topology_snapshot_duty(
                         &estate_id,
                         now_epoch_secs,
-                        stats,
+                        sink.as_ref(),
                         self.store.as_ref(),
                         self.last_topology_inputs_token.take(),
                     );
@@ -1371,11 +1386,11 @@ impl TopologyInputsToken {
 fn topology_snapshot_duty(
     estate_id: &str,
     now_epoch_secs: f64,
-    stats: &StatsStore,
+    sink: &dyn GovernorTopologySink,
     estate: &dyn DrawerStore,
     previous: Option<TopologyInputsToken>,
 ) -> Option<TopologyInputsToken> {
-    use neuron_kit::topology_analysis::{
+    use crate::topology_analysis::{
         graph_topology, TopologyDrawerInput, TopologyFactInput, TopologyTunnelInput,
     };
 
@@ -1475,9 +1490,9 @@ fn topology_snapshot_duty(
         .unwrap_or_else(|_| format!(
             r#"{{"nodes":[],"edges":[],"structurePending":true,"communities":[],"generatedTs":"{generated_ts}"}}"#));
 
-    if let Err(e) = stats.write_topology_snapshot(estate_id, now_epoch_secs, &payload) {
+    if let Err(e) = sink.write_topology_snapshot(estate_id, now_epoch_secs, &payload) {
         eprintln!(
-            "AutonomicGovernor: topology snapshot write failed for estate {estate_id}: {e:?}"
+            "AutonomicGovernor: topology snapshot write failed for estate {estate_id}: {e}"
         );
         // Write failed: return `previous` so the next cadence recomputes.
         return previous;

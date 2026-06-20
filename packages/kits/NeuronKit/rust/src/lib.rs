@@ -31,6 +31,7 @@
 
 pub mod anomaly_scan;
 pub mod anticipation;
+pub mod autonomic_governor;
 pub mod diffusion;
 pub mod composition_grid;
 pub mod benchmark_live;
@@ -49,6 +50,8 @@ pub mod estate_maintenance_sink;
 pub mod distillation;
 pub mod hmm_feature_extractor;
 pub mod drift;
+pub mod governor_topology_sink;
+pub mod graph_centrality;
 pub mod hybrid_recall;
 pub mod keystones;
 pub mod latent_themes;
@@ -59,6 +62,7 @@ pub mod mind_overlap;
 pub mod mmr_rank;
 pub mod moment_signature;
 pub mod partial_recall;
+pub mod preference_producer;
 pub mod precedence;
 pub mod query_precision;
 pub mod reduction_composition;

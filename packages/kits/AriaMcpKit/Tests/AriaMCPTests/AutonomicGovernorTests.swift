@@ -1,8 +1,10 @@
 import Testing
 import Foundation
+import CognitionKit
 import GeniusLocusKit
 import LatticeLib
 import LocusKit
+import NeuronKit
 import PersistenceKit
 import PersistenceKitInMemory
 import VectorKit
@@ -80,17 +82,29 @@ struct AutonomicGovernorTests {
         #expect(due.graphAnalyticsFired)  // 600 s elapsed → fires
     }
 
-    @Test func graphAnalyticsScanOnEmptyEstateCompletesWithoutError() async throws {
-        // An estate with no drawers has no wings; graphAnalyticsScan must return
-        // without throwing (C-16: empty nodeIDs → empty results, not an error).
+    @Test func graphAnalyticsHandlerOnEmptyEstateCompletesWithoutError() async throws {
+        // An estate with no drawers has no wings. The injected handler (the
+        // CognitionKit-based Keystones + ConstellationLens closure) must return
+        // without throwing when there are no wings — C-16: empty nodeIDs → empty
+        // results, not an error. The handler is the injection seam that keeps
+        // NeuronKit free of CognitionKit (CognitionKit imports NeuronKit, so the
+        // reverse would invert the layer stack).
         let (kit, handle) = try await makeEstate()
-        try await AutonomicGovernor.graphAnalyticsScan(
-            kit: kit, handle: handle, now: Date(timeIntervalSince1970: 6_000_000))
+        let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
+            let drawers = try await kit.allDrawers(in: handle)
+            let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+            for wing in wings {
+                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
+                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+            }
+        }
+        try await handler(kit, handle, Date(timeIntervalSince1970: 6_000_000))
     }
 
-    @Test func graphAnalyticsScanOnEstateWithWing() async throws {
-        // Capture a drawer so there is one wing; graphAnalyticsScan must complete
-        // without error (wing with no tunnels → empty Keystones / Constellation).
+    @Test func graphAnalyticsHandlerOnEstateWithWingCompletesWithoutError() async throws {
+        // Capture a drawer so there is one wing. The injected handler must complete
+        // without error: a wing with no tunnels yields empty Keystones / Constellation
+        // results — not an error (C-16).
         let (kit, handle) = try await makeEstate()
         _ = try await kit.capture(handle, CaptureFrame(
             content: "test memory",
@@ -99,8 +113,15 @@ struct AutonomicGovernorTests {
             latticeAnchor: .udc("004"),
             addedBy: "graph-analytics-test",
             embeddingModelID: "test-model-v1"))
-        try await AutonomicGovernor.graphAnalyticsScan(
-            kit: kit, handle: handle, now: Date(timeIntervalSince1970: 7_000_000))
+        let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
+            let drawers = try await kit.allDrawers(in: handle)
+            let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+            for wing in wings {
+                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
+                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+            }
+        }
+        try await handler(kit, handle, Date(timeIntervalSince1970: 7_000_000))
     }
 
     // MARK: - § 5 — Topology snapshot duty

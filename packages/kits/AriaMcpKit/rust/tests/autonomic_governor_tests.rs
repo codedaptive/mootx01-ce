@@ -27,8 +27,10 @@ use std::sync::{
 };
 use std::time::{Duration, UNIX_EPOCH};
 
-use aria_mcp::autonomic_governor::AutonomicGovernor;
+use neuron_kit::autonomic_governor::AutonomicGovernor;
+use neuron_kit::governor_topology_sink::GovernorTopologySink;
 use aria_mcp::estate_registry::EstateRegistry;
+use aria_mcp::governor_topology_adapter::StatsStoreTopologySink;
 use intellectus_lib::{EventKind, Intellectus, NoOpSink, StatSample, StatsSink};
 
 // ─────────────────────────────────────────────────────────────────
@@ -492,12 +494,14 @@ fn ag13_topology_snapshot_duty_writes_to_store() {
     let drawer_store = Arc::clone(&registry.default.store);
 
     // cadence=0 so the snapshot fires immediately on every tick.
+    let sink: Box<dyn GovernorTopologySink> =
+        Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
     let mut governor = AutonomicGovernor::new_for_testing(
         coord,
         handle,
         drawer_store,
         0,
-        Some(Arc::clone(&stats_store_arc)),
+        Some(sink),
     );
 
     // The duty is gated on the LIVE monitoring flag — enable it first
@@ -547,8 +551,10 @@ fn ag14_monitoring_off_gates_topology_duty() {
     let estate_id = Uuid::from_bytes(handle.estate_uuid).to_string();
     let drawer_store = Arc::clone(&registry.default.store);
 
+    let sink: Box<dyn GovernorTopologySink> =
+        Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
     let mut governor = AutonomicGovernor::new_for_testing(
-        coord, handle, drawer_store, 0, Some(Arc::clone(&stats_store_arc)));
+        coord, handle, drawer_store, 0, Some(sink));
 
     // Monitoring defaults OFF on a fresh store — the duty must not write.
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(11_000_000));
@@ -585,8 +591,10 @@ fn ag15_unchanged_estate_skips_recompute() {
     let estate_id = Uuid::from_bytes(handle.estate_uuid).to_string();
     let drawer_store = Arc::clone(&registry.default.store);
 
+    let sink: Box<dyn GovernorTopologySink> =
+        Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
     let mut governor = AutonomicGovernor::new_for_testing(
-        coord, handle, drawer_store, 0, Some(Arc::clone(&stats_store_arc)));
+        coord, handle, drawer_store, 0, Some(sink));
 
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(12_000_000));
     let first = stats_store_arc
@@ -628,8 +636,10 @@ fn ag15b_inputs_token_is_never_persisted() {
     let estate_id = Uuid::from_bytes(handle.estate_uuid).to_string();
     let drawer_store = Arc::clone(&registry.default.store);
 
+    let sink: Box<dyn GovernorTopologySink> =
+        Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
     let mut governor = AutonomicGovernor::new_for_testing(
-        coord, handle, drawer_store, 0, Some(Arc::clone(&stats_store_arc)));
+        coord, handle, drawer_store, 0, Some(sink));
 
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(15_000_000));
     let payload = stats_store_arc

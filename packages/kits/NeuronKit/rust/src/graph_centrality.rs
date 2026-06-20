@@ -1,5 +1,5 @@
 //! Graph-centrality PRODUCER support — the Rust mirror of Swift
-//! `GraphCentralityProducer.swift`.
+//! `NeuronKit/Governor/GraphCentralityProducer.swift`.
 //!
 //! ─────────────────────────────────────────────────────────────────
 //! DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -153,7 +153,7 @@ pub fn build_centrality_graph(
 /// Empty node set ⇒ empty result ⇒ empty map (C-16). The `f64 → f32` narrowing
 /// is the documented float boundary the cross-port conformance gate compares at.
 pub fn compute_centrality_scores(graph: &CentralityGraph) -> HashMap<String, f32> {
-    let ranked = neuron_kit::keystones(&graph.node_ids, &graph.edges, graph.node_ids.len());
+    let ranked = crate::keystones(&graph.node_ids, &graph.edges, graph.node_ids.len());
     let mut scores = HashMap::with_capacity(ranked.len());
     for keystone in ranked {
         scores.insert(keystone.id, keystone.centrality as f32);

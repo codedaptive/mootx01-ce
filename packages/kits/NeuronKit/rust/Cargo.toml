@@ -47,10 +47,18 @@ substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 # FeelsLike (Lens 7) surfaces SubstrateML's partial_state_recall, whose
 # row id + fingerprint types (RowId, Fingerprint256) come from SubstrateTypes.
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# uuid: the AutonomicGovernor formats EstateHandle estate_uuid bytes as a
+# UUID string (via Uuid::from_bytes) when constructing estate IDs for topology
+# snapshots and telemetry event tags. Promoted from dev-dependencies when the
+# governor moved from AriaMcpKit to NeuronKit.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Test-only: building a parent estate to derive branches from needs the
-# in-memory Storage backend (the same construction LocusKit's own tests use)
-# and a fresh estate UUID.
+# in-memory Storage backend (the same construction LocusKit's own tests use).
 persistence-kit = { path = "../../PersistenceKit/rust" }
+
+# uuid is also a production dep (AutonomicGovernor formats estate UUIDs).
+# Listed separately in [dependencies] above; the dev-dependencies entry is
+# kept for any test helpers that need v4 generation.
 uuid = { version = "1", features = ["v4"] }

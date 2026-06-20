@@ -31,7 +31,7 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use aria_mcp::autonomic_governor::AutonomicGovernor;
+use neuron_kit::autonomic_governor::AutonomicGovernor;
 use aria_mcp::estate_registry::EstateRegistry;
 use genius_locus_kit::{
     default_standing_signal_names, SchedulerConcurrencyPolicy as ConcurrencyPolicy,

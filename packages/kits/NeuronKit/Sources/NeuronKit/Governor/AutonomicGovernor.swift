@@ -1,10 +1,15 @@
-import CognitionKit
 import Foundation
 import GeniusLocusKit
 import LatticeLib
 import LocusKit
-import NeuronKit
+import OSLog
 import SubstrateTypes
+
+/// Fleet-standard OSLog channel for the AutonomicGovernor.
+///
+/// Uses subsystem "com.mootx01.kit" and category "NeuronKit" per CLAUDE.md.
+/// Private to this file — callers use the module-level `logger` symbol defined here.
+private let logger = Logger(subsystem: "com.mootx01.kit", category: "NeuronKit")
 
 /// Read the topology snapshot cadence from the environment.
 ///
@@ -37,10 +42,9 @@ public func autonomicGovernorDefaultTopologyCadenceMs() -> Int {
 ///
 /// A positive value reinstates a minimum spacing (test determinism / load
 /// throttling); 0 is the shipping near-realtime default. Invalid or absent
-/// values fall back to 0. This supersedes the prior hourly cadence (cookbook
-/// §2.2 rewrite). A free function (not a method) so it can be a default argument
-/// of `AutonomicGovernor.init` without the Swift `self`/`Self` restriction in
-/// default-argument expressions.
+/// values fall back to 0. A free function (not a method) so it can be a default
+/// argument of `AutonomicGovernor.init` without the Swift `self`/`Self`
+/// restriction in default-argument expressions.
 public func autonomicGovernorDefaultPoolReduceCadenceMs() -> Int {
     guard let raw = ProcessInfo.processInfo.environment["MOOTX01_POOL_REDUCE_CADENCE_SECONDS"],
           let secs = Int(raw), secs >= 0
@@ -55,6 +59,14 @@ public func autonomicGovernorDefaultPoolReduceCadenceMs() -> Int {
 /// daemon's own interval: dreaming (NeuronKit), maintenance (NeuronKit), and the
 /// standing-signal scheduler (GeniusLocusKit). It runs alongside the HTTP
 /// transport for the lifetime of the resident process.
+///
+/// LAYERING: The AutonomicGovernor lives in NeuronKit because it coordinates
+/// NeuronKit's own daemons (DreamingDaemon, MaintenanceDaemon) and presses
+/// GeniusLocusKit buttons (signalTick, registerGraphCache, registerPreferenceStore).
+/// The MCP / AriaMcpKit host starts the governor and injects host-coupled
+/// concerns (topology snapshot handler, topology monitoring gate, graph-analytics
+/// handler) as closures so NeuronKit never imports AriaMcpKit or CognitionKit.
+/// The injection seam is the same pattern as the existing `topologyHandler`.
 ///
 /// DETERMINISM (ARIA_MCP_SPEC §9/§17): the loop is the ONLY scheduler. It reads
 /// the clock once per tick and injects that `now` into every daemon; the daemons
@@ -71,6 +83,11 @@ public func autonomicGovernorDefaultPoolReduceCadenceMs() -> Int {
 /// POLICY (P2): cadence policy comes from in-memory stores seeded with spec
 /// defaults (dreaming 30 s, maintenance 5 min). P3 swaps these for the manifest
 /// store so an operator's policy survives restarts; the seam is unchanged.
+///
+/// AUTO-REINDEX: the DreamingDaemon is constructed with an
+/// `EstateCorpusGrowthProbe`, so distributional embedding bases are retrained
+/// automatically when corpus growth crosses the threshold. The governor logs
+/// "auto-reindex: on" at startup to confirm the probe is live.
 public actor AutonomicGovernor {
 
     private let kit: GeniusLocusKit
@@ -80,12 +97,22 @@ public actor AutonomicGovernor {
     /// Base loop granularity in milliseconds — the sampling resolution for the
     /// daemons' own (longer) cadences, not a cadence itself.
     private let baseTickMs: Int
-    /// How often graph analytics (Keystones + Constellation per wing) fire.
-    /// Default 10 minutes; pass 0 in tests to fire on every tick.
+    /// How often graph analytics fire (host-injected handler). Default 10 minutes;
+    /// pass 0 in tests to fire on every tick. When `graphAnalyticsHandler` is nil,
+    /// the cadence gate still advances (so the interval resets correctly), but the
+    /// duty is a no-op.
     private let graphAnalyticsIntervalMs: Int
-    /// Wall-clock instant of the most recent graphAnalyticsScan dispatch.
+    /// Wall-clock instant of the most recent graphAnalytics dispatch.
     /// Nil on first tick so the scan fires immediately at startup.
     private var lastGraphAnalyticsFired: Date? = nil
+    /// Host-injected graph analytics handler. Called by the governor on its cadence
+    /// with the live kit, handle, and deterministic `now`. The handler is the
+    /// host's (AriaMcpKit's) CognitionKit-based Keystones + Constellation scan.
+    /// Nil = no graph analytics duty (acceptable for estates that don't need it).
+    ///
+    /// Injected here so NeuronKit never imports CognitionKit (which would invert
+    /// the layering: CognitionKit depends on NeuronKit, not the reverse).
+    private let graphAnalyticsHandler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void)?
     /// How often the graph-centrality producer (graphCentralityScan) fires —
     /// computes per-drawer eigenvalue centrality and registers the GraphCache
     /// the recall `graph` column reads. Default 10 minutes (same cadence as
@@ -115,13 +142,15 @@ public actor AutonomicGovernor {
     private var lastTopologySnapshotFired: Date? = nil
     /// Called by topologySnapshotDuty when a snapshot is ready.
     /// Nil when no stats store is configured (no consumer to write to).
-    /// Injected in ResidentDaemon so AriaMCP never imports ObserverSink directly.
+    /// Injected by the host (AriaResident) so NeuronKit never imports ObserverSink
+    /// directly. This matches the design principle that keeps AriaMCP free of
+    /// telemetry imports.
     private let topologyHandler: (@Sendable (String, Date, Data) async -> Void)?
     /// Monitoring gate for the topology duty. Checked at each due cadence
     /// BEFORE any estate read or compute: false skips the entire duty for
-    /// that interval ("off is free"). Nil = always run. Injected in
-    /// ResidentDaemon from the stats store's live monitoring flag, so a
-    /// moot-mgr on/off flip takes effect at the next cadence without restart.
+    /// that interval ("off is free"). Nil = always run. Injected by the host
+    /// from the stats store's live monitoring flag, so a moot-mgr on/off flip
+    /// takes effect at the next cadence without restart.
     private let topologyGate: (@Sendable () async -> Bool)?
     /// Process-local dirty token of the most recent COMPUTED topology snapshot
     /// inputs. When the next due cadence yields the same token, the duty skips
@@ -162,6 +191,12 @@ public actor AutonomicGovernor {
         poolReduceCadenceMs: Int = autonomicGovernorDefaultPoolReduceCadenceMs(),
         topologyHandler: (@Sendable (String, Date, Data) async -> Void)? = nil,
         topologyGate: (@Sendable () async -> Bool)? = nil,
+        // Graph analytics handler: the host (AriaMcpKit) injects the
+        // CognitionKit-based Keystones + Constellation scan. Nil = no graph
+        // analytics duty. This injection seam keeps NeuronKit free of CognitionKit
+        // (CognitionKit depends on NeuronKit, so importing it here would invert
+        // the layer stack).
+        graphAnalyticsHandler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void)? = nil,
         // Pool paths default to the LatticeLib-resolved convention. Tests pass
         // explicit temp paths (or nil to skip the reduce path entirely).
         poolDirectory: URL? = NovelPoolSubmitter.poolDirectory(),
@@ -172,6 +207,7 @@ public actor AutonomicGovernor {
         self.handle = handle
         self.baseTickMs = baseTickMs
         self.graphAnalyticsIntervalMs = graphAnalyticsIntervalMs
+        self.graphAnalyticsHandler = graphAnalyticsHandler
         self.graphCentralityIntervalMs = graphCentralityIntervalMs
         self.preferenceIntervalMs = preferenceIntervalMs
         self.topologyCadenceMs = topologyCadenceMs
@@ -183,10 +219,19 @@ public actor AutonomicGovernor {
         self.clock = clock
         // Construct the daemons against the live estate via NeuronKit's seam
         // adapters. In-memory policy stores for P2 (P3 → manifest store).
-        self.dreaming = NeuronKit.dreamingDaemon(
+        //
+        // AUTO-REINDEX: wire an EstateCorpusGrowthProbe so distributional embedding
+        // bases are retrained automatically when corpus growth crosses the threshold.
+        // The probe is optional in DreamingDaemon — a nil probe silently skips the
+        // auto-reindex gate each cycle (no error, no log spam). The production governor
+        // always passes a live probe; tests may omit it by constructing DreamingDaemon
+        // directly with growthProbe: nil.
+        self.dreaming = DreamingDaemon(
             reader: EstateDreamingReader(handle: handle, kit: kit),
             sink: EstateDreamingSink(handle: handle, kit: kit),
-            policyStore: InMemoryDreamingPolicyStore()
+            rewardSource: RecallTraceRewardSource(),
+            policyStore: InMemoryDreamingPolicyStore(),
+            growthProbe: EstateCorpusGrowthProbe(handle: handle, kit: kit)
         )
         self.maintenance = MaintenanceDaemon(
             reader: EstateMaintenanceReader(handle: handle, kit: kit),
@@ -233,11 +278,14 @@ public actor AutonomicGovernor {
         // Load persisted cadence policy once (best-effort; an empty store leaves
         // the spec defaults in place).
         do { try await dreaming.loadPersistedPolicy() }
-        catch { Logging.stderr.log("AutonomicGovernor: dreaming policy load failed: \(error)") }
+        catch { logger.error("AutonomicGovernor: dreaming policy load failed: \(error)") }
         do { try await maintenance.loadPersistedPolicy() }
-        catch { Logging.stderr.log("AutonomicGovernor: maintenance policy load failed: \(error)") }
+        catch { logger.error("AutonomicGovernor: maintenance policy load failed: \(error)") }
 
-        Logging.stderr.log("AutonomicGovernor started (base tick \(baseTickMs)ms)")
+        // Confirm auto-reindex is wired (the EstateCorpusGrowthProbe is always
+        // passed at construction in the production governor).
+        let tickMs = baseTickMs
+        logger.info("AutonomicGovernor started (base tick \(tickMs)ms, auto-reindex: on)")
         while !Task.isCancelled {
             _ = await tick(now: clock())
             // Sleep OUTSIDE the per-pump catches. Task.sleep throws
@@ -246,7 +294,7 @@ public actor AutonomicGovernor {
             do { try await Task.sleep(nanoseconds: UInt64(baseTickMs) * 1_000_000) }
             catch { break }
         }
-        Logging.stderr.log("AutonomicGovernor stopped")
+        logger.info("AutonomicGovernor stopped")
     }
 
     /// One governor iteration with an injected `now`. Each daemon self-gates; each
@@ -259,10 +307,10 @@ public actor AutonomicGovernor {
         var signalsTicked = false
 
         do { dreamingFired = try await dreaming.pump(now: now) != nil }
-        catch { Logging.stderr.log("AutonomicGovernor: dreaming pump error: \(error)") }
+        catch { logger.error("AutonomicGovernor: dreaming pump error: \(error)") }
 
         do { maintenanceFired = try await maintenance.pump(now: now) != nil }
-        catch { Logging.stderr.log("AutonomicGovernor: maintenance pump error: \(error)") }
+        catch { logger.error("AutonomicGovernor: maintenance pump error: \(error)") }
 
         // Standing signals: the resident daemon registers the default standing
         // signals once at bootstrap (AriaResident.runResidentDaemon, before this
@@ -280,27 +328,30 @@ public actor AutonomicGovernor {
             if case .schedulerNotStarted = error {
                 // benign — no standing signals registered yet, nothing to tick.
             } else {
-                Logging.stderr.log("AutonomicGovernor: signalTick error: \(error)")
+                logger.error("AutonomicGovernor: signalTick error: \(error)")
             }
         } catch {
-            Logging.stderr.log("AutonomicGovernor: signalTick error: \(error)")
+            logger.error("AutonomicGovernor: signalTick error: \(error)")
         }
 
-        // Graph analytics: fire Keystones + Constellation per wing on the configured
-        // interval (default 10 min). First tick fires immediately (lastGraphAnalyticsFired
-        // is nil). The scan runs in an unstructured Task (actor-inherited context;
-        // graphAnalyticsScan is nonisolated, so the actor's executor is released at
-        // its first await — tick() returns without stalling). Errors are logged and
-        // never propagated to tick().
+        // Graph analytics: fire on the configured interval (default 10 min).
+        // The host injects the handler (graphAnalyticsHandler) which performs
+        // CognitionKit's Keystones + Constellation scan per wing. When the
+        // handler is nil no scan runs but the cadence gate still advances so
+        // the interval resets correctly. First tick fires immediately
+        // (lastGraphAnalyticsFired is nil). The scan runs in an unstructured
+        // Task (handler is nonisolated) so tick() returns without stalling.
         let graphAnalyticsElapsed = lastGraphAnalyticsFired.map {
             now.timeIntervalSince($0) * 1000 >= Double(graphAnalyticsIntervalMs)
         } ?? true
 
         if graphAnalyticsElapsed {
             lastGraphAnalyticsFired = now
-            Task { [kit, handle, now] in
-                do { try await AutonomicGovernor.graphAnalyticsScan(kit: kit, handle: handle, now: now) }
-                catch { Logging.stderr.log("AutonomicGovernor: graphAnalyticsScan error: \(error)") }
+            if let handler = graphAnalyticsHandler {
+                Task { [kit, handle, now, handler] in
+                    do { try await handler(kit, handle, now) }
+                    catch { logger.error("AutonomicGovernor: graphAnalytics error: \(error)") }
+                }
             }
         }
 
@@ -321,7 +372,7 @@ public actor AutonomicGovernor {
             lastGraphCentralityFired = now
             Task { [kit, handle, now] in
                 do { try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: now) }
-                catch { Logging.stderr.log("AutonomicGovernor: graphCentralityScan error: \(error)") }
+                catch { logger.error("AutonomicGovernor: graphCentralityScan error: \(error)") }
             }
         }
 
@@ -343,7 +394,7 @@ public actor AutonomicGovernor {
             lastPreferenceFired = now
             Task { [kit, handle, now] in
                 do { try await AutonomicGovernor.preferenceScan(kit: kit, handle: handle, now: now) }
-                catch { Logging.stderr.log("AutonomicGovernor: preferenceScan error: \(error)") }
+                catch { logger.error("AutonomicGovernor: preferenceScan error: \(error)") }
             }
         }
 
@@ -374,7 +425,7 @@ public actor AutonomicGovernor {
                             handler: handler)
                         await self.recordTopologyInputsToken(token)
                     } catch {
-                        Logging.stderr.log("AutonomicGovernor: topologySnapshotDuty error: \(error)")
+                        logger.error("AutonomicGovernor: topologySnapshotDuty error: \(error)")
                     }
                 }
             }
@@ -418,22 +469,20 @@ public actor AutonomicGovernor {
                     tableArtifactURL: tableURL,
                     now: now)
                 if !result.isNoop {
-                    Logging.stderr.log("AutonomicGovernor: pool reduce merged \(result.nounsAdded) nouns + \(result.verbsAdded) verbs (consumed \(result.consumed), quarantined \(result.quarantined))")
+                    logger.info("AutonomicGovernor: pool reduce merged \(result.nounsAdded) nouns + \(result.verbsAdded) verbs (consumed \(result.consumed), quarantined \(result.quarantined))")
                     // Live atomic swap at the safe point: adopt the just-merged
                     // table in-session. Only on a non-noop reduce — a noop wrote
                     // nothing new, so the running table is already current. Swap
                     // from the SAME artifact path the reducer just wrote
-                    // (`tableURL`), so the running tagger learns the merged tokens
-                    // (parity with the Rust governor, which swaps from its
-                    // configured pool_table_artifact).
+                    // (`tableURL`), so the running tagger learns the merged tokens.
                     let newVersion = WordClassTableCache.reload(fromArtifact: tableURL)
                     tableSwapped = true
-                    Logging.stderr.log("AutonomicGovernor: live word-class table swap → version \(newVersion)")
+                    logger.info("AutonomicGovernor: live word-class table swap → version \(newVersion)")
                 }
             } catch {
                 // A missing/unwritable table artifact is the expected state until
                 // a writable table is provisioned; log once per fire, never crash.
-                Logging.stderr.log("AutonomicGovernor: pool reduce skipped (\(error))")
+                logger.error("AutonomicGovernor: pool reduce skipped (\(error))")
             }
         }
 
@@ -453,31 +502,31 @@ public actor AutonomicGovernor {
 
     /// Run Keystones and Constellation lenses for every wing in the estate.
     ///
-    /// Enumerates wings by collecting distinct `.wing` values from all
-    /// non-tombstoned drawers (the established GLK pattern — GeniusLocusKit
-    /// exposes no dedicated listWings API; `kit.allDrawers(in:)` is the
-    /// GLK-compliant path per the DreamingReads surface). A wing with no
-    /// tunnels produces empty results and completes without error (C-16).
-    /// Any failure propagates to the caller, which logs and swallows it so
-    /// tick() remains resilient.
+    /// NOTE: This static func is no longer called directly by the governor's
+    /// tick(). The graphAnalyticsHandler closure (injected by the host) performs
+    /// this duty using CognitionKit's Keystones and ConstellationLens, keeping
+    /// CognitionKit out of NeuronKit (CognitionKit depends on NeuronKit, not the
+    /// reverse). This func is retained here as documentation of the intended
+    /// call shape so the host-side injection matches exactly.
     ///
     /// - Parameters:
     ///   - kit: The live GeniusLocusKit actor.
     ///   - handle: The estate to analyse.
     ///   - now: Injected instant (determinism requirement — never read Date() here).
-    static func graphAnalyticsScan(
+    static func graphAnalyticsScanShape(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         now: Date
     ) async throws {
-        let drawers = try await kit.allDrawers(in: handle)
-        // Collect distinct wings from non-tombstoned drawers, sorted for
-        // deterministic iteration order.
-        let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
-        for wing in wings {
-            _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
-            _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
-        }
+        // Called as: graphAnalyticsHandler = { kit, handle, now in
+        //     let drawers = try await kit.allDrawers(in: handle)
+        //     let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+        //     for wing in wings {
+        //         _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
+        //         _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+        //     }
+        // }
+        // See AriaResident.runResidentDaemon for the wired implementation.
     }
 
     // MARK: - Graph-centrality producer duty
@@ -485,14 +534,6 @@ public actor AutonomicGovernor {
     /// Compute per-drawer eigenvalue centrality for the whole estate and
     /// register it as a `GraphCache`, taking the `unionBest` / `matrixAware`
     /// recall `graph` score column from dark to live.
-    ///
-    /// This is the graph-centrality PRODUCER (the consumption surface —
-    /// `GeniusLocusKit.registerGraphCache` and the recall `graph` column —
-    /// already shipped; nothing was computing scores to register). It runs on
-    /// the governor's cadence, reads the estate structure graph once, shapes
-    /// it into the (nodeIDs, edges) the `NeuronKit.keystones` oracle consumes,
-    /// runs that oracle over ALL drawers (`topK = nodeIDs.count`), and installs
-    /// the resulting per-drawer scores.
     ///
     /// Math ownership (I-17): this duty owns NO math. Eigenvalue centrality is
     /// the conformance-gated SubstrateML primitive surfaced by
@@ -518,7 +559,7 @@ public actor AutonomicGovernor {
     ///   - kit:    The live GeniusLocusKit actor.
     ///   - handle: The estate to score.
     ///   - now:    Injected instant (determinism requirement).
-    static func graphCentralityScan(
+    public static func graphCentralityScan(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         now: Date
@@ -556,67 +597,29 @@ public actor AutonomicGovernor {
     /// taking the `unionBest` / `matrixAware` recall `preference` score column
     /// from dark to live.
     ///
-    /// This is the preference PRODUCER, the sibling of the graph-centrality
-    /// producer (the consumption surface — `GeniusLocusKit.registerPreferenceStore`
-    /// and the recall `preference` column — already shipped; nothing was computing
-    /// strengths to register). It runs on the governor's cadence, reads the
-    /// estate's recall-trace reward outcomes once, shapes them into the per-drawer
-    /// `(label, endorsements, dismissals)` records the `NeuronKit.learnedPreference`
-    /// Bradley-Terry fitter consumes, runs that fitter, and installs the resulting
-    /// per-drawer strengths.
-    ///
-    /// Outcome source (the implicit relevance signal, C-15): each recall trace
-    /// row records a surfaced drawer (`target`) and whether the caller picked it
-    /// (`used`). A drawer surfaced-and-used is one endorsement (a win vs the
-    /// neutral baseline in the fitter's anchor reduction); surfaced-and-passed-over
-    /// is one dismissal (a loss). This is exactly "what users picked vs passed
-    /// over", aggregated per drawer.
-    ///
     /// Math ownership (I-17): this duty owns NO fitting math. The Bradley-Terry
     /// preference fit is the conformance-gated SubstrateML primitive surfaced by
     /// `NeuronKit.learnedPreference` (the `Bias` lens, anchor reduction); the duty
-    /// only shapes the outcomes and caches the strengths. It is a faithful cadence
-    /// wrapper of a direct `learnedPreference` call on the same records — the
-    /// cross-port conformance gate proves exactly that. Its Rust twin
-    /// (`preference_outcomes` + `compute_preference_scores`) builds the identical
-    /// record multiset and calls the identical fitter, so the two ports compute
-    /// identical strengths for the same trace history.
+    /// only shapes the outcomes and caches the strengths.
     ///
     /// Window: all retained recall traces up to `now` (`since = .distantPast`).
-    /// Retention is bounded by the maintenance prune cycle, so this reads the
-    /// estate's live trace history. Deterministic — a pure function of the
-    /// recorded rows and `now`; never reads `Date()` here.
-    ///
-    /// The duty's only side effect is the store registration (idempotent
-    /// re-registration replaces the prior snapshot). An estate with no recall
-    /// traces (a fresh estate, or one whose traces were all pruned) yields no
-    /// records ⇒ `learnedPreference([]) == []` ⇒ an empty store — every
-    /// `preferenceScore` is 0.0, identical to "no store registered", which is
-    /// correct (C-16).
-    ///
-    /// Reads go through the public GeniusLocusKit verb surface
-    /// (`recentRecallTraces`) — no LocusKit reach-around (B-1).
+    /// Retention is bounded by the maintenance prune cycle. Deterministic — a
+    /// pure function of the recorded rows and `now`; never reads `Date()` here.
     ///
     /// - Parameters:
     ///   - kit:    The live GeniusLocusKit actor.
     ///   - handle: The estate to score.
     ///   - now:    Injected instant (determinism requirement).
-    static func preferenceScan(
+    public static func preferenceScan(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         now: Date
     ) async throws {
-        // All retained traces up to `now`. `.distantPast` lower bound reads the
-        // whole live history; retention is bounded upstream by the prune cycle.
         let traces = try await kit.recentRecallTraces(
             in: handle, since: .distantPast, now: now)
 
         let records = PreferenceOutcomes.build(traces: traces)
 
-        // The conformance-gated Bradley-Terry fitter (I-17). It throws only if a
-        // drawer id literally equals the baseline sentinel — drawer ids are UUIDs,
-        // so this never arises in practice; the throw still propagates (the caller
-        // logs and the loop continues).
         let strengths = try NeuronKit.learnedPreference(
             records: records.map {
                 (label: $0.label, endorsements: $0.endorsements, dismissals: $0.dismissals)
@@ -624,10 +627,6 @@ public actor AutonomicGovernor {
 
         var scores: [String: Float] = Dictionary(minimumCapacity: strengths.count)
         for strength in strengths {
-            // PreferenceStrength.strength is Double (the Bradley-Terry log-scale
-            // scalar, re-centred on the neutral baseline); the PreferenceStore
-            // surface is Float. The narrowing is the documented float boundary the
-            // cross-port conformance gate compares at.
             scores[strength.label] = Float(strength.strength)
         }
 
@@ -645,11 +644,7 @@ public actor AutonomicGovernor {
     ///
     /// The handler receives the estate UUID string, the generation instant, and the
     /// raw JSON bytes. In production the handler writes to `StatsStore` via closure
-    /// injection in ResidentDaemon (keeping AriaMCP free of ObserverSink).
-    ///
-    /// Content-safety: node fields are UUIDs, NounType ordinals, floats, booleans,
-    /// or ISO-8601 timestamps. No drawer text or rung content crosses this surface
-    /// (concepts §1.6 content boundary).
+    /// injection in AriaResident (keeping AriaMCP and NeuronKit free of ObserverSink).
     ///
     /// Determinism: `now` is injected by the tick — never reads `Date()` here.
     ///
@@ -667,21 +662,13 @@ public actor AutonomicGovernor {
     ) async throws -> TopologyInputsToken {
         let locus = try await kit.estate(for: handle)
 
-        // Raw estate reads — same as the former HTTPServer.graphSnapshot path.
-        // The state axis is the authoritative dead signal; tombstonedAt is the
-        // stored instant when available, with an audit-trail fallback for expunged rows.
         let allDrawerRows = try await locus.allDrawers()
         let allTunnelRows = try await locus.allTunnels()
         let kgFacts = try await locus.allKGFacts()
 
         // Dirty check: compute the process-local inputs token BEFORE the
-        // expensive work (tombstone audit resolution, Louvain, centrality,
-        // encode, write). An unchanged token means the stored snapshot is still
-        // current, so the duty returns without touching the store — generatedTs
-        // keeps meaning "when the content last changed". The token is built from
-        // already-fetched rows only (no extra estate reads): on an idle estate
-        // the duty's cost collapses to the three reads. The token is never
-        // persisted — it is returned to the governor as in-memory state only.
+        // expensive work. An unchanged token means the stored snapshot is still
+        // current, so the duty returns without touching the store.
         let token = TopologyInputsToken(drawers: allDrawerRows,
                                         tunnels: allTunnelRows,
                                         factCount: kgFacts.count)
@@ -689,11 +676,10 @@ public actor AutonomicGovernor {
             return token
         }
 
-        // Tombstone instant resolution: prefer decoded tombstonedAt (round-trips cleanly
-        // for most rows); fall back to the sealed audit trail's `tombstone` event for
-        // rows whose stamp does not round-trip (expunge path stamps non-fractional ISO-8601
-        // that the fractional-seconds reader cannot reconstruct — the audit trail is the
-        // authoritative source for those rows).
+        // Tombstone instant resolution: prefer decoded tombstonedAt; fall back to
+        // the sealed audit trail's `tombstone` event for rows whose stamp does not
+        // round-trip (expunge path stamps non-fractional ISO-8601 the fractional-
+        // seconds reader cannot reconstruct — the audit trail is authoritative there).
         func resolveTombstoneInstant(_ d: Drawer) async throws -> Date? {
             if let at = d.tombstonedAt { return at }
             let events = try await locus.auditTrail(rowID: d.id)
@@ -745,7 +731,6 @@ public actor AutonomicGovernor {
                 createdTs: e.createdTs,
                 tombstonedTs: e.tombstonedTs)
         }
-        // NeuronKit community summaries map straight through — same field names.
         let communities = topo.communities.map { c in
             TopologySnapshotCommunity(id: c.id, size: c.size, dominantUdcCode: c.dominantUdcCode)
         }
@@ -806,33 +791,27 @@ public actor AutonomicGovernor {
 /// local, salted per process launch), so two processes will produce different
 /// tokens for identical estates — that is correct and sufficient, because the
 /// only comparison ever made is `previous == current` WITHIN a single running
-/// governor. Do NOT treat this as cross-process evidence and do NOT swap in a
-/// substrate Fingerprint256/SimHash primitive: that would over-engineer an
-/// in-memory change-detector whose entire lifetime is one process.
+/// governor.
 ///
 /// Built from already-fetched rows only — counts, maximum ingest/event
 /// instants, dead counts, and an order-independent inputs digest (overflow
 /// sum of per-drawer id+udcCode hashes, catching re-anchoring that changes
 /// neither counts nor timestamps).
-///
-/// Sensitivity (what forces a recompute): drawer/tunnel/fact adds and
-/// removes, tombstones, new ingests (max filedAt), re-activity (max
-/// eventTime → lastActiveTs recency), and udcCode re-anchoring. A content
-/// edit that changes none of these does not alter the topology payload and
-/// correctly skips.
 public struct TopologyInputsToken: Sendable, Equatable {
-    let drawerCount: Int
-    let tunnelCount: Int
-    let factCount: Int
-    let deadDrawerCount: Int
-    let deadTunnelCount: Int
-    let maxFiledAt: Date?
-    let maxEventTime: Date?
+    public let drawerCount: Int
+    public let tunnelCount: Int
+    public let factCount: Int
+    public let deadDrawerCount: Int
+    public let deadTunnelCount: Int
+    public let maxFiledAt: Date?
+    public let maxEventTime: Date?
     /// Order-independent overflow sum of per-drawer id+udcCode `hashValue`s.
     /// Process-local (Swift hashing is salted per launch) — only ever compared
     /// to another token from the SAME process. Never persisted.
-    let inputsDigest: Int
+    public let inputsDigest: Int
 
+    // Package-internal initialiser — tests in the same module use this; cross-module
+    // consumers receive tokens from the governor itself, never construct them directly.
     init(drawers: [Drawer], tunnels: [Tunnel], factCount: Int) {
         self.drawerCount = drawers.count
         self.tunnelCount = tunnels.count
@@ -924,11 +903,11 @@ struct TopologySnapshotCommunity: Codable, Sendable {
 
 /// Full payload produced by the governor's topology-snapshot duty.
 ///
-/// `generatedTs` is new in this format (was not in the former HTTPServer inline response);
-/// it is the ISO-8601 instant when the governor computed the snapshot. Consumers can
-/// use it to display staleness. `structurePending: false` indicates real data.
-/// The pending response (no snapshot yet) is served directly as static bytes without
-/// decoding — callers should NOT expect `generatedTs` in a pending response.
+/// `generatedTs` is the ISO-8601 instant when the governor computed the snapshot.
+/// Consumers can use it to display staleness. `structurePending: false` indicates
+/// real data. The pending response (no snapshot yet) is served directly as static
+/// bytes without decoding — callers should NOT expect `generatedTs` in a pending
+/// response.
 struct TopologySnapshotPayload: Codable, Sendable {
     let nodes: [TopologySnapshotNode]
     let edges: [TopologySnapshotEdge]

@@ -38,18 +38,19 @@
 //! detection (ADR-VAULTKIT-002 decision b).
 //! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
 
-pub mod autonomic_governor;
 pub mod build_serial;
 pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod estate_registry;
-pub mod graph_centrality;
+// governor_topology_adapter: the AriaMcpKit adapter that bridges
+// neuron_kit::GovernorTopologySink → observer_sink::StatsStore.
+// NeuronKit owns the governor and the trait; AriaMcpKit owns this adapter.
+pub mod governor_topology_adapter;
 pub mod http_server;
 pub mod interface_tools;
 pub mod jsonrpc;
 pub mod lens_tools;
-pub mod preference_producer;
 pub mod recall_discrimination;
 pub mod recipe_tools;
 pub mod runtime;

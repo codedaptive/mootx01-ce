@@ -13,7 +13,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::autonomic_governor::AutonomicGovernor;
+use neuron_kit::autonomic_governor::AutonomicGovernor;
+use crate::governor_topology_adapter::StatsStoreTopologySink;
 use crate::http_server::{
     run_http_loop, GLOBAL_4XX_COUNTER, GLOBAL_5XX_COUNTER, GLOBAL_INFLIGHT_COUNTER,
     GLOBAL_INFLIGHT_HWM, GLOBAL_LATENCY_FAST, GLOBAL_LATENCY_MID, GLOBAL_LATENCY_NS_TOTAL,
@@ -156,8 +157,14 @@ pub fn run(banner: &str) {
         let http_stats_store = gov_stats_store.clone();
 
         std::thread::spawn(move || {
-            let mut governor = AutonomicGovernor::new_with_stats_store(
-                gov_coord, gov_handle, gov_store, gov_stats_store,
+            // Build the host-injected topology sink from the stats store (if
+            // configured). The governor holds the sink as Box<dyn
+            // GovernorTopologySink>, keeping NeuronKit free of observer_sink.
+            let topology_sink: Option<Box<dyn neuron_kit::governor_topology_sink::GovernorTopologySink>> =
+                gov_stats_store.map(|s| Box::new(StatsStoreTopologySink::new(s))
+                    as Box<dyn neuron_kit::governor_topology_sink::GovernorTopologySink>);
+            let mut governor = AutonomicGovernor::new_with_topology_sink(
+                gov_coord, gov_handle, gov_store, topology_sink,
             );
             // Bootstrap the architecture-spec §11.2 default standing signals
             // before the loop starts, mirroring the Swift resident's

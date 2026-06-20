@@ -21,9 +21,9 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use aria_mcp::autonomic_governor::AutonomicGovernor;
+use neuron_kit::autonomic_governor::AutonomicGovernor;
 use aria_mcp::estate_registry::EstateRegistry;
-use aria_mcp::preference_producer::{
+use neuron_kit::preference_producer::{
     compute_preference_scores, preference_outcomes, PreferenceCache, PreferenceRecord,
 };
 use genius_locus_kit::recall::{

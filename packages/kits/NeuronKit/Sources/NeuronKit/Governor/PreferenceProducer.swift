@@ -1,7 +1,6 @@
 import Foundation
 import GeniusLocusKit
 import LocusKit
-import NeuronKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -21,7 +20,7 @@ import NeuronKit
 ///
 /// Holds the Bradley-Terry preference strength for every drawer that appears in
 /// the estate's recall-trace reward history, computed by
-/// `AutonomicGovernor.preferenceScan` on a cadence. Implements the GLK
+/// `NeuronKit.AutonomicGovernor.preferenceScan` on a cadence. Implements the GLK
 /// `PreferenceStore` consumption protocol: the `matrixAware` / `unionBest`
 /// recall path reads `preferenceScore(for:)` per candidate drawer to populate
 /// the `preference` score column. Drawers absent from the snapshot score 0.0,
@@ -59,9 +58,10 @@ public final class PreferenceCache: PreferenceStore, Sendable {
 /// Shapes the estate's recall-trace reward outcomes into the per-drawer
 /// `(label, endorsements, dismissals)` records the `NeuronKit.learnedPreference`
 /// Bradley-Terry fitter consumes — the EXACT input shape its anchor reduction
-/// expects. The Rust producer (`preference_outcomes` in preference_producer.rs)
-/// builds the IDENTICAL record multiset so both ports feed the fitter the same
-/// outcomes and obtain identical preference strengths.
+/// expects. The Rust producer (`preference_outcomes` in
+/// neuron-kit/preference_producer.rs) builds the IDENTICAL record multiset so
+/// both ports feed the fitter the same outcomes and obtain identical preference
+/// strengths.
 public enum PreferenceOutcomes {
 
     /// One per-drawer Bradley-Terry curation record. `endorsements` is the count
@@ -73,6 +73,14 @@ public enum PreferenceOutcomes {
         public let label: String
         public let endorsements: Int
         public let dismissals: Int
+
+        /// Memberwise initialiser — explicit so cross-module callers (tests) can
+        /// construct records directly for comparison.
+        public init(label: String, endorsements: Int, dismissals: Int) {
+            self.label = label
+            self.endorsements = endorsements
+            self.dismissals = dismissals
+        }
     }
 
     /// Build the per-drawer curation records from recall traces.

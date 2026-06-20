@@ -1,7 +1,6 @@
 import Foundation
 import GeniusLocusKit
 import LocusKit
-import NeuronKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -16,8 +15,8 @@ import NeuronKit
 /// Pre-built per-drawer graph-centrality cache for one estate.
 ///
 /// Holds the eigenvalue-centrality score for every live drawer, computed
-/// by `AutonomicGovernor.graphCentralityScan` on a cadence. Implements the
-/// GLK `GraphCache` consumption protocol: the `matrixAware` / `unionBest`
+/// by `NeuronKit.AutonomicGovernor.graphCentralityScan` on a cadence. Implements
+/// the GLK `GraphCache` consumption protocol: the `matrixAware` / `unionBest`
 /// recall path reads `graphScore(for:)` per candidate drawer to populate
 /// the `graph` score column. Drawers absent from the snapshot score 0.0,
 /// which is correct (a drawer with no structural edges has no centrality).
@@ -50,7 +49,7 @@ public final class GraphCentralityCache: GraphCache, Sendable {
 /// Builds the estate's structure-graph adjacency in the exact shape the
 /// `NeuronKit.keystones` oracle consumes, from the same substrate reads the
 /// topology lens uses (drawers + tunnels + kg_facts). The Rust producer
-/// (`graph_centrality_adjacency` in autonomic_governor.rs) builds the
+/// (`graph_centrality_adjacency` in neuron-kit/autonomic_governor.rs) builds the
 /// IDENTICAL (nodeIDs, edges) so both ports feed keystones the same graph
 /// and obtain bit-identical centralities.
 public enum GraphCentralityAdjacency {

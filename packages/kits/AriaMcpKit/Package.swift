@@ -127,6 +127,19 @@ let package = Package(
             dependencies: [
                 "AriaMCP",
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                // NeuronKit: AriaResident constructs NeuronKit.AutonomicGovernor
+                // (the governor now lives in NeuronKit, not AriaMCP). App→kit
+                // layering (downstream→upstream), no inversion. The AriaMCP target
+                // itself still lists NeuronKit for its own direct uses (recall, lens
+                // tools, etc.); this dep is the AriaResident target's own declaration.
+                .product(name: "NeuronKit", package: "NeuronKit"),
+                // CognitionKit: AriaResident injects the graphAnalyticsHandler closure
+                // (Keystones + ConstellationLens) into NeuronKit.AutonomicGovernor.
+                // The closure is the injection seam that keeps NeuronKit free of
+                // CognitionKit (CognitionKit depends on NeuronKit, not the reverse).
+                // CognitionKit is a host concern — used here, not in the AriaMCP
+                // library core. App→kit layering, no inversion.
+                .product(name: "CognitionKit", package: "CognitionKit"),
                 // Telemetry lives HERE (the composition layer), not in AriaMCP —
                 // keeping the JSON-RPC core free of ObserverSink/IntellectusLib.
                 .product(name: "ObserverSink", package: "ObserverSink"),

@@ -1,5 +1,5 @@
 //! Preference PRODUCER support — the Rust mirror of Swift
-//! `PreferenceProducer.swift`.
+//! `NeuronKit/Governor/PreferenceProducer.swift`.
 //!
 //! ─────────────────────────────────────────────────────────────────
 //! DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -131,12 +131,12 @@ pub fn preference_outcomes(traces: &[RecallTraceItem]) -> Vec<PreferenceRecord> 
 /// still propagates (the caller logs and the loop continues).
 pub fn compute_preference_scores(
     records: &[PreferenceRecord],
-) -> Result<HashMap<String, f32>, neuron_kit::TournamentError> {
+) -> Result<HashMap<String, f32>, crate::TournamentError> {
     let tuples: Vec<(String, i64, i64)> = records
         .iter()
         .map(|r| (r.label.clone(), r.endorsements, r.dismissals))
         .collect();
-    let strengths = neuron_kit::learned_preference(&tuples)?;
+    let strengths = crate::learned_preference(&tuples)?;
     let mut scores = HashMap::with_capacity(strengths.len());
     for strength in strengths {
         scores.insert(strength.label, strength.strength as f32);

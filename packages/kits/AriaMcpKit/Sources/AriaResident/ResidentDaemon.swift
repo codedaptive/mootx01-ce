@@ -1,6 +1,8 @@
 import Foundation
 import AriaMCP
+import CognitionKit
 import GeniusLocusKit
+import NeuronKit
 import ObserverSink
 import IntellectusLib
 import Synchronization
@@ -257,7 +259,39 @@ public enum AriaResident {
         }
 
         let server = HTTPServer(dispatcher: dispatcher, port: config.port, maxBodyBytes: config.maxBodyBytes, topologyReader: topologyReader)
-        let governor = AutonomicGovernor(kit: kit, handle: handle, baseTickMs: config.brainTickMs, topologyHandler: topologyHandler, topologyGate: topologyGate)
+
+        // Graph-analytics handler: inject the CognitionKit-based Keystones +
+        // ConstellationLens scan into NeuronKit.AutonomicGovernor as a closure.
+        // The governor runs this handler on its 10-minute cadence per wing.
+        //
+        // Injection seam: the governor (AutonomicGovernor) lives in NeuronKit.
+        // CognitionKit depends on NeuronKit (not the reverse), so NeuronKit cannot import CognitionKit
+        // directly. The handler closure is the boundary: AriaResident (which may
+        // freely import both NeuronKit and CognitionKit) provides the concrete
+        // implementation; NeuronKit stores and calls only an opaque typed closure.
+        //
+        // Per-wing: Keystones ranks load-bearing drawers by eigenvalue centrality
+        // over the tunnel graph (Lens 1, Structure). ConstellationLens recovers
+        // emergent communities via Louvain community detection (Lens 2, Structure).
+        // Running both per wing on the governor's cadence keeps structural signals
+        // current for the recall matrix without requiring any manual trigger.
+        let graphAnalyticsHandler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void)? = { kit, handle, now in
+            let drawers = try await kit.allDrawers(in: handle)
+            let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+            for wing in wings {
+                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
+                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+            }
+        }
+
+        let governor = AutonomicGovernor(
+            kit: kit,
+            handle: handle,
+            baseTickMs: config.brainTickMs,
+            topologyHandler: topologyHandler,
+            topologyGate: topologyGate,
+            graphAnalyticsHandler: graphAnalyticsHandler
+        )
 
         // Standing-signal bootstrap (the dormant-loop activation). The governor
         // calls `kit.signalTick` every tick, but until a scheduler is registered
