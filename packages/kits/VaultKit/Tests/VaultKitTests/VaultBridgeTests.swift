@@ -1177,4 +1177,232 @@ struct VaultBridgeTests {
         #expect(reimportReport.drawersWritten == 0, "re-import into same estate must not write new drawers (idempotency)")
         #expect(reimportReport.drawersSkippedUnchanged == 2, "re-import must count both drawers as skipped-unchanged")
     }
+
+    // MARK: - Bug M: charter duplication
+
+    /// Exporting an estate with seeded _charter drawers must NOT include them
+    /// in the vault manifest. Importing that vault into a freshly-provisioned
+    /// estate (which already has its own 7 seeded charters) must not add
+    /// duplicate charter drawers — the charter count must remain exactly 7
+    /// (the provisioned set), not grow to 14.
+    ///
+    /// Root cause: the export path previously included `room == "_charter"`
+    /// drawers in the projection. Since every provisioned estate seeds its
+    /// own charter drawers with new lineage IDs, importing from a source
+    /// estate duplicated them in the target.
+    ///
+    /// Fix (Bug M): `DrawerMapping.export` now skips drawers whose
+    /// `room == charterRoom` ("_charter") before projecting to NoteIR.
+    @Test("Bug M: export excludes _charter system drawers; import into provisioned estate creates no charter duplicates")
+    func exportExcludesCharterDrawers() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+        // --- Source estate: provision via GLK so charters are seeded ---
+        let kit1 = GeniusLocusKit()
+        let owner1 = OwnerCredentials(ownerIdentifier: "charter-test-source")
+        let storage1 = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let params = EstateProvisionParams(
+            estateName: "CharterSource",
+            kind: .glk,
+            zoomWindowLow: 0,
+            zoomWindowHigh: 999,
+            frameworkProfile: "Test",
+            syncMode: .none
+        )
+        let handle1 = try await kit1.provision(storage: storage1, owner: owner1, params: params)
+
+        // Capture one user-content drawer so the export has something to write.
+        let userFrame = CaptureFrame(
+            content: "A regular user note.",
+            channel: .typed,
+            room: "notes",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "none",
+            eventTime: now
+        )
+        _ = try await kit1.capture(handle1, userFrame, mode: .regular)
+
+        // Export to a temp vault.
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let bridge1 = VaultBridge(kit: kit1, mapping: DrawerMapping(classifyOnImport: false))
+        let exportReport = try await bridge1.export(estate: handle1, to: vault, scope: .believed, now: now)
+
+        // The export must NOT contain any _charter notes — charter drawers are
+        // estate-structural and must be excluded from the vault projection.
+        #expect(exportReport.notesExported == 1,
+                "export must include only the 1 user-content drawer, not the 7 charter drawers")
+
+        // Verify no _charter files landed in the vault directory.
+        let vaultContents = FileManager.default.enumerator(
+            at: vault,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )?.allObjects as? [URL] ?? []
+        let charterFiles = vaultContents.filter { $0.pathComponents.contains("_charter") }
+        #expect(charterFiles.isEmpty,
+                "vault must contain no _charter folder or files (charter drawers excluded from export)")
+
+        // --- Target estate: provision so it has its own 7 seeded charters ---
+        let kit2 = GeniusLocusKit()
+        let owner2 = OwnerCredentials(ownerIdentifier: "charter-test-target")
+        let storage2 = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let params2 = EstateProvisionParams(
+            estateName: "CharterTarget",
+            kind: .glk,
+            zoomWindowLow: 0,
+            zoomWindowHigh: 999,
+            frameworkProfile: "Test",
+            syncMode: .none
+        )
+        let handle2 = try await kit2.provision(storage: storage2, owner: owner2, params: params2)
+
+        // Recall the charter drawers seeded at provision via estate.allDrawers() —
+        // the recall pipeline explicitly excludes charter drawers (they are estate-
+        // structural metadata, not recallable content), so we must use allDrawers()
+        // to count them. This mirrors the pattern in GLK RecallHygieneTests.swift H7.
+        let estate2 = try await kit2.estate(for: handle2)
+        let chartersBeforeImport = try await estate2.allDrawers()
+            .filter { $0.room == LocusKit.charterRoom }
+        #expect(chartersBeforeImport.count == 7,
+                "provisioned estate must have exactly 7 charter drawers before import")
+
+        // Import the vault into the target estate.
+        let bridge2 = VaultBridge(kit: kit2, mapping: DrawerMapping(classifyOnImport: false))
+        let importReport = try await bridge2.importVault(at: vault, into: handle2, now: now)
+        #expect(importReport.drawersWritten == 1,
+                "import must write exactly the 1 user-content note (no charter duplicates)")
+
+        // Charter count must be unchanged after import — still 7.
+        // Use allDrawers() again (same rationale as above).
+        let chartersAfterImport = try await estate2.allDrawers()
+            .filter { $0.room == LocusKit.charterRoom }
+        #expect(chartersAfterImport.count == 7,
+                "charter count must remain 7 after import — no duplicates from the vault (Bug M)")
+    }
+
+    // MARK: - Bug N: _distilled_from provenance as tunnel not body text
+
+    /// A factoid with a `_distilled_from` provenance tunnel must round-trip
+    /// export → import such that:
+    ///   1. The exported vault note body does NOT contain the literal text
+    ///      `_distilled_from` (the provenance link must not be injected into content).
+    ///   2. After import, the factoid drawer content is clean — no markdown link text.
+    ///   3. The `_distilled_from` tunnel exists in the re-imported estate (the
+    ///      provenance graph edge survives as a real tunnel, not lost).
+    ///
+    /// Root cause: `_distilled_from` tunnels (label == "_distilled_from",
+    /// kind == .references) were previously included in `note.links`. The
+    /// Obsidian adapter rendered them as markdown links appended to the body,
+    /// corrupting the factoid's content on re-import.
+    ///
+    /// Fix (Bug N): `DrawerMapping.noteIR` separates `_distilled_from` tunnels
+    /// into a dedicated frontmatter key (`distilled_from_sources`). The import
+    /// path reads that key and reconstructs the tunnels without touching content.
+    @Test("Bug N: _distilled_from provenance tunnel round-trips as tunnel metadata, not body text")
+    func distilledFromProvenanceRoundTrips() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+        // Capture a source drawer (simulates a raw memory that was distilled).
+        let sourceFrame = CaptureFrame(
+            content: "Original source memory content.",
+            channel: .typed,
+            room: "raw-memories",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "none",
+            eventTime: now
+        )
+        let sourceDrawer = try await kit.capture(handle, sourceFrame, mode: .regular)
+
+        // Capture a factoid drawer in "_distilled" (simulates DistillationCycle output).
+        let factoidContent = "Distilled factoid: the essence of the source."
+        let factoidFrame = CaptureFrame(
+            content: factoidContent,
+            channel: .typed,
+            room: "_distilled",
+            latticeAnchor: LatticeAnchor(udcCode: "001"),
+            addedBy: "distillation-daemon",
+            embeddingModelID: "none",
+            eventTime: now
+        )
+        let factoidDrawer = try await kit.capture(handle, factoidFrame, mode: .regular)
+
+        // Create the _distilled_from provenance tunnel (factoid → source),
+        // exactly as DistillationCycle does.
+        let estate = try await kit.estate(for: handle)
+        let provenanceFrame = TunnelCaptureFrame(
+            sourceWing: factoidDrawer.wing,
+            sourceRoom: "_distilled",
+            targetWing: sourceDrawer.wing,
+            targetRoom: sourceDrawer.room,
+            label: "_distilled_from",
+            addedBy: "distillation-daemon",
+            sourceDrawerId: factoidDrawer.id,
+            targetDrawerId: sourceDrawer.id,
+            kind: .references,
+            originClass: .derived
+        )
+        _ = try await estate.capture(provenanceFrame)
+
+        // Export the estate to the vault.
+        let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
+        _ = try await bridge.export(estate: handle, to: vault, scope: .believed, now: now)
+
+        // --- Assertion 1: the factoid vault file must NOT contain _distilled_from text ---
+        // Find the factoid note file (it is in the _distilled room). Use allObjects to
+        // collect synchronously before the async suspension point so Swift concurrency
+        // is happy (NSEnumerator.makeIterator is unavailable from async contexts).
+        let vaultFiles = FileManager.default.enumerator(
+            at: vault,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )?.allObjects as? [URL] ?? []
+        let factoidFileURL = vaultFiles.first { url in
+            url.pathExtension == "md" &&
+            ObsidianAdapter.relativePath(of: url, under: vault).contains("_distilled")
+        }
+        let factoidFile = try #require(factoidFileURL, "factoid vault file must exist under _distilled/")
+        let factoidFileText = try String(contentsOf: factoidFile, encoding: .utf8)
+        #expect(!factoidFileText.contains("_distilled_from"),
+                "Bug N: factoid vault file must NOT contain '_distilled_from' link text in body")
+        // The frontmatter must carry the provenance metadata for round-trip reconstruction.
+        #expect(factoidFileText.contains("distilled_from_sources"),
+                "Bug N: factoid vault file must carry 'distilled_from_sources' frontmatter key")
+
+        // --- Assertion 2: re-import into a fresh estate, assert clean content ---
+        let (kit2, handle2) = try await openEstate()
+        let bridge2 = VaultBridge(kit: kit2, mapping: DrawerMapping(classifyOnImport: false))
+        _ = try await bridge2.importVault(at: vault, into: handle2, now: now)
+
+        let importedDrawers = try await kit2.recall(
+            handle2,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10_000_000)
+        )
+        let importedFactoid = importedDrawers.first { $0.room == "_distilled" }
+        let factoid = try #require(importedFactoid, "factoid drawer must be imported")
+
+        // Content must be the original factoid text, with no link appended.
+        #expect(factoid.content == factoidContent,
+                "Bug N: factoid content must be clean after round-trip — no '_distilled_from' link appended")
+        #expect(!factoid.content.contains("_distilled_from"),
+                "Bug N: factoid content must not contain the provenance link text")
+
+        // --- Assertion 3: _distilled_from tunnel exists after import ---
+        let importedTunnels = try await kit2.recallTunnels(handle2, wing: factoid.wing)
+        let provenanceTunnels = importedTunnels.filter {
+            $0.label == "_distilled_from" && $0.sourceRoom == "_distilled"
+        }
+        #expect(!provenanceTunnels.isEmpty,
+                "Bug N: _distilled_from provenance tunnel must exist after round-trip import")
+        let pTunnel = try #require(provenanceTunnels.first)
+        #expect(pTunnel.targetRoom == sourceDrawer.room,
+                "Bug N: provenance tunnel must point to the source drawer's room")
+    }
 }

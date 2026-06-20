@@ -34,6 +34,7 @@ use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, intake::WriteMode};
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
+    default_wings::CHARTER_ROOM,
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
@@ -247,6 +248,16 @@ impl DrawerMapping {
         let mut excluded_secret = 0usize;
         let mut excluded_private = 0usize;
         for drawer in recalled {
+            // Bug M fix: system charter drawers (room == CHARTER_ROOM == "_charter")
+            // are estate-structural — auto-seeded at provision time for every new
+            // estate. Exporting them and importing into a freshly-provisioned target
+            // estate duplicates all 7 charter drawers (target already has its own
+            // seeded set; the import mints new lineage IDs from the source moot_id).
+            // Charter drawers carry no user-authored content and are regenerated on
+            // provision. CHARTER_ROOM == "_charter" (locus_kit::default_wings constant).
+            if drawer.room == CHARTER_ROOM {
+                continue;
+            }
             let tier = drawer.adjective_sensitivity();
             if tier.is_excluded_from_bulk() {
                 // Secret never rides bulk channels, under any scope.
@@ -391,12 +402,47 @@ impl DrawerMapping {
             frontmatter.insert("sensitivity".to_owned(), Self::sensitivity_label(tier).to_owned());
         }
 
-        // Each `.references` tunnel's label carries the raw wikilink text that
-        // produced it on import, so export renders it back verbatim.
-        let links: Vec<WikiLink> = references
+        // Bug N fix: `_distilled_from` tunnels are provenance graph edges, not body
+        // content. Rendering them as wikilinks (or standard-md links) into the note
+        // body causes two problems: (a) the body text gets the literal markdown link
+        // appended (e.g. `[_distilled_from](../../_distilled_from.md)`), and (b) on
+        // re-import that appended text is stored as the drawer's content, permanently
+        // corrupting the factoid. Provenance tunnels must be serialized as structured
+        // frontmatter that the import path can reconstruct as tunnels without touching
+        // the content field.
+        //
+        // Separation: filter into provenance tunnels (`label == "_distilled_from"`) and
+        // regular content-reference tunnels. Only content-reference tunnels become
+        // wikilinks in the `links` array; provenance tunnels ride the new frontmatter
+        // key `distilled_from_sources` as "targetWing/targetRoom" entries (semicolon-
+        // separated, deterministically sorted). The import path reads this key and
+        // reconstructs the tunnels without injecting text into content.
+        let provenance_tunnels: Vec<&&Tunnel> =
+            references.iter().filter(|t| t.label == "_distilled_from").collect();
+        let content_tunnels: Vec<&&Tunnel> =
+            references.iter().filter(|t| t.label != "_distilled_from").collect();
+
+        // Each content `.references` tunnel's label carries the raw wikilink text
+        // that produced it on import, so export renders it back verbatim.
+        let links: Vec<WikiLink> = content_tunnels
             .iter()
             .map(|t| WikiLink::new(t.label.clone(), None, t.label.clone()))
             .collect();
+
+        // Provenance tunnels encoded as "targetWing/targetRoom" pairs so the import
+        // path can reconstruct each `_distilled_from` tunnel from frontmatter alone.
+        // Sorted for deterministic output so round-trip comparisons are stable.
+        if !provenance_tunnels.is_empty() {
+            let mut targets: Vec<String> = provenance_tunnels
+                .iter()
+                .map(|t| format!("{}/{}", t.target_wing, t.target_room))
+                .collect();
+            targets.sort();
+            frontmatter.insert(
+                "distilled_from_sources".to_owned(),
+                targets.join(";"),
+            );
+        }
 
         // Reconstruct tags from KG facts (hard-close #29-A round-trip).
         // Facts with subject "tag:<t>" and predicate "tagged" were filed on
@@ -711,12 +757,67 @@ impl DrawerMapping {
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
 
-        // Create tunnels for each wikilink, skipping any whose stable
-        // endpoint+label signature already exists.
+        // The estate actor is needed for tunnel capture (both provenance tunnels
+        // below and content wikilink tunnels after). Fetch once, shared by both paths.
         let estate = coordinator
             .estate_for(handle)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         let mut tunnels_created = 0;
+
+        // Bug N fix — reconstruct _distilled_from provenance tunnels from frontmatter.
+        // On export these tunnels were excluded from `note.links` (which rides into body
+        // text) and encoded as "targetWing/targetRoom" pairs in the `distilled_from_sources`
+        // frontmatter key (semicolon-separated). Reconstruct each pair as a real
+        // TunnelCaptureFrame so the provenance graph survives the round-trip without
+        // injecting any text into the drawer's content field.
+        if let Some(sources_str) = note.frontmatter.get("distilled_from_sources") {
+            if !sources_str.is_empty() {
+                let added_by_val = non_empty(note.frontmatter.get("addedBy"))
+                    .unwrap_or_else(|| self.added_by.clone());
+                for source in sources_str.split(';') {
+                    // Each entry is "targetWing/targetRoom"; split on the FIRST '/'
+                    // only so room paths that contain '/' survive intact.
+                    let mut parts = source.splitn(2, '/');
+                    let target_wing = match parts.next() {
+                        Some(w) if !w.is_empty() => w.to_owned(),
+                        _ => continue,
+                    };
+                    let target_room = match parts.next() {
+                        Some(r) if !r.is_empty() => r.to_owned(),
+                        _ => continue,
+                    };
+                    let sig = Self::tunnel_signature(
+                        &drawer.wing,
+                        &drawer.room,
+                        &target_room,
+                        "_distilled_from",
+                        TunnelKind::References,
+                    );
+                    if existing_tunnel_signatures.contains(&sig) {
+                        continue;
+                    }
+                    let mut tunnel_frame = TunnelCaptureFrame::new(
+                        drawer.wing.clone(),
+                        drawer.room.clone(),
+                        target_wing,
+                        target_room,
+                        "_distilled_from".to_owned(),
+                        added_by_val.clone(),
+                    );
+                    tunnel_frame.source_drawer_id = Some(drawer.id.clone());
+                    tunnel_frame.kind = TunnelKind::References;
+                    tunnel_frame.origin_class = TunnelOriginClass::Imported;
+                    estate
+                        .capture_tunnel(tunnel_frame, now)
+                        .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                    existing_tunnel_signatures.insert(sig);
+                    tunnels_created += 1;
+                }
+            }
+        }
+
+        // Create tunnels for each wikilink, skipping any whose stable
+        // endpoint+label signature already exists.
         for link in &note.links {
             let target_room = if link.target.is_empty() {
                 "unresolved".to_owned()

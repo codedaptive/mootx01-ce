@@ -180,6 +180,17 @@ public struct DrawerMapping: Sendable {
         var excludedSecret = 0
         var excludedPrivate = 0
         for drawer in recalled {
+            // Bug M fix: system charter drawers (room == charterRoom, i.e. "_charter")
+            // are estate-structural — they are auto-seeded at provision time for every
+            // new estate and must NOT be included in the vault export. Exporting them
+            // and then importing into a freshly-provisioned target estate duplicates all
+            // 7 charter drawers (target already has its own seeded set; the import adds
+            // 7 more with different lineage IDs because the vault's moot_id is from the
+            // source estate). Charter drawers carry no user-authored content; they are
+            // regenerated on provision. `charterRoom` == "_charter" (LocusKit constant).
+            if drawer.room == charterRoom {
+                continue
+            }
             let tier = drawer.adjectiveSensitivity
             if tier.isExcludedFromBulk {
                 // Secret never rides bulk channels, under any scope.
@@ -302,12 +313,38 @@ public struct DrawerMapping: Sendable {
             frontmatter["sensitivity"] = Self.sensitivityLabel(drawer.adjectiveSensitivity)
         }
 
-        // Each `.references` tunnel's label carries the raw wikilink text
+        // Bug N fix: `_distilled_from` tunnels are provenance graph edges, not body
+        // content. Rendering them as wikilinks (or standard-md links) into the note
+        // body causes two problems: (a) the body text gets the literal markdown link
+        // appended (e.g. `[_distilled_from](../../_distilled_from.md)`), and (b) on
+        // re-import that appended text is stored as the drawer's content, permanently
+        // corrupting the factoid. Provenance tunnels must be serialized as structured
+        // frontmatter that the import path can reconstruct as tunnels without touching
+        // the content field.
+        //
+        // Separation: filter into provenance tunnels (`label == "_distilled_from"`) and
+        // regular content-reference tunnels. Only content-reference tunnels become
+        // wikilinks in the `links` array; provenance tunnels ride the new frontmatter
+        // key `distilled_from_sources` as "targetWing/targetRoom" entries (semicolon-
+        // separated, deterministically sorted). The import path reads this key and
+        // reconstructs the tunnels without injecting text into content.
+        let provenanceTunnels = references.filter { $0.label == "_distilled_from" }
+        let contentTunnels   = references.filter { $0.label != "_distilled_from" }
+
+        // Each content `.references` tunnel's label carries the raw wikilink text
         // that produced it on import, so export renders it back verbatim.
-        // Tunnel signatures use the source wing from the drawer — these are
-        // stable post-ADR-016 because the drawer.wing is now the actual wing
-        // the drawer lives in (no longer always defaultWingName for new drawers).
-        let links = references.map { WikiLink(target: $0.label, alias: nil, raw: $0.label) }
+        let links = contentTunnels.map { WikiLink(target: $0.label, alias: nil, raw: $0.label) }
+
+        // Provenance tunnels encoded as "targetWing/targetRoom" pairs so the import
+        // path can reconstruct each `_distilled_from` tunnel from frontmatter alone.
+        // Sorted for deterministic output so round-trip comparisons are stable.
+        if !provenanceTunnels.isEmpty {
+            let targets = provenanceTunnels
+                .map { "\($0.targetWing)/\($0.targetRoom)" }
+                .sorted()
+                .joined(separator: ";")
+            frontmatter["distilled_from_sources"] = targets
+        }
 
         // Reconstruct tags from KG facts (hard-close #29-A round-trip).
         // Facts with subject "tag:<t>" and predicate "tagged" were filed on
@@ -623,17 +660,60 @@ public struct DrawerMapping: Sendable {
             )
         }
 
+        // `GeniusLocusKit` is an actor; `estate(for:)` is actor-isolated,
+        // so the hop is awaited. It returns the live `LocusKit.Estate`
+        // actor — GLK's sanctioned access point for the tunnel-capture
+        // verb that the GLK verb surface does not itself re-export.
+        // Fetched once here and shared by both the provenance-tunnel path
+        // (Bug N fix) and the content-wikilink path below.
+        let estate = try await kit.estate(for: handle)
+        var tunnelsCreated = 0
+
+        // Bug N fix — reconstruct _distilled_from provenance tunnels from frontmatter.
+        // On export these tunnels were excluded from `note.links` (which rides into body
+        // text) and encoded as "targetWing/targetRoom" pairs in the `distilled_from_sources`
+        // frontmatter key (semicolon-separated). Reconstruct each pair as a real
+        // TunnelCaptureFrame so the provenance graph survives the round-trip without
+        // injecting any text into the drawer's content field.
+        if let sourcesStr = note.frontmatter["distilled_from_sources"], !sourcesStr.isEmpty {
+            for source in sourcesStr.split(separator: ";").map(String.init) {
+                // Each entry is "targetWing/targetRoom"; split on the first "/" only
+                // so room paths containing "/" survive intact.
+                let parts = source.split(separator: "/", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { continue }
+                let targetWing = parts[0]
+                let targetRoom = parts[1]
+                let signature = Self.tunnelSignature(
+                    sourceWing: drawer.wing,
+                    sourceRoom: drawer.room,
+                    targetRoom: targetRoom,
+                    label: "_distilled_from",
+                    kind: .references
+                )
+                guard !existingTunnelSignatures.contains(signature) else { continue }
+                let tunnelFrame = TunnelCaptureFrame(
+                    sourceWing: drawer.wing,
+                    sourceRoom: drawer.room,
+                    targetWing: targetWing,
+                    targetRoom: targetRoom,
+                    label: "_distilled_from",
+                    addedBy: frame.addedBy,
+                    sourceDrawerId: drawer.id,
+                    targetDrawerId: nil,
+                    kind: .references,
+                    originClass: .imported
+                )
+                _ = try await estate.capture(tunnelFrame)
+                existingTunnelSignatures.insert(signature)
+                tunnelsCreated += 1
+            }
+        }
+
         // Create tunnels for each wikilink, skipping any whose stable
         // endpoint+label signature already exists (re-import dedup; the
         // substrate's standalone tunnel capture performs a bare insert
         // with no native canonicalisation, so the bridge keys idempotency
         // on the signature).
-        // `GeniusLocusKit` is an actor; `estate(for:)` is actor-isolated,
-        // so the hop is awaited. It returns the live `LocusKit.Estate`
-        // actor — GLK's sanctioned access point for the tunnel-capture
-        // verb that the GLK verb surface does not itself re-export.
-        let estate = try await kit.estate(for: handle)
-        var tunnelsCreated = 0
         for link in note.links {
             let targetRoom = link.target.isEmpty ? "unresolved" : link.target
             let signature = Self.tunnelSignature(
