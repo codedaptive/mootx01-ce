@@ -4,4 +4,5 @@
 // constant (the noise schedule across the zoom hierarchy: node fast → estate
 // slow). Built bottom-up: the node layer first.
 
+pub mod node_anomaly;
 pub mod node_motion;
