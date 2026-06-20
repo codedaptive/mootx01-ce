@@ -108,7 +108,14 @@ public enum NodeMotionLens {
         now: Date,
         lambdaPerDay: Double
     ) -> NodeMotion {
-        let nowMs = Int64((now.timeIntervalSince1970 * 1000.0).rounded())
+        // The packed-HLC layout truncates `physicalTime` to the low 40 bits of
+        // epoch-ms, so HLC.physicalTime is `epoch_ms & (2^40 − 1)`, NOT the full
+        // wall clock. Align `now` to that same 40-bit domain (and wrap the diff)
+        // — otherwise the untruncated wall clock dwarfs the truncated physical and
+        // every age reads as millennia, collapsing volatility to 0. The 2^40-ms
+        // window is ~34 years, so a genuine wrap is a non-issue at these scales.
+        let physicalMask: Int64 = (1 << 40) - 1
+        let nowMs = Int64((now.timeIntervalSince1970 * 1000.0).rounded()) & physicalMask
 
         // One drawer write emits several field entries sharing one HLC; volatility
         // counts MUTATION MOMENTS, so fold over distinct HLCs.
@@ -119,9 +126,11 @@ public enum NodeMotionLens {
         var trajectory: [UInt64] = []
 
         for entry in entries where entry.rowID == rowID {
-            let physical = entry.hlc.physicalTime
+            let physical = entry.hlc.physicalTime & physicalMask
             if seenPhysical.insert(physical).inserted {
-                let ageDays = max(0.0, Double(nowMs - physical)) / msPerDay
+                var dtMs = nowMs - physical
+                if dtMs < 0 { dtMs += physicalMask + 1 }  // 40-bit wrap
+                let ageDays = Double(dtMs) / msPerDay
                 volatility += exp(-lambdaPerDay * ageDays)
                 eventCount += 1
                 if lastMs == nil || physical > lastMs! { lastMs = physical }

@@ -57,6 +57,13 @@ pub fn fold(
     now_ms: i64,
     lambda_per_day: f64,
 ) -> NodeMotion {
+    // The packed-HLC layout truncates physical_time to the low 40 bits of
+    // epoch-ms, so align `now` to the same domain (and wrap the diff); otherwise
+    // the untruncated wall clock dwarfs the truncated physical and every age reads
+    // as millennia, collapsing volatility to 0. ~34-year window — no real wrap.
+    const PHYSICAL_MASK: i64 = (1 << 40) - 1;
+    let now_ms_masked = now_ms & PHYSICAL_MASK;
+
     let mut seen_physical: HashSet<i64> = HashSet::new();
     let mut volatility = 0.0_f64;
     let mut event_count = 0usize;
@@ -64,12 +71,16 @@ pub fn fold(
     let mut trajectory: Vec<u64> = Vec::new();
 
     for entry in entries.iter().filter(|e| e.row_id == row_id) {
-        let physical = entry.hlc.physical_time;
+        let physical = entry.hlc.physical_time & PHYSICAL_MASK;
 
         // Distinct mutation moment -> one decay-weighted contribution. One drawer
         // write emits several field entries sharing one HLC.
         if seen_physical.insert(physical) {
-            let age_days = (now_ms - physical).max(0) as f64 / MS_PER_DAY;
+            let mut dt = now_ms_masked - physical;
+            if dt < 0 {
+                dt += PHYSICAL_MASK + 1; // 40-bit wrap
+            }
+            let age_days = dt as f64 / MS_PER_DAY;
             volatility += (-lambda_per_day * age_days).exp();
             event_count += 1;
             if last_ms.map_or(true, |l| physical > l) {

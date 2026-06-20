@@ -34,6 +34,8 @@ enum LensTools {
         "moot_lens_keystones", "moot_lens_constellation", "moot_lens_free_association",
         "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
         "moot_lens_drift",
+        // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+        "moot_lens_node_motion",
         // Renamed from moot_lens_contradiction (the lexical-cohesion outlier detector).
         "moot_lens_cohesion",
         // New: genuine contradiction detector — contradicts-tunnels + conflicting KG facts.
@@ -143,6 +145,16 @@ enum LensTools {
                         "estateID": estateIDSchema,
                     ],
                     required: ["splitAt"]),
+                provenance: .recipe),
+            ProjectedTool(
+                name: "moot_lens_node_motion",
+                description: "Reasoning lens (diffusion, node layer): how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history.",
+                inputSchema: objectSchema(
+                    properties: [
+                        "rowID": stringSchema("UUID of the memory (drawer) to read motion for."),
+                        "estateID": estateIDSchema,
+                    ],
+                    required: ["rowID"]),
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_cohesion",
@@ -535,6 +547,21 @@ enum LensTools {
             return list("anticipate", predictions.map {
                 "action=\(channelName($0.action)) successRate=\($0.successRate) n=\($0.count)"
             })
+
+        case "moot_lens_node_motion":
+            let rowID = try requireString(args, "rowID")
+            let motion = try await NodeMotionLens.run(kit: kit, handle: handle, rowID: rowID)
+            let anomaly = NodeMotionLens.classify(motion: motion)
+            let trajectory = motion.anchorTrajectory.map(String.init).joined(separator: " → ")
+            let verdict = anomaly.isChurning ? "churning"
+                : (anomaly.reanchored ? "reanchored" : "stable")
+            return ToolDispatcher.textResult("""
+            node_motion: \(rowID)
+              volatility: \(String(format: "%.3f", motion.volatility)) over \(motion.eventCount) event(s)
+              topic trajectory: \(trajectory.isEmpty ? "(none)" : trajectory)
+              reanchored: \(motion.reanchored)  current_anchor: \(motion.currentAnchor.map(String.init) ?? "none")
+              anomaly: \(verdict)\(anomaly.isAnomalous ? "  ⚠" : "")
+            """)
 
         case "moot_lens_successors":
             let out = try await TunnelSuccessor.run(
