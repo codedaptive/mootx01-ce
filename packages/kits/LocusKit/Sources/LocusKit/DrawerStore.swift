@@ -1292,6 +1292,7 @@ public actor DrawerStore {
     public func reanchorGated(
         drawerId: String,
         toRoom: String? = nil,
+        toWing: String? = nil,
         toLattice: LatticeAnchor? = nil,
         changedBy: String,
         reason: String? = nil,
@@ -1368,6 +1369,13 @@ public actor DrawerStore {
             }
             if let newRoom = toRoom {
                 updateValues["room"] = .text(newRoom)
+            }
+            // Cross-wing moves: update the wing column when toWing is supplied.
+            // Wings emerge from SELECT DISTINCT wing on the drawers table (no wings
+            // table), so writing a new wing name here is sufficient to move the drawer
+            // into the target wing.
+            if let newWing = toWing {
+                updateValues["wing"] = .text(newWing)
             }
 
             if !updateValues.isEmpty {

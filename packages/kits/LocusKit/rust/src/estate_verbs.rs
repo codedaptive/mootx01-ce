@@ -1705,11 +1705,12 @@ impl Estate {
         &self,
         row_id: &str,
         to_room: Option<&str>,
+        to_wing: Option<&str>,
         to_lattice: Option<crate::estate_types::LatticeAnchor>,
     ) -> Result<(), LocusKitError> {
-        if to_room.is_none() && to_lattice.is_none() {
+        if to_room.is_none() && to_wing.is_none() && to_lattice.is_none() {
             return Err(LocusKitError::InvalidContent(
-                "reanchor requires toRoom or toLattice".to_string(),
+                "reanchor requires toRoom, toWing, or toLattice".to_string(),
             ));
         }
         if self.store.get_drawer(row_id)?.is_none() {
@@ -1734,6 +1735,7 @@ impl Estate {
         self.store.reanchor_gated(
             row_id,
             to_room,
+            to_wing,
             to_lattice,
             &changed_by,
             Some("reanchored via Estate.reanchor"),
@@ -3133,9 +3135,9 @@ mod tests {
 
     #[test]
     fn reanchor_empty_args_returns_invalid_content() {
-        // Belt-and-suspenders guard: both to_room and to_lattice nil.
+        // Belt-and-suspenders guard: all of to_room, to_wing, and to_lattice nil.
         let estate = make_estate();
-        let err = estate.reanchor("id", None, None).unwrap_err();
+        let err = estate.reanchor("id", None, None, None).unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
     }
 
@@ -3147,6 +3149,7 @@ mod tests {
                 "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
                 Some("new-room"),
                 None,
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
@@ -3156,7 +3159,7 @@ mod tests {
     fn reanchor_to_new_room_updates_room() {
         let estate = make_estate();
         let d = basic_capture(&estate, "content", "original-room");
-        estate.reanchor(&d.id, Some("new-room"), None).unwrap();
+        estate.reanchor(&d.id, Some("new-room"), None, None).unwrap();
         let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(updated.room, "new-room");
         // Bitmaps unchanged.
@@ -3170,7 +3173,7 @@ mod tests {
         let estate = make_estate();
         let d = basic_capture(&estate, "content", "room-x");
         estate
-            .reanchor(&d.id, None, Some(LatticeAnchor::udc("003.000")))
+            .reanchor(&d.id, None, None, Some(LatticeAnchor::udc("003.000")))
             .unwrap();
         let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(updated.udc_code, "003.000");

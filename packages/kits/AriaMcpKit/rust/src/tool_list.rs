@@ -239,11 +239,12 @@ fn confirm_memory_tool() -> serde_json::Value {
 fn move_memory_tool() -> serde_json::Value {
     json!({
         "name": "moot_move_memory",
-        "description": "Move a memory to a different location in the estate.",
+        "description": "Move a memory to a different location within the estate (reanchor). Supports cross-wing moves via the optional `wing` argument.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "id": string_schema("UUID of the memory to move."),
-                "location": string_schema("New location path: wing/room or just room.")
+                "location": string_schema("New location hint (free-form string; server resolves to room coordinate)."),
+                "wing": string_schema("Optional target wing name for cross-wing moves (ADR-016). When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\".")
             }),
             json!(["id", "location"])
         )))

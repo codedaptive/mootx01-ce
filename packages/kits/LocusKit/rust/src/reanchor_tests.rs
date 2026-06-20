@@ -74,7 +74,7 @@ mod tests {
 
         estate
             .store
-            .reanchor_gated(&d.id, Some("room-new"), None, "test", None, 1_700_000_500)
+            .reanchor_gated(&d.id, Some("room-new"), None, None, "test", None, 1_700_000_500)
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
@@ -93,7 +93,7 @@ mod tests {
 
         estate
             .store
-            .reanchor_gated(&d.id, Some("room-moved"), None, "test", None, 1_700_000_500)
+            .reanchor_gated(&d.id, Some("room-moved"), None, None, "test", None, 1_700_000_500)
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
@@ -119,7 +119,7 @@ mod tests {
         };
         estate
             .store
-            .reanchor_gated(&d.id, None, Some(new_anchor), "test", None, 1_700_000_500)
+            .reanchor_gated(&d.id, None, None, Some(new_anchor), "test", None, 1_700_000_500)
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
@@ -143,6 +143,7 @@ mod tests {
             .store
             .reanchor_gated(
                 &d.id,
+                None,
                 None,
                 Some(LatticeAnchor::udc("003.000")),
                 "test",
@@ -170,7 +171,7 @@ mod tests {
 
         estate
             .store
-            .reanchor_gated(&d.id, Some("room-b"), None, "test", None, 1_700_000_500)
+            .reanchor_gated(&d.id, Some("room-b"), None, None, "test", None, 1_700_000_500)
             .unwrap();
 
         let count_after = audit_event_count(estate.store.as_ref(), &d.id);
@@ -189,6 +190,7 @@ mod tests {
                 ID_ABSENT,
                 Some("new-room"),
                 None,
+                None,
                 "test",
                 None,
                 1_700_000_100,
@@ -205,7 +207,7 @@ mod tests {
     fn estate_reanchor_empty_args_returns_invalid_content() {
         let estate = make_estate();
         let d = basic_capture(&estate, "empty guard", "room-a", "000");
-        let err = estate.reanchor(&d.id, None, None).unwrap_err();
+        let err = estate.reanchor(&d.id, None, None, None).unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
     }
 
@@ -213,7 +215,7 @@ mod tests {
     fn estate_reanchor_nonexistent_row_returns_not_found() {
         let estate = make_estate();
         let err = estate
-            .reanchor(ID_ABSENT, Some("new-room"), None)
+            .reanchor(ID_ABSENT, Some("new-room"), None, None)
             .unwrap_err();
         assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
     }
@@ -223,7 +225,7 @@ mod tests {
         let estate = make_estate();
         let d = basic_capture(&estate, "room move via estate", "original-room", "000");
 
-        estate.reanchor(&d.id, Some("moved-room"), None).unwrap();
+        estate.reanchor(&d.id, Some("moved-room"), None, None).unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.room, "moved-room");
@@ -235,7 +237,7 @@ mod tests {
         let d = basic_capture(&estate, "lattice via estate", "room-x", "000");
 
         estate
-            .reanchor(&d.id, None, Some(LatticeAnchor::udc("003.000")))
+            .reanchor(&d.id, None, None, Some(LatticeAnchor::udc("003.000")))
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
@@ -250,7 +252,7 @@ mod tests {
         let before_op = d.operational_bitmap;
         let before_prov = d.provenance;
 
-        estate.reanchor(&d.id, Some("new-room"), None).unwrap();
+        estate.reanchor(&d.id, Some("new-room"), None, None).unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.adjective_bitmap, before_adj);
@@ -266,7 +268,7 @@ mod tests {
         assert_eq!(count_before, 1); // genesis
 
         estate
-            .reanchor(&d.id, Some("audit-moved-room"), None)
+            .reanchor(&d.id, Some("audit-moved-room"), None, None)
             .unwrap();
 
         let count_after = audit_event_count(estate.store.as_ref(), &d.id);
@@ -279,11 +281,28 @@ mod tests {
         let d = basic_capture(&estate, "both fields via estate", "room-a", "100");
 
         estate
-            .reanchor(&d.id, Some("room-b"), Some(LatticeAnchor::udc("200")))
+            .reanchor(&d.id, Some("room-b"), None, Some(LatticeAnchor::udc("200")))
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.room, "room-b");
         assert_eq!(after.udc_code, "200");
+    }
+
+    #[test]
+    fn estate_reanchor_to_wing_updates_wing() {
+        // Bug J regression: reanchor must update the wing column when to_wing is supplied.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "wing move via estate", "origin-room", "000");
+        let original_wing = d.wing.clone();
+
+        estate
+            .reanchor(&d.id, Some("target-room"), Some("TargetWing"), None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(after.wing, "TargetWing", "wing must be updated by reanchor");
+        assert_eq!(after.room, "target-room", "room must also be updated");
+        assert_ne!(after.wing, original_wing, "wing must differ from original");
     }
 }

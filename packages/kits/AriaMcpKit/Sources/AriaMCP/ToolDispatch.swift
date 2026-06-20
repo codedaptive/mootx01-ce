@@ -1234,14 +1234,23 @@ extension ToolDispatcher {
     ///
     /// The caller provides a free-form `location` hint; the server maps it
     /// to the substrate's `toRoom` field (same convention as `moot_file_memory`).
+    /// An optional `wing` argument triggers a cross-wing move, reanchoring the
+    /// drawer into the named wing. When `wing` is omitted, the drawer stays in
+    /// its current wing and only the room changes (existing behavior, unchanged).
     func runMoveMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
         let location = try requireString(args, "location")
+        // ADR-016 §3: optional `wing` moves the drawer into a different wing.
+        // When absent, the drawer stays in its current wing — room-only move.
+        let wing = try optionalString(args["wing"], argument: "wing")
         // Note usage: moving a surfaced drawer means the user acted on it.
         await noteUsage(rowID, handle: handle)
-        // location maps to room; no UDC change at this surface layer.
-        try await kit.reanchor(handle, ReanchorFrame(rowID: rowID, toRoom: location, toLattice: nil))
+        // location maps to toRoom; wing (when provided) triggers a cross-wing move.
+        try await kit.reanchor(handle, ReanchorFrame(rowID: rowID, toRoom: location, toWing: wing, toLattice: nil))
+        if let wing {
+            return Self.textResult("moved memory \(rowID) to \(wing)/\(location)")
+        }
         return Self.textResult("moved memory \(rowID) to \(location)")
     }
 }

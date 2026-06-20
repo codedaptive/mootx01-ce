@@ -519,6 +519,7 @@ pub trait DrawerStore: Send + Sync {
         &self,
         _drawer_id: &str,
         _to_room: Option<&str>,
+        _to_wing: Option<&str>,
         _to_lattice: Option<crate::estate_types::LatticeAnchor>,
         _changed_by: &str,
         _reason: Option<&str>,
@@ -1528,12 +1529,13 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         &self,
         drawer_id: &str,
         to_room: Option<&str>,
+        to_wing: Option<&str>,
         to_lattice: Option<crate::estate_types::LatticeAnchor>,
         changed_by: &str,
         reason: Option<&str>,
         now: i64,
     ) -> Result<(), LocusKitError> {
-        self.as_ref().reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
+        self.as_ref().reanchor_gated(drawer_id, to_room, to_wing, to_lattice, changed_by, reason, now)
     }
     fn add_tunnel(&self, tunnel: &Tunnel) -> Result<(), LocusKitError> {
         self.as_ref().add_tunnel(tunnel)

@@ -797,12 +797,22 @@ fn run_move_memory(
     let estate = registry.resolve(args, "estateID")?;
     let id = require_string(args, "id")?;
     let location = require_string(args, "location")?;
+    // ADR-016 §3: optional `wing` triggers a cross-wing move.
+    // When absent, only the room changes and the wing stays unchanged.
+    let wing = optional_string(args, "wing")?;
 
     // Note usage: moving a surfaced drawer means the user acted on it.
     note_usage(id, &estate, ledger);
     let coord = estate.coord.lock().unwrap();
-    match coord.reanchor(&estate.handle, id, Some(location), None) {
-        Ok(()) => Ok(text_result(&format!("moved memory {id} to {location}"))),
+    match coord.reanchor(&estate.handle, id, Some(location), wing, None) {
+        Ok(()) => {
+            let msg = if let Some(w) = wing {
+                format!("moved memory {id} to {w}/{location}")
+            } else {
+                format!("moved memory {id} to {location}")
+            };
+            Ok(text_result(&msg))
+        }
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
