@@ -937,9 +937,13 @@ extension ToolDispatcher {
         // background). True = inline-encode before returning.
         let impatient = try optionalBool(args["impatient"], argument: "impatient") ?? false
         let mode: WriteMode = impatient ? .impatient : .regular
+        // ADR-016 §3: optional `wing` argument routes this memory into a specific wing.
+        // When supplied, the drawer files into that wing.
+        // When absent, defaults to LocusKit.defaultWingName ("Agentic Memory") — the AI's
+        // working memory wing. `location` maps to room only and never encodes a wing.
+        let wing: String? = try optionalString(args["wing"], argument: "wing") ?? LocusKit.defaultWingName
         // location is a caller-facing subject-matter hint; map it to the
-        // room field (structural coordinate). Wing defaults to "memories";
-        // future routing logic can refine this per estate topology.
+        // room field (structural coordinate) only.
         let room = location
         // Pass the unclassified sentinel anchor to the capture seam. The seam
         // (GeniusLocusKit.capture(_:_:mode:)) classifies the content via
@@ -959,7 +963,8 @@ extension ToolDispatcher {
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             eventTime: eventTime,
-            exportability: exportability
+            exportability: exportability,
+            wing: wing
         )
         // Mode-aware capture: regular enqueues the encode job (background
         // semantic indexing); impatient encodes inline before returning.
@@ -987,7 +992,14 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let query = try requireString(args, "query")
         let rawLimit = try optionalInt(args["limit"], argument: "limit") ?? 20
-        let filterChain = try decodeFilterChain(args["filter"])
+        // Build the base filter chain from the `filter` argument.
+        var filterChain = try decodeFilterChain(args["filter"])
+        // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
+        // When absent, recall spans all wings (existing default behavior unchanged).
+        // Appended to the filter chain so it composes with any explicit filter.
+        if let wingName = try optionalString(args["wing"], argument: "wing") {
+            filterChain.append(.inWing(wingName))
+        }
         let explain = try optionalBool(args["explain"], argument: "explain") ?? false
         // Decode optional `scoring`. Absent keeps the documented default
         // (matrixAware). An unknown NON-EMPTY string is a client error and
@@ -1627,23 +1639,53 @@ extension ToolDispatcher {
     }
 
     /// `moot_estate_map` — return the estate's structural map with memory counts.
+    ///
+    /// ADR-016 §3: each wing's charter drawer (room `_charter`) is surfaced
+    /// inline after the wing header so callers can orient to each wing's role
+    /// without a separate lookup. Charter drawers are excluded from the per-room
+    /// counts so the map stays a structural index, not a content dump.
     func runEstateMap(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
         let active = drawers.filter { $0.tombstonedAt == nil }
-        // Group by wing then room, counting drawers per location.
+
+        // Build a per-wing charter map: wing → charter text (from the `_charter` room).
+        // A wing may have been created without a charter drawer (e.g. user-defined wings
+        // pre-ADR-016); in that case the charter entry is absent and no inline text is shown.
+        var charters: [String: String] = [:]
+        for d in active where d.room == LocusKit.charterRoom {
+            // Only record the first charter drawer found per wing; duplicates are ignored.
+            if charters[d.wing] == nil {
+                charters[d.wing] = d.content
+            }
+        }
+
+        // Group by wing then room, counting non-charter drawers per location.
+        // Charter drawers are excluded from counts (they are structural metadata,
+        // not user-filed memories; surfacing them in counts would inflate the map).
         var map: [String: [String: Int]] = [:]
-        for d in active {
+        for d in active where d.room != LocusKit.charterRoom {
             map[d.wing, default: [:]][d.room, default: 0] += 1
         }
+
         var lines: [String] = ["estate map: \(handle.estateName)"]
         for wing in map.keys.sorted() {
             lines.append("  \(wing)/")
+            // Surface the wing's charter inline so the caller understands its role.
+            if let charter = charters[wing] {
+                lines.append("    charter: \(charter)")
+            }
             for room in (map[wing] ?? [:]).keys.sorted() {
                 let count = map[wing]?[room] ?? 0
                 lines.append("    \(room): \(count)")
             }
+        }
+        // Also surface wings that have a charter but no non-charter drawers yet.
+        // These are newly seeded wings with no user content — still useful to show.
+        for wing in charters.keys.sorted() where map[wing] == nil {
+            lines.append("  \(wing)/")
+            lines.append("    charter: \(charters[wing]!)")
         }
         return Self.textResult(lines.joined(separator: "\n"))
     }

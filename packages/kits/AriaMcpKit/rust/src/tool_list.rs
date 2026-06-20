@@ -146,7 +146,8 @@ fn file_memory_tool() -> serde_json::Value {
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "content": string_schema("Verbatim content to file."),
-                "location": string_schema("Location path: wing/room or just room. Wing defaults to 'memories'."),
+                "location": string_schema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
+                "wing": string_schema("Optional wing name to route this memory into a specific wing (ADR-016). When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                 "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
                 "exportability": string_schema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Omit to use the default; null is invalid."),
                 "kind": string_schema("Content kind: prose (default), code, transcript, list, structuredJSON, imageCaption, fingerprintOnly. Omit to use the default; null is invalid."),
@@ -167,6 +168,7 @@ fn memory_search_tool() -> serde_json::Value {
                 "query": string_schema("Natural-language search query."),
                 "limit": integer_schema("Max results to return (default 20). Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
+                "wing": string_schema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                 "explain": boolean_schema("Include scoring explanation (default false). Omit to use the default; null is invalid."),
                 "scoring": string_schema("Scoring mode: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
@@ -401,7 +403,7 @@ fn estate_status_tool() -> serde_json::Value {
 fn estate_map_tool() -> serde_json::Value {
     json!({
         "name": "moot_estate_map",
-        "description": "Return the estate wing/room taxonomy tree grouped by location.",
+        "description": "Return the estate's structural map: all wings and rooms, with memory counts per location. Each wing's charter (its role description, seeded at provision per ADR-016) is shown inline so you can orient to the estate's provenance structure at a glance.",
         "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
     })
 }
@@ -533,7 +535,8 @@ fn recall_precise_tool() -> serde_json::Value {
                 "limit": integer_schema("Max ranked matches to return. Default 20."),
                 "pool": integer_schema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit."),
                 "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, dense-fused, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
-                "filter": filter_schema()
+                "filter": filter_schema(),
+                "wing": string_schema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!(["query"])
         )))
@@ -572,7 +575,8 @@ fn recall_shaped_tool() -> serde_json::Value {
                     "enum": preset_enum
                 },
                 "limit": integer_schema("Max ranked matches to return. Default 20."),
-                "filter": filter_schema()
+                "filter": filter_schema(),
+                "wing": string_schema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!(["query"])
         )))

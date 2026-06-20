@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
+    default_wings::{CHARTER_ROOM, DEFAULT_WING_NAME},
     estate_types::LatticeAnchor,
     filter::RecallFrame,
     frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
@@ -331,13 +332,13 @@ pub fn dispatch(
 
 /// File a memory into the estate. Requires `content` and `location`.
 ///
-/// `location` maps to `room`; wing is derived by the estate from its manifest
-/// owner identifier. Server owns infrastructure fields (channel, lattice,
-/// added_by, embeddingModelID). The lattice anchor sentinel is passed to the
-/// GeniusLocusKit capture seam (`capture_with_mode`), which classifies via
-/// `Fdc::encode_anchor` when the sentinel arrives with non-empty content;
-/// UNRESOLVED content keeps the "000" sentinel (one-door principle). Mirrors
-/// Swift `runFileMemory`.
+/// `location` maps to `room`; optional `wing` routes the drawer into a named
+/// wing (ADR-016 §3). When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory").
+/// Server owns infrastructure fields (channel, lattice, added_by, embeddingModelID).
+/// The lattice anchor sentinel is passed to the GeniusLocusKit capture seam
+/// (`capture_with_mode`), which classifies via `Fdc::encode_anchor` when the
+/// sentinel arrives with non-empty content; UNRESOLVED content keeps the "000"
+/// sentinel (one-door principle). Mirrors Swift `runFileMemory`.
 fn run_file_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -384,6 +385,15 @@ fn run_file_memory(
     // Provenance channel: marks this row as MCP-agent-sourced in the provenance
     // bitmap (§2.5). Mirrors Swift's `provenanceChannel: .mcpAgent`.
     frame.provenance_channel = Channel::McpAgent;
+    // ADR-016 §3: optional `wing` argument routes this memory into a specific wing.
+    // When supplied, the drawer files into that wing.
+    // When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory") — the AI's
+    // working memory wing. Mirrors Swift runFileMemory wing routing.
+    frame.wing = Some(
+        optional_string(args, "wing")?
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| DEFAULT_WING_NAME.to_string()),
+    );
     // Optional back-dated event time. When supplied, the drawer's event_time
     // is set to the caller's ISO8601 instant (epoch seconds) instead of the
     // ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory which
@@ -509,7 +519,14 @@ fn run_memory_search(
     // preview in the search result requires the content blob. Structured
     // hydration (the RecallFrame default) strips content blobs and would
     // render every result as an empty-content preview.
-    let mut frame = RecallFrame::new(decode_filter_chain(args)?);
+    let mut filter_chain = decode_filter_chain(args)?;
+    // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
+    // When absent, recall spans all wings (existing default behavior unchanged).
+    // Appended to the filter chain so it composes with any explicit filter arg.
+    if let Some(wing_name) = optional_string(args, "wing")? {
+        filter_chain.push(locus_kit::filter::Filter::InWing(wing_name.to_string()));
+    }
+    let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 
     // B-10a: mark as external so the coordinator writes recall-trace rows for
@@ -1386,28 +1403,61 @@ fn run_estate_map(
         .map(|m| m.estate_name)
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Full hydration required so charter drawer content bodies are available.
+    // The default Structured hydration uses a no-blob projection that zeroes the
+    // content field — charter text would be empty. Full forces the blob load.
+    // Mirrors Swift runEstateMap which uses estate.allDrawers() (always full).
+    let mut map_frame = RecallFrame::new(vec![]);
+    map_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .recall(&estate.handle, map_frame, now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    // Group by wing then room.
+    // Build a per-wing charter map: wing → charter text (from CHARTER_ROOM drawers).
+    // ADR-016 §3: each wing's charter is surfaced inline so callers can orient to each
+    // wing's role without a separate lookup. The first charter drawer per wing wins;
+    // user-defined wings without a charter drawer show no inline text.
+    let mut charters: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for d in &drawers {
+        if d.room == CHARTER_ROOM && !charters.contains_key(d.wing.as_str()) {
+            charters.insert(d.wing.as_str(), d.content.as_str());
+        }
+    }
+
+    // Group by wing then room, counting NON-charter drawers per location.
+    // Charter drawers are excluded from counts — they are structural metadata,
+    // not user-filed memories, mirroring Swift runEstateMap (ADR-016 §3).
     let mut tree: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, usize>> =
         std::collections::BTreeMap::new();
     for d in &drawers {
-        *tree
-            .entry(d.wing.as_str())
-            .or_default()
-            .entry(d.room.as_str())
-            .or_insert(0) += 1;
+        if d.room != CHARTER_ROOM {
+            *tree
+                .entry(d.wing.as_str())
+                .or_default()
+                .entry(d.room.as_str())
+                .or_insert(0) += 1;
+        }
     }
 
     // Header mirrors Swift runEstateMap: "estate map: estateName" (not a raw count).
-    // The per-room counts in the body enumerate the currently-believed drawers.
+    // Per-room counts enumerate non-charter drawers; charter text shown inline per wing.
     let mut lines = vec![format!("estate map: {estate_name}")];
     for (wing, rooms) in &tree {
         lines.push(format!("  {wing}/"));
+        // Surface the wing's charter inline per ADR-016 §3.
+        if let Some(charter) = charters.get(wing) {
+            lines.push(format!("    charter: {charter}"));
+        }
         for (room, count) in rooms {
             lines.push(format!("    {room}: {count}"));
+        }
+    }
+    // Also surface wings that have a charter but no non-charter drawers yet —
+    // newly seeded wings with no user content. Mirrors Swift runEstateMap.
+    for (wing, charter) in &charters {
+        if !tree.contains_key(wing) {
+            lines.push(format!("  {wing}/"));
+            lines.push(format!("    charter: {charter}"));
         }
     }
     Ok(text_result(&lines.join("\n")))

@@ -4071,3 +4071,228 @@ fn non_gate_error_does_not_produce_gate_rejection_phrase() {
         "non-gate error must not look like gate rejection; got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-016 Wings SURFACE lane — estate_map charters + recall wing scoping
+//
+// Change 2: estate_map surfaces each wing's charter inline.
+// Change 3: memory_search / recall_precise / recall_shaped accept optional
+//           `wing` argument that scopes recall to a single wing.
+//
+// Change 1 (file_memory wing routing) is NOT tested — blocked because
+// CaptureFrame has no `wing` field (requires LocusKit change, out of scope).
+// ---------------------------------------------------------------------------
+
+// MARK: – Change 2: estate_map charters
+
+/// `moot_estate_map` must surface a charter for any wing that has a drawer
+/// in the `_charter` room. We seed one manually (filing a memory to location
+/// "_charter") and verify the map includes "charter:" inline for that wing.
+/// The default wing for all captures is "Agentic Memory" (ADR-016).
+#[test]
+fn estate_map_surfaces_charter_inline_for_seeded_wing() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // File a memory into the `_charter` room for the "Agentic Memory" wing.
+    // The MCP surface maps `location` to `room`; all captures land in
+    // defaultWingName ("Agentic Memory"). This seeds the charter entry.
+    let a = args![
+        "content" => "The AI's own observations, inferences, decisions, session learnings.",
+        "location" => "_charter"
+    ];
+    let file_result = dispatch_tool("moot_file_memory", &a, &registry, &ledger)
+        .expect("file_memory to _charter room must succeed");
+    assert!(
+        is_success(&file_result),
+        "filing a charter memory must succeed; got: {file_result:?}"
+    );
+
+    // Run estate_map — must include "charter:" inline for the Agentic Memory wing.
+    let result = dispatch_tool("moot_estate_map", &args![], &registry, &ledger)
+        .expect("estate_map must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+
+    assert!(
+        text.contains("charter:"),
+        "estate_map must include 'charter:' for a wing with a _charter drawer; got: {text}"
+    );
+    assert!(
+        text.contains("observations"),
+        "estate_map must show the charter text inline; got: {text}"
+    );
+}
+
+/// `moot_estate_map` must NOT surface `_charter` as a room count line.
+/// The reserved room is inlined as "charter: <text>", not as "_charter: N".
+#[test]
+fn estate_map_excludes_charter_room_from_room_counts() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Seed a charter drawer.
+    let a = args![
+        "content" => "Wing role description",
+        "location" => "_charter"
+    ];
+    dispatch_tool("moot_file_memory", &a, &registry, &ledger)
+        .expect("file_memory to _charter room must succeed");
+
+    let result = dispatch_tool("moot_estate_map", &args![], &registry, &ledger)
+        .expect("estate_map must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+
+    // The `_charter` room must not appear as a room count entry.
+    assert!(
+        !text.contains("_charter:"),
+        "estate_map must not surface `_charter` as a room count line; got: {text}"
+    );
+}
+
+// MARK: – Change 3: recall wing scoping — moot_memory_search
+
+/// `moot_memory_search` without a `wing` arg must succeed unchanged.
+/// Confirms the default path (no wing filter) is unbroken after the change.
+#[test]
+fn memory_search_without_wing_succeeds_unchanged() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    file_one_memory(&registry, "arctic fox camouflage snow winter survival", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "arctic fox"],
+        &registry,
+        &ledger,
+    ).expect("memory_search must not throw");
+    assert!(
+        is_success(&result),
+        "memory_search without wing must succeed; got: {result:?}"
+    );
+}
+
+/// `moot_memory_search` with `wing` = "Agentic Memory" must succeed.
+/// Captures land in defaultWingName ("Agentic Memory"), so the scoped
+/// search must not error.
+#[test]
+fn memory_search_scoped_to_default_wing_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    file_one_memory(&registry, "bald eagle nest riverine habitat territory", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "bald eagle", "wing" => "Agentic Memory"],
+        &registry,
+        &ledger,
+    ).expect("memory_search with wing must not throw");
+    assert!(
+        is_success(&result),
+        "memory_search scoped to 'Agentic Memory' must succeed; got: {result:?}"
+    );
+}
+
+/// `moot_memory_search` scoped to an empty wing must succeed (no error).
+/// An empty result is a valid answer — the wing filter is not an error.
+#[test]
+fn memory_search_scoped_to_empty_wing_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    // Content lands in "Agentic Memory". "Source Corpus" has no captures.
+    file_one_memory(&registry, "grey wolf pack hierarchy social structure", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "grey wolf", "wing" => "Source Corpus"],
+        &registry,
+        &ledger,
+    ).expect("memory_search on empty wing must not throw");
+    assert!(
+        is_success(&result),
+        "memory_search scoped to an empty wing must succeed (not error); got: {result:?}"
+    );
+}
+
+// MARK: – Change 3: recall wing scoping — moot_recall_precise
+
+/// `moot_recall_precise` without `wing` must succeed unchanged.
+#[test]
+fn recall_precise_without_wing_succeeds_unchanged() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    file_one_memory(&registry, "black bear foraging berry season omnivore", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_recall_precise",
+        &args!["query" => "black bear", "filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    ).expect("recall_precise must not throw");
+    assert!(
+        is_success(&result),
+        "recall_precise without wing must succeed; got: {result:?}"
+    );
+}
+
+/// `moot_recall_precise` with `wing` = "Agentic Memory" must succeed.
+/// The wing filter is composed with the base filter via Filter::All.
+#[test]
+fn recall_precise_with_wing_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    file_one_memory(&registry, "mountain lion cougar puma altitude range stealth", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_recall_precise",
+        &args!["query" => "mountain lion", "filter" => "unconfirmed", "wing" => "Agentic Memory"],
+        &registry,
+        &ledger,
+    ).expect("recall_precise with wing must not throw");
+    assert!(
+        is_success(&result),
+        "recall_precise scoped to 'Agentic Memory' must succeed; got: {result:?}"
+    );
+}
+
+// MARK: – Change 3: recall wing scoping — moot_recall_shaped
+
+/// `moot_recall_shaped` without `wing` must succeed unchanged.
+#[test]
+fn recall_shaped_without_wing_succeeds_unchanged() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    file_one_memory(&registry, "wolverine boreal forest solitary wide range", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "wolverine", "filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    ).expect("recall_shaped must not throw");
+    assert!(
+        is_success(&result),
+        "recall_shaped without wing must succeed; got: {result:?}"
+    );
+}
+
+/// `moot_recall_shaped` with `wing` = "Agentic Memory" must succeed.
+/// The wing filter is composed with the base filter via Filter::All.
+#[test]
+fn recall_shaped_with_wing_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    file_one_memory(&registry, "snowy owl arctic tundra silent flight prey", "wildlife");
+
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "snowy owl", "filter" => "unconfirmed", "wing" => "Agentic Memory"],
+        &registry,
+        &ledger,
+    ).expect("recall_shaped with wing must not throw");
+    assert!(
+        is_success(&result),
+        "recall_shaped scoped to 'Agentic Memory' must succeed; got: {result:?}"
+    );
+}

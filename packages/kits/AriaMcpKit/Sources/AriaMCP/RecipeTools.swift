@@ -147,6 +147,7 @@ enum RecipeTools {
                     ]),
                     "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid. Composes orthogonally with the preset — the preset ranks, the filter filters."),
+                    "wing": stringSchema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -209,6 +210,7 @@ enum RecipeTools {
                     "pool": integerSchema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit. Omit to use the default; null is invalid."),
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
+                    "wing": stringSchema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -555,7 +557,16 @@ enum RecipeTools {
         // Default coarse pool is CognitionKit's own default (30); honour an
         // explicit override. The recipe clamps pool >= limit internally.
         let pool = try optionalInt(args["pool"], argument: "pool") ?? CognitionKit.PreciseRecall.defaultPool
-        let filter = try decodeSingleFilter(args["filter"])
+        // ADR-016 §4: optional `wing` scopes recall to a single wing.
+        // When present, compose with the explicit filter via Filter.all so both
+        // constraints apply. When absent, the filter arg stands alone.
+        let baseFilter = try decodeSingleFilter(args["filter"])
+        let filter: LocusKit.Filter
+        if let wingName = try optionalString(args["wing"], argument: "wing") {
+            filter = .all([baseFilter, .inWing(wingName)])
+        } else {
+            filter = baseFilter
+        }
         // The ablation selector: a named reduction composition.
         //   Absent  → nil → the recipe's default (`text`); absence ≠ unknown.
         //   Present → validated against the grid; unknown name → fail closed
@@ -655,7 +666,15 @@ enum RecipeTools {
         let query = try requireString(args, "query")
         // 20 is moot_memory_search's own default limit; keep parity.
         let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
-        let filter = try decodeSingleFilter(args["filter"])
+        // ADR-016 §4: optional `wing` scopes recall to a single wing.
+        // When present, compose with the explicit filter via Filter.all.
+        let baseFilter = try decodeSingleFilter(args["filter"])
+        let filter: LocusKit.Filter
+        if let wingName = try optionalString(args["wing"], argument: "wing") {
+            filter = .all([baseFilter, .inWing(wingName)])
+        } else {
+            filter = baseFilter
+        }
 
         // The steering selector: a named RecallShape preset.
         //   Absent  → "balanced" → the unsteered default; absence ≠ unknown.

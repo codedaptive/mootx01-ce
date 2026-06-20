@@ -258,6 +258,7 @@ fn run_precise_recall_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    use locus_kit::filter::Filter;
     let estate = registry.resolve(args, "estateID")?;
     let query = require_string(args, "query")?;
     // 20 is moot_memory_search's own default limit; keep parity.
@@ -269,7 +270,14 @@ fn run_precise_recall_tool(
     let pool = optional_integer(args, "pool")?
         .map(|i| i as usize)
         .unwrap_or(PRECISE_DEFAULT_POOL);
-    let filter = decode_precise_filter(args)?;
+    // ADR-016 §4: optional `wing` scopes recall to a single wing.
+    // When present, compose with the explicit filter via Filter::All.
+    // When absent, the base filter stands alone (existing behavior unchanged).
+    let base_filter = decode_precise_filter(args)?;
+    let filter = match optional_string(args, "wing")? {
+        Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
+        None => base_filter,
+    };
 
     // The ablation selector: a named reduction composition. Absent ⇒ None ⇒ the
     // recipe's default (`text`). Present-but-unknown ⇒ fail closed at the
@@ -369,13 +377,20 @@ fn run_shaped_recall_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    use locus_kit::filter::Filter;
     let estate = registry.resolve(args, "estateID")?;
     let query = require_string(args, "query")?;
     // 20 is moot_memory_search's own default limit; keep parity.
     let limit = optional_integer(args, "limit")?
         .map(|i| i as usize)
         .unwrap_or(20);
-    let filter = decode_precise_filter(args)?;
+    // ADR-016 §4: optional `wing` scopes recall to a single wing.
+    // When present, compose with the explicit filter via Filter::All.
+    let base_filter = decode_precise_filter(args)?;
+    let filter = match optional_string(args, "wing")? {
+        Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
+        None => base_filter,
+    };
 
     // The steering selector: a named RecallShape preset. Absent ⇒ "balanced"
     // (unsteered default). Present-but-unknown ⇒ fail closed at the boundary (the

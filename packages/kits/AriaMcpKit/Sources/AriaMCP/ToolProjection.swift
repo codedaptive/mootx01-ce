@@ -136,7 +136,8 @@ public enum ToolProjection {
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "content": stringSchema("The text content to remember."),
-                        "location": stringSchema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Used for retrieval organisation."),
+                        "location": stringSchema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
+                        "wing": stringSchema("Optional wing name to route this memory into a specific wing (ADR-016). When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                         "sensitivity": stringSchema("Optional sensitivity: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
                         "exportability": stringSchema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Use moot_update_memory with mutation=correctExportability(public) to promote an existing private memory. Drawers born public are immediately returned by filter:exportable searches. Omit to use the default; null is invalid."),
                         "kind": stringSchema("Optional content kind: prose (default), code, transcript, list, structuredJSON, imageCaption. Omit to use the default; null is invalid."),
@@ -155,6 +156,7 @@ public enum ToolProjection {
                         "query": stringSchema("Natural-language search query."),
                         "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
                         "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. null is invalid."),
+                        "wing": stringSchema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                         "explain": booleanSchema("Return per-hit explanation blocks when true. Omit to use the default; null is invalid."),
                         "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
@@ -371,7 +373,7 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_estate_map",
-                description: "Return the estate's structural map: all wings and rooms, with memory counts per location.",
+                description: "Return the estate's structural map: all wings and rooms, with memory counts per location. Each wing's charter (its role description, seeded at provision per ADR-016) is shown inline so you can orient to the estate's provenance structure at a glance.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [:],
                     required: []
