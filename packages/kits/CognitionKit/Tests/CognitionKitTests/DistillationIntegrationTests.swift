@@ -48,7 +48,8 @@ struct DistillationIntegrationTests {
     // capitalized position so defaultExtractor extracts the same entity from
     // every sentence. Recurrence across the item's own sentences drives
     // docFrequency=1.0 → confidence=1.0 → a factoid is produced. The item is
-    // segmented into M=5 sentences (src=5 in the DIST header).
+    // segmented into M=5 sentences for the incidence matrix; however src= in the
+    // DIST header records sourceIDs.count = 1 (the single source memory), not M.
     private static let itemBody: String =
         "Records exist. The Provenance record confirms zero. " +
         "The Provenance record confirms one. The Provenance record confirms two. " +
@@ -267,8 +268,12 @@ struct DistillationIntegrationTests {
             // confidence=1.0 is expected from the single-feature (Provenance) cluster.
             #expect(header.confidence > 0.4,
                 "parsed confidence must exceed 0.4 — pipeline gate ensures this")
-            #expect(header.sourceCount == 5,
-                "DIST header src= field must record M = 5 reduction units (the item's sentences)")
+            // src= in the DIST header records the number of SOURCE MEMORIES (sourceIDs.count),
+            // not the sentence count (M). For intra-item distillation there is always exactly
+            // one source memory (the item itself), so sourceCount must be 1. This is the
+            // invariant: sourceCount == number of _distilled_from tunnels == expand returns.
+            #expect(header.sourceCount == 1,
+                "DIST header src= must record source memory count (1 for intra-item), not sentence count")
             #expect(header.deltaType == .static,
                 "identical recurring feature across sentences yields deltaType=STATIC")
 

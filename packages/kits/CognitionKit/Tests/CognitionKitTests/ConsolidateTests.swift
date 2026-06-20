@@ -2,7 +2,7 @@
 //
 // Integration tests for the Consolidate recipe under the INTRA-ITEM model.
 //
-// Test IDs: CK-CO-1 .. CK-CO-7
+// Test IDs: CK-CO-1 .. CK-CO-8
 //
 // Consolidate drives the PER-ITEM sweep GeniusLocusKit.distillItemsSweep:
 // each stored item is reduced from its OWN sentences (intraItem: true). These
@@ -210,5 +210,60 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
 
         #expect(out.factoidsProduced == 0)
+    }
+
+    // CK-CO-8: Source-count invariant — reported src= in the DIST header equals the
+    // number of _distilled_from tunnels, which equals the number of sources expand_memory
+    // returns. For the intra-item model each factoid has exactly ONE source (the item
+    // itself), so the invariant is: sourceCount == 1 == tunnels.count == expand.sources.count.
+    //
+    // This test guards the bug where src=N in the DIST header was set to M (sentence count)
+    // instead of sourceIDs.count (source memory count), causing reported sources: 3/5/N
+    // while expand_memory returned only 1 source.
+    @Test("CK-CO-8: source-count invariant — DIST header src== tunnel count == expand sources count")
+    func sourceCountMatchesTunnelsAndExpand() async throws {
+        let (kit, handle, _, _) = try await openEstateWithVectorStore()
+
+        // Capture one multi-sentence item. The intra-item pipeline runs on its
+        // own sentences; the factoid should link back to this single source.
+        let sourceIDs = try await captureItems(count: 1, body: recurringBody, kit: kit, handle: handle)
+        let sourceID = sourceIDs[0]
+
+        let out = try await runConsolidate(kit: kit, handle: handle)
+        #expect(out.factoidsProduced == 1)
+
+        // Resolve the factoid drawer.
+        let allDrawers = try await kit.allDrawers(in: handle)
+        let factoidDrawer = try #require(
+            allDrawers.first { $0.room == "_distilled" && $0.lineageID.uuidString == sourceID },
+            "one factoid in _distilled whose lineageID == sourceID")
+
+        // 1. DIST header src= must be 1 (one source memory, not sentence count).
+        let factoidContent = try await kit.hydrate(handle, ids: [factoidDrawer.id])
+        let content = try #require(factoidContent[factoidDrawer.id], "factoid must be hydrateable")
+        let header = try #require(DistilledHeader.parse(content), "factoid must have a DIST header")
+        #expect(header.sourceCount == 1,
+            "src= in DIST header must be 1 (sourceIDs.count), not the sentence count")
+
+        // 2. _distilled_from tunnel count must be 1.
+        let allTunnels = try await kit.recallTunnels(handle, wing: LocusKit.defaultWingName)
+        let sourceTunnels = allTunnels.filter {
+            $0.label == "_distilled_from" && $0.sourceDrawerId == factoidDrawer.id
+        }
+        #expect(sourceTunnels.count == 1,
+            "_distilled_from tunnel count must equal sourceIDs.count (1)")
+
+        // 3. expand_memory sources.count must be 1, and sourceCount (from header) must agree.
+        let expandOut = try await ExpandMemory().run(
+            input: ExpandMemory.Input(factoidDrawerID: factoidDrawer.id),
+            estate: handle, kit: kit)
+        #expect(expandOut.sourceCount == 1,
+            "ExpandMemory.Output.sourceCount must equal the DIST header src= value (1)")
+        #expect(expandOut.sources.count == 1,
+            "expand_memory must return exactly 1 source for an intra-item factoid")
+        #expect(expandOut.sourceCount == expandOut.sources.count,
+            "sourceCount (DIST header) must equal sources.count (actual tunnels returned)")
+        #expect(expandOut.sources[0].id == sourceID,
+            "the single expanded source must be the original captured item")
     }
 }

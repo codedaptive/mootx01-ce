@@ -513,7 +513,13 @@ public enum DistillationPipeline {
             .map { $0.display }
             .joined(separator: " ")
 
-        let drawerContent = "[DIST|conf=\(confStr)|src=\(M)|snr=\(snrStr)|delta=\(deltaStr)\(uncertainFlag)] \(prose)"
+        // src= records the number of SOURCE MEMORIES (input.sourceIDs.count), NOT the
+        // number of incidence-matrix rows (M = memoryContents.count). In the cross-memory
+        // cluster model both happen to be equal, but in the intra-item model memoryContents
+        // holds the item's sentences (M ≥ 3) while sourceIDs holds exactly the one source
+        // drawer ID. src= must equal the number of _distilled_from tunnels captureFactoid
+        // writes, which iterates memberDrawers — one per sourceID.
+        let drawerContent = "[DIST|conf=\(confStr)|src=\(input.sourceIDs.count)|snr=\(snrStr)|delta=\(deltaStr)\(uncertainFlag)] \(prose)"
 
         // Feature fingerprint: OR-reduce of featureHash for each selected feature
         let fingerprint = selected.reduce(Fingerprint256.zero) { acc, feature in

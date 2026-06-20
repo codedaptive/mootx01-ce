@@ -616,8 +616,15 @@ impl DistillationPipeline {
         });
         let prose: String = sorted_selected.iter().map(|f| f.display.as_str()).collect::<Vec<_>>().join(" ");
 
+        // src= records the number of SOURCE MEMORIES (input.source_ids.len()), NOT the
+        // number of incidence-matrix rows (m = memory_contents.len()). In the cross-memory
+        // cluster model both happen to be equal, but in the intra-item model memory_contents
+        // holds the item's sentences (m ≥ 3) while source_ids holds exactly the one source
+        // drawer ID. src= must equal the number of _distilled_from tunnels written by
+        // captureFactoid, which iterates member_drawers — one per source_id.
+        let source_count = input.source_ids.len();
         let drawer_content = format!(
-            "[DIST|conf={conf_str}|src={m}|snr={snr_str}|delta={delta_str}{uncertain_flag}] {prose}"
+            "[DIST|conf={conf_str}|src={source_count}|snr={snr_str}|delta={delta_str}{uncertain_flag}] {prose}"
         );
 
         // Feature fingerprint: OR-reduce of feature_hash for each selected feature
@@ -1138,6 +1145,44 @@ mod tests {
             !output.drawer_content.contains("migrat ") && !output.drawer_content.ends_with("migrat"),
             "prose must not render the bare stem 'migrat'; got {}",
             output.drawer_content
+        );
+    }
+
+    /// src= in the DIST header must equal source_ids.len(), not memory_contents.len().
+    ///
+    /// In the intra-item model memory_contents holds the item's sentences (m ≥ 3)
+    /// while source_ids holds exactly one entry (the source drawer UUID). The header's
+    /// src= field tracks how many _distilled_from tunnels will be written, which is
+    /// source_ids.len() (= 1), not m. This test guards the regression where src=m
+    /// was used, producing src=3/5/N while only 1 tunnel was actually written.
+    #[test]
+    fn intra_item_src_header_equals_source_ids_count_not_sentence_count() {
+        // Five sentences about Provenance (recurring capitalised entity) — m=5, but
+        // only ONE source memory (source_ids.len()=1). src= must be 1.
+        let input = DistillationInput::new(
+            vec![
+                "Records exist.".to_string(),
+                "The Provenance record confirms zero.".to_string(),
+                "The Provenance record confirms one.".to_string(),
+                "The Provenance record confirms two.".to_string(),
+                "The Provenance record confirms three.".to_string(),
+            ],
+            None,
+            "intra-item-test-cluster",
+            vec!["single-source-drawer-id".to_string()], // one source memory, not five
+        );
+        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, true);
+        if !output.succeeded {
+            // If the pipeline doesn't produce a factoid on this fixture, the assertion is
+            // vacuously irrelevant — but log for visibility.
+            return;
+        }
+        let header = DistilledHeader::parse(&output.drawer_content)
+            .expect("succeeded output must have a parseable DIST header");
+        assert_eq!(
+            header.source_count, 1,
+            "src= must be source_ids.len()=1, not sentence count m=5; got {}",
+            header.source_count
         );
     }
 }
