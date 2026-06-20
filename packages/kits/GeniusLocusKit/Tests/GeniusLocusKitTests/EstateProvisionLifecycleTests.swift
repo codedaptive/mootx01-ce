@@ -738,3 +738,133 @@ struct EstateProvisionSQLiteTests {
         #expect(sqliteCount == 0)
     }
 }
+
+// MARK: - ADR-016: Default wing seeding at provision
+
+/// T14–T18: ADR-016 §1 + §2 — seven default wings are seeded at provision.
+///
+/// Every provisioned estate (any kind) has seven wings, each carrying a
+/// `_charter` drawer that describes the wing's role. The default wing for
+/// `capture` is "Agentic Memory". Charter drawers carry the "none" embedding
+/// sentinel so they are excluded from the semantic recall pipeline.
+@Suite("ADR-016 — Default Wing Seeding at Provision")
+struct ADR016DefaultWingSeedingTests {
+
+    // MARK: - T14: seven wings present after provision
+
+    /// A freshly provisioned estate exposes exactly 7 distinct wing names —
+    /// the ADR-016 default wing set, drawn from `LocusKit.defaultWings`.
+    @Test
+    func provisionSeedsSevenDistinctWings() async throws {
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
+        defer { Task { try? await kit.close(handle) } }
+
+        let estate = try await kit.estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        let wingNames = Set(allDrawers.map(\.wing))
+
+        let expectedWings = Set(LocusKit.defaultWings.map(\.name))
+        #expect(wingNames == expectedWings,
+            "provision must seed exactly the 7 default wing names; got \(wingNames)")
+    }
+
+    // MARK: - T15: each wing has a _charter drawer
+
+    /// Each of the 7 default wings has exactly one charter drawer in the
+    /// reserved `_charter` room, confirming wings are created by charter filing.
+    @Test
+    func eachDefaultWingHasOneCharterDrawer() async throws {
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
+        defer { Task { try? await kit.close(handle) } }
+
+        let estate = try await kit.estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+
+        #expect(charters.count == LocusKit.defaultWings.count,
+            "must have one charter drawer per default wing; got \(charters.count)")
+
+        // Every default wing name must appear exactly once.
+        for wing in LocusKit.defaultWings {
+            let wingCharters = charters.filter { $0.wing == wing.name }
+            #expect(wingCharters.count == 1,
+                "wing '\(wing.name)' must have exactly 1 charter drawer; got \(wingCharters.count)")
+        }
+    }
+
+    // MARK: - T16: default wing name is "Agentic Memory"
+
+    /// `LocusKit.defaultWingName` is "Agentic Memory" and capture lands there.
+    @Test
+    func defaultWingNameIsAgenticMemory() async throws {
+        #expect(LocusKit.defaultWingName == "Agentic Memory",
+            "defaultWingName must be 'Agentic Memory' per ADR-016 §1")
+
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
+        defer { Task { try? await kit.close(handle) } }
+
+        let frame = CaptureFrame(
+            content: "arbitrary content",
+            channel: .typed,
+            room: "inbox",
+            latticeAnchor: .udc("001"),
+            addedBy: "test",
+            embeddingModelID: "test-v1"
+        )
+        let drawer = try await kit.capture(handle, frame)
+        #expect(drawer.wing == LocusKit.defaultWingName,
+            "capture without explicit wing must land in defaultWingName")
+    }
+
+    // MARK: - T17: charter drawers carry the "none" embedding sentinel
+
+    /// Charter drawers are structural metadata, not semantic content — they
+    /// carry embeddingModelID = "none" so they are excluded from the encode
+    /// pipeline (reindexMissing, enqueueEncodeJob).
+    @Test
+    func charterDrawersCarryNoneEmbeddingSentinel() async throws {
+        let kit = GeniusLocusKit()
+        let storage = makeStorage()
+        let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
+        defer { Task { try? await kit.close(handle) } }
+
+        let estate = try await kit.estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+
+        for charter in charters {
+            #expect(charter.embeddingModelID == LocusKit.charterEmbeddingModelID,
+                "charter drawer for '\(charter.wing)' must have embeddingModelID == 'none'")
+        }
+    }
+
+    // MARK: - T18: seeding works for all estate kinds
+
+    /// Wing seeding is not restricted to GLK estates — locusOnly and
+    /// corpusOnly estates also receive the 7 default wings.
+    @Test
+    func allEstateKindsSeedDefaultWings() async throws {
+        for (name, params) in [
+            ("locus-only", locusOnlyParams()),
+            ("corpus-only", corpusOnlyParams()),
+        ] {
+            let kit = GeniusLocusKit()
+            let storage = makeStorage()
+            let handle = try await kit.provision(storage: storage, owner: testOwner, params: params)
+            defer { Task { try? await kit.close(handle) } }
+
+            let estate = try await kit.estate(for: handle)
+            let allDrawers = try await estate.allDrawers()
+            let wingNames = Set(allDrawers.map(\.wing))
+            let expectedWings = Set(LocusKit.defaultWings.map(\.name))
+            #expect(wingNames == expectedWings,
+                "\(name) provision must seed all 7 default wings; got \(wingNames)")
+        }
+    }
+}

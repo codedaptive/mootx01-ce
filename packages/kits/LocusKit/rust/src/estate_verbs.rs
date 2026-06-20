@@ -41,10 +41,15 @@
 
 use crate::adjectives::{State, Trust};
 use crate::bitmap_evaluator::BitmapEvaluator;
+use crate::default_wings::{
+    CHARTER_ADDED_BY, CHARTER_EMBEDDING_MODEL_ID, CHARTER_ROOM, CHARTER_UDC_CODE,
+    DEFAULT_WING_NAME,
+};
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
 use crate::error::LocusKitError;
 use crate::estate::Estate;
+use crate::estate_types::LatticeAnchor;
 use crate::frames::TunnelCaptureFrame;
 use crate::frames::{AssociateFrame, CaptureFrame, LearnFrame, MutationKind, ProposeFrame};
 use crate::provenance::Confirmation;
@@ -248,20 +253,14 @@ impl Estate {
             6,
         );
 
-        // Derive the default wing from the manifest owner identifier.
-        // The owner field is set at Estate::create time; an empty owner
-        // falls back to "wing_default" so capture never blocks on an
-        // uninitialized manifest.
-        let owner = self
-            .store
-            .read_manifest()
-            .map(|m| m.owner_identifier)
-            .unwrap_or_default();
-        let wing = if owner.is_empty() {
-            "wing_default".to_string()
-        } else {
-            format!("wing_{}", owner)
-        };
+        // ADR-016: when the caller supplies an explicit wing, file the drawer
+        // there; otherwise fall back to the estate default ("Agentic Memory").
+        // The None → DEFAULT_WING_NAME fold keeps all existing callers
+        // byte-identical. Mirrors Swift `frame.wing ?? defaultWing()`.
+        let wing = frame
+            .wing
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WING_NAME.to_string());
 
         // Stamp a lineage id: use the caller's if provided, otherwise fresh.
         let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
@@ -308,6 +307,68 @@ impl Estate {
         ));
         Ok(drawer)
     }
+
+    // -----------------------------------------------------------------------
+    // seed_wing
+    // -----------------------------------------------------------------------
+
+    /// Seed a named wing by writing a charter drawer into the `_charter` room.
+    ///
+    /// ADR-016 §2: wings emerge from `SELECT DISTINCT wing` across drawers —
+    /// there is no wings table. Filing a drawer with `room = "_charter"` in
+    /// a given wing IS the act of creating that wing. This is the only verb
+    /// that writes a drawer with a caller-supplied wing name; all other paths
+    /// through `capture` use `DEFAULT_WING_NAME` unconditionally.
+    ///
+    /// `seed_wing` routes through `DrawerStore::add_drawer` (the same
+    /// structural chokepoint as `capture`) so the container fingerprint OR
+    /// aggregate is maintained. The charter drawer is filed with:
+    /// - `wing`: the supplied `wing_name`
+    /// - `room`: `CHARTER_ROOM` ("_charter")
+    /// - `added_by`: `CHARTER_ADDED_BY` ("estate-provision")
+    /// - `embedding_model_id`: `CHARTER_EMBEDDING_MODEL_ID` ("none")
+    /// - `lattice_anchor`: UDC "001" (Knowledge class — spec I-5)
+    ///
+    /// Idempotent at the business level: re-seeding an already-chartered wing
+    /// adds a second charter drawer, but the seven default wings are seeded
+    /// exactly once at `provision`. GeniusLocusKit's seed loop is the only
+    /// caller in production.
+    ///
+    /// Returns an error if `wing_name` is empty (same guard as Swift
+    /// `seedWing` in `EstateVerbs.swift`).
+    ///
+    /// Mirrors Swift `Estate.seedWing(_:charter:addedBy:now:)`.
+    pub fn seed_wing(
+        &self,
+        wing_name: &str,
+        charter: &str,
+        now: i64,
+    ) -> Result<Drawer, LocusKitError> {
+        if wing_name.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "seed_wing: wing_name must not be empty".to_string(),
+            ));
+        }
+        let drawer_id = Uuid::new_v4().to_string();
+        let lattice_anchor = LatticeAnchor::udc(CHARTER_UDC_CODE);
+        let mut drawer = Drawer::new(
+            drawer_id,
+            charter.to_string(),
+            wing_name.to_string(),
+            CHARTER_ROOM.to_string(),
+            CHARTER_ADDED_BY.to_string(),
+            now,
+            CHARTER_EMBEDDING_MODEL_ID.to_string(),
+        );
+        drawer.udc_code = lattice_anchor.udc_code;
+        drawer.udc_facets = lattice_anchor.udc_facets;
+        // add_drawer maintains the container fingerprint OR aggregate
+        // (spec § 11.5), identical to the capture path. No separate
+        // fingerprint call needed — coverage is structurally guaranteed.
+        self.store.add_drawer(&drawer, now)?;
+        Ok(drawer)
+    }
+
     // -----------------------------------------------------------------------
     // capture (tunnel)
     // -----------------------------------------------------------------------
@@ -2132,11 +2193,14 @@ mod tests {
     }
 
     #[test]
-    fn capture_wing_derived_from_owner() {
+    fn capture_uses_default_wing_name() {
+        // ADR-016: all captures use the fixed DEFAULT_WING_NAME constant
+        // ("Agentic Memory") regardless of the estate's owner identifier.
+        // The prior dynamic derivation ("wing_<owner>" / "wing_default")
+        // is retired.
         let estate = make_estate();
         let drawer = basic_capture(&estate, "x", "r");
-        // Owner is "owner" → wing_owner.
-        assert_eq!(drawer.wing, "wing_owner");
+        assert_eq!(drawer.wing, DEFAULT_WING_NAME);
     }
 
     // --- capture container-fingerprint maintenance (P0-PARITY #33) ---

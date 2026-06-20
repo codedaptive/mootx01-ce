@@ -31,7 +31,7 @@ import PersistenceKitInMemory
 @Suite("ConsolidateTests — on-demand per-item distillation recipe (DC1)")
 struct ConsolidateTests {
 
-    // ownerIdentifier drives wing derivation: wing = "wing_\(ownerID)".
+    // ADR-016: wing is the fixed constant LocusKit.defaultWingName ("Agentic Memory").
     private static let ownerID = "consolidate-test"
     private let t0 = Date(timeIntervalSince1970: 1_750_000_000)
 

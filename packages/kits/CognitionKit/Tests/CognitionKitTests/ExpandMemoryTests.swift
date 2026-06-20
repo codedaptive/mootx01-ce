@@ -18,19 +18,19 @@ import PersistenceKitInMemory
 @Suite("ExpandMemoryTests")
 struct ExpandMemoryTests {
 
-    // ownerIdentifier → wing = "wing_\(ownerID)" per EstateLifecycle convention
+    // ADR-016: wing is the fixed constant LocusKit.defaultWingName ("Agentic Memory").
+    // Tunnels are filed in this wing by Consolidate and captureFactoid.
     private static let ownerID = "expand-memory-test"
-    private static let wing = "wing_\(ownerID)"
+    private static let wing = LocusKit.defaultWingName
 
     private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
         let storage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         let owner = OwnerCredentials(ownerIdentifier: Self.ownerID)
-        // Estate.create stamps ownerIdentifier into the manifest. Estate.open
-        // (called by kit.open) only reads it — without this call the owner
-        // would be the schema default ("") and wing derivation would produce
-        // "wing_" instead of the expected value.
+        // Estate.create must be called before kit.open so that the estate
+        // schema exists in storage. Wing assignment is now driven by the fixed
+        // LocusKit.defaultWingName constant, not the ownerIdentifier.
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner)
         return (kit, handle)

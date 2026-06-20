@@ -153,9 +153,12 @@ public extension Estate {
         )
 
         let now = Date()
+        // ADR-016: when the caller supplies an explicit wing, file the drawer
+        // there; otherwise fall back to the estate default ("Agentic Memory").
+        // The nil → defaultWing() fold keeps all existing callers byte-identical.
         let drawer = Drawer(
             content: frame.content,
-            wing: try await defaultWing(),
+            wing: frame.wing ?? defaultWing(),
             room: frame.room,
             addedBy: frame.addedBy,
             filedAt: now,
@@ -1578,16 +1581,82 @@ public extension Estate {
         return try await store.auditEventCountForRow(uuid)
     }
 
-    /// Default wing name derived from the manifest's owner identifier.
-    /// Used by `capture` when the caller does not pass an explicit
-    /// wing (which is currently always — `CaptureFrame` has no wing
-    /// slot at the MVP milestone; rooms partition within the
-    /// owner-default wing).
+    /// The default wing for `capture` when the caller does not supply an
+    /// explicit wing (which is currently always — `CaptureFrame` has no
+    /// wing slot at the MVP milestone; rooms partition within the default wing).
     ///
-    /// Throws if the manifest cannot be read; the failure surfaces as
-    /// a substrate error rather than a silent default.
-    private func defaultWing() async throws -> String {
-        let owner = try await store.readManifest().ownerIdentifier
-        return "wing_\(owner.isEmpty ? "default" : owner)"
+    /// ADR-016: fixed to `defaultWingName` ("Agentic Memory"), replacing the
+    /// prior dynamic `"wing_<owner>"` derivation. All captures without an
+    /// explicit wing are now filed under "Agentic Memory" regardless of estate
+    /// owner, giving the AI a stable home wing across every estate.
+    ///
+    /// Non-throwing: the name is a compile-time constant; no manifest read needed.
+    private func defaultWing() -> String {
+        return defaultWingName  // "Agentic Memory" — ADR-016
+    }
+
+    // MARK: - seedWing (ADR-016 estate-init seeding primitive)
+
+    /// Seed one wing's charter drawer at estate provision time.
+    ///
+    /// Called by GeniusLocusKit's `provision()` for each of the seven default
+    /// wings (ADR-016 §1 and §2). Files a single drawer at `_charter` room
+    /// in `wingName` with the supplied `charterText` as its content.
+    ///
+    /// Note: `capture(_:)` also supports an explicit wing via `CaptureFrame.wing`
+    /// (ADR-016 follow-up). `seedWing` remains the estate-init path; per-drawer
+    /// wing targeting at capture time is the caller-opt-in path.
+    ///
+    /// Design:
+    /// - Wing names are free-form strings; no "wings" table exists — wings
+    ///   emerge from `SELECT DISTINCT wing` over the drawers table.
+    ///   Filing a charter drawer IS the act of creating the wing.
+    /// - The `_charter` room convention mirrors `_distilled` (DistillationCycle):
+    ///   reserved rooms start with `_` to distinguish system-managed rooms from
+    ///   caller-supplied ones.
+    /// - Idempotent: `DrawerStore.addDrawer` inserts a new row unconditionally.
+    ///   Duplicate seeding (e.g. on an already-provisioned estate) produces a
+    ///   second charter drawer. The caller (GLK provision) is responsible for
+    ///   calling `seedWing` only once per fresh estate.
+    ///
+    /// - Parameters:
+    ///   - wingName: the wing to seed. Must not be empty.
+    ///   - charterText: plain-language role description to file as the charter.
+    ///   - addedBy: audit actor identifier.
+    ///   - now: deterministic write timestamp threaded from the provision call.
+    /// - Throws: `LocusKitError.invalidContent` if `wingName` is empty;
+    ///   substrate errors from the underlying write.
+    public func seedWing(
+        _ wingName: String,
+        charter charterText: String,
+        addedBy: String,
+        now: Date
+    ) async throws {
+        guard !wingName.isEmpty else {
+            throw LocusKitError.invalidContent("seedWing: wingName must not be empty")
+        }
+        // Assemble the charter drawer with exactly the fields that CaptureFrame
+        // translates for ordinary captures, but with an explicit wing name
+        // instead of calling defaultWing(). All bitmaps default to zero; charter
+        // drawers are plain prose without feature flags or adjective overrides.
+        //
+        // UDC "001" (Knowledge) is the canonical code for self-describing /
+        // meta-knowledge drawers per spec I-5 (udcCode must not be empty).
+        // embeddingModelID = "none": charters are seeded before any embedding
+        // model is registered; the estate's semantic lane will encode them on
+        // the next ingest pass. Using "none" as a placeholder is consistent with
+        // other pre-embedding-wiring capture paths.
+        let drawer = Drawer(
+            content: charterText,
+            wing: wingName,
+            room: charterRoom,
+            addedBy: addedBy,
+            filedAt: now,
+            embeddingModelID: charterEmbeddingModelID,
+            udcCode: charterUDCCode
+        )
+        // Route through the covered chokepoint so the container fingerprint
+        // is maintained — same structural guarantee as ordinary capture.
+        try await addDrawerCovered(drawer, now: now)
     }
 }

@@ -162,6 +162,7 @@ fn synthesise_capture(index: i64) -> UnifiedAuditLog {
         sensitivity: 0, // normal
         kind: 0,        // prose
         lineage_id: None,
+        wing: None, // ADR-016: None → estate default ("Agentic Memory")
     };
 
     let mut log = UnifiedAuditLog::new();

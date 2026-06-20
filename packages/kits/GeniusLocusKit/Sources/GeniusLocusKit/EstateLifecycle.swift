@@ -174,6 +174,46 @@ public extension GeniusLocusKit {
         // This validates the manifest, issues the handle, and sets mount state to .mounted.
         let handle = try await open(storage: storage, owner: owner)
 
+        // Step 2b: Seed the seven default wings (ADR-016 §1 and §2).
+        // Each wing gets a `_charter` memory in its reserved `_charter` room so
+        // a fresh agent can orient from the store itself via `estate_map`. Seeded
+        // once at provision with a deterministic `now` threaded from this call.
+        // The `estate(for:)` accessor returns the live LocusKit.Estate actor so
+        // `seedWing` runs inside the actor's serial isolation.
+        //
+        // Implementation note: `wireSubstores` (step 3) wires Corpus + VectorStore
+        // and mounts the encode queue AFTER this step. Charters captured here are
+        // therefore row-only on the first provision pass — the semantic encoding
+        // lane will pick them up on the next encode-drain cycle once the queue is
+        // mounted. This matches the LocusOnly baseline where row-only capture is
+        // fully supported.
+        //
+        // Failure policy: wing seeding is part of provision — if seeding fails
+        // the estate is considered partially provisioned. The estate is closed
+        // and an `underlyingEstateFailure` is thrown so the caller sees the error
+        // rather than silently receiving an un-seeded estate.
+        do {
+            let locusEstate = try estate(for: handle)
+            let provisionNow = Date()
+            for wing in LocusKit.defaultWings {
+                try await locusEstate.seedWing(
+                    wing.name,
+                    charter: wing.charter,
+                    addedBy: LocusKit.charterAddedBy,
+                    now: provisionNow
+                )
+            }
+            Self.lifecycleLog.info(
+                "seeded \(LocusKit.defaultWings.count, privacy: .public) default wings for \(handle.estateUUID, privacy: .public)"
+            )
+        } catch {
+            // Close the half-seeded estate to avoid a zombie in the registry.
+            try? await close(handle)
+            throw GeniusLocusKitError.underlyingEstateFailure(
+                reason: "default wing seeding failed: \(error)"
+            )
+        }
+
         // Step 3: Wire sub-stores based on kind.
         let backingStorage = corpusStorage ?? storage
         do {

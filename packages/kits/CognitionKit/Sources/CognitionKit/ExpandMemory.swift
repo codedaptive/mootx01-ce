@@ -17,6 +17,7 @@
 
 import Foundation
 import GeniusLocusKit
+import LocusKit
 import SubstrateML
 
 // MARK: - ExpandedSource
@@ -130,13 +131,12 @@ public struct ExpandMemory: Recipe {
             throw ExpandError.notADistilledDrawer(id: input.factoidDrawerID)
         }
 
-        // 2. Resolve the estate's wing from its manifest.
-        //    The wing naming convention is "wing_\(ownerIdentifier)", established
-        //    by EstateLifecycle at open time. kit.estate(for:) is actor-isolated
-        //    on GeniusLocusKit (public extension in EstateCoordinator.swift).
-        let locusEstate = try await kit.estate(for: estate)
-        let manifest = try await locusEstate.manifest
-        let wing = "wing_\(manifest.ownerIdentifier)"
+        // 2. Resolve the estate's default wing.
+        //    ADR-016: the default wing is the fixed constant `LocusKit.defaultWingName`
+        //    ("Agentic Memory"). Distilled factoids and their _distilled_from tunnels are
+        //    filed in this wing by Consolidate and captureFactoid. kit.estate(for:) is
+        //    actor-isolated on GeniusLocusKit (public extension in EstateCoordinator.swift).
+        let wing = LocusKit.defaultWingName
 
         // 3. Recall all tunnels in the estate's wing; filter to the outgoing
         //    _distilled_from edges where this factoid is the source.

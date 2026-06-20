@@ -448,34 +448,38 @@ struct CrossEstateFederationTests {
 
     // MARK: - 10. .wing scope narrows to the granted wing (GRANT-SCOPE-P1)
 
-    /// A grant with `.wing("wing_scope-wing")` returns only drawers whose
-    /// `wing` matches the granted name. A drawer injected into a different
+    /// A grant with `.wing(defaultWingName)` returns only drawers whose
+    /// `wing` matches the default wing name. A drawer injected into a different
     /// wing via `captureWithAttributes` is excluded. Tests that the wing
     /// filter is both inclusive (matching drawers pass) and exclusive
     /// (non-matching drawers are dropped).
+    ///
+    /// ADR-016: `defaultWing()` now returns the constant `defaultWingName`
+    /// ("Agentic Memory") for all estates regardless of owner — the grant
+    /// scope must use the same constant.
     @Test
     func scopeWingNarrowsToGrantedWing() async throws {
         let kit = GeniusLocusKit()
-        // Owner identifier "scope-wing" → defaultWing() = "wing_scope-wing".
         let srcOwner = OwnerCredentials(ownerIdentifier: "scope-wing")
         let reqOwner = OwnerCredentials(ownerIdentifier: "scope-wing-req")
         let hB = try await openEstate(in: kit, owner: srcOwner)
         let hA = try await openEstate(in: kit, owner: reqOwner)
 
-        // Drawer in the granted wing (via normal capture → defaultWing).
+        // Drawer in the default wing (via normal capture → defaultWing = defaultWingName).
         let dInWing = try await capture(into: hB, tag: "scope-wing-in", kit: kit)
         // Drawer injected directly into a different wing.
         let dOutWing = try await captureWithAttributes(
             into: hB, wing: "other-wing", room: "r", udcCode: "004",
             tag: "scope-wing-out", kit: kit)
 
-        _ = try await kit.issueGrant(hB, scopedGrantOptions(to: hA, scope: .wing("wing_scope-wing")))
+        // Grant scoped to the default wing — all normal captures land here (ADR-016).
+        _ = try await kit.issueGrant(hB, scopedGrantOptions(to: hA, scope: .wing(LocusKit.defaultWingName)))
 
         let result = try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
         let ids = result.drawers.map(\.id)
 
         #expect(ids.contains(dInWing.id),
-            "wing scope must include drawers in the granted wing")
+            "wing scope must include drawers in the default wing")
         #expect(!ids.contains(dOutWing.id),
             "wing scope must exclude drawers in other wings")
     }

@@ -104,6 +104,7 @@
 pub mod adjectives;
 pub mod association;
 pub mod association_operational;
+pub mod default_wings;
 #[cfg(test)]
 mod association_tests;
 #[cfg(test)]
@@ -112,6 +113,8 @@ mod capture_tunnel_tests;
 mod container_fingerprint_coverage_tests;
 #[cfg(test)]
 mod two_clock_ingest_tests;
+#[cfg(test)]
+mod capture_into_wing_tests;
 
 pub mod audit_types;
 pub mod bitmap_evaluator;

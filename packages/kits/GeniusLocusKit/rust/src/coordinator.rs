@@ -66,6 +66,7 @@ use engram_lib::Engram;
 use vectorkit::vector_store::{VectorMatch, VectorStore};
 use persistence_kit::storage::Storage;
 use persistence_kit::inmemory::InMemoryStorage;
+use locus_kit::default_wings::DEFAULT_WINGS;
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
 use uuid::Uuid;
@@ -3034,6 +3035,44 @@ impl EstateCoordinator {
             params.zoom_window_low,
             params.zoom_window_high,
         )?;
+
+        // Step 2b: Seed the seven default wings (ADR-016 §1 and §2).
+        // Each wing gets a `_charter` drawer that defines its role. Wings emerge
+        // from SELECT DISTINCT wing — filing a charter drawer IS creating the wing.
+        // Mirrors Swift EstateLifecycle.swift provision Step 2b.
+        // Seeding failure closes the estate (no half-provisioned zombie estates).
+        {
+            // Provision-time wall clock (epoch seconds). Charter drawers are
+            // structural metadata, not AI-generated content, so calling the
+            // system clock here mirrors Swift's `let provisionNow = Date()` at
+            // the same provision boundary.
+            let seed_now: i64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let seed_result = self
+                .estate_for(&handle)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("estate_for during wing seed: {:?}", e),
+                })
+                .and_then(|estate| {
+                    for wing in DEFAULT_WINGS {
+                        estate
+                            .seed_wing(wing.name, wing.charter, seed_now)
+                            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                                reason: format!(
+                                    "default wing seeding failed for '{}': {:?}",
+                                    wing.name, e
+                                ),
+                            })?;
+                    }
+                    Ok(())
+                });
+            if let Err(e) = seed_result {
+                let _ = self.close(&handle);
+                return Err(e);
+            }
+        }
 
         // Step 3: Wire sub-stores by kind — same logic as Swift EstateLifecycle.swift §provision.
         // backing_storage is the persistence_kit Storage used for Corpus + VectorStore;

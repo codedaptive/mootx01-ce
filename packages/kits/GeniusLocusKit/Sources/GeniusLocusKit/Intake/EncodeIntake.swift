@@ -286,6 +286,14 @@ public extension GeniusLocusKit {
             // Skip drawers with empty content — nothing to encode (matches the
             // guard in enqueueEncodeJob).
             guard !drawer.content.isEmpty else { continue }
+            // Skip structural drawers that carry the "none" embedding sentinel.
+            // Charter drawers (_charter room, embeddingModelID = "none") are
+            // spatial metadata, not semantic content — encoding them would waste
+            // slots and pollute BM25 rankings with role-description text. The
+            // "none" sentinel is the canonical signal that a drawer was
+            // intentionally captured without a semantic lane (ADR-016 §2,
+            // DefaultWings.swift charterEmbeddingModelID).
+            guard drawer.embeddingModelID != "none" else { continue }
             // Skip drawers already in the BundleStore — idempotence.
             guard !indexedIDs.contains(drawer.id) else { continue }
             // Enqueue using the existing P3 path. The drain worker picks it up
@@ -312,6 +320,10 @@ public extension GeniusLocusKit {
         drawer: Drawer
     ) async throws {
         guard !drawer.content.isEmpty else { return }
+        // Structural drawers with the "none" embedding sentinel are never
+        // encoded — they are spatial metadata (charter drawers, etc.), not
+        // semantic content. ADR-016 §2 / DefaultWings.swift charterEmbeddingModelID.
+        guard drawer.embeddingModelID != "none" else { return }
         if encodeQueues[handle] == nil {
             try await mountEncodeQueue(for: handle)
         }

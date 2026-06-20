@@ -215,12 +215,11 @@ private extension GeniusLocusKit {
         vectorStore: VectorStore,
         now: Date
     ) async throws -> String {
-        // Derive the estate's wing name from the manifest owner identifier.
-        // Mirrors LocusKit.EstateVerbs.defaultWing() (private there).
-        let manifest = try await estate.manifest
-        let wing = manifest.ownerIdentifier.isEmpty
-            ? "wing_default"
-            : "wing_\(manifest.ownerIdentifier)"
+        // The factoid drawer is captured via estate.capture(_:), which files it
+        // under the estate's default wing (defaultWingName = "Agentic Memory",
+        // ADR-016). The tunnel source wing must match where the factoid actually
+        // lands — use the same constant rather than re-deriving from the manifest.
+        let factoidWing = LocusKit.defaultWingName  // "Agentic Memory" — ADR-016
 
         let lineageID = UUID(uuidString: clusterID) ?? UUID()
 
@@ -261,7 +260,7 @@ private extension GeniusLocusKit {
         // originClass = .derived: tunnel relationship inferred by the substrate.
         for sourceDrawer in memberDrawers {
             let tunnelFrame = TunnelCaptureFrame(
-                sourceWing: wing,
+                sourceWing: factoidWing,
                 sourceRoom: "_distilled",
                 targetWing: sourceDrawer.wing,
                 targetRoom: sourceDrawer.room,

@@ -105,6 +105,14 @@ public struct CaptureFrame: Sendable {
     /// that is immediately visible to `filter:exportable` recall
     /// (DEBT-1 write-side fix).
     public var exportability: AdjectiveExportability
+    /// Wing to file the drawer into (ADR-016). When `nil` the capture
+    /// verb uses `defaultWing()` — "Agentic Memory" — preserving
+    /// byte-identical behaviour for all existing callers. Supply a
+    /// non-nil value to route a drawer into a specific wing at capture
+    /// time (e.g. "User Canon", "Personal") without a post-capture
+    /// reanchor step. The follow-up VaultKit/file_memory wiring threads
+    /// this field through from the ARIA surface.
+    public var wing: String?
 
     public init(
         content: String,
@@ -123,7 +131,8 @@ public struct CaptureFrame: Sendable {
         lineageID: LineageID? = nil,
         eventTime: Date? = nil,
         featureFlags: DrawerFeatureFlags = [],
-        exportability: AdjectiveExportability = .private_
+        exportability: AdjectiveExportability = .private_,
+        wing: String? = nil
     ) {
         self.content = content
         self.channel = channel
@@ -142,6 +151,7 @@ public struct CaptureFrame: Sendable {
         self.eventTime = eventTime
         self.featureFlags = featureFlags
         self.exportability = exportability
+        self.wing = wing
     }
 }
 
