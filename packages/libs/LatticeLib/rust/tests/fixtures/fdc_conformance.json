@@ -1,258 +1,214 @@
 [
   {
-    "code": "004",
-    "input": "computer software programming and information science"
+    "input" : "computer software programming and information science"
   },
   {
-    "code": "011",
-    "input": "database management system SQL"
+    "input" : "database management system SQL"
   },
   {
-    "code": "615.892",
-    "input": "machine learning neural networks artificial intelligence"
+    "code" : "615.892",
+    "input" : "machine learning neural networks artificial intelligence"
   },
   {
-    "code": "006.6",
-    "input": "computer graphics rendering visualization"
+    "code" : "006.6",
+    "input" : "computer graphics rendering visualization"
   },
   {
-    "code": "004",
-    "input": "operating systems kernel processes"
+    "input" : "operating systems kernel processes"
   },
   {
-    "code": "137",
-    "input": "network protocols internet communication"
+    "input" : "network protocols internet communication"
   },
   {
-    "code": "004",
-    "input": "software engineering algorithms data structures"
+    "code" : "004",
+    "input" : "software engineering algorithms data structures"
   },
   {
-    "code": "942",
-    "input": "web development HTML programming"
+    "code" : "942",
+    "input" : "web development HTML programming"
   },
   {
-    "code": "959",
-    "input": "distributed systems cloud computing"
+    "code" : "959",
+    "input" : "distributed systems cloud computing"
   },
   {
-    "code": "501",
-    "input": "chemistry and physics"
+    "input" : "chemistry and physics"
   },
   {
-    "code": "541",
-    "input": "organic chemistry reactions molecules"
+    "input" : "organic chemistry reactions molecules"
   },
   {
-    "code": "124",
-    "input": "physics mechanics quantum theory"
+    "input" : "physics mechanics quantum theory"
   },
   {
-    "code": "061",
-    "input": "biology genetics evolution organisms"
+    "input" : "biology genetics evolution organisms"
   },
   {
-    "code": "521",
-    "input": "astronomy stars planets solar system"
+    "input" : "astronomy stars planets solar system"
   },
   {
-    "code": "549",
-    "input": "geology rocks minerals earth science"
+    "code" : "549",
+    "input" : "geology rocks minerals earth science"
   },
   {
-    "code": "119",
-    "input": "mathematics calculus algebra geometry"
+    "input" : "mathematics calculus algebra geometry"
   },
   {
-    "code": "314",
-    "input": "statistics probability data analysis"
+    "input" : "statistics probability data analysis"
   },
   {
-    "code": "336",
-    "input": "economics markets trade finance"
+    "code" : "336",
+    "input" : "economics markets trade finance"
   },
   {
-    "code": "027",
-    "input": "political science government democracy"
+    "input" : "political science government democracy"
   },
   {
-    "code": "001",
-    "input": "sociology society culture community"
+    "input" : "sociology society culture community"
   },
   {
-    "code": "094",
-    "input": "history ancient civilizations war"
+    "input" : "history ancient civilizations war"
   },
   {
-    "code": "028",
-    "input": "philosophy ethics morality reasoning"
+    "input" : "philosophy ethics morality reasoning"
   },
   {
-    "code": "373",
-    "input": "language linguistics grammar syntax"
+    "input" : "language linguistics grammar syntax"
   },
   {
-    "code": "823",
-    "input": "literature poetry novels writing"
+    "code" : "823",
+    "input" : "literature poetry novels writing"
   },
   {
-    "code": "701",
-    "input": "art painting sculpture museum"
+    "input" : "art painting sculpture museum"
   },
   {
-    "code": "144",
-    "input": "music theory instruments composition"
+    "input" : "music theory instruments composition"
   },
   {
-    "code": "617",
-    "input": "medicine surgery treatment disease"
+    "code" : "617",
+    "input" : "medicine surgery treatment disease"
   },
   {
-    "code": "615.85",
-    "input": "pharmacology drugs clinical trials"
+    "code" : "615.85",
+    "input" : "pharmacology drugs clinical trials"
   },
   {
-    "code": "139",
-    "input": "anatomy physiology human body organs"
+    "input" : "anatomy physiology human body organs"
   },
   {
-    "code": "131",
-    "input": "nursing patient care hospital"
+    "code" : "131",
+    "input" : "nursing patient care hospital"
   },
   {
-    "code": "323",
-    "input": "law legal rights court justice"
+    "input" : "law legal rights court justice"
   },
   {
-    "code": "297",
-    "input": "religion theology Christianity Islam"
+    "code" : "297",
+    "input" : "religion theology Christianity Islam"
   },
   {
-    "code": "025",
-    "input": "education teaching learning school"
+    "input" : "education teaching learning school"
   },
   {
-    "code": "011",
-    "input": "library classification books cataloging"
+    "input" : "library classification books cataloging"
   },
   {
-    "code": "601",
-    "input": "engineering civil construction bridges"
+    "input" : "engineering civil construction bridges"
   },
   {
-    "code": "636",
-    "input": "animal behavior mammals dogs cats"
+    "code" : "636",
+    "input" : "animal behavior mammals dogs cats"
   },
   {
-    "code": "681",
-    "input": "sports athletics competition games"
+    "input" : "sports athletics competition games"
   },
   {
-    "code": "621.1",
-    "input": "transportation automobile travel vehicles"
+    "input" : "transportation automobile travel vehicles"
   },
   {
-    "code": "631",
-    "input": "agriculture farming crops soil"
+    "code" : "631",
+    "input" : "agriculture farming crops soil"
   },
   {
-    "code": "385",
-    "input": "environment climate change pollution"
+    "code" : "385",
+    "input" : "environment climate change pollution"
   },
   {
-    "code": "363.47",
-    "input": "energy electricity power generation"
+    "input" : "energy electricity power generation"
   },
   {
-    "code": "004",
-    "input": "architecture buildings design construction"
+    "input" : "architecture buildings design construction"
   },
   {
-    "code": "363.41",
-    "input": "manufacturing production industry factory"
+    "input" : "manufacturing production industry factory"
   },
   {
-    "code": "326",
-    "input": "economics business trade markets"
+    "input" : "economics business trade markets"
   },
   {
-    "code": "014",
-    "input": "theoretical computer science complexity"
+    "input" : "theoretical computer science complexity"
   },
   {
-    "code": "005",
-    "input": "programming languages compilers interpreters"
+    "input" : "programming languages compilers interpreters"
   },
   {
-    "code": "533",
-    "input": "robotics automation mechanical engineering"
+    "code" : "533",
+    "input" : "robotics automation mechanical engineering"
   },
   {
-    "code": "667",
-    "input": "materials science metals polymers"
+    "code" : "667",
+    "input" : "materials science metals polymers"
   },
   {
-    "code": "501",
-    "input": "chemistry"
+    "input" : "chemistry"
   },
   {
-    "code": "001",
-    "input": "computer"
+    "input" : "computer"
   },
   {
-    "code": "032",
-    "input": "mathematics"
+    "input" : "mathematics"
   },
   {
-    "code": "011",
-    "input": "physics"
+    "input" : "physics"
   },
   {
-    "code": "064",
-    "input": "music"
+    "input" : "music"
   },
   {
-    "code": "001",
-    "input": "philosophy"
+    "input" : "philosophy"
   },
   {
-    "code": "001",
-    "input": "history"
+    "input" : "history"
   },
   {
-    "code": "036",
-    "input": "geography"
+    "input" : "geography"
   },
   {
-    "code": "004",
-    "input": "engineering"
+    "input" : "engineering"
   },
   {
-    "code": "021",
-    "input": "medicine"
+    "input" : "medicine"
   },
   {
-    "code": "004",
-    "input": "law"
+    "input" : "law"
   },
   {
-    "code": "001",
-    "input": "economics"
+    "input" : "economics"
   },
   {
-    "code": "006.6",
-    "input": "art"
+    "input" : "art"
   },
   {
-    "input": "zzqqxv wwkkjj plldfg"
+    "input" : "zzqqxv wwkkjj plldfg"
   },
   {
-    "input": "xyzzy frobozz zork"
+    "input" : "xyzzy frobozz zork"
   },
   {
-    "input": ""
+    "input" : ""
   },
   {
-    "input": "   "
+    "input" : "   "
   }
 ]

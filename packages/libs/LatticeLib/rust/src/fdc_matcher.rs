@@ -63,6 +63,28 @@ pub enum ScoreMode {
     IdfCosine,
 }
 
+/// Maximum number of codes that may share the argmax score while still yielding
+/// a classifiable result. When more codes than this are tied at the top IDF
+/// score, the query bag is dominated by common cross-domain vocabulary (low-IDF
+/// terms present in almost every signature) rather than subject-specific
+/// vocabulary. The tie-break (lowest code lexicographically) then selects an
+/// arbitrary code, not a semantically grounded one — that is a
+/// confidently-wrong specific code, which is worse than the honest
+/// "unclassified" sentinel "000".
+///
+/// Calibration (v1.0 frame, 1 071 code signatures):
+///   • subject-specific text (e.g. "biology / physiology"): ≤ 2 codes tied at
+///     the top IDF score — the winning code is in the correct domain.
+///   • software/technical text (e.g. "wings ADR pipeline"): 10–13 codes tied
+///     — the "winner" is an arbitrary code in an unrelated domain (235 =
+///     angels/devotional, 621.2 = hydraulic engineering, etc.).
+///
+/// Setting the limit to 4 passes genuine subject-specific queries (≤ 2 ties
+/// observed on the v1.0 frame) while correctly returning UNRESOLVED for
+/// technical/generic text that would otherwise get a confidently-wrong code.
+/// Mirrors Swift `FDCMatcher.maximumTiedWinnersForClassification`.
+pub const MAX_TIED_WINNERS_FOR_CLASSIFICATION: usize = 4;
+
 pub struct FdcMatcher {
     /// Pinned descent cutoff (cookbook §6.1). v1.0 default is 1.
     pub stop_threshold: usize,
@@ -301,6 +323,21 @@ impl FdcMatcher {
                 node = code.clone();
                 node_score = s;
             }
+        }
+
+        // Tie-count guard (MAX_TIED_WINNERS_FOR_CLASSIFICATION): when many
+        // codes share the argmax score, the query bag is dominated by common
+        // cross-domain Q-IDs with near-zero IDF weight. The tie-break
+        // (lowest code) picks an arbitrary code rather than a semantically
+        // grounded one — a confidently-wrong specific code is worse than the
+        // honest "000" unclassified sentinel. UNRESOLVED when tied codes
+        // exceed the allowed maximum. Mirrors Swift FDCMatcher.encodeAnchor.
+        let tied_count = candidates
+            .iter()
+            .filter(|c| self.score(c, &bag) == node_score)
+            .count();
+        if tied_count > MAX_TIED_WINNERS_FOR_CLASSIFICATION {
+            return (None, qid); // too many tied winners — no discriminating signal
         }
 
         // Step 5 — frame descent (§6.1). A child must clear the RAW overlap

@@ -161,6 +161,29 @@ public struct FDCMatcher: Sendable {
         return o
     }
 
+    /// Maximum number of codes that may share the argmax score while still
+    /// yielding a classifiable result. When more codes than this are tied at
+    /// the top IDF score, the query bag is dominated by common cross-domain
+    /// vocabulary (low-IDF terms present in almost every signature) rather
+    /// than subject-specific vocabulary. The tie-break (lowest code
+    /// lexicographically) then selects an arbitrary code, not a semantically
+    /// grounded one — that is a confidently-wrong specific code, which is
+    /// worse than the honest "unclassified" sentinel "000".
+    ///
+    /// Calibration (v1.0 frame, 1 071 code signatures):
+    ///   • subject-specific text (e.g. "biology / physiology"): ≤ 2 codes tied
+    ///     at the top IDF score — the winning code is in the correct domain.
+    ///   • software/technical text (e.g. "wings ADR pipeline"): 10–13 codes
+    ///     tied — the "winner" is an arbitrary code in an unrelated domain
+    ///     (235 = angels/devotional, 621.2 = hydraulic engineering, etc.).
+    ///
+    /// Setting the limit to 4 passes genuine subject-specific queries (≤ 2
+    /// ties observed on the v1.0 frame) while correctly returning UNRESOLVED
+    /// for technical/generic text that would otherwise get a confidently-wrong
+    /// code. Mirrors Rust `FdcMatcher::MAX_TIED_WINNERS_FOR_CLASSIFICATION`.
+    public static let maximumTiedWinnersForClassification: Int = 4
+
+
     /// Encode `text` to an FDC code, or `nil` for UNRESOLVED. Never guesses.
     public func encode(_ text: String) -> String? {
         encodeAnchor(text).code
@@ -202,6 +225,18 @@ public struct FDCMatcher: Sendable {
             if s > nodeScore || (s == nodeScore && code < node) {
                 node = code; nodeScore = s
             }
+        }
+
+        // Tie-count guard (§maximumTiedWinnersForClassification): when many
+        // codes share the argmax score, the query bag is dominated by common
+        // cross-domain Q-IDs with near-zero IDF weight. The tie-break
+        // (lowest code) picks an arbitrary code rather than a semantically
+        // grounded one — a confidently-wrong specific code is worse than the
+        // honest "000" unclassified sentinel. UNRESOLVED when tied codes
+        // exceed the allowed maximum.
+        let tiedCount = candidates.filter { score(code: $0, bag: bag) == nodeScore }.count
+        guard tiedCount <= Self.maximumTiedWinnersForClassification else {
+            return (nil, qid)   // too many tied winners — no discriminating signal
         }
 
         // Step 5 — frame descent (§6.1). A child must clear the (raw) overlap

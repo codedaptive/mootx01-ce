@@ -17,12 +17,35 @@ struct EideticLibTests {
         #expect(EideticLib.version == "0.1.0")
     }
 
-    @Test("lookup resolves a topical term to an FDC code")
-    func lookupChemistryResolvesToCode() {
-        let anchor = EideticLib.lookup("chemistry")
+    // The honest-classification guard (tie-count) means that single-word
+    // lookups for broad terms like "chemistry" or "philosophy" correctly
+    // return UNRESOLVED: each maps to a Q-ID in 100–800+ signatures,
+    // producing a large tied-winner set. To test the resolving path,
+    // use multi-term topical text with distinctive subject vocabulary.
+    @Test("lookup resolves topical text to an FDC code")
+    func lookupTopicalTextResolvesToCode() {
+        // Multi-term biology text with distinctive Q-IDs — resolves to a
+        // natural-sciences FDC code. Single words like "chemistry" or
+        // "philosophy" are now correctly UNRESOLVED (too many tied candidates).
+        let topical = "Biology is the scientific study of life and living organisms, " +
+            "including their physical structure, chemical processes, molecular " +
+            "interactions, physiological mechanisms, and evolution."
+        let anchor = EideticLib.lookup(topical)
         #expect(
             !anchor.code.isEmpty,
-            "lookup must resolve a topical term to an FDC code"
+            "topical text with distinctive subject vocabulary must resolve to an FDC code"
+        )
+    }
+
+    @Test("single-word lookup for broad term returns UNRESOLVED (honest guard)")
+    func singleWordBroadTermReturnsUnresolved() {
+        // "chemistry" maps to Q2329, which appears in 111 signatures →
+        // 111 tied codes → tie-count guard fires → UNRESOLVED (empty code).
+        // This is the honest result: there is no discriminating signal.
+        let anchor = EideticLib.lookup("chemistry")
+        #expect(
+            anchor.code.isEmpty,
+            "broad single-word term with 100+ tied candidates must return UNRESOLVED; got: '\(anchor.code)'"
         )
     }
 
@@ -35,8 +58,8 @@ struct EideticLibTests {
 
     @Test("lookup carries data version")
     func lookupCarriesDataVersion() {
-        // dataVersion records the pinned FDC signatures version that
-        // produced the answer (LatticeLib's bundled artifacts).
+        // dataVersion records the pinned FDC signatures version.
+        // Use any lookup — even UNRESOLVED results carry the version.
         let anchor = EideticLib.lookup("chemistry")
         #expect(anchor.dataVersion == FDC.dataVersion)
         #expect(!anchor.dataVersion.isEmpty)

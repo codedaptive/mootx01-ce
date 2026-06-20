@@ -101,6 +101,71 @@ struct LookupConformanceTests {
         )
     }
 
+    /// Regenerate lookup_vectors.json with the current EideticLib.lookup output.
+    /// Only runs when REGEN_LOOKUP_VECTORS=1 is set in the environment.
+    ///
+    /// Usage: REGEN_LOOKUP_VECTORS=1 swift test --filter regenerateLookupVectors
+    ///
+    /// After running, commit the updated fixture. The expected_code values for
+    /// single-word inputs that previously returned specific codes may now be ""
+    /// (UNRESOLVED) because the honest-classification guard (tie-count) correctly
+    /// identifies these as degenerate bags.
+    @Test("regenerate lookup vectors (REGEN_LOOKUP_VECTORS=1 only)")
+    func regenerateLookupVectors() throws {
+        guard ProcessInfo.processInfo.environment["REGEN_LOOKUP_VECTORS"] == "1" else {
+            return  // skip silently — operator-triggered action only
+        }
+
+        let file = try loadVectors()
+        guard let bundleURL = Bundle.module.url(forResource: "lookup_vectors", withExtension: "json", subdirectory: "SharedVectors") else {
+            throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot locate lookup_vectors.json in bundle"])
+        }
+
+        // Walk up from bundle URL to find the source file at Tests/SharedVectors/lookup_vectors.json
+        // The bundle path is deep inside .build/; we use #filePath to locate the source.
+        let sourceFile = #filePath
+        let thisFile = URL(fileURLWithPath: sourceFile)
+        let testsDir = thisFile
+            .deletingLastPathComponent()  // EideticLibTests/
+            .deletingLastPathComponent()  // Tests/
+        let sharedVectorsURL = testsDir
+            .appendingPathComponent("SharedVectors")
+            .appendingPathComponent("lookup_vectors.json")
+
+        struct OutputVector: Encodable {
+            let id: String
+            let input: String
+            let expected_code: String
+            let expected_qid: String?
+        }
+        struct OutputFile: Encodable {
+            let schema_version: String
+            let vectors: [OutputVector]
+        }
+
+        let updated = file.vectors.map { v -> OutputVector in
+            let anchor = EideticLib.lookup(v.input)
+            return OutputVector(
+                id: v.id,
+                input: v.input,
+                expected_code: anchor.code,
+                expected_qid: anchor.wikidataQID
+            )
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted]
+        let outputFile = OutputFile(schema_version: file.schemaVersion, vectors: updated)
+        let data = try encoder.encode(outputFile)
+        try data.write(to: sharedVectorsURL, options: .atomic)
+
+        let nilCount = updated.filter { $0.expected_code.isEmpty }.count
+        print("Regenerated \(sharedVectorsURL.path)")
+        print("  total vectors: \(updated.count)")
+        print("  UNRESOLVED (empty code): \(nilCount)")
+        print("  resolved: \(updated.count - nilCount)")
+    }
+
     /// Every vector with a non-null expected_qid must produce the matching
     /// Q-ID from EideticLib.lookup. Vectors with null expected_qid must
     /// produce nil.

@@ -135,15 +135,24 @@ private struct HMMFDCConformanceHarness {
         }
         guard !candidateSet.isEmpty else { return nil }
 
+        let candidates = candidateSet.sorted()
+
         var node = ""
         var nodeScore = -Double.greatestFiniteMagnitude
-        for code in candidateSet.sorted() {
+        for code in candidates {
             let s = score(code: code, bag: bag)
             if s > nodeScore || (s == nodeScore && code < node) {
                 node = code
                 nodeScore = s
             }
         }
+
+        // Mirror FDCMatcher.maximumTiedWinnersForClassification: when many codes
+        // share the argmax score the bag is dominated by common cross-domain Q-IDs
+        // with near-zero IDF. The tie-break then selects an arbitrary code rather
+        // than a semantically grounded one. Return UNRESOLVED.
+        let tiedCount = candidates.filter { score(code: $0, bag: bag) == nodeScore }.count
+        guard tiedCount <= FDCMatcher.maximumTiedWinnersForClassification else { return nil }
 
         while true {
             var best: String?
@@ -250,5 +259,59 @@ struct FDCConformanceTests {
             failures.isEmpty,
             "FDC HMM conformance FAILED: \(failures.count)/\(vectors.count) vectors diverge:\n\(report)"
         )
+    }
+
+    /// Regenerate the shared conformance fixture with the current HMM encoder
+    /// output. Only runs when the REGEN_FDC_FIXTURE env var is set to "1".
+    ///
+    /// Usage: REGEN_FDC_FIXTURE=1 swift test --filter regenerateConformanceFixture
+    ///
+    /// After running, verify the fixture looks sane (many nil codes is expected
+    /// now that the tie-count guard filters degenerate bags), then commit it.
+    @Test("regenerate conformance fixture (REGEN_FDC_FIXTURE=1 only)")
+    func regenerateConformanceFixture() throws {
+        guard ProcessInfo.processInfo.environment["REGEN_FDC_FIXTURE"] == "1" else {
+            // Skip silently — this is an operator-triggered action, not a
+            // routine assertion.
+            return
+        }
+
+        let vectors = try loadVectors()
+        let harness = try HMMFDCConformanceHarness.load()
+
+        // Produce updated vectors: keep the same input strings but replace
+        // the expected codes with what the new encoder actually produces.
+        struct OutputVector: Encodable {
+            let input: String
+            let code: String?
+        }
+        let updated = vectors.map { v in
+            OutputVector(input: v.input, code: harness.encode(v.input))
+        }
+
+        // Locate the fixture file the same way loadVectors() does.
+        let sourceFile = #filePath
+        let thisFile = URL(fileURLWithPath: sourceFile)
+        let packageRoot = thisFile
+            .deletingLastPathComponent()  // LatticeLibTests/
+            .deletingLastPathComponent()  // Tests/
+            .deletingLastPathComponent()  // package root (LatticeLib/)
+        let fixtureURL = packageRoot
+            .appendingPathComponent("rust")
+            .appendingPathComponent("tests")
+            .appendingPathComponent("fixtures")
+            .appendingPathComponent("fdc_conformance.json")
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(updated)
+        try data.write(to: fixtureURL, options: .atomic)
+
+        // Report what changed.
+        let nilCount = updated.filter { $0.code == nil }.count
+        print("Regenerated \(fixtureURL.path)")
+        print("  total vectors: \(updated.count)")
+        print("  UNRESOLVED (nil): \(nilCount)")
+        print("  resolved: \(updated.count - nilCount)")
     }
 }
