@@ -878,6 +878,18 @@ fn erase_memory_without_confirmed_returns_tool_error() {
         is_tool_error(&result),
         "erase without confirmed must be isError:true; got: {result:?}"
     );
+    // The error message must name "confirmed" — the actual field in the tool schema
+    // and the handler. Naming "confirmation" instead would loop AI consumers forever
+    // because that field does not exist and the handler ignores it.
+    let msg = content_text(&result);
+    assert!(
+        msg.contains("confirmed"),
+        "error message must name 'confirmed' (the caller-facing field); got: {msg}"
+    );
+    assert!(
+        !msg.contains("confirmation=true"),
+        "error message must not name 'confirmation=true' — not the schema field; got: {msg}"
+    );
 }
 
 #[test]

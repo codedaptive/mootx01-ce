@@ -250,4 +250,62 @@ struct TeachmeTests {
             "error results must never have a hint appended"
         )
     }
+
+    // MARK: - Test 10: erase error message names the correct caller field
+
+    /// When `moot_erase_memory` is called without `confirmed: true`, the error
+    /// message must name "confirmed" — the actual field the tool schema requires
+    /// and the handler reads. If the message named "confirmation" instead, an AI
+    /// consumer reading the error would retry with the wrong field and loop forever.
+    ///
+    /// This test pins the corrected field name so the mismatch cannot regress.
+    @Test func eraseErrorMessageNamesConfirmedField() async throws {
+        let dispatcher = try await makeDispatcher()
+
+        // Pass confirmed:false — triggers the VerbError.expungeNotConfirmed path.
+        let result = try await dispatcher.dispatch(
+            name: "moot_erase_memory",
+            arguments: .object([
+                "id": .string("any-row-id"),
+                "reason": .string("test field-name in error message"),
+                "confirmed": .bool(false),
+            ])
+        )
+        #expect(isError(result), "erase without confirmed:true must return isError:true")
+        let message = text(of: result)
+        #expect(
+            message.contains("confirmed=true"),
+            "error must name the actual caller field 'confirmed=true'; got: \(message)"
+        )
+        #expect(
+            !message.contains("confirmation=true"),
+            "error must not name 'confirmation=true' — that field does not exist in the schema; got: \(message)"
+        )
+
+        // Verify confirmed:true still performs the erase successfully.
+        // File a real memory first so the id is valid.
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("erase field-name regression test"),
+                "location": .string("archive"),
+            ])
+        )
+        #expect(!isError(fileResult), "file_memory must succeed; got: \(text(of: fileResult))")
+        let filed = text(of: fileResult)
+        // Extract the row id from "filed memory <id>\n..."
+        let rowID = filed.components(separatedBy: "\n").first?
+            .replacingOccurrences(of: "filed memory ", with: "") ?? ""
+        #expect(!rowID.isEmpty, "must extract a row id from file result; got: \(filed)")
+
+        let eraseResult = try await dispatcher.dispatch(
+            name: "moot_erase_memory",
+            arguments: .object([
+                "id": .string(rowID),
+                "reason": .string("regression test — confirmed:true erases"),
+                "confirmed": .bool(true),
+            ])
+        )
+        #expect(!isError(eraseResult), "erase with confirmed:true must succeed; got: \(text(of: eraseResult))")
+    }
 }

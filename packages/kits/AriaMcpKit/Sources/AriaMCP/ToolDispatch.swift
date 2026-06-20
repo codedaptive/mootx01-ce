@@ -695,7 +695,10 @@ public struct ToolDispatcher: Sendable {
             // not callable by external clients) return this error by design.
             return "Verb \(verb) is not callable on this estate: the estate refused the operation. propose and associate are substrate-driven verbs; for other verbs, check the estate's configuration."
         case .expungeNotConfirmed(let rowID):
-            return "expunge of \(rowID) requires confirmation=true."
+            // The caller-facing field is "confirmed" — name it exactly so AI consumers
+            // can retry with the correct argument rather than dead-ending on a
+            // field name mismatch between this message and the tool schema.
+            return "expunge of \(rowID) requires confirmed=true."
         case .emptyReanchor(let rowID):
             return "reanchor of \(rowID) requires at least one of toRoom or toUDC."
         case .underlyingEstateFailure(let verb, let reason):
