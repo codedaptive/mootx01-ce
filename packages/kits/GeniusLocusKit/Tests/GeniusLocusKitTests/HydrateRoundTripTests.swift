@@ -53,36 +53,33 @@ import PersistenceKitReplication
 @Suite("GLK composite schema version == sum of component versions (ADR-012)")
 struct CompositeSchemaVersionTests {
 
-    /// The composite version is component versions plus the GLK-only addend.
-    /// Component sum after ADR-012 `ext` pre-provisioning:
+    /// The composite version is the sum of component versions.
+    /// Components after ADR-012 `ext` pre-provisioning:
     ///   LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
-    /// DG1 adds glkVersion = 1 (memory_clusters table), making total = 8.
     /// This guards the version coupling the Rust replication gate depends on:
     /// a drift between composite and the gate's expected value would let a
     /// fresh estate open at a version the gate rejects.
-    @Test("composite version equals component sum plus GLK addend and equals 8")
+    @Test("composite version equals component sum and equals 7")
     func compositeVersionEqualsComponentSum() {
-        // Component-only sum; glkVersion (private) adds 1 on top of this.
         let componentSum =
             LocusKitSchema.version
             + VectorStore.schemaDeclaration.version
             + BundleStore.schemaDeclaration.version
-        // GLK-only addend is 1 (memory_clusters, DG1). Total = 8.
-        #expect(GeniusLocusKitSchema.version == componentSum + 1)
-        #expect(GeniusLocusKitSchema.version == 8)
+        #expect(GeniusLocusKitSchema.version == componentSum)
+        #expect(GeniusLocusKitSchema.version == 7)
         // The declaration the gate actually consumes carries the same version.
-        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 8)
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 7)
     }
 
     /// A fresh in-memory estate opens with the composite schema and registers
     /// the composite version under the "GeniusLocusKit" kit ID — the value the
-    /// replication schema gate checks. DG1 raised this from 7 to 8.
-    @Test("fresh estate opens and registers composite version 8")
+    /// replication schema gate checks.
+    @Test("fresh estate opens and registers composite version 7")
     func freshEstateOpensAtCompositeVersion() async throws {
         let storage = makeInMemoryStorage()
         try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
         let registered = try await storage.currentSchemaVersion(for: GeniusLocusKitSchema.kitID)
-        #expect(registered == 8)
+        #expect(registered == 7)
     }
 }
 

@@ -1,21 +1,17 @@
 // Consolidate.swift
 //
-// Recipe that triggers a distillation sweep on demand.
+// Recipe that triggers a per-item distillation sweep on demand.
 // Used by moot_consolidate tool and at session boundaries.
 //
 // Layer discipline B-1/B-2: pure sequencing. Delegates all sweep work to
-// GeniusLocusKit.runDistillationSweep, which owns the cluster query, the
-// per-cluster distillation loop, and all storage mutations.
+// GeniusLocusKit.distillItemsSweep, which iterates active not-yet-distilled
+// items, applies the injected distillFn, and captures factoid drawers.
 //
-// GLK call sequence:
-//   1. kit.runDistillationSweep(handle:distillFn:now:clusterID:includeHeld:)
-//      → queries clusters by status (open; optionally also held), optionally
-//        filtered to a single clusterID. Runs distillFn per eligible cluster,
-//        captures factoid drawers, writes _distilled_from tunnels, updates
-//        cluster status rows. Returns factoid count (Int).
-//   2. kit.heldClusterIDs(handle:)   — queries memory_clusters status='held'
-//   3. kit.failedClusterIDs(handle:) — queries memory_clusters status='failed'
-//      → populate Output.heldClusterIDs and Output.failedClusterIDs.
+// GLK call:
+//   kit.distillItemsSweep(handle:distillFn:now:limit:)
+//      → sweeps active, not-yet-distilled items. Runs distillFn per eligible
+//        item, captures factoid drawers in "_distilled", writes _distilled_from
+//        tunnels. Returns factoid count (Int).
 //
 // RecipeCatalog registration: deferred to the Dc4 mission.
 
@@ -24,12 +20,12 @@ import GeniusLocusKit
 import NeuronKit
 import SubstrateML
 
-/// Compact working memory by distilling open clusters into factoids on demand.
+/// Compact working memory by distilling active items into factoids on demand.
 ///
-/// Calls GeniusLocusKit's distillation sweep, which processes eligible clusters
-/// (member_count ≥ 3, status = open; or also held when `includeHeld` is true),
-/// runs the distillation pipeline per cluster, and persists produced factoids as
-/// ordinary drawers in room `_distilled`.
+/// Calls GeniusLocusKit's per-item distillation sweep, which processes active
+/// not-yet-distilled items long enough to form a usable intra-item feature
+/// matrix, runs the distillation pipeline per item, and persists produced
+/// factoids as ordinary drawers in room `_distilled`.
 ///
 /// Named `consolidate` for use as `moot_consolidate` in AriaMcpKit.
 public struct Consolidate: Recipe {
@@ -38,11 +34,11 @@ public struct Consolidate: Recipe {
 
     /// Parameters controlling the consolidation sweep.
     public struct Input: Sendable {
-        /// Target a specific cluster by UUID. `nil` sweeps all ready clusters.
+        /// Reserved for future per-item filtering (e.g. limit by room or tag).
+        /// Currently unused — the sweep processes all eligible items.
         public let clusterID: String?
 
-        /// When `true`, include SNR-gated held clusters in the sweep so they
-        /// get another distillation attempt now that more members may have arrived.
+        /// Reserved for future use. Currently unused in the per-item model.
         public let includeHeld: Bool
 
         public init(clusterID: String? = nil, includeHeld: Bool = false) {
@@ -58,22 +54,8 @@ public struct Consolidate: Recipe {
         /// Number of distilled factoid drawers produced this sweep.
         public let factoidsProduced: Int
 
-        /// Cluster UUIDs with `status = 'held'` after the sweep — those that
-        /// were gated by the SNR threshold (SNR < 2.0).
-        public let heldClusterIDs: [String]
-
-        /// Cluster UUIDs with `status = 'failed'` after the sweep — those where
-        /// confidence fell below the 0.4 threshold or a pipeline error occurred.
-        public let failedClusterIDs: [String]
-
-        public init(
-            factoidsProduced: Int,
-            heldClusterIDs: [String],
-            failedClusterIDs: [String]
-        ) {
+        public init(factoidsProduced: Int) {
             self.factoidsProduced = factoidsProduced
-            self.heldClusterIDs = heldClusterIDs
-            self.failedClusterIDs = failedClusterIDs
         }
     }
 
@@ -82,10 +64,9 @@ public struct Consolidate: Recipe {
     public let name = "consolidate"
     public let version = "1.0.0"
     public let description =
-        "Compact working memory by distilling open clusters into factoids. " +
-        "Calls the GLK distillation sweep, which processes all ready clusters " +
-        "(member_count ≥ 3, status = open) and persists each factoid as a " +
-        "drawer in room `_distilled`."
+        "Compact working memory by distilling active items into factoids. " +
+        "Calls the GLK per-item distillation sweep, which processes all " +
+        "eligible items and persists each factoid as a drawer in room `_distilled`."
 
     // The sweep routes through NeuronKit.distillCluster (one door), which uses
     // the production HMM-tagger feature extractor. requiredCapabilities is empty:
@@ -140,12 +121,10 @@ public struct Consolidate: Recipe {
         }
 
         // Per-item distillation: each stored item is reduced from its OWN chunks
-        // (the corrected intra-item model — distillation §1, sub-quadratic sparse
-        // selection over one corpus). This does NOT read memory_clusters; it
-        // sweeps active, not-yet-distilled items and produces one factoid per
-        // item that carries enough intra-item recurrence. Cross-memory clustering
-        // is not the distillation grain — held/failed cluster lists no longer
-        // apply, so they are empty.
+        // (the intra-item model — distillation §1, sub-quadratic sparse
+        // selection over one corpus). Sweeps active, not-yet-distilled items
+        // and produces one factoid per item that carries enough intra-item
+        // recurrence (M ≥ 3 sentences, non-zero dominant component F*).
         let factoidsProduced = try await kit.distillItemsSweep(
             handle: estate,
             distillFn: distillFn,
@@ -153,10 +132,6 @@ public struct Consolidate: Recipe {
             limit: nil
         )
 
-        return Output(
-            factoidsProduced: factoidsProduced,
-            heldClusterIDs: [],
-            failedClusterIDs: []
-        )
+        return Output(factoidsProduced: factoidsProduced)
     }
 }

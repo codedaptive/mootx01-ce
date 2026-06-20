@@ -71,7 +71,7 @@ use persistence_kit::{
     inmemory::InMemoryStorage,
     replication,
     replication::{ReplicationCursor, ReplicationError},
-    schema::{ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration},
+    schema::SchemaDeclaration,
     storage::Storage,
 };
 use crate::audit::{
@@ -87,12 +87,10 @@ use crate::matrix::MatrixTier;
 ///
 /// Mirrors `GeniusLocusKitSchema.estateSchemaDeclaration` in Swift.
 ///
-/// A GeniusLocus estate is a composition of three kits plus GLK-only tables,
-/// each with its own per-kit schema. The composite schema aggregates all 15
-/// user-visible tables and uses the SUM of the three component versions plus
-/// the GLK-only addend — post-ADR-012 `ext` slot that is LocusKit v2 +
-/// VectorKit v3 + CorpusKit/BundleStore v2 = 7, plus glk_only_version = 1
-/// for the `memory_clusters` table (DG1), giving a total of 8.
+/// A GeniusLocus estate is a composition of three kits, each with its own
+/// per-kit schema. The composite schema aggregates all 14 user-visible tables
+/// and uses the SUM of the three component versions — post-ADR-012 `ext` slot
+/// that is LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
 /// (BasisStore is the separate "CorpusKitBasis" kit-ID schema, not part of
 /// this composite, so its version is not summed.) The version is computed
 /// from the live component declarations below, so a future component bump
@@ -109,45 +107,35 @@ use crate::matrix::MatrixTier;
 /// The Rust replication primitive checks the global schema version, not a
 /// per-kit version like Swift. Opening the composite schema advances the
 /// global version to max(existing, composite). Because the composite is the
-/// SUM of the component versions plus the GLK-only addend it is always >=
-/// every component version, so opening it writes exactly the composite version
-/// to the migrations table without touching existing data tables
-/// (CREATE TABLE IF NOT EXISTS). For fresh in-memory storages it creates all
-/// 15 tables at once.
+/// SUM of the component versions it is always >= every component version,
+/// so opening it writes exactly the composite version to the migrations table
+/// without touching existing data tables (CREATE TABLE IF NOT EXISTS). For
+/// fresh in-memory storages it creates all 15 tables at once (13 LocusKit + 1 VectorKit + 1 CorpusKit).
 pub fn composite_schema() -> SchemaDeclaration {
     let lk = locus_kit::schema::schema();
     let vk = vectorkit::VectorStore::schema_declaration();
     let ck = corpus_kit::BundleStore::schema_declaration();
 
-    // GLK-only schema version addend (1 for the memory_clusters table, DG1).
-    // Mirrors Swift `GeniusLocusKitSchema.glkVersion`. Increment when a table
-    // owned exclusively by GeniusLocusKit (not by a component kit) is added.
-    const GLK_ONLY_VERSION: i32 = 1;
-
     // Composite version = sum of the three GLK-composed component versions
-    // plus the GLK-only addend (mirrors Swift `GeniusLocusKitSchema.version`).
-    // Derived, not a literal, so it can never drift from the components.
-    let composite_version = lk.version + vk.version + ck.version + GLK_ONLY_VERSION;
+    // (mirrors Swift `GeniusLocusKitSchema.version`). Derived, not a literal,
+    // so it can never drift from the components. No GLK-only addend: the
+    // cross-memory cluster path (DG5) was removed; GeniusLocusKit owns no
+    // tables beyond what the three component kits declare.
+    let composite_version = lk.version + vk.version + ck.version;
 
     let mut tables = Vec::new();
     tables.extend(lk.tables);
     tables.extend(vk.tables);
     tables.extend(ck.tables);
-    // GLK-only: memory_clusters — distillation staging table (DG1).
-    // Mirrors `GeniusLocusKitSchema.glkTables` in Swift.
-    tables.push(memory_clusters_table());
 
     let mut indices = Vec::new();
     indices.extend(lk.indices);
     indices.extend(vk.indices);
     indices.extend(ck.indices);
-    // GLK-only indices: status and factoid scans on memory_clusters.
-    // Mirrors `GeniusLocusKitSchema.glkIndices` in Swift.
-    indices.extend(memory_clusters_indices());
 
     SchemaDeclaration {
         kit_id: "GeniusLocusKit".to_string(),
-        version: composite_version, // LocusKit v3 + VectorKit v3 + CorpusKit v2 + glk 1 = 9
+        version: composite_version, // LocusKit v2 + VectorKit v3 + CorpusKit v2 = 7
         tables,
         indices,
         // No cross-kit migrations at the composite level — each component kit
@@ -158,81 +146,23 @@ pub fn composite_schema() -> SchemaDeclaration {
     }
 }
 
-/// `memory_clusters` table declaration (DG1). Tracks cluster lifecycle from
-/// grouping through SNR computation to factoid production.
-///
-/// A cluster moves: open → held | distilling → distilled | failed.
-/// The `member_ids` column stores a JSON array of drawer ID strings.
-/// Mirrors the Swift `GeniusLocusKitSchema.glkTables` table declaration.
-fn memory_clusters_table() -> TableDeclaration {
-    TableDeclaration::new(
-        "memory_clusters",
-        vec![
-            ColumnDeclaration::uuid("id"),
-            // Lifecycle state: open | held | distilling | distilled | failed (NOT NULL)
-            ColumnDeclaration::text("status"),
-            // Signal-to-noise ratio — null until the distillation sweep computes it
-            ColumnDeclaration::float("snr").nullable(),
-            // JSON array of drawer ID strings (the cluster members) (NOT NULL)
-            ColumnDeclaration::json("member_ids"),
-            // Count of member_ids entries, kept in sync for fast threshold checks (NOT NULL)
-            ColumnDeclaration::int("member_count"),
-            // UUID string of the produced "_distilled" drawer — null until distilled
-            ColumnDeclaration::text("factoid_id").nullable(),
-            // Human-readable reason a cluster was held — null otherwise
-            ColumnDeclaration::text("held_reason").nullable(),
-            // Epoch-seconds timestamp: when this cluster was first seeded (NOT NULL)
-            ColumnDeclaration::timestamp("filed_at"),
-            // Epoch-seconds timestamp: last state update (NOT NULL)
-            ColumnDeclaration::timestamp("updated_at"),
-        ],
-        // Primary key is the cluster UUID (id column). Mirrors the Swift
-        // TableDeclaration `primaryKey: ["id"]` in GeniusLocusKitSchema.
-        vec!["id".to_string()],
-    )
-}
-
-/// Indices for the `memory_clusters` table.
-/// Mirrors `GeniusLocusKitSchema.glkIndices` in Swift.
-fn memory_clusters_indices() -> Vec<IndexDeclaration> {
-    vec![
-        // Fast status-filtered scans (find all open clusters at sweep time).
-        IndexDeclaration::new(
-            "idx_memory_clusters_status",
-            "memory_clusters",
-            vec!["status".to_string()],
-        ),
-        // Fast factoid lookups (resolve which cluster produced a given factoid drawer).
-        IndexDeclaration::new(
-            "idx_memory_clusters_factoid",
-            "memory_clusters",
-            vec!["factoid_id".to_string()],
-        ),
-    ]
-}
-
 #[cfg(test)]
 mod composite_version_tests {
     use super::*;
 
     /// The composite version is the SUM of the three GLK-composed component
-    /// versions plus the GLK-only addend (1 for memory_clusters, DG1).
-    /// LocusKit v3 + VectorKit v3 + CorpusKit/BundleStore v2 + glk 1 = 9.
+    /// versions. LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
     /// This guards the coupling the global-MAX replication gate depends on:
     /// a drift between composite and components would let a fresh estate open
-    /// at a version the gate rejects. Mirrors Swift `CompositeSchemaVersionTests`
-    /// with the DG1 addend included.
+    /// at a version the gate rejects. Mirrors Swift `CompositeSchemaVersionTests`.
     #[test]
     fn composite_version_equals_component_sum() {
         let lk = locus_kit::schema::SCHEMA_VERSION;
         let vk = vectorkit::VectorStore::schema_declaration().version;
         let ck = corpus_kit::BundleStore::schema_declaration().version;
-        // GLK_ONLY_VERSION = 1 for memory_clusters (DG1). Must be kept in sync
-        // with the constant inside composite_schema().
-        const GLK_ONLY_VERSION: i32 = 1;
         let s = composite_schema();
-        assert_eq!(s.version, lk + vk + ck + GLK_ONLY_VERSION);
-        assert_eq!(s.version, 9);
+        assert_eq!(s.version, lk + vk + ck);
+        assert_eq!(s.version, 7);
         assert_eq!(s.kit_id, "GeniusLocusKit");
     }
 }

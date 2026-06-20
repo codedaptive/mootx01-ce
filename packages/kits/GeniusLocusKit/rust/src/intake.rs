@@ -57,9 +57,6 @@ use std::time::Duration;
 use corpus_kit::Corpus;
 use locus_kit::drawer::Drawer;
 use persistence_kit::inmemory::InMemoryStorage;
-use persistence_kit::predicate::StoragePredicate;
-use persistence_kit::types::{Column, TypedValue};
-use vectorkit::vector_store::VectorStore;
 use queuekit::{
     Job, JobId, ObservationStatus, PersistenceKitBackend, QueueBackend, QueueError, StreamId,
 };
@@ -428,12 +425,6 @@ impl EstateCoordinator {
         // capture which guards `has_corpus`). The worker holds a CLONED backend
         // handle over the same storage and a clone of the `Arc<Corpus>`.
         let stop = Arc::new(AtomicBool::new(false));
-        // Capture cluster-assignment resources for the background worker BEFORE
-        // moving into the closure. The watch worker processes encode jobs on its
-        // own OS thread, so it cannot borrow `self`; these clones let it call
-        // `assign_cluster_standalone` without holding the coordinator.
-        let worker_estate_storage = self.estate_storages.get(handle).cloned();
-        let worker_vector_store = self.vector_stores.get(handle).cloned();
         let worker = if let Some(corpus) = self.corpus_for(handle) {
             let worker_backend = backend.clone();
             let worker_stop = Arc::clone(&stop);
@@ -446,8 +437,6 @@ impl EstateCoordinator {
                         corpus,
                         worker_stop,
                         est,
-                        worker_estate_storage,
-                        worker_vector_store,
                     );
                 })
                 .map_err(|e| verb_fail(format!("encode drain worker spawn failed: {e}")))?;
@@ -661,18 +650,6 @@ impl EstateCoordinator {
             // mirroring the drain-path EncodeJob fix above.
             .ingest(&drawer.content, &drawer.id, drawer.filed_at * 1000)
             .map_err(|e| verb_fail(format!("corpus ingest failed: {e:?}")))?;
-
-        // Dg5: prose engram is now in VectorKit — assign a cluster (impatient
-        // path). Errors are logged inside and never propagated; the drawer and
-        // prose engram are already durably stored. Mirrors Swift
-        // `ingestDrawerIntoCorpus` calling `assignClusterAfterIngest` after the
-        // `corpus.ingest` succeeds.
-        self.assign_cluster_after_ingest(
-            handle,
-            &drawer.id,
-            &drawer.content,
-            drawer.filed_at, // epoch seconds
-        );
         Ok(())
     }
 
@@ -735,13 +712,10 @@ impl EstateCoordinator {
     /// not violate QueueKit B-7 (which forbids the QUEUE from auto-requeuing a
     /// half-assigned job; here the CONSUMER retries). Returns `Ok(())` on the
     /// first success, `Err(())` if the budget is exhausted.
-    ///
-    /// `handle` is supplied so the successful-ingest path can call
-    /// `assign_cluster_after_ingest` (Dg5) on the drain path, mirroring the
-    /// Swift `ingestAndReply` that calls `assignClusterAfterIngest` before reply.
+    /// Ingest one drained job into the corpus (drain path). AT-LEAST-ONCE retry.
     fn ingest_one_with_retry(
         &self,
-        handle: &EstateHandle,
+        _handle: &EstateHandle,
         corpus: &Option<Arc<Corpus>>,
         job: &Job,
     ) -> Result<(), ()> {
@@ -767,82 +741,13 @@ impl EstateCoordinator {
                 &encode_job.drawer_id,
                 encode_job.captured_at_millis(),
             ) {
-                Ok(()) => {
-                    // Dg5: prose engram is now in VectorKit — assign a cluster
-                    // (drain path). Errors are logged inside and never propagated;
-                    // the drawer and prose engram are already durably stored.
-                    // Mirrors Swift `ingestAndReply` calling
-                    // `assignClusterAfterIngest` before the queue reply.
-                    //
-                    // `captured_at_secs` = millis / 1000; VectorStore and
-                    // memory_clusters timestamps use epoch seconds, not millis.
-                    let captured_at_secs = encode_job.captured_at_millis() / 1000;
-                    self.assign_cluster_after_ingest(
-                        handle,
-                        &encode_job.drawer_id,
-                        &encode_job.text,
-                        captured_at_secs,
-                    );
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(_) => continue,
             }
         }
         Err(())
     }
 
-    /// Embed `content`, register the drawer's engram in the dedicated
-    /// cluster-assignment VectorKit lane, then call the cluster-assignment
-    /// decision logic and perform the resulting DB write (Dg5).
-    ///
-    /// Mirrors Swift `GeniusLocusKit.assignClusterAfterIngest` in
-    /// `EncodeIntake.swift`.
-    ///
-    /// WHY a dedicated lane: `Corpus::ingest` stores engrams under chunk IDs
-    /// (content-addressed UUIDs), not drawer IDs. The nearest-neighbor search
-    /// used by cluster assignment returns an `item_id` that is then looked up in
-    /// `memory_clusters.member_ids`. If that item_id is a chunk ID, the lookup
-    /// always returns None and every capture seeds a fresh cluster. By using a
-    /// separate model lane (`<base_model_id>-cluster`) that stores engrams under
-    /// the DRAWER ID, `find_nearest` returns drawer IDs exclusively and the
-    /// cluster lookup works correctly.
-    ///
-    /// Errors are logged to stderr but never propagated — cluster assignment is
-    /// best-effort; the drawer row and prose engram are already durably stored.
-    ///
-    /// Delegates to the `assign_cluster_standalone` free function (which is also
-    /// called from the background watch-worker path). The coordinator method
-    /// extracts the estate's corpus, vector_store, and storage from the registry
-    /// and passes them through; the standalone function carries the shared logic
-    /// so neither path duplicates it.
-    pub(crate) fn assign_cluster_after_ingest(
-        &self,
-        handle: &EstateHandle,
-        drawer_id: &str,
-        content: &str,
-        now_secs: i64,
-    ) {
-        // Cluster assignment requires both a Corpus (for embed) and a raw
-        // storage handle (for memory_clusters I/O). Either may be absent for
-        // non-GLK estates.
-        let corpus = match self.corpus_for(handle) {
-            Some(c) => c,
-            None => return,
-        };
-        let vector_store = self.vector_stores.get(handle).cloned();
-        let storage = self.estate_storages.get(handle).cloned();
-
-        // Delegate to the shared standalone function. A no-op when either
-        // vector_store or storage is None (non-GLK estate).
-        assign_cluster_standalone(
-            drawer_id,
-            content,
-            now_secs,
-            &corpus,
-            storage.as_ref(),
-            vector_store.as_ref(),
-        );
-    }
 }
 
 /// The bounded at-least-once retry budget for a single encode job's ingest.
@@ -866,16 +771,9 @@ pub(crate) const UNCLASSIFIED_SENTINEL: &str = "000";
 /// nothing and succeeds. The watch worker has no test seam — it runs in
 /// production; the pump path (`ingest_one_with_retry`) carries the injectable
 /// failure seam.
-///
-/// After a successful ingest, calls `assign_cluster_standalone` (Dg5) when
-/// `cluster_storage` and `cluster_vector_store` are both present. Mirrors the
-/// Swift watch-path `ingestAndReply` which calls `assignClusterAfterIngest`
-/// before the queue reply.
 fn ingest_one_into(
     corpus: Option<&Arc<Corpus>>,
     job: &Job,
-    cluster_storage: Option<&Arc<dyn persistence_kit::storage::Storage>>,
-    cluster_vector_store: Option<&Arc<vectorkit::vector_store::VectorStore>>,
 ) -> Result<(), ()> {
     // Decode once (permanent on failure).
     let encode_job = EncodeJob::from_job(job).map_err(|_| ())?;
@@ -895,22 +793,6 @@ fn ingest_one_into(
             )
             .is_ok()
         {
-            // Dg5: prose engram is now in VectorKit — assign a cluster
-            // (watch-worker path). Mirrors Swift `ingestAndReply` which calls
-            // `assignClusterAfterIngest` before the queue reply. The function
-            // is a no-op when either the storage or the vector store is absent.
-            //
-            // `captured_at_secs` = millis / 1000; VectorStore and
-            // memory_clusters timestamps use epoch seconds, not millis.
-            let captured_at_secs = encode_job.captured_at_millis() / 1000;
-            assign_cluster_standalone(
-                &encode_job.drawer_id,
-                &encode_job.text,
-                captured_at_secs,
-                corpus,
-                cluster_storage,
-                cluster_vector_store,
-            );
             return Ok(());
         }
     }
@@ -923,17 +805,11 @@ fn ingest_one_into(
 /// terminal. Exits when the stop flag is set (checked at the top of each batch)
 /// — `drop_encode_queue` sets the flag and enqueues a wake marker to release the
 /// parked watch.
-///
-/// `estate_storage` and `estate_vector_store` are the GLK estate's raw storage
-/// and VectorStore handles, needed for cluster-assignment I/O (Dg5). Both are
-/// `None` for non-GLK estates; the cluster assignment is a no-op in that case.
 fn encode_drain_watch_loop(
     backend: PersistenceKitBackend,
     corpus: Arc<Corpus>,
     stop: Arc<AtomicBool>,
     estate: uuid::Uuid,
-    estate_storage: Option<Arc<dyn persistence_kit::storage::Storage>>,
-    estate_vector_store: Option<Arc<vectorkit::vector_store::VectorStore>>,
 ) {
     let handler = |job: Job, _session: queuekit::SessionId| -> Result<(), QueueError> {
         // Stop requested: break the watch loop. Returning Err is the documented
@@ -947,8 +823,6 @@ fn encode_drain_watch_loop(
         let terminal = match ingest_one_into(
             Some(&corpus),
             &job,
-            estate_storage.as_ref(),
-            estate_vector_store.as_ref(),
         ) {
             Ok(()) => ObservationStatus::Done,
             // The drawer row is already durably stored; a failed encode must not
@@ -973,242 +847,6 @@ fn encode_drain_watch_loop(
 /// Enqueue a tiny wake marker job to release a parked `watch` at teardown. The
 /// marker carries empty content, so the worker drains-and-replies it without
 /// ingesting (then sees the stop flag and exits). Best-effort.
-/// The fixed model-lane ID for cluster-assignment vector storage.
-///
-/// This ID is training-independent and decoupled from the estate's primary
-/// Corpus model ID. The cluster-assignment path uses `content_deterministic_fingerprint`
-/// (FNV-1a → LCG → FloatSimHash, byte-identical to `EmbeddingModel.deterministic`)
-/// so clusters form correctly even on fresh/untrained estates where the trained
-/// recall providers (RI/PPMI/LSA/NMF) have not yet accumulated a basis.
-///
-/// Swift parity: `GeniusLocusKit.clusterModelID` in `EncodeIntake.swift`.
-pub(crate) const CLUSTER_MODEL_ID: &str = "corpus-deterministic-v1-cluster";
-
-/// The FloatSimHash projection seed for the cluster-assignment structural
-/// fingerprint. Must match `EmbeddingModel.deterministicSeed` in CorpusKit.swift
-/// (Swift: `0xC05B_D15C_A15D_1B00`) so the Swift and Rust cluster-assignment
-/// lanes produce byte-identical engrams for the same content text.
-const CLUSTER_FP_SEED: u64 = 0xC05B_D15C_A15D_1B00;
-
-/// Compute a training-independent structural fingerprint for `text`.
-///
-/// Uses FNV-1a → LCG → FloatSimHash — the exact same algorithm as
-/// `EmbeddingModel.deterministic`'s inference closure in CorpusKit — so the
-/// result is deterministic, network-free, training-free, and byte-identical to
-/// the `.deterministic` embedding provider's output (given the same text).
-///
-/// This replaces `corpus.embed(content)` in the cluster-assignment path so
-/// clusters form on fresh/untrained estates. On an untrained estate, trained
-/// providers (RI/PPMI/LSA/NMF) return a near-zero engram for every text
-/// (no accumulated basis), causing every capture to appear maximally distant
-/// from every other — which makes every drawer seed a fresh singleton cluster
-/// and `member_count` never reaches the ≥3 distillation gate.
-///
-/// Swift parity: `GeniusLocusKit.contentDeterministicFingerprint(_:)` in
-/// `EncodeIntake.swift`.
-fn content_deterministic_fingerprint(text: &str) -> substrate_types::fingerprint256::Fingerprint256 {
-    use substrate_ml::float_simhash;
-
-    if text.is_empty() {
-        return substrate_types::fingerprint256::Fingerprint256::ZERO;
-    }
-    // FNV-1a 64-bit over the text's UTF-8 bytes. Matches Swift exactly:
-    // `text.utf8.reduce(FNV_OFFSET) { ($0 ^ UInt64($1)) &* FNV_PRIME }`.
-    let fnv_prime: u64    = 1_099_511_628_211;
-    let fnv_offset: u64   = 14_695_981_039_346_656_037;
-    let mut h: u64 = fnv_offset;
-    for b in text.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(fnv_prime);
-    }
-    // LCG constants from the .deterministic provider's inference closure.
-    let lcg_multiplier: u64 = 6_364_136_223_846_793_005;
-    let lcg_increment: u64  = 1_442_695_040_888_963_407;
-    let floats: Vec<f32> = (0..32)
-        .map(|_| {
-            h = h.wrapping_mul(lcg_multiplier).wrapping_add(lcg_increment);
-            // High 24 bits as mantissa in [0, 1), scaled to [-1, 1].
-            let mantissa = (h >> 40) as f32 / (1u64 << 24) as f32;
-            mantissa * 2.0 - 1.0
-        })
-        .collect();
-    // FloatSimHash.project is the canonical signed-hyperplane projection,
-    // bit-identical to the Swift SubstrateML.FloatSimHash.project for the
-    // same (vector, seed) pair. The seed is CLUSTER_FP_SEED.
-    float_simhash::project(&floats, CLUSTER_FP_SEED)
-}
-
-/// Standalone cluster-assignment function that takes all needed components as
-/// parameters. Shares logic with `EstateCoordinator::assign_cluster_after_ingest`
-/// but runs without a `self` reference so it can be called from the background
-/// watch-worker thread (which has no access to the coordinator).
-///
-/// Called after a successful `Corpus::ingest` on BOTH the pump path
-/// (via `EstateCoordinator::assign_cluster_after_ingest`) and the watch-worker
-/// path (via `ingest_one_into`).
-///
-/// A no-op when either `storage` or `vector_store` is `None` — the cluster
-/// assignment lane requires both. Errors are logged to stderr but never
-/// propagated. Mirrors Swift `assignClusterAfterIngest` in `EncodeIntake.swift`.
-fn assign_cluster_standalone(
-    drawer_id: &str,
-    content: &str,
-    now_secs: i64,
-    _corpus: &Corpus,
-    storage: Option<&Arc<dyn persistence_kit::storage::Storage>>,
-    vector_store: Option<&Arc<VectorStore>>,
-) {
-    let (storage, vector_store) = match (storage, vector_store) {
-        (Some(s), Some(vs)) => (s, vs),
-        _ => return, // non-GLK estate: no cluster assignment
-    };
-
-    // Compute the training-independent structural fingerprint of the content.
-    // This replaces corpus.embed(content), which would delegate to the DEFAULT
-    // trained provider (RI on a production estate). On a fresh/untrained estate
-    // RI has no accumulated basis and returns a near-zero engram for every text,
-    // causing every drawer to appear maximally distant — every capture seeds a
-    // fresh singleton cluster and member_count never reaches the ≥3 gate.
-    let engram = content_deterministic_fingerprint(content);
-
-    // Register this drawer's engram in the cluster-assignment lane.
-    // Lane ID is CLUSTER_MODEL_ID — fixed, training-independent (not derived
-    // from corpus.model_id()) so the lane is stable regardless of which trained
-    // model is primary for this estate.
-    if let Err(e) = vector_store.add_vector(drawer_id, &engram, CLUSTER_MODEL_ID, "1", now_secs) {
-        eprintln!(
-            "[glk] assign_cluster_standalone: add_vector failed for drawer {drawer_id}: {e:?}"
-        );
-        return;
-    }
-
-    // Find the nearest neighbor in the cluster-assignment lane (limit=2 to
-    // handle a possible self-hit at distance 0).
-    let matches = match vector_store.find_nearest(&engram, CLUSTER_MODEL_ID, 2) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "[glk] assign_cluster_standalone: find_nearest failed for drawer {drawer_id}: {e:?}"
-            );
-            return;
-        }
-    };
-
-    // Exclude self-hit.
-    let nearest = matches.iter().find(|m| m.item_id != drawer_id);
-
-    // Look up an existing open cluster that contains the nearest neighbor.
-    let open_cluster_id = if let Some(n) = nearest {
-        let predicate = StoragePredicate::Eq(
-            Column::new("memory_clusters", "status"),
-            TypedValue::Text("open".to_string()),
-        );
-        let rows = storage
-            .row_store()
-            .query("memory_clusters", Some(&predicate), &[], None, None)
-            .unwrap_or_default();
-        let mut found: Option<String> = None;
-        for row in &rows {
-            let member_ids: Vec<String> = match row.get("member_ids") {
-                Some(TypedValue::Json(data)) => {
-                    serde_json::from_slice(data).unwrap_or_default()
-                }
-                _ => continue,
-            };
-            if member_ids.contains(&n.item_id) {
-                if let Some(TypedValue::Text(id)) = row.get("id") {
-                    found = Some(id.clone());
-                    break;
-                }
-            }
-        }
-        found
-    } else {
-        None
-    };
-
-    // Decision gate (Hamming threshold = 64, mirrors Swift).
-    let nearest_distance = nearest.map(|m| m.distance as u32);
-    let decision = crate::brain::distillation_cycle::assign_cluster_decision(
-        nearest_distance,
-        open_cluster_id,
-    );
-
-    // Execute the DB write.
-    let write_result = match decision {
-        crate::brain::distillation_cycle::ClusterAssignmentDecision::Joined { cluster_id } => {
-            // Append drawer_id to the existing cluster.
-            let predicate = StoragePredicate::Eq(
-                Column::new("memory_clusters", "id"),
-                TypedValue::Text(cluster_id.clone()),
-            );
-            let rows = storage
-                .row_store()
-                .query("memory_clusters", Some(&predicate), &[], Some(1), None)
-                .unwrap_or_default();
-            if let Some(row) = rows.first() {
-                let mut member_ids: Vec<String> = match row.get("member_ids") {
-                    Some(TypedValue::Json(data)) => {
-                        serde_json::from_slice(data).unwrap_or_default()
-                    }
-                    _ => vec![],
-                };
-                if !member_ids.contains(&drawer_id.to_string()) {
-                    member_ids.push(drawer_id.to_string());
-                    let updated_data = serde_json::to_vec(&member_ids).unwrap_or_default();
-                    let current_count = match row.get("member_count") {
-                        Some(TypedValue::Int(n)) => *n,
-                        _ => 0,
-                    };
-                    let mut values = std::collections::BTreeMap::new();
-                    values.insert("member_ids".to_string(), TypedValue::Json(updated_data));
-                    values.insert(
-                        "member_count".to_string(),
-                        TypedValue::Int(current_count + 1),
-                    );
-                    values.insert("updated_at".to_string(), TypedValue::Timestamp(now_secs));
-                    storage
-                        .row_store()
-                        .update("memory_clusters", values, &predicate)
-                        .map(|_| ())
-                        .map_err(|e| format!("{e:?}"))
-                } else {
-                    Ok(()) // already a member, idempotent
-                }
-            } else {
-                Ok(()) // cluster disappeared — nothing to append to
-            }
-        }
-        crate::brain::distillation_cycle::ClusterAssignmentDecision::Seeded => {
-            // Insert a new single-member open cluster.
-            let cluster_id = uuid::Uuid::new_v4().to_string();
-            let member_data =
-                serde_json::to_vec(&vec![drawer_id.to_string()]).unwrap_or_default();
-            let mut values = std::collections::BTreeMap::new();
-            values.insert("id".to_string(), TypedValue::Text(cluster_id));
-            values.insert("status".to_string(), TypedValue::Text("open".to_string()));
-            values.insert("snr".to_string(), TypedValue::Null);
-            values.insert("member_ids".to_string(), TypedValue::Json(member_data));
-            values.insert("member_count".to_string(), TypedValue::Int(1));
-            values.insert("factoid_id".to_string(), TypedValue::Null);
-            values.insert("held_reason".to_string(), TypedValue::Null);
-            values.insert("filed_at".to_string(), TypedValue::Timestamp(now_secs));
-            values.insert("updated_at".to_string(), TypedValue::Timestamp(now_secs));
-            storage
-                .row_store()
-                .insert("memory_clusters", values)
-                .map(|_| ())
-                .map_err(|e| format!("{e:?}"))
-        }
-    };
-
-    if let Err(e) = write_result {
-        eprintln!(
-            "[glk] assign_cluster_standalone: cluster DB write failed for drawer {drawer_id}: {e}"
-        );
-    }
-}
-
 fn enqueue_wake_job(
     backend: &PersistenceKitBackend,
     stream_id: &StreamId,

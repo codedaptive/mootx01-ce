@@ -23,9 +23,8 @@ import VectorKit
 /// fold closure via `TemporalCausalitySignal.spec(foldCycle:)`.
 ///
 /// Signal 8 (DistillationSignal) was wired in DG5. Production callers
-/// supply a `distillationCycle` closure that wraps
-/// `kit.runDistillationSweep(handle:distillFn:now:)` with the estate
-/// handle and the NeuronKit-backed `distillFn` closure.
+/// supply a `distillationCycle` closure that runs the per-item
+/// distillation sweep and returns the count of factoids produced.
 public extension GeniusLocusKit {
 
     /// Names of the eight v1 standing signals, in the order they are
@@ -62,8 +61,8 @@ public extension GeniusLocusKit {
     ///     test registration where no live daemon is available.
     ///   - distillationCycle: async closure forwarded to
     ///     `DistillationSignal.spec(distillationCycle:)`. The caller wraps
-    ///     `kit.runDistillationSweep(handle:distillFn:now:)` with the estate
-    ///     handle and a NeuronKit-backed `distillFn` closure here.
+    ///     the per-item distillation sweep (`kit.distillItemsSweep`) with
+    ///     the estate handle and a NeuronKit-backed `distillFn` closure here.
     ///     Defaults to a no-op that returns zero factoids — correct for
     ///     test registration where no live distillation engine is available.
     ///   - modelID: the embedding model whose stored vectors are scanned
@@ -100,8 +99,8 @@ public extension GeniusLocusKit {
             TemporalCausalitySignal.defaultSpec(),
             // DistillationSignal wired with the injected distillationCycle closure
             // per architecture spec §11.2, signal 8 (DG5). The caller supplies
-            // a closure wrapping kit.runDistillationSweep; the default no-op
-            // (returns 0) is appropriate for tests without a live sweep engine.
+            // a closure that runs the per-item distillation sweep; the default
+            // no-op (returns 0) is appropriate for tests without a live sweep engine.
             DistillationSignal.spec(distillationCycle: distillationCycle),
         ]
         var registered: [String: SignalID] = [:]

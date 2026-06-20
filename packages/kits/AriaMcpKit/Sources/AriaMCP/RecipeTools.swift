@@ -67,9 +67,9 @@ enum RecipeTools {
     /// this runs — the reason the matrix-driven precise compositions score zero
     /// on an undreamt estate.
     static let dreamToolName = "moot_dream"
-    /// On-demand distillation sweep: compact working memory by distilling open
-    /// clusters into factoids. Delegates to GeniusLocusKit.runDistillationSweep,
-    /// which processes all clusters with member_count ≥ 3 and status = open.
+    /// On-demand distillation sweep: compact working memory by distilling active
+    /// items into factoids. Delegates to GeniusLocusKit.distillItemsSweep,
+    /// which processes all eligible not-yet-distilled items.
     static let consolidateToolName = "moot_consolidate"
     /// Dense distilled-tier recall: Hamming NN over the distillation-features-v1
     /// VectorKit lane — no embedding model inference. Returns factoid prose
@@ -299,32 +299,28 @@ enum RecipeTools {
 
     // MARK: - consolidate descriptor
 
-    /// On-demand distillation sweep. Delegates all work to
-    /// GeniusLocusKit.runDistillationSweep — processes all open clusters with
-    /// member_count ≥ 3 and persists each factoid as a drawer in room `_distilled`.
-    /// Optional `cluster_id` and `include_held` are accepted but forwarded as
-    /// Input fields; the current GLK sweep API processes all eligible clusters
-    /// (per-cluster targeting requires a future GLK enhancement).
+    /// On-demand per-item distillation sweep. Delegates all work to
+    /// GeniusLocusKit.distillItemsSweep — processes all active not-yet-distilled
+    /// items and persists each factoid as a drawer in room `_distilled`.
+    /// The `cluster_id` and `include_held` args are accepted for API stability
+    /// but are not used by the per-item sweep model.
     private static func consolidateTool() -> ProjectedTool {
         ProjectedTool(
             name: consolidateToolName,
-            description: "Compact working memory by distilling open clusters into factoids. "
-                + "Calls the GLK distillation sweep, which processes all ready clusters "
-                + "(member_count ≥ 3, status = open) and persists each factoid as a "
+            description: "Compact working memory by distilling active items into factoids. "
+                + "Calls the GLK per-item distillation sweep, which processes all "
+                + "eligible not-yet-distilled items and persists each factoid as a "
                 + "drawer in room `_distilled`. Returns the count of factoids produced "
                 + "this sweep.",
             inputSchema: objectSchema(
                 properties: [
                     "cluster_id": stringSchema(
-                        "Optional UUID of a specific cluster to distill. Omit to sweep all "
-                            + "eligible open clusters. Per-cluster targeting is accepted but the "
-                            + "current GLK sweep API processes all eligible clusters."),
+                        "Accepted for API stability; not used by the per-item sweep model."),
                     "include_held": .object([
                         "type": .string("boolean"),
                         "description": .string(
-                            "When true, include SNR-gated held clusters in the sweep. "
-                                + "Accepted but does not yet alter GLK behaviour; held-cluster "
-                                + "support requires a future GLK enhancement. Default false."),
+                            "Accepted for API stability; not used by the per-item sweep model. "
+                                + "Default false."),
                     ]),
                     "estateID": stringSchema(
                         "Optional UUID of the open estate to target. Omit for the default estate."),
@@ -853,11 +849,12 @@ enum RecipeTools {
 
     // MARK: - consolidate
 
-    /// Run `moot_consolidate`: trigger a distillation sweep on demand.
+    /// Run `moot_consolidate`: trigger a per-item distillation sweep on demand.
     ///
-    /// Decodes the optional `cluster_id` and `include_held` args and delegates
-    /// to the Consolidate recipe, which calls GLK.runDistillationSweep. Returns
-    /// a plain-text summary of factoids produced this sweep.
+    /// Decodes the optional `cluster_id` and `include_held` args (accepted for
+    /// API stability, not used by the per-item model) and delegates to the
+    /// Consolidate recipe, which calls GLK.distillItemsSweep. Returns a
+    /// plain-text summary of factoids produced this sweep.
     private static func runConsolidate(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -882,13 +879,9 @@ enum RecipeTools {
             input: .init(clusterID: clusterID, includeHeld: includeHeld),
             estate: handle, kit: kit)
 
-        let heldCount = out.heldClusterIDs.count
-        let failedCount = out.failedClusterIDs.count
         let body = """
         moot_consolidate: sweep complete
         factoidsProduced: \(out.factoidsProduced)
-        heldClusters: \(heldCount)
-        failedClusters: \(failedCount)
         """
         return ToolDispatcher.textResult(body)
     }
@@ -1009,7 +1002,7 @@ enum RecipeTools {
                 return ToolDispatcher.errorResult(
                     "drawer \(id) has no _distilled_from tunnels. "
                         + "The factoid may predate tunnel wiring — "
-                        + "fall back to lineage_id + memory_clusters query.")
+                        + "fall back to lineage_id query to locate source drawers.")
             }
         }
 

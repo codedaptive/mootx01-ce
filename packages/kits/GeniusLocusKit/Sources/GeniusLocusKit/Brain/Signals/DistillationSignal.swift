@@ -2,8 +2,8 @@ import Foundation
 
 /// Distillation sweep standing signal — architecture spec §11.2, signal 8.
 ///
-/// Runs the distillation pipeline on open memory clusters on each fire and
-/// surfaces the result as a diagnostic. Mirrors TemporalCausalitySignal
+/// Fires the per-item distillation sweep on each hourly tick and surfaces
+/// the factoid count as a diagnostic. Mirrors TemporalCausalitySignal
 /// exactly in structure: hourly cadence, .single concurrency, diagnostic
 /// emission, injected closure for the live cycle.
 ///
@@ -13,9 +13,10 @@ import Foundation
 /// Usage pattern (mirrors TemporalCausalitySignal):
 ///
 ///     let spec = DistillationSignal.spec { now in
-///         // Caller owns the cluster store and distillation pipeline;
-///         // it runs the sweep and returns the factoid count produced.
-///         return try await myEstateController.runDistillationSweep(now: now)
+///         // Caller owns the estate and distillation pipeline;
+///         // it runs the per-item sweep and returns the factoid count.
+///         return try await kit.distillItemsSweep(handle: handle,
+///             distillFn: distillFn, now: now)
 ///     }
 ///     let id = try await kit.registerStandingSignal(spec, in: handle, now: now)
 ///
@@ -35,13 +36,13 @@ public enum DistillationSignal {
     /// `GeniusLocusKit.defaultStandingSignalNames` (registered by Dg4).
     public static let signalName = "distillation-sweep"
 
-    /// Build a signal spec that invokes the distillation pipeline on each fire.
+    /// Build a signal spec that invokes the per-item distillation pipeline on each fire.
     ///
     /// The `distillationCycle` closure is called with the scheduler's `now`
-    /// and should run the full distillation sweep over open memory clusters,
-    /// returning the count of factoids produced. An empty successful return (0)
-    /// is correct when no clusters were ready to distill. On error the throw is
-    /// caught and surfaced as a `.diagnostic` emission.
+    /// and should run the per-item distillation sweep, returning the count of
+    /// factoids produced. An empty successful return (0) is correct when no
+    /// items were ready to distill. On error the throw is caught and surfaced
+    /// as a `.diagnostic` emission.
     ///
     /// - Parameter distillationCycle: async closure that executes the
     ///   distillation sweep. Captures the estate's cluster store and

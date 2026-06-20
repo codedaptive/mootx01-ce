@@ -2,14 +2,13 @@
 //
 // Integration tests for the Consolidate recipe under the INTRA-ITEM model.
 //
-// Test IDs: CK-CO-1 .. CK-CO-8
+// Test IDs: CK-CO-1 .. CK-CO-7
 //
-// Consolidate now drives the PER-ITEM sweep GeniusLocusKit.distillItemsSweep:
-// each stored item is reduced from its OWN sentences (intraItem: true). It does
-// NOT read memory_clusters, so held/failed CLUSTER lists no longer apply — the
-// recipe returns them empty. These tests verify the per-item contract: items
-// with ≥3 sentences and a non-zero feature fingerprint produce one factoid each;
-// short items are skipped; the sweep is idempotent; held/failed are always empty.
+// Consolidate drives the PER-ITEM sweep GeniusLocusKit.distillItemsSweep:
+// each stored item is reduced from its OWN sentences (intraItem: true). These
+// tests verify the per-item contract: items with ≥3 sentences and a non-zero
+// feature fingerprint produce one factoid each; short items are skipped;
+// the sweep is idempotent.
 //
 // Layer discipline: estates opened via public GeniusLocusKit API. Items captured
 // via the public GLK verb.
@@ -124,8 +123,7 @@ struct ConsolidateTests {
 
     // MARK: - Tests
 
-    // CK-CO-1: Empty estate (no VectorStore, no items) → factoidsProduced = 0,
-    // held/failed empty, no crash.
+    // CK-CO-1: Empty estate (no VectorStore, no items) → factoidsProduced = 0, no crash.
     @Test("CK-CO-1: empty estate returns factoidsProduced=0 with no crash")
     func emptyEstate() async throws {
         let (kit, handle) = try await openEstate()
@@ -133,12 +131,9 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
 
         #expect(out.factoidsProduced == 0)
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
     }
 
-    // CK-CO-2: A single recurring multi-sentence item produces exactly one factoid;
-    // held/failed are empty under the intra-item model.
+    // CK-CO-2: A single recurring multi-sentence item produces exactly one factoid.
     @Test("CK-CO-2: one recurring multi-sentence item produces one factoid")
     func oneItemProducesOneFactoid() async throws {
         let (kit, handle, _, _) = try await openEstateWithVectorStore()
@@ -148,9 +143,6 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
 
         #expect(out.factoidsProduced == 1)
-        // Intra-item: there is no cluster status, so these lists are always empty.
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
     }
 
     // CK-CO-3: Multiple recurring items each distill into their own factoid.
@@ -162,9 +154,7 @@ struct ConsolidateTests {
 
         let out = try await runConsolidate(kit: kit, handle: handle)
 
-        #expect(out.factoidsProduced == 3, "one factoid per item, not one per cluster")
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
+        #expect(out.factoidsProduced == 3, "one factoid per item")
     }
 
     // CK-CO-4: An item with fewer than 3 sentences is too short to distill and is
@@ -178,8 +168,6 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
 
         #expect(out.factoidsProduced == 0, "an item with <3 sentences must not distill")
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
     }
 
     // CK-CO-5: The per-item sweep is idempotent. A second run produces no new
@@ -195,8 +183,6 @@ struct ConsolidateTests {
 
         let second = try await runConsolidate(kit: kit, handle: handle)
         #expect(second.factoidsProduced == 0, "already-distilled items must be skipped on re-run")
-        #expect(second.heldClusterIDs.isEmpty)
-        #expect(second.failedClusterIDs.isEmpty)
     }
 
     // CK-CO-6: A mix of distillable and short items produces a factoid only for the
@@ -211,8 +197,6 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
 
         #expect(out.factoidsProduced == 2, "only the two multi-sentence items distill")
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
     }
 
     // CK-CO-7: With no VectorStore registered, the sweep produces nothing even when
@@ -226,25 +210,5 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
 
         #expect(out.factoidsProduced == 0)
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
-    }
-
-    // CK-CO-8: held/failed lists are ALWAYS empty under the intra-item model,
-    // regardless of Input targeting fields (which the per-item sweep ignores).
-    @Test("CK-CO-8: held and failed lists are always empty under the intra-item model")
-    func heldFailedAlwaysEmpty() async throws {
-        let (kit, handle, _, _) = try await openEstateWithVectorStore()
-
-        try await captureItems(count: 1, body: recurringBody, kit: kit, handle: handle)
-
-        // Input targeting fields are accepted but no longer consulted by the
-        // per-item sweep; held/failed remain empty either way.
-        let out = try await runConsolidate(
-            input: Consolidate.Input(clusterID: "ignored", includeHeld: true),
-            kit: kit, handle: handle)
-
-        #expect(out.heldClusterIDs.isEmpty)
-        #expect(out.failedClusterIDs.isEmpty)
     }
 }

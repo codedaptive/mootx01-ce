@@ -113,8 +113,8 @@ struct DistillationIntegrationTests {
         }
 
         // Resolve the factoid: the only drawer in room "_distilled" whose
-        // lineageID is the source item's id. The intra-item path does NOT write
-        // memory_clusters — the factoid is found directly by its room + lineage.
+        // lineageID equals the source item's id (set by distillItemsSweep
+        // via captureFactoid using the source drawer's UUID as lineageID).
         let allDrawers = try await kit.allDrawers(in: handle)
         guard let factoid = allDrawers.first(where: {
             $0.room == "_distilled" && $0.lineageID.uuidString == sourceID

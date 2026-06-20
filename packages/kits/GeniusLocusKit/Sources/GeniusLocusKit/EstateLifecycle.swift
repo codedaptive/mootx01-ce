@@ -241,16 +241,16 @@ public extension GeniusLocusKit {
     ) async throws {
         switch kind {
         case .glk:
-            // Apply the GLK composite schema so the GLK-only `memory_clusters`
-            // table (DG1, distillation staging) exists on backingStorage. The
-            // plain `open(storage:owner:)` path applies only the LocusKit /
-            // VectorKit / CorpusKit component schemas — it never registers the
-            // composite — so without this the distillation cluster lane has no
-            // table to write to and `consolidate` fails with "no such table:
-            // memory_clusters". Idempotent: CREATE TABLE IF NOT EXISTS for the
-            // already-present component tables, plus a migration-version record
-            // for "GeniusLocusKit". This is the same composite open the hydrate
-            // launch path performs in open(inMemory:hydrateFrom:).
+            // Apply the GLK composite schema so all component kit tables (LocusKit,
+            // VectorKit, CorpusKit) are registered on backingStorage under the
+            // GeniusLocusKit composite kit ID. The plain `open(storage:owner:)` path
+            // applies only the LocusKit component schema — it never registers the
+            // composite — so opening the composite here ensures the version gate in
+            // the replication primitive sees the correct composite version for this
+            // estate. Idempotent: CREATE TABLE IF NOT EXISTS for all tables, plus a
+            // migration-version record for "GeniusLocusKit". This is the same
+            // composite open the hydrate launch path performs in
+            // open(inMemory:hydrateFrom:).
             try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
             // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
             // Both are created on backingStorage. The Corpus.init call applies both
