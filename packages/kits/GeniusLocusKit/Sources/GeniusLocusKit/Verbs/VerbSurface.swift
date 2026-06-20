@@ -818,7 +818,7 @@ public extension GeniusLocusKit {
     /// must be present; an empty reanchor raises `VerbError.emptyReanchor`
     /// at the GLK boundary before dispatch.
     func reanchor(_ handle: EstateHandle, _ frame: ReanchorFrame) async throws {
-        guard frame.toRoom != nil || frame.toLattice != nil else {
+        guard frame.toRoom != nil || frame.toWing != nil || frame.toLattice != nil else {
             throw VerbError.emptyReanchor(rowID: frame.rowID)
         }
         let estate = try estate(for: handle)
@@ -826,6 +826,7 @@ public extension GeniusLocusKit {
             try await estate.reanchor(
                 rowID: frame.rowID,
                 toRoom: frame.toRoom,
+                toWing: frame.toWing,
                 toLattice: frame.toLattice
             )
         } catch {

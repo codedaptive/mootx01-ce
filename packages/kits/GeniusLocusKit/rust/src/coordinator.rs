@@ -1605,9 +1605,10 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         row_id: &str,
         to_room: Option<&str>,
+        to_wing: Option<&str>,
         to_lattice: Option<LatticeAnchor>,
     ) -> Result<(), VerbDispatchError> {
-        if to_room.is_none() && to_lattice.is_none() {
+        if to_room.is_none() && to_wing.is_none() && to_lattice.is_none() {
             return Err(VerbError::EmptyReanchor {
                 row_id: row_id.to_string(),
             }
@@ -1615,7 +1616,7 @@ impl EstateCoordinator {
         }
         let estate = self.estate_for_verb(handle)?;
         estate
-            .reanchor(row_id, to_room, to_lattice)
+            .reanchor(row_id, to_room, to_wing, to_lattice)
             .map_err(|e| remap("reanchor", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
@@ -5009,7 +5010,7 @@ mod tests {
     #[test]
     fn co4_empty_reanchor_is_refused() {
         let (coord, h) = open_one();
-        let err = coord.reanchor(&h, "row-1", None, None).unwrap_err();
+        let err = coord.reanchor(&h, "row-1", None, None, None).unwrap_err();
         assert_eq!(
             err,
             VerbDispatchError::Verb(VerbError::EmptyReanchor {

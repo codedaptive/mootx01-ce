@@ -292,13 +292,14 @@ impl DrawerStore for PostgresDrawerStore {
         &self,
         drawer_id: &str,
         to_room: Option<&str>,
+        to_wing: Option<&str>,
         to_lattice: Option<crate::estate_types::LatticeAnchor>,
         changed_by: &str,
         reason: Option<&str>,
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.0
-            .reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
+            .reanchor_gated(drawer_id, to_room, to_wing, to_lattice, changed_by, reason, now)
     }
 
     fn add_tunnel(&self, tunnel: &crate::tunnel::Tunnel) -> Result<(), LocusKitError> {

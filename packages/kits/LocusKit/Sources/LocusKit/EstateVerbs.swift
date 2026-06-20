@@ -1219,11 +1219,12 @@ public extension Estate {
     func reanchor(
         rowID: RowID,
         toRoom: RoomID? = nil,
+        toWing: String? = nil,
         toLattice: LatticeAnchor? = nil
     ) async throws {
-        guard toRoom != nil || toLattice != nil else {
+        guard toRoom != nil || toWing != nil || toLattice != nil else {
             throw LocusKitError.invalidContent(
-                "reanchor requires toRoom or toLattice"
+                "reanchor requires toRoom, toWing, or toLattice"
             )
         }
         guard try await store.getDrawer(id: rowID) != nil else {
@@ -1233,6 +1234,7 @@ public extension Estate {
         try await store.reanchorGated(
             drawerId: rowID,
             toRoom: toRoom,
+            toWing: toWing,
             toLattice: toLattice,
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: "reanchored via Estate.reanchor",

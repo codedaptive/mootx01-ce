@@ -1611,6 +1611,7 @@ impl DrawerStore for DrawerStoreCore {
         &self,
         drawer_id: &str,
         to_room: Option<&str>,
+        to_wing: Option<&str>,
         to_lattice: Option<crate::estate_types::LatticeAnchor>,
         changed_by: &str,
         reason: Option<&str>,
@@ -1702,6 +1703,13 @@ impl DrawerStore for DrawerStoreCore {
         }
         if let Some(new_room) = to_room {
             update_vals.insert("room".to_string(), TypedValue::Text(new_room.to_string()));
+        }
+        // Cross-wing move: update the wing column when to_wing is supplied.
+        // Wings emerge from SELECT DISTINCT wing on the drawers table (no wings
+        // table), so writing a new wing name here is sufficient to move the drawer
+        // into the target wing. Mirrors Swift DrawerStore.reanchorGated.
+        if let Some(new_wing) = to_wing {
+            update_vals.insert("wing".to_string(), TypedValue::Text(new_wing.to_string()));
         }
         if !update_vals.is_empty() {
             row_store
@@ -3276,13 +3284,14 @@ impl DrawerStore for InMemoryDrawerStore {
         &self,
         drawer_id: &str,
         to_room: Option<&str>,
+        to_wing: Option<&str>,
         to_lattice: Option<crate::estate_types::LatticeAnchor>,
         changed_by: &str,
         reason: Option<&str>,
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.inner
-            .reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
+            .reanchor_gated(drawer_id, to_room, to_wing, to_lattice, changed_by, reason, now)
     }
     fn add_tunnel(&self, tunnel: &crate::tunnel::Tunnel) -> Result<(), LocusKitError> {
         self.inner.add_tunnel(tunnel)

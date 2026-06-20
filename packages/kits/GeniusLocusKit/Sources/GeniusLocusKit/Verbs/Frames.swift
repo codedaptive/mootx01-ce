@@ -125,24 +125,28 @@ public struct ExpungeFrame: Sendable, Equatable {
 ///
 /// `reanchor` updates a row's lattice anchor or its room/wing, leaving
 /// content and fingerprint blocks other than Block 1 untouched
-/// (cookbook §10.2). At least one of `toRoom` or `toLattice` must be
-/// non-nil; an empty reanchor is rejected at the GLK boundary as
+/// (cookbook §10.2). At least one of `toRoom`, `toWing`, or `toLattice`
+/// must be non-nil; an empty reanchor is rejected at the GLK boundary as
 /// `VerbError.emptyReanchor`.
 public struct ReanchorFrame: Sendable, Equatable {
     /// The drawer to reanchor.
     public let rowID: RowID
     /// Target room. `nil` keeps the current room.
     public let toRoom: RoomID?
+    /// Target wing. `nil` keeps the current wing. Cross-wing moves require this field.
+    public let toWing: String?
     /// Target lattice anchor. `nil` keeps the current anchor.
     public let toLattice: LatticeAnchor?
 
     public init(
         rowID: RowID,
         toRoom: RoomID? = nil,
+        toWing: String? = nil,
         toLattice: LatticeAnchor? = nil
     ) {
         self.rowID = rowID
         self.toRoom = toRoom
+        self.toWing = toWing
         self.toLattice = toLattice
     }
 }

@@ -975,6 +975,137 @@ fn move_memory_succeeds() {
     );
 }
 
+/// Bug J regression: move_memory must honour the `wing` argument.
+///
+/// Files a memory into "OriginWing", then moves it to "TargetWing" via
+/// `moot_move_memory`. Verifies:
+///   1. The success text names both wing and room.
+///   2. A recall scoped to "TargetWing" finds the memory.
+///   3. A recall scoped to "OriginWing" returns zero hits.
+#[test]
+fn move_memory_with_wing_reanchors_to_target_wing() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // File into "OriginWing".
+    let file_result = dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "cross-wing-rust-test unique zeta omega unique-payload",
+            "location" => "origin-room",
+            "wing" => "OriginWing"
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("file_memory must succeed");
+    assert!(is_success(&file_result), "file_memory must succeed; got: {file_result:?}");
+    let file_text = content_text(&file_result);
+    let id = file_text
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("filed memory "))
+        .expect("must parse id from file result");
+
+    // Move to "TargetWing".
+    let move_result = dispatch_tool(
+        "moot_move_memory",
+        &args![
+            "id" => id,
+            "location" => "target-room",
+            "wing" => "TargetWing"
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("move_memory must not throw");
+    assert!(is_success(&move_result), "move_memory must succeed; got: {move_result:?}");
+    let move_text = content_text(&move_result);
+    assert!(
+        move_text.contains("TargetWing"),
+        "move result must name the target wing; got: {move_text}"
+    );
+    assert!(
+        move_text.contains("target-room"),
+        "move result must name the target room; got: {move_text}"
+    );
+
+    // Recall in TargetWing must find the memory.
+    let target_recall = dispatch_tool(
+        "moot_memory_search",
+        &args![
+            "query" => "cross-wing-rust-test unique zeta omega",
+            "wing" => "TargetWing"
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("memory_search must not throw");
+    assert!(is_success(&target_recall));
+    let target_text = content_text(&target_recall);
+    assert!(
+        !target_text.contains("found 0 memory(s)"),
+        "recall in TargetWing must find the moved memory; got: {target_text}"
+    );
+
+    // Recall in OriginWing must return 0 hits.
+    let origin_recall = dispatch_tool(
+        "moot_memory_search",
+        &args![
+            "query" => "cross-wing-rust-test unique zeta omega",
+            "wing" => "OriginWing"
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("memory_search must not throw");
+    assert!(is_success(&origin_recall));
+    let origin_text = content_text(&origin_recall);
+    assert!(
+        origin_text.contains("found 0 memory(s)"),
+        "recall in OriginWing must return 0 hits after cross-wing move; got: {origin_text}"
+    );
+}
+
+/// Bug O regression (Rust verification): moot_memory_search with results must
+/// NOT emit the "no memories matched" coaching hint.
+///
+/// The Rust coaching_engine already gated on "found 0 memory(s)" (not the
+/// substring "0 memory"), so this test proves the invariant is preserved.
+#[test]
+fn search_with_results_does_not_emit_no_results_hint() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // File a memory so the search can return at least one hit.
+    dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "rust-hint-test unique alpha bravo charlie unique-payload",
+            "location" => "hint-test-room"
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("file_memory must succeed");
+
+    let search_result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "rust-hint-test unique alpha bravo"],
+        &registry,
+        &ledger,
+    )
+    .expect("memory_search must not throw");
+    assert!(is_success(&search_result));
+    let search_text = content_text(&search_result);
+
+    // Must not emit the "no memories matched" coaching hint.
+    assert!(
+        !search_text.contains("no memories matched"),
+        "No-results hint must not fire when search returned results; got: {search_text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 5. Tier 2 — Connections
 // ---------------------------------------------------------------------------

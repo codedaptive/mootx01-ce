@@ -59,7 +59,9 @@ enum CoachingEngine {
             return "Queries work best as keywords or a short question under 50 words. Long queries dilute the semantic signal."
         }
         // Zero results — help caller broaden or verify the location exists.
-        if resultText.contains("0 memory") {
+        // Gate on the full prefix "found 0 memory" so a result like "found 20 memory(s)"
+        // (which contains the substring "0 memory") does not spuriously fire this hint.
+        if resultText.contains("found 0 memory") {
             return "No results. Try broader terms, or check `moot_estate_map` to confirm the location exists."
         }
         return nil

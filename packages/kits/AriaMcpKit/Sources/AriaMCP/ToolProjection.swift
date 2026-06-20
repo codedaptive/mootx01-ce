@@ -217,11 +217,12 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_move_memory",
-                description: "Move a memory to a different location within the estate (reanchor).",
+                description: "Move a memory to a different location within the estate (reanchor). Supports cross-wing moves via the optional `wing` argument.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "id": stringSchema("Memory row identifier."),
-                        "location": stringSchema("New location hint (free-form string; server resolves to structural coordinates)."),
+                        "location": stringSchema("New location hint (free-form string; server resolves to room coordinate)."),
+                        "wing": stringSchema("Optional target wing name for cross-wing moves (ADR-016). When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\". null is invalid."),
                     ],
                     required: ["id", "location"]
                 )),
