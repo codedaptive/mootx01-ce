@@ -96,6 +96,28 @@ enum AuditBridge {
                 originRowID: nil
             ))
         }
+
+        // Lattice anchor (the FDC zone) → the diffusion zone / topic-trajectory
+        // motion model (ADR-DIFFUSION-001 §5, Option 3a). The anchor is already
+        // on the event (before/after); bridging it through gives the
+        // UnifiedAuditLog the zone time-series with no substrate change. Emit on
+        // capture (no prior anchor) and whenever a reanchor changes it; a mutate
+        // that leaves the anchor unchanged emits nothing here. value = .integer
+        // of the UInt64 UDC code (bit-preserving round trip).
+        let afterAnchor = event.afterLatticeAnchor.udcCode
+        let beforeAnchor = event.beforeLatticeAnchor?.udcCode
+        if beforeAnchor != afterAnchor {
+            entries.append(UnifiedAuditEntry(
+                tier: .locus,
+                hlc: event.hlc,
+                verb: unifiedVerb,
+                rowID: event.rowId,
+                fieldPath: "latticeAnchor",
+                beforeValue: beforeAnchor.map { .integer(Int64(bitPattern: $0)) } ?? .null,
+                afterValue: .integer(Int64(bitPattern: afterAnchor)),
+                originRowID: nil
+            ))
+        }
         return entries
     }
 

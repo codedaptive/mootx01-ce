@@ -109,18 +109,31 @@ confidence of the extrapolation.
 ## 5. Data substrate — the position-fingerprint audit extension (Option 3)
 
 Diffusion needs a **time-series at each layer**. The distillation mirror is current-
-state only. **Verified finding:** the audit log cannot supply the history — the
-`UnifiedAuditLog` records `{hlc, verb, rowID, fieldPath ∈ {adjective, operational,
-provenance}, before/after = bitmap}`; it captures bitmap-flag deltas and lifecycle
-*timing* but **not** content, room, or lattice anchor. So it has the *when* but not
-the *where/what*.
+state only. **Verified finding (refined 2026-06-19):** the substrate already carries
+more than first thought.
+- The `UnifiedAuditLog` records `{hlc, verb, rowID}` per change, so **mutation timing
+  / lifecycle is already present** (node volatility is foldable today).
+- The underlying `SubstrateTypes.AuditEvent` **already carries the lattice anchor**
+  (`beforeLatticeAnchor`/`afterLatticeAnchor`, a `UInt64` UDC code) — so the **zone**
+  is in the substrate, with before/after on `reanchor`. It is simply **not bridged**
+  to the `UnifiedAuditLog` yet: `AuditBridge.bridge` emits only the three bitmap
+  columns (`adjective`/`operational`/`provenance`).
+- The only thing genuinely absent is the fine **content fingerprint** (the semantic
+  position that moves on a value change *within* a zone, e.g. apache→agpl).
 
-**Decision — Option 3:** extend the audited fields to record the **reduced position**,
-not the content. On `capture` / `mutate` / `reanchor`, additionally emit:
+So Option 3 splits into a cheap, no-substrate-change foundation and a later
+fingerprint enhancement.
 
-- `fieldPath:"fingerprint"` → the 256-bit reduced position (already computed at
-  capture by FDC), and
-- `fieldPath:"zone"` → the room / UDC anchor.
+**Decision — Option 3 (a): bridge the zone (no substrate change).** Extend
+`AuditBridge.bridge` to also emit a `fieldPath:"latticeAnchor"` entry from the
+event's before/after anchor (`.integer` of the UDC code). This unlocks **zone /
+topic-trajectory motion + mutation-timing volatility** from the existing audit, both
+ports, touching only the GLK bridge (the substrate `AuditEvent`/`AuditGate` are
+untouched — the anchor is already there).
+
+**Decision — Option 3 (b): add the content fingerprint (later).** For fine node
+*value* trajectories, add a `fieldPath:"fingerprint"` (256-bit reduced position,
+computed at capture). This is the only part that extends the substrate audit fields.
 
 Rationale: same cost class as the existing bitmap entries (tiny, fixed-width), no
 hot-path cost (positions are computed at capture anyway), **single source of truth**,
@@ -236,12 +249,17 @@ distillation pipeline was the original modelling error this ADR corrects.
 
 ## 11. Build sequencing & dependencies
 
-1. **Audit-position extension (Option 3)** — log `fingerprint` + `zone` on
-   `capture`/`mutate`/`reanchor`, both ports. *Prerequisite for everything.* Cheap,
-   isolated.
-2. **Node-layer motion model** — fold node fingerprint paths with λ_node; deliver
-   `DeltaFeatureExtractor`-backed supersession/convergence + write-time anomaly.
-   Buildable immediately after (1); does not need the multi-level tree.
+1. **Bridge the zone — Option 3(a)** — `AuditBridge` emits a `latticeAnchor` entry
+   from the event's before/after anchor, both ports. **No substrate change** (the
+   anchor is already in `AuditEvent`); touches only the GLK bridge + its tests.
+   *Prerequisite for the fold.* Cheap, isolated. ← **building first**
+2. **Node-layer motion model** — fold the node's `{verb, hlc, anchor}` history with
+   λ_node: mutation-timing volatility + topic-trajectory + reanchor supersession +
+   write-time anomaly. Buildable on Option 3(a) alone; does not need the multi-level
+   tree. (Fine *value*-trajectory supersession waits on the content fingerprint,
+   Option 3(b).)
+3. **Content fingerprint — Option 3(b)** — add `fieldPath:"fingerprint"` to the audit
+   (the only substrate-audit-field extension) for fine node value trajectories.
 3. **Multi-level distillation tree** — zone-factoid / estate-factoid (factoids-of-
    factoids) + **update-on-re-distill** (versioned factoids). *Gates the zone/estate
    motion models* — they have no positions to track until the tree exists.

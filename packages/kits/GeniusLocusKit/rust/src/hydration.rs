@@ -237,6 +237,69 @@ mod composite_version_tests {
     }
 }
 
+#[cfg(test)]
+mod audit_bridge_anchor_tests {
+    // Lattice-anchor bridging for the diffusion zone series (ADR-DIFFUSION-001
+    // §5, Option 3a). Mirrors Swift AuditBridgeTests.
+    use super::*;
+    use substrate_types::audit_event::AuditEvent;
+    use substrate_types::hlc::HLC;
+    use substrate_types::lattice_anchor::LatticeAnchor;
+    use substrate_types::row::RowId;
+
+    fn event(verb: &str, before: Option<LatticeAnchor>, after: LatticeAnchor) -> AuditEvent {
+        AuditEvent {
+            event_id: 1,
+            estate_uuid: 1,
+            row_id: RowId(1),
+            hlc: HLC { physical_time: 100, logical_count: 0, node_id: 1 },
+            verb: verb.to_string(),
+            before_bitmaps: if verb == "capture" { None } else { Some((0, 0, 0)) },
+            after_bitmaps: (0, 0, 0),
+            before_lattice_anchor: before,
+            after_lattice_anchor: after,
+            actor: "capture".to_string(),
+            reason: None,
+        }
+    }
+
+    fn code(s: &str) -> i64 {
+        LatticeAnchor::udc(s).udc_code as i64
+    }
+
+    #[test]
+    fn capture_emits_anchor() {
+        let entries = bridge_audit_event(&event("capture", None, LatticeAnchor::udc("530")));
+        let anchors: Vec<_> = entries.iter().filter(|e| e.field_path == "latticeAnchor").collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].before_value, UnifiedAuditValue::Null);
+        assert_eq!(anchors[0].after_value, UnifiedAuditValue::Integer(code("530")));
+    }
+
+    #[test]
+    fn reanchor_emits_before_after() {
+        let entries = bridge_audit_event(&event(
+            "reanchor",
+            Some(LatticeAnchor::udc("530")),
+            LatticeAnchor::udc("004"),
+        ));
+        let anchors: Vec<_> = entries.iter().filter(|e| e.field_path == "latticeAnchor").collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].before_value, UnifiedAuditValue::Integer(code("530")));
+        assert_eq!(anchors[0].after_value, UnifiedAuditValue::Integer(code("004")));
+    }
+
+    #[test]
+    fn unchanged_anchor_emits_nothing() {
+        let entries = bridge_audit_event(&event(
+            "mutate",
+            Some(LatticeAnchor::udc("530")),
+            LatticeAnchor::udc("530"),
+        ));
+        assert!(entries.iter().all(|e| e.field_path != "latticeAnchor"));
+    }
+}
+
 // MARK: - Flush convenience
 
 /// Flush an in-memory storage into a durable storage.
@@ -486,6 +549,33 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
             name.to_string(),
             before_value,
             after_value,
+            None,
+        ));
+    }
+
+    // Lattice anchor (the FDC zone) -> the diffusion zone / topic-trajectory
+    // motion model (ADR-DIFFUSION-001 §5, Option 3a). Mirrors Swift AuditBridge:
+    // the anchor is already on the event (before/after); bridging it through
+    // gives the UnifiedAuditLog the zone time-series with no substrate change.
+    // Emit on capture (no prior anchor) and whenever a reanchor changes it; a
+    // mutate that leaves the anchor unchanged emits nothing here. value =
+    // Integer of the u64 UDC code (bit-preserving, matching Swift's
+    // Int64(bitPattern:)).
+    let after_anchor = event.after_lattice_anchor.udc_code;
+    let before_anchor = event.before_lattice_anchor.map(|a| a.udc_code);
+    if before_anchor != Some(after_anchor) {
+        let before_value = match before_anchor {
+            Some(bc) => UnifiedAuditValue::Integer(bc as i64),
+            None => UnifiedAuditValue::Null,
+        };
+        entries.push(UnifiedAuditEntry::new(
+            AuditTier::Locus,
+            event.hlc,
+            unified_verb,
+            entry_uuid,
+            "latticeAnchor".to_string(),
+            before_value,
+            UnifiedAuditValue::Integer(after_anchor as i64),
             None,
         ));
     }
