@@ -14,10 +14,6 @@ facts, write them back with the appropriate MOOTx01 tool.
 If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
 happened unless you actually queried it.
 
-Before answering memory-dependent questions, query MOOTx01. Reach for it when
-the user asks about prior decisions, preferences, project history, source
-material, unresolved issues, or continuing earlier work.
-
 ## Startup
 
 When relevant:
@@ -52,4 +48,3 @@ Before ending meaningful work:
 - Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
 Never claim MOOTx01 recall unless you actually queried it.
-
