@@ -84,9 +84,46 @@ installed is the one we shipped:
 
 - Release artifacts publish SHA-256 checksums in `checksums.txt`
   alongside each release. The installer verifies them before
-  extraction. You can check by hand with `shasum -a 256`.
+  extraction, and fails closed if no SHA-256 tool is available — the
+  installation is aborted rather than proceeding with an unverified
+  binary. You can check by hand with `shasum -a 256`.
 - macOS binaries are Developer ID signed and notarized. Verify with
   `codesign --verify` and `spctl --assess`.
+- **Linux/POSIX — minisign Ed25519 signature (CAND-004).** Linux does
+  not have an OS-enforced code-signing mechanism equivalent to macOS
+  Developer ID or Windows Authenticode. As an independent trust root
+  for Linux/POSIX releases, mootx01 publishes a detached Ed25519
+  signature of `checksums.txt` (the file `checksums.txt.minisig`)
+  alongside each release, signed with the project's minisign key
+  (key id `2A2AD38EB13379AB`). The public key is bundled at
+  `scripts/minisign.pub` in the repository and embedded in the Rust
+  upgrade binary at compile time.
+
+  The shell installer (`install.sh`) and the `mootx01 upgrade` command
+  verify this signature **fail-closed** on Linux: if `minisign` is not
+  installed, or the signature is missing or invalid, installation is
+  aborted with a descriptive error rather than proceeding with an
+  unverified binary.
+
+  **Verification order on Linux/POSIX:**
+  1. Download asset and `checksums.txt` (TLS from `github.com`)
+  2. SHA-256 checksum verification against `checksums.txt`
+  3. minisign Ed25519 signature verification of `checksums.txt` against
+     the bundled public key (independent trust root)
+  4. Extraction
+
+  **Current status:** The verification infrastructure is fully wired
+  and fail-closed, and the **real public key is committed** at
+  `scripts/minisign.pub` (key id `2A2AD38EB13379AB`). Releases are
+  signed when the `MINISIGN_SECRET_KEY` GitHub repository secret is
+  present. Until the signing secret is configured, releases are
+  published unsigned and Linux/POSIX installers will (correctly)
+  **reject** them fail-closed. macOS (Developer ID) and Windows
+  (Authenticode) are unaffected.
+
+Do not pipe remote installer content directly to a shell. Download,
+review, verify, then act — in that order. Any verification failure is
+a hard stop.
 
 If the checksum or signature does not match, the binary is not ours.
 Nothing in this document applies to it.
