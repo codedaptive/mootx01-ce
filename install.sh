@@ -97,12 +97,17 @@ verify_checksum() {
 }
 
 # verify_minisign verifies a detached Ed25519 minisign signature of the
-# checksums.txt file against the public key bundled at scripts/minisign.pub.
-# This provides an independent trust root beyond the TLS transport used to
-# fetch the release from GitHub.
+# checksums.txt file against the public key passed as the pub_key_file
+# argument ($3). This provides an independent trust root beyond the TLS
+# transport used to fetch the release from GitHub.
+#
+# The caller supplies the key file path. In curl|sh install mode the key
+# is embedded in this script and written to a temp file by the call site;
+# in a repo checkout the caller could supply scripts/minisign.pub directly.
+# This function is agnostic about the source — it receives a file path.
 #
 # Fail-closed in two ways:
-#   1. If scripts/minisign.pub contains the PLACEHOLDER sentinel, the
+#   1. If the supplied key file contains the PLACEHOLDER sentinel, the
 #      operator has not yet committed a real keypair. Exit non-zero.
 #   2. If the `minisign` binary is not present on PATH, exit non-zero with
 #      installation instructions. Do NOT skip verification — omitting it
