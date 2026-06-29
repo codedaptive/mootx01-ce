@@ -513,13 +513,14 @@ jobs:
           $versionNum = $env:VERSION_NUM
           # BinDir must be an absolute path: ISCC resolves /DBinDir relative to the
           # .iss file's SourceDir (distribution\windows\), not the caller's CWD.
-          # Passing $PWD (the workspace root) means {#BinDir}\mootx01.exe resolves
-          # correctly to the exes copied there by the "Package binaries" step above.
+          # Passing $($PWD.Path) (workspace root absolute path) means
+          # {#BinDir}\mootx01.exe resolves to the exes copied there by the
+          # "Package binaries" step above.
           # /O. — output the setup.exe into the workspace root (caller's CWD).
           & $iscc `
             "/DMyAppVersion=$versionNum" `
             "/DArch=x86_64" `
-            "/DBinDir=$PWD" `
+            "/DBinDir=$($PWD.Path)" `
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           # The .iss OutputBaseFilename produces: mootx01-<version>-windows-x86_64-setup.exe
@@ -602,7 +603,7 @@ jobs:
           & $iscc `
             "/DMyAppVersion=$versionNum" `
             "/DArch=arm64" `
-            "/DBinDir=$PWD" `
+            "/DBinDir=$($PWD.Path)" `
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           $setupAsset = "mootx01-${versionNum}-windows-arm64-setup.exe"
