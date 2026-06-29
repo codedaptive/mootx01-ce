@@ -415,7 +415,10 @@ jobs:
       # encounter a missing .minisig — this is expected until the operator
       # completes the steps above.
       - name: Sign checksums with minisign (CAND-004)
-        if: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
+        # NOTE: GitHub Actions forbids referencing `secrets` in a step-level
+        # `if:` conditional, so the secret-present check is done INSIDE the
+        # script (the secret is exposed via env below). The step always runs but
+        # no-ops cleanly when the signing key is not configured.
         working-directory: assets
         env:
           # The Ed25519 private key, stored as a GitHub repository secret.
@@ -424,6 +427,14 @@ jobs:
           # Passphrase for the private key (empty string if the key has no passphrase).
           MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
         run: |
+          # Secret-present gate (in-script, since `secrets` is not allowed in
+          # step `if:`). Without a configured signing key, skip cleanly — the
+          # release publishes unsigned and Linux/POSIX installers fail-closed.
+          if [ -z "${MINISIGN_SECRET_KEY}" ]; then
+            echo "MINISIGN_SECRET_KEY not set — skipping signing (release will be unsigned)."
+            exit 0
+          fi
+
           # Install minisign on the runner (ubuntu-22.04; the release job).
           # minisign is not pre-installed on GitHub-hosted ubuntu runners.
           sudo apt-get install -y minisign
