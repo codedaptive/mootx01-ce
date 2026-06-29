@@ -92,12 +92,64 @@ jobs:
           cp "$MGR_BIN" moot-mgr
           tar -czf "${ASSET}" mootx01 moot-mgr
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
           path: ${{ env.ASSET }}
+
+      # ── macOS .pkg installer (arm64) ────────────────────────────────────────
+      # Build the Mootx01Setup SwiftUI assistant (apps/Mootx01-Setup), sign the
+      # bare executable, then assemble the .pkg via build-pkg.sh. The script
+      # requires a signed app binary so the postinstall panel is code-trusted.
+      #
+      # Installer signing uses a DIFFERENT certificate class from binary signing:
+      # "Developer ID Installer" rather than "Developer ID Application". The
+      # INSTALLER_IDENTITY secret stores the full identity string for productsign.
+      # When absent, build-pkg.sh emits an unsigned .pkg with a warning — fine for
+      # RC1 internal testing. The in-script guard mirrors the minisign signing step.
+      - name: Build setup assistant (arm64)
+        run: |
+          # Setup assistant links MootInstallerCore from apps/mootx01 via local
+          # path dependency; both packages must be built for the same arch.
+          swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup
+          SETUP_BIN="$(find apps/Mootx01-Setup/.build -name Mootx01Setup -path '*/release/Mootx01Setup' | head -1)"
+          echo "SETUP_BIN=${SETUP_BIN}" >> "${GITHUB_ENV}"
+
+      - name: Sign setup assistant (arm64)
+        run: |
+          # Codesign the bare executable before build-pkg.sh wraps it in the .app
+          # bundle. Must use runtime hardening so the bundle survives Gatekeeper.
+          IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
+          codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
+
+      - name: Build macOS .pkg installer (arm64)
+        env:
+          # "Developer ID Installer" identity for productsign. Stored as a
+          # repository secret (full string, e.g.
+          # "Developer ID Installer: Codedaptive, LLC (G94X5T5GK7)").
+          # When absent the script emits an unsigned .pkg — acceptable for RC1.
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+        run: |
+          # Strip leading 'v' from tag (build-pkg.sh uses version in filename).
+          VERSION_NUM="${VERSION#v}"
+          bash distribution/macos/build-pkg.sh \
+            "${VERSION_NUM}" \
+            arm64 \
+            "${MOOT_BIN}" \
+            "${MGR_BIN}" \
+            "${SETUP_BIN}"
+          PKG_ASSET="mootx01-${VERSION_NUM}-macos-arm64.pkg"
+          echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload macOS .pkg installer (arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-pkg
+          path: ${{ env.PKG_ASSET }}
 
   build-macos-x86_64:
     name: Build macOS x86_64
@@ -177,12 +229,49 @@ jobs:
           cp "$MGR_BIN" moot-mgr
           tar -czf "${ASSET}" mootx01 moot-mgr
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
           name: macos-x86_64
           path: ${{ env.ASSET }}
+
+      # ── macOS .pkg installer (x86_64) ───────────────────────────────────────
+      # Cross-compiled x86_64 build; same pattern as the arm64 .pkg job above.
+      # The Mootx01-Setup package is also cross-compiled with --arch x86_64 so
+      # the setup binary matches the installed CLI arch on Intel Macs.
+      - name: Build setup assistant (x86_64)
+        run: |
+          swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup --arch x86_64
+          SETUP_BIN="$(find apps/Mootx01-Setup/.build -name Mootx01Setup -path '*/release/Mootx01Setup' | head -1)"
+          echo "SETUP_BIN=${SETUP_BIN}" >> "${GITHUB_ENV}"
+
+      - name: Sign setup assistant (x86_64)
+        run: |
+          IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
+          codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
+
+      - name: Build macOS .pkg installer (x86_64)
+        env:
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+        run: |
+          VERSION_NUM="${VERSION#v}"
+          bash distribution/macos/build-pkg.sh \
+            "${VERSION_NUM}" \
+            x86_64 \
+            "${MOOT_BIN}" \
+            "${MGR_BIN}" \
+            "${SETUP_BIN}"
+          PKG_ASSET="mootx01-${VERSION_NUM}-macos-x86_64.pkg"
+          echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload macOS .pkg installer (x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64-pkg
+          path: ${{ env.PKG_ASSET }}
 
   # ── Linux builds (x86_64 + arm64) ─────────────────────────────────────────
   # Linux ships the Rust CLI from apps/mootx01/rust (NOT the Swift installer —
@@ -311,12 +400,53 @@ jobs:
           Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
           Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Export version for the Inno Setup step below (strip leading 'v').
+          "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
           path: ${{ env.ASSET }}
+
+      # ── Windows Inno Setup installer (x86_64) ───────────────────────────────
+      # Compiles distribution/windows/mootx01-setup.iss with ISCC (the Inno Setup
+      # compiler) to produce a single-file mootx01-<version>-windows-x86_64-setup.exe
+      # that installs mootx01.exe + moot-mgr.exe into %USERAPPDATA%\.mootx01\bin,
+      # adds them to the user PATH, and runs `mootx01 install` post-install.
+      #
+      # BinDir=. — the existing "Package binaries" step above already copied both
+      # .exe files to the workspace root, so ISCC can find them at ".".
+      #
+      # Inno Setup is installed via Chocolatey; windows-latest runners include
+      # Chocolatey but not ISCC itself. The choco install takes ~30 s.
+      - name: Install Inno Setup (x86_64)
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows setup installer (x86_64)
+        shell: pwsh
+        run: |
+          # ISCC is the command-line Inno Setup compiler. After the choco install
+          # it lives at C:\Program Files (x86)\Inno Setup 6\ISCC.exe.
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $versionNum = $env:VERSION_NUM
+          # /DBinDir=. — mootx01.exe and moot-mgr.exe are in the workspace root.
+          # /O. — output the setup.exe into the workspace root.
+          & $iscc `
+            "/DMyAppVersion=$versionNum" `
+            "/DArch=x86_64" `
+            "/DBinDir=." `
+            "/O." `
+            "distribution/windows/mootx01-setup.iss"
+          # The .iss OutputBaseFilename produces: mootx01-<version>-windows-x86_64-setup.exe
+          $setupAsset = "mootx01-${versionNum}-windows-x86_64-setup.exe"
+          "SETUP_ASSET=$setupAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload Windows setup installer (x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-setup
+          path: ${{ env.SETUP_ASSET }}
 
   # ── Windows build (arm64) ─────────────────────────────────────────────────
   # Native arm64 Windows build on the windows-11-arm runner — the same Rust CLI
@@ -358,12 +488,45 @@ jobs:
           Copy-Item "apps/moot-mgr/rust/target/aarch64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
           Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Export version for the Inno Setup step below (strip leading 'v').
+          "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
           name: windows-arm64
           path: ${{ env.ASSET }}
+
+      # ── Windows Inno Setup installer (arm64) ────────────────────────────────
+      # Same pattern as the x86_64 Inno Setup job above. The .iss script is
+      # arch-agnostic; /DArch=arm64 is passed so the output filename and the
+      # installed app directory embed the correct architecture label.
+      #
+      # NOTE: windows-11-arm runners ship Chocolatey but Inno Setup 6 publishes
+      # only an x86 installer — it runs under x86 emulation on arm64 Windows
+      # (supported on Snapdragon), so `choco install innosetup` is safe here.
+      - name: Install Inno Setup (arm64)
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows setup installer (arm64)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $versionNum = $env:VERSION_NUM
+          & $iscc `
+            "/DMyAppVersion=$versionNum" `
+            "/DArch=arm64" `
+            "/DBinDir=." `
+            "/O." `
+            "distribution/windows/mootx01-setup.iss"
+          $setupAsset = "mootx01-${versionNum}-windows-arm64-setup.exe"
+          "SETUP_ASSET=$setupAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload Windows setup installer (arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-setup
+          path: ${{ env.SETUP_ASSET }}
 
   # ── Create GitHub release + attach assets ──────────────────────────────────
   release:
@@ -378,6 +541,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Download all assets
+        # Downloads every artifact uploaded by the build jobs into assets/<name>/.
+        # This includes the new installer artifacts (macos-arm64-pkg,
+        # macos-x86_64-pkg, windows-x86_64-setup, windows-arm64-setup) alongside
+        # the existing binary archives.
         uses: actions/download-artifact@v4
         with:
           path: assets
@@ -388,9 +555,13 @@ jobs:
       - name: Generate checksums.txt
         working-directory: assets
         run: |
-          # Collect all release archives from subdirs into one flat dir.
+          # Collect all release files from artifact subdirs into one flat dir.
+          # Covers binary archives (*.tar.gz, *.zip), macOS .pkg installers,
+          # and Windows setup .exe installers so the checksum file covers all
+          # release assets and the minisign signature below seals the full set.
           mkdir -p flat
-          find . -name '*.tar.gz' -o -name '*.zip' | xargs -I{} cp {} flat/
+          find . \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pkg' -o -name '*.exe' \) \
+            | xargs -I{} cp {} flat/
           cd flat
           sha256sum * > ../checksums.txt
 

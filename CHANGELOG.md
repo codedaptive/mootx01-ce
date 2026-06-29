@@ -7,6 +7,24 @@ the tag carries the pre-release qualifier.
 
 ## develop/1.0.x — 2026-06-29
 
+### CI — installer build path (ce-installer-ci)
+
+- **macOS `.pkg` installers now produced by `release.yml`** — both arm64
+  and x86_64 macOS build jobs now build the `Mootx01Setup` SwiftUI setup
+  assistant (`apps/Mootx01-Setup`), sign it, then assemble a `.pkg` via
+  `distribution/macos/build-pkg.sh`. The `.pkg` is signed with
+  `productsign` when `APPLE_INSTALLER_IDENTITY` is set; otherwise emits
+  unsigned (RC1-friendly). Artifacts: `macos-arm64-pkg` /
+  `macos-x86_64-pkg`, published as release assets and covered by
+  `checksums.txt` + minisig.
+
+- **Windows Inno Setup installers now produced by `release.yml`** — both
+  Windows build jobs (x86_64 and arm64) now install Inno Setup via
+  Chocolatey and compile `distribution/windows/mootx01-setup.iss` to
+  produce `mootx01-<version>-windows-<arch>-setup.exe`. Artifacts:
+  `windows-x86_64-setup` / `windows-arm64-setup`, published as release
+  assets and covered by `checksums.txt` + minisig.
+
 ### apps/installer — CAND-005 (CE edition-surface port)
 
 - **PowerShell installer no longer advertises `irm | iex`** — `install.ps1`'s
