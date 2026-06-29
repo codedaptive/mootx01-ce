@@ -41,7 +41,13 @@ import Foundation
 /// Made `public` (T4) so `CorpusKit` can replace its private `DrainLease` with
 /// this shared implementation — the corpus encode drainer and any future drainers
 /// (dreaming, signals) all use the same struct, keyed by their stream name.
-public struct DrainLease {
+/// `Sendable`: a pure value type over Sendable stored properties (`URL`,
+/// `String`, `TimeInterval`). The conformance lets `Corpus`'s non-isolated
+/// `deinit` read a stored `DrainLease?` and call `release()` directly, which
+/// avoids the `isolated deinit` form that tripped a cross-module SIL-optimizer
+/// cycle under release whole-module optimization. Matches the Rust twin, which
+/// is `Send` by construction.
+public struct DrainLease: Sendable {
     /// Path to the lease file: `<directory>/<stream>.drain.lease`.
     /// Each stream gets its own file, so leases are fully independent.
     public let leaseURL: URL

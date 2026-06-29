@@ -795,23 +795,32 @@ public actor Corpus {
         try await bundleStore.recomputeAllCorpusMerkleRoots()
     }
 
-    /// Join the ingest drain worker and release the drain lease on actor teardown.
+    /// Cancel the ingest drain worker and release the drain lease on actor teardown.
     ///
     /// Called by the Swift runtime when the last reference to this `Corpus` is
-    /// released. `dropIngestQueue()` cancels the background drain worker Task and
-    /// releases the `DrainLease` — so any in-progress drain loop exits cleanly and
-    /// the next process that opens the same estate can take the lease immediately
-    /// rather than waiting out the TTL (15 s). The `isolated` keyword (SE-0371,
-    /// Swift 6+) permits calling actor-isolated synchronous methods directly from
-    /// deinit without `await`: the runtime guarantees exclusive access at deinit.
+    /// released. Cancelling the worker Task and releasing the `DrainLease` lets any
+    /// in-progress drain loop exit cleanly and lets the next process that opens the
+    /// same estate take the lease immediately rather than waiting out the TTL (15 s).
     ///
-    /// Idempotent: `dropIngestQueue()` is a no-op when the queue was never
-    /// mounted or was already dropped via an explicit teardown call (the normal
-    /// path for orchestrated estates).
+    /// A plain (non-isolated) `deinit` may read the actor's own stored properties
+    /// directly — the runtime guarantees exclusive access at deinit — so the teardown
+    /// touches `ingestDrainWorker`/`drainLease` inline rather than calling the
+    /// actor-isolated `dropIngestQueue()`. The `isolated deinit` form (SE-0371) tripped
+    /// an actor-isolation inference cycle in the cross-module SIL optimizer under
+    /// release whole-module optimization (`error: circular reference` with no source
+    /// location); inlining the field access avoids the cycle while preserving the exact
+    /// teardown effect (cancel worker + release lease). `Task.cancel()` and the
+    /// `DrainLease` struct's `release()` are both non-isolated, so neither needs actor
+    /// hops. The explicit orchestrated-teardown path still calls `dropIngestQueue()`.
+    ///
+    /// Idempotent: both calls are no-ops when the queue was never mounted or was
+    /// already dropped via an explicit teardown call (the normal path for
+    /// orchestrated estates).
     ///
     /// Rust twin: `impl Drop for Corpus { fn drop(&mut self) { self.drop_ingest_queue(); } }`
-    isolated deinit {
-        dropIngestQueue()
+    deinit {
+        ingestDrainWorker?.cancel()
+        drainLease?.release()
     }
 
     /// The default signal's serving provider — `slots[0].provider`.
