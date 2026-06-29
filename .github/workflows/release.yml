@@ -102,14 +102,13 @@ jobs:
 
       # ── macOS .pkg installer (arm64) ────────────────────────────────────────
       # Build the Mootx01Setup SwiftUI assistant (apps/Mootx01-Setup), sign the
-      # bare executable, then assemble the .pkg via build-pkg.sh. The script
-      # requires a signed app binary so the postinstall panel is code-trusted.
+      # bare executable, assemble a signed+notarized .pkg via build-pkg.sh.
       #
       # Installer signing uses a DIFFERENT certificate class from binary signing:
-      # "Developer ID Installer" rather than "Developer ID Application". The
-      # INSTALLER_IDENTITY secret stores the full identity string for productsign.
-      # When absent, build-pkg.sh emits an unsigned .pkg with a warning — fine for
-      # RC1 internal testing. The in-script guard mirrors the minisign signing step.
+      # "Developer ID Installer" (APPLE_INSTALLER_CERT_P12) rather than
+      # "Developer ID Application" (APPLE_SIGNING_CERT_P12). The .app binary
+      # inside the .pkg is codesigned with the application cert; productsign
+      # wraps the whole .pkg with the installer cert.
       - name: Build setup assistant (arm64)
         run: |
           # Setup assistant links MootInstallerCore from apps/mootx01 via local
@@ -121,18 +120,45 @@ jobs:
       - name: Sign setup assistant (arm64)
         run: |
           # Codesign the bare executable before build-pkg.sh wraps it in the .app
-          # bundle. Must use runtime hardening so the bundle survives Gatekeeper.
+          # bundle. Application cert (already loaded from prior keychain import step)
+          # with runtime hardening so the bundle passes Gatekeeper.
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
           codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
+      - name: Import Developer ID Installer Certificate (arm64)
+        # The installer cert is a separate .p12 from the application signing cert;
+        # it uses a dedicated second keychain so we don't need the original
+        # build.keychain password. productsign will find the installer identity
+        # in installer.keychain via the user keychain search list.
+        # APPLE_INSTALLER_CERT_P12 and APPLE_INSTALLER_CERT_PASSWORD are the same
+        # secret names used in the EE release workflow.
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+        run: |
+          INST_KEYCHAIN="$RUNNER_TEMP/installer.keychain"
+          INST_KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$INST_KEYCHAIN"
+          security unlock-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/installer-cert.p12"
+          security import "$RUNNER_TEMP/installer-cert.p12" \
+            -k "$INST_KEYCHAIN" \
+            -P "$CERT_P12_PASSWORD" \
+            -T /usr/bin/productsign
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
+          # Add the installer keychain to the user search list so productsign finds it.
+          security list-keychain -d user -s "$RUNNER_TEMP/build.keychain" "$INST_KEYCHAIN"
+          rm "$RUNNER_TEMP/installer-cert.p12"
+
       - name: Build macOS .pkg installer (arm64)
         env:
-          # "Developer ID Installer" identity for productsign. Stored as a
-          # repository secret (full string, e.g.
-          # "Developer ID Installer: Codedaptive, LLC (G94X5T5GK7)").
-          # When absent the script emits an unsigned .pkg — acceptable for RC1.
-          INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+          # Constructed inline from APPLE_TEAM_ID — same pattern as the EE
+          # release workflow. No separate APPLE_INSTALLER_IDENTITY secret needed.
+          INSTALLER_IDENTITY: "Developer ID Installer: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
         run: |
           # Strip leading 'v' from tag (build-pkg.sh uses version in filename).
           VERSION_NUM="${VERSION#v}"
@@ -144,6 +170,25 @@ jobs:
             "${SETUP_BIN}"
           PKG_ASSET="mootx01-${VERSION_NUM}-macos-arm64.pkg"
           echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Notarize macOS .pkg (arm64)
+        # Notarize the signed .pkg with Apple so Gatekeeper clears it on download.
+        # Uses the same notarytool credentials as the binary notarization step above.
+        # xcrun stapler staple embeds the notarization ticket into the .pkg so it
+        # can be verified offline.
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p ~/.private_keys
+          echo "$APPLE_API_KEY_P8" | base64 --decode > \
+            ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          xcrun notarytool submit "${PKG_ASSET}" \
+            --key ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_KEY_ISSUER }}" \
+            --wait
+          xcrun stapler staple "${PKG_ASSET}"
+          rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
 
       - name: Upload macOS .pkg installer (arm64)
         uses: actions/upload-artifact@v4
@@ -253,9 +298,30 @@ jobs:
           codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
+      - name: Import Developer ID Installer Certificate (x86_64)
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+        run: |
+          INST_KEYCHAIN="$RUNNER_TEMP/installer.keychain"
+          INST_KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$INST_KEYCHAIN"
+          security unlock-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/installer-cert.p12"
+          security import "$RUNNER_TEMP/installer-cert.p12" \
+            -k "$INST_KEYCHAIN" \
+            -P "$CERT_P12_PASSWORD" \
+            -T /usr/bin/productsign
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
+          security list-keychain -d user -s "$RUNNER_TEMP/build.keychain" "$INST_KEYCHAIN"
+          rm "$RUNNER_TEMP/installer-cert.p12"
+
       - name: Build macOS .pkg installer (x86_64)
         env:
-          INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+          INSTALLER_IDENTITY: "Developer ID Installer: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
         run: |
           VERSION_NUM="${VERSION#v}"
           bash distribution/macos/build-pkg.sh \
@@ -266,6 +332,21 @@ jobs:
             "${SETUP_BIN}"
           PKG_ASSET="mootx01-${VERSION_NUM}-macos-x86_64.pkg"
           echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Notarize macOS .pkg (x86_64)
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p ~/.private_keys
+          echo "$APPLE_API_KEY_P8" | base64 --decode > \
+            ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          xcrun notarytool submit "${PKG_ASSET}" \
+            --key ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_KEY_ISSUER }}" \
+            --wait
+          xcrun stapler staple "${PKG_ASSET}"
+          rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
 
       - name: Upload macOS .pkg installer (x86_64)
         uses: actions/upload-artifact@v4
