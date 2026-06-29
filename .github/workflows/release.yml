@@ -511,12 +511,15 @@ jobs:
           # it lives at C:\Program Files (x86)\Inno Setup 6\ISCC.exe.
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           $versionNum = $env:VERSION_NUM
-          # /DBinDir=. — mootx01.exe and moot-mgr.exe are in the workspace root.
-          # /O. — output the setup.exe into the workspace root.
+          # BinDir must be an absolute path: ISCC resolves /DBinDir relative to the
+          # .iss file's SourceDir (distribution\windows\), not the caller's CWD.
+          # Passing $PWD (the workspace root) means {#BinDir}\mootx01.exe resolves
+          # correctly to the exes copied there by the "Package binaries" step above.
+          # /O. — output the setup.exe into the workspace root (caller's CWD).
           & $iscc `
             "/DMyAppVersion=$versionNum" `
             "/DArch=x86_64" `
-            "/DBinDir=." `
+            "/DBinDir=$PWD" `
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           # The .iss OutputBaseFilename produces: mootx01-<version>-windows-x86_64-setup.exe
@@ -594,10 +597,12 @@ jobs:
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           $versionNum = $env:VERSION_NUM
+          # BinDir must be absolute — same reason as the x86_64 job above:
+          # ISCC resolves /DBinDir relative to the .iss file's SourceDir, not CWD.
           & $iscc `
             "/DMyAppVersion=$versionNum" `
             "/DArch=arm64" `
-            "/DBinDir=." `
+            "/DBinDir=$PWD" `
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           $setupAsset = "mootx01-${versionNum}-windows-arm64-setup.exe"
