@@ -221,6 +221,44 @@ if [ -f "$tmp/moot-mgr" ]; then
   mgr_installed=1
 fi
 
+# macOS Gatekeeper quarantine — set the com.apple.quarantine extended attribute
+# on each installed binary so that Gatekeeper assesses the binary on first run.
+#
+# WHY quarantine-xattr rather than minisign on macOS:
+#   The trust root split is deliberate. macOS binaries are signed with an Apple
+#   Developer ID certificate and notarized through Apple's notary service — a
+#   hardware-backed, certificate-revocable chain of custody that is tighter
+#   than any software-only signature scheme. Gatekeeper enforces this on first
+#   execution and blocks unsigned or revoked binaries automatically.
+#
+#   curl+tar does NOT set com.apple.quarantine, so Gatekeeper would never see
+#   the binary as "downloaded from the internet" and would not assess it on
+#   first run. Setting the quarantine xattr explicitly restores that assessment,
+#   ensuring that a substituted or revoked binary is caught before execution.
+#
+#   Linux uses minisign (an independent Ed25519 trust root, no OS PKI available).
+#   macOS uses Developer ID + Gatekeeper (OS PKI). The two approaches are
+#   complementary, not redundant: minisign on macOS would add complexity for
+#   zero additional security benefit given Gatekeeper's stronger guarantee.
+if [ "$os" = "macos" ]; then
+  # Quarantine flags field: 0083 = downloaded from internet + should require
+  # Gatekeeper assessment. The timestamp is the current time in hex seconds
+  # since the macOS epoch (2001-01-01 UTC = Unix 978307200).
+  _qts="$(printf '%x' "$(($(date +%s) - 978307200))" 2>/dev/null || echo "00000000")"
+  _qval="0083;${_qts};mootx01-installer;"
+  if command -v xattr >/dev/null 2>&1; then
+    for _bin in "$INSTALL_DIR/mootx01" "$INSTALL_DIR/moot-mgr"; do
+      if [ -f "$_bin" ]; then
+        xattr -w com.apple.quarantine "$_qval" "$_bin" 2>/dev/null \
+          && echo "Quarantine xattr set on $_bin (Gatekeeper will assess on first run)" \
+          || echo "Note: could not set quarantine xattr on $_bin — Gatekeeper assessment skipped (non-fatal)"
+      fi
+    done
+  else
+    echo "Note: xattr not found — skipping Gatekeeper quarantine tagging (non-fatal)"
+  fi
+fi
+
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
