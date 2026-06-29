@@ -1,49 +1,147 @@
 #!/bin/bash
 # postinstall — runs after the macOS .pkg places files.
 #
-# The .pkg installs into /tmp/mootx01-install/ (a staging area that
-# avoids baking a specific home path into the package at build time).
+# The .pkg installs the payload into a root-owned staging area at
+# /Library/Application Support/com.codedaptive.mootx01/staging.
+# /Library/Application Support is owned by root:wheel and is NOT
+# world-writable, so a local attacker cannot pre-create or race-modify
+# the staging directory. This script validates the staging area before
+# trusting any content: it rejects symlinks, non-root ownership, and
+# group/other-writable permissions. Only after those checks pass does
+# it copy, symlink, chown, and launch the staged binaries.
+#
 # This script:
-#   1. Moves the staged files to ~/.mootx01/ in the installing user's home.
-#   2. Creates ~/.local/bin symlinks (same layout install.sh uses).
-#   3. Launches the setup assistant for interactive client wiring.
+#   1. Validates the staging directory (ownership, not-a-symlink, permissions, realpath).
+#   2. Validates each staged file (not-a-symlink) before ditto.
+#   3. Moves the staged files to ~/.mootx01/ in the installing user's home.
+#   4. Creates ~/.local/bin symlinks (same layout as install.sh).
+#   5. Launches the setup assistant for interactive client wiring.
 #
 # IMPORTANT: this script must NEVER return non-zero. A postinstall
 # failure causes the macOS Installer to roll back ALL file placement,
 # which is worse than any individual step failing here. Every command
-# is guarded; exit 0 is unconditional.
+# is guarded; exit 0 is unconditional. Validation failures abort the
+# file-placement block but do not prevent the exit 0.
 
-STAGING="/tmp/mootx01-install"
+# The staging area that pkgbuild placed the payload into.
+# /Library/Application Support is owned by root:wheel (mode 755),
+# so only root can create/modify content here — the world-writable
+# /tmp attack surface is eliminated.
+STAGING="/Library/Application Support/com.codedaptive.mootx01/staging"
 INSTALL_DIR="$HOME/.mootx01"
 LOCAL_BIN="$HOME/.local/bin"
 
-# 1. Move staged files to the user's home.
+# ── Staging directory validation ─────────────────────────────────────────────
+# All checks run before ANY content is trusted. Any failure aborts the
+# file-placement block and skips ditto/chown/launch. exit 0 is still
+# unconditional (see IMPORTANT note above).
+
+STAGING_OK=0  # 0 = checks passed, 1 = failed
+
 if [ -d "$STAGING" ]; then
+    # Reject if STAGING itself is a symlink — a symlink could redirect to
+    # an attacker-controlled directory even when the parent is root-owned.
+    if [ -L "$STAGING" ]; then
+        echo "postinstall: SECURITY: staging path is a symlink — aborting file placement" >&2
+        STAGING_OK=1
+    fi
+
+    # Verify that STAGING is owned by root (uid 0). The pkg places the dir
+    # as root during installation; if it is owned by any other user, something
+    # has gone wrong and we must not trust the content.
+    if [ "$STAGING_OK" -eq 0 ]; then
+        STAGING_UID="$(stat -f '%u' "$STAGING" 2>/dev/null)"
+        if [ "$STAGING_UID" != "0" ]; then
+            echo "postinstall: SECURITY: staging dir not owned by root (uid=$STAGING_UID) — aborting" >&2
+            STAGING_OK=1
+        fi
+    fi
+
+    # Verify that STAGING is not group-writable or other-writable.
+    # Mode bits: stat -f '%Mp%Lp' on macOS returns 4-octal-digit permission string.
+    if [ "$STAGING_OK" -eq 0 ]; then
+        STAGING_MODE="$(stat -f '%Mp%Lp' "$STAGING" 2>/dev/null)"
+        # Extract the group and other write bits from the mode string.
+        # stat -f '%Mp%Lp' returns e.g. "0755"; we need positions 2 and 3 (0-indexed).
+        # A group-write bit means the group octet has bit 2 set (value 2 in the octet).
+        # An other-write bit means the other octet has bit 2 set.
+        GROUP_OCTET="${STAGING_MODE:2:1}"
+        OTHER_OCTET="${STAGING_MODE:3:1}"
+        # Group octet: writable if octet is 2,3,6,7 (bit 2 of 0-7 set).
+        # Other octet: same logic.
+        if echo "$GROUP_OCTET" | grep -qE '^[2367]$' || echo "$OTHER_OCTET" | grep -qE '^[2367]$'; then
+            echo "postinstall: SECURITY: staging dir is group/other-writable (mode=$STAGING_MODE) — aborting" >&2
+            STAGING_OK=1
+        fi
+    fi
+
+    # Verify that the realpath of STAGING is the expected canonical path.
+    # This guards against hardlink or bind-mount tricks that pass -L but
+    # resolve elsewhere.
+    if [ "$STAGING_OK" -eq 0 ]; then
+        CANONICAL_STAGING="/Library/Application Support/com.codedaptive.mootx01/staging"
+        REAL_STAGING="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$STAGING" 2>/dev/null)"
+        if [ "$REAL_STAGING" != "$CANONICAL_STAGING" ]; then
+            echo "postinstall: SECURITY: staging realpath '$REAL_STAGING' != expected '$CANONICAL_STAGING' — aborting" >&2
+            STAGING_OK=1
+        fi
+    fi
+else
+    # Staging dir does not exist — nothing to install (unexpected, but not fatal).
+    STAGING_OK=1
+fi
+
+# ── File placement (only if all staging checks passed) ───────────────────────
+
+if [ "$STAGING_OK" -eq 0 ]; then
     mkdir -p "$INSTALL_DIR" 2>/dev/null
-    # Use ditto for reliable recursive merge (handles .app bundles, xattrs).
-    ditto "$STAGING/bin"              "$INSTALL_DIR/bin"              2>/dev/null
-    ditto "$STAGING/Mootx01Setup.app" "$INSTALL_DIR/Mootx01Setup.app" 2>/dev/null
-    # Clean up the staging area.
+
+    # Validate each source before ditto: must not be a symlink.
+    # If either source is a symlink, skip placement for that item.
+    BIN_SRC="$STAGING/bin"
+    APP_SRC="$STAGING/Mootx01Setup.app"
+
+    if [ -L "$BIN_SRC" ]; then
+        echo "postinstall: SECURITY: staged bin/ is a symlink — skipping bin placement" >&2
+    elif [ -d "$BIN_SRC" ]; then
+        # Use ditto for reliable recursive merge (handles .app bundles, xattrs).
+        ditto "$BIN_SRC" "$INSTALL_DIR/bin" 2>/dev/null
+    fi
+
+    if [ -L "$APP_SRC" ]; then
+        echo "postinstall: SECURITY: staged Mootx01Setup.app is a symlink — skipping app placement" >&2
+    elif [ -d "$APP_SRC" ]; then
+        ditto "$APP_SRC" "$INSTALL_DIR/Mootx01Setup.app" 2>/dev/null
+    fi
+
+    # Clean up the staging area now that content has been copied out.
     rm -rf "$STAGING" 2>/dev/null
 fi
 
-# 2. Symlinks onto PATH.
+# ── Symlinks onto PATH ────────────────────────────────────────────────────────
 mkdir -p "$LOCAL_BIN" 2>/dev/null
 ln -sf "$INSTALL_DIR/bin/mootx01"  "$LOCAL_BIN/mootx01"  2>/dev/null
 ln -sf "$INSTALL_DIR/bin/moot-mgr" "$LOCAL_BIN/moot-mgr" 2>/dev/null
 
-# 3. Fix ownership — pkgbuild runs as root but these are user files.
-REAL_USER="${USER:-$(stat -f '%Su' "$HOME" 2>/dev/null)}"
-if [ -n "$REAL_USER" ]; then
+# ── Fix ownership ─────────────────────────────────────────────────────────────
+# pkgbuild runs postinstall as root, but these are user-owned files.
+# Prefer the console user from /dev/console (not attacker-influenceable $USER).
+# Fall back to $SUDO_USER then $USER if /dev/console is unavailable.
+REAL_USER="$(stat -f '%Su' /dev/console 2>/dev/null)"
+if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+    REAL_USER="${SUDO_USER:-${USER:-}}"
+fi
+if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     chown -R "$REAL_USER" "$INSTALL_DIR" 2>/dev/null
     chown -h "$REAL_USER" "$LOCAL_BIN/mootx01" 2>/dev/null
     chown -h "$REAL_USER" "$LOCAL_BIN/moot-mgr" 2>/dev/null
 fi
 
-# 4. Launch the setup assistant (best-effort). If this fails for any
-#    reason the user can always run `mootx01 install` from a terminal.
+# ── Launch setup assistant ────────────────────────────────────────────────────
+# Best-effort. If this fails for any reason the user can always run
+# `mootx01 install` from a terminal.
 SETUP_APP="$INSTALL_DIR/Mootx01Setup.app"
-if [ -d "$SETUP_APP" ] && [ -n "$REAL_USER" ]; then
+if [ -d "$SETUP_APP" ] && [ ! -L "$SETUP_APP" ] && [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     sudo -u "$REAL_USER" open "$SETUP_APP" 2>/dev/null &
 fi
 
