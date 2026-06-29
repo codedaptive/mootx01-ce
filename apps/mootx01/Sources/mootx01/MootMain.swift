@@ -36,7 +36,7 @@ enum MootEntry {
 struct Mootx01: AsyncParsableCommand {
 
     /// Semver string for the installed binary. Reported by --version and
-    /// used by the online upgrade path to compare against the latest release tag.
+    /// used by --check to compare against the latest release tag.
     static let currentVersion = "1.0.4"
 
     static var configuration: CommandConfiguration {
@@ -47,13 +47,15 @@ struct Mootx01: AsyncParsableCommand {
             discussion: """
             Run `mootx01 serve` (or just `mootx01` when stdin is a pipe) to start
             the ARIA MCP server. Use `mootx01 install` to wire it into your MCP clients.
-            Use `mootx01 upgrade` to download the latest release or replace the binary
-            from a local build and restart background services.
+            Use `mootx01 upgrade` to replace the binary from a local build and
+            restart background services.
             """,
             version: currentVersion,
             subcommands: [
                 ServeCommand.self,
                 ProxyCommand.self,
+                DrainCommand.self,
+                DreamCommand.self,
                 InstallCommand.self,
                 UpgradeCommand.self,
                 UninstallCommand.self,

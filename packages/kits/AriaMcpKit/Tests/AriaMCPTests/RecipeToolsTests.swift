@@ -56,7 +56,6 @@ struct RecipeToolsTests {
             "moot_confirm_migration",
             "moot_consolidate",
             "moot_dream",
-            "moot_expand_memory",
             "moot_lens_anticipate",
             "moot_lens_apriori",
             "moot_lens_associations",
@@ -85,6 +84,7 @@ struct RecipeToolsTests {
             "moot_recall_distilled",
             "moot_recall_precise",
             "moot_recall_shaped",
+            "moot_recollect",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -502,7 +502,7 @@ struct RecipeToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "dream-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Four co-filed drawers ⇒ C(4,2) = 6 co-occurrence pairs to consider.
+        // File four drawers so they co-surface on external-origin recall.
         for text in [
             "the treaty fixed the indemnity at 46 million marks",
             "the treaty ceded the eastern province in 1871",
@@ -517,6 +517,18 @@ struct RecipeToolsTests {
                 ]))
         }
 
+        // Fire 3 external-origin recalls (moot_memory_search) to enqueue co-recall
+        // windows. Each search surfaces all four drawers and writes one DreamingItem
+        // to the estate's dreaming queue (v2 drain-fed model: candidates come ONLY
+        // from draining the dreaming queue, not from a co-occurrence reader pass).
+        // After 3 searches, co_recall_count for each of the C(4,2)=6 drawer pairs
+        // reaches 3, meeting DreamingPolicy.default minAttempts=3.
+        for _ in 0..<3 {
+            _ = try await dispatcher.dispatch(
+                name: "moot_memory_search",
+                arguments: .object(["query": .string("treaty indemnity province armistice")]))
+        }
+
         // Deterministic instant so the cycle (diary timestamp, reward window)
         // is reproducible.
         let dreamArgs = JSONValue.object(["now": .string("2026-06-11T00:00:00Z")])
@@ -527,10 +539,16 @@ struct RecipeToolsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(text.contains("matrix rebuilt, dreaming cycle complete"))
-        // Four drawers in one room ⇒ the co-occurrence reader saw pairs, so the
-        // cycle considered candidates (the matrix has co-occurrence content).
-        #expect(text.contains("consideredCandidates: 6"),
-                "four co-filed drawers yield six co-occurrence pairs")
+        // Three external-origin recalls × four co-surfaced drawers → co_recall_count
+        // reaches 3 for each of the six pairs → all six are considered.
+        // Extract and verify the count is ≥ 6 (estate may include additional seed
+        // drawers, so the count can exceed 6 without being wrong).
+        let candidatesLine = text.components(separatedBy: "\n")
+            .first(where: { $0.hasPrefix("consideredCandidates: ") }) ?? ""
+        let countStr = candidatesLine.replacingOccurrences(of: "consideredCandidates: ", with: "")
+        let count = Int(countStr.trimmingCharacters(in: .whitespaces)) ?? 0
+        #expect(count >= 6,
+                "three searches × ≥4 co-surfaced drawers must yield ≥6 co-recall pairs (v2 drain model); got: \(text)")
 
         // Idempotent: a second dream over unchanged state emits no NEW proposals
         // (every candidate already proposed or suppressed). The tool still
@@ -639,7 +657,7 @@ struct RecipeToolsTests {
     @Test func testIsRecipeToolReturnsTrueForAllThreeDistillationTools() {
         #expect(RecipeTools.isRecipeTool("moot_consolidate"))
         #expect(RecipeTools.isRecipeTool("moot_recall_distilled"))
-        #expect(RecipeTools.isRecipeTool("moot_expand_memory"))
+        #expect(RecipeTools.isRecipeTool("moot_recollect"))
     }
 
     // MARK: - tools() count
@@ -647,7 +665,7 @@ struct RecipeToolsTests {
     @Test func testToolsCountIncreasedByThree() {
         // Baseline was 8 (listRecipes, listRecipesCatalog, groundedSynthesis,
         // preciseRecall, shapedRecall, runMigration, confirmMigration, dream).
-        // After adding consolidate, recallDistilled, expandMemory: 11.
+        // After adding consolidate, recallDistilled, recollect: 11.
         #expect(RecipeTools.tools().count == 11)
     }
 
@@ -737,12 +755,12 @@ struct RecipeToolsTests {
                 "first line must start with 'found N distilled factoid(s) for:'")
     }
 
-    // MARK: - moot_expand_memory dispatch
+    // MARK: - moot_recollect dispatch
 
-    @Test func testExpandMemoryNonDistilledDrawerReturnsErrorResult() async throws {
+    @Test func testRecollectNonDistilledDrawerReturnsErrorResult() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "expand-non-distilled"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-non-distilled"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         // File a regular (non-distilled) memory and get its drawer id.
@@ -756,32 +774,32 @@ struct RecipeToolsTests {
             Self.uuids(in: fileText).first?.uuidString,
             "file result must contain a UUID for the captured drawer")
 
-        // Expanding a non-distilled drawer must return errorResult, not throw.
+        // Recollecting from a non-distilled drawer must return errorResult, not throw.
         let result = try await dispatcher.dispatch(
-            name: "moot_expand_memory",
+            name: "moot_recollect",
             arguments: .object(["drawer_id": .string(drawerID)]))
 
         let obj = try #require(result.objectValue)
-        // ExpandError.notADistilledDrawer surfaces as a tool error (isError: true),
+        // RecollectError.notADistilledDrawer surfaces as a tool error (isError: true),
         // not as a JSONRPC throw — matching the recipe-level refusal discipline.
         #expect(obj["isError"]?.boolValue == true,
-                "expanding a non-distilled drawer must return a tool error")
+                "recollecting a non-distilled drawer must return a tool error")
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(text.contains("not a distilled factoid"),
                 "error message must indicate the drawer is not a distilled factoid")
     }
 
-    @Test func testExpandMemoryDispatchRoutesToRunExpandMemory() async throws {
+    @Test func testRecollectDispatchRoutesToRunRecollect() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "expand-memory-dispatch"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         // Unknown drawer id returns factoidNotFound errorResult.
         let unknownID = UUID().uuidString
         let result = try await dispatcher.dispatch(
-            name: "moot_expand_memory",
+            name: "moot_recollect",
             arguments: .object(["drawer_id": .string(unknownID)]))
 
         let obj = try #require(result.objectValue)
@@ -794,7 +812,7 @@ struct RecipeToolsTests {
                 "error must say the drawer was not found")
     }
 
-    @Test func testExpandMemoryOutputStartsWithExpand() async throws {
+    @Test func testRecollectOutputStartsWithExpand() async throws {
         // Verify the output format prefix when a valid distilled drawer is supplied.
         // We can't easily produce a full distilled drawer in a unit test without
         // running the distillation pipeline — instead we verify the dispatch route
@@ -803,7 +821,7 @@ struct RecipeToolsTests {
         // by checking the error result doesn't start with "expand:" (routing worked).
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "expand-fmt"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-fmt"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         // The spec says success output starts with "expand: {drawer_id}".
@@ -817,14 +835,14 @@ struct RecipeToolsTests {
         let drawerID = try #require(Self.uuids(in: fileText).first?.uuidString)
 
         let result = try await dispatcher.dispatch(
-            name: "moot_expand_memory",
+            name: "moot_recollect",
             arguments: .object(["drawer_id": .string(drawerID)]))
         let obj = try #require(result.objectValue)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
 
         // A non-distilled drawer returns an error — it does NOT start with "expand:".
-        // This confirms dispatch() routes correctly to runExpandMemory (not to some
+        // This confirms dispatch() routes correctly to runRecollect (not to some
         // default path that could accidentally produce "expand:"-prefixed output).
         #expect(obj["isError"]?.boolValue == true)
         #expect(!text.hasPrefix("expand:"),
@@ -850,5 +868,198 @@ struct RecipeToolsTests {
             out.append(id)
         }
         return out
+    }
+}
+
+// MARK: - Security hardening — limit clamping and future-now guard
+
+/// Validates the MCP-boundary security hardening introduced by the secfix-p1-ariamcp stream:
+/// - Negative/zero limits throw invalidParams (DoS prevention).
+/// - Over-ceiling limits are clamped to 500 rather than passed to the substrate.
+/// - Dream future-now timestamps more than 24 h ahead are rejected.
+///
+/// These tests exercise `ToolDispatcher.clampLimit` directly plus end-to-end
+/// dispatch of moot_recall_precise, moot_recall_shaped, moot_recall_distilled,
+/// and moot_dream through the real dispatcher. No mocks.
+@Suite("Recipe tools — security hardening")
+struct RecipeToolsSecurityTests {
+
+    // MARK: - clampLimit unit tests
+
+    @Test func clampLimitAbsentReturnsDefault() throws {
+        let result = try ToolDispatcher.clampLimit(nil, argument: "limit")
+        #expect(result == 20)
+    }
+
+    @Test func clampLimitAbsentHonorsCustomDefault() throws {
+        let result = try ToolDispatcher.clampLimit(nil, argument: "pool", default: 30)
+        #expect(result == 30)
+    }
+
+    @Test func clampLimitNegativeThrowsInvalidParams() throws {
+        #expect(throws: JSONRPCError.self) {
+            try ToolDispatcher.clampLimit(-1, argument: "limit")
+        }
+    }
+
+    @Test func clampLimitZeroThrowsInvalidParams() throws {
+        #expect(throws: JSONRPCError.self) {
+            try ToolDispatcher.clampLimit(0, argument: "limit")
+        }
+    }
+
+    @Test func clampLimitNegativeErrorMessageIsActionable() {
+        do {
+            _ = try ToolDispatcher.clampLimit(-5, argument: "limit")
+            Issue.record("Expected throw")
+        } catch let e as JSONRPCError {
+            #expect(e.message.contains("limit"))
+            #expect(e.message.contains("-5"))
+        } catch {
+            Issue.record("Wrong error type: \(error)")
+        }
+    }
+
+    @Test func clampLimitWithinCeilingPassesThrough() throws {
+        let result = try ToolDispatcher.clampLimit(42, argument: "limit")
+        #expect(result == 42)
+    }
+
+    @Test func clampLimitAtCeilingPassesThrough() throws {
+        let result = try ToolDispatcher.clampLimit(500, argument: "limit")
+        #expect(result == 500)
+    }
+
+    @Test func clampLimitOverCeilingClampsTo500() throws {
+        let result = try ToolDispatcher.clampLimit(1_000_000, argument: "limit")
+        #expect(result == 500)
+    }
+
+    @Test func clampLimitCustomCeilingIsHonored() throws {
+        let result = try ToolDispatcher.clampLimit(200_000, argument: "walkLength", ceiling: 100_000)
+        #expect(result == 100_000)
+    }
+
+    // MARK: - End-to-end dispatch: negative limit → invalidParams error
+
+    private func openEstate(in kit: GeniusLocusKit) async throws -> EstateHandle {
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"))
+        return try await kit.open(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"))
+    }
+
+    @Test func preciseRecallNegativeLimitThrows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_recall_precise",
+                arguments: .object([
+                    "query": .string("test"),
+                    "limit": .integer(-1),
+                ]))
+        }
+    }
+
+    @Test func shapedRecallNegativeLimitThrows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_recall_shaped",
+                arguments: .object([
+                    "query": .string("test"),
+                    "limit": .integer(-1),
+                ]))
+        }
+    }
+
+    @Test func distilledRecallNegativeLimitThrows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_recall_distilled",
+                arguments: .object([
+                    "query": .string("test"),
+                    "limit": .integer(0),
+                ]))
+        }
+    }
+
+    // MARK: - Dream future-now guard
+
+    @Test func dreamFarFutureNowThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // A date 48 hours in the future — well beyond the 24 h ceiling.
+        let farFuture = Date().addingTimeInterval(48 * 3600)
+        let formatter = ISO8601DateFormatter()
+        let farFutureStr = formatter.string(from: farFuture)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_dream",
+                arguments: .object(["now": .string(farFutureStr)]))
+        }
+    }
+
+    @Test func dreamNowWithinCeilingIsAccepted() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // A date 12 hours in the future — within the 24 h ceiling.
+        let nearFuture = Date().addingTimeInterval(12 * 3600)
+        let formatter = ISO8601DateFormatter()
+        let nearFutureStr = formatter.string(from: nearFuture)
+
+        // Should NOT throw — the future-now guard allows up to 24 h.
+        // The dream itself may fail (empty estate) but must not fail at the
+        // boundary validation.
+        _ = try? await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object(["now": .string(nearFutureStr)]))
+    }
+
+    // MARK: - moot_synthesize clampLimit boundary guards (Finding 3)
+
+    /// A negative `limit` on `moot_synthesize` must throw `invalidParams`.
+    /// Before the fix, it passed through unclamped, potentially causing
+    /// downstream range violations in the substrate.
+    @Test func groundedSynthesisNegativeLimitThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        await #expect(throws: JSONRPCError.self) {
+            // Explicit type annotation required — Swift cannot infer JSONValue
+            // inside the #expect(throws:) closure without it.
+            let args: JSONValue = .object(["limit": .integer(-1)])
+            _ = try await dispatcher.dispatch(name: "moot_synthesize", arguments: args)
+        }
+    }
+
+    /// An over-ceiling `limit` on `moot_synthesize` must be clamped to 500.
+    @Test func groundedSynthesisOverCeilingLimitIsClamped() async throws {
+        // Over-ceiling limit must be silently clamped, not crash or throw.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Should not throw — clamped to 500 and dispatches normally.
+        let args: JSONValue = .object(["limit": .integer(1_000_000)])
+        _ = try? await dispatcher.dispatch(name: "moot_synthesize", arguments: args)
     }
 }

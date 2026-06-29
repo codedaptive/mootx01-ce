@@ -28,8 +28,8 @@ import SubstrateTypes
 ///    did not constrain those concerns. Confirmation is not defaulted:
 ///    unconfirmed captures are recallable unless the caller explicitly
 ///    asks for `.userConfirmed`. Tombstone exclusion is always
-///    enforced and is independent of the chain (state == 9 rejected
-///    at the bitmap tier).
+///    enforced and is independent of the chain (`State.tombstoned`
+///    raw 33 is rejected at the bitmap tier).
 /// 2. Bitmap-tier evaluation (§ 7.9.2 / § 7.9.3) — each Filter case
 ///    compiles to a predicate over `(adjectiveBitmap,
 ///    operationalBitmap, provenance)` and is applied via
@@ -148,7 +148,8 @@ struct BitmapEvaluator {
     static func evaluate(
         frame: RecallFrame,
         drawers: [Drawer],
-        store: DrawerStore
+        store: DrawerStore,
+        nodeNames: [String: (wing: String, room: String)] = [:]
     ) async throws -> [Drawer] {
         let chain = insertDefaults(frame.filterChain)
 
@@ -189,7 +190,7 @@ struct BitmapEvaluator {
 
         // 2. Structured-tier filters (room/wing/time/lattice).
         candidates = candidates.filter {
-            evaluateStructuredTier(chain: chain, drawer: $0)
+            evaluateStructuredTier(chain: chain, drawer: $0, nodeNames: nodeNames)
         }
 
         // 3. Content-tier filters (substring match).
@@ -198,7 +199,7 @@ struct BitmapEvaluator {
         }
 
         // 4. Ordering.
-        return sort(candidates, ordering: frame.ordering)
+        return sort(candidates, ordering: frame.ordering, nodeNames: nodeNames)
     }
 
     // MARK: - Default insertion (§ 7.9.5)
@@ -268,20 +269,6 @@ struct BitmapEvaluator {
         }
     }
 
-    private static func isBitmapProvFilter(_ f: Filter) -> Bool {
-        switch f {
-        case .userConfirmed, .automatedConfirmedOnly, .unconfirmed,
-             .sourceType, .channel, .confidenceAtLeast:
-            return true
-        case .all(let fs), .any(let fs):
-            return fs.contains(where: isBitmapProvFilter)
-        case .not(let inner):
-            return isBitmapProvFilter(inner)
-        default:
-            return false
-        }
-    }
-
     private static func isBitmapSensitivityFilter(_ f: Filter) -> Bool {
         switch f {
         case .sensitivity, .sensitivityAtMost:
@@ -317,6 +304,29 @@ struct BitmapEvaluator {
     /// eliminates the dominant per-query I/O cost on large estates.
     static func chainHasContentPredicate(_ chain: [Filter]) -> Bool {
         chain.contains { isContentFilter($0) }
+    }
+
+    /// Whether the chain carries any structured-tier predicate that
+    /// requires a `nodeNames` lookup (`.inRoom`, `.inWing`, or a
+    /// composition containing one). When true the recall path must
+    /// resolve wing/room names from the node tree before calling
+    /// `evaluate` so the structured tier can apply the filter.
+    /// When false the default `nodeNames: [:]` suffices.
+    static func chainHasStructuredNameFilter(_ chain: [Filter]) -> Bool {
+        chain.contains { isStructuredNameFilter($0) }
+    }
+
+    private static func isStructuredNameFilter(_ f: Filter) -> Bool {
+        switch f {
+        case .inRoom, .inWing:
+            return true
+        case .all(let fs), .any(let fs):
+            return fs.contains { isStructuredNameFilter($0) }
+        case .not(let inner):
+            return isStructuredNameFilter(inner)
+        default:
+            return false
+        }
     }
 
     private static func filterIsPrunable(_ filter: Filter) -> Bool {
@@ -495,9 +505,10 @@ struct BitmapEvaluator {
     // MARK: - Structured-tier evaluation (§ 7.9.4 step 3)
 
     private static func evaluateStructuredTier(
-        chain: [Filter], drawer: Drawer
+        chain: [Filter], drawer: Drawer,
+        nodeNames: [String: (wing: String, room: String)]
     ) -> Bool {
-        chain.allSatisfy { evaluateStructured($0, drawer: drawer) }
+        chain.allSatisfy { evaluateStructured($0, drawer: drawer, nodeNames: nodeNames) }
     }
 
     /// Classifier — does `f` (or any of its children) name a
@@ -521,11 +532,13 @@ struct BitmapEvaluator {
     }
 
     private static func evaluateStructured(
-        _ filter: Filter, drawer: Drawer
+        _ filter: Filter, drawer: Drawer,
+        nodeNames: [String: (wing: String, room: String)]
     ) -> Bool {
+        let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
         switch filter {
-        case .inRoom(let r):        return drawer.room == r
-        case .inWing(let w):        return drawer.wing == w
+        case .inRoom(let r):        return names.room == r
+        case .inWing(let w):        return names.wing == w
         case .lineageID(let l):     return drawer.lineageID == l
         case .createdAfter(let d):  return drawer.filedAt > d
         case .createdBefore(let d): return drawer.filedAt < d
@@ -550,13 +563,13 @@ struct BitmapEvaluator {
         case .all(let fs):
             return fs
                 .filter(isStructuralFilter)
-                .allSatisfy { evaluateStructured($0, drawer: drawer) }
+                .allSatisfy { evaluateStructured($0, drawer: drawer, nodeNames: nodeNames) }
         case .any(let fs):
             let structural = fs.filter(isStructuralFilter)
             if structural.isEmpty { return true }
-            return structural.contains { evaluateStructured($0, drawer: drawer) }
+            return structural.contains { evaluateStructured($0, drawer: drawer, nodeNames: nodeNames) }
         case .not(let f):
-            if isStructuralFilter(f) { return !evaluateStructured(f, drawer: drawer) }
+            if isStructuralFilter(f) { return !evaluateStructured(f, drawer: drawer, nodeNames: nodeNames) }
             return true
 
         default: return true  // bitmap and content cases pass at this tier
@@ -639,14 +652,21 @@ struct BitmapEvaluator {
 
     // MARK: - Ordering
 
-    private static func sort(_ drawers: [Drawer], ordering: Ordering) -> [Drawer] {
+    private static func sort(
+        _ drawers: [Drawer], ordering: Ordering,
+        nodeNames: [String: (wing: String, room: String)]
+    ) -> [Drawer] {
         switch ordering {
         case .byCaptureTimeDesc:
             return drawers.sorted { $0.filedAt > $1.filedAt }
         case .byCaptureTimeAsc:
             return drawers.sorted { $0.filedAt < $1.filedAt }
         case .byRoomAsc:
-            return drawers.sorted { $0.room < $1.room }
+            return drawers.sorted {
+                let r0 = nodeNames[$0.parentNodeId]?.room ?? ""
+                let r1 = nodeNames[$1.parentNodeId]?.room ?? ""
+                return r0 < r1
+            }
         }
     }
 }

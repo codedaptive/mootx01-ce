@@ -102,9 +102,8 @@ public enum MomentSummary {
         return window.contains(row.captureHLC)
     }
 
-    /// OR-reduce a sequence of fingerprints. Mirrors
-    /// glref-swift-ORReduce.swift; redeclared inline for
-    /// standalone readability.
+    /// OR-reduce a sequence of fingerprints. Imports Fingerprint256
+    /// from SubstrateTypes; OR reduction is implemented inline.
     public static func orReduce(_ fps: [Fingerprint256]) -> Fingerprint256 {
         var b0: UInt64 = 0, b1: UInt64 = 0, b2: UInt64 = 0, b3: UInt64 = 0
         for f in fps {
@@ -116,20 +115,6 @@ public enum MomentSummary {
         return Fingerprint256(block0: b0, block1: b1, block2: b2, block3: b3)
     }
 }
-
-// MARK: - Standalone fingerprint redeclaration
-//
-// In a wired-in package context, import Fingerprint256 from
-// glref-swift-Fingerprint256.swift. Here a lightweight alias is
-// declared so the file is readable as a standalone reference.
-
-// The canonical `Fingerprint256` struct lives in
-// glref-swift-Fingerprint256.swift and is imported via the
-// GeniusLocusReference module. The previously redeclared
-// stand-in here (originally named Fingerprint256Lite for
-// standalone readability) is now removed to resolve the
-// duplicate-type error at link time.
-
 
 // MARK: - Properties
 //

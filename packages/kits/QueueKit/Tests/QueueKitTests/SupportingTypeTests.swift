@@ -183,4 +183,21 @@ struct SupportingTypeTests {
         #expect(w.percentile(50) == 3.0,
                 "p50 of capacity-evicted window [2,3,100] must be 3.0; got \(w.percentile(50))")
     }
+
+    // P7-secfix: NaN / infinity / out-of-range p must return 0 without trapping.
+    @Test func latencyWindowNaNAndInfinityReturnZero() {
+        var w = QueueLatencyWindow()
+        w.append(10.0)
+        w.append(20.0)
+        // Non-finite inputs must return 0, not trap.
+        #expect(w.percentile(.nan) == 0.0, "percentile(NaN) must return 0")
+        #expect(w.percentile(.infinity) == 0.0, "percentile(+inf) must return 0")
+        #expect(w.percentile(-.infinity) == 0.0, "percentile(-inf) must return 0")
+        // Out-of-range inputs must return 0.
+        #expect(w.percentile(-1.0) == 0.0, "percentile(-1) must return 0")
+        #expect(w.percentile(101.0) == 0.0, "percentile(101) must return 0")
+        // Boundary values must still work.
+        #expect(w.percentile(0.0) == 10.0, "percentile(0) must return the minimum sample")
+        #expect(w.percentile(100.0) == 20.0, "percentile(100) must return the maximum sample")
+    }
 }

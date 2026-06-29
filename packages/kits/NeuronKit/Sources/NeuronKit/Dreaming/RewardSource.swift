@@ -12,9 +12,8 @@
 //
 // PRECEDENCE: when a diary entry carries a non-nil `reward`,
 // `ExplicitDiaryRewardSource` returns it directly; when nil it falls
-// back to the trace-derived `RecallTraceRewardSource` value (0.0 for
-// all trace rows, because explicit-source consumers should only be wired
-// when diary reward is expected to be present). The daemon's default
+// back to the trace-derived `RecallTraceRewardSource` value (1.0 when
+// the trace item was used, 0.0 otherwise). The daemon's default
 // wiring is `RecallTraceRewardSource` — no change to existing behaviour
 // for callers that never set DiaryEntry.reward.
 //
@@ -89,10 +88,10 @@ public struct RecallTraceRewardSource: RewardSource {
 /// is consulted, so existing recall-trace behaviour is preserved for
 /// rows without an explicit reward.
 ///
-/// Usage: the caller supplies a keyed lookup of diary rewards so this
-/// source stays deterministic and free of substrate I/O — the daemon
-/// reads diary entries via its `DreamingSubstrateReader` seam (or the
-/// caller pre-loads them) and passes the reward map here.
+/// Usage: the caller constructs the reward map from diary entries and
+/// passes it here; this source is then deterministic and free of
+/// substrate I/O. `DreamingSubstrateReader` has no diary-entry read
+/// method — diary reward loading is a caller responsibility.
 public struct ExplicitDiaryRewardSource: RewardSource {
 
     /// Explicit rewards by drawer target ID. Populated from

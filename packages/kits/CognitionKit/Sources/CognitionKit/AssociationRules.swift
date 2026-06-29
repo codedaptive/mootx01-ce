@@ -292,7 +292,7 @@ private func drawerLabels(_ drawer: Drawer) -> [String] {
         contentKindLabel(drawer.contentKind),
         captureChannelLabel(drawer.captureChannel),
         sensitivityLabel(drawer.adjectiveSensitivity),
-        "room:\(drawer.room)",
+        "room:\(drawer.parentNodeId)",
     ]
 }
 

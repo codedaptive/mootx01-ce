@@ -4,6 +4,7 @@ use crate::error::StorageResult;
 use crate::predicate::{OrderClause, StoragePredicate};
 use crate::types::{RowHandle, StorageRow, TypedValue};
 use std::collections::BTreeMap;
+use substrate_types::AsOfCoordinate;
 
 pub trait RowStore: Send + Sync {
     fn insert(&self, table: &str, values: BTreeMap<String, TypedValue>)
@@ -168,5 +169,123 @@ pub trait RowStore: Send + Sync {
             }
             Err(other) => Err(other),
         }
+    }
+
+    // ----------------------------------------------------------------
+    // As-of temporal query (ADR-017 §15)
+    // ----------------------------------------------------------------
+
+    /// Temporal query: returns rows visible at the given `AsOfCoordinate`.
+    ///
+    /// - `None` or `Present`: delegates to [`query`](Self::query) — the
+    ///   current live state.
+    /// - `AsOf(hlc)`: returns rows whose HLC validity range includes the
+    ///   given HLC. **Currently gated off** — returns
+    ///   `StorageError::FeatureGated` until NT-L4 (lineage-wide expunge)
+    ///   and NT-P3 (erasure overlay) have both merged.
+    ///
+    /// The filter logic (when ungated): a row with `created_hlc` and optional
+    /// `tombstoned_hlc` is visible at HLC T when
+    /// `created_hlc <= T AND (tombstoned_hlc IS NULL OR tombstoned_hlc > T)`.
+    fn query_as_of(
+        &self,
+        table: &str,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        as_of: Option<AsOfCoordinate>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        match as_of {
+            None | Some(AsOfCoordinate::Present) => {
+                self.query(table, predicate, order_by, limit, offset)
+            }
+            Some(AsOfCoordinate::AsOf(_)) => {
+                Err(crate::error::StorageError::FeatureGated {
+                    feature: "asOfQuery".to_owned(),
+                })
+            }
+        }
+    }
+
+    /// Temporal projected query: as-of variant of [`query_projected`](Self::query_projected).
+    /// Same gating behavior as [`query_as_of`](Self::query_as_of).
+    fn query_projected_as_of(
+        &self,
+        table: &str,
+        columns: &[&str],
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        as_of: Option<AsOfCoordinate>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        match as_of {
+            None | Some(AsOfCoordinate::Present) => {
+                self.query_projected(table, columns, predicate, order_by, limit, offset)
+            }
+            Some(AsOfCoordinate::AsOf(_)) => {
+                Err(crate::error::StorageError::FeatureGated {
+                    feature: "asOfQuery".to_owned(),
+                })
+            }
+        }
+    }
+
+    /// Temporal skip-corrupt query: as-of variant of
+    /// [`query_skip_corrupt`](Self::query_skip_corrupt).
+    /// Same gating behavior as [`query_as_of`](Self::query_as_of).
+    fn query_skip_corrupt_as_of(
+        &self,
+        table: &str,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        as_of: Option<AsOfCoordinate>,
+    ) -> StorageResult<(Vec<StorageRow>, usize)> {
+        match as_of {
+            None | Some(AsOfCoordinate::Present) => {
+                self.query_skip_corrupt(table, predicate, order_by, limit, offset)
+            }
+            Some(AsOfCoordinate::AsOf(_)) => {
+                Err(crate::error::StorageError::FeatureGated {
+                    feature: "asOfQuery".to_owned(),
+                })
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Explicit transaction boundary (GLK_BATCH1)
+    // ----------------------------------------------------------------
+
+    /// Open a serializable write transaction on the backing store.
+    ///
+    /// Backends that support explicit transactions (`SqliteRowStore`) override
+    /// this to issue `BEGIN IMMEDIATE`. All other backends inherit the no-op
+    /// default, which is correct — they have no serializable multi-statement
+    /// transaction concept.
+    ///
+    /// `CachingRowStore` explicitly delegates to its backing store rather than
+    /// relying on the no-op default: live GLK estates wrap `SqliteRowStore` in
+    /// a `CachingRowStore`, so the default would silently swallow the boundary.
+    fn begin_transaction(&self) -> StorageResult<()> {
+        Ok(())
+    }
+
+    /// Commit the transaction opened by `begin_transaction`.
+    ///
+    /// Backends override alongside `begin_transaction`. Same no-op policy.
+    fn commit_transaction(&self) -> StorageResult<()> {
+        Ok(())
+    }
+
+    /// Roll back the transaction opened by `begin_transaction`, discarding
+    /// all changes since `BEGIN IMMEDIATE`.
+    ///
+    /// Backends override alongside `begin_transaction`. Same no-op policy.
+    fn rollback_transaction(&self) -> StorageResult<()> {
+        Ok(())
     }
 }

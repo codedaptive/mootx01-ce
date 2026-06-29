@@ -20,21 +20,14 @@ import Foundation
 /// - VectorStore.findNearest (10k corpus, top-K via EngramLib): P99 <
 ///   75 ms over 100 queries.
 ///
-/// **Note on the retrieval budget.** The original mission text called
-/// for P99 < 10 ms on `findNearest`. The substrate's Phase 2
-/// measurements (`DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`)
-/// recorded `SimdKernel.hammingTopK` at N=1M in 604 µs — far below
-/// 10 ms for the kernel alone. The path measured here goes
-/// through `VectorStore.findNearest`, which adds SQLite row scan and
-/// per-row engram decode on top of the kernel call; that pipeline cost
-/// pushes per-query latency into the 20–30 ms range at N=10,000 on
-/// apple-m5-max. The ceiling was 50 ms (calibrated with ~2× headroom on
-/// apple-m5-max); it was raised to 75 ms during VK-TEST-01 (Bob,
-/// 2026-05-31) because the path's typical P99 on slower hosts is ~44 ms,
-/// leaving only ~12% headroom under 50 ms — single-sample wall-clock
-/// noise crossed the line on ~1 run in 3. 75 ms keeps a meaningful
-/// budget (~1.7× typical) while making the assertion non-flaky. The
-/// precise numbers and the Theorem 5 verdict are recorded in
+/// **Note on the retrieval budget.** The path measured here goes
+/// through `VectorStore.findNearest`, which uses the resident array and
+/// dense-index hot path (BruteForceIndex or MIHIndex). The 75 ms ceiling
+/// was set during VK-TEST-01 (Bob, 2026-05-31) because the typical P99
+/// on slower hosts is ~44 ms, leaving only ~12% headroom under 50 ms —
+/// single-sample wall-clock noise crossed the line on ~1 run in 3. 75 ms
+/// keeps a meaningful budget (~1.7× typical) while making the assertion
+/// non-flaky. The Theorem 5 verdict is recorded in
 /// `DECISION_VEC05_THEOREM5_2026-05-18.md`.
 ///
 /// All four suites run unconditionally. The end-to-end suite drives a
@@ -99,8 +92,10 @@ struct CapturePathBenchmarkTests {
     /// inference closure. The closure stands in for a CoreML model so
     /// the suite runs unconditionally in CI; it exercises the real
     /// embed (closure + canonical FloatSimHash projection) and store
-    /// path, which is what the capture-path budget governs. Asserts
-    /// P99 < 100 ms and median < 50 ms (iPhone budget, spec I-4 / R-3).
+    /// path, which is what the capture-path budget governs. Measures
+    /// P99 and median every run; ceiling assertions (P99 < 100 ms,
+    /// median < 50 ms, iPhone budget spec I-4 / R-3) enforced only
+    /// under MOOTX01_PERF=1.
     @Test func testEndToEndCapturePathP99Under100Milliseconds() async throws {
         // Acquire GlobalTestLock so the benchmark runs without CPU
         // competition from VectorStoreTests or telemetry tests. Both
@@ -162,9 +157,9 @@ struct CapturePathBenchmarkTests {
     // MARK: - Suite 2: VectorStore-only latency (always runs)
 
     /// 1000 `addVector` calls with a precomputed `Engram.zero`. Isolates
-    /// storage latency from embedding and projection. Asserts P99 < 5
-    /// ms — the storage half of the capture-path budget, leaving the
-    /// remaining ~95 ms for inference and projection on real hardware.
+    /// storage latency from embedding and projection. Measures P99 every
+    /// run; ceiling assertion (P99 < 5 ms — the storage half of the
+    /// capture-path budget) enforced only under MOOTX01_PERF=1.
     @Test func testVectorStoreAddVectorP99Under5Milliseconds() async throws {
         try await GlobalTestLock.shared.withLock {
         let store = try await Self.freshStore()
@@ -204,7 +199,8 @@ struct CapturePathBenchmarkTests {
     // MARK: - Suite 3: Retrieval latency (always runs)
 
     /// Stores 10,000 deterministic engrams, then issues 100 `findNearest`
-    /// queries with k=10. Asserts P99 < 75 ms per query. The corpus
+    /// queries with k=10. Measures P99 every run; ceiling assertion
+    /// (P99 < 75 ms per query) enforced only under MOOTX01_PERF=1. The corpus
     /// size matches the documented retrieval scale ceiling for VectorKit
     /// v1.0 (the in-process Hamming top-K path is bandwidth-bound and
     /// stays well under the budget through ~100k rows; sqlite-vec / HNSW
@@ -329,11 +325,9 @@ struct CapturePathBenchmarkTests {
         ProcessInfo.processInfo.environment["MOOTX01_PERF"] == "1"
     }
 
-    /// Builds a fresh in-memory store. Each call gets a fresh
-    /// estate so the benchmarks do not share corpus state across
-    /// suites. The pre-refactor implementation used an on-disk
-    /// SQLite file; with PersistenceKit's InMemory backend (mission 6)
-    /// the benchmark exercises the abstraction without disk I/O.
+    /// Builds a fresh scratch-SQLite-backed VectorStore. Each call gets
+    /// a fresh on-disk scratch store (via `makeScratchStorage()`) so
+    /// benchmarks do not share corpus state across suites.
     private static func freshStore() async throws -> VectorStore {
         let storage = try makeScratchStorage()
         try await storage.open(schema: VectorStore.schemaDeclaration)

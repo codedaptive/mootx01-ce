@@ -1,5 +1,5 @@
 //! svc_smoke — live Task Scheduler round-trip for the Windows service
-//! backend (register → query → restart → unregister), driving the real
+//! backend (register → start → restart → unregister), driving the real
 //! `core::service` code path including /TR quoting. Run on a Windows box:
 //!
 //!   cargo run --example svc_smoke
@@ -24,7 +24,11 @@ fn main() {
     let scratch_str = scratch.display().to_string();
 
     const TASK: &str = "mootx01-svc-smoke"; // never the real task name
-    let (exec, arg) = service::daemon_task_command(&exe.display().to_string(), Some(&scratch_str));
+    // vault_on=true: smoke uses the default vault-on posture (ADR-015).
+    // Fails CLOSED if scratch_str contains cmd.exe-unsafe characters (it won't
+    // — temp_dir() paths are ASCII-clean on all supported Windows builds).
+    let (exec, arg) = service::daemon_task_command(&exe.display().to_string(), Some(&scratch_str), true)
+        .expect("scratch data-dir path must be cmd.exe-safe");
     println!("action: {exec} {arg}");
 
     // Register + start.

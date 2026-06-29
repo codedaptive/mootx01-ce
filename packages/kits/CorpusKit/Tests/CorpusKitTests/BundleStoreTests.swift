@@ -169,6 +169,78 @@ struct BundleStoreTests {
             != Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "y"))
     }
 
+    // MARK: - Per-corpus Merkle root (NT-C1 Part 3)
+
+    @Test func corpusMerkleRootEmptyBeforeInsert() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let root = try await store.corpusMerkleRoot(for: "nonexistent")
+            #expect(root == MerkleRoot.empty)
+        }
+    }
+
+    @Test func corpusMerkleRootUpdatesAfterInsert() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let c1 = Chunk(
+                sourceID: "src-merkle", startOffset: 0, length: 5, text: "alpha",
+                hlc: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1))
+            try await store.insert([c1])
+            let root1 = try await store.corpusMerkleRoot(for: "src-merkle")
+            #expect(root1 != MerkleRoot.empty)
+
+            let c2 = Chunk(
+                sourceID: "src-merkle", startOffset: 10, length: 4, text: "beta",
+                hlc: HLC(physicalTime: 2, logicalCount: 0, nodeID: 1))
+            try await store.insert([c2])
+            let root2 = try await store.corpusMerkleRoot(for: "src-merkle")
+            #expect(root2 != MerkleRoot.empty)
+            #expect(root2 != root1, "root must change when a chunk is added")
+        }
+    }
+
+    @Test func corpusMerkleRootDiffersPerSource() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let c1 = Chunk(
+                sourceID: "src-X", startOffset: 0, length: 5, text: "hello",
+                hlc: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1))
+            let c2 = Chunk(
+                sourceID: "src-Y", startOffset: 0, length: 5, text: "world",
+                hlc: HLC(physicalTime: 2, logicalCount: 0, nodeID: 1))
+            try await store.insert([c1, c2])
+            let rootX = try await store.corpusMerkleRoot(for: "src-X")
+            let rootY = try await store.corpusMerkleRoot(for: "src-Y")
+            #expect(rootX != MerkleRoot.empty)
+            #expect(rootY != MerkleRoot.empty)
+            #expect(rootX != rootY, "different corpora must have different roots")
+        }
+    }
+
+    @Test func globalCorpusMerkleRootReflectsAllCorpora() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let emptyGlobal = try await store.globalCorpusMerkleRoot()
+            #expect(emptyGlobal == MerkleRoot.empty)
+
+            let c1 = Chunk(
+                sourceID: "src-G1", startOffset: 0, length: 4, text: "data",
+                hlc: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1))
+            try await store.insert([c1])
+            let global1 = try await store.globalCorpusMerkleRoot()
+            #expect(global1 != MerkleRoot.empty)
+
+            let c2 = Chunk(
+                sourceID: "src-G2", startOffset: 0, length: 4, text: "more",
+                hlc: HLC(physicalTime: 2, logicalCount: 0, nodeID: 1))
+            try await store.insert([c2])
+            let global2 = try await store.globalCorpusMerkleRoot()
+            #expect(global2 != global1, "global root must change when a new corpus is added")
+        }
+    }
+
+    // MARK: - Content-addressed id
+
     @Test func reingestionIsIdempotent() async throws {
         // Re-chunking the same source text and re-inserting must not
         // grow the store: content-addressed ids make the second pass a

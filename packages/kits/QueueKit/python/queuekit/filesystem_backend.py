@@ -50,6 +50,14 @@ class InvalidTerminalStatus(QueueError):
     pass
 
 
+class InvalidIdentifier(QueueError):
+    """A stream_id, job id, or other caller-supplied identifier contains a
+    path separator, equals '.' or '..', or contains an ASCII control
+    character. Planned security hardening — parity with Swift/Rust ports.
+    """
+    pass
+
+
 class FilesystemBackend:
     """Per spec §5,6,8,9 — POSIX maildir."""
 
@@ -90,6 +98,36 @@ class FilesystemBackend:
             except OSError:
                 pass
 
+    # --- Identifier validation (planned security hardening, CAND-023) ---
+
+    @staticmethod
+    def _validate_identifier(id: str) -> None:
+        """Validate that ``id`` is a safe single filesystem path component.
+
+        An identifier used to build a queue path (stream_id, job id, or any
+        caller-influenced component) must not contain characters that could
+        escape the queue root via path traversal. Specifically, rejects:
+
+        - empty strings
+        - "." or ".." (dot directory components)
+        - "/" or "\\" (POSIX and Windows path separators)
+        - ASCII control characters 0x00–0x1F and 0x7F
+
+        Legitimate identifiers — 32-char hex job ids, stream names like
+        "encode" or "dreaming" — all pass. Enforces the same rule as the
+        Swift and Rust ports. Raises ``InvalidIdentifier`` on rejection.
+        """
+        if not id:
+            raise InvalidIdentifier("empty identifier")
+        if id in (".", ".."):
+            raise InvalidIdentifier(f"dot component: {id!r}")
+        for ch in id:
+            if ch in ("/", "\\"):
+                raise InvalidIdentifier(f"path separator in {id!r}")
+            v = ord(ch)
+            if v <= 0x1F or v == 0x7F:
+                raise InvalidIdentifier(f"control character in {id!r}")
+
     # --- HLC ---
 
     def _next_hlc(self) -> HLC:
@@ -108,15 +146,20 @@ class FilesystemBackend:
     # --- write (spec §8) ---
 
     def write(self, job: Job) -> None:
+        # Validate before any filesystem path construction.
+        self._validate_identifier(job.stream_id)
+        self._validate_identifier(job.id)
         encoded = encode_job(job)
         filename = filename_for_job(job)
         tmp_path = self.tmp_dir / filename
         new_path = self.new_dir / filename
 
-        # Step 3: O_CREAT | O_EXCL
+        # Step 3: O_CREAT | O_EXCL — 0o600 (owner read/write only) to match
+        # Swift and Rust FilesystemBackend behaviour; job files carry encoded
+        # payloads (estate paths, content) and must not be group/world readable.
         try:
             fd = os.open(str(tmp_path),
-                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except OSError as e:
             raise WriteFailed(f"open O_EXCL failed: {e}") from e
         try:
@@ -231,6 +274,8 @@ class FilesystemBackend:
 
     def complete(self, job_id: str, status: ObservationStatus,
                  artifacts: Iterable[ArtifactRef]) -> None:
+        # Validate before signal file path construction.
+        self._validate_identifier(job_id)
         if not status.is_terminal():
             raise InvalidTerminalStatus(status)
         artifacts = list(artifacts)
@@ -255,8 +300,9 @@ class FilesystemBackend:
         signal_data = encode_signal(signal)
         signal_tmp = self.tmp_dir / f"{job_id}.signal"
         signal_final = self.done_dir / f"{job_id}.signal"
+        # 0o600 — owner read/write only, parity with Swift/Rust ports and job files.
         fd = os.open(str(signal_tmp),
-                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
             os.write(fd, signal_data)
             os.fsync(fd)

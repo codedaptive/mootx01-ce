@@ -151,4 +151,40 @@ struct HydrationDecodeTests {
             ])
         )
     }
+
+    // MARK: - E. clampLimit guards on moot_federated_search (Finding 3)
+
+    /// A negative `limit` on `moot_federated_search` must throw `invalidParams`.
+    /// Before the fix, the limit bypassed clampLimit and reached the substrate raw.
+    @Test func federatedSearchNegativeLimitThrowsInvalidParams() async throws {
+        let (dispatcher, requesterID) = try await makeDispatcher()
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_federated_search",
+                arguments: .object([
+                    "requesterEstateID": .string(requesterID.uuidString),
+                    "limit": .integer(-1),
+                ])
+            )
+            Issue.record("Negative limit must throw invalidParams, but did not throw")
+        } catch let error as JSONRPCError {
+            #expect(
+                error.code == JSONRPCErrorCode.invalidParams,
+                "Negative limit must throw invalidParams; got code \(error.code)"
+            )
+        }
+    }
+
+    /// An over-ceiling `limit` on `moot_federated_search` must be silently clamped.
+    @Test func federatedSearchOverCeilingLimitDoesNotThrow() async throws {
+        let (dispatcher, requesterID) = try await makeDispatcher()
+        // Should not throw — clamped to 500 before reaching the substrate.
+        _ = try await dispatcher.dispatch(
+            name: "moot_federated_search",
+            arguments: .object([
+                "requesterEstateID": .string(requesterID.uuidString),
+                "limit": .integer(1_000_000),
+            ])
+        )
+    }
 }

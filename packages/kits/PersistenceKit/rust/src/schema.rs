@@ -53,6 +53,12 @@ pub struct TableDeclaration {
     /// in row update / delete with StorageError::AppendOnlyViolation.
     /// INSERT remains allowed.
     pub append_only: bool,
+    /// When true, the hash-on-write hook computes a ContentHash for
+    /// every insert, update, and upsert on this table's rows. The
+    /// hash is supplied by a `ContentHashProvider` callback injected
+    /// into `HashingRowStore`; PersistenceKit does not depend on
+    /// substrate-lib or substrate-kernel (ADR-017 §16 / NT-P2).
+    pub hashable: bool,
 }
 
 impl TableDeclaration {
@@ -68,6 +74,7 @@ impl TableDeclaration {
             unique_constraints: Vec::new(),
             generated_columns: Vec::new(),
             append_only: false,
+            hashable: false,
         }
     }
 
@@ -85,6 +92,52 @@ impl TableDeclaration {
         self.append_only = true;
         self
     }
+
+    /// Marks this table for hash-on-write: every insert, update, and
+    /// upsert computes a ContentHash via a caller-supplied callback
+    /// (ADR-017 §16 / NT-P2).
+    pub fn hashable(mut self) -> Self {
+        self.hashable = true;
+        self
+    }
+
+    /// Returns the column name tagged with `CreatedHlc` role, if any.
+    pub fn created_hlc_column(&self) -> Option<&str> {
+        self.columns
+            .iter()
+            .find(|c| c.role == Some(ColumnRole::CreatedHlc))
+            .map(|c| c.name.as_str())
+    }
+
+    /// Returns the column name tagged with `TombstonedHlc` role, if any.
+    pub fn tombstoned_hlc_column(&self) -> Option<&str> {
+        self.columns
+            .iter()
+            .find(|c| c.role == Some(ColumnRole::TombstonedHlc))
+            .map(|c| c.name.as_str())
+    }
+
+    /// True when the table declares temporal validity columns
+    /// and can participate in as-of filtering.
+    pub fn supports_as_of_filter(&self) -> bool {
+        self.created_hlc_column().is_some()
+    }
+}
+
+/// Semantic role of a column within the as-of temporal filter
+/// (ADR-017 §15). Columns tagged with a role participate in the
+/// temporal validity window: `created_hlc <= T AND
+/// (tombstoned_hlc IS NULL OR tombstoned_hlc > T)`.
+/// Kits declare roles at schema time; PersistenceKit uses them to
+/// push the filter into the engine without knowing kit-specific
+/// column names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnRole {
+    /// The HLC at which the row became valid.
+    CreatedHlc,
+    /// The HLC at which the row was superseded or deleted. Nullable
+    /// by convention — a nil tombstone means "still live."
+    TombstonedHlc,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +146,9 @@ pub struct ColumnDeclaration {
     pub column_type: ColumnType,
     pub nullable: bool,
     pub default_value: Option<TypedValue>,
+    /// Semantic role for temporal filtering. None means the column
+    /// has no special role in the as-of filter.
+    pub role: Option<ColumnRole>,
 }
 
 impl ColumnDeclaration {
@@ -102,6 +158,7 @@ impl ColumnDeclaration {
             column_type,
             nullable: false,
             default_value: None,
+            role: None,
         }
     }
 
@@ -146,8 +203,29 @@ impl ColumnDeclaration {
     pub fn hlc(name: impl Into<String>) -> Self {
         Self::new(name, ColumnType::Hlc)
     }
+    /// HLC column tagged as the row-creation timestamp for
+    /// as-of temporal filtering (ADR-017 §15).
+    pub fn created_hlc(name: impl Into<String>) -> Self {
+        let mut col = Self::new(name, ColumnType::Hlc);
+        col.role = Some(ColumnRole::CreatedHlc);
+        col
+    }
+    /// HLC column tagged as the row-tombstone timestamp for
+    /// as-of temporal filtering (ADR-017 §15). Nullable by
+    /// convention — a nil tombstone means "still live."
+    pub fn tombstoned_hlc(name: impl Into<String>) -> Self {
+        let mut col = Self::new(name, ColumnType::Hlc);
+        col.nullable = true;
+        col.role = Some(ColumnRole::TombstonedHlc);
+        col
+    }
     pub fn fingerprint(name: impl Into<String>) -> Self {
         Self::new(name, ColumnType::Fingerprint)
+    }
+    /// Builder: set the column role for temporal filtering.
+    pub fn with_role(mut self, role: ColumnRole) -> Self {
+        self.role = Some(role);
+        self
     }
 }
 

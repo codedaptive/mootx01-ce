@@ -17,21 +17,24 @@
 //
 // What the pipeline does NOT do:
 //
-//   - It does not introduce a new cognition store. Updates are
-//     applied through `MatrixTier.applyCapture` and
-//     `MatrixCalibrationRegistry.record` — the existing public
-//     surfaces from GLK-06.
+//   - It does not introduce a new cognition store. Matrix updates
+//     are applied through `MatrixTier.applyCapture` — the existing
+//     public surface from GLK-06. The `calibration` parameter is
+//     accepted for interface stability but `MatrixCalibrationRegistry.record`
+//     is not called; the pipeline leaves the registry unchanged and
+//     returns `calibrationObservationsRecorded: 0`. Calibration
+//     extraction from the audit log is intentionally deferred.
 //   - It does not run NMF on every pass. NMF latent-factor refresh
 //     is a per-week task in the cookbook; the training daemon's
-//     per-tick work is the cheap F / O / calibration fold. Latent
-//     factors are recomputed only when the caller invokes
+//     per-tick work is the cheap F / O fold. Latent factors are
+//     recomputed only when the caller invokes
 //     `EnrichmentPipeline.refactorize(...)` explicitly. The training
 //     daemon's tick path does not call refactorize on its own.
 //   - It does not modify the audit log (the log is the source of
 //     truth per I-2 / I-20; the pipeline only reads it).
 //
-// Determinism. The pipeline accepts `now: Date` and a watermark
-// parameter on every entry point; no `Date()` is read inside the
+// Determinism. The pipeline's `run` entry point accepts a
+// `highWaterMark: HLC` parameter; no `Date()` is read inside the
 // pipeline so the conformance gate against the Rust mirror compares
 // bit-equal output for identical inputs.
 
@@ -58,10 +61,12 @@ import SubstrateTypes
 /// what the pipeline did without re-deriving the numbers.
 public struct EnrichmentPassResult: Sendable, Equatable, Codable {
 
-    /// Number of unified-audit entries the pass actually consumed.
-    /// Equals zero for a dormant daemon (the daemon short-circuits
-    /// before invoking the pipeline) and equals the size of the
-    /// post-watermark tail otherwise.
+    /// Number of state-changing audit entries the pass counted. Only
+    /// verbs that advance matrix state — `capture`, `expunge`, `mutate`,
+    /// `reanchor`, `withdraw` — increment this counter. Read-only verbs
+    /// (`recall`, `propose`, `associate`, `learn`, `dreamCompact`, `migrate`)
+    /// and federation/key-custody verbs (`grantIssued`, `grantRevoked`,
+    /// `keyDecayed`, `physicalKeyDecayed`) are skipped without counting.
     public let transitionsConsidered: Int
 
     /// Number of distinct (fieldPath, bitPosition) cells whose F

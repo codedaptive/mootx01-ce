@@ -315,9 +315,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Local timestamp `yyyymmdd-HHMMSS` for backup suffixes. Dependency-free
-/// (the crate ships no chrono); derived from the system clock in UTC, which is
-/// sufficient for a unique-per-second backup name.
+/// UTC timestamp `yyyymmdd-HHMMSS` for backup suffixes. Dependency-free
+/// (the crate ships no chrono); computed from `SystemTime::UNIX_EPOCH` in UTC,
+/// which is sufficient for a unique-per-second backup name.
 fn backup_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()

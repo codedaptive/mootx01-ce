@@ -93,7 +93,7 @@ final class ConformanceTests {
         #expect(countIn("done") == 2)
     }
 
-    // MARK: - Area 3: Signal before rename
+    // MARK: - Area 3: Signal file written after reply
 
     @Test func area3SignalCorrectness() async throws {
         let kit = try QueueKit(
@@ -206,7 +206,7 @@ final class ConformanceTests {
         try FileManager.default.setAttributes(
             [.modificationDate: Date(timeIntervalSinceNow: -600)],
             ofItemAtPath: stale)
-        // Re-init — Area 6 says: on reinit, stale gone, no job lost.
+        // Re-init — Area 6: stale tmp entries are removed on reinit.
         _ = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 2))

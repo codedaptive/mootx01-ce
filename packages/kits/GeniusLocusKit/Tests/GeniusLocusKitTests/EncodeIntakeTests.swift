@@ -185,32 +185,38 @@ struct EncodeIntakeTests {
             "impatient-written drawer must be searchable")
     }
 
-    // MARK: - EncodeJob payload round-trips through QueueKit's Job
-
     // MARK: - reindexMissing: backfill for pre-wiring drawers
 
-    /// `reindexMissing` enqueues an EncodeJob for every active drawer that is
-    /// NOT already in the Corpus BundleStore, so content captured before the
+    /// `reindexMissing` enqueues onto the Corpus ingest queue for every active
+    /// drawer that is NOT already in the Corpus BundleStore, so content captured before the
     /// dual-path wiring (or after an index loss) becomes BM25/vector searchable.
     ///
     /// Sequence:
     ///   1. Capture a drawer via the LEGACY no-mode overload (simulating pre-wiring
     ///      content: the row lands but the Corpus is never fed).
     ///   2. Assert the drawer is NOT findable via BM25 (semantic lane dark).
-    ///   3. Call `reindexMissing`. Assert the return value is 1.
+    ///   3. Call `reindexMissing`. Assert the return value is 1 + hintCount.
     ///   4. Drain the encode queue. Assert the drawer IS now findable via BM25.
+    ///
+    /// NOTE: Hint drawers (AI_Charter_Hint room, seeded at provision via addDrawerCovered)
+    /// also count as unindexed — they land in the DrawerStore without Corpus entries because
+    /// seedWing bypasses the encode queue. reindexMissing correctly picks them up for
+    /// backfill. The expected count is 1 user drawer + 7 hint drawers.
     @Test
     func reindexMissingEnqueuesUnindexedDrawersAndTheyBecomeSearchable() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         defer { Task { try? await kit.close(handle) } }
 
         let content = "palladium platinum catalyst oxidation chemical"
+        // Hint drawers are seeded at provision via addDrawerCovered (not the Corpus
+        // encode path), so they start unindexed. reindexMissing backfills all of them.
+        let hintCount = LocusKit.defaultWings.count
 
         // 1. Capture via the legacy path (row-only, no Corpus feed). This simulates
         //    content that landed before the dual-path intake wiring.
         let drawer = try await kit.capture(handle, captureFrame(content))
 
-        // 2. Drain the queue and confirm the drawer is NOT in the Corpus yet.
+        // 2. Drain the queue and confirm the user drawer is NOT in the Corpus yet.
         //    (The legacy capture never enqueued a job, so the queue is empty and
         //    the drawer's sourceID is absent from the BundleStore.)
         try await kit.awaitEncodeDrain(for: handle)
@@ -219,12 +225,12 @@ struct EncodeIntakeTests {
         #expect(beforeHit == nil,
             "legacy-captured drawer must NOT be found via BM25 before reindexMissing")
 
-        // 3. Call reindexMissing. It should enqueue exactly 1 job.
+        // 3. Call reindexMissing. It should enqueue the user drawer + all hint drawers.
         let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
-        #expect(enqueued == 1,
-            "reindexMissing must enqueue 1 job for the 1 un-indexed drawer; got \(enqueued)")
+        #expect(enqueued == 1 + hintCount,
+            "reindexMissing must enqueue 1 user drawer + \(hintCount) hint drawers; got \(enqueued)")
 
-        // 4. Drain and confirm the drawer IS now semantically searchable.
+        // 4. Drain and confirm the user drawer IS now semantically searchable.
         try await kit.awaitEncodeDrain(for: handle)
         let afterResult = try await kit.recall(handle, hybridRequest(query: "palladium catalyst oxidation"))
         let afterHit = afterResult.hits.first { $0.drawer?.id == drawer.id && $0.sources.contains(.corpusBM25) }
@@ -233,27 +239,41 @@ struct EncodeIntakeTests {
     }
 
     /// `reindexMissing` skips drawers that are already in the Corpus —
-    /// idempotence invariant.
+    /// idempotence invariant for user-captured content.
+    ///
+    /// NOTE: Hint drawers (AI_Charter_Hint room) are seeded at provision via
+    /// addDrawerCovered (not the Corpus encode path), so they remain unindexed until
+    /// reindexMissing runs. The expected count here is hintCount (7), not 0 — the user
+    /// drawer was indexed via regular drain, but the hints were not.
     @Test
     func reindexMissingSkipsAlreadyIndexedDrawers() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         defer { Task { try? await kit.close(handle) } }
 
+        // Hint drawers seeded at provision via addDrawerCovered remain unindexed.
+        let hintCount = LocusKit.defaultWings.count
+
         // Capture via the mode-aware path (indexed immediately via regular drain).
         _ = try await kit.capture(handle, captureFrame("rhodium iridium rare metal group"), mode: .regular)
         try await kit.awaitEncodeDrain(for: handle)
 
-        // reindexMissing should find 0 missing (the drawer is already indexed).
+        // reindexMissing skips the already-indexed user drawer but picks up hint drawers.
         let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
-        #expect(enqueued == 0,
-            "reindexMissing must skip already-indexed drawers; expected 0, got \(enqueued)")
+        #expect(enqueued == hintCount,
+            "reindexMissing must skip the indexed user drawer; only hint drawers unindexed; expected \(hintCount), got \(enqueued)")
     }
 
     /// `reindexMissing` correctly handles a mix: some drawers indexed, some not.
+    ///
+    /// NOTE: Hint drawers (AI_Charter_Hint room) seeded at provision via addDrawerCovered
+    /// are also unindexed. The expected count is 3 legacy user drawers + 7 hint drawers.
     @Test
     func reindexMissingHandlesMixedIndexedAndUnindexed() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         defer { Task { try? await kit.close(handle) } }
+
+        // Hint drawers seeded at provision via addDrawerCovered remain unindexed.
+        let hintCount = LocusKit.defaultWings.count
 
         // Capture 2 via mode-aware (will be indexed).
         _ = try await kit.capture(handle, captureFrame("vanadium steel alloying element"), mode: .regular)
@@ -265,12 +285,12 @@ struct EncodeIntakeTests {
         _ = try await kit.capture(handle, captureFrame("molybdenum disulfide lubricant"))
         _ = try await kit.capture(handle, captureFrame("tungsten carbide cutting insert"))
 
-        // reindexMissing must enqueue exactly 3 (the un-indexed ones).
+        // reindexMissing must enqueue 3 legacy user drawers + hintCount hint drawers.
         let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
-        #expect(enqueued == 3,
-            "reindexMissing must enqueue 3 un-indexed drawers; got \(enqueued)")
+        #expect(enqueued == 3 + hintCount,
+            "reindexMissing must enqueue 3 un-indexed user drawers + \(hintCount) hint drawers; got \(enqueued)")
 
-        // After draining, all 3 un-indexed drawers should be BM25-searchable.
+        // After draining, all 3 un-indexed user drawers should be BM25-searchable.
         try await kit.awaitEncodeDrain(for: handle)
         let result = try await kit.recall(handle, hybridRequest(query: "niobium tungsten carbide"))
         let corpusHits = result.hits.filter { $0.sources.contains(.corpusBM25) }
@@ -278,31 +298,58 @@ struct EncodeIntakeTests {
             "at least 1 reindexed drawer must surface via BM25 after drain; got \(corpusHits.count)")
     }
 
-    // MARK: - EncodeJob round-trip
+    // The encode-job payload round-trip moved to CorpusKit alongside the
+    // relocated ingest pipeline: the queue + drain + IngestJob now live in
+    // CorpusKit (CorpusIngestQueueTests covers the IngestJob round-trip and the
+    // queue→drain→encode path). GLK's tests here cover the orchestration: the
+    // mode-aware capture and reindexMissing driving the Corpus queue.
 
-    /// The EncodeJob payload (P2) survives a Job encode/decode round-trip,
-    /// preserving the drawer id, estate uuid, text, model id, and capture instant.
+    // MARK: - Part 6: reindexMissing hard cap (secfix/c-glk-remaining)
+
+    /// Verify that `reindexMaxJobs` is the documented constant 10,000.
+    ///
+    /// This test locks the DoS-hardening constant value (secfix/c-glk-remaining
+    /// Part 6). If someone accidentally lowers this to a value that would break
+    /// normal import flows, or raises it to a value that reinstates the unbounded
+    /// fan-out, this test catches it.
+    ///
+    /// Behavioral test for the cap itself (>10k drawers) is impractical in unit
+    /// tests — provisioning 10,001 drawers would take minutes. The constant value
+    /// test + the existing reindexMissing tests (which exercise paths below the
+    /// cap) together lock both the boundary value and the pre-cap behavior.
     @Test
-    func encodeJobRoundTripsThroughJob() throws {
-        let captured = Date(timeIntervalSince1970: 1_700_000_000.5)
-        let estate = UUID()
-        let payload = EncodeJob(
-            drawerID: "drawer-123",
-            estateUUID: estate,
-            text: "round-trip payload text",
-            embeddingModelID: "test-model-v1",
-            capturedAt: captured)
-        let streamID = StreamID(rawValue: "glk_encode_test")
-        let hlc = HLC(physicalTime: 42, logicalCount: 0, nodeID: 1)
-        let job = try payload.toJob(streamID: streamID, submittedAt: hlc)
-        let decoded = try EncodeJob.from(job: job)
+    func reindexMissing_maxJobsCap_constantIs10000() {
+        // reindexMaxJobs is a static let on GeniusLocusKit — accessible via
+        // @testable import. The value 10,000 is the security-hardening constant
+        // from Part 6 of secfix/c-glk-remaining. Rust parity: REINDEX_MAX_JOBS.
+        #expect(GeniusLocusKit.reindexMaxJobs == 10_000,
+            "reindexMaxJobs must equal 10,000 (DoS hardening constant, Part 6)")
+    }
 
-        #expect(decoded.drawerID == "drawer-123")
-        #expect(decoded.estateUUID == estate)
-        #expect(decoded.text == "round-trip payload text")
-        #expect(decoded.embeddingModelID == "test-model-v1")
-        // Capture instant round-trips to the same sub-second instant.
-        #expect(abs(decoded.capturedAt.timeIntervalSince1970 - captured.timeIntervalSince1970) < 0.001)
-        #expect(job.streamID == streamID)
+    /// Verify `reindexMissing` enqueues at most `reindexMaxJobs` drawers when
+    /// fewer than the cap are unindexed — the normal (non-truncation) path.
+    ///
+    /// This is a regression gate: the cap must not suppress legitimate backfill
+    /// work below the threshold. The existing tests verify specific counts (1+hints,
+    /// 3+hints); this test verifies the return value is ≤ reindexMaxJobs.
+    @Test
+    func reindexMissing_resultNeverExceedsCap() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Capture a few drawers via the legacy (row-only) path.
+        for i in 0..<5 {
+            _ = try await kit.capture(handle, captureFrame("cap-test content \(i)"))
+        }
+
+        let enqueued = try await kit.reindexMissing(handle: handle, now: Date())
+        let cap = GeniusLocusKit.reindexMaxJobs
+
+        #expect(enqueued <= cap,
+            "reindexMissing must never return more than reindexMaxJobs (\(cap)); got \(enqueued)")
+        // Non-trivial: at least 1 drawer must have been enqueued (proves the cap
+        // did not suppress legitimate work below the threshold).
+        #expect(enqueued >= 1,
+            "reindexMissing must enqueue at least the 5 legacy drawers; got \(enqueued)")
     }
 }

@@ -18,7 +18,7 @@ from .job import (
     decode_job,
     encode_signal,
 )
-from .filesystem_backend import FilesystemBackend, QueueError
+from .filesystem_backend import FilesystemBackend, QueueError, InvalidIdentifier
 from .queue import QueueKit
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "HLC",
     "FilesystemBackend",
     "QueueError",
+    "InvalidIdentifier",
     "QueueKit",
     "base64url_encode",
     "base64url_decode",

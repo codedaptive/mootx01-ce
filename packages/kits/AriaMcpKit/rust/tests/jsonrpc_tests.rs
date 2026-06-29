@@ -6,7 +6,7 @@
 //! the cross-version wire surface; they must pass byte-for-byte against
 //! any conforming client.
 //!
-//! Also covers the JSON value type: all six variants round-trip through
+//! Also covers the JSON value type: all seven variants round-trip through
 //! serde_json without loss (the same property Swift's `testJSONValueRoundTrip`
 //! pins over Foundation/JSONSerialization).
 

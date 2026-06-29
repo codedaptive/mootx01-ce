@@ -54,9 +54,9 @@ fn rust_deserialize_reproduces_fixture_embeddings() {
     let restored = LsaProvider::from_serialized_basis(&blob).expect("blob must deserialize");
 
     for entry in &f.embeddings {
-        // Empty text yields an empty fold-in vector (no float bits to pin);
-        // its Engram is ZERO. Skip the float check for empty text but still
-        // confirm the Engram is the zero engram.
+        // The loop always computes float bits via embed_float(...).unwrap_or_default()
+        // and compares them to the fixture; empty text yields an empty vector, so
+        // float_bits are [] — matched by the fixture entry.
         let floats = restored.embed_float(&entry.text).unwrap_or_default();
         let bits: Vec<u32> = floats.iter().map(|x| x.to_bits()).collect();
         assert_eq!(bits, entry.float_bits, "float bits for '{}'", entry.text);

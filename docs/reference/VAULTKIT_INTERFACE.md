@@ -1,10 +1,10 @@
 ---
 title: VaultKit Interface
-version: 1.7.0
+version: 1.11.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-18
+date: 2026-06-28
 description: Public interface contract for VaultKit — bidirectional bridge between a MOOTx01 estate and human-readable Markdown vaults, programmatic exchange formats, and MemPalace.
 relates_to:
   - docs/decisions/ADR-VAULTKIT-001.md
@@ -471,7 +471,7 @@ Identity resolution on import (priority order):
 2. `frontmatter["moot_id"]` → parse as UUID
 3. FNV-1a 128-bit hash of `stableSourceKey`
 
-### `VaultBridge` (facade)
+### `VaultBridge` (Interface)
 
 ```swift
 public struct VaultBridge: Sendable {
@@ -489,7 +489,8 @@ public struct VaultBridge: Sendable {
                        now: Date) async throws -> ExportReport
     public func importVault(at vaultURL: URL,
                             into handle: EstateHandle,
-                            now: Date) async throws -> ImportReport
+                            now: Date,
+                            mode: EncodeSpeed = .foreground) async throws -> ImportReport
     /// Path-scoped import: identical to importVault but restricts the
     /// import to notes whose vault-relative path is in `includingPaths`.
     /// Used by moot_vault_reconcile apply mode so only the M candidates
@@ -508,6 +509,38 @@ public struct VaultBridge: Sendable {
                                 adapter: MemPalaceChromaAdapter = MemPalaceChromaAdapter()
                                 ) async throws -> ImportReport
 }
+
+### `PalaceBridge` (direct palace import)
+
+```swift
+public struct PalaceBridge: Sendable {
+    public init(kit: GeniusLocusKit)
+    /// Import a MemPalace at `palaceRoot` directly into `handle`, bypassing NoteIR.
+    ///
+    /// Reads all three palace stores:
+    ///   1. palace/chroma.sqlite3 — collections `mempalace_drawers` + `mempalace_closets`
+    ///   2. tunnels.json — cross-wing connections
+    ///   3. knowledge_graph.sqlite3 — KG entities and triples
+    ///
+    /// Applies four import guards: tombstone protection, content-idempotent dedup,
+    /// sensitivity floor (never downgrades tier on re-import), and tunnel signature
+    /// dedup (endpoint+kind pair). Files a diary receipt under VaultBridge.receiptAgentName.
+    /// Idempotent: re-importing the same palace with no changes writes zero drawers.
+    ///
+    /// `now` is caller-supplied (determinism rule — never call Date() inside).
+    @discardableResult
+    public func importPalace(at palaceRoot: URL,
+                             into handle: EstateHandle,
+                             now: Date,
+                             mode: EncodeSpeed = .foreground) async throws -> ImportReport
+}
+```
+
+Rust: `PalaceBridge::new(&mut EstateCoordinator)` + `import_palace(palace_root: &Path, handle: &EstateHandle, now: i64, progress, mode: EncodeSpeed) -> Result<ImportReport, VaultKitError>` (synchronous). `ImportReport` fields: `drawers_written`, `drawers_updated`, `drawers_skipped_unchanged`, `drawers_skipped_tombstoned`, `tunnels_created`, `items_skipped`.
+
+`mode` (`EncodeSpeed.foreground` default / `.background`) sets the post-import encode SPEED (drain QoS) only. The WRITE strategy is chosen automatically by source size (`streamThreshold` = 250k chroma rows): at or below → one bulk `captureBatch` transaction; above → per-item streaming so no single transaction holds the write lock across hundreds of thousands of rows. The caller never selects the write strategy.
+
+Exposed as the `moot_palace_import` MCP tool (PAR-PB-1). Tool requires `estateID` + `palace_path` (absolute path to the palace root directory).
 
 public struct ExportReport: Sendable, Equatable {
     public var notesExported: Int
@@ -672,6 +705,7 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `DrawerMapping.lineageID(forStableSourceKey:)` | `DrawerMapping::lineage_id(key)` | `vault_kit::drawer_mapping` | FNV-1a 128-bit. Produces byte-identical `UUID`/`Uuid` for all inputs, verified by a shared conformance vector. |
 | `ImportReport` | `ImportReport` | `vault_kit::vault_bridge` | `drawersWritten` -> `drawers_written`, etc. `Int` -> `usize`. `fieldsDropped: [String: Int]` -> `fields_dropped: BTreeMap<String, usize>` (BTree for deterministic iteration). |
 | `VaultBridge` | `VaultBridge<'a>` | `vault_kit::vault_bridge` | Rust is synchronous (no `async`); `now: i64` (ms-since-epoch) passed by caller (Swift: `now: Date`). `export(estate:to:scope:now:)` -> `export(handle, vault_path, now, scope)` — both return `ExportReport`. `receiptAgentName` -> `RECEIPT_AGENT_NAME`. `importMemPalace(at:into:now:adapter:)` -> `import_mem_palace(palace_root, handle, now, &adapter)` (Rust takes the adapter explicitly; Swift defaults it). Path-scoped import: `importVault(at:includingPaths:into:now:)` -> `import_vault_filtered(vault_path, &candidate_paths, handle, now)` — used by reconcile apply mode to action only the M candidates, not the full vault. Both share one private import core (`importNotes` / `import_notes`) with `importVault`. Both write the same diary receipts (see Audit receipts above). |
+| `PalaceBridge` | `PalaceBridge<'a>` | `vault_kit::palace_bridge` | Direct MemPalace → substrate import that bypasses NoteIR entirely. Reads all three palace stores (chroma.sqlite3 with collections `mempalace_drawers` / `mempalace_closets`, tunnels.json, knowledge_graph.sqlite3) and constructs native `CaptureFrame`/`TunnelCaptureFrame` calls. Swift: `init(kit: GeniusLocusKit)`; Rust: `new(&mut EstateCoordinator)`. Applies four import guards (both ports): tombstone protection (withdrawn lineages not resurrected), content-idempotent dedup (unchanged active drawers skipped), sensitivity floor (re-import never downgrades tier), tunnel signature dedup (endpoint+kind signature prevents duplicates on re-import). KG entity and triple import also applies tombstone and content-idempotent guards. Files a diary receipt under `VaultBridge.receiptAgentName` (`"vaultkit"`) after each run. Swift: `async throws`; Rust: synchronous. `importPalace(at:into:now:)` -> `import_palace(palace_root, handle, now)` — both return `ImportReport`. Exposed as `moot_palace_import` MCP tool (PAR-PB-1). |
 | `ExportReport` | `ExportReport` | `vault_kit::vault_bridge` | `notesExported` -> `notes_exported`, `excludedSecretTier` -> `excluded_secret_tier`, `excludedPrivateTier` -> `excluded_private_tier`, `scope` -> `scope`. |
 | `VaultKitError` | `VaultKitError` | `vault_kit::error` | Rust: `Io`, `AdapterError`, `I5Violation`, `VerbError`, `UnsupportedFormatVersion`, `Serialization` cases. Swift: `unsupportedFormatVersion(Int)` + `adapterError(String)` (mirrors Rust `AdapterError`; used by `MemPalaceChromaAdapter`) — other adapter/bridge paths rethrow GLK and Foundation errors, and malformed corpus JSON surfaces as Foundation `DecodingError` (Rust's `Serialization` analogue). |
 | `MCPClientError` | `McpClientError` | `vault_kit::mcp_stdio_client` | Swift: `public struct MCPClientError: Error` (a plain-struct error with a `message: String` field, wraps any JSON-RPC protocol failure as a single string). Rust: `pub enum McpClientError` with two cases: `Io(std::io::Error)` (wraps OS-level I/O) and `Protocol(String)` (any JSON-RPC protocol failure). Conceptually paired: both represent `MCPStdioClient`/`McpStdioClient` call failures. Names differ (`MCPClientError` / `McpClientError`) and shapes differ (Swift single-case struct / Rust two-case enum) — the Rust enum is more specific about the failure cause. | 
@@ -702,5 +736,9 @@ separately-gated mission).
 
 | Version | Date | Change |
 |---|---|---|
+| 1.11.0 | 2026-06-28 | Path-traversal hardening (planned lockdown). `ObsidianAdapter.fromIR(_:to:)` and `ExchangeAdapter.decode(_:)` now enforce vault containment as a security boundary. A shared `containedVaultURL(forRelativePath:under:)` helper (Swift) / `contained_vault_path` free function (Rust) validates every vault-relative path before any filesystem access: rejects `..`, absolute prefixes, backslash separators, empty and `.` components (lexical phase). A second pass via `ensureContainedInVault(_:under:)` (Swift) / `write_contained_file` (Rust) re-checks the fully-resolved path with symlink expansion (`resolvingSymlinksInPath` / `canonicalize`) and rejects pre-existing symlinks at the destination. `ExchangeAdapter.decode` validates `pathComponents` entries with the same lexical rules before projecting them to `NoteIR`. Both phases share identical rejection vocabulary across Swift and Rust. Errors surface as `VaultKitError.adapterError` (Swift) / `VaultKitError::AdapterError` (Rust) — fail-closed, never silent. Both ports. |
+| 1.10.0 | 2026-06-25 | T7 (one engine, many gates): `importVault` / `importVault(includingPaths:)` / `importMemPalace` and the shared `importNotes` core replace `batch: bool` with `mode: EncodeSpeed` — matching `importPalace` (T1). All source gates (MemPalace, Obsidian, OKF, Markdown vaults) now run the SAME ingest policy: encode SPEED is caller-declared, the bulk-vs-stream WRITE strategy is size-gated automatically via the new single-source `ImportPolicy` (`streamThreshold` = 250k; Rust `import_policy`). Each importer calls `setEncodeSpeed(mode)` then size-gates by item count, so adding a gate never re-invents the write strategy. Both ports. |
+| 1.9.0 | 2026-06-25 | T1 (encode mode): `importPalace` / `import_palace` replace the `batch: bool` arg with `mode: EncodeSpeed` (`.foreground` default / `.background`) — encode SPEED (drain QoS) only. The WRITE strategy is now chosen automatically by source size (`streamThreshold` = 250k rows): ≤ threshold → one bulk `captureBatch` transaction; above → per-item streaming. The caller no longer selects the write strategy. Both ports. |
+| 1.8.0 | 2026-06-22 | Added `PalaceBridge` — direct MemPalace → substrate import bypassing NoteIR (PAR-PB-1). Reads three palace stores (chroma.sqlite3, tunnels.json, knowledge_graph.sqlite3). Four import guards: tombstone, content-idempotent dedup, sensitivity floor, tunnel signature dedup. Swift `async`; Rust synchronous. Exposed as `moot_palace_import` MCP tool. Added concordance row and public struct documentation. |
 | 1.7.0 | 2026-06-18 | `ObsidianAdapter` extended to be an OKF v0.1 superset. Added `pureObsidianLinks` flag (Swift `Bool`) / `pure_obsidian_links: bool` (Rust), default `false`. Default mode emits `type:` frontmatter key (OKF required), frontmatter `tags:` array, standard-md `[alias](relpath.md)` links, and one `index.md` per folder. Pure-Obsidian mode (`true`) emits `[[wikilinks]]` (legacy). Both ports read unified wikilinks + standard-md links via `parseAllLinks`/`parse_all_links`. `index.md`/`log.md` skipped on import. All existing callers of `ObsidianAdapter()`/`new()` remain source-compatible (defaulted param). |
 | 1.6.0 | 2026-06-14 | (prior) |

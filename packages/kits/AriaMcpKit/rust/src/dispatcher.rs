@@ -1,11 +1,11 @@
 //! The method router — dispatches JSON-RPC requests to handlers.
 //!
 //! Mirrors the Swift `ARIA_MCPDispatcher.route(_:)` method: handles
-//! `initialize`, `ping`, `tools/list`, and `tools/call`. All other method
-//! names return a `methodNotFound` error.
+//! `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`,
+//! and `prompts/list`. All other method names return a `methodNotFound` error.
 //!
 //! `tools/call` delegates to `crate::dispatch::dispatch_tool` which holds
-//! the full tool dispatch table (recipe tools, lens tools, lexicon tools).
+//! the full tool dispatch table (federation, interface/maintenance, vault, recipe, lens tools).
 //!
 //! # Session ledger
 //!
@@ -111,6 +111,11 @@ impl Dispatcher {
             "ping" => Ok(serde_json::json!({})),
             "tools/list" => Ok(serde_json::json!({ "tools": self.tools })),
             "tools/call" => self.tools_call(request.params.as_ref()),
+            // Resources and prompts are advertised in v1.0 capabilities; the lists
+            // are empty until v1.1 implements subscriptions and recipe-prompt surfacing.
+            // Mirrors Swift Server.route() cases for "resources/list" and "prompts/list".
+            "resources/list" => Ok(serde_json::json!({ "resources": [] })),
+            "prompts/list" => Ok(serde_json::json!({ "prompts": [] })),
             _ => Err(JSONRPCError::new(
                 JSONRPCErrorCode::METHOD_NOT_FOUND,
                 format!("Method not found: {}", request.method),
@@ -147,10 +152,21 @@ impl Dispatcher {
         Ok(serde_json::json!({
             "protocolVersion": negotiated,
             "capabilities": {
-                // tools/list and tools/call are the only primitives this
-                // server implements (v1). Resources, prompts, sampling,
-                // elicitation, and tasks are not advertised.
-                "tools": {}
+                "tools": {},
+                // Resources and prompts are advertised (v1.0 conformance per
+                // ARIA_MCP_SPEC_v0.2 §9). Lists are empty until v1.1 implements
+                // subscriptions and recipe-prompt surfacing. Advertising now
+                // signals capability to clients so they light up those surfaces
+                // when content arrives, and degrade cleanly to tools-only today.
+                "resources": {
+                    "subscribe": false,
+                    "listChanged": false
+                },
+                "prompts": {
+                    "listChanged": false
+                },
+                // Logging is advertised; the server logs to stderr per §5.
+                "logging": {}
             },
             "serverInfo": {
                 "name": self.server_name,

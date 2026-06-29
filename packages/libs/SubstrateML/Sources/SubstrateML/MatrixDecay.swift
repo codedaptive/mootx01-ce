@@ -123,7 +123,20 @@ public enum MatrixDecay {
                 "estate": estate,
                 "matrix_rows": "\(matrix.rows)",
                 "matrix_cols": "\(matrix.cols)",
-                "elapsed_seconds": "\(Int(dt))",
+                // dt is a Double derived from an Int64 subtraction, so
+                // for normal wall-clock values it fits in Int64 safely.
+                // However, `isFinite` alone does not guard against a very
+                // large finite dt (e.g. ≥ Double(Int64.max) ≈ 9.2e18 s):
+                // `Int64(dt)` traps on overflow for those inputs. The
+                // combined guard (isFinite AND < Int64.max as Double)
+                // produces Int64.max for pathological inputs, which is
+                // correct "saturate" behaviour rather than a trap.
+                "elapsed_seconds": {
+                    let secs: Int64 = (dt.isFinite && dt < Double(Int64.max))
+                        ? Int64(dt)
+                        : Int64.max
+                    return "\(secs)"
+                }(),
             ],
             ts: ts
         ))

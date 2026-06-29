@@ -7,11 +7,10 @@
 //!
 //! # PostgreSQL tests
 //!
-//! `new_postgres` and `register_postgres` are tested for the lazy-construction
-//! contract (construction succeeds without a live PG server because the pool
-//! connects on first use). Live round-trip tests require a real PostgreSQL
-//! server and are gated on the `PERSISTENCEKIT_PG_URL` environment variable;
-//! they are skipped when that variable is absent.
+//! `new_postgres` and `register_postgres` require a live PostgreSQL server
+//! because `DrawerStoreCore::new` initializes the estate manifest on first open.
+//! All PostgreSQL tests are gated on the `PERSISTENCEKIT_PG_URL` environment
+//! variable and skipped when that variable is absent.
 //!
 //! # Isolation
 //!
@@ -45,15 +44,20 @@ macro_rules! args {
     }};
 }
 
-/// Generate a unique temp-dir path for a SQLite estate. The file does not
-/// exist yet; it will be created by `new_sqlite`. On test teardown, the
-/// caller removes the file with `std::fs::remove_file`.
+/// Generate a unique temp path for a SQLite estate, in its OWN subdirectory.
+///
+/// Each estate gets a private subdir (codefile + unique id) so its
+/// `queue.sqlite` sibling — which `EstateConfiguration::queue_sibling` derives
+/// from the estate's PARENT directory — is unique per estate. Dropping every
+/// estate flat into `temp_dir()` made them all share one `temp_dir()/queue.sqlite`,
+/// which accumulated stale in-flight encode jobs across test runs. A per-estate
+/// subdir mirrors production, where each estate lives in its own directory. The
+/// file does not exist yet; `new_sqlite` creates it.
 fn temp_sqlite_path(label: &str) -> String {
-    let name = format!("aria_mcp_persist_{}_{}.sqlite", label, Uuid::new_v4());
-    std::env::temp_dir()
-        .join(name)
-        .to_string_lossy()
-        .into_owned()
+    let dir = std::env::temp_dir()
+        .join(format!("aria_mcp_persist_{}_{}", label, Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create per-estate temp dir");
+    dir.join("estate.sqlite").to_string_lossy().into_owned()
 }
 
 /// Extract content[0].text from a dispatch result.
@@ -188,9 +192,14 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
             .expect("search must succeed");
         let search_text = content_text(&search_result);
 
+        // The persisted memory must survive reopen and be found. A reopened
+        // SQLite estate also re-seeds the 7 ADR-016 wings (each an
+        // AI_Charter_Hint memory) — normal drawers now — so the count is not
+        // exactly 1. The id + content assertions below prove THIS memory
+        // round-tripped; here we only require the search found something.
         assert!(
-            search_text.contains("found 1 memory(s)"),
-            "reopen must find exactly one persisted memory; got: {search_text}"
+            !search_text.starts_with("found 0"),
+            "reopen must find the persisted memory; got: {search_text}"
         );
         assert!(
             search_text.contains(&filed_id),

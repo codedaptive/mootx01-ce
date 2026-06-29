@@ -22,11 +22,12 @@ struct TunnelKindTests {
         #expect(TunnelKind.covers.rawValue == 6)
         #expect(TunnelKind.elaborates.rawValue == 7)
         #expect(TunnelKind.respondsTo.rawValue == 8)
+        #expect(TunnelKind.parent.rawValue == 9)
     }
 
     @Test("TunnelKind unrecognised raw value returns nil")
     func tunnelKindUnknownRawIsNil() {
-        #expect(TunnelKind(rawValue: 9) == nil)
+        #expect(TunnelKind(rawValue: 10) == nil)
         #expect(TunnelKind(rawValue: -1) == nil)
     }
 
@@ -138,12 +139,12 @@ struct TunnelKindTests {
         #expect(decoded == original)
     }
 
-    @Test("All nine TunnelKind cases round-trip on Tunnel")
+    @Test("All ten TunnelKind cases round-trip on Tunnel")
     func allKindsRoundTripOnTunnel() {
         let now = t(1_700_000_000)
         let allKinds: [TunnelKind] = [
             .supersedes, .references, .blocks, .validates, .contradicts,
-            .derivesFrom, .covers, .elaborates, .respondsTo,
+            .derivesFrom, .covers, .elaborates, .respondsTo, .parent,
         ]
         for k in allKinds {
             let tunnel = Tunnel(

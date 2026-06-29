@@ -7,8 +7,7 @@
 // next row from the current row's weighted out-edges (or restarts
 // to the start row with probability `restartProb`), and records
 // the visited sequence. The result is consumed by CognitionKit's
-// exploratory recall primitives (deferred to v0.37 per cookbook
-// § 19.1).
+// exploratory recall primitive (recall_exploratory).
 //
 // The substrate uses SplitMix64 as the random number generator
 // (mirroring the test harness's deterministic PRNG); calls with
@@ -19,7 +18,7 @@
 //   § 7.4   Random walks (the spec)
 //   § 8.5   OR-reduction (downstream consumer for walk-aggregate
 //           fingerprints)
-//   § 19.1  v0.37 deferred: recall_exploratory primitive
+//   § 19.1  recall_exploratory primitive (implemented, uses walkWithRestart)
 
 import Foundation
 
@@ -102,11 +101,10 @@ public enum RandomWalks {
     }
 
     /// Random walk with restart aggregating visits by row. Used
-    /// by CognitionKit's recall_exploratory (cookbook § 19.1
-    /// deferred-to-v0.37; reference here returns a usable result
-    /// for harness tests). Takes a `[RowId: [RowId]]` adjacency
-    /// rather than the indexed form because the cognition tier
-    /// works in RowId space, not in densely-numbered graph nodes.
+    /// by CognitionKit's recall_exploratory (cookbook § 19.1).
+    /// Takes a `[RowId: [RowId]]` adjacency rather than the indexed
+    /// form because the cognition tier works in RowId space, not in
+    /// densely-numbered graph nodes.
     ///
     /// Returns a dictionary mapping visited rowIds to visit counts.
     public static func walkWithRestart(

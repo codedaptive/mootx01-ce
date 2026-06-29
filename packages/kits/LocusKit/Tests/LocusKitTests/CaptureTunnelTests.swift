@@ -110,9 +110,12 @@ struct CaptureTunnelTests {
         let second = try await estate.capture(drawerFrame("v2", lineage: lineage))
         let cascadeTunnel = try #require(
             try await estate._peekTunnel(id: "supersedes:\(second.id):\(first.id)"))
+        // drawerFrame() captures with no explicit wing (defaults to "Agentic Memory")
+        // and room "test-room" — use these hardcoded values since Drawer.wing/.room
+        // are no longer stored properties.
         let standalone = try await estate.capture(TunnelCaptureFrame(
-            sourceWing: second.wing, sourceRoom: second.room,
-            targetWing: first.wing, targetRoom: first.room,
+            sourceWing: "Agentic Memory", sourceRoom: "test-room",
+            targetWing: "Agentic Memory", targetRoom: "test-room",
             label: "supersedes", addedBy: "test-agent",
             sourceDrawerId: second.id, targetDrawerId: first.id,
             kind: .supersedes))

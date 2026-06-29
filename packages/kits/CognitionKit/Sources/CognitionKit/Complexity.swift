@@ -28,13 +28,15 @@ public struct ComplexityOutput: Sendable, Equatable {
 /// there redundancy between how I file by room vs by wing?"
 ///
 /// Supported field names: `"room"`, `"wing"`, `"addedBy"`,
-/// `"embeddingModelID"`. An unrecognised name maps all drawers to the key
+/// `"embeddingModelID"`. Both `"room"` and `"wing"` map to
+/// `drawer.parentNodeId` (the same field); they are aliases, not
+/// distinct dimensions. An unrecognised name maps all drawers to the key
 /// `"_unknown"` (B-8 total-over-edge-input posture — the recipe never throws
 /// on an invalid label).
 ///
 /// Layer discipline (SPEC § 5, B-1/B-2): pure sequencing — recall via GLK +
-/// NeuronKit `complexity`. Read-only (B-6, I-6). No write verb, now passed
-/// in, deterministic.
+/// NeuronKit `complexity`. Read-only (B-6, I-6). No write verb. The `now`
+/// parameter is accepted for signature parity but is not read by this recipe.
 ///
 /// Rust peer: `run_complexity` in `complexity_recipe.rs`. Shares the same
 /// field-extraction and joint-matrix logic operating on the recalled drawer
@@ -95,12 +97,15 @@ public enum Complexity {
     /// Extract a label-field string value from a drawer.
     ///
     /// Supported field names: "room", "wing", "addedBy", "embeddingModelID".
+    /// "room" and "wing" both return `parentNodeId` — the UUID of the parent
+    /// room node. Display-name resolution is the caller's responsibility via
+    /// `Estate.resolveNodeNames(parentNodeIds:)`.
     /// Any unrecognised name returns "_unknown" so the recipe never throws on
     /// an invalid label (B-8 total-over-edge-input posture).
     private static func fieldValue(_ drawer: Drawer, field: String) -> String {
         switch field {
-        case "room":             return drawer.room
-        case "wing":             return drawer.wing
+        case "room":             return drawer.parentNodeId
+        case "wing":             return drawer.parentNodeId
         case "addedBy":          return drawer.addedBy
         case "embeddingModelID": return drawer.embeddingModelID
         default:                 return "_unknown"

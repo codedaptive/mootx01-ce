@@ -67,6 +67,11 @@ observer-sink    = { path = "../../../libs/ObserverSink/rust" }
 # from autonomic_governor.rs. App→lib path dep (downstream→upstream), no
 # inversion. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
 lattice-lib      = { path = "../../../libs/LatticeLib/rust" }
+# queuekit: dream_runner.rs acquires the "dreaming" DrainLease (per-(estate,stream)
+# stampede prevention, ADR-021 Decision 7). QueueKit is already a transitive dep
+# via neuron-kit; added as a direct dep so dream_runner can name DrainLease explicitly.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; recorded in T10 blast-radius.
+queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 
 [dev-dependencies]
 # convergence-kit: EstateStatusSyncTests (Rust) directly names NoSyncEngine and

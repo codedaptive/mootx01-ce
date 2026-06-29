@@ -43,10 +43,12 @@ pub mod constellation;
 pub mod context_synthesizer;
 pub mod dreaming_cycle;
 pub mod dreaming_decision;
+pub mod rem_cycle_table;
 pub mod estate_dreaming_reader;
 pub mod estate_dreaming_sink;
 pub mod estate_maintenance_reader;
 pub mod estate_maintenance_sink;
+pub mod estate_manifest_policy_store;
 pub mod distillation;
 pub mod hmm_feature_extractor;
 pub mod drift;
@@ -89,7 +91,7 @@ pub use bias::{learned_preference, representation_bias, CategoryBias, Preference
 pub use constellation::{constellations, Constellation};
 pub use context_synthesizer::{synthesize, ContextDocument, DrawerRowMeta};
 pub use dreaming_cycle::{
-    tunnel_key, CoOccurrenceObservation, DreamingCycleReport, DreamingDaemon, DreamingPolicy,
+    tunnel_key, DreamingCycleReport, DreamingDaemon, DreamingPolicy,
     DreamingPolicyStore, DreamingProposalSink, DreamingSubstrateReader, ExplicitDiaryRewardSource,
     InMemoryDreamingPolicyStore, ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource,
     RewardSource, RewardSourceKind, TunnelLink,
@@ -102,7 +104,7 @@ pub use dreaming_decision::{
 /// `EstateCoordinator`. Mirrors `EstateDreamingReader.swift`.
 pub use estate_dreaming_reader::EstateDreamingReader;
 /// Production adapter that binds `DreamingProposalSink` to a live
-/// `DrawerStore`. Mirrors `EstateDreamingSink.swift`. Closes BRAIN-PROPOSE.
+/// `EstateCoordinator`. Mirrors `EstateDreamingSink.swift`. Closes BRAIN-PROPOSE.
 pub use estate_dreaming_sink::EstateDreamingSink;
 /// Production adapter that binds `MaintenanceSubstrateReader` to a live
 /// `EstateCoordinator`. Mirrors `EstateMaintenanceReader.swift`.
@@ -112,7 +114,8 @@ pub use estate_maintenance_reader::EstateMaintenanceReader;
 pub use estate_maintenance_sink::EstateMaintenanceSink;
 pub use drift::{drift, DriftScore};
 pub use hybrid_recall::{
-    page_recall, rerank, shingle_similarity, shingles, DrawerRow, RecallFrameTuning, RecallPage,
+    hybrid_recall, page_recall, rerank, shingle_similarity, shingles, DrawerRow, RecallFrameTuning,
+    RecallPage,
 };
 pub use keystones::{keystones, Keystone};
 pub use latent_themes::{latent_themes, LatentThemes, ThemeLoading};
@@ -122,7 +125,7 @@ pub use lattice_anchor::{
 pub use maintenance_cycle::{
     InMemoryMaintenancePolicyStore, MaintenanceCycleReport, MaintenanceDaemon,
     MaintenanceDiaryEntry, MaintenancePolicy, MaintenancePolicyStore, MaintenanceProposalSink,
-    MaintenanceScan, MaintenanceSubstrateReader,
+    MaintenanceScan, MaintenanceSubstrateReader, NodeInvariantRow,
     ProposeFrameOut as MaintenanceProposeFrameOut,
 };
 pub use maintenance_decision::{
@@ -231,14 +234,19 @@ mod tests {
     }
 
     #[test]
-    fn chemistry_term_produces_qid_completed_status() {
-        // EideticLib resolves "chemistry" to an FDC code with a populated
-        // Wikidata QID, so the enrichment status is QidCompleted. Parity
-        // with the Swift NeuronKit assertion. The exact FDC code string is
-        // LatticeLib's conformance concern (single-token encode parity is
-        // tracked separately) — this test asserts the enrichment STATUS,
-        // matching what the Swift port asserts.
-        let inference = infer_lattice_anchor("chemistry");
+    fn realistic_content_produces_qid_completed_status() {
+        // Production NEVER feeds the encoder a bare single noun — the FDC anchor
+        // is computed over real captured content (drawer.content / frame.content),
+        // which is always multi-token. A single token (e.g. "chemistry") maps to
+        // one very common Q-ID present in ~111 code signatures, so every candidate
+        // ties at the same Raw score and the tie-count guard
+        // (MAX_TIED_WINNERS_FOR_CLASSIFICATION) correctly returns UNRESOLVED — a
+        // confidently-wrong specific code is worse than the honest "000" sentinel.
+        // Multi-token content carries several Q-IDs whose overlap DISCRIMINATES
+        // one code, so a winner emerges and the anchor resolves with a Q-ID →
+        // status = QidCompleted. This input resolves to FDC code "547" (organic
+        // chemistry) on both ports. Parity with the Swift NeuronKit assertion.
+        let inference = infer_lattice_anchor("organic chemistry of carbon compounds and reactions");
         assert!(!inference.code.is_empty());
         assert!(inference.wikidata_qid.is_some());
         assert_eq!(

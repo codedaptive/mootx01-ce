@@ -21,8 +21,8 @@ public struct DrawerEntity: AppEntity, Identifiable, Sendable {
     /// drawer in one step and act on it in the next.
     public let id: String
 
-    /// Verbatim content preview. A drawer's content is immutable at its core;
-    /// what we carry here is exactly what was captured.
+    /// Content preview from recall results. Carries the recall preview text
+    /// (up to 120 characters); not guaranteed to be the verbatim full capture.
     @Property(title: "Content")
     public var content: String
 

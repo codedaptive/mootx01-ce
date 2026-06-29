@@ -11,10 +11,10 @@
 //! substrate, zero new NeuronKit surface. Read-only.
 //!
 //! Trust signal: `source_type` is used (it is settable at capture and varies),
-//! not `confirmation` — the user-confirmed tier can only be reached through
-//! the confirm/mutate verb, which is Brain-layer (`NotSupportedByEstate`)
-//! until that layer ships. When confirmation goes live, a user-confirmed boost
-//! folds into `trust_rank` the same way.
+//! not `confirmation`. The confirm/mutate verb is now live in LocusKit/GLK
+//! Rust, but this recipe intentionally ignores confirmation today — ranking
+//! uses only `source_type` and confidence. When confirmation is wired here,
+//! a user-confirmed boost will fold into `trust_rank` the same way.
 //!
 //! v1.1.0 extension: if a `MatrixCalibrationCurve` is supplied, the ranked
 //! confidences are calibrated via `neuron_kit::calibrate` and attached as
@@ -77,6 +77,7 @@ pub fn run_trust_grounded_synthesis(
     mut frame: RecallFrame,
     calibration_curve: Option<&MatrixCalibrationCurve>,
     now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
 ) -> Result<TrustGroundedOutput, RecipeRunError> {
     // B-5: capability gate before any substrate touch.
     verify_capabilities(&[NeuronKitCapability::Synthesize], &shipped_capabilities())?;
@@ -117,10 +118,17 @@ pub fn run_trust_grounded_synthesis(
         .collect();
     let meta: Vec<DrawerRowMeta> = drawers
         .iter()
-        .map(|d| DrawerRowMeta {
-            wing: d.wing.clone(),
-            room: d.room.clone(),
-            is_currently_believed: true,
+        .map(|d| {
+            let (wing, room) = node_names
+                .get(&d.parent_node_id)
+                .cloned()
+                .unwrap_or_default();
+            DrawerRowMeta {
+                parent_node_id: d.parent_node_id.clone(),
+                wing,
+                room,
+                is_currently_believed: true,
+            }
         })
         .collect();
 
@@ -163,6 +171,11 @@ mod tests {
     use locus_kit::frames::CaptureFrame;
 
     const NOW: i64 = 1_700_000_000;
+
+    /// Empty node-name map for tests — no display-name resolution needed.
+    fn empty_names() -> std::collections::HashMap<String, (String, String)> {
+        std::collections::HashMap::new()
+    }
 
     fn coord_with_parent() -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
@@ -211,7 +224,7 @@ mod tests {
         let _d1 = capture(&coord, &h, "derived-a", SourceType::Derived);
         let _d2 = capture(&coord, &h, "derived-b", SourceType::Derived);
 
-        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW).expect("trust");
+        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW, &empty_names()).expect("trust");
         assert_eq!(out.ranked_ids.len(), 4);
         // The two highest-ranked memories are the canonical ones.
         let top2: HashSet<&String> = out.ranked_ids[0..2].iter().collect();
@@ -231,7 +244,7 @@ mod tests {
     #[test]
     fn ck_tr2_empty_estate_guarded() {
         let (coord, h) = coord_with_parent();
-        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW).expect("trust");
+        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW, &empty_names()).expect("trust");
         assert!(out.ranked_ids.is_empty());
         assert_eq!(out.high_trust_count, 0);
     }
@@ -298,7 +311,7 @@ mod tests {
 
         // Call with a .structured frame — the fix upgrades to .full before recall.
         let out =
-            run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW).expect("trust");
+            run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW, &empty_names()).expect("trust");
 
         // a. All three drawers were ranked.
         assert_eq!(out.ranked_ids.len(), 3, "all three SQLite-backed drawers must be ranked");

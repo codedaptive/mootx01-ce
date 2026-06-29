@@ -1,8 +1,10 @@
 // Chunk.swift
 //
 // A unit of text retrievable from a RAG bundle. One Chunk maps
-// to one BundleRow in storage, paired with one StoredVector in
-// VectorKit's vectors table via (drawerID, modelID).
+// to one BundleRow in storage; VectorStore entries use
+// chunk.id.uuidString as itemID and include modelID. More than
+// one vector row per chunk is possible via vectorIndex (binary
+// lane 0 plus optional float lane 1).
 //
 // The chunk identifier is content-addressed: it is a deterministic
 // RFC 4122 v5 UUID derived from (sourceID, startOffset, text). Two
@@ -52,8 +54,9 @@ public struct Chunk: Sendable, Equatable, Codable {
     /// normalize or lowercase.
     public let text: String
 
-    /// HLC for ordering across replicas. Filled in by the bundle
-    /// store on insert.
+    /// HLC for ordering across replicas. Caller-supplied and
+    /// immutable; BundleStore.insert stores chunk.hlc as-is and
+    /// does not fill or replace it.
     public let hlc: HLC
 
     /// Free-form per-chunk metadata. Encoded as JSON in storage.

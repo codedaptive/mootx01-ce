@@ -44,9 +44,9 @@ public let globalInflightHighWater: Atomic<Int> = Atomic(0)
 
 /// Cumulative sum of request service time in nanoseconds (dispatch → response
 /// written). Used together with globalRPCCounter to derive mean latency.
-/// Not a histogram — kept simple on purpose: p50/p95 approximation from
-/// per-request duration buckets lives in the Rust twin where we have atomics
-/// that can hold 64-bit values without overflow concern.
+/// Not a histogram — kept simple on purpose; p50/p95 proxies are derived
+/// from the fast/mid/slow bucket counters below, present in both the Swift
+/// and Rust implementations.
 public let globalLatencyNsTotal: Atomic<Int> = Atomic(0)
 
 /// Latency bucket counters. Three buckets cover the QOPT/T3b benchmark range:
@@ -237,6 +237,30 @@ public let globalConcurrencyGate: ConcurrencyGate = {
     return ConcurrencyGate(maxConcurrent: clampedC, maxQueued: clampedQ)
 }()
 
+/// The process-wide SSE concurrency gate. Separate from the normal
+/// request/response gate so that long-lived SSE connections cannot starve
+/// POST / JSON-RPC slots.
+///
+/// SSE connections hold a slot from THIS gate for their entire lifetime.
+/// Normal requests hold a slot from `globalConcurrencyGate` only for the
+/// duration of a single request/response exchange. The two pools are
+/// completely independent — saturating SSE slots never queues normal
+/// requests, and vice versa.
+///
+/// Default: 16 concurrent SSE streams, maxQueued=0 (shed immediately when
+/// the cap is hit rather than queuing; SSE clients that cannot connect
+/// retry on their own reconnect timer). Configurable via
+/// `MOOTX01_HTTP_MAX_SSE` before first access.
+public let globalSSEConcurrencyGate: ConcurrencyGate = {
+    let env = ProcessInfo.processInfo.environment
+    let maxC = env["MOOTX01_HTTP_MAX_SSE"].flatMap(Int.init) ?? 16
+    // Clamp: at least 1, at most 256. maxQueued=0 — shed immediately; SSE
+    // clients self-reconnect via EventSource retry so queuing adds no value
+    // and would silently hold open sockets during backpressure.
+    let clampedC = min(max(maxC, 1), 256)
+    return ConcurrencyGate(maxConcurrent: clampedC, maxQueued: 0)
+}()
+
 /// The ARIA_MCP loopback HTTP transport (MCP "Streamable HTTP").
 ///
 /// A resident, headless HTTP server bound to `127.0.0.1:<port>` that speaks the
@@ -276,6 +300,14 @@ public let globalConcurrencyGate: ConcurrencyGate = {
 /// next fd. Per-request latency is tracked in fast/mid/slow buckets and
 /// 4xx/5xx/shed counts are exposed as module-level atomics, picked up by
 /// `ServerMetricsTelemetry`.
+///
+/// SSE isolation (CAND-025): SSE streams (`GET /api/events`) use a SEPARATE
+/// `globalSSEConcurrencyGate` (default 16 concurrent, maxQueued=0). A normal
+/// gate slot is acquired at accept time for request parsing then released
+/// immediately before the SSE stream starts; the SSE gate slot is then
+/// acquired and held for the full stream lifetime. This prevents idle SSE
+/// clients from exhausting the 64-slot normal pool and blocking all
+/// POST/JSON-RPC traffic.
 public struct HTTPServer: Sendable {
 
     public let dispatcher: ARIA_MCPDispatcher
@@ -291,21 +323,28 @@ public struct HTTPServer: Sendable {
     /// so the HTTP transport never imports ObserverSink. When nil, GET /api/graph
     /// returns structurePending:true (no snapshot in store).
     public let topologyReader: (@Sendable (String?) async -> Data?)?
-    /// Concurrency gate — injectable for testing (default: process-wide singleton).
+    /// Concurrency gate for normal request/response cycles — injectable for testing
+    /// (default: process-wide `globalConcurrencyGate`).
     public let concurrencyGate: ConcurrencyGate
+    /// Concurrency gate for long-lived SSE streams — separate from the normal gate
+    /// so SSE connections cannot starve POST / JSON-RPC traffic. Injectable for
+    /// testing (default: process-wide `globalSSEConcurrencyGate`).
+    public let sseConcurrencyGate: ConcurrencyGate
 
     public init(
         dispatcher: ARIA_MCPDispatcher,
         port: UInt16 = 4242,
         maxBodyBytes: Int = 4 * 1024 * 1024,
         topologyReader: (@Sendable (String?) async -> Data?)? = nil,
-        concurrencyGate: ConcurrencyGate = globalConcurrencyGate
+        concurrencyGate: ConcurrencyGate = globalConcurrencyGate,
+        sseConcurrencyGate: ConcurrencyGate = globalSSEConcurrencyGate
     ) {
         self.dispatcher = dispatcher
         self.port = port
         self.maxBodyBytes = maxBodyBytes
         self.topologyReader = topologyReader
         self.concurrencyGate = concurrencyGate
+        self.sseConcurrencyGate = sseConcurrencyGate
     }
 
     /// Bind the loopback listener and serve until the process is terminated.
@@ -327,9 +366,9 @@ public struct HTTPServer: Sendable {
     /// that would exceed `maxConcurrent + maxQueued` never stall or hit the OS TCP
     /// backlog — they are accepted and shed promptly.
     ///
-    /// - Returns: the bound port (only meaningful for the OS-assigned `port: 0`
-    ///   test path, which calls `bind()` and inspects `boundPort` instead of
-    ///   blocking; production callers pass a fixed port and never return).
+    /// - Note: For the OS-assigned `port: 0` test path, call `bind()` directly;
+    ///   `bind()` returns the bound port and `boundPort` reflects the assigned
+    ///   port. `run()` has no return value.
     /// - Throws: `SocketError` if the loopback socket cannot be bound (e.g.
     ///   `EADDRINUSE` when the port is already taken).
     public func run() async throws {
@@ -338,6 +377,7 @@ public struct HTTPServer: Sendable {
         let maxBody = self.maxBodyBytes
         let reader = self.topologyReader
         let gate = self.concurrencyGate
+        let sseGate = self.sseConcurrencyGate
         let thread = Thread {
             while true {
                 guard let cfd = POSIXSocket.acceptOne(listenFD) else { continue }
@@ -369,7 +409,8 @@ public struct HTTPServer: Sendable {
                         dispatcher: dispatcher,
                         maxBodyBytes: maxBody,
                         topologyReader: reader,
-                        gate: gate
+                        gate: gate,
+                        sseGate: sseGate
                     )
                 }
             }
@@ -428,12 +469,21 @@ public struct HTTPServer: Sendable {
     /// This is handled at the serve layer rather than inside route() because SSE
     /// requires holding the socket open past the end of a single
     /// request/response exchange; route() only handles stateless pairs.
+    ///
+    /// Two-gate protocol for SSE (CAND-025 hardening):
+    /// Normal requests hold a `gate` slot for the request/response exchange only.
+    /// SSE connections would hold that slot for their ENTIRE lifetime (minutes to
+    /// hours), starving POST / JSON-RPC traffic. Fix: once SSE intent is detected,
+    /// release the normal gate slot early and acquire a slot from the dedicated
+    /// `sseGate` instead. The SSE gate is held for the full stream lifetime; the
+    /// normal gate is free immediately.
     static func serve(
         _ fd: Int32,
         dispatcher: ARIA_MCPDispatcher,
         maxBodyBytes: Int,
         topologyReader: (@Sendable (String?) async -> Data?)? = nil,
-        gate: ConcurrencyGate = globalConcurrencyGate
+        gate: ConcurrencyGate = globalConcurrencyGate,
+        sseGate: ConcurrencyGate = globalSSEConcurrencyGate
     ) async {
         // Phase 2: wait for a concurrency slot. This is the semaphore
         // wait — it blocks on the cooperative pool until one of the
@@ -445,9 +495,16 @@ public struct HTTPServer: Sendable {
         // Atomic.add returns (oldValue:, newValue:) in Swift 6.3.
         let inFlight = globalInflightCounter.add(1, ordering: .relaxed).newValue
         updateInflightHighWater(inFlight)
+
+        // Guard flag: set to true in the SSE path after we manually release the
+        // normal gate early. The defer below checks this flag so the release is
+        // not executed a second time on the SSE exit path.
+        var normalSlotReleased = false
         defer {
-            _ = globalInflightCounter.add(-1, ordering: .relaxed)
-            gate.release()
+            if !normalSlotReleased {
+                _ = globalInflightCounter.add(-1, ordering: .relaxed)
+                gate.release()
+            }
         }
 
         // Start the per-request latency clock. clock_gettime_nsec_np is
@@ -471,9 +528,13 @@ public struct HTTPServer: Sendable {
         // until the peer disconnects. The CSRF/origin guard runs first — cross-origin
         // browser tabs are not permitted on this endpoint either.
         //
-        // The SSE stream is NOT counted as an RPC call (it does not carry a
-        // JSON-RPC frame). It IS counted as an in-flight request for the duration
-        // it holds the concurrency slot, so the gate still enforces the cap.
+        // Two-gate protocol (CAND-025):
+        //   1. Release the normal gate slot early (before driving the stream) so
+        //      normal request/response traffic is never blocked by idle SSE clients.
+        //   2. Acquire the SSE gate slot instead. sseGate.tryEnqueue() is used here
+        //      (non-blocking) because we are on the cooperative pool at this point
+        //      and the SSE gate has maxQueued=0 by design — shed immediately if the
+        //      SSE cap is hit.
         if request.method == "GET", request.path == "/api/events", request.wantsEventStream {
             guard Self.isOriginAllowed(request.origin) else {
                 HTTPResponse(
@@ -483,6 +544,33 @@ public struct HTTPServer: Sendable {
                 ).send(fd: fd)
                 return
             }
+
+            // Release the normal concurrency slot before entering the long-lived stream.
+            // Mark the flag so the outer defer does not double-release.
+            normalSlotReleased = true
+            _ = globalInflightCounter.add(-1, ordering: .relaxed)
+            gate.release()
+
+            // Acquire the SSE gate slot. tryEnqueue() + waitForSlot() is the
+            // two-phase protocol: tryEnqueue() does the maxQueued depth check
+            // (non-blocking); waitForSlot() waits for a maxConcurrent slot.
+            // For the SSE gate maxQueued=0, so tryEnqueue() rejects immediately
+            // when the SSE cap is hit — no silent queuing of SSE connections.
+            guard sseGate.tryEnqueue() else {
+                // SSE capacity exhausted — respond 503 and close.
+                HTTPResponse(
+                    status: 503,
+                    headers: [
+                        "Content-Type": "application/json",
+                        "Retry-After": "5",
+                    ],
+                    body: Data(#"{"error":"sse_capacity_exceeded"}"#.utf8)
+                ).send(fd: fd)
+                return
+            }
+            sseGate.waitForSlot()
+            defer { sseGate.release() }
+
             await driveSSEStream(fd: fd)
             return
         }
@@ -495,8 +583,10 @@ public struct HTTPServer: Sendable {
         case 500..<600: _ = global5xxCounter.add(1, ordering: .relaxed)
         default: break
         }
-        // 202 is the notification path (no response body per JSON-RPC spec);
-        // every other status is a dispatched tool call. Count only dispatched calls.
+        // 202 is the notification path (no response body per JSON-RPC spec).
+        // Counts every non-202 response, including GET side-channel endpoints
+        // such as /api/graph, /api/lattice, and /api/admin/estates — not
+        // exclusively dispatched JSON-RPC tool calls.
         if response.status != 202 {
             _ = globalRPCCounter.add(1, ordering: .relaxed)
         }
@@ -655,15 +745,44 @@ public struct HTTPServer: Sendable {
     /// send none) or a loopback origin. Any other origin is a cross-origin
     /// browser request (the DNS-rebinding vector) and is rejected. Mirrors
     /// moot-mgr's `HTTPReadAPI.isOriginAllowed`.
+    ///
+    /// The scheme+host prefix is matched exactly and the suffix validated to be
+    /// empty or a port — this is equivalent to extracting the host and comparing
+    /// it, without Foundation URL parsing quirks. Prefix-only comparison would
+    /// accept attacker-owned names like `localhost.evil` or `127.0.0.1.evil`.
     static func isOriginAllowed(_ origin: String?) -> Bool {
-        guard let origin, !origin.isEmpty else { return true }
-        let lowered = origin.lowercased()
-        return lowered.hasPrefix("http://127.0.0.1")
-            || lowered.hasPrefix("http://localhost")
-            || lowered.hasPrefix("https://127.0.0.1")
-            || lowered.hasPrefix("https://localhost")
-            || lowered.hasPrefix("http://[::1]")
-            || lowered.hasPrefix("https://[::1]")
+        guard let origin else { return true }
+        let lowered = origin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lowered.isEmpty else { return true }
+        return Self.isLoopbackOrigin(lowered)
+    }
+
+    /// True if `origin` (already lowercased) is an exact loopback origin.
+    /// The check matches one of six canonical loopback scheme+host prefixes
+    /// and then validates the suffix is empty (bare host) or a port (`:<digits>`).
+    /// Prefix-only comparison would accept attacker-owned names like
+    /// `localhost.evil` or `127.0.0.1.evil`; the suffix validation closes that gap.
+    private static func isLoopbackOrigin(_ origin: String) -> Bool {
+        [
+            "http://127.0.0.1",
+            "http://localhost",
+            "https://127.0.0.1",
+            "https://localhost",
+            "http://[::1]",
+            "https://[::1]",
+        ].contains { prefix in
+            guard origin.hasPrefix(prefix) else { return false }
+            return Self.isValidOriginSuffix(String(origin.dropFirst(prefix.count)))
+        }
+    }
+
+    /// True if `suffix` is the remainder of an origin after the loopback host:
+    /// either empty (bare host) or `:` followed by one or more digits (port).
+    private static func isValidOriginSuffix(_ suffix: String) -> Bool {
+        if suffix.isEmpty { return true }
+        guard suffix.first == ":" else { return false }
+        let port = suffix.dropFirst()
+        return !port.isEmpty && port.allSatisfy(\.isNumber)
     }
 
     // MARK: - Private wire-shape types for GET endpoints (non-graph)

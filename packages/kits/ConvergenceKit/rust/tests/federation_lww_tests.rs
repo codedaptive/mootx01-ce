@@ -12,9 +12,9 @@
 //   4. newer_delete_wins: a delete whose HLC is >= the local row's _syncHLC
 //      must hard-delete the local row.
 //
-// apply_record is tested directly via a two-peer push/pull path where record
-// HLCs are explicitly set in the enqueued SyncRecord, giving full HLC control
-// without relying on wall-clock timing.
+// apply_record is reached indirectly via the public enqueue/push/pull path;
+// record HLCs are explicitly set in the enqueued SyncRecord, giving full
+// HLC control without relying on wall-clock timing.
 //
 // This mirrors FederationLWWTests.swift — all four force-test cases and their
 // assertions must match across both ports.
@@ -77,6 +77,12 @@ fn make_pair(
     let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
     engine_a.enable(lww_manifest(), storage_a).unwrap();
     engine_b.enable(lww_manifest(), storage_b).unwrap();
+
+    // Symmetric pairing required before push delivers envelopes.
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
+
     (engine_a, engine_b)
 }
 

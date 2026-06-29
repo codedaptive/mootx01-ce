@@ -22,10 +22,8 @@
 //! The format is byte-identical to the Swift implementation for the same
 //! logical array (arch spec §4.3 cross-language byte-identity mandate).
 //!
-//! On POSIX (Linux) we use `memmap2` for read-only mmap of the sidecar.
-//! On Windows we use a heap read (same semantics, slightly slower).
-//! Both paths produce bit-identical scan results; mmap is a load
-//! optimisation, never a semantic (arch spec §4.3).
+//! The sidecar is loaded via `fs::read()` on all platforms (heap read).
+//! The format is byte-identical to the Swift implementation (arch spec §4.3).
 //!
 //! The SQLite `vectors` table is always the source of truth. The sidecar
 //! is a regenerable cache. `rebuild_from` regenerates it from a sorted
@@ -66,10 +64,10 @@ pub const VEC_MAGIC: [u8; 4] = [0x56, 0x45, 0x43, 0x31];
 /// Format version. LE u16.
 ///
 /// Version 0x0002: adds `live_count` field (LE u32) after `count` and
-/// before `tombstone_words`. Enables O(1) stale detection in VectorStore
-/// (compare sidecar live_count against the table binary-row count).
-/// No installed sidecars exist at version 0x0001; the old bytes are
-/// rejected by `parse_sidecar`.
+/// before `tombstone_words`. The field is written on save but read and
+/// discarded on load — stale detection recomputes live count from the
+/// tombstone bitmap. No installed sidecars exist at version 0x0001;
+/// the old bytes are rejected by `parse_sidecar`.
 pub const VEC_VERSION: u16 = 0x0002;
 
 /// Tombstone compaction threshold: when (dead / total) > threshold,
@@ -139,8 +137,10 @@ impl ResidentArrayStore {
 
     /// Load (or reload) the sidecar from disk.
     ///
-    /// If the file is absent or invalid, the in-memory array is reset
-    /// to empty. Call once at startup before calling `snapshot()`.
+    /// If the file is absent, returns `Ok(())` without changing the
+    /// in-memory array. If the file is present but invalid, the
+    /// in-memory array is reset to empty (the SQLite table is the
+    /// source of truth). Call once at startup before `snapshot()`.
     pub fn load(&mut self) -> Result<(), VectorKitError> {
         let path = self.sidecar_path.clone();
         if !path.exists() {
@@ -637,7 +637,16 @@ impl ResidentArrayStore {
 
         // Tombstones
         let tombstone_words = read_le_u32(data, pos)? as usize; pos += 4;
-        check_bounds(data, pos, tombstone_words * 8, "tombstone block")?;
+        // Guard against overflow in tombstone_words * 8: a malformed sidecar
+        // can carry a tombstone_words value large enough that the multiplication
+        // overflows usize, producing a spuriously small bound (debug: panic,
+        // release: wraps). Use checked_mul so both modes fail closed with an error.
+        let tombstone_block = tombstone_words.checked_mul(8).ok_or_else(|| {
+            VectorKitError::DecodingFailure(
+                "ResidentArrayStore: tombstone block size overflows usize".into(),
+            )
+        })?;
+        check_bounds(data, pos, tombstone_block, "tombstone block")?;
         let mut tombstones = Vec::with_capacity(tombstone_words);
         for _ in 0..tombstone_words {
             tombstones.push(read_le_u64(data, pos)?);
@@ -645,7 +654,14 @@ impl ResidentArrayStore {
         }
 
         // Vectors block
-        let vectors_bytes = count * stride;
+        // Guard against overflow in count * stride: a malformed sidecar can carry
+        // values large enough that their product overflows usize. checked_mul
+        // fails closed with an error in both debug and release builds.
+        let vectors_bytes = count.checked_mul(stride).ok_or_else(|| {
+            VectorKitError::DecodingFailure(
+                "ResidentArrayStore: vectors block size overflows usize".into(),
+            )
+        })?;
         check_bounds(data, pos, vectors_bytes, "vectors block")?;
         let storage = data[pos..pos + vectors_bytes].to_vec();
         pos += vectors_bytes;

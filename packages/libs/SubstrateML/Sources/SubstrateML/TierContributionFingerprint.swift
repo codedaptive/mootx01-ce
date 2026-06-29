@@ -22,9 +22,15 @@
 //   bytes 24..55     OR-reduced Fingerprint256 (32 bytes)
 //   bytes 56..63     HLC of the contribution (8 bytes BE)
 //
-// Total: 64 bytes per contribution. CRC32 over the 64 bytes
-// provides integrity; the handshake-established shared key
-// signs the contribution against tampering.
+// Total: 64 bytes per contribution. This layer emits the bare
+// 64-byte payload — it neither checksums nor signs. Authenticity
+// is a federation-egress concern, not a substrate one: the
+// originating estate signs the outbound payload and encrypts it
+// to the recipient scope at the share point (sign-then-encrypt-
+// to-scope, DECISION_FEDERATION_SHARING_MODEL). That signature is
+// ECDSA P-256 (ADR-013, EE FIPS requirement) and is built with
+// the federation transport in v1.1; nothing signs this payload
+// before then.
 //
 // Used by:
 //   § 12.3    Tier contribution definition (this file)

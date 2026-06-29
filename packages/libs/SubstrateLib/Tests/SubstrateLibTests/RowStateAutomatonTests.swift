@@ -2,10 +2,13 @@
 //
 // Per-type coverage for the row-state finite-state automaton
 // (cookbook § 9) in RowStateAutomaton.swift: the transition table,
-// `validate`, and the I-22 / S-1 / S-5 forbidden-combination checks.
+// `validate`, and the I-22 / S-1 forbidden-combination checks.
+// S-5 coverage is included but tests the defused behavior — bitmaps
+// are preserved on tombstone (not rejected); the active S-5 check
+// is deferred until F17 reinstates the expunge_completed_flag gate.
 //
 // Mirrors the behavior set asserted by the Rust
-// `glref-rust-row_state.rs` test module (mod tests + i22_tests) so
+// `packages/libs/SubstrateLib/rust/src/row_state.rs` test module so
 // the two legs pin the same automaton semantics.
 
 import Testing

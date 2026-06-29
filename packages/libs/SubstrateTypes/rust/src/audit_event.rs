@@ -17,8 +17,9 @@ use crate::row::RowId;
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
     /// Deterministic content-ID (SHA-256 over the wire fields incl. verb
-    /// name, first 16 bytes). Mirrors Swift `AuditEvent.eventID`. Set by
-    /// `audit_gate::content_id`; gives federation idempotence.
+    /// name, first 16 bytes). Set by `audit_gate::content_id`; gives
+    /// federation idempotence. Swift `AuditEvent.eventID` is a random
+    /// UUID, not a content hash — the two are not equivalent.
     pub event_id: u128,
     pub estate_uuid: u128,
     pub row_id: RowId,

@@ -42,16 +42,18 @@ import LocusKit
 /// silent for freshly-learned references that have not yet drifted.
 ///
 /// ── Fingerprint drift (real reads) ────────────────────────────────────
-/// `fingerprintBaselines()` reads the room-level container OR aggregates the
-/// recall pruner maintains (spec § 11.5) through
-/// `GeniusLocusKit.roomLevelFingerprints(in:)` and maps each to a v1 drift
-/// fraction: the set-bit density of the aggregate over the three bitmap lanes
-/// (192 bits). A focused container reads low drift; a container whose content
-/// has spread across many disparate adjective/operational/provenance bits reads
-/// high. Deterministic and identical to the Rust port's definition. The
-/// persisted-baseline refinement (Hamming distance against a recorded per-scope
-/// baseline) requires a baseline-persistence surface that does not exist yet;
-/// bit density is the honest v1 signal that uses the data available today.
+/// `fingerprintBaselines()` computes the OR-aggregate of each container
+/// node's drawer bitmaps (adjectiveBitmap, operationalBitmap, provenance)
+/// grouped by `parentNodeId` (room-level node per ADR-017) and maps each
+/// to a v1 drift fraction: the set-bit density of the aggregate over the
+/// three bitmap lanes (192 bits). The scope key is the parentNodeId —
+/// native node IDs as scope keys per NT-N1. A focused container reads low
+/// drift; a container whose content has spread across many disparate
+/// adjective/operational/provenance bits reads high. Deterministic and
+/// identical to the Rust port's definition. The persisted-baseline
+/// refinement (Hamming distance against a recorded per-scope baseline)
+/// requires a baseline-persistence surface that does not exist yet; bit
+/// density is the honest v1 signal that uses the data available today.
 public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
 
     /// Bit width of a `ContainerFingerprint`'s three i64 lanes (3 × 64). The v1
@@ -136,31 +138,46 @@ public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
 
     /// Fingerprint-drift observations for the fingerprint-drift scan.
     ///
-    /// Reads the room-level container OR aggregates the recall pruner maintains
-    /// (spec § 11.5) via `GeniusLocusKit.roomLevelFingerprints(in:)` and maps
-    /// each to a v1 drift fraction — the set-bit density of the aggregate over
-    /// its three bitmap lanes (192 bits). The `scopeKey` is the `wing/room`
-    /// string the daemon uses as the proposal target. One observation per
-    /// room-level container; the daemon thresholds each against
+    /// Computes the OR-aggregate of each container node's drawer bitmaps
+    /// (adjectiveBitmap, operationalBitmap, provenance) grouped by
+    /// `parentNodeId` (room-level node per ADR-017). The v1 drift fraction
+    /// is the set-bit density of the aggregate over the three bitmap lanes
+    /// (192 bits). The `scopeKey` and `nodeId` are the parentNodeId — the
+    /// native node ID scope key. One observation per container node; the
+    /// daemon thresholds each against
     /// `MaintenancePolicy.fingerprintDriftThreshold`.
     ///
     /// The persisted-baseline refinement (Hamming distance of the live
     /// aggregate against a recorded per-scope baseline) requires a
-    /// baseline-persistence surface that does not exist yet; bit density is the
-    /// honest v1 signal that uses the data available today. Identical definition
-    /// to the Rust port.
+    /// baseline-persistence surface that does not exist yet; bit density is
+    /// the honest v1 signal that uses the data available today. Identical
+    /// definition to the Rust port.
     public func fingerprintBaselines() async throws -> [FingerprintDriftObservation] {
-        let entries = try await kit.roomLevelFingerprints(in: handle)
-        return entries.map { entry in
+        let drawers = try await kit.allDrawers(in: handle, limit: Self.maintenanceScanCap)
+        // Group non-tombstoned, Cluster-A drawers by parentNodeId and
+        // OR-aggregate their three bitmap lanes per container node.
+        var aggregates: [String: ContainerFingerprint] = [:]
+        for drawer in drawers where drawer.tombstonedAt == nil && drawer.state.isClusterA {
+            let nodeId = drawer.parentNodeId
+            let existing = aggregates[nodeId] ?? ContainerFingerprint(
+                adjective: 0, operational: 0, provenance: 0)
+            aggregates[nodeId] = ContainerFingerprint(
+                adjective: existing.adjective | drawer.adjectiveBitmap,
+                operational: existing.operational | drawer.operationalBitmap,
+                provenance: existing.provenance | drawer.provenance)
+        }
+        return aggregates.map { (nodeId, fingerprint) in
             FingerprintDriftObservation(
-                scopeKey: "\(entry.wing)/\(entry.room)",
-                driftFraction: Self.fingerprintDriftFraction(entry.fingerprint)
-            )
+                scopeKey: nodeId,
+                nodeId: nodeId,
+                driftFraction: Self.fingerprintDriftFraction(fingerprint))
         }
     }
 
     /// Active drawers with enrichment-status `qid_pending`, bounded to
-    /// `limit` rows for O(cap) scan cost (B-10a: internal read, no trace).
+    /// `limit` rows (B-10a: internal read, no trace). Scans the full
+    /// drawer corpus at the GLK tier — `limit` caps the output count,
+    /// not the scan cost.
     ///
     /// Delegates to `GeniusLocusKit.qidPendingDrawers(in:limit:)`, which
     /// filters the full drawer corpus to non-tombstoned Cluster-A rows with

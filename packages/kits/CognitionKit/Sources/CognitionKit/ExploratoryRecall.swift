@@ -124,6 +124,13 @@ public struct ExploratoryRecall: Recipe {
     /// in SubstrateML (spec B-5, I-3).
     public let requiredCapabilities: [NeuronKitCapability] = [.exploratoryRecall]
 
+    // Maximum walk steps accepted from caller input. Walks beyond this bound
+    // exhaust CPU proportionally (O(steps)) and offer diminishing visit-count
+    // differentiation past ~50k steps on any realistic estate graph. Clamped,
+    // not rejected, so callers requesting absurdly large walks degrade
+    // gracefully rather than panic. CK-4 planned hardening.
+    private static let maxWalkSteps: Int = 50_000
+
     public func run(
         input: Input,
         estate: EstateHandle,
@@ -131,6 +138,21 @@ public struct ExploratoryRecall: Recipe {
     ) async throws -> Output {
         // B-5: verify capability before any estate touch.
         try verifyCapabilities(required: requiredCapabilities)
+
+        // CK-4: Sanitise walk parameters before passing them to
+        // RandomWalks.walkWithRestart. Unvalidated inputs can cause:
+        //   • steps ≤ 0   → zero-length walk (visit map empty, silently useless)
+        //     steps >> N  → O(steps) CPU proportional to caller input (DoS)
+        //   • restartProbability ≥ 1.0 → walk always teleports, never progresses
+        //     restartProbability < 0.0  → undefined PRNG behaviour in the engine
+        //   • k < 0 → prefix(k) panics in some contexts
+        //
+        // Clamp rather than throw: degrades gracefully, avoids adding a new
+        // RecipeError case (and its cross-port parity cost). The clamp bounds
+        // are documented constants; callers cannot exceed them.
+        let safeSteps = max(1, min(input.steps, Self.maxWalkSteps))
+        let safeRestart = max(Float32(0.0), min(input.restartProbability, Float32(0.999)))
+        let safeK = max(0, input.k)
 
         // 1. Read the tunnel graph via GLK (I-2: no direct substrate).
         let tunnels = try await kit.recallTunnels(estate, wing: input.wing)
@@ -168,10 +190,11 @@ public struct ExploratoryRecall: Recipe {
         let rngSeed = FNV.hash64(input.seedDrawerID)
 
         // 6. Run the walk (engine owns all math; B-1, I-1).
+        // Use safeSteps / safeRestart — clamped to valid bounds above (CK-4).
         let visits = RandomWalks.walkWithRestart(
             seed: seedRowId,
-            steps: input.steps,
-            restartProbability: input.restartProbability,
+            steps: safeSteps,
+            restartProbability: safeRestart,
             rngSeed: rngSeed,
             adjacency: adjacency)
 
@@ -189,8 +212,9 @@ public struct ExploratoryRecall: Recipe {
             if $0.visitCount != $1.visitCount { return $0.visitCount > $1.visitCount }
             return $0.drawerID < $1.drawerID
         }
-        if input.k > 0 {
-            ranked = Array(ranked.prefix(input.k))
+        // Use safeK — clamped to ≥ 0 above (CK-4).
+        if safeK > 0 {
+            ranked = Array(ranked.prefix(safeK))
         }
 
         return Output(results: ranked, visitedCount: visitedCount)

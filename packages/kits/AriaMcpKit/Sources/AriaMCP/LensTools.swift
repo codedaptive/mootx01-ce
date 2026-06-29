@@ -8,12 +8,11 @@
 // projection, no generic run-by-name dispatcher.
 //
 // Tool stem = moot_lens_ + catalog name: moot_lens_keystones … moot_lens_complexity.
-// The 14 reasoning lenses span structure, topic, preference, surprise,
-// grounding/trust, associative, prediction, and federated categories.
-// The 3 analytics lenses (moot_lens_associations, moot_lens_concepts,
-// moot_lens_apriori) and 4 temporal/information-theoretic lenses
-// (moot_lens_moment, moot_lens_rhythm, moot_lens_precedence,
-// moot_lens_complexity) follow in catalog order.
+// 23 lens tools total: 16 reasoning/federated lenses, 4 temporal/information-
+// theoretic lenses (moot_lens_moment, moot_lens_rhythm, moot_lens_precedence,
+// moot_lens_complexity), and 3 analytics lenses (moot_lens_associations,
+// moot_lens_concepts, moot_lens_apriori). In tools(), the temporal/information-
+// theoretic tools are listed before the analytics tools.
 // The two federated lenses take a second estate via `estateIDB`,
 // resolved through the dispatcher's own estate registry exactly like
 // `estateID`.
@@ -358,12 +357,19 @@ enum LensTools {
     /// Run the named lens tool. Same contract as `RecipeTools.dispatch`:
     /// out-of-band faults throw `JSONRPCError`; lens-level refusals come
     /// back as `errorResult` so the client keeps the call id.
+    ///
+    /// `resolveHandle` resolves the primary estate from `estateID`; it is
+    /// restricted to the default estate per Item 3 hardening.
+    /// `resolvePeer` resolves a comparison estate from `estateID`; it is
+    /// unrestricted because lens comparisons are read-only cross-estate
+    /// operations that are explicitly opt-in via the `estateIDB` argument.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         defaultHandle: EstateHandle,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle
+        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
+        resolvePeer: ([String: JSONValue]) throws -> EstateHandle
     ) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         switch name {
@@ -371,7 +377,8 @@ enum LensTools {
             let ranked = try await Keystones.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
-                topK: try integer(args, "topK", default: 5))
+                topK: try ToolDispatcher.clampLimit(
+                    try integer(args, "topK", default: 5), argument: "topK"))
             return list("keystones", ranked.map { "\($0.id) centrality=\($0.centrality)" })
 
         case "moot_lens_constellation":
@@ -384,8 +391,15 @@ enum LensTools {
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
                 seedDrawerID: try requireString(args, "seedDrawerID"),
-                walkLength: try integer(args, "walkLength", default: 10_000),
-                k: try integer(args, "k", default: 10))
+                // walkLength ceiling 100_000: walk steps are bounded separately from
+                // result counts; the default (10_000) is well within the ceiling, but
+                // an attacker can pass Int.max to exhaust CPU. Parity: Rust uses
+                // clamp_limit(walk_length, "walkLength", 10_000, 100_000).
+                walkLength: try ToolDispatcher.clampLimit(
+                    try integer(args, "walkLength", default: 10_000),
+                    argument: "walkLength", ceiling: 100_000),
+                k: try ToolDispatcher.clampLimit(
+                    try integer(args, "k", default: 10), argument: "k"))
             // free_association is a forward walk; a seed with no outgoing tunnels
             // (or one not present in the wing) yields no associations. Return a
             // hint rather than a bare "0 results" that reads as an empty estate.
@@ -421,7 +435,14 @@ enum LensTools {
             lines.append("against:")
             lines += report.biasedAgainst.map { "  \($0.label) bias=\($0.bias)" }
             lines.append("dismissal:")
-            lines += report.dismissal.map { "  \($0.room) rate=\($0.rate)" }
+            // DismissalRate carries nodeId (parentNodeId); resolve to display
+            // room name via the node tree for human-readable output.
+            let dismissalNodeNames = try await kit.estate(for: handle)
+                .resolveNodeNames(parentNodeIds: report.dismissal.map(\.nodeId))
+            lines += report.dismissal.map {
+                let room = dismissalNodeNames[$0.nodeId]?.room ?? $0.nodeId
+                return "  \(room) rate=\($0.rate)"
+            }
             lines.append("learned:")
             lines += report.learned.map {
                 "  \($0.label) strength=\($0.strength) (+\($0.endorsements)/−\($0.dismissals))"
@@ -572,7 +593,9 @@ enum LensTools {
             return list("tunnel_successor", out.map { "\($0.id) weight=\($0.weight)" })
 
         case "moot_lens_overlap":
-            let handleB = try resolveHandle(secondEstateArgs(args))
+            // resolvePeer is used here (not resolveHandle) because estateIDB
+            // is a legitimate cross-estate comparison target, not CRUD routing.
+            let handleB = try resolvePeer(secondEstateArgs(args))
             // Reject self-comparison — overlap of an estate with itself always
             // produces a degenerate result (overlap=1.0) that provides no
             // useful signal and may confuse the caller.
@@ -590,7 +613,9 @@ enum LensTools {
                 "mind_overlap: \(out.overlap) (a=\(out.aCount), b=\(out.bCount) drawer(s))")
 
         case "moot_lens_divergence":
-            let handleBD = try resolveHandle(secondEstateArgs(args))
+            // resolvePeer is used here (not resolveHandle) because estateIDB
+            // is a legitimate cross-estate comparison target, not CRUD routing.
+            let handleBD = try resolvePeer(secondEstateArgs(args))
             // Reject self-comparison — divergence of an estate with itself always
             // produces a degenerate result (JS=0) that provides no useful signal.
             guard handleBD.estateUUID != handle.estateUUID else {
@@ -610,7 +635,11 @@ enum LensTools {
 
         case "moot_lens_associations":
             let filterChain = try decodeFilterChain(args["filter"])
-            let limit = try optionalInt(args["limit"], argument: "limit")
+            // Route through clampLimit so negative and over-ceiling values are
+            // rejected/clamped at the MCP boundary. Parity: Rust lens_tools.rs
+            // moot_lens_associations uses clamp_limit with the same ceiling.
+            let limit = try ToolDispatcher.clampLimit(
+                try optionalInt(args["limit"], argument: "limit"), argument: "limit")
             let minSupport = try doubleArg(args["minSupport"], argument: "minSupport") ?? 0.0
             let minConfidence = try doubleArg(args["minConfidence"], argument: "minConfidence") ?? 0.0
             let arFrame = LocusKit.RecallFrame(
@@ -641,10 +670,15 @@ enum LensTools {
         case "moot_lens_moment":
             let windowStart = try requireDate(args, "windowStart")
             let windowEnd = try requireDate(args, "windowEnd")
+            // Window validation: requireWindowRange rejects reversed windows (Swift
+            // ClosedRange would trap at runtime on start > end) and caps the span to
+            // 3 years (DoS prevention — scanning decades exhausts memory).
+            // Parity: Rust moot_lens_moment uses require_window_range with the same checks.
+            let momentWindow = try requireWindowRange(start: windowStart, end: windowEnd)
             let compWindows = try decodeComparisonWindows(args["comparisonWindows"])
             let out = try await Moment.run(
                 kit: kit, handle: handle,
-                window: windowStart...windowEnd,
+                window: momentWindow,
                 comparisonWindows: compWindows,
                 now: Date())
             var momentLines = [
@@ -661,7 +695,8 @@ enum LensTools {
             let bucketSeconds = try integer(args, "bucketSeconds", default: 86400)
             let bucketCount = try integer(args, "bucketCount", default: 32)
             let endingAt = try requireDate(args, "endingAt")
-            let topK = try integer(args, "topK", default: 3)
+            let topK = try ToolDispatcher.clampLimit(
+                try integer(args, "topK", default: 3), argument: "topK")
             let out = try await Rhythm.run(
                 kit: kit, handle: handle,
                 bit: bit,
@@ -679,12 +714,17 @@ enum LensTools {
         case "moot_lens_precedence":
             let windowStart = try requireDate(args, "windowStart")
             let windowEnd = try requireDate(args, "windowEnd")
+            // Window validation: same guards as moot_lens_moment — ordering check
+            // (ClosedRange would trap) plus 3-year cap.
+            // Parity: Rust moot_lens_precedence uses require_window_range.
+            let precedenceWindow = try requireWindowRange(start: windowStart, end: windowEnd)
             let targetField = try requireString(args, "targetField")
             let targetValue = try requireString(args, "targetValue")
-            let k = try integer(args, "k", default: 5)
+            let k = try ToolDispatcher.clampLimit(
+                try integer(args, "k", default: 5), argument: "k")
             let out = try await Precedence.run(
                 kit: kit, handle: handle,
-                window: windowStart...windowEnd,
+                window: precedenceWindow,
                 target: TemporalFieldCoord(fieldPath: targetField, valueRepr: targetValue),
                 k: k,
                 now: Date())
@@ -739,7 +779,11 @@ enum LensTools {
 
         case "moot_lens_concepts":
             let fcFilterChain = try decodeFilterChain(args["filter"])
-            let fcLimit = try optionalInt(args["limit"], argument: "limit")
+            // Route through clampLimit so negative and over-ceiling values are
+            // rejected/clamped at the MCP boundary. Parity: Rust lens_tools.rs
+            // moot_lens_concepts uses clamp_limit with the same ceiling.
+            let fcLimit = try ToolDispatcher.clampLimit(
+                try optionalInt(args["limit"], argument: "limit"), argument: "limit")
             let minSupport = try integer(args, "minSupport", default: 1)
             let maxIntentSize = try integer(args, "maxIntentSize", default: 8)
             let maxConcepts = try integer(args, "maxConcepts", default: 20)
@@ -831,6 +875,34 @@ enum LensTools {
         return date
     }
 
+    /// Build a validated `ClosedRange<Date>` from a start/end pair decoded from
+    /// the lens tool arguments.
+    ///
+    /// Two guards are applied before constructing the range:
+    ///   1. `start <= end` — a reversed window is a client error, not a silent
+    ///      empty result. Swift's `...` operator would precondition-fail (crash)
+    ///      on a reversed range; this check surfaces a proper `invalidParams`
+    ///      instead.
+    ///   2. Max range cap — a window spanning decades can scan the entire corpus
+    ///      and exhaust memory. Cap is 3 years (≈ 94 608 000 seconds), which is
+    ///      generous for any legitimate analytical query.
+    private static func requireWindowRange(
+        start: Date, end: Date
+    ) throws -> ClosedRange<Date> {
+        guard start <= end else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "windowStart must be ≤ windowEnd; got start=\(start) end=\(end)")
+        }
+        let maxDurationSeconds: TimeInterval = 3 * 365.25 * 24 * 60 * 60 // ~3 years
+        guard end.timeIntervalSince(start) <= maxDurationSeconds else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "window span must not exceed 3 years; reduce the range")
+        }
+        return start...end
+    }
+
     private static func optionalString(_ value: JSONValue?, argument: String) throws -> String? {
         guard let value else { return nil }
         guard let string = value.stringValue else {
@@ -914,7 +986,7 @@ enum LensTools {
                     code: JSONRPCErrorCode.invalidParams,
                     message: "each comparisonWindows entry needs ISO8601 windowStart and windowEnd")
             }
-            return start...end
+            return try requireWindowRange(start: start, end: end)
         }
     }
 

@@ -146,9 +146,8 @@ public indirect enum GeneratedExpression: Sendable, Equatable {
     }
 
     /// Extract an integer from an integer-family TypedValue. Other
-    /// cases (and absent columns) read as 0, matching the SQL
-    /// behavior where a generated column over a NULL integer column
-    /// is NULL-coalesced to 0 by the surrounding bit operations.
+    /// cases and absent columns return 0 (the InMemory evaluator's
+    /// sentinel for a missing or non-integer bitmap column).
     static func integerValue(_ value: TypedValue?) -> Int64 {
         switch value {
         case .int(let i), .bitmap(let i): return i

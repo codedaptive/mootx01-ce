@@ -91,6 +91,7 @@ pub fn run_grounded_synthesis(
     frame: RecallFrame,
     tuning: RecallFrameTuning,
     now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     // B-5: verify capabilities before any substrate touch. A capability gate
     // failure propagates as RecipeRunError::Recipe.
@@ -136,11 +137,16 @@ pub fn run_grounded_synthesis(
     let meta_by_id: HashMap<String, DrawerRowMeta> = drawers
         .iter()
         .map(|d| {
+            let (wing, room) = node_names
+                .get(&d.parent_node_id)
+                .cloned()
+                .unwrap_or_default();
             (
                 d.id.clone(),
                 DrawerRowMeta {
-                    wing: d.wing.clone(),
-                    room: d.room.clone(),
+                    parent_node_id: d.parent_node_id.clone(),
+                    wing,
+                    room,
                     is_currently_believed: true,
                 },
             )
@@ -191,6 +197,11 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
+    /// Empty node-name map for tests — no display-name resolution needed.
+    fn empty_names() -> std::collections::HashMap<String, (String, String)> {
+        std::collections::HashMap::new()
+    }
+
     fn coord_with_rows(contents: &[&str]) -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
         // InMemoryDrawerStore::new allocates InMemoryStorage internally.
@@ -232,7 +243,7 @@ mod tests {
             "cats and dogs are pets",
         ]);
         let out =
-            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW)
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names())
                 .expect("run");
         assert_eq!(out.drawer_count, 3, "all recalled rows feed synthesis");
         assert!(
@@ -249,14 +260,17 @@ mod tests {
     fn gs2_empty_estate_yields_empty_document() {
         let (coord, h) = coord_with_rows(&[]);
         let out =
-            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW)
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names())
                 .expect("run");
         assert_eq!(out.drawer_count, 0);
         assert!(out.context.patterns.is_empty());
     }
 
-    // GS-3: the capability gate fires before any substrate touch — a host
-    // missing `synthesize` is rejected with MissingCapability (parity of B-5).
+    // GS-3: a host missing `synthesize` is rejected with MissingCapability
+    // (parity of B-5). The test directly calls `verify_capabilities` rather
+    // than running `run_grounded_synthesis` against an instrumented substrate,
+    // so it confirms the error variant but does not prove ordering at the recipe
+    // boundary.
     #[test]
     fn gs3_capability_gate_blocks_missing_capability() {
         // Directly exercise the gate the recipe runs first: a host offering

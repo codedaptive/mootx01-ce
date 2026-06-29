@@ -138,11 +138,11 @@ struct NProviderTests {
 
             let perSignal = await corpus.floatNearestPerSignal(query: probe, limit: perSignalLimit)
 
-            // Swift is canonical: write the observed per-signal lists as the
-            // shared fixture so the Rust leg can assert identity. The encoder is
-            // deterministic (sorted keys not needed — the array order is the slot
-            // order). Writing on every run keeps the fixture in lockstep with the
-            // canonical Swift output; the assertion below pins it.
+            // Swift is canonical: the observed per-signal lists form the shared
+            // fixture for Rust-leg identity assertions. The encoder is deterministic
+            // (sorted keys not needed — the array order is the slot order). The
+            // fixture is regenerated only when CORPUSKIT_GENERATE_FIXTURES is set;
+            // normal test runs assert against the committed Swift-canonical fixture.
             let observed = NPerSignalFixture(
                 probe: probe,
                 limit: perSignalLimit,
@@ -179,8 +179,8 @@ struct NProviderTests {
     struct NPerSignalFixture: Codable, Equatable {
         struct Signal: Codable, Equatable {
             let modelID: String
-            /// One of: "hits", "dark_provider", "dark_no_rows", "empty_query",
-            /// "store_error". Tags the FloatLaneOutcome kind cross-port.
+            /// One of: "hits", "dark_provider", "dark_no_rows", "dark_vocab_miss",
+            /// "empty_query", "store_error". Tags the FloatLaneOutcome kind cross-port.
             let kind: String
             /// Ranked itemIDs (empty unless kind == "hits"), nearest first.
             let rankedItemIDs: [String]

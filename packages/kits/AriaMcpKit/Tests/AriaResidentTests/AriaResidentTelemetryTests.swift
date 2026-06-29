@@ -4,8 +4,9 @@
 //   1. statsStorePathFromEnv — env override, useDefault=true default path, useDefault=false nil.
 //   2. installManagerTelemetry with a real path: wires the sink so a reported sample
 //      lands in the stats store (enabled sink persists samples).
-//   3. installManagerTelemetry with nil/empty path: returns nil, leaves Intellectus
-//      with its existing (no-op) sink (disabled stays no-op).
+//   3. installManagerTelemetry with nil/empty path: returns nil. The tests assert
+//      only the nil return value; they do not inspect the installed sink or prove
+//      no-op behavior of the enabled gate.
 //
 // Both-ports parity note:
 //   The Rust port's stats_store_path_from_env() is exercised by the Rust
@@ -144,10 +145,9 @@ struct InstallManagerTelemetryTests {
 
             let result = await AriaResident.installManagerTelemetry(storePath: nil)
             #expect(result == nil, "nil path must return nil — no store opened")
-            // Intellectus gate must not have been enabled by a nil-path install.
-            // (We cannot inspect the installed sink directly, but the enabled gate
-            // is the gating property for whether report() has any effect.)
-            // The call must leave enabled state unchanged when it returns nil.
+            // The enabled state is saved in wasEnabled and restored by defer.
+            // There is no assertion that isEnabled == wasEnabled after the call;
+            // the sink cannot be inspected directly.
         }
     }
 

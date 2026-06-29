@@ -18,9 +18,9 @@
 //
 // Default decay lambdas: categorical = 0.5, numerical = 0.8 (from §2 type table).
 //
-// Timestamps are f64 Unix epoch seconds. Confidence = convergence_score × decay_lambda;
-// full temporal weighting (C × w_temporal) requires TypedDecayWeighting and is
-// applied upstream in DistillationPipeline.
+// Timestamps are f64 Unix epoch seconds. Confidence: 1.0 for STATIC, C for
+// CONVERGENT, decay_lambda for MONOTONE, 0.0 for OSCILLATING/DIVERGENT. Full
+// temporal weighting applied upstream in DistillationPipeline.
 
 /// Five-class trajectory label for a feature sequence.
 /// String representation is uppercase ASCII, matching Swift DeltaType.rawValue.
@@ -68,7 +68,8 @@ pub struct DeltaAnalysis {
     pub convergence_score: f32,
     /// Average rate of change across differences. Some only when delta_type == Monotone.
     pub slope: Option<f32>,
-    /// Simplified confidence: convergence_score × decay_lambda.
+    /// Confidence: 1.0 for STATIC, C for CONVERGENT, decay_lambda for MONOTONE,
+    /// 0.0 for OSCILLATING and DIVERGENT. Mirrors Swift semantics.
     pub confidence: f32,
 }
 
@@ -82,7 +83,7 @@ impl DeltaFeatureExtractor {
     /// - `sequence`: (value, timestamp_epoch_seconds) pairs in chronological order.
     /// - `decay_lambda`: type-specific decay rate (default 0.5 for REL/ENT per §2).
     ///
-    /// Detection order: STATIC → CONVERGENT → OSCILLATING → DIVERGENT.
+    /// Detection order: STATIC → OSCILLATING → CONVERGENT → DIVERGENT.
     pub fn analyze_categorical(sequence: &[(String, f64)], decay_lambda: f32) -> DeltaAnalysis {
         let m = sequence.len();
 
@@ -93,7 +94,7 @@ impl DeltaFeatureExtractor {
                 terminal_value: terminal,
                 convergence_score: 1.0,
                 slope: None,
-                confidence: decay_lambda,
+                confidence: 1.0,
             };
         }
 
@@ -105,35 +106,16 @@ impl DeltaFeatureExtractor {
                 terminal_value: first.clone(),
                 convergence_score: 1.0,
                 slope: None,
-                confidence: decay_lambda,
+                confidence: 1.0,
             };
         }
 
         let terminal_value = sequence[m - 1].0.clone();
 
-        // Convergence score: k = length of consecutive trailing run matching terminal.
-        let mut k = 0usize;
-        for (val, _) in sequence.iter().rev() {
-            if val == &terminal_value {
-                k += 1;
-            } else {
-                break;
-            }
-        }
-        let convergence_score = k as f32 / m as f32;
-
-        // CONVERGENT: terminal value holds for at least half the sequence.
-        if convergence_score >= 0.5 {
-            return DeltaAnalysis {
-                delta_type: DeltaType::Convergent,
-                terminal_value,
-                convergence_score,
-                slope: None,
-                confidence: convergence_score * decay_lambda,
-            };
-        }
-
         // OSCILLATING: period-2 pattern on last 4 observations (A→B→A→B).
+        // Checked BEFORE convergence (matching Swift detection order) so an
+        // oscillating sequence with low decay_lambda isn't misclassified as
+        // CONVERGENT.
         if m >= 4 {
             let last4 = &sequence[m - 4..];
             let (a0, b0, a1, b1) = (&last4[0].0, &last4[1].0, &last4[2].0, &last4[3].0);
@@ -146,6 +128,28 @@ impl DeltaFeatureExtractor {
                     confidence: 0.0,
                 };
             }
+        }
+
+        // Convergence score: k = length of consecutive trailing run matching terminal.
+        let mut k = 0usize;
+        for (val, _) in sequence.iter().rev() {
+            if val == &terminal_value {
+                k += 1;
+            } else {
+                break;
+            }
+        }
+        let convergence_score = k as f32 / m as f32;
+
+        // CONVERGENT: convergence score meets or exceeds decay_lambda threshold.
+        if convergence_score >= decay_lambda {
+            return DeltaAnalysis {
+                delta_type: DeltaType::Convergent,
+                terminal_value,
+                convergence_score,
+                slope: None,
+                confidence: convergence_score,
+            };
         }
 
         // DIVERGENT: no classifiable pattern.

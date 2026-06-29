@@ -56,14 +56,14 @@ public struct RecipeDescriptor: Sendable, Equatable, Codable {
 /// tool surface and any in-process enumerator read from here.
 public enum RecipeCatalog {
 
-    /// Every shipped recipe's descriptor, in stable declaration order:
-    /// the foundational recipes first, then the reasoning lenses by
-    /// category. A recipe registers when both its versions ship
-    /// (LENS_DISCOVERABILITY_DECISION v2.0) — added here once, it
-    /// becomes discoverable everywhere that reads the catalog. The lens
-    /// entry points are static namespaces, so their descriptors are
-    /// declared literally; descriptor strings match `catalog.rs`
-    /// byte-for-byte (the conformance anchor).
+    /// Every catalog descriptor, in stable declaration order: the foundational
+    /// recipes first, then the reasoning lenses by category. Descriptors are
+    /// either backed by a local Swift `Recipe` conformer (GroundedSynthesis,
+    /// MigrationBenchmark, ShapedRecall, ExploratoryRecall, Consolidate,
+    /// DistilledRecall, Recollect) or declared as literal metadata for
+    /// lens static namespaces. Descriptor strings match `catalog.rs`
+    /// byte-for-byte (the conformance anchor). Not every literal entry has a
+    /// separate `Recipe`-conforming Swift implementation in this directory.
     public static let all: [RecipeDescriptor] = [
         RecipeDescriptor(GroundedSynthesis()),
         RecipeDescriptor(MigrationBenchmark()),
@@ -176,7 +176,7 @@ public enum RecipeCatalog {
         // to this file (Dc4 consolidation strategy).
         RecipeDescriptor(Consolidate()),
         RecipeDescriptor(DistilledRecall()),
-        RecipeDescriptor(ExpandMemory()),
+        RecipeDescriptor(Recollect()),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

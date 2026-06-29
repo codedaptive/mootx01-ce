@@ -2,14 +2,15 @@
 //
 // Parity force-tests for the observer-driven outbox auto-population.
 //
-// These mirror FederationObserverOutboxTests.swift one-for-one and assert
-// IDENTICAL behavior across both ports:
+// These mirror FederationObserverOutboxTests.swift for cases 1 and 3;
+// case 2 (explicit_enqueue_still_works) is a Rust-only regression test
+// with no Swift analogue (the Swift file documents this explicitly):
 //   1. write_auto_populates_outbox: an insert/update/delete to a
 //      federation-enabled estate auto-populates the outbox WITHOUT any
 //      explicit `enqueue` call — push then delivers the record to the peer.
 //   2. explicit_enqueue_still_works: the explicit `enqueue` entry point
 //      remains a working path (regression — it was the only path before
-//      the observer wiring landed).
+//      the observer wiring landed). Rust-only; no Swift mirror.
 //   3. disable_stops_auto_population: after `disable`, a later write does
 //      NOT auto-populate the outbox (lifecycle: workers stopped, no leak).
 //
@@ -74,6 +75,12 @@ fn make_pair(
     let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
     engine_a.enable(manifest(), storage_a).unwrap();
     engine_b.enable(manifest(), storage_b).unwrap();
+
+    // Symmetric pairing required before push delivers envelopes.
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
+
     (engine_a, engine_b)
 }
 
@@ -240,10 +247,13 @@ fn disable_stops_auto_population() {
     // Give any (incorrectly) surviving worker a chance to run.
     std::thread::sleep(Duration::from_millis(200));
 
-    // Re-enable and push: the outbox must be empty (the pre-disable write was
-    // cleared, and the post-disable write was not captured because workers
-    // were stopped before the write).
+    // Re-enable, re-pair, and push: the outbox must be empty (the pre-disable
+    // write was cleared, and the post-disable write was not captured because
+    // workers were stopped before the write). Re-pair so push actually checks
+    // the outbox rather than short-circuiting on the pairing gate.
     engine_a.enable(manifest(), storage_a.clone()).unwrap();
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family).unwrap();
     let pushed = engine_a.push().unwrap().pushed;
     assert_eq!(
         pushed, 0,

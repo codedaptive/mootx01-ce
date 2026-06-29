@@ -61,8 +61,9 @@ pub fn parse_add_drawer_id(text_blocks: &[String]) -> Result<String, PalaceRespo
 
 /// Parse the assigned id from a write response's text blocks, given the id key
 /// that tool returns. The four-noun generalization of [`parse_add_drawer_id`]:
-/// `add_drawer` → `drawer_id`, `create_tunnel` → `tunnel_id`, `kg_add` →
-/// `triple_id`, `diary_write` → `entry_id` (verified live, v3.3.3). The
+/// `add_drawer` → `drawer_id`, `create_tunnel` → `id` (bare key),
+/// `kg_add` → `triple_id`, `diary_write` → `entry_id` (verified live,
+/// v3.3.3). The
 /// `already_exists` shape carries the same key. Returns `None` when no block
 /// carries a non-empty value for `id_key`. Mirrors Swift `parseAssignedID`.
 pub fn parse_assigned_id(text_blocks: &[String], id_key: &str) -> Option<String> {

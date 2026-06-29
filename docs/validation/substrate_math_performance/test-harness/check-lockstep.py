@@ -26,8 +26,9 @@ Exit status:
   1 — at least one mismatch
   2 — environment error
 
-Naming conversion: snake_case → CamelCase by capitalizing each segment.
-HLC, FFT, FNV, NMF are special-cased as acronyms that stay all-caps.
+Naming note: this checker compares Rust snake_case names against Swift
+CamelCase names by direct mapping. A `snake_to_camel` helper exists but
+is not called by the current audit; the check uses direct string lookup.
 
 False positives possible (Rust-only types that are wire-internal or
 nested helpers). Each violation includes a hint string so you can decide:

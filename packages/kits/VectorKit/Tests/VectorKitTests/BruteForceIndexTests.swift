@@ -5,19 +5,17 @@
 //
 // Test strategy (three layers):
 //
-//   1. Conformance gate — the brute-force oracle is anchored to the
-//      existing `hamming_nn_topk_tie.json` substrate vector. The oracle
-//      must produce identical results to EngramLib.findNearest on the
-//      same candidates. This is the Kong condition: "the brute-force
-//      oracle gets its OWN independent gate against the substrate's
-//      already-four-way-tested HammingNN."
+//   1. Conformance gate — five hardcoded candidate vectors are inserted
+//      and the top-k Hamming order and tie-break behavior are asserted
+//      directly. Validates BruteForceIndex distance ordering against
+//      known ground truth without calling EngramLib.findNearest.
 //
 //   2. Determinism and order tests — the MIH spec vectors (§1.10 of the
 //      retrieval algorithms reference) exercised through BruteForceIndex:
 //      distance ASC, tie-break by itemID ASC, multi-model filter, delete.
 //
-//   3. SQLite-backed persistence — write → mmap-reopen → identical top-k
-//      on a real on-disk file (NOT InMemory), as required by the mission.
+//   3. Sidecar-backed resident-array persistence — write → mmap-reopen →
+//      identical top-k on a real on-disk .vec file (NOT InMemory).
 //      These tests verify that the .vec sidecar round-trips exactly and
 //      that mmap load and heap load produce bit-identical arrays.
 //
@@ -687,8 +685,8 @@ struct ResidentArrayStoreTests {
     ///
     /// Write 4 vectors, tombstone 2. Count must remain 4 (total slots),
     /// liveCount must become 2 (non-tombstoned). After reload from disk,
-    /// the same values must hold — live_count was written to the sidecar
-    /// header at flush time and the bitmap must agree on reload.
+    /// liveCount is recomputed from the tombstone bitmap, so the same
+    /// values must hold regardless of the sidecar header's live_count field.
     @Test func liveCount_afterTombstone_isCorrect() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("c5-livecount-\(UUID().uuidString).vec")

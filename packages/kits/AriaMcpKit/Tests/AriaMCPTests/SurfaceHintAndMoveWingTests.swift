@@ -45,13 +45,9 @@ struct SurfaceHintAndMoveWingTests {
     // MARK: - Bug O: coaching hint fires only on zero results
 
     /// File a memory, search for it, then verify the "No results" coaching hint
-    /// does NOT appear — even though the result text contains "0 memory" as a
-    /// substring (e.g. "found 20 memory(s)").
-    ///
-    /// Before the fix: CoachingEngine checked `resultText.contains("0 memory")`
-    /// which matches any count containing "0" followed by " memory", including
-    /// "10 memory(s)", "20 memory(s)", etc. The corrected check is
-    /// `resultText.contains("found 0 memory")` which only matches genuine zero.
+    /// does NOT appear. The test asserts the result does not contain "found 0 memory",
+    /// confirming the hint fires only on genuine zero results, not on counts that
+    /// happen to contain "0" as a substring.
     @Test("moot_memory_search with results does not emit No-results hint")
     func searchWithResultsHasNoEmptyHint() async throws {
         let dispatcher = try await makeDispatcher()
@@ -81,14 +77,15 @@ struct SurfaceHintAndMoveWingTests {
             !searchText.contains("found 0 memory"),
             "search must return at least one hit; got: \(searchText)"
         )
-        // The "No results" hint must NOT be present because results were returned.
+        // The no-results hint must NOT be present because results were returned.
+        // Hint text matches Rust coaching_engine.rs trigger 2.
         #expect(
-            !searchText.contains("No results"),
+            !searchText.contains("no memories matched"),
             "No-results hint must not fire when search returned results; got: \(searchText)"
         )
         #expect(
-            !searchText.contains("Try broader terms"),
-            "Try-broader-terms hint must not fire when search returned results; got: \(searchText)"
+            !searchText.contains("broaden the query"),
+            "Broaden-query hint must not fire when search returned results; got: \(searchText)"
         )
     }
 
@@ -113,17 +110,18 @@ struct SurfaceHintAndMoveWingTests {
             "zero-result search must report 0 memories; got: \(searchText)"
         )
         // The coaching hint must fire on genuine zero results.
+        // Hint text matches Rust coaching_engine.rs trigger 2.
         #expect(
-            searchText.contains("No results") || searchText.contains("broader"),
+            searchText.contains("no memories matched") || searchText.contains("broaden the query"),
             "No-results coaching hint must fire when search returned 0 hits; got: \(searchText)"
         )
     }
 
     // MARK: - Bug J: move_memory must honor the wing argument
 
-    /// File a memory into wing "Projects", then move it to wing "Professional"
-    /// via moot_move_memory. Verify it is now recalled under "Professional" and
-    /// NOT recalled when scoped to "Projects".
+    /// File a memory into wing "OriginWing", then move it to wing "TargetWing"
+    /// via moot_move_memory. Verify it is now recalled under "TargetWing" and
+    /// NOT recalled when scoped to "OriginWing".
     ///
     /// Before the fix: ReanchorFrame had no toWing field; the wing arg was
     /// silently ignored and the drawer stayed in its original wing.
@@ -131,7 +129,7 @@ struct SurfaceHintAndMoveWingTests {
     func moveMemoryHonorsWing() async throws {
         let dispatcher = try await makeDispatcher()
 
-        // File a memory into a specific room (the default wing "Agentic Memory" is used).
+        // File a memory into wing "OriginWing" (explicitly passed; not using the default wing).
         let fileResult = try await dispatcher.dispatch(
             name: "moot_file_memory",
             arguments: .object([

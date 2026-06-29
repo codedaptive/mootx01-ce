@@ -13,6 +13,9 @@ pub struct Anchor {
 
     /// The Wikidata Q-ID for the primary concept, or `None` if
     /// the resolver could not find a confident match.
+    /// Explicit rename: camelCase auto-rename produces "wikidataQid" but
+    /// Swift's Codable encodes the property name verbatim as "wikidataQID".
+    #[serde(rename = "wikidataQID")]
     pub wikidata_qid: Option<String>,
 
     /// Confidence packed into the substrate provenance
@@ -41,5 +44,20 @@ mod tests {
         let json = serde_json::to_string(&anchor).expect("serialize");
         let decoded: Anchor = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, anchor);
+    }
+
+    #[test]
+    fn anchor_json_key_matches_swift_codable() {
+        // Swift encodes the property as "wikidataQID" (capital QID),
+        // not "wikidataQid" (which camelCase auto-rename would produce).
+        let anchor = Anchor {
+            code: "547".to_string(),
+            wikidata_qid: Some("Q11165".to_string()),
+            confidence: 32,
+            data_version: "0.1.0".to_string(),
+        };
+        let json = serde_json::to_string(&anchor).expect("serialize");
+        assert!(json.contains("\"wikidataQID\""), "JSON must use wikidataQID (capital QID) to match Swift: {json}");
+        assert!(!json.contains("\"wikidataQid\""), "JSON must NOT use wikidataQid (lowercase id): {json}");
     }
 }

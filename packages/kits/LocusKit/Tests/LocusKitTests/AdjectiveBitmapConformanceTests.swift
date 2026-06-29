@@ -92,7 +92,7 @@ struct AdjectiveBitmapConformanceTests {
         for entry in Self.sensitivityTable {
             let bitmap = Int64(entry.expectedRaw) << 6
             let drawer = Drawer(
-                content: "c", wing: "w", room: "r", addedBy: "test",
+                content: "c", parentNodeId: "test-parent", addedBy: "test",
                 filedAt: Date(timeIntervalSince1970: 0),
                 embeddingModelID: "minilm-v6",
                 adjectiveBitmap: bitmap
@@ -126,7 +126,7 @@ struct AdjectiveBitmapConformanceTests {
         for entry in Self.exportabilityTable {
             let bitmap = Int64(entry.expectedRaw) << 12
             let drawer = Drawer(
-                content: "c", wing: "w", room: "r", addedBy: "test",
+                content: "c", parentNodeId: "test-parent", addedBy: "test",
                 filedAt: Date(timeIntervalSince1970: 0),
                 embeddingModelID: "minilm-v6",
                 adjectiveBitmap: bitmap
@@ -173,7 +173,7 @@ struct AdjectiveBitmapConformanceTests {
         for entry in Self.trustTable {
             let bitmap = Int64(entry.expectedRaw) << 18
             let drawer = Drawer(
-                content: "c", wing: "w", room: "r", addedBy: "test",
+                content: "c", parentNodeId: "test-parent", addedBy: "test",
                 filedAt: Date(timeIntervalSince1970: 0),
                 embeddingModelID: "minilm-v6",
                 adjectiveBitmap: bitmap
@@ -196,7 +196,7 @@ struct AdjectiveBitmapConformanceTests {
             | (Int64(Trust.observed.rawValue) << 18)
         #expect(raw == 0x40402, "composite encoding mismatch: \(raw) != 0x40402")
         let drawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             adjectiveBitmap: raw
@@ -213,7 +213,7 @@ struct AdjectiveBitmapConformanceTests {
     func dreamingRecalcRequiredAtBit26() {
         // Default zero ⇒ flag false.
         let zeroDrawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             adjectiveBitmap: 0
@@ -222,7 +222,7 @@ struct AdjectiveBitmapConformanceTests {
 
         // Bit 26 set ⇒ flag true.
         let flaggedDrawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             adjectiveBitmap: Int64(1) << 26
@@ -231,7 +231,7 @@ struct AdjectiveBitmapConformanceTests {
 
         // High bits don't leak in (bit 27, 28 etc. set without bit 26 ⇒ flag false).
         let neighborBitsDrawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             adjectiveBitmap: Int64(1) << 27
@@ -248,7 +248,7 @@ struct AdjectiveBitmapConformanceTests {
             | (Int64(1) << 26)
 
         let drawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             adjectiveBitmap: raw

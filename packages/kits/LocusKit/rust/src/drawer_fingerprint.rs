@@ -235,8 +235,7 @@ mod tests {
         let mut d = Drawer::new(
             "d1",
             "hello",
-            "study",
-            "notes",
+            "test-parent",
             "alice",
             1_700_000_000,
             "test-v1",
@@ -402,9 +401,9 @@ mod tests {
 
     /// I-17 deterministic null: cross-noun-deferred sub-fields take
     /// zero, so two drawers identical in their populated fields produce
-    /// bit-identical fingerprints. Establishes that the deferred slots
-    /// (defer pattern, completion bucket, recency, stream source, QID
-    /// closure) are not accidentally being seeded from elsewhere.
+    /// bit-identical fingerprints. Establishes that the AmbientSample-only
+    /// deferred slots (defer pattern, completion bucket, behavioral recency,
+    /// stream-source bitset) are not accidentally being seeded from elsewhere.
     #[test]
     fn i17_null_holds_for_identical_drawers() {
         let fam = EstateFingerprintFamilies::new(UUID_A);

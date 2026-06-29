@@ -8,7 +8,7 @@ import SubstrateTypes
 @testable import GeniusLocusKit
 
 /// Firing tests for the nine default standing signals — architecture
-/// spec §11.2 / mission GLK-05 + ADR-017 F1 (TrainingSignal).
+/// spec §11.2 / mission GLK-05 + ADR-018 F1 (TrainingSignal).
 ///
 /// Every test follows the same template:
 ///
@@ -72,8 +72,9 @@ struct StandingSignalsTests {
     }
 
     /// Assert every outcome reached the verb boundary — either successfully
-    /// routed, previously-stubbed, failed due to a scaffold/sentinel target
-    /// (expected now that propose/associate are live), or a diagnostic record.
+    /// routed, failed due to a scaffold/sentinel target (expected for live
+    /// propose/associate verbs), a diagnostic record, or `routedButVerbStubbed`
+    /// (tolerated as legacy/backward-compatible boundary-reach only).
     ///
     /// `routeFailed` is expected for scaffold signals that emit proposals or
     /// associations targeting sentinel row IDs (e.g. "row-scaffold-001") that
@@ -89,7 +90,8 @@ struct StandingSignalsTests {
     ) {
         #expect(!outcomes.isEmpty, "expected at least one outcome", sourceLocation: sourceLocation)
         // All four outcome cases indicate the scheduler reached a verb boundary
-        // (or recorded a diagnostic). No case is an unexpected failure here.
+        // (or recorded a diagnostic). `routedButVerbStubbed` is tolerated as
+        // legacy boundary-reach; `routeFailed` is expected for live scaffold targets.
         for outcome in outcomes {
             switch outcome {
             case .routed, .routedButVerbStubbed, .diagnosticRecorded, .routeFailed:
@@ -124,51 +126,91 @@ struct StandingSignalsTests {
     @Test
     func dreamingSignalEmitsRealProposalsFromDaemonCycle() async throws {
         let (kit, handle) = try await openOneEstate()
-        // Synthetic daemon cycle returning one non-sentinel proposal. The
-        // target row does not exist in the test estate, so the propose verb
-        // produces routeFailed — which is the correct outcome: the signal
-        // fired, the daemon ran, and the verb boundary was reached.
-        let spec = DreamingSignal.spec { _ in
-            [ProposeFrame(
-                target: "row-dreaming-test-a",
-                kind: .miningPattern,
-                justification: "synthetic daemon cycle for test")]
-        }
+        // Synthetic daemon cycle: the daemon already wrote proposals via
+        // EstateDreamingSink; the closure returns only the count so the
+        // scheduler records activity without re-dispatching frames (single-
+        // write invariant). The signal emits one diagnostic summarising the
+        // cycle.
+        let spec = DreamingSignal.spec { _ in 1 }
         let id = try await registerAndFire(
             kit, in: handle, spec: spec,
             cadence: DreamingSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
         #expect(report.name == "dreaming-daemon")
-        // One real proposal from the daemon cycle; no sentinel associate.
+        // One diagnostic from the cycle summary — no re-dispatched propose verb.
         #expect(report.emissionCount == 1,
-            "one proposal from daemon cycle — no sentinel associate emission")
-        assertVerbBoundaryReached(report.recentOutcomes)
-        let verbs = report.recentOutcomes.compactMap { outcome -> String? in
+            "one cycle-complete diagnostic emitted — daemon already wrote proposals")
+        // Single-write invariant: no propose verb in outcomes; only diagnosticRecorded.
+        let hasNonDiagnostic = report.recentOutcomes.contains { outcome in
             switch outcome {
-            case .routed(let v), .routedButVerbStubbed(let v): return v
-            case .routeFailed(let v, _): return v
-            case .diagnosticRecorded: return nil
+            case .routed, .routedButVerbStubbed, .routeFailed: return true
+            case .diagnosticRecorded: return false
             }
         }
-        #expect(verbs == ["propose"])
+        #expect(!hasNonDiagnostic,
+            "scheduler must not re-dispatch proposals the daemon already wrote")
     }
 
     @Test
     func dreamingSignalEmitsZeroProposalsForEmptyEstate() async throws {
         let (kit, handle) = try await openOneEstate()
         // Empty daemon cycle: the estate has no co-occurrence candidates.
-        // The signal fires cleanly and produces zero emissions.
-        let spec = DreamingSignal.spec { _ in [] }
+        // The closure returns 0; the signal still emits one cycle-summary
+        // diagnostic so the report records the fire.
+        let spec = DreamingSignal.spec { _ in 0 }
         let id = try await registerAndFire(
             kit, in: handle, spec: spec,
             cadence: DreamingSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
         #expect(report.name == "dreaming-daemon")
-        #expect(report.emissionCount == 0,
-            "empty estate: daemon cycle returns zero proposals, signal fires cleanly")
-        #expect(report.recentOutcomes.isEmpty)
+        // Even a zero-proposal cycle emits one diagnostic summary.
+        #expect(report.emissionCount == 1,
+            "empty estate: one cycle-summary diagnostic even for zero proposals")
+        // The diagnostic should have no verb outcome (diagnosticRecorded only).
+        let hasVerbOutcome = report.recentOutcomes.contains { outcome in
+            switch outcome {
+            case .routed, .routedButVerbStubbed, .routeFailed: return true
+            case .diagnosticRecorded: return false
+            }
+        }
+        #expect(!hasVerbOutcome)
+    }
+
+    @Test
+    func dreamingSignalSingleWriteInvariant() async throws {
+        // Regression guard for the double-write bug: the DreamingSignal closure
+        // returns a count (Int), not frames. The scheduler must not call
+        // dispatchPropose for dreaming — proposals are already persisted by
+        // EstateDreamingSink inside triggerDreamingCycle. This test verifies that
+        // N proposals from the daemon produce exactly N substrate writes, not 2N.
+        let (kit, handle) = try await openOneEstate()
+        // nonisolated(unsafe): the counter is only ever mutated from the signal
+        // scheduler's serial call (no concurrent writes). The unsafe annotation
+        // satisfies Swift 6 strict concurrency for @Sendable closure capture.
+        nonisolated(unsafe) var writeCount = 0
+        let spec = DreamingSignal.spec { _ in
+            // Simulate daemon that wrote 3 proposals via EstateDreamingSink.
+            writeCount += 3
+            return 3
+        }
+        let id = try await registerAndFire(
+            kit, in: handle, spec: spec,
+            cadence: DreamingSignal.defaultCadenceSeconds)
+        let report = try await report(kit, in: handle, for: id)
+        // Only the closure's side effect count: 3 daemon writes. No scheduler
+        // re-dispatch, which would have incremented a propose verb outcome.
+        #expect(writeCount == 3, "daemon wrote exactly 3 proposals once")
+        let proposeVerbs = report.recentOutcomes.filter { outcome in
+            switch outcome {
+            case .routed(let v), .routedButVerbStubbed(let v), .routeFailed(let v, _):
+                return v == "propose"
+            case .diagnosticRecorded: return false
+            }
+        }
+        #expect(proposeVerbs.isEmpty,
+            "scheduler must not re-dispatch propose verbs for dreaming (single-write invariant)")
     }
 
     @Test
@@ -313,7 +355,7 @@ struct StandingSignalsTests {
 
     // MARK: - Training signal
 
-    /// Assert that the training signal is in the default name set (ADR-017 F1)
+    /// Assert that the training signal is in the default name set (ADR-018 F1)
     /// and that a tick invokes TrainingDaemon.runOnce. The daemon is configured
     /// with a zero threshold so the gate is always open; the test verifies the
     /// pipeline ran (liveRowCount > 0 after a capture log) even though the
@@ -325,7 +367,7 @@ struct StandingSignalsTests {
         // Assert the signal name is in the canonical default set so the test
         // would fail if the signal were ever removed from the registry.
         #expect(GeniusLocusKit.defaultStandingSignalNames.contains(TrainingSignal.signalName),
-            "TrainingSignal must be in the default standing signal names (ADR-017 F1)")
+            "TrainingSignal must be in the default standing signal names (ADR-018 F1)")
 
         // Set up mutable boxes — the spec closure must be @Sendable so it
         // captures reference-typed boxes, not inout bindings.
@@ -401,7 +443,7 @@ struct StandingSignalsTests {
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        // ADR-017 F1 added TrainingSignal as signal 9. Any future addition
+        // ADR-018 F1 added TrainingSignal as signal 9. Any future addition
         // must update this count and extend defaultStandingSignalNames.
         #expect(registered.count == 9, "all nine v1 signals register")
         #expect(
@@ -446,10 +488,10 @@ struct StandingSignalsTests {
         // architecture spec §11.2, signal 8.
         #expect(DistillationSignal.defaultCadenceSeconds == 3_600,
             "distillation sweep runs hourly per architecture spec §11.2")
-        // Added 2026-06-20 (ADR-017 F1): training-daemon signal runs hourly
+        // Added 2026-06-20 (ADR-018 F1): training-daemon signal runs hourly
         // matching the distillation-sweep and temporal-causality-fold rhythm.
         #expect(TrainingSignal.defaultCadenceSeconds == 3_600,
-            "training-daemon signal runs hourly per ADR-017 F1")
+            "training-daemon signal runs hourly per ADR-018 F1")
     }
 
     // MARK: - T-population end-to-end

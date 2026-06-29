@@ -38,11 +38,18 @@ public enum DreamingSignal {
     /// Build a signal spec that invokes the dreaming daemon on each fire.
     ///
     /// The `daemonCycle` closure is called with the scheduler's `now` and
-    /// returns the proposals the daemon emitted. An empty array is correct
+    /// returns the number of proposals the daemon emitted. Zero is correct
     /// when the estate has no co-occurrence candidates to mine. On error, the
     /// closure's throw is caught and surfaced as a `.diagnostic` emission so
     /// the scheduler's signal log records the failure without silencing the
     /// signal.
+    ///
+    /// **Single-write invariant:** the daemon writes proposals directly to
+    /// the estate via `EstateDreamingSink.propose` (which calls `kit.propose`).
+    /// The scheduler MUST NOT re-dispatch those same frames — doing so would
+    /// write each proposal twice. The closure therefore returns a count (not
+    /// frames), and the signal emits a diagnostic summarising the cycle rather
+    /// than re-issuing `SignalEmission.propose` for frames already persisted.
     ///
     /// **Usage:** construct a `DreamingDaemon` (NeuronKit) once with production
     /// adapters and capture it in the closure:
@@ -52,7 +59,7 @@ public enum DreamingSignal {
     ///     let store  = InMemoryDreamingPolicyStore()
     ///     let daemon = NeuronKit.dreamingDaemon(reader: reader, sink: sink, policyStore: store)
     ///     let spec   = DreamingSignal.spec { now in
-    ///         try await daemon.triggerDreamingCycle(now: now).proposalsEmitted
+    ///         try await daemon.triggerDreamingCycle(now: now).proposalsEmitted.count
     ///     }
     ///     let id = try await kit.registerStandingSignal(spec, in: handle, now: now)
     ///
@@ -60,7 +67,7 @@ public enum DreamingSignal {
     /// scheduler's `.single` concurrency policy, which together guarantee at most
     /// one cycle runs at a time per estate.
     public static func spec(
-        daemonCycle: @escaping @Sendable (Date) async throws -> [ProposeFrame]
+        daemonCycle: @escaping @Sendable (Date) async throws -> Int
     ) -> SignalSpec {
         SignalSpec(
             name: signalName,
@@ -69,17 +76,15 @@ public enum DreamingSignal {
             concurrencyPolicy: .single,
             emit: { context in
                 do {
-                    let proposals = try await daemonCycle(context.now)
-                    // Map each ProposeFrame (substrate verb frame) to the Brain
-                    // layer's ProposalFrame (SignalEmission.propose). Both types
-                    // are in GeniusLocusKit; the scheduler converts ProposalFrame
-                    // back to ProposeFrame before dispatching to the verb surface.
-                    return proposals.map { frame in
-                        SignalEmission.propose(ProposalFrame(
-                            target: frame.target,
-                            kind: frame.kind,
-                            justification: frame.justification))
-                    }
+                    let proposalCount = try await daemonCycle(context.now)
+                    // The daemon already persisted proposals via EstateDreamingSink.
+                    // The scheduler must NOT re-dispatch them — that would be a
+                    // double-write. Instead, emit a single diagnostic summarising
+                    // the cycle so the signal report records activity.
+                    return [.diagnostic(DiagnosticReport(
+                        title: "dreaming-daemon.cycle.complete",
+                        detail: "proposals emitted this cycle: \(proposalCount)",
+                        observedAt: context.now))]
                 } catch {
                     // Surface daemon errors as a diagnostic rather than crashing
                     // the scheduler's drain loop. The error appears in the signal's

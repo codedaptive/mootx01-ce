@@ -19,11 +19,27 @@ import PersistenceKitInMemory
 import QueueKit
 import LocusKit
 
+// T5 (ADR-021 Decision 7): the signals queue is now the SHARED per-estate
+// encrypted queue — the same `queue.sqlite` sibling that carries the encode
+// stream. The scheduler's jobs are isolated by `stream_id = "signals"` so
+// the drain path never claims encode (or future dreaming) jobs.
+// Backend selection (parallel to CorpusIngestQueue T4):
+//   - SQLite estate → PersistenceKitBackend over queueSibling("queue.sqlite")
+//   - InMemory estate → PersistenceKitBackend over a fresh InMemoryStorage
+// The queue and (for SQLite) the drain lease are received from
+// `ensureScheduler` in SignalAPI.swift, which has access to the estate's
+// storage configuration through `storages[handle]`.
+
 /// The standing-signals scheduler — one per estate.
 ///
-/// Architecture: the scheduler owns a single QueueKit instance backed
-/// by `PersistenceKitBackend` over `InMemoryStorage`. The RAM-backed
-/// queue is the serial dispatch substrate decided in
+/// Architecture: the scheduler owns a single QueueKit instance backed by
+/// `PersistenceKitBackend`. Backend selection (T5, ADR-021 Decision 7):
+///   - SQLite estate → shared encrypted `queue.sqlite` beside the estate,
+///     so standing signals are crash-durable and survive process restarts.
+///   - InMemory estate → transient in-memory backend (estate is ephemeral
+///     so durability is irrelevant and would waste memory).
+///
+/// The queue is the serial dispatch substrate decided in
 /// `docs/decisions/DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21.md`:
 /// QueueKit's `drainAvailable()` claim runs at `.serializable`
 /// isolation behind a status guard, so exactly one drainer ever
@@ -71,11 +87,19 @@ public actor StandingSignalScheduler {
     /// across estates.
     public let handle: EstateHandle
 
-    /// QueueKit instance backing the serial lane. Mounted on a
-    /// dedicated InMemoryStorage so scheduler state does not collide
-    /// with estate substrate writes — the queue is a transient
-    /// dispatch surface, not durable history.
-    private let queue: QueueKit
+    /// QueueKit instance backing the serial lane. Backend is
+    /// selected by `ensureScheduler` in `SignalAPI.swift` (T5):
+    ///   - SQLite estate → shared `queue.sqlite` sibling (crash-durable)
+    ///   - InMemory estate → transient in-memory backend
+    /// Internal so the GC sweep in `DreamingQueueAPI.sweepStaleInFlightJobs`
+    /// can call `reclaimInFlight` on the signals queue when its drain lease
+    /// is stale (crash-recovery GC, Mission #54).
+    internal let queue: QueueKit
+
+    /// Stream-keyed drain lease for SQLite estates (T2, ADR-021). nil
+    /// for InMemory estates (single-process, no cross-process contention).
+    /// The scheduler holds the lease so `SignalAPI` can release it on close.
+    internal let drainLease: DrainLease?
 
     /// HLC generator used to stamp jobs. The scheduler does not need
     /// the HLC for ordering (jobs are drained in FIFO order from
@@ -85,9 +109,10 @@ public actor StandingSignalScheduler {
     /// actor isolation serialises every mutation.
     private var hlcGenerator: HLCGenerator
 
-    /// Stream identifier used on every job the scheduler enqueues. A
-    /// single stream so all signals share one drainer per estate per
-    /// the serial-lane decision.
+    /// Stream identifier used on every job the scheduler enqueues.
+    /// Fixed as `"signals"` (T5, ADR-021 Decision 7) so the signals
+    /// drainer never claims encode or future dreaming jobs that share
+    /// the same `queue.sqlite`.
     private let streamID: StreamID
 
     /// Registered signals, keyed by SignalID. Holds the spec including
@@ -141,30 +166,41 @@ public actor StandingSignalScheduler {
     /// non-nil error on a routing failure.
     private let dispatcher: SignalDispatcher
 
-    /// Construct a scheduler for one estate. The QueueKit instance is
-    /// freshly minted on an `InMemoryStorage` with the QueueKit
-    /// schema applied. Async because schema declaration is async.
+    /// Construct a scheduler for one estate.
+    ///
+    /// The caller is responsible for building the `QueueKit` backend and
+    /// (optionally) the `DrainLease` before constructing the scheduler.
+    /// `ensureScheduler(for:)` in `SignalAPI.swift` selects the backend
+    /// based on the estate's storage configuration (T5, ADR-021 Decision 7):
+    ///   - SQLite estate → `PersistenceKitBackend` over `queue.sqlite` sibling
+    ///   - InMemory estate → `PersistenceKitBackend` over `InMemoryStorage`
+    ///
+    /// Not async itself — schema is applied before the queue is passed in.
+    ///
+    /// - Parameters:
+    ///   - handle: The estate this scheduler serves.
+    ///   - hlcGenerator: HLC stamp generator for queue job ordering.
+    ///   - dispatcher: Routing surface for `propose` and `associate` emissions.
+    ///   - queue: Pre-built QueueKit instance (schema already open).
+    ///   - drainLease: Stream-keyed drain lease for SQLite estates; nil for
+    ///     InMemory estates (no cross-process contention needed).
     public init(
         handle: EstateHandle,
         hlcGenerator: HLCGenerator,
-        dispatcher: SignalDispatcher
-    ) async throws {
+        dispatcher: SignalDispatcher,
+        queue: QueueKit,
+        drainLease: DrainLease? = nil
+    ) {
         self.handle = handle
         self.hlcGenerator = hlcGenerator
-        self.streamID = StreamID(
-            rawValue: "glk_scheduler_\(handle.estateUUID.uuidString.lowercased())")
+        // T5 (ADR-021 Decision 7): all scheduler jobs are stamped with
+        // stream_id = "signals" so the drain path is isolated to signal
+        // jobs and never claims encode or future dreaming jobs that share
+        // the same queue.sqlite.
+        self.streamID = StreamID(rawValue: "signals")
         self.dispatcher = dispatcher
-        // The scheduler's queue is a transient dispatch substrate, so
-        // the PersistenceKitInMemory backend is appropriate — no
-        // persistence, no cross-estate sharing. We mint a fresh
-        // configuration whose estateID matches the scheduler's
-        // EstateHandle so diagnostics correlate cleanly.
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: handle.estateUUID,
-            backend: .inMemory))
-        try await PersistenceKitBackend.openSchema(on: storage)
-        let backend = PersistenceKitBackend(storage: storage)
-        self.queue = QueueKit(backend: backend)
+        self.queue = queue
+        self.drainLease = drainLease
         Self.logger.debug("StandingSignalScheduler opened for estate \(handle.estateUUID, privacy: .public)")
     }
 
@@ -381,8 +417,12 @@ public actor StandingSignalScheduler {
         // returns once all enqueued work has been applied — there is
         // no background drainer task in GLK-04; the kit's actor model
         // already serialises across callers.
+        //
+        // T5 (ADR-021 Decision 7): drain only the "signals" stream so
+        // we never claim encode or future dreaming jobs that share
+        // the same queue.sqlite (T1 stream-scoped drain).
         while true {
-            let batch = try await queue.drain()
+            let batch = try await queue.drain(stream: streamID)
             if batch.isEmpty { break }
             for entry in batch {
                 let (jobID, signalID, emission) = try Self.decodeJob(entry.job)

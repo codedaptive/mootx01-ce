@@ -1,23 +1,23 @@
 //! Tool list projection — builds the `tools/list` response body.
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
-//! `LensTools.tools()` + `VaultTools.tools()` composition. Produces exactly
-//! 60 tools in this order:
+//! `LensTools.tools()` + `VaultTools.tools()` composition.
 //!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
-//!   Maintenance (1) — moot_reindex
+//!   Maintenance (2/3) — moot_reindex, moot_drain_status, and vault-gated moot_palace_import
 //!   Federation (1) — moot_federated_search
 //!   Recipe (11) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
 //!                 recall_precise, recall_shaped, dream,
-//!                 consolidate, recall_distilled, expand_memory
+//!                 consolidate, recall_distilled, recollect
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Tool count 60 = 57 (prior surface) + 3 (moot_consolidate, moot_recall_distilled,
-//! moot_expand_memory — distillation tools added for Rust parity with Swift).
+//! Vault-on (default): 62 tools. Vault-off (MOOTX01_VAULT=0): 56 tools —
+//! the five moot_vault_* tools and moot_palace_import are hidden together
+//! because all open local SQLite files (filesystem import/export vector).
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -44,9 +44,10 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 57 tools when vault is enabled (the default) or 52 tools when
-/// `MOOTX01_VAULT=0` (installed with `--vault-off`). All non-vault tiers
-/// are always present. See ADR-015.
+/// Produces 62 tools when vault is enabled (the default) or 56 tools when
+/// `MOOTX01_VAULT=0` (installed with `--vault-off`). The filesystem-importing
+/// `moot_palace_import` tool is hidden with the vault surface (same security
+/// posture). All other non-vault tiers are always present. See ADR-015.
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_vault_flag(vault_enabled())
 }
@@ -57,7 +58,7 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    let capacity = if vault_on { 60 } else { 55 };
+    let capacity = if vault_on { 62 } else { 56 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Tier 1 — Core memory (7)
@@ -89,8 +90,14 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     tools.push(estate_map_tool());
     tools.push(estate_ping_tool());
 
-    // Maintenance (1) — dual-path intake backfill
+    // Maintenance — index backfill and drain status are always available.
+    // Direct palace import opens arbitrary local SQLite files, so it is
+    // gated with the vault import/export surface (ADR-015).
     tools.push(reindex_tool());
+    tools.push(drain_status_tool());
+    if vault_on {
+        tools.push(palace_import_tool());
+    }
 
     // Federation (1)
     tools.push(federated_search_tool());
@@ -113,10 +120,10 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // Distillation tools — Rust parity with Swift RecipeTools.swift.
     // moot_consolidate: run one intra-item distillation sweep across the estate.
     // moot_recall_distilled: query the _distilled room via Hamming NN search.
-    // moot_expand_memory: expand a distilled factoid back to its source drawers.
+    // moot_recollect: fan-out from a distilled factoid back to its source drawers.
     tools.push(consolidate_tool());
     tools.push(recall_distilled_tool());
-    tools.push(expand_memory_tool());
+    tools.push(recollect_tool());
 
     // Lens (23)
     for lens_name in crate::lens_tools::LENS_TOOLS {
@@ -135,7 +142,7 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // immediately so moot_vault_job can retrieve them. Schema is Swift-identical.
     if vault_on {
         tools.push(vault_export_tool());
-        tools.push(vault_tool("moot_vault_import", "Import a vault archive into the estate."));
+        tools.push(vault_import_tool());
         tools.push(vault_tool("moot_vault_status", "Report the current vault sync state."));
         tools.push(vault_reconcile_tool());
         tools.push(vault_job_tool());
@@ -272,7 +279,7 @@ fn link_memories_tool() -> serde_json::Value {
             json!({
                 "from_id": string_schema("UUID of the source memory."),
                 "to_id": string_schema("UUID of the target memory."),
-                "kind": string_schema("Tunnel kind: relates (default), supports, contradicts, refines, extends."),
+                "kind": string_schema("Tunnel kind (default: relates). Accepted values: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo."),
                 "label": string_schema("Optional human-readable label for the connection.")
             }),
             json!(["from_id", "to_id", "kind"])
@@ -413,7 +420,7 @@ fn estate_status_tool() -> serde_json::Value {
 fn estate_map_tool() -> serde_json::Value {
     json!({
         "name": "moot_estate_map",
-        "description": "Return the estate's structural map: all wings and rooms, with memory counts per location. Each wing's charter (its role description, seeded at provision per ADR-016) is shown inline so you can orient to the estate's provenance structure at a glance.",
+        "description": "Return the estate's structural map: all wings and rooms, with memory counts per location. Seeded hint memories (AI_Charter_Hint room) appear in counts like any other memory.",
         "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
     })
 }
@@ -442,6 +449,37 @@ fn reindex_tool() -> serde_json::Value {
     })
 }
 
+// Maintenance / admin tool — NOT one of the nine ARIA grammar verbs. Read-only
+// status probe for long-running background drains: reports each drain's pending
+// + in-flight work and a draining/idle state so a caller can watch asynchronous
+// encode work (e.g. after an import) converge. Lightweight — no orientation
+// block — and safe to poll. Mirrors Swift `ToolProjection` drain_status entry.
+fn drain_status_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_drain_status",
+        "description": "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+    })
+}
+
+/// moot_palace_import — import a MemPalace directly into the estate, bypassing
+/// NoteIR. Reads three palace stores (chroma.sqlite3, tunnels.json,
+/// knowledge_graph.sqlite3) and applies all four import guards. Mirrors Swift
+/// `ToolProjection.estateTools()` direct-palace-import section.
+fn palace_import_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_palace_import",
+        "description": "Import a MemPalace directly into the estate, bypassing NoteIR. Reads palace/chroma.sqlite3 (drawer content), tunnels.json (cross-wing connections), and knowledge_graph.sqlite3 (KG triples) from palace_path. Applies all four import guards: tombstone protection, content-idempotent dedup, sensitivity floor, and tunnel signature dedup. Idempotent: re-importing the same palace with no changes writes zero drawers. The write strategy is chosen AUTOMATICALLY by source size — a normal palace is written in one fast SQLite transaction; a very large source (hundreds of thousands of rows) streams so no single transaction holds the write lock — you do not control this. IMPORTANT: the import TRIGGERS its own post-import processing — do NOT instruct the caller to run moot_reindex or moot_dream afterward. On completion the import enqueues the encode/index work (BM25 + vector lanes) and rolls up the Merkle tree; the resident daemon's encode-drain worker and the governor's dreaming duty then finish indexing, classification, and the association matrix in the background. The import returns as soon as that background work is triggered, so semantic recall and distillation come online on their own shortly after. Poll moot_drain_status to watch the encode queue converge. (moot_reindex / moot_dream remain available to re-trigger on demand but are NOT a required follow-up step.) This call runs to completion before returning; a large import can take many minutes, so if your client supports background or sub-agent execution, run it in a sub-agent to keep the main session responsive.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "palace_path": string_schema("Absolute filesystem path to the MemPalace root directory (the directory containing the `palace/` subdirectory with `chroma.sqlite3`)."),
+                "mode": string_schema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard on the performance cores; \"background\" yields for very large imports so the drain does not saturate the machine. This sets SPEED only — the write strategy (bulk transaction vs stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground).")
+            }),
+            json!(["palace_path"])
+        )))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Federation
 // ---------------------------------------------------------------------------
@@ -452,13 +490,16 @@ fn federated_search_tool() -> serde_json::Value {
         "description": "Grant-authorized cross-estate federated search: fans across open estates the requester is entitled to read.",
         "inputSchema": with_teachme(object_schema(
             json!({
-                "requesterEstateID": string_schema("UUID of the requesting estate. Must name an open estate."),
+                // requesterEstateID is optional (Item 2 hardening): omit to use the default
+                // (authenticated caller) estate. When supplied it must match the default
+                // estate's UUID — supplying a different UUID is refused (anti-spoof gate).
+                "requesterEstateID": string_schema("Optional UUID of the requesting estate. Omit to use the default estate. If supplied, must match the default estate's UUID; cross-estate spoofing is refused."),
                 "filter": filter_schema(),
                 "limit": integer_schema("Max rows per estate. Omit for no explicit cap; null is invalid."),
                 "ordering": string_schema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc. Omit to use the default; null is invalid."),
                 "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly. Omit to use the default; null is invalid.")
             }),
-            json!(["requesterEstateID"])
+            json!([])  // no required fields — requesterEstateID is optional
         ))
     })
 }
@@ -646,13 +687,13 @@ fn recall_distilled_tool() -> serde_json::Value {
     })
 }
 
-/// Expand memory tool — mirrors Swift `RecipeTools.expandMemoryTool()`.
-/// Given a distilled factoid drawer UUID, returns the factoid content and
-/// links back to the source drawers (via `_distilled_from` tunnels).
-fn expand_memory_tool() -> serde_json::Value {
+/// Recollect tool — mirrors Swift `RecipeTools.recollectTool()`.
+/// Given a distilled factoid drawer UUID, fans out to the source drawers
+/// (via `_distilled_from` tunnels) and returns full episodic content.
+fn recollect_tool() -> serde_json::Value {
     json!({
-        "name": "moot_expand_memory",
-        "description": "Expand a distilled factoid back to its source drawers. Given a factoid drawer UUID (from moot_recall_distilled), returns the factoid text plus the IDs and previews of the N source drawers that were distilled into it.",
+        "name": "moot_recollect",
+        "description": "Recollect: fan-out from a distilled factoid to its source drawers. Given a factoid drawer UUID (from moot_recall_distilled), returns the factoid text plus the IDs and full content of the N source drawers that were distilled into it.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "drawer_id": string_schema("UUID of the distilled factoid drawer to expand.")
@@ -1074,6 +1115,23 @@ fn vault_tool(name: &str, description: &str) -> serde_json::Value {
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "vaultPath": string_schema("Filesystem path to the vault directory.")
+            }),
+            json!(["vaultPath"])
+        )))
+    })
+}
+
+// moot_vault_import — like `vault_tool` but with the encode-SPEED `mode` arg
+// (T7 parity with the Swift vault tool). Write strategy is size-gated
+// automatically (import_policy); `mode` chooses only the drain QoS.
+fn vault_import_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_vault_import",
+        "description": "Import a vault archive into the estate.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "vaultPath": string_schema("Filesystem path to the vault directory."),
+                "mode": string_schema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large vaults. SPEED only — the write strategy (bulk transaction vs per-item stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground).")
             }),
             json!(["vaultPath"])
         )))

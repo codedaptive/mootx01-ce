@@ -10,9 +10,9 @@
 // owns HTTP/1.1 request parsing, buffered-response writing, and SSE framing.
 //
 // EDITION-NEUTRAL / AUTH-FREE INVARIANT (ADR-LOOPBACKHTTP-001, condition 3):
-// no authentication, authorization, token, Origin, or OAuth logic ever lives
-// here. The library exposes only a generic request -> response (+ streaming)
-// seam; consumers compose credential logic ABOVE the transport (nothing in
+// no authentication policy or OAuth enforcement logic lives here. The library
+// exposes convenience header accessors (`bearerToken`, `origin`) for consumers
+// to read; accept/reject policy is composed ABOVE the transport (nothing in
 // Community Edition, bearer+Origin in moot-mgr, OAuth 2.1 in the EE-only v2
 // remote layer). This keeps the same binary shipping unchanged in both editions.
 //

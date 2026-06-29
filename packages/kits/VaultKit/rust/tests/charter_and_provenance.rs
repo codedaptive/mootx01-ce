@@ -1,9 +1,9 @@
-//! Tests for Bug M (charter duplication) and Bug N (_distilled_from provenance).
+//! Tests for hint-drawer export behaviour and Bug N (_distilled_from provenance).
 //!
-//! Bug M: Exporting an estate that has seeded _charter system drawers must not
-//! include them in the vault export. Importing that vault into a freshly-
-//! provisioned target estate must not duplicate the charter drawers — the charter
-//! count must stay at 7 (the provisioned set), not grow to 14.
+//! Hint-drawer export: hint drawers (AI_Charter_Hint room) are normal drawers —
+//! they export and import like any other drawer. A provisioned estate with 7 hint
+//! drawers + 1 user note exports 8 notes; the AI_Charter_Hint room folder appears
+//! in the vault tree; importing into a fresh estate writes all 8 drawers.
 //!
 //! Bug N: A factoid with a `_distilled_from` provenance tunnel must export such
 //! that the vault note body contains NO `_distilled_from` link text. After
@@ -11,7 +11,7 @@
 //! tunnel must exist in the re-imported estate.
 //!
 //! Mirrors Swift `VaultBridgeTests`:
-//!   - `exportExcludesCharterDrawers()`
+//!   - `exportIncludesHintDrawers()`
 //!   - `distilledFromProvenanceRoundTrips()`
 
 use std::{path::PathBuf, sync::Arc};
@@ -22,7 +22,7 @@ use genius_locus_kit::{
     handle::EstateHandle,
 };
 use locus_kit::{
-    default_wings::{CHARTER_ROOM, DEFAULT_WINGS},
+    default_wings::{HINT_ROOM, DEFAULT_WINGS},
     drawer_operational::CaptureChannel,
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
@@ -34,6 +34,7 @@ use locus_kit::{
 use persistence_kit::{inmemory::InMemoryStorage, storage::Storage};
 use uuid::Uuid;
 use vault_kit::{DrawerMapping, ObsidianAdapter, VaultAdapter, VaultBridge, VaultExportScope};
+use vault_kit::drawer_mapping::resolve_drawer_node_names;
 
 /// Fixed timestamp in milliseconds-since-epoch for determinism.
 const NOW: i64 = 1_750_000_000_000;
@@ -53,8 +54,7 @@ fn make_stores() -> (Arc<dyn DrawerStore>, Arc<dyn Storage>) {
     (store as Arc<dyn DrawerStore>, storage as Arc<dyn Storage>)
 }
 
-/// Standard GLK provision params — LocusOnly so no Corpus/VectorStore sub-stores
-/// are needed (charter seeding only requires the DrawerStore).
+/// Standard GLK provision params.
 fn glk_params(name: &str) -> EstateProvisionParams {
     EstateProvisionParams {
         estate_name: name.to_string(),
@@ -66,7 +66,7 @@ fn glk_params(name: &str) -> EstateProvisionParams {
     }
 }
 
-/// Provision a GLK estate — seeds 7 default wings each with a `_charter` drawer.
+/// Provision a GLK estate — seeds 7 default wings each with an AI_Charter_Hint drawer.
 fn provision_estate(name: &str) -> (EstateCoordinator, EstateHandle) {
     let (store, storage) = make_stores();
     let mut coord = EstateCoordinator::new();
@@ -83,7 +83,7 @@ fn provision_estate(name: &str) -> (EstateCoordinator, EstateHandle) {
     (coord, handle)
 }
 
-/// Open a simple (non-provisioned) in-memory estate. No charter seeding.
+/// Open a simple (non-provisioned) in-memory estate. No hint seeding.
 fn open_simple(name: &str) -> (EstateCoordinator, EstateHandle) {
     let mut coord = EstateCoordinator::new();
     let store: Arc<dyn DrawerStore> = Arc::new(
@@ -95,13 +95,12 @@ fn open_simple(name: &str) -> (EstateCoordinator, EstateHandle) {
     (coord, handle)
 }
 
-/// Build a VaultBridge over the given coordinator (mutable borrow, matching the
-/// existing test helper convention in `wing_vault_layout.rs` and `idempotent_import.rs`).
+/// Build a VaultBridge over the given coordinator.
 fn bridge(coord: &mut EstateCoordinator) -> VaultBridge<'_> {
     VaultBridge::new(
         coord,
         Box::new(ObsidianAdapter::new()),
-        DrawerMapping::new("charter-prov-test", "test-v1", false),
+        DrawerMapping::new("hint-prov-test", "test-v1", false),
     )
 }
 
@@ -128,109 +127,104 @@ fn current_drawers(coord: &EstateCoordinator, handle: &EstateHandle) -> Vec<locu
 
 /// Temp vault directory path.
 fn temp_vault(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("vaultkit-charter-prov-{}-{}", tag, Uuid::new_v4()))
+    std::env::temp_dir().join(format!("vaultkit-hint-prov-{}-{}", tag, Uuid::new_v4()))
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Bug M: charter exclusion from export
+// Hint-drawer export: hint drawers ARE included in vault export
 // ─────────────────────────────────────────────────────────────────
 
-/// Exporting a provisioned estate must NOT include `_charter` system drawers.
-/// Importing that vault into a freshly-provisioned target must not add duplicate
-/// charters — the charter count must remain 7 (the provisioned set), not rise to 14.
+/// Hint drawers (AI_Charter_Hint room) are normal drawers — they export to the
+/// vault alongside user-content drawers. A provisioned estate with 7 hint drawers
+/// + 1 user note must export exactly 8 NoteIR entries. The AI_Charter_Hint
+/// folder must appear in the vault tree. Importing into a fresh estate writes
+/// all 8 drawers.
 ///
-/// Root cause: the export path previously included `room == "_charter"` drawers.
-/// Fix: `DrawerMapping::export` now skips drawers whose `room == CHARTER_ROOM`.
-///
-/// Mirrors Swift `VaultBridgeTests.exportExcludesCharterDrawers`.
+/// Mirrors Swift `VaultBridgeTests.exportIncludesHintDrawers`.
 #[test]
-fn export_excludes_charter_drawers_no_duplicates_on_import() {
+fn export_includes_hint_drawers_as_normal_entries() {
     let expected_wing_count = DEFAULT_WINGS.len(); // 7
+    let expected_total = expected_wing_count + 1;  // 7 hints + 1 user note
 
-    // --- Source estate: provisioned so 7 charter drawers are seeded. ---
-    let (coord1, handle1) = provision_estate("charter-source");
+    // --- Source estate: provisioned so 7 hint drawers are seeded. ---
+    let (coord1, handle1) = provision_estate("hint-source");
 
-    // Capture one user-content drawer so the export has something to write.
+    // Capture one user-content drawer alongside the 7 hint drawers.
     let user_frame = CaptureFrame::new(
-        "A regular user note for charter exclusion test.",
+        "A regular user note for hint-export test.",
         CaptureChannel::Typed,
         "notes",
         LatticeAnchor::udc("000"),
-        "charter-prov-test",
+        "hint-prov-test",
         "test-v1",
     );
     coord1
         .capture(&handle1, user_frame, NOW)
         .expect("capture user note");
 
-    // Export: mapping.export() produces a projection; adapter writes the vault.
-    let vault = temp_vault("bug-m");
+    // Export: all believed drawers including hints.
+    let vault = temp_vault("hint-export");
     std::fs::create_dir_all(&vault).expect("create vault dir");
-    let mapping = DrawerMapping::new("charter-prov-test", "test-v1", false);
+    let mapping = DrawerMapping::new("hint-prov-test", "test-v1", false);
     let projection = mapping
         .export(&coord1, &handle1, NOW, VaultExportScope::Believed)
         .expect("mapping.export");
 
-    // The projection must contain only 1 note (the user note, NOT the 7 charters).
+    // All 8 drawers (7 hints + 1 user note) must be in the projection.
     assert_eq!(
         projection.notes.len(),
-        1,
-        "Bug M: export projection must contain only the 1 user-content note, not the {} charter drawers",
-        expected_wing_count
+        expected_total,
+        "hint-export: projection must contain {} entries (7 hint drawers + 1 user note); got {}",
+        expected_total,
+        projection.notes.len()
     );
 
-    // Write the vault to disk so we can import it.
+    // Write vault to disk via ObsidianAdapter.
     let adapter = ObsidianAdapter::new();
     adapter
         .from_ir(&projection.notes, &vault)
         .expect("adapter.from_ir");
 
-    // Verify no _charter files or folders were written to the vault.
+    // The AI_Charter_Hint room folder must appear in the vault tree (hint drawers
+    // are normal — they export under their wing/<room>/<slug>.md path).
     let vault_entries = walkdir_all(&vault);
-    let charter_entries: Vec<&PathBuf> = vault_entries
+    let hint_entries: Vec<&PathBuf> = vault_entries
         .iter()
-        .filter(|p| p.components().any(|c| c.as_os_str() == "_charter"))
+        .filter(|p| p.components().any(|c| c.as_os_str() == HINT_ROOM))
         .collect();
     assert!(
-        charter_entries.is_empty(),
-        "Bug M: vault must contain no _charter folder or files; found: {:?}",
-        charter_entries
+        !hint_entries.is_empty(),
+        "hint-export: vault must contain AI_Charter_Hint folder/files (hint drawers export normally); found entries: {:?}",
+        walkdir_all(&vault)
     );
 
-    // --- Target estate: provisioned with its own 7 charter drawers. ---
-    let (mut coord2, handle2) = provision_estate("charter-target");
-
-    // Verify the target has exactly 7 charter drawers before import.
-    // Charter drawers are visible via Estate::all_drawers() — the recall
-    // pipeline excludes them, so we must go through the estate directly.
-    let estate2 = coord2.estate_for(&handle2).expect("estate_for");
-    let all_before = estate2.all_drawers().expect("all_drawers before import");
-    let charters_before: Vec<_> = all_before.iter().filter(|d| d.room == CHARTER_ROOM).collect();
-    assert_eq!(
-        charters_before.len(),
-        expected_wing_count,
-        "Bug M: provisioned target must have {} charter drawers before import",
-        expected_wing_count
-    );
-
-    // Import the vault into the target estate.
+    // --- Import vault into a fresh (non-provisioned) estate. ---
+    let (mut coord2, handle2) = open_simple("hint-target");
     let import_report = bridge(&mut coord2)
-        .import_vault(&vault, &handle2, NOW)
+        .import_vault(&vault, &handle2, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import_vault");
+
+    // All 8 drawers must be written (hints are not filtered on import either).
     assert_eq!(
-        import_report.drawers_written, 1,
-        "Bug M: import must write exactly the 1 user-content note, not the charter drawers"
+        import_report.drawers_written,
+        expected_total,
+        "hint-import: all {} drawers (7 hints + 1 user note) must be written into the fresh estate",
+        expected_total
     );
 
-    // Charter count must be unchanged — still 7, not 14.
-    let estate2_post = coord2.estate_for(&handle2).expect("estate_for post-import");
-    let all_after = estate2_post.all_drawers().expect("all_drawers after import");
-    let charters_after: Vec<_> = all_after.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    // Hint drawers must be in recall (they are normal drawers).
+    let recalled = current_drawers(&coord2, &handle2);
+    let names = resolve_drawer_node_names(&coord2, &handle2, &recalled);
+    let hint_recalled: Vec<_> = recalled
+        .iter()
+        .filter(|d| names.get(&d.parent_node_id).map(|(_, r)| r.as_str()) == Some(HINT_ROOM))
+        .collect();
     assert_eq!(
-        charters_after.len(),
+        hint_recalled.len(),
         expected_wing_count,
-        "Bug M: charter count must remain {} after import — no duplicates from vault",
-        expected_wing_count
+        "hint-import: {} hint drawers must appear in recall (normal drawers); got {}",
+        expected_wing_count,
+        hint_recalled.len()
     );
 
     // Cleanup.
@@ -258,7 +252,7 @@ fn export_excludes_charter_drawers_no_duplicates_on_import() {
 /// Mirrors Swift `VaultBridgeTests.distilledFromProvenanceRoundTrips`.
 #[test]
 fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
-    // --- Source estate: plain open (no provision; charter seeding not needed). ---
+    // --- Source estate: plain open (no provision; hint seeding not needed). ---
     let (coord1, handle1) = open_simple("distilled-source");
 
     let factoid_content = "Distilled factoid: the essence of the source.".to_owned();
@@ -269,7 +263,7 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
         CaptureChannel::Typed,
         "raw-memories",
         LatticeAnchor::udc("000"),
-        "charter-prov-test",
+        "hint-prov-test",
         "test-v1",
     );
     let source_drawer = coord1
@@ -291,12 +285,18 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
 
     // Create the `_distilled_from` provenance tunnel (factoid → source),
     // exactly as DistillationCycle does.
+    // Resolve wing/room display names from the node tree (ADR-017).
+    let both_drawers = vec![factoid_drawer.clone(), source_drawer.clone()];
+    let node_names = resolve_drawer_node_names(&coord1, &handle1, &both_drawers);
+    let (factoid_wing, _) = node_names.get(&factoid_drawer.parent_node_id).cloned().unwrap_or_default();
+    let (source_wing, source_room) = node_names.get(&source_drawer.parent_node_id).cloned().unwrap_or_default();
+
     let estate1 = coord1.estate_for(&handle1).expect("estate_for source");
     let mut provenance_frame = TunnelCaptureFrame::new(
-        factoid_drawer.wing.clone(),
+        factoid_wing.clone(),
         "_distilled".to_owned(),
-        source_drawer.wing.clone(),
-        source_drawer.room.clone(),
+        source_wing.clone(),
+        source_room.clone(),
         "_distilled_from".to_owned(),
         "distillation-daemon".to_owned(),
     );
@@ -311,7 +311,7 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
     // Export the estate to the vault.
     let vault = temp_vault("bug-n");
     std::fs::create_dir_all(&vault).expect("create vault dir");
-    let mapping = DrawerMapping::new("charter-prov-test", "test-v1", false);
+    let mapping = DrawerMapping::new("hint-prov-test", "test-v1", false);
     let projection = mapping
         .export(&coord1, &handle1, NOW, VaultExportScope::Believed)
         .expect("mapping.export");
@@ -345,7 +345,7 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
     // --- Assertion 2: import into a fresh estate; factoid content must be clean. ---
     let (mut coord2, handle2) = open_simple("distilled-target");
     let import_report = bridge(&mut coord2)
-        .import_vault(&vault, &handle2, NOW)
+        .import_vault(&vault, &handle2, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import_vault");
     // Both the source drawer and the factoid drawer must be imported.
     assert!(
@@ -355,7 +355,10 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
     );
 
     let imported = current_drawers(&coord2, &handle2);
-    let imported_factoid = imported.iter().find(|d| d.room == "_distilled");
+    let imported_names = resolve_drawer_node_names(&coord2, &handle2, &imported);
+    let imported_factoid = imported.iter().find(|d| {
+        imported_names.get(&d.parent_node_id).map(|(_, r)| r.as_str()) == Some("_distilled")
+    });
     let factoid = imported_factoid.expect("factoid drawer must be imported");
 
     assert_eq!(
@@ -371,9 +374,11 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
     // --- Assertion 3: `_distilled_from` tunnel must exist after import. ---
     // Use Estate::tunnels_from_wing — the only surface that returns tunnels
     // originating from a specific wing without going through the recall pipeline.
+    // Resolve the factoid's wing name from the node tree (ADR-017).
+    let (factoid_wing_imported, _) = imported_names.get(&factoid.parent_node_id).cloned().unwrap_or_default();
     let estate2 = coord2.estate_for(&handle2).expect("estate_for target");
     let tunnels = estate2
-        .tunnels_from_wing(&factoid.wing)
+        .tunnels_from_wing(&factoid_wing_imported)
         .expect("tunnels_from_wing");
     let provenance_tunnels: Vec<_> = tunnels
         .iter()
@@ -385,9 +390,9 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
     );
     let p_tunnel = &provenance_tunnels[0];
     assert_eq!(
-        p_tunnel.target_room, source_drawer.room,
+        p_tunnel.target_room, source_room,
         "Bug N: provenance tunnel must point to the source drawer's room ('{}'); got '{}'",
-        source_drawer.room, p_tunnel.target_room
+        source_room, p_tunnel.target_room
     );
 
     // Cleanup.

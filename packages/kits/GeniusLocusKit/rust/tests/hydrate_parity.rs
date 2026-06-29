@@ -120,6 +120,9 @@ fn open_estate_on_storage(
     storage: Arc<InMemoryStorage>,
     owner: OwnerCredentials,
 ) -> (EstateCoordinator, genius_locus_kit::EstateHandle) {
+    // Retain the backing storage before it is moved into the DrawerStore, so it
+    // can be registered in storages[handle] (parity with coord.open).
+    let storage_handle: Arc<dyn persistence_kit::Storage> = storage.clone();
     let store = Arc::new(
         InMemoryDrawerStore::with_storage(storage, NOW, None)
             .expect("InMemoryDrawerStore::with_storage"),
@@ -127,7 +130,7 @@ fn open_estate_on_storage(
     let estate = Estate::open(store, owner).expect("Estate::open");
     let mut coord = EstateCoordinator::new();
     let handle = coord
-        .open_estate_directly(estate, 0, i64::MAX)
+        .open_estate_directly(estate, storage_handle, 0, i64::MAX)
         .expect("open_estate_directly");
     (coord, handle)
 }
@@ -214,7 +217,12 @@ fn hydrate_round_trip_drawers_and_kg_facts() {
     // Register the hydrated estate in a coordinator to use recall.
     let mut hydrated_coord = EstateCoordinator::new();
     let hydrated_handle = hydrated_coord
-        .open_estate_directly(hydrated.estate, 0, i64::MAX)
+        .open_estate_directly(
+            hydrated.estate,
+            Arc::clone(&hydrated.storage),
+            0,
+            i64::MAX,
+        )
         .expect("register hydrated estate");
 
     // ── Assert logical equivalence ─────────────────────────────────────

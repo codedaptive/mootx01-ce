@@ -15,9 +15,8 @@
 //
 // Storage: flat [Float] of length 216. Float32 per cookbook
 // (sufficient resolution for marginals; Float64 would be wasteful
-// here and would introduce bit-identity hazards for the cross-
-// language conformance gate, which requires Double bit-pattern
-// matching).
+// here). The cross-language conformance gate operates on Float32
+// bit-patterns, matching the Rust port's f32 storage.
 //
 // Decay: C does NOT decay (cookbook § 6.8 table). It is derived
 // from F, which also does not decay.

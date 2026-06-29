@@ -55,7 +55,19 @@ pub struct MatrixSnapshot {
 }
 
 impl MatrixSnapshot {
-    pub const CURRENT_SCHEMA_VERSION: i32 = 1;
+    /// Binary snapshot format version.
+    ///
+    /// v1 (initial): F/O/T/calibration-curves + temporal_watermark trailer (16 bytes).
+    ///   update_timestamps always loaded as empty HashMap (no per-model decay baseline).
+    ///
+    /// v2 (2026-06-28): same as v1, plus update_timestamps section appended after
+    ///   temporal_watermark. update_timestamps is the per-model last-observation
+    ///   time (f64 epoch-seconds) required by MatrixCalibrationRegistry::record_with_decay.
+    ///   Without this field, the first record_with_decay after restart has no last_ts
+    ///   and silently skips decay computation. Schema is NOT FROZEN; no data exists
+    ///   to migrate — a clean v1→v2 bump is safe. Callers that load a v1 snapshot
+    ///   receive an empty update_timestamps (same behavior as before this fix).
+    pub const CURRENT_SCHEMA_VERSION: i32 = 2;
 
     pub fn new(
         tier: MatrixTier,
@@ -187,7 +199,7 @@ impl MatrixPersistenceBackend {
 // in this mission; the conformance harness compares in-memory tier
 // state, not on-disk bytes.
 
-fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
+pub(crate) fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
     use super::matrix::{MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixValueCoord};
     use crate::audit::UnifiedAuditValue;
 
@@ -305,18 +317,34 @@ fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
         }
     }
 
-    // temporal_watermark_hlc — appended as a 16-byte trailer (i64 + i32 + i32).
-    // Snapshots produced by older builds that lack this trailer are loaded with
-    // HLC::ZERO fallback in decode_snapshot, mirroring Swift's
-    // `decodeIfPresent(HLC.self) ?? .zero` backward-compatibility path.
+    // temporal_watermark_hlc — 16 bytes (i64 + i32 + i32).
+    // v1-format snapshots end here; v2 appends update_timestamps below.
     put_i64(&mut out, s.tier.temporal_watermark_hlc.physical_time);
     put_i32(&mut out, s.tier.temporal_watermark_hlc.logical_count);
     put_i32(&mut out, s.tier.temporal_watermark_hlc.node_id);
 
+    // update_timestamps (v2 section): per-model last-observation time (f64 epoch-seconds).
+    //
+    // Required by MatrixCalibrationRegistry::record_with_decay to compute the elapsed
+    // time since last observation for decay math. Without this field, the first
+    // record_with_decay after restart has no last_ts and silently skips decay.
+    //
+    // Format: u32 count, then (str model_id, f64 timestamp) pairs, sorted by model_id
+    // for deterministic output. Decoders check schema_version: v1 gets empty map,
+    // v2 reads this section. Parity: Swift Codable already serializes this field
+    // through MatrixCalibrationRegistry.Codable — this section makes Rust match.
+    let mut ts_entries: Vec<(&String, &f64)> = s.calibration.update_timestamps.iter().collect();
+    ts_entries.sort_by(|a, b| a.0.cmp(b.0));
+    put_u32(&mut out, ts_entries.len() as u32);
+    for (model_id, ts) in ts_entries {
+        put_str(&mut out, model_id);
+        out.extend_from_slice(&ts.to_le_bytes());
+    }
+
     out
 }
 
-fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceError> {
+pub(crate) fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceError> {
     use super::calibration::{
         MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationRegistry,
     };
@@ -460,35 +488,74 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         }
         curves.insert(id, MatrixCalibrationCurve { buckets });
     }
-    // update_timestamps is not stored in the binary snapshot format (pre-decay-feature
-    // snapshots have no per-model timestamp data). On load, the field starts empty,
-    // meaning the first record_with_decay call will apply no decay — correct because
-    // there is no elapsed time to compute from a missing baseline.
-    let calibration = MatrixCalibrationRegistry { curves, update_timestamps: std::collections::HashMap::new() };
-
-    // temporal_watermark_hlc trailer — 16 bytes (i64 + i32 + i32).
+    // temporal_watermark_hlc — 16 bytes (i64 + i32 + i32).
     //
-    // Snapshots written before this field was added have no trailing bytes.
-    // Decoding falls back to HLC::ZERO in that case, mirroring Swift's
-    // `decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero`.
-    //
-    // A partial trailer (1–15 remaining bytes) is a malformed snapshot
-    // and returns SnapshotDecodeFailed so the caller falls back to rebuild.
+    // Tail layout by schema_version:
+    //   v1, no trailer:  remaining == 0  → HLC::ZERO (legacy; no update_timestamps follows).
+    //   v1, with trailer: remaining == 16 → read HLC; no update_timestamps section.
+    //   v2:              remaining >= 16 mandatory (temporal_watermark) + mandatory
+    //                    update_timestamps count (≥4 bytes for u32). A v2 blob with
+    //                    remaining == 0 OR with no bytes after the watermark is CORRUPT
+    //                    (truncated), not a valid legacy path — fail with a decode error
+    //                    so MatrixSnapshotStore.load returns None and triggers a full
+    //                    rebuild rather than accepting a v2 snapshot with a reset watermark
+    //                    that could replay temporal deltas over already-loaded state.
     let remaining = r.buf.len() - r.pos;
-    tier.temporal_watermark_hlc = match remaining {
-        0 => HLC::ZERO,
-        16 => {
-            let pt = r.i64()?;
-            let lc = r.i32()?;
-            let node = r.i32()?;
-            HLC::new(pt, lc, node)
-        }
-        n => {
-            return Err(MatrixPersistenceError::SnapshotDecodeFailed(format!(
-                "unexpected trailing bytes: {n} (expected 0 or 16)"
-            )));
-        }
+
+    // For v2, a missing temporal_watermark section is a corruption indicator —
+    // v2 blobs MUST contain the full tail. Reject before reading anything from it.
+    if schema_version >= 2 && remaining < 16 {
+        return Err(MatrixPersistenceError::SnapshotDecodeFailed(format!(
+            "truncated v2 snapshot: expected ≥16 bytes for temporal_watermark, found {remaining}"
+        )));
+    }
+
+    tier.temporal_watermark_hlc = if remaining >= 16 {
+        let pt = r.i64()?;
+        let lc = r.i32()?;
+        let node = r.i32()?;
+        HLC::new(pt, lc, node)
+    } else {
+        // remaining == 0 and schema_version < 2 (v1 without watermark trailer).
+        // Mirrors Swift's `decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero`.
+        HLC::ZERO
     };
+
+    // update_timestamps section (v2 mandatory tail): per-model last-observation time
+    // (f64 epoch-seconds). Required for decay math in MatrixCalibrationRegistry::
+    // record_with_decay. A missing section on a v2 blob is a corruption indicator —
+    // the encoder always writes this section for v2 (even if empty, writing count=0).
+    //
+    // Decision tree:
+    //   v1, no watermark (remaining was 0): r.pos == r.buf.len() → empty map (OK, v1 path).
+    //   v1, watermark present (remaining was 16): r.pos == r.buf.len() → empty map (OK, v1).
+    //   v2, watermark read but no bytes left: r.pos >= r.buf.len() → CORRUPT — reject.
+    //   v2, watermark read, bytes remain: decode the timestamps section.
+    let mut update_timestamps = std::collections::HashMap::new();
+    if schema_version >= 2 {
+        // v2 mandates the update_timestamps section (count field at minimum).
+        // An encoder always writes the 4-byte u32 count even for an empty map.
+        if r.pos >= r.buf.len() {
+            return Err(MatrixPersistenceError::SnapshotDecodeFailed(
+                "truncated v2 snapshot: update_timestamps section is absent after temporal_watermark".into(),
+            ));
+        }
+        let n_ts = r.u32()? as usize;
+        for _ in 0..n_ts {
+            let model_id = r.string()?;
+            let ts_bytes = r.read_bytes(8)?;
+            let ts = f64::from_le_bytes([
+                ts_bytes[0], ts_bytes[1], ts_bytes[2], ts_bytes[3],
+                ts_bytes[4], ts_bytes[5], ts_bytes[6], ts_bytes[7],
+            ]);
+            update_timestamps.insert(model_id, ts);
+        }
+    }
+    // v1 path: update_timestamps remains empty — first record_with_decay applies
+    // no decay (no elapsed time to compute from a missing baseline), matching
+    // prior behavior while preserving calibration curves read above.
+
+    let calibration = MatrixCalibrationRegistry { curves, update_timestamps };
 
     Ok(MatrixSnapshot {
         schema_version,
@@ -496,4 +563,139 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         tier,
         calibration,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Part 2 regression tests: v2 truncation path.
+//
+// Verifies that:
+//   1. A complete v2 blob decodes successfully.
+//   2. A complete v1 blob (no temporal_watermark, no update_timestamps) decodes
+//      successfully with HLC::ZERO and an empty update_timestamps map.
+//   3. A v2 blob truncated BEFORE the temporal_watermark (remaining == 0 after
+//      calibration curves) is REJECTED with a decode error.
+//   4. A v2 blob that has the temporal_watermark but NO update_timestamps section
+//      (truncated at the watermark boundary) is REJECTED with a decode error.
+//
+// Prior to the fix, cases 3 and 4 were silently accepted, returning a snapshot
+// with HLC::ZERO or an empty update_timestamps map — allowing incremental_update
+// to replay temporal deltas over already-loaded state from a reset watermark.
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod v2_truncation_tests {
+    use super::{decode_snapshot, encode_snapshot, MatrixSnapshot, MatrixPersistenceError};
+    use super::super::calibration::MatrixCalibrationRegistry;
+    use super::super::matrix::MatrixTier;
+    use substrate_types::hlc::HLC;
+
+    fn make_v2_snapshot() -> MatrixSnapshot {
+        MatrixSnapshot::new(
+            MatrixTier::new(),
+            MatrixCalibrationRegistry::default(),
+            HLC::new(1_000, 0, 1),
+        )
+    }
+
+    /// A complete v2 snapshot round-trips through encode → decode without error.
+    #[test]
+    fn v2_complete_blob_decodes_ok() {
+        let snap = make_v2_snapshot();
+        assert_eq!(snap.schema_version, 2, "test fixture must be schema_version 2");
+        let bytes = encode_snapshot(&snap);
+        let decoded = decode_snapshot(&bytes).expect("complete v2 blob must decode");
+        assert_eq!(decoded.schema_version, 2);
+        assert_eq!(decoded.hlc_watermark, snap.hlc_watermark);
+    }
+
+    /// A v1 snapshot (schema_version forced to 1, no temporal_watermark or
+    /// update_timestamps written) decodes without error, yielding HLC::ZERO
+    /// and an empty update_timestamps map — preserving pre-v2 behavior.
+    #[test]
+    fn v1_blob_decodes_ok_with_zero_watermark_and_empty_timestamps() {
+        // Build a v1 blob by encoding a v2 snapshot and patching schema_version to 1.
+        // A real v1 blob has no temporal_watermark or update_timestamps trailer, so
+        // we encode a v2 (which DOES write those sections) and trim the final
+        // 16 (temporal_watermark) + 4 (ts count u32) bytes = 20 bytes.
+        let mut snap = make_v2_snapshot();
+        snap.schema_version = 1;
+        // Encode with schema_version=1: the encoder writes temporal_watermark
+        // and update_timestamps regardless of schema_version (the encoder always
+        // emits the full v2 layout). To simulate a genuine v1 blob (no tail),
+        // encode a v2, set version=1 in the first 4 bytes, then strip the 20-byte tail.
+        let mut bytes = encode_snapshot(&snap);
+        // Patch the first 4 bytes (little-endian i32) to schema_version = 1.
+        bytes[0] = 1; bytes[1] = 0; bytes[2] = 0; bytes[3] = 0;
+        // Strip the 20-byte v2 tail (16 temporal_watermark + 4 ts count).
+        let tail_len = 16 + 4; // watermark(i64+i32+i32) + u32(0 ts)
+        if bytes.len() >= tail_len {
+            bytes.truncate(bytes.len() - tail_len);
+        }
+        let decoded = decode_snapshot(&bytes).expect("v1 blob without trailer must decode");
+        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(
+            decoded.tier.temporal_watermark_hlc,
+            HLC::ZERO,
+            "v1 without watermark → HLC::ZERO"
+        );
+        assert!(
+            decoded.calibration.update_timestamps.is_empty(),
+            "v1 without timestamps → empty map"
+        );
+    }
+
+    /// A v2 blob truncated AFTER calibration curves but BEFORE the temporal_watermark
+    /// (remaining == 0 when we reach the watermark field) must be REJECTED.
+    /// Before the fix: remaining==0 + schema_version>=2 yielded HLC::ZERO silently.
+    #[test]
+    fn v2_truncated_before_watermark_is_rejected() {
+        let snap = make_v2_snapshot();
+        let bytes = encode_snapshot(&snap);
+        // Strip the final 16+4 = 20 bytes (temporal_watermark + ts count).
+        // This leaves a v2 blob with remaining==0 at the watermark decode point.
+        assert!(
+            bytes.len() >= 20,
+            "encoded snapshot must be at least 20 bytes to truncate"
+        );
+        let truncated = &bytes[..bytes.len() - 20];
+        let result = decode_snapshot(truncated);
+        assert!(
+            result.is_err(),
+            "truncated v2 blob (no watermark) must be rejected, got Ok"
+        );
+        if let Err(MatrixPersistenceError::SnapshotDecodeFailed(msg)) = &result {
+            assert!(
+                msg.contains("truncated v2"),
+                "error message must mention 'truncated v2', got: {msg}"
+            );
+        }
+    }
+
+    /// A v2 blob with temporal_watermark present but NO update_timestamps section
+    /// (truncated between watermark and ts count) must be REJECTED.
+    /// Before the fix: r.pos>=r.buf.len() after watermark yielded empty timestamps silently.
+    #[test]
+    fn v2_truncated_after_watermark_missing_ts_section_is_rejected() {
+        let snap = make_v2_snapshot();
+        let bytes = encode_snapshot(&snap);
+        // Strip only the 4-byte ts-count (u32) and any ts entries.
+        // The encoded v2 with empty update_timestamps writes exactly 4 bytes for count=0.
+        // After stripping those 4 bytes, temporal_watermark is present but ts section missing.
+        assert!(
+            bytes.len() >= 4,
+            "encoded snapshot must be at least 4 bytes to strip ts count"
+        );
+        let truncated = &bytes[..bytes.len() - 4];
+        let result = decode_snapshot(truncated);
+        assert!(
+            result.is_err(),
+            "v2 blob with watermark but no ts section must be rejected, got Ok"
+        );
+        if let Err(MatrixPersistenceError::SnapshotDecodeFailed(msg)) = &result {
+            assert!(
+                msg.contains("truncated v2") || msg.contains("absent"),
+                "error message must identify the truncation, got: {msg}"
+            );
+        }
+    }
 }

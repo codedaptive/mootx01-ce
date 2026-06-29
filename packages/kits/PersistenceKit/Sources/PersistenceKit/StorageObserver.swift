@@ -94,6 +94,52 @@ public struct BlobChange: Sendable {
     }
 }
 
+// MARK: - Dirty-chain event (ADR-017 §16 / NT-P2)
+
+/// A dirty-chain notification emitted by the hash-on-write hook.
+///
+/// When a row in a hashable table is written (insert, update, or upsert),
+/// the `HashingRowStore` computes the row's content hash and emits this
+/// event carrying the three-identifier dirty chain: the changed row's UUID
+/// and its two ancestors in the Merkle containment hierarchy. These IDs are
+/// the minimum payload for dirty-chain incremental re-rooting (NT-L3).
+///
+/// PersistenceKit does not assign meaning to the parent IDs — the consuming
+/// kit's `ParentChainProvider` callback supplies them. A consumer that has
+/// no parent chain (or whose table is not hashable) never sees this event.
+///
+/// Consumed by:
+/// - CachingRowStore (NT-P4) to invalidate cached Merkle roots
+/// - Merkle rollup (NT-L3) to recompute affected subtrees
+public struct DirtyChainEvent: Sendable {
+    /// The row that was written. Named `changedRowId` (not `changedDrawerId`)
+    /// because PersistenceKit operates on generic rows — LocusKit maps this
+    /// to drawer/node semantics at its own layer.
+    public let changedRowId: UUID
+    /// The immediate parent node in the containment hierarchy.
+    public let parentNodeId: UUID
+    /// The grandparent node in the containment hierarchy.
+    public let grandparentNodeId: UUID
+    /// The content hash computed by the hash-on-write hook.
+    public let contentHash: ContentHash
+    /// The table the row belongs to.
+    public let table: String
+
+    public init(
+        changedRowId: UUID,
+        parentNodeId: UUID,
+        grandparentNodeId: UUID,
+        contentHash: ContentHash,
+        table: String
+    ) {
+        self.changedRowId = changedRowId
+        self.parentNodeId = parentNodeId
+        self.grandparentNodeId = grandparentNodeId
+        self.contentHash = contentHash
+        self.table = table
+    }
+}
+
 public protocol StorageObserver: Sendable {
     /// Observe changes on `table` for the listed events.
     /// Multiple observers on the same table coexist.
@@ -107,4 +153,22 @@ public protocol StorageObserver: Sendable {
     /// Consumed by the incremental replication session to track which blob
     /// keys became dirty between sync runs. Multiple subscribers coexist.
     func observeBlobs() -> AsyncStream<BlobChange>
+
+    /// Observe dirty-chain events from hash-on-write hooks.
+    ///
+    /// Emitted when a row in a hashable table is written and the
+    /// hash-on-write hook fires. The event carries the changed row's
+    /// content hash and its Merkle-containment parent chain.
+    ///
+    /// Default implementation returns an immediately-finished stream
+    /// (backward-compatible for observers that predate hash-on-write).
+    func observeDirtyChain() -> AsyncStream<DirtyChainEvent>
+}
+
+public extension StorageObserver {
+    /// Default: returns an immediately-finished stream. Observers that
+    /// support hash-on-write override this to deliver live events.
+    func observeDirtyChain() -> AsyncStream<DirtyChainEvent> {
+        AsyncStream { $0.finish() }
+    }
 }

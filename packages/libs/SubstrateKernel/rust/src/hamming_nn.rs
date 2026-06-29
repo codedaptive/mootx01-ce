@@ -39,10 +39,10 @@ pub struct HammingNNHit {
     pub distance: u32,
 }
 
-// We want the heap to keep the K SMALLEST distances. Standard
-// BinaryHeap is a max-heap, so we wrap with Reverse: the heap's
-// "max" is the largest distance kept, ready to be evicted.
-// Direct PartialOrd on HammingNNHit so the heap orders correctly.
+// We want the heap to keep the K SMALLEST distances. BinaryHeap is a
+// max-heap; the Ord impl below uses direct distance comparison so the
+// heap's root is the LARGEST distance in the current top-K set, ready
+// to be evicted when a closer candidate arrives. No Reverse wrapper.
 impl Ord for HammingNNHit {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.distance.cmp(&other.distance)
@@ -105,29 +105,39 @@ where
 
 // Batched / vectorized hot-path
 //
-// The reference implementation above is correct and clear. The
-// production hot-path in NeuronKit (Rust port) is structured
-// differently:
+// The reference implementation above (`top_k`) is correct and clear.
+// A vectorized bulk variant exists in `kernel_avx512.rs` for x86_64:
 //
-//   1. Bit-slice the candidate fingerprints by block (256 separate
-//      arrays of length N).
-//   2. For each block, XOR with the corresponding anchor block
-//      replicated across N lanes.
-//   3. Per-row popcount via VPOPCNTQ (AVX-512) or vcnt (NEON).
-//   4. Sum the four block popcounts per row.
-//   5. Top-K via a SIMD-aware tournament reduction.
+//   1. Broadcast the anchor's four 64-bit blocks across the eight
+//      lanes of four __m512i registers (one register per block).
+//   2. For each group of 8 candidates, gather candidate.block_j into
+//      one __m512i (8 lanes) and XOR with the anchor's broadcasted
+//      block_j via _mm512_xor_epi64.
+//   3. Per-lane popcount via _mm512_popcnt_epi64 (VPOPCNTQ instruction,
+//      requires avx512vpopcntdq). Four VPOPCNTQ calls per 8 candidates.
+//   4. Sum the four block popcounts per candidate lane with
+//      _mm512_add_epi64. Store 8 distances.
+//   5. Top-K via the same heap algorithm as this scalar reference.
+//
+// That backend (`Avx512HammingKernel` in `kernel_avx512.rs`) is a
+// DARK PATH — built and wired into the dispatch table via
+// `PortableKernel::of_kind(KernelKind::Avx512)`, but NOT selected by
+// `PortableKernel::for_current_platform()`. Scalar (`ScalarKernel`)
+// remains the live oracle. Gate-enable is pending MatrixSprint perf
+// proof on real AVX-512 VPOPCNTDQ hardware (see P11-VAL-015).
 //
 // All backends must produce results bit-identical to the scalar
 // reference here. The cookbook § 18.2 conformance suite validates
-// this with CRC checks.
+// this with CRC checks. `Avx512HammingKernel` is bit-identical by
+// construction: XOR and VPOPCNTQ are exact integer operations.
 
 // GPU implementation
 //
 // A Metal kernel for Hamming-NN lives in
-// glref-metal-hamming_nn.metal. On non-Apple platforms a CUDA or
-// SPIR-V/Vulkan equivalent is implementable but is out of scope
-// for the v0.36 reference; the AVX-512 backend handles bulk
-// workloads on x86_64.
+// glref-metal-hamming_nn.metal. On non-Apple platforms the
+// AVX-512 backend (`kernel_avx512.rs`) handles bulk workloads on
+// x86_64. CUDA or SPIR-V/Vulkan equivalents are implementable
+// but are out of scope for the v0.36 reference.
 
 #[cfg(test)]
 mod tests {

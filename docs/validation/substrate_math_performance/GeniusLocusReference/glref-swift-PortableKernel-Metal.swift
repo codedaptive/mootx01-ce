@@ -1,15 +1,10 @@
 // PortableKernel-Metal.swift
 //
-// Metal-backed kernel implementation per Phase 2.β-2(c) of the
-// kernel-learned-dispatch protocol. Tests the existing
-// glref-metal-hamming_nn.metal compute shader against the
-// CPU-side SimdKernel for hammingDistanceBatch.
-//
-// The shader file header claims: "this kernel becomes preferable
-// to AMX/NEON CPU backends at roughly 100K candidate rows."
-// Phase 2.β-2(c) tests this empirically at the batch sizes the
-// stress-test sweep covers (1..256), then extrapolates the
-// slope to predict the crossover.
+// Metal-backed kernel implementation. Implements MetalKernel and
+// embeds the `hamming_distance_kernel` shader source as a Swift string
+// (no separate .metal file in this package). The Metal backend becomes
+// preferable to AMX/NEON CPU backends at roughly 100K candidate rows
+// where GPU dispatch overhead amortizes.
 //
 // Cost model per call:
 //   - Buffer allocation: anchor (32 B), candidates (32N B),
@@ -412,16 +407,11 @@ public struct MetalKernel: SubstrateKernel {
 
     // MARK: - Embedded Metal shader source
 
-    /// The `hamming_distance_kernel` compute function. This is
-    /// a verbatim copy of the relevant portion of
-    /// `glref-metal-hamming_nn.metal`. Embedded as a string so
-    /// the SwiftPM build doesn't need a custom Metal-compilation
-    /// step.
-    ///
-    /// If the canonical .metal file is updated, this string must
-    /// be updated to match; the conformance gate
-    /// (`validate-vectors --kernel metal`) catches divergence
-    /// because the CRC will not match the scalar reference.
+    /// The `hamming_distance_kernel` compute function, embedded as a
+    /// Metal shader string so the SwiftPM build does not need a custom
+    /// Metal-compilation step. This is the canonical shader source;
+    /// there is no separate `glref-metal-hamming_nn.metal` file in
+    /// this package. If the shader logic changes, update this string.
     private static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;

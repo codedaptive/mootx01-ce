@@ -84,7 +84,8 @@ public enum GrantHKDF {
             t = hmac(key: prk, data: data)
             okm.append(contentsOf: t)
             counter &+= 1
-            // Clear intermediate to avoid leaving key material in temporaries.
+            // Allow the optimizer to release `data` after this point;
+            // it is no longer needed and is out of scope next iteration.
             data.withUnsafeMutableBytes { _ in }
         }
         return Array(okm.prefix(length))
@@ -93,7 +94,11 @@ public enum GrantHKDF {
     // MARK: - RFC 2104 HMAC-SHA256
 
     /// HMAC-SHA256(key, data) per RFC 2104. Uses the in-repo `SHA256`.
-    static func hmac(key: [UInt8], data: [UInt8]) -> [UInt8] {
+    ///
+    /// Public so SubstrateLib's KeyedCommitment API can compute HMAC-SHA256
+    /// over canonical leaf payload bytes without reimplementing the
+    /// construction. All internal callers (extract, expand) continue to work.
+    public static func hmac(key: [UInt8], data: [UInt8]) -> [UInt8] {
         // SHA-256 block size is 64 bytes.
         let blockSize = 64
 

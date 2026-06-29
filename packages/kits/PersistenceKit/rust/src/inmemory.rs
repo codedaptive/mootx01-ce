@@ -45,9 +45,24 @@ use substrate_types::hlc::HLC;
 #[derive(Clone, Default)]
 struct State {
     schema_version: i32,
+    /// Per-kit schema versions (for `current_schema_version_for`).
+    kit_schema_versions: BTreeMap<String, i32>,
     tables: BTreeMap<String, Table>,
     blobs: BTreeMap<String, Vec<u8>>,
     audit_events: Vec<AuditEvent>,
+    // Notification isolation (SECFIX-WS2-PK F2/F4): buffer notifications during
+    // a transaction so rolled-back writes never reach observers.
+    //
+    // `in_transaction` is part of State so the snapshot taken before the
+    // transaction (when `in_transaction = false`) automatically resets this
+    // field on rollback — no separate cleanup needed on the error path.
+    in_transaction: bool,
+    /// Row change events buffered while `in_transaction = true`. Drained and
+    /// emitted to the hub on commit; discarded on rollback via snapshot restore.
+    pending_row_events: Vec<TableChange>,
+    /// Blob change events buffered while `in_transaction = true`. Mirrors
+    /// `pending_row_events` for the blob hub.
+    pending_blob_events: Vec<BlobChange>,
 }
 
 #[derive(Clone)]
@@ -142,7 +157,11 @@ impl Storage for InMemoryStorage {
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut state = self.state.lock().unwrap();
-        if state.schema_version < schema.version {
+        // Gate on per-kit version so a second kit opening on this storage
+        // does not skip migration because another kit advanced the global
+        // schema_version counter above this kit's target version.
+        let kit_current = state.kit_schema_versions.get(&schema.kit_id).copied().unwrap_or(0);
+        if kit_current < schema.version {
             apply_migrations_inner(&mut state, schema)?;
         }
         Ok(())
@@ -156,6 +175,10 @@ impl Storage for InMemoryStorage {
         Ok(self.state.lock().unwrap().schema_version)
     }
 
+    fn current_schema_version_for(&self, kit_id: &str) -> StorageResult<i32> {
+        Ok(self.state.lock().unwrap().kit_schema_versions.get(kit_id).copied().unwrap_or(0))
+    }
+
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut state = self.state.lock().unwrap();
         apply_migrations_inner(&mut state, schema)
@@ -166,12 +189,39 @@ impl Storage for InMemoryStorage {
         _isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()> {
-        // No native transaction: snapshot the whole state and restore it if
-        // the block rolls back. (Single-threaded transaction semantics.)
+        // Notification isolation (SECFIX-WS2-PK F2/F4): take the snapshot
+        // BEFORE marking in_transaction so the snapshot carries
+        // `in_transaction = false` and empty pending event lists. On rollback,
+        // restoring the snapshot automatically resets those fields — no
+        // separate cleanup needed on the error path.
         let snapshot = self.state.lock().unwrap().clone();
+        // Mark transaction open: writes will buffer notifications.
+        {
+            let mut state = self.state.lock().unwrap();
+            state.in_transaction = true;
+            state.pending_row_events.clear();
+            state.pending_blob_events.clear();
+        }
         match block(self) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Commit: drain pending events and emit them now that the
+                // writes are committed to the live state.
+                let (row_events, blob_events) = {
+                    let mut state = self.state.lock().unwrap();
+                    state.in_transaction = false;
+                    (
+                        std::mem::take(&mut state.pending_row_events),
+                        std::mem::take(&mut state.pending_blob_events),
+                    )
+                };
+                for ev in row_events { self.hub.emit(ev); }
+                for ev in blob_events { self.blob_hub.emit(ev); }
+                Ok(())
+            }
             Err(e) => {
+                // Restore the pre-transaction snapshot. The snapshot has
+                // `in_transaction = false` and empty pending event lists, so
+                // rolled-back notifications are automatically discarded.
                 *self.state.lock().unwrap() = snapshot;
                 // Record the rollback for introspection. The counter lives
                 // outside `state` so it is not itself rolled back.
@@ -254,11 +304,15 @@ fn apply_migrations_inner(state: &mut State, schema: &SchemaDeclaration) -> Stor
                 rows: BTreeMap::new(),
             });
     }
-    // Apply migrations in order.
+    // Per-kit version is the source of truth for the migration gate.
+    // The global `schema_version` is updated in parallel so the no-arg
+    // `current_schema_version()` still returns a sensible value (the max
+    // across all kits that have opened on this storage instance).
+    let kit_current = state.kit_schema_versions.get(&schema.kit_id).copied().unwrap_or(0);
     let mut pending: Vec<_> = schema
         .migrations
         .iter()
-        .filter(|m| m.from_version >= state.schema_version && m.to_version <= schema.version)
+        .filter(|m| m.from_version >= kit_current && m.to_version <= schema.version)
         .cloned()
         .collect();
     pending.sort_by_key(|m| m.from_version);
@@ -266,10 +320,12 @@ fn apply_migrations_inner(state: &mut State, schema: &SchemaDeclaration) -> Stor
         for op in migration.operations {
             apply_operation(state, op)?;
         }
-        state.schema_version = migration.to_version;
+        state.kit_schema_versions.insert(schema.kit_id.clone(), migration.to_version);
+        state.schema_version = std::cmp::max(state.schema_version, migration.to_version);
     }
-    if state.schema_version < schema.version {
-        state.schema_version = schema.version;
+    if state.kit_schema_versions.get(&schema.kit_id).copied().unwrap_or(0) < schema.version {
+        state.kit_schema_versions.insert(schema.kit_id.clone(), schema.version);
+        state.schema_version = std::cmp::max(state.schema_version, schema.version);
     }
     Ok(())
 }
@@ -297,6 +353,13 @@ fn apply_operation(state: &mut State, op: SchemaOperation) -> StorageResult<()> 
                 .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("addColumn: table {} not found", table),
                 })?;
+            // Idempotent (mirrors CREATE TABLE IF NOT EXISTS): the fresh-DB path
+            // creates the table at the latest schema before replaying migrations
+            // from version 0, so the column may already be present. Skip in that
+            // case to avoid a duplicate column entry in the declaration.
+            if t.declaration.columns.iter().any(|c| c.name == column.name) {
+                return Ok(());
+            }
             t.declaration.columns.push(column);
             Ok(())
         }
@@ -345,7 +408,7 @@ impl RowStore for InMemoryRowStore {
         table: &str,
         values: BTreeMap<String, TypedValue>,
     ) -> StorageResult<RowHandle> {
-        let (key, stored) = {
+        let (key, stored, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -364,15 +427,28 @@ impl RowStore for InMemoryRowStore {
             let mut stored = values;
             materialize_generated(&generated, &mut stored);
             t.rows.insert(key, stored.clone());
-            (key, stored)
+            // Buffer notification if in a transaction (SECFIX-WS2-PK F2).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                state.pending_row_events.push(TableChange {
+                    table: table.to_string(),
+                    event: StorageEvent::Insert,
+                    row_key: Some(key),
+                    values: Some(stored.clone()),
+                    hlc: None,
+                });
+            }
+            (key, stored, in_txn)
         };
-        self.hub.emit(TableChange {
-            table: table.to_string(),
-            event: StorageEvent::Insert,
-            row_key: Some(key),
-            values: Some(stored),
-            hlc: None,
-        });
+        if !in_txn {
+            self.hub.emit(TableChange {
+                table: table.to_string(),
+                event: StorageEvent::Insert,
+                row_key: Some(key),
+                values: Some(stored),
+                hlc: None,
+            });
+        }
         Ok(RowHandle::new(table, key))
     }
 
@@ -382,7 +458,7 @@ impl RowStore for InMemoryRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        let (key, event, emitted_values) = {
+        let (key, event, emitted_values, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -404,7 +480,7 @@ impl RowStore for InMemoryRowStore {
                 })
                 .map(|(k, _)| *k);
             let generated = t.declaration.generated_columns.clone();
-            if let Some(k) = existing_key {
+            let (key, ev, vals) = if let Some(k) = existing_key {
                 let row = t.rows.get_mut(&k).unwrap();
                 for (col, v) in values.into_iter() {
                     row.insert(col, v);
@@ -418,15 +494,29 @@ impl RowStore for InMemoryRowStore {
                 materialize_generated(&generated, &mut stored);
                 t.rows.insert(key, stored.clone());
                 (key, StorageEvent::Insert, stored)
+            };
+            // Buffer notification if in a transaction (SECFIX-WS2-PK F2).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                state.pending_row_events.push(TableChange {
+                    table: table.to_string(),
+                    event: ev,
+                    row_key: Some(key),
+                    values: Some(vals.clone()),
+                    hlc: None,
+                });
             }
+            (key, ev, vals, in_txn)
         };
-        self.hub.emit(TableChange {
-            table: table.to_string(),
-            event,
-            row_key: Some(key),
-            values: Some(emitted_values),
-            hlc: None,
-        });
+        if !in_txn {
+            self.hub.emit(TableChange {
+                table: table.to_string(),
+                event,
+                row_key: Some(key),
+                values: Some(emitted_values),
+                hlc: None,
+            });
+        }
         Ok(RowHandle::new(table, key))
     }
 
@@ -437,7 +527,7 @@ impl RowStore for InMemoryRowStore {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
         let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
-        let count = {
+        let (count, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -467,23 +557,38 @@ impl RowStore for InMemoryRowStore {
                 notifications.push((k, row.clone()));
                 count += 1;
             }
-            count
+            // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                for (key, row) in &notifications {
+                    state.pending_row_events.push(TableChange {
+                        table: table.to_string(),
+                        event: StorageEvent::Update,
+                        row_key: Some(*key),
+                        values: Some(row.clone()),
+                        hlc: None,
+                    });
+                }
+            }
+            (count, in_txn)
         };
-        for (key, row) in notifications {
-            self.hub.emit(TableChange {
-                table: table.to_string(),
-                event: StorageEvent::Update,
-                row_key: Some(key),
-                values: Some(row),
-                hlc: None,
-            });
+        if !in_txn {
+            for (key, row) in notifications {
+                self.hub.emit(TableChange {
+                    table: table.to_string(),
+                    event: StorageEvent::Update,
+                    row_key: Some(key),
+                    values: Some(row),
+                    hlc: None,
+                });
+            }
         }
         Ok(count)
     }
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
         let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
-        let count = {
+        let (count, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -506,16 +611,31 @@ impl RowStore for InMemoryRowStore {
                 t.rows.remove(k);
                 notifications.push((*k, row.clone()));
             }
-            matching.len()
+            // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                for (key, row) in &notifications {
+                    state.pending_row_events.push(TableChange {
+                        table: table.to_string(),
+                        event: StorageEvent::Delete,
+                        row_key: Some(*key),
+                        values: Some(row.clone()),
+                        hlc: None,
+                    });
+                }
+            }
+            (matching.len(), in_txn)
         };
-        for (key, row) in notifications {
-            self.hub.emit(TableChange {
-                table: table.to_string(),
-                event: StorageEvent::Delete,
-                row_key: Some(key),
-                values: Some(row),
-                hlc: None,
-            });
+        if !in_txn {
+            for (key, row) in notifications {
+                self.hub.emit(TableChange {
+                    table: table.to_string(),
+                    event: StorageEvent::Delete,
+                    row_key: Some(key),
+                    values: Some(row),
+                    hlc: None,
+                });
+            }
         }
         Ok(count)
     }
@@ -608,30 +728,57 @@ struct InMemoryBlobStore {
 impl BlobStore for InMemoryBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> StorageResult<()> {
         let bytes_vec = bytes.to_vec();
-        self.state
-            .lock()
-            .unwrap()
-            .blobs
-            .insert(key.to_string(), bytes_vec.clone());
-        // Emit put event AFTER successful write so subscribers see the committed state.
-        self.blob_hub.emit(BlobChange {
-            key: key.to_string(),
-            event: BlobEvent::Put,
-            bytes: Some(bytes_vec),
-        });
+        let in_txn = {
+            let mut state = self.state.lock().unwrap();
+            state.blobs.insert(key.to_string(), bytes_vec.clone());
+            // Buffer the notification when inside a transaction (SECFIX-WS2-PK F4).
+            // The blob is written to the in-memory store but the transaction has not
+            // committed; emitting now would deliver a phantom put to replication
+            // sessions if the transaction is rolled back.
+            let in_txn = state.in_transaction;
+            if in_txn {
+                state.pending_blob_events.push(BlobChange {
+                    key: key.to_string(),
+                    event: BlobEvent::Put,
+                    bytes: Some(bytes_vec.clone()),
+                });
+            }
+            in_txn
+        };
+        if !in_txn {
+            self.blob_hub.emit(BlobChange {
+                key: key.to_string(),
+                event: BlobEvent::Put,
+                bytes: Some(bytes_vec),
+            });
+        }
         Ok(())
     }
     fn get(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
         Ok(self.state.lock().unwrap().blobs.get(key).cloned())
     }
     fn delete(&self, key: &str) -> StorageResult<()> {
-        self.state.lock().unwrap().blobs.remove(key);
-        // Emit delete event AFTER successful removal.
-        self.blob_hub.emit(BlobChange {
-            key: key.to_string(),
-            event: BlobEvent::Delete,
-            bytes: None,
-        });
+        let in_txn = {
+            let mut state = self.state.lock().unwrap();
+            state.blobs.remove(key);
+            // Buffer the notification when inside a transaction (SECFIX-WS2-PK F4).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                state.pending_blob_events.push(BlobChange {
+                    key: key.to_string(),
+                    event: BlobEvent::Delete,
+                    bytes: None,
+                });
+            }
+            in_txn
+        };
+        if !in_txn {
+            self.blob_hub.emit(BlobChange {
+                key: key.to_string(),
+                event: BlobEvent::Delete,
+                bytes: None,
+            });
+        }
         Ok(())
     }
     fn exists(&self, key: &str) -> StorageResult<bool> {

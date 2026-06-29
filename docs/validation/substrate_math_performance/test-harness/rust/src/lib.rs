@@ -3,9 +3,9 @@
 // Library crate for the GeniusLocus reference test harness.
 //
 // Mirrors the Swift harness at
-// `substrate_reference/test-harness/swift/`. Both produce vector
-// files that the other validates, and the CRC32 over the canonical
-// binary serialization is the conformance gate.
+// `docs/validation/substrate_math_performance/test-harness/swift/`.
+// Both produce vector files that the other validates, and the CRC32
+// over the canonical binary serialization is the conformance gate.
 
 pub mod harness;
 pub mod primitives;

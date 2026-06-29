@@ -276,13 +276,15 @@ impl DenseIndex for BruteForceIndex {
             })
             .collect();
 
-        // Sort by (distance ASC, item_id ASC) — the oracle total order.
-        // Sorting over all candidates ensures the correct k winners at
-        // tie boundaries (not insertion-order-dependent).
+        // Sort by (distance ASC, VectorRecordKey ASC) — strict total order.
+        // Using the full VectorRecordKey (itemID, vectorIndex, modelID, modelVersion)
+        // rather than itemID alone ensures that distinct records sharing the same
+        // itemID sort deterministically and consistently with MIHIndex's tie-break.
+        // This is the conformance-gate oracle order that MIH must replicate.
         all_hits.sort_by(|a, b| {
             a.raw_distance
                 .cmp(&b.raw_distance)
-                .then(a.key.item_id.cmp(&b.key.item_id))
+                .then(a.key.cmp(&b.key))
         });
 
         // Truncate to k.

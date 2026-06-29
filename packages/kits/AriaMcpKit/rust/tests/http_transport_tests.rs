@@ -172,6 +172,27 @@ fn http_cross_origin_is_rejected() {
     assert_eq!(status, 403);
 }
 
+/// Loopback-prefix spoofing: attacker registers `localhost.evil` (or
+/// `127.0.0.1.evil`) as a domain DNS-resolving to 127.0.0.1. The old
+/// prefix-only check would allow these; the suffix-validated check rejects them.
+#[test]
+fn http_loopback_prefix_spoof_origin_is_rejected() {
+    for origin in [
+        "http://localhost.evil",
+        "https://localhost.attacker.test",
+        "http://127.0.0.1.evil",
+        "http://[::1].evil",
+        "http://localhost@evil.example",
+    ] {
+        let (status, _) = round_trip_with_origin(
+            "POST",
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#,
+            Some(origin),
+        );
+        assert_eq!(status, 403, "spoofed origin {origin} must be rejected");
+    }
+}
+
 #[test]
 fn http_loopback_origin_is_allowed() {
     let (status, _) = round_trip_with_origin(
@@ -252,7 +273,7 @@ fn http_get_graph_store_payload_returned_verbatim() {
     let pre_built_payload = r#"{"nodes":[{"id":"abc","nounType":0,"communityId":1,"centrality":0.5,"anomaly":false,"tombstonedTs":null}],"edges":[],"structurePending":false,"communities":[{"id":1,"size":1,"dominantUdcCode":"510"}],"generatedTs":"2026-01-01T00:00:00Z"}"#;
     // 1_735_689_600.0 == 2026-01-01T00:00:00Z in Unix epoch seconds.
     store
-        .write_topology_snapshot(&estate_id, 1_735_689_600.0, pre_built_payload)
+        .write_topology_snapshot(&estate_id, 1_735_689_600.0, pre_built_payload, None)
         .expect("write_topology_snapshot must succeed");
 
     let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial");
@@ -514,7 +535,8 @@ fn slow_client_does_not_block_fast_concurrent_request() {
 
     // Spawn the server loop: serves exactly 2 connections then returns.
     let server_listener = listener.try_clone().expect("clone listener");
-    let server_thread = run_http_loop_for_test(server_listener, Arc::clone(&dispatcher), Arc::clone(&gate), 2);
+    let sse_gate = Arc::new(ConcurrencyGate::new(16, 0));
+    let server_thread = run_http_loop_for_test(server_listener, Arc::clone(&dispatcher), Arc::clone(&gate), Arc::clone(&sse_gate), 2);
 
     // Brief pause to ensure the server loop is in accept() before clients connect.
     std::thread::sleep(Duration::from_millis(5));
@@ -636,10 +658,12 @@ fn saturation_overflow_reads_503_on_wire_while_slot_holder_in_flight() {
     // gate: 1 concurrency slot + 1 soft-queue slot = total capacity 2.
     // connection_count=3: A (served as worker), B (served as worker), C (shed).
     let gate = ConcurrencyGate::new(1, 1);
+    let sse_gate_2 = Arc::new(ConcurrencyGate::new(16, 0));
     let server_thread = run_http_loop_for_test(
         listener,
         Arc::clone(&dispatcher),
         Arc::clone(&gate),
+        Arc::clone(&sse_gate_2),
         3,
     );
 
@@ -904,4 +928,110 @@ fn sse_get_without_accept_header_returns_404() {
         .unwrap();
 
     assert_eq!(status, 404, "GET /api/events without Accept: text/event-stream must return 404");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - CAND-025: SSE gate isolation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Verifies that concurrent SSE connections do NOT consume slots from the normal
+/// request/response gate (CAND-025). The test opens N SSE connections that hold
+/// their sockets open, then verifies a normal POST completes without waiting for
+/// the SSE connections to close.
+///
+/// Setup: normal gate maxConcurrent=1 (tight — any slot leak is fatal);
+/// SSE gate maxConcurrent=4 (room for the test SSE clients).
+/// If SSE were consuming normal gate slots, the POST would block waiting for one
+/// of the SSE clients to disconnect and release its slot.
+#[test]
+fn sse_streams_do_not_starve_normal_gate_slots() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::{Arc, Mutex};
+
+    let config = ServerConfig::default_inmemory();
+    let dispatcher = Arc::new(Mutex::new(
+        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial)
+    ));
+    let listener = bind_loopback(0).expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+
+    // Tight normal gate: 1 concurrent slot.
+    // If SSE consumed this slot, the POST below would block until an SSE client disconnects.
+    let normal_gate = Arc::new(ConcurrencyGate::new(1, 4));
+    // Generous SSE gate: 4 concurrent SSE streams — room for our 3 test clients.
+    let test_sse_gate = Arc::new(ConcurrencyGate::new(4, 0));
+
+    // Serve 4 connections: 3 SSE + 1 POST.
+    let server_thread = run_http_loop_for_test(
+        listener,
+        Arc::clone(&dispatcher),
+        Arc::clone(&normal_gate),
+        Arc::clone(&test_sse_gate),
+        4,
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Connect 3 SSE clients and leave them open.
+    let mut sse_clients: Vec<TcpStream> = Vec::new();
+    for _ in 0..3 {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect SSE");
+        client.set_read_timeout(Some(std::time::Duration::from_millis(200))).ok();
+        let req = "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nOrigin: http://127.0.0.1\r\n\r\n";
+        client.write_all(req.as_bytes()).unwrap();
+        client.flush().unwrap();
+        // Read the SSE response head to confirm the server accepted the connection.
+        let mut head = vec![0u8; 256];
+        let _ = client.read(&mut head); // may timeout after 200ms — that's OK
+        sse_clients.push(client);
+    }
+
+    // Wait briefly to let the SSE threads establish their streams.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Now issue a normal POST while all 3 SSE connections are still open.
+    // With the fix: SSE holds the test_sse_gate; normal_gate slot is free.
+    // Without the fix: normal_gate would be held by the first SSE client,
+    // and this POST would stall until a timeout or disconnect.
+    let frame = r#"{"jsonrpc":"2.0","id":99,"method":"ping"}"#;
+    let frame_bytes = frame.as_bytes();
+    let http_req = format!(
+        "POST /mcp/v1/message HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nOrigin: http://127.0.0.1\r\n\r\n{}",
+        frame_bytes.len(),
+        frame
+    );
+    let mut post_client = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect POST");
+    // POST must complete within 3 seconds. If the gate is starved this will time out.
+    post_client.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok();
+    post_client.write_all(http_req.as_bytes()).unwrap();
+    post_client.flush().unwrap();
+
+    let mut resp = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match post_client.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => { resp.extend_from_slice(&buf[..n]); }
+        }
+    }
+
+    // Close SSE clients to let the server thread exit cleanly.
+    drop(sse_clients);
+    let _ = server_thread.join();
+
+    let resp_text = String::from_utf8_lossy(&resp);
+    let first_line = resp_text.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    let status: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    assert_eq!(
+        status, 200,
+        "POST must complete with 200 while SSE streams are open; got {status}. Response: {}",
+        &resp_text[..resp_text.len().min(300)]
+    );
+    assert!(
+        resp_text.contains("\"result\""),
+        "POST response must contain JSON-RPC result; got: {}",
+        &resp_text[..resp_text.len().min(300)]
+    );
 }

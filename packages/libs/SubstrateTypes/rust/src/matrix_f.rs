@@ -1,7 +1,7 @@
 // matrix_f.rs
 //
 // Field-presence matrix F per cookbook § 6.1. Mirror of
-// glref-swift-MatrixF.swift.
+// Sources/SubstrateTypes/MatrixF.swift.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixF {

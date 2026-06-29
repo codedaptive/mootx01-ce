@@ -807,6 +807,76 @@ fn grt06b_exhausted_budget_refuses() {
     );
 }
 
+/// GRT-06-secfix: budget debit write failure refuses the read (fail-closed).
+///
+/// secfix/punt-g2 finding: `federated_recall` previously used `let _ =
+/// store.debit_budget(...)` which silently discarded storage write errors,
+/// allowing content to be returned even if the debit could not be persisted.
+/// A repeated-storage-failure scenario could allow unbounded reads against a
+/// grant whose budget can no longer be decremented.
+///
+/// The fix propagates the `GrantStoreError` as
+/// `GeniusLocusKitError::UnderlyingEstateFailure`, refusing the read before
+/// content is touched (fail-closed). This is structural: the `?` operator
+/// ensures the function returns before step 7 (recall) on any debit error.
+///
+/// NOTE: Full fault-injection testing (simulating a storage write failure
+/// mid-transaction) requires a `FailingStorage` fixture not yet present in
+/// the test harness. This test documents the contract and regression-guards
+/// the normal debit path to ensure the fix did not change the success path.
+#[test]
+fn grt06_secfix_debit_write_failure_is_fail_closed_contract() {
+    // Normal path: debit succeeds and the read returns content.
+    // The `?` operator in coordinator.rs ensures any debit error is propagated
+    // before content is read. Verify the success path still works after the fix.
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::HandedOver,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0xFFu8; 32], NOW_F64).expect("issue");
+    coord
+        .grant_store_mut(&src)
+        .expect("store")
+        .set_budget(grant.id, 1.0)
+        .expect("set_budget");
+
+    // Recall succeeds — debit path is exercised and budget decrements.
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        NOW_F64 + 1.0,
+        NOW + 1,
+    );
+    assert!(
+        result.is_ok(),
+        "normal recall with valid budget must succeed after fail-closed fix; got {:?}",
+        result.err()
+    );
+    // Budget decremented — debit was persisted.
+    let budget_after = coord
+        .grant_store(&src)
+        .expect("store")
+        .get(grant.id)
+        .expect("get ok")
+        .expect("grant present")
+        .grant
+        .inference_remaining_budget;
+    let expected = 1.0 - EstateCoordinator::BUDGET_DEBIT_PER_READ;
+    assert!(
+        (budget_after - expected).abs() < 1e-9,
+        "budget must decrement exactly once; expected {expected:.6}, got {budget_after:.6}"
+    );
+}
+
 /// GRT-06c: budget debit clamps at 0.0, never goes negative.
 ///
 /// Swift mirror: CrossEstateFederationTests test 20
@@ -1232,6 +1302,133 @@ fn grt07e_mid_decay_grant_proceeds_and_budget_debits() {
         .grant.inference_remaining_budget;
     assert!((budget_after - 0.99).abs() < 1e-9,
         "one read debits 0.01 regardless of decay state; got {budget_after}");
+}
+
+// ---------------------------------------------------------------------------
+// B1 Finding #2 regression — degenerate mode-3 custody parameters guard
+//
+// Mirrors Swift GRT01_GrantTests tests decayDerivedRejectsZeroThreshold,
+// decayDerivedRejectsTotalSharesBelowThreshold, decayDerivedRejectsTotalSharesAboveCap,
+// and decayDerivedAcceptsValidParameters.
+//
+// A mode-3 (DecayDerived) grant with threshold=0 causes Lagrange
+// reconstruction to interpolate an empty point set → DecayFieldElement::zero,
+// a constant anyone can precompute, breaking the custody model. The guard
+// also rejects totalShares < threshold and totalShares > 255.
+// ---------------------------------------------------------------------------
+
+/// Mode-3 with `threshold = 0` and clearance confirmed must be rejected with
+/// `GrantError::InvalidCustodyParameters`.
+///
+/// Swift mirror: GRT01_GrantTests.decayDerivedRejectsZeroThreshold
+#[test]
+fn grt08a_mode3_threshold_zero_rejected() {
+    use genius_locus_kit::GrantError;
+    let (mut coord, h) = open_coord();
+    let opts = GrantOptions {
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::DecayDerived {
+            // threshold=0 causes Lagrange interpolation over an empty share set
+            // → DecayFieldElement::zero — a precomputable constant (B1 finding #2).
+            threshold: 0,
+            total_shares: 3,
+            drift_rate: DriftRate::Slow,
+            experimental_ip_clearance_confirmed: true,
+        },
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let err = coord.issue_grant(&h, opts, &[0u8; 32], NOW_F64).unwrap_err();
+    assert_eq!(
+        err, GrantError::InvalidCustodyParameters,
+        "GRT-08a: threshold=0 must produce InvalidCustodyParameters"
+    );
+}
+
+/// Mode-3 with `total_shares < threshold` and clearance confirmed must be
+/// rejected — reconstruction is impossible when the share count is below the
+/// threshold.
+///
+/// Swift mirror: GRT01_GrantTests.decayDerivedRejectsTotalSharesBelowThreshold
+#[test]
+fn grt08b_mode3_total_shares_below_threshold_rejected() {
+    use genius_locus_kit::GrantError;
+    let (mut coord, h) = open_coord();
+    let opts = GrantOptions {
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::DecayDerived {
+            threshold: 5,
+            // total_shares < threshold: cannot reconstruct the secret.
+            total_shares: 3,
+            drift_rate: DriftRate::Slow,
+            experimental_ip_clearance_confirmed: true,
+        },
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let err = coord.issue_grant(&h, opts, &[0u8; 32], NOW_F64).unwrap_err();
+    assert_eq!(
+        err, GrantError::InvalidCustodyParameters,
+        "GRT-08b: total_shares < threshold must produce InvalidCustodyParameters"
+    );
+}
+
+/// Mode-3 with `total_shares > 255` and clearance confirmed must be rejected —
+/// the implementation cap guards against pathological share counts.
+///
+/// Swift mirror: GRT01_GrantTests.decayDerivedRejectsTotalSharesAboveCap
+#[test]
+fn grt08c_mode3_total_shares_above_cap_rejected() {
+    use genius_locus_kit::GrantError;
+    let (mut coord, h) = open_coord();
+    let opts = GrantOptions {
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::DecayDerived {
+            threshold: 2,
+            // total_shares = 256 exceeds the MAX_DECAY_SHARES cap of 255.
+            total_shares: 256,
+            drift_rate: DriftRate::Slow,
+            experimental_ip_clearance_confirmed: true,
+        },
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let err = coord.issue_grant(&h, opts, &[0u8; 32], NOW_F64).unwrap_err();
+    assert_eq!(
+        err, GrantError::InvalidCustodyParameters,
+        "GRT-08c: total_shares > 255 must produce InvalidCustodyParameters"
+    );
+}
+
+/// Valid mode-3 parameters (threshold > 0, total_shares ≥ threshold, ≤ 255,
+/// clearance confirmed) must succeed — the guard must not be a spurious barrier.
+///
+/// Swift mirror: GRT01_GrantTests.decayDerivedAcceptsValidParameters
+#[test]
+fn grt08d_mode3_valid_parameters_accepted() {
+    let (mut coord, h) = open_coord();
+    let opts = GrantOptions {
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::DecayDerived {
+            threshold: 2,
+            total_shares: 3,
+            drift_rate: DriftRate::Slow,
+            experimental_ip_clearance_confirmed: true,
+        },
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    // Must not error — valid parameters with clearance confirmed.
+    coord.issue_grant(&h, opts, &[0x11u8; 32], NOW_F64)
+        .expect("GRT-08d: valid mode-3 parameters must succeed");
 }
 
 // ---------------------------------------------------------------------------

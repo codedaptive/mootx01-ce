@@ -204,6 +204,17 @@ extension NeuronKit {
     /// inter-continent bridge gain negative.
     public static let topologyResolution = 0.05
 
+    /// Maximum number of drawers per KGFact subject group bonded into the
+    /// shared-subject clique. Planned hardening: a subject shared by many
+    /// drawers (generic label or data-quality issue) generates O(n²) adjacency
+    /// edges; capping at kgFactCliqueCap limits one group to at most
+    /// kgFactCliqueCap*(kgFactCliqueCap-1)/2 = 1 225 edges. Drawers beyond
+    /// the cap are excluded from bonding for that subject — they still appear
+    /// in the graph as isolated or tunnel-bonded nodes. Cap hit is logged once
+    /// per group at warning level (no subject content — avoids leaking user data).
+    /// Parity-aligned with KGFACT_CLIQUE_CAP in topology_analysis.rs.
+    public static let kgFactCliqueCap = 50
+
     /// Compute the estate topology snapshot from plain descriptors.
     ///
     /// Live/dead partition comes from the descriptors (the caller resolves
@@ -269,7 +280,18 @@ extension NeuronKit {
         }
         var kgEdges: [GraphTopologyEdge] = []
         for (_, drawerIDs) in subjectIndex where drawerIDs.count > 1 {
-            let unique = Array(Set(drawerIDs))
+            // Sort for determinism (Set iteration order is insertion-dependent
+            // in Swift; sorted() aligns with the Rust port's sort_unstable so
+            // both ports build the same edge multiset from the same facts).
+            var unique = Array(Set(drawerIDs)).sorted()
+            // Planned hardening: cap group size to prevent O(n²) edge
+            // explosion. Drawers beyond kgFactCliqueCap receive no bond for
+            // this subject. Parity: mirrors KGFACT_CLIQUE_CAP in topology_analysis.rs.
+            if unique.count > NeuronKit.kgFactCliqueCap {
+                topologyLogger.warning(
+                    "NeuronKit.graphTopology: KGFact group has \(unique.count) drawers; capping at \(NeuronKit.kgFactCliqueCap) (planned hardening)")
+                unique = Array(unique.prefix(NeuronKit.kgFactCliqueCap))
+            }
             for i in 0..<unique.count {
                 for j in (i + 1)..<unique.count {
                     // createdTs is nil: a shared-subject bond aggregates facts
@@ -357,8 +379,9 @@ extension NeuronKit {
             centralityMap[nodeIDs[i]] = c / norm
         }
 
-        // ISO8601DateFormatter per call is intentional: this runs at most once
-        // per /api/graph request (low frequency); the allocation is negligible.
+        // ISO8601DateFormatter per call is intentional: this is called at
+        // low frequency (graph requests and scheduled topology snapshots);
+        // the allocation is negligible.
         let iso = ISO8601DateFormatter()
         var nodes = live.map { d in
             GraphTopologyNode(

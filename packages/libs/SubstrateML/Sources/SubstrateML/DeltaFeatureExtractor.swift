@@ -5,8 +5,8 @@
 // Analyzes an ordered sequence of (value, timestamp) observations for a
 // single feature (REL, ENT, or NUM schema) and classifies the sequence's
 // trajectory. Feeds Stage 2.5 of the distillation pipeline, which rescues
-// CONVERGENT and MONOTONE features that would otherwise fail the majority-
-// vote threshold because no single value reaches df >= τ_maj.
+// CONVERGENT and MONOTONE features that would otherwise fail the structural
+// recurrence threshold (df < 2/M).
 //
 // DeltaType classification:
 //   STATIC      — all values identical (handled by Stage 2 majority vote)

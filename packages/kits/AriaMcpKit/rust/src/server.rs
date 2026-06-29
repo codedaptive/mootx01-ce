@@ -27,7 +27,7 @@
 //!   | Absent or empty       | Non-empty            | SQLite at path    |
 //!   | Absent or empty       | Absent or empty      | In-memory (default)|
 //!
-//!   `from_env()` is the production entry point; `main.rs` calls it.
+//!   `from_env()` is the production entry point; `runtime.rs` calls it via `runtime::run`.
 //! - `default_inmemory()` — unconditionally in-memory; preserved for tests.
 //!
 //! Wire surface (tools, schemas, JSON-RPC methods) is unchanged regardless
@@ -89,11 +89,9 @@ impl ServerConfig {
             std::process::exit(1);
         } else if !postgres_url.is_empty() {
             // Only ARIA_MCP_POSTGRES_URL set → PostgreSQL-backed estate.
-            // PostgresDrawerStore::from_connection_string is lazy — the pool
-            // acquires connections on first use, not here. Construction
-            // succeeds even when the database is temporarily unreachable;
-            // the first tool call that touches the estate surfaces any
-            // connection error. Matches Swift's AriaMCPMain postgres branch.
+            // EstateRegistry::new_postgres reads the estate manifest during
+            // construction, so an unreachable or unusable PostgreSQL estate
+            // fails at startup rather than on first tool call.
             // Redact userinfo before logging — the URL may contain
             // user:password@host, which would leak credentials to stderr / log
             // aggregators. Log host only, matching the Swift side
@@ -174,11 +172,91 @@ impl ServerConfig {
 
 /// Run the newline-delimited JSON stdio loop until `reader` returns EOF.
 ///
+/// Maximum frame size for the stdio read loop (CAND-051 hardening).
+/// Public so integration tests can verify the cap triggers at the correct boundary.
+///
+/// A peer writing bytes without a newline terminator would cause the
+/// `BufReader::read_line` accumulation buffer to grow without bound,
+/// eventually exhausting process memory (local DoS). This cap limits the
+/// accumulated line length: once a partial line exceeds `MAX_FRAME_BYTES`
+/// with no newline the loop exits cleanly rather than growing further.
+/// 4 MiB matches the HTTP transport's `maxBodyBytes` default — large
+/// enough for any legitimate MCP payload and small enough to bound
+/// per-connection memory to a known ceiling.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read one newline-terminated line from `reader`, accumulating partial
+/// chunks, and return it. Returns `None` on EOF or read error; returns
+/// `Some(String)` when a complete line is found.
+///
+/// Unlike `BufReader::read_line`, this function enforces `MAX_FRAME_BYTES`:
+/// if the accumulated length exceeds the cap before a newline is found the
+/// function logs the overflow and returns `None` to close the loop — the
+/// caller must not continue reading from a runaway peer.
+///
+/// Implementation uses `BufReader::fill_buf` + `consume` to inspect the
+/// internal buffer in place without a byte-at-a-time read, giving the same
+/// throughput as `read_line` while adding the size gate.
+fn read_line_capped<R: BufRead>(reader: &mut R) -> Option<String> {
+    let mut line = String::new();
+    loop {
+        // fill_buf() returns the bytes currently available in the internal
+        // buffer without consuming them. On EOF it returns Ok(&[]).
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("aria-mcp: read error: {e}");
+                return None;
+            }
+        };
+        if available.is_empty() {
+            // EOF — return what we have, or None if the line is empty.
+            if line.is_empty() {
+                return None;
+            }
+            return Some(line);
+        }
+        // Scan the available bytes for a newline.
+        let newline_pos = available.iter().position(|&b| b == b'\n');
+        let consume_len = match newline_pos {
+            Some(pos) => pos + 1, // consume through the newline
+            None => available.len(), // consume all available bytes
+        };
+        // Accumulate into the line string. `from_utf8_lossy` replaces any invalid
+        // UTF-8 sequences with the replacement character so the buffer never
+        // contains unvalidated bytes. Legitimate MCP frames are always valid UTF-8
+        // (JSON over stdio); the lossy path is a safety net only.
+        let chunk = String::from_utf8_lossy(&available[..consume_len]);
+        line.push_str(&chunk);
+        reader.consume(consume_len);
+
+        // Check frame size cap before deciding whether to continue.
+        if line.len() > MAX_FRAME_BYTES {
+            eprintln!(
+                "aria-mcp stdio: frame size cap exceeded ({} > {}), closing input",
+                line.len(),
+                MAX_FRAME_BYTES
+            );
+            return None;
+        }
+
+        // If we found a newline, the line is complete.
+        if newline_pos.is_some() {
+            return Some(line);
+        }
+        // Otherwise loop to read the next chunk.
+    }
+}
+
 /// Reads bytes from `reader`, splits on newline, parses each line as JSON,
 /// dispatches, and writes responses to `writer` one line each. Malformed
 /// lines emit a parseError response with a null id, matching the Swift
 /// server's behavior, so a client can recover by sending the next
 /// well-formed request without restarting the server.
+///
+/// Frame size cap (CAND-051): if a partial line accumulates more than
+/// `MAX_FRAME_BYTES` without a newline the loop exits cleanly. The peer
+/// is expected to reconnect; the process does not crash or grow without bound.
 pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: ServerConfig) {
     let dispatcher = Dispatcher::new(
         config.registry,
@@ -187,18 +265,12 @@ pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: Serv
         &config.build_serial,
     );
     let mut buf = BufReader::new(reader);
-    let mut line = String::new();
 
     loop {
-        line.clear();
-        match buf.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("aria-mcp: read error: {e}");
-                break;
-            }
-        }
+        let line = match read_line_capped(&mut buf) {
+            Some(l) => l,
+            None => break, // EOF, read error, or frame size cap exceeded
+        };
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
         if trimmed.is_empty() {
             continue;

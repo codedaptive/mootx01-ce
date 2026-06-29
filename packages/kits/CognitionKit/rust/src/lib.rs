@@ -27,19 +27,34 @@
 //!    paired with a Swift version in `Sources/CognitionKit/` (SPEC C-7
 //!    satisfied) and registered in BOTH versions' catalogs with byte-
 //!    identical descriptors, per
-//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`
-//!    (the catalog lists what ships in both versions).
+//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`.
+//!    All 30 catalog entries are present in both versions; the 3 distillation-
+//!    family entries carry descriptor metadata in Rust but no full Rust recipe
+//!    body in this directory.
 //!
-//! Determinism: every function here is a pure function of its inputs.
-//! No clock, no randomness, no unordered iteration that reaches output.
+//! Determinism: the sequencing logic in `migration_orchestration` is a pure
+//! function of its inputs when tested via the `RecipeSubstrate` trait; the
+//! live path (`migration_live::run_migration_benchmark_sqlite`) reads mutable
+//! estate state via `EstateCoordinator` and captures `SystemTime` for telemetry.
+//! Lens recipes are read-only; no unordered iteration reaches output.
 //!
 //! Conformance: each module's `#[cfg(test)]` block fits the same
 //! fixtures as the Swift `*Tests` and asserts identical results.
 
 pub mod anticipate_recipe;
-// consolidate.rs — ConsolidateInput/Output data types for the per-item
-// distillation recipe. Rust parity with CognitionKit/Consolidate.swift.
+// consolidate.rs — ConsolidateInput/Output data types AND run_consolidate recipe
+// body for the per-item distillation recipe. Rust parity with
+// CognitionKit/Consolidate.swift. run_consolidate delegates to
+// EstateCoordinator::distill_items_sweep (parity with Swift's kit.distillItemsSweep).
 pub mod consolidate;
+// distilled_recall.rs — DistilledRecallInput/Output/DistilledMatch types AND
+// run_distilled_recall recipe body. Rust parity with CognitionKit/DistilledRecall.swift.
+// Searches the distilled memory tier via Hamming NN (no embedding model inference).
+pub mod distilled_recall;
+// recollect.rs — RecollectInput/Output/ExpandedSource/RecollectError types AND
+// run_recollect recipe body. Rust parity with CognitionKit/Recollect.swift.
+// Fans out from a _distilled factoid to its source memories via _distilled_from tunnels.
+pub mod recollect;
 pub mod association_rules_recipe;
 pub mod exploratory_recall_recipe;
 pub mod bias_recipe;
@@ -71,7 +86,14 @@ pub mod trust_lens_recipe;
 pub mod tunnel_successor_recipe;
 
 pub use anticipate_recipe::run_anticipate;
-pub use consolidate::{ConsolidateInput, ConsolidateOutput};
+pub use consolidate::{run_consolidate, ConsolidateInput, ConsolidateOutput};
+pub use distilled_recall::{
+    classify_distilled_discrimination, run_distilled_recall, DistilledDiscriminationLevel,
+    DistilledMatch, DistilledRecallInput, DistilledRecallOutput,
+};
+pub use recollect::{
+    run_recollect, ExpandedSource, RecollectError, RecollectInput, RecollectOutput,
+};
 pub use association_rules_recipe::{
     run_apriori_rules, run_association_rules, AprioriRulesOutput, AssociationRuleResult,
     AssociationRulesOutput,

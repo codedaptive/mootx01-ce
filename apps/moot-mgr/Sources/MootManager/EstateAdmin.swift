@@ -80,6 +80,13 @@ public actor EstateAdmin {
         /// profile, but `estate(for:)` is package-internal, so the engine keeps the
         /// kind here rather than reading it back across the kit boundary.
         let kind: EstateKind
+        /// Filesystem URL of the SQLite file for this estate, or `nil` for
+        /// InMemory backends. Stored at provision time so `destroy` can delete
+        /// the file after GLK's teardown releases the connection — deriving it
+        /// inline at destroy time from `estateUUID` is equivalent but keeping it
+        /// here makes the relationship between the file and the estate explicit.
+        /// (secfix/ws2-coredelete §Cluster F: SQLite file deletion after destroy)
+        let sqliteURL: URL?
     }
     private var hosted: [String: Provenance] = [:]
 
@@ -204,7 +211,7 @@ public actor EstateAdmin {
             )
         }
 
-        let storage = try makeStorage(backend: backend)
+        let (storage, sqliteURL) = try makeStorage(backend: backend)
         let owner = OwnerCredentials(ownerIdentifier: request.owner)
         let params = EstateProvisionParams(
             estateName: request.estateName,
@@ -220,7 +227,7 @@ public actor EstateAdmin {
         let handle = try await kit.provision(storage: storage, owner: owner, params: params)
 
         let uuid = handle.estateUUID.uuidString
-        hosted[uuid] = Provenance(handle: handle, storage: storage, backend: backend, kind: kind)
+        hosted[uuid] = Provenance(handle: handle, storage: storage, backend: backend, kind: kind, sqliteURL: sqliteURL)
         let state = await kit.mountState(for: handle) ?? .mounted
         logger.info("provisioned \(kind.rawValue, privacy: .public) estate \(uuid, privacy: .public) (\(backend.rawValue, privacy: .public))")
 
@@ -265,9 +272,17 @@ public actor EstateAdmin {
     ///
     /// The operator must re-type the estate's exact name in `request.confirmName`
     /// (concepts §1.8). A mismatch refuses the destroy with `AdminError.destroyConfirmMismatch`
-    /// — no data is touched. On a match, GLK `destroy(...)` closes the estate and
-    /// tears down every sub-store the kind wired, then the estate is dropped from
-    /// the provenance map (so its handle and storage are released).
+    /// — no data is touched. On a match:
+    ///
+    ///   1. GLK `destroy(...)` closes the estate and tears down every sub-store
+    ///      the kind wired (Corpus recall index, VectorStore, LocusKit drawer
+    ///      content blobs zeroed in SQLite).
+    ///   2. The estate is dropped from the provenance map.
+    ///   3. If the estate used a SQLite backend, the SQLite file and its WAL/SHM
+    ///      sidecar files are deleted from disk (destruction contract
+    ///      secfix/ws2-coredelete §Cluster F). Step 3 runs AFTER step 1 because
+    ///      GLK's close() releases the SQLite file handle; deleting while the file
+    ///      is still open would leave the data accessible until the process exits.
     ///
     /// - Parameter request: The lifecycle request (UUID + confirmName).
     /// - Returns: The result; mount state is nil (the estate no longer exists).
@@ -281,6 +296,37 @@ public actor EstateAdmin {
         }
         try await kit.destroy(storage: prov.storage, handle: prov.handle)
         hosted[request.estateUUID] = nil
+
+        // Delete the SQLite file and WAL/SHM sidecar files AFTER GLK destroy
+        // releases the SQLite file handle. InMemory estates have no file to delete
+        // (sqliteURL is nil). Deletion failures are logged but do not fail the
+        // destroy — the in-memory state is already torn down and the file will be
+        // re-encountered on the next open attempt (which will fail cleanly because
+        // the estate is no longer in the hosted map).
+        if let sqliteURL = prov.sqliteURL {
+            let fm = FileManager.default
+            // SQLite WAL and SHM sidecar filenames use a DASH suffix
+            // ("<path>-wal", "<path>-shm"), not a dot extension. Using
+            // appendingPathExtension would produce "<path>.sqlite.wal",
+            // which is the wrong path and would silently miss the files.
+            let walURL = URL(fileURLWithPath: sqliteURL.path + "-wal")
+            let shmURL = URL(fileURLWithPath: sqliteURL.path + "-shm")
+            for fileURL in [sqliteURL, walURL, shmURL] {
+                do {
+                    if fm.fileExists(atPath: fileURL.path) {
+                        try fm.removeItem(at: fileURL)
+                        logger.info(
+                            "destroy: deleted \(fileURL.lastPathComponent, privacy: .public) for estate \(request.estateUUID, privacy: .public)"
+                        )
+                    }
+                } catch {
+                    logger.error(
+                        "destroy: failed to delete \(fileURL.lastPathComponent, privacy: .public) for estate \(request.estateUUID, privacy: .public): \(error, privacy: .public)"
+                    )
+                }
+            }
+        }
+
         logger.info("destroyed estate \(request.estateUUID, privacy: .public)")
         return EstateAdminResult(ok: true, detail: "destroyed '\(prov.handle.estateName)'", estateUUID: request.estateUUID, mountState: nil)
     }
@@ -342,17 +388,23 @@ public actor EstateAdmin {
     ///
     /// - SQLite: a file at `<estatesDirectory>/<uuid>.sqlite`. The directory is
     ///   created on demand. A fresh UUID names the file so two provisions never
-    ///   collide on disk.
-    /// - InMemory: a volatile store; nothing touches the filesystem.
-    private func makeStorage(backend: EstateBackendKind) throws -> any Storage {
+    ///   collide on disk. Returns the file URL alongside the storage so `destroy`
+    ///   can delete the file after the GLK connection is released (secfix/ws2-
+    ///   coredelete §Cluster F).
+    /// - InMemory: a volatile store; nothing touches the filesystem. Returns
+    ///   `nil` for the URL.
+    ///
+    /// Returns `(storage, sqliteURL?)` — the URL is non-nil only for SQLite
+    /// backends.
+    private func makeStorage(backend: EstateBackendKind) throws -> (any Storage, URL?) {
         let estateID = UUID()
         switch backend {
         case .inMemory:
-            return InMemoryStorage(configuration: EstateConfiguration(
+            return (InMemoryStorage(configuration: EstateConfiguration(
                 estateID: estateID,
                 backend: .inMemory,
                 cacheConfig: cacheConfig
-            ))
+            )), nil)
         case .sqlite:
             try FileManager.default.createDirectory(
                 at: estatesDirectory,
@@ -363,11 +415,12 @@ public actor EstateAdmin {
             // P1: pass the resolved cacheConfig so SQLiteStorage.init wraps the
             // bare SQLiteRowStore in the tested CachingRowStore hot tier when
             // enabled. The live resident host now runs with the cache ON.
-            return try SQLiteStorage(configuration: EstateConfiguration(
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
                 estateID: estateID,
                 backend: .sqlite(url: url),
                 cacheConfig: cacheConfig
             ))
+            return (storage, url)
         }
     }
 }

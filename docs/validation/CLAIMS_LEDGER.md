@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-05-22
-last_updated: 2026-06-14
+last_updated: 2026-06-17
 phase: A
 ---
 
@@ -229,7 +229,8 @@ by I-16 and I-15 respectively; they are listed below as
 - Type: invariant
 - Status: active in v1.0
 - Evidence: evidenced by the four-cell conformance gate and
-  the cross-language byte-equality test for all 24 primitives.
+  the cross-language byte-equality test for all 28 conformant
+  primitives.
 - Evidence pointer: the four-way conformance
   matrix; current as of develop tip `7da4413`.
 

@@ -69,7 +69,7 @@ fn raw_exec(path: &str, sql: &str) {
 }
 
 fn sample_drawer(id: &str) -> Drawer {
-    let mut d = Drawer::new(id, "corrupt read-back content", "w", "r", "test", NOW, "test-v1");
+    let mut d = Drawer::new(id, "corrupt read-back content", "test-parent", "test", NOW, "test-v1");
     d.udc_code = "001".to_string();
     d
 }

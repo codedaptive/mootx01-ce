@@ -15,11 +15,11 @@
 // Storage is six Bitmaps (one per bit position), each of size
 // ceil(N_rows · 36 / 8) bytes.
 //
-// Scan operations: a query like "rows where field 12 has value
-// 5" decomposes into per-bit predicates (bit0=1, bit1=0, bit2=1)
-// that are computed in parallel via bitwise AND of the relevant
-// bit-slices. The whole scan is O(N_rows / 64) word operations
-// regardless of the value being matched.
+// Scan operations: the reference `scanFieldEquals` iterates rows
+// one at a time and checks each of the six bits individually.
+// The production bitmap design achieves O(N_rows / 64) via
+// word-parallel bitwise AND of bit-slices; this reference uses
+// a simpler row-wise scan for clarity.
 //
 // Memory cost (1M rows × 36 fields × 6 bits): 27 MiB. Within the
 // LPDDR5 working-set budget of Apple silicon and well within

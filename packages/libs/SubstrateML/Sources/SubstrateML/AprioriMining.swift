@@ -77,6 +77,32 @@ public struct AprioriThresholds: Equatable, Sendable, Codable {
         self.minLift = minLift
         self.maxK = max(2, maxK)
     }
+
+    // Custom Decodable to prevent the Swift-synthesised init(from:) from
+    // bypassing the maxK >= 2 floor. The synthesised path sets stored
+    // properties directly from the encoded values without going through
+    // the public init, so a payload carrying maxK = 0 or 1 would
+    // produce an AprioriThresholds whose maxK is below the enforced minimum,
+    // silently corrupting a for-loop that iterates 2...thresholds.maxK.
+    // This custom init routes through the public init so the clamping
+    // (max(2, maxK)) is always applied regardless of the serialised value.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedMinSupport    = try c.decode(Double.self, forKey: .minSupport)
+        let decodedMinConfidence = try c.decode(Double.self, forKey: .minConfidence)
+        let decodedMinLift       = try c.decode(Double.self, forKey: .minLift)
+        let decodedMaxK          = try c.decode(Int.self,    forKey: .maxK)
+        self.init(
+            minSupport:    decodedMinSupport,
+            minConfidence: decodedMinConfidence,
+            minLift:       decodedMinLift,
+            maxK:          decodedMaxK
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case minSupport, minConfidence, minLift, maxK
+    }
 }
 
 /// One mined rule `antecedent → consequent` with five standard

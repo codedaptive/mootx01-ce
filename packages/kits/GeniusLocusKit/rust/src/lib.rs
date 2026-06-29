@@ -19,6 +19,8 @@
 //            gate, enrichment pipeline that folds the post-watermark
 //            audit-log tail into the matrix tier, and the daemon
 //            engine that composes the two with a held watermark.
+//   NT-G1  — SubstrateNodeTopologyProvider adapter (String↔UUID bridge
+//            over LocusKit NodeStore, auto-registered on estate open).
 //
 // The theorem / performance gate (GLK-08) remains out of scope and
 // ships in a later sub-mission.
@@ -57,13 +59,16 @@ pub mod handle;
 // `composite_schema` declaration. Also adds `open_hydrating` to
 // `EstateCoordinator` via an impl block.
 pub mod hydration;
-// intake.rs — Dual-Path Intake (G7): WriteMode, EncodeJob, the per-estate
-// encode queue (D-B), mode-aware capture (D-A), and the pump-driven drain.
-// Rust twin of EncodeJob.swift + EncodeIntake.swift.
+// intake.rs — Dual-Path Intake (G7): WriteMode and mode-aware capture (D-A),
+// the capture→encode ORCHESTRATION. The encode queue + drain + worker pool +
+// retry + job payload now live in CorpusKit (corpus_ingest_queue.rs); GLK
+// enqueues into the Corpus and coordinates the room rollup via on_encoded.
+// Rust twin of EncodeIntake.swift.
 pub mod intake;
 pub mod matrix;
 pub mod migration;
 pub mod node_topology;
+pub mod substrate_node_topology_provider;
 pub mod recall;
 pub mod training;
 pub mod verbs;
@@ -91,6 +96,10 @@ pub use brain::scheduler::{
     SignalRouteOutcome as SchedulerSignalRouteOutcome, SignalSpec as SchedulerSignalSpec,
     SignalState as SchedulerSignalState, SignalTrigger as SchedulerSignalTrigger,
     SubscriptionID as SchedulerSubscriptionID, EMISSION_CLASS_TAGS,
+    // T5 (ADR-021 Decision 7): stream_id stamped on every signal Job sent to the
+    // shared per-estate queue.sqlite. The drain loop uses drain_for_stream to
+    // claim only "signals" jobs, leaving encode jobs or dreaming jobs untouched.
+    SIGNAL_STREAM_ID,
 };
 // Test-only stub dispatcher — compiled out of production (see serial_lane.rs).
 // Reachable from integration tests via the `test-seams` feature.
@@ -101,12 +110,16 @@ pub use brain::signals::{
     DecaySweepSignal, DistillationSignal, DreamingSignal, EndOfDayTournamentSignal,
     MaintenanceSignal, TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
-pub use migration::{ExternalCorpus, ExternalEntry};
-// Dual-Path Intake (G7) public surface: the write mode and the encode-job
-// payload. The coordinator methods (`capture_with_mode`, `mount_encode_queue`,
-// `await_encode_drain`, `drain_encode_queue_once`) are inherent methods on
-// `EstateCoordinator` and reachable through it directly.
-pub use intake::{EncodeJob, WriteMode};
+pub use migration::{
+    run_parallel, verify_migration, ExternalCorpus, ExternalEntry, MigrationDivergence,
+    MigrationError, MigrationVerification, ParallelCaptureMode, ParallelRunHandle,
+};
+// Dual-Path Intake (G7) public surface: the write mode. The coordinator
+// methods (`capture_with_mode`, `await_encode_drain`, `reindex_missing`) are
+// inherent methods on `EstateCoordinator` and reachable through it directly;
+// they delegate the encode mechanism to the estate's Corpus (CorpusKit owns the
+// ingest queue + drain + worker pool).
+pub use intake::WriteMode;
 pub use hydration::{
     bridge_audit_event, composite_schema, open_hydrating, flush as glk_flush,
     HydratedEstate, HydrateError,
@@ -117,10 +130,20 @@ pub use coordinator::{
     EstateKind, EstateMountState, EstateProvisionParams, SyncMode,
     FederatedRecallResult, FederatedReadRefusalReason,
     SyncEngineEntry, format_sync_state_token,
-    ExpungeIntegritySweepResult,
+    ExpungeIntegritySweepResult, DrainStatus,
+    // ADR-021 Phase 2b: dreaming-queue job payload. Public so the T9 drainer
+    // (a downstream crate) and integration tests can decode queue.sqlite payloads.
+    DreamingItem,
 };
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
+// Re-export the encode-speed knob so consumers that depend on GeniusLocusKit
+// (VaultKit's PalaceBridge, AriaMcpKit) can name it without a direct CorpusKit
+// dependency. `.foreground` / `.background` select the drain's embedding QoS;
+// write strategy is size-gated separately. (Swift defines a distinct GLK enum
+// that maps to CorpusKit's, because Swift forbids using an imported enum's cases
+// in a default argument; Rust has no such restriction, so a re-export suffices.)
+pub use corpus_kit::corpus::EncodeSpeed;
 // Re-exports for B-1-compliant reader types: NeuronKit readers import these
 // from genius_locus_kit so they carry no direct locus_kit:: imports.
 pub use locus_kit::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State as DrawerState};
@@ -139,6 +162,7 @@ pub use training::{
     TrainingDaemonTick, TrainingThresholdDecision, TrainingThresholdGate,
 };
 pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
+pub use substrate_node_topology_provider::SubstrateNodeTopologyProvider;
 pub use recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
     GraphCache, PreferenceStore,

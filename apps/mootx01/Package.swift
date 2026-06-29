@@ -8,7 +8,7 @@
 // bash install scripts) per MOOTX01-CLI-001.
 //
 // The serve subcommand wraps AriaMCP + GeniusLocusKit on macOS only
-// (Apple Silicon, macOS 15+). All other subcommands — install, uninstall,
+// (Apple Silicon, macOS 26+). All other subcommands — install, uninstall,
 // db, status, query — are cross-platform and compile on Linux.
 //
 // MootInstallerCore holds path/config helpers and the installer state
@@ -22,8 +22,8 @@ import PackageDescription
 
 let package = Package(
     name: "mootx01",
-    // macOS(.v15) is the minimum for the serve subcommand and its deps
-    // (AriaMCP, GeniusLocusKit, LocusKit, PersistenceKitSQLite).
+    // macOS(.v26) is the package-level minimum; serve and its deps
+    // (AriaMCP, GeniusLocusKit, LocusKit, PersistenceKitSQLite) require it.
     // Linux builds succeed because ServeCommand.swift is guarded with
     // #if os(macOS) — SPM compiles only the cross-platform subcommands
     // (install, uninstall, db, status, query) on Linux.
@@ -41,6 +41,13 @@ let package = Package(
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
+        // NeuronKit: DreamCommand constructs DreamingDaemon + seam adapters
+        // (EstateDreamingReader, EstateDreamingSink, EstateManifestDreamingPolicyStore)
+        // to run one REM-ALPHA dreaming cycle. Required by T10 (ADR-021 Phase 5).
+        .package(name: "NeuronKit", path: "../../packages/kits/NeuronKit"),
+        // QueueKit: DreamCommand acquires the "dreaming" DrainLease to prevent
+        // concurrent dreamers for the same estate. Required by T10 (ADR-021 Phase 5).
+        .package(name: "QueueKit", path: "../../packages/kits/QueueKit"),
     ],
     targets: [
         .target(
@@ -67,6 +74,10 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // DreamCommand: NeuronKit provides DreamingDaemon + seam adapters;
+                // QueueKit provides DrainLease for per-stream stampede prevention.
+                .product(name: "NeuronKit", package: "NeuronKit"),
+                .product(name: "QueueKit", package: "QueueKit"),
             ],
             path: "Sources/mootx01"
         ),

@@ -4,10 +4,14 @@
 // Verifies: cache hit/miss, sensitivity gate, write-through invalidation,
 // observer-driven invalidation, and LRU eviction.
 //
-// Each test works by populating the cache via a query, then deleting the
-// row from the backing store directly (without going through CachingRowStore).
-// A subsequent query either returns from cache (hit) or falls through to
-// the now-empty backing store (miss/invalidated).
+// Cache-miss/hit and sensitivity tests work by populating the cache via a
+// query, then deleting the row from the backing store directly (bypassing
+// CachingRowStore). A subsequent query returns from cache (hit) or falls
+// through to the now-empty backing store (miss/invalidated). Write-through
+// (update/delete/upsert via CachingRowStore) and observer-driven invalidation
+// tests use a different approach: they mutate through the caching layer or fire
+// a StorageObserver event and verify the cache is cleared without backing-store
+// deletion.
 
 import Testing
 import Foundation
@@ -71,9 +75,15 @@ struct CachingRowStoreTests {
         )
     }
 
-    /// Encode a sensitivity level into the `provenance` column value.
-    /// level = (raw >> 4) & 0x7  →  raw = level << 4
-    func provenance(level: Int) -> TypedValue { .int(Int64(level) << 4) }
+    /// Encode a sensitivity ordinal into the `provenance` bitmap column value.
+    /// Ordinals: 0=Normal, 1=Elevated, 2=Restricted, 3=Secret — matching the
+    /// `Sensitivity` cases in LocusKit's `Provenance.swift`. Sensitivity lives in
+    /// bits 30–35 of the provenance bitmap (scale-gapped per cookbook §2.5 v0.6:
+    /// Normal=0, Elevated=16, Restricted=32, Secret=48).
+    func provenance(level: Int) -> TypedValue {
+        let scaleGapped = Int64(level * 16)  // ordinal → scale-gapped raw value
+        return .int(scaleGapped << 30)       // place in bits 30–35
+    }
 
     func idPredicate(table: String = "things", _ id: UUID) -> StoragePredicate {
         .eq(Column(table: table, name: "id"), .uuid(id))
@@ -241,6 +251,53 @@ struct CachingRowStoreTests {
 
         let miss = try await caching.query(table: "things", where: p)
         #expect(miss.count == 0, "unparseable provenance → fail closed; row not cached")
+    }
+
+    @Test("Sensitivity at old wrong bit position (bits 4–6) is treated as Normal and admitted")
+    func oldBitPositionTreatedAsNormal() async throws {
+        // Regression: before the fix, the gate decoded (raw >> 4) & 0x7 (bits [5:4]).
+        // A value of 3 << 4 = 48 would have looked like Secret and been rejected.
+        // After the fix the gate reads bits 30–35; value 48 in the low bits leaves
+        // bits 30–35 as 0 (Normal, ordinal 0), so the row is admitted.
+        let storage = try await makeStorage()
+        let caching = makeCaching(backing: storage.rowStore, threshold: 2)
+        let id = UUID()
+
+        // Old-style encoding: secret level at bits [5:4], NOT at bits 30–35
+        _ = try await storage.rowStore.insert(
+            table: "things",
+            values: ["id": .uuid(id), "name": .text("old-encoding"),
+                     "provenance": .int(Int64(3) << 4)]   // 48, bits 30–35 = 0
+        )
+        let p = idPredicate(id)
+        _ = try await caching.query(table: "things", where: p)
+        _ = try await storage.rowStore.delete(table: "things", where: p)
+
+        let result = try await caching.query(table: "things", where: p)
+        #expect(result.count == 1,
+                "bits 30–35 are 0 (Normal) at old-style encoding; row must be admitted")
+    }
+
+    @Test("Secret encoded at correct bits 30–35 is always rejected")
+    func secretAtCorrectBitsAlwaysRejected() async throws {
+        // Regression: verify the gate reads the right bit field. Secret raw = 48;
+        // at bits 30–35 that is Int64(48) << 30. Must be rejected at any threshold.
+        let storage = try await makeStorage()
+        let caching = makeCaching(backing: storage.rowStore, threshold: 2)
+        let id = UUID()
+
+        _ = try await storage.rowStore.insert(
+            table: "things",
+            values: ["id": .uuid(id), "name": .text("secret-at-correct-bits"),
+                     "provenance": .int(Int64(48) << 30)]  // Secret at bits 30–35
+        )
+        let p = idPredicate(id)
+        _ = try await caching.query(table: "things", where: p)
+        _ = try await storage.rowStore.delete(table: "things", where: p)
+
+        let result = try await caching.query(table: "things", where: p)
+        #expect(result.count == 0,
+                "Secret encoded at bits 30–35 must never be admitted to the cache")
     }
 
     // MARK: — Write-through invalidation

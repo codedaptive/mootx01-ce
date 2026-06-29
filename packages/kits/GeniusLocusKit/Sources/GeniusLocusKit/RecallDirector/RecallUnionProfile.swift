@@ -5,9 +5,11 @@ import Foundation
 ///
 /// The profile describes how concentrated vs. dispersed each signal column
 /// is (sharpness), how consistently candidates were confirmed by multiple
-/// lanes (signalAgreement), how redundant the top candidates are
-/// (redundancy), and a reserved field for the future matrix coherence
-/// signal (matrixCoherence).
+/// lanes (signalAgreement), how redundant the top candidates are via pairwise
+/// Jaccard over `sourceMask` bits as a pre-hydration proxy (redundancy), and
+/// the mean co-occurrence score over the top-16 candidates computed from the
+/// matrix scoring pass (matrixCoherence — live when a MatrixTier is registered;
+/// not reserved for a future mission).
 ///
 /// Used by `RecallWeights.adaptive` to tune per-lane weights toward the
 /// signals that are most informative for the current query.
@@ -25,9 +27,12 @@ public struct RecallUnionProfile: Sendable {
     /// were confirmed by every active lane; near 0.0 means each lane
     /// found disjoint sets.
     public let signalAgreement: Float
-    /// Mean pairwise shingle similarity over the top-16 candidates (by
-    /// final score). Values > 0.5 indicate the buffer is dominated by
-    /// near-duplicate content; the diversity weight should be raised.
+    /// Mean pairwise Jaccard similarity over `sourceMask` bits for the
+    /// top-16 candidates (by final score) — a pre-hydration proxy for
+    /// content redundancy. Values > 0.5 indicate the buffer is dominated
+    /// by candidates confirmed by overlapping lane sets; the diversity
+    /// weight should be raised. Post-hydration shingle similarity is not
+    /// computed at this stage.
     public let redundancy: Float
     /// Mean co-occurrence score over the top-16 candidates by final score.
     ///

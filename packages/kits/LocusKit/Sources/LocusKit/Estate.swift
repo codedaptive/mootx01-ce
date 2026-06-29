@@ -51,6 +51,13 @@ public actor Estate {
     /// alongside the store over the same storage; backfilled on open.
     internal let containerFP: ContainerFingerprintStore
 
+    /// The estate's containment tree store (ADR-017). Wings and rooms
+    /// are nodes; the capture verb resolves wing/room display names to
+    /// node IDs through this store's create-on-demand resolution (§7).
+    /// Public so GeniusLocusKit's SubstrateNodeTopologyProvider can
+    /// share this store instead of constructing a redundant one (NT-Q1).
+    public let nodeStore: NodeStore
+
     /// Parsed UUID form of the manifest's `estate_uuid` row. Cached
     /// at init time because the value never changes for the lifetime
     /// of the file (the manifest's `estate_uuid` is set once at create
@@ -97,6 +104,19 @@ public actor Estate {
         _testForceInternalReadError = read
     }
 
+    /// The identity key store used to persist and retrieve the estate's Ed25519
+    /// private signing key. `KeychainEstateIdentityKeyStore` in production;
+    /// callers inject `InMemoryEstateIdentityKeyStore` for tests.
+    private let identityKeyStore: any EstateIdentityKeyStore
+
+    /// In-memory cache of the estate's Ed25519 private signing key raw bytes,
+    /// loaded from `identityKeyStore` at open time. Nil when the key is absent
+    /// from the store (e.g. Keychain was wiped after the first open, or the
+    /// estate was opened before the identity keypair existed). Grant signing
+    /// throws at the call site when this is nil; the estate remains usable for
+    /// all other operations.
+    private let _privateSigningKeyData: Data?
+
     // MARK: - Private init
 
     /// Construct an Estate around an already-opened store and a
@@ -106,7 +126,10 @@ public actor Estate {
     /// stored value is not a valid UUID string.
     private init(store: DrawerStore,
                  containerFP: ContainerFingerprintStore,
-                 manifest: ManifestValues) throws {
+                 nodeStore: NodeStore,
+                 manifest: ManifestValues,
+                 identityKeyStore: any EstateIdentityKeyStore,
+                 privateSigningKeyData: Data?) throws {
         guard let uuid = UUID(uuidString: manifest.estateUUID) else {
             throw EstateError.manifestMismatch(
                 key: ManifestKey.estateUUID.rawValue,
@@ -116,7 +139,10 @@ public actor Estate {
         }
         self.store = store
         self.containerFP = containerFP
+        self.nodeStore = nodeStore
         self._estateUUID = uuid
+        self.identityKeyStore = identityKeyStore
+        self._privateSigningKeyData = privateSigningKeyData
     }
 
     // MARK: - Open
@@ -130,11 +156,29 @@ public actor Estate {
     /// written by a future schema whose bitmap bit positions may have
     /// shifted.
     ///
+    /// On first open (when `ed25519_public_key` is absent from the manifest)
+    /// a fresh Curve25519 Ed25519 keypair is minted. The public key is
+    /// written to the manifest; the private key is stored in `identityKeyStore`
+    /// (Keychain in production) and cached in memory for the lifetime of this
+    /// `Estate` instance. The private key is never written to `estate_meta`:
+    /// `manifest.value` is ordinary, unencrypted metadata readable by anyone
+    /// with database or backup access. Mirrors Rust `Estate::open` post PR #8.
+    ///
+    /// On subsequent opens the private key is loaded from `identityKeyStore`
+    /// and cached in memory. If the key is absent from the store (e.g. the
+    /// Keychain was wiped), the estate opens successfully but grant signing
+    /// will throw at the call site.
+    ///
     /// - Parameters:
     ///   - storage: an already-constructed storage backend (SQLite or
     ///     in-memory). The caller owns its lifecycle.
     ///   - owner: credentials identifying the opening party. The
     ///     substrate only validates that `ownerIdentifier` is non-empty.
+    ///   - identityKeyStore: the store used to persist and retrieve the
+    ///     estate's Ed25519 private signing key. Defaults to
+    ///     `KeychainEstateIdentityKeyStore` (production). Inject
+    ///     `InMemoryEstateIdentityKeyStore` in tests to avoid Keychain
+    ///     entitlement requirements and cross-test pollution.
     /// - Throws:
     ///   - `EstateError.emptyOwnerIdentifier` if the owner identifier
     ///     is empty (raised before any storage call).
@@ -142,9 +186,12 @@ public actor Estate {
     ///     be opened.
     ///   - `EstateError.manifestMismatch(key:found:expected:)` if the
     ///     bitmap layout version is incompatible.
+    ///   - `EstateError.keychainError(status:)` if the identity key store
+    ///     fails to persist the newly-minted private key on first open.
     public static func open(
         storage: any Storage,
-        owner: OwnerCredentials
+        owner: OwnerCredentials,
+        identityKeyStore: any EstateIdentityKeyStore = KeychainEstateIdentityKeyStore()
     ) async throws -> Estate {
         guard !owner.ownerIdentifier.isEmpty else {
             throw EstateError.emptyOwnerIdentifier
@@ -167,25 +214,57 @@ public actor Estate {
                 expected: Self.expectedBitmapLayoutVersion
             )
         }
-        // Establish the estate's Ed25519 federation identity on first
-        // open. The keypair is the signing identity for federation
-        // grants (DECISION_SYNCKIT_DESIGN_2026-05-19 §8); minting it once
-        // and persisting both halves to the manifest makes the public key
+        // Parse the estate UUID early: it is used as the Keychain account key
+        // (kSecAttrAccount = estate UUID string) to isolate each estate's
+        // signing key. A malformed UUID surfaces as manifestMismatch here before
+        // any key-store access, matching the same error the private init would
+        // produce and avoiding a stale Keychain lookup against an invalid account.
+        guard let estateID = UUID(uuidString: manifest.estateUUID) else {
+            throw EstateError.manifestMismatch(
+                key: ManifestKey.estateUUID.rawValue,
+                found: manifest.estateUUID,
+                expected: "<valid UUID string>"
+            )
+        }
+        // Establish the estate's Ed25519 federation identity on first open.
+        // The keypair is the signing credential for federation grants
+        // (DECISION_SYNCKIT_DESIGN_2026-05-19 §8); minting it once and
+        // persisting the public half to the manifest makes the public key
         // stable across every subsequent open of the same storage. Key
-        // generation is intrinsically random — like the estate UUID
-        // minted at create — so it is exempt from the deterministic-engine
-        // rule. See ManifestKey.ed25519PrivateKeyWrapped for the at-rest
-        // wrapping note. Stored as base64 of the raw 32-byte forms.
+        // generation is intrinsically random — like the estate UUID minted
+        // at create — so it is exempt from the deterministic-engine rule.
+        //
+        // Security posture (ADR-007, mirrors Rust Estate::open post PR #8):
+        //   - The private key lives in the identity key store (Keychain in prod).
+        //   - The private key is NEVER written to manifest.value: that table is
+        //     ordinary metadata, unencrypted, visible to database and backup readers.
+        //   - Only the public key is written to the manifest; it is safe to store
+        //     there — a public key has no confidentiality requirement.
+        var privateSigningKeyData: Data?
         if manifest.ed25519PublicKey == nil {
+            // First open: mint a fresh Curve25519 keypair for this estate.
             let privateKey = Curve25519.Signing.PrivateKey()
+            // Store the private key in the identity key store (Keychain) first.
+            // If this throws, the public key has not yet been written, so the
+            // estate remains in the pre-identity state on rollback — consistent.
+            try identityKeyStore.storePrivateKey(
+                privateKey.rawRepresentation,
+                forEstateID: estateID
+            )
+            // Write only the public key to the manifest.
             try await store.setMeta(
                 key: ManifestKey.ed25519PublicKey.rawValue,
                 value: privateKey.publicKey.rawRepresentation.base64EncodedString()
             )
-            try await store.setMeta(
-                key: ManifestKey.ed25519PrivateKeyWrapped.rawValue,
-                value: privateKey.rawRepresentation.base64EncodedString()
-            )
+            // Cache the private key bytes in memory for this Estate instance.
+            // Avoids a Keychain round-trip on the first issueGrant call.
+            privateSigningKeyData = privateKey.rawRepresentation
+        } else {
+            // Subsequent open: load the private key from the identity key store.
+            // Returns nil if the key is absent (e.g. the Keychain was wiped, or
+            // this estate was opened with a different key store instance). The
+            // estate remains fully openable; only grant signing will throw.
+            privateSigningKeyData = try identityKeyStore.loadPrivateKey(forEstateID: estateID)
         }
         let containerFP: ContainerFingerprintStore
         do {
@@ -193,11 +272,25 @@ public actor Estate {
         } catch {
             throw EstateError.substrateUnavailable("\(error)")
         }
+        // NodeStore shares the same storage — schema already opened.
+        let nodeStore = NodeStore(storage: storage)
+        // ADR-017: ensure root node exists. createRoot is idempotent —
+        // returns existing root if already seeded.
+        _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
         // Backfill so the aggregate covers every active row and is
         // therefore sound to prune against. One full scan at open.
         let active = (try await store.allDrawers()).filter { $0.tombstonedAt == nil }
-        try await containerFP.rebuildAll(activeDrawers: active)
-        return try Estate(store: store, containerFP: containerFP, manifest: manifest)
+        let nodeNames = try await store.resolveNodeNames(
+            parentNodeIds: active.map(\.parentNodeId))
+        try await containerFP.rebuildAll(activeDrawers: active, nodeNames: nodeNames)
+        return try Estate(
+            store: store,
+            containerFP: containerFP,
+            nodeStore: nodeStore,
+            manifest: manifest,
+            identityKeyStore: identityKeyStore,
+            privateSigningKeyData: privateSigningKeyData
+        )
     }
 
     // MARK: - Create
@@ -283,8 +376,22 @@ public actor Estate {
         } catch {
             throw EstateError.substrateUnavailable("\(error)")
         }
+        let nodeStore = NodeStore(storage: storage)
+        // ADR-017: seed root node on create. createRoot is idempotent.
+        _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
         let manifest = try await store.readManifest()
-        return try Estate(store: store, containerFP: containerFP, manifest: manifest)
+        // Estate.create does not mint the Ed25519 keypair — that happens in
+        // Estate.open (the first open after create). The created estate carries
+        // no identity key store and no cached private key; callers that need
+        // grant signing must open the estate after creating it.
+        return try Estate(
+            store: store,
+            containerFP: containerFP,
+            nodeStore: nodeStore,
+            manifest: manifest,
+            identityKeyStore: KeychainEstateIdentityKeyStore(),
+            privateSigningKeyData: nil
+        )
     }
 
     // MARK: - Close
@@ -414,12 +521,22 @@ public actor Estate {
         let loadLevel: HydrationLevel = needsContent ? .full : hydrationLevel
         let loaded = try await store.getDrawers(ids: ids, hydrationLevel: loadLevel)
         let loadedIDs = Set(loaded.map(\.id))
+        // Resolve wing/room names when the frame contains structured name
+        // filters (.inWing, .inRoom). Without this, the evaluator's
+        // structured tier sees empty names and excludes all drawers.
+        let nodeNames: [String: (wing: String, room: String)]
+        if BitmapEvaluator.chainHasStructuredNameFilter(frame.filterChain) {
+            let parentIds = Set(loaded.map(\.parentNodeId))
+            nodeNames = try await store.resolveNodeNames(parentNodeIds: Array(parentIds))
+        } else {
+            nodeNames = [:]
+        }
         // Run the exact recall filter pipeline over the loaded rows. asOf-based
         // historical reconstruction is honored too (BitmapEvaluator reads the
         // audit log via `store`), so a frame's `asOf` projects the same state
         // it would on the full recall path.
         let admissible = try await BitmapEvaluator.evaluate(
-            frame: frame, drawers: loaded, store: store)
+            frame: frame, drawers: loaded, store: store, nodeNames: nodeNames)
         return FrameFilteredDrawers(admissible: admissible, loadedIDs: loadedIDs)
     }
 
@@ -461,6 +578,33 @@ public actor Estate {
     /// already have a Tunnel. Delegates to `DrawerStore.allTunnels`.
     public func allTunnels() async throws -> [Tunnel] {
         try await store.allTunnels()
+    }
+
+    /// All non-tombstoned, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    ///
+    /// Active-edge view: retired tunnels (bit 13 of `operationalBitmap` set) are
+    /// excluded so that OMEGA retirement removes a tunnel from the dreaming
+    /// suppression set — enabling later co-recall to re-propose it. Delegates to
+    /// `DrawerStore.allActiveTunnels`.
+    public func allActiveTunnels() async throws -> [Tunnel] {
+        try await store.allActiveTunnels()
+    }
+
+    /// Flip bit 13 of `operationalBitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Throws `LocusKitError.tunnelNotFound` if no non-tombstoned tunnel exists for
+    /// `tunnelId`. Delegates to `DrawerStore.retireTunnel(id:changedBy:now:)`.
+    public func retireTunnel(id tunnelId: String, changedBy: String, now: Date) async throws {
+        try await store.retireTunnel(id: tunnelId, changedBy: changedBy, now: now)
+    }
+
+    /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Reverses a prior `retireTunnel`. Throws `LocusKitError.tunnelNotFound` if no
+    /// non-tombstoned tunnel exists for `tunnelId`. Delegates to
+    /// `DrawerStore.unretireTunnel(id:changedBy:now:)`.
+    public func unretireTunnel(id tunnelId: String, changedBy: String, now: Date) async throws {
+        try await store.unretireTunnel(id: tunnelId, changedBy: changedBy, now: now)
     }
 
     /// Delete recall-trace rows whose `recalledAt` is strictly before
@@ -556,6 +700,17 @@ public actor Estate {
         try await store.allDiaryEntries()
     }
 
+    // MARK: - Node-tree name resolution
+
+    /// Resolve parentNodeId UUIDs to display-name pairs (wing, room).
+    /// Higher kits call this to obtain display names after ADR-017
+    /// removed them from the Drawer struct.
+    public func resolveNodeNames(
+        parentNodeIds: [String]
+    ) async throws -> [String: (wing: String, room: String)] {
+        try await store.resolveNodeNames(parentNodeIds: parentNodeIds)
+    }
+
     // MARK: - Manifest and identity
 
     /// Typed snapshot of the estate manifest.
@@ -574,6 +729,52 @@ public actor Estate {
     /// because estate identity is a property of the substrate, not the
     /// handle.
     public var estateUUID: UUID { _estateUUID }
+
+    /// The raw 32-byte Curve25519 Ed25519 private signing key, loaded from the
+    /// identity key store at open time and cached in memory for this Estate's
+    /// lifetime.
+    ///
+    /// Returns `nil` when the key is absent from the store — e.g. after a
+    /// Keychain wipe, or when the estate was opened with an `InMemoryEstateIdentityKeyStore`
+    /// that did not contain the key. In that case
+    /// `GeniusLocusKit.VerbSurface.issueGrant` throws
+    /// `GeniusLocusKitError.invalidManifest` at the signing step.
+    ///
+    /// Callers outside GeniusLocusKit should not need this; grant issuance
+    /// is the only use of the private key in the substrate layer.
+    public func retrievePrivateSigningKeyData() -> Data? {
+        _privateSigningKeyData
+    }
+
+    // MARK: - Estate metadata (consumer key-value surface)
+
+    /// Read a per-estate metadata value by key, or `nil` on miss.
+    ///
+    /// This is the public, lowest-level key-value surface over the estate
+    /// manifest table (spec §5.9) — the "future verb surface" the manifest
+    /// accessor anticipated. The substrate OWNS this durable storage; upper
+    /// layers (e.g. NeuronKit's dreaming/maintenance daemons) persist their
+    /// own state here THROUGH the estate's public interface rather than
+    /// reaching around the substrate to a host-owned store (Interface Rules:
+    /// features are owned at the lowest level; data flows through public
+    /// interfaces).
+    ///
+    /// Consumers MUST namespace their keys (e.g. `"neuronkit.dreaming.policy"`)
+    /// to avoid collision with the typed v1 manifest keys in `ManifestKey`.
+    /// The value round-trips verbatim and survives restarts (the manifest
+    /// table is durable).
+    public func meta(key: String) async throws -> String? {
+        try await store.getMeta(key: key)
+    }
+
+    /// Write a per-estate metadata value (upsert on `key`).
+    ///
+    /// See `meta(key:)` for the ownership rationale and the key-namespacing
+    /// requirement. The write is durable and visible to a subsequent
+    /// `meta(key:)` read (including across a restart).
+    public func setMeta(key: String, value: String) async throws {
+        try await store.setMeta(key: key, value: value)
+    }
 
     // MARK: - Verb methods (added by LOCI_V035_14)
     //

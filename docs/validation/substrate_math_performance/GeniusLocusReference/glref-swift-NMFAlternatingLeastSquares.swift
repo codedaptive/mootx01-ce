@@ -1,7 +1,9 @@
 // NMFAlternatingLeastSquares.swift
 //
-// Non-negative matrix factorization via alternating least squares
-// per cookbook § 6.9 and § 8.9.
+// Non-negative matrix factorization via Lee-Seung multiplicative
+// update rules per cookbook § 6.9 and § 8.9. (The file name says
+// alternating least squares but the implementation uses multiplicative
+// updates; the algorithm is described below.)
 //
 //   V ≈ W × H,  V ∈ R+^{m×n},  W ∈ R+^{m×k},  H ∈ R+^{k×n}
 //
@@ -30,7 +32,8 @@
 //   § 8.9    NMF over F matrix (latent themes)
 //   § 11.11  recall_by_latent_factor primitive
 //   § 11.12  recall_loading_on_factor primitive
-//   § 15     Dreaming daemon rule 4 (monthly NMF rerun)
+//   § 15     Dreaming daemon rule 4 (monthly NMF rerun — not yet
+//            wired in ReferenceRuleExecutor)
 
 import Foundation
 

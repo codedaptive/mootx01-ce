@@ -32,6 +32,9 @@
 //! - `drawer_mapping` — `DrawerMapping` + `ImportOutcome` (`NoteIR` ⇄
 //!   substrate `Drawer`/`Tunnel` via the GLK verb surface).
 //! - `vault_bridge` — `VaultBridge` + `ImportReport` (the public facade).
+//! - `palace_bridge` — `PalaceBridge` + `ImportReport` (direct palace →
+//!   substrate import, bypassing NoteIR; applies four import guards:
+//!   tombstone, content-idempotent dedup, sensitivity floor, tunnel sig dedup).
 //! - `error` — `VaultKitError` (MOOTx01Error-style structured error enum).
 //!
 //! ## Conformance
@@ -49,10 +52,12 @@ pub mod corpus_projection;
 pub mod drawer_mapping;
 pub mod error;
 pub mod exchange_adapter;
+pub mod import_policy;
 pub mod mcp_stdio_client;
 pub mod mem_palace_chroma_adapter;
 pub mod note_ir;
 pub mod obsidian_adapter;
+pub mod palace_bridge;
 pub mod palace_drift_detector;
 pub mod palace_item;
 pub mod palace_payload_envelope;

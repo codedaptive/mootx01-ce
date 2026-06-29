@@ -1,24 +1,99 @@
-//! Hybrid-recall reranking engine, Rust version. Conformance-gated
-//! against the Swift `HybridRecallEngine` over shared deterministic
-//! test vectors per NeuronKit `MISSION_NK_1A_REASONING_SURFACE`.
+//! Hybrid-recall reranking engine and GLK entry point, Rust version.
+//! Conformance-gated against the Swift `HybridRecallEngine` over shared
+//! deterministic test vectors per NeuronKit `MISSION_NK_1A_REASONING_SURFACE`.
 //!
-//! The Rust version intentionally does NOT host a `hybrid_recall(...)`
-//! async entry point analogous to Swift's. The estate handle and the
-//! GeniusLocusKit verb surface are Swift-only today; the Rust side
-//! exposes the pure data-in / data-out reranking math
-//! (`HybridRecallEngine::rerank`) and the deterministic shingle
-//! similarity, both of which must match the Swift version bit-for-bit
-//! against shared test vectors. The day the substrate gains a Rust
-//! verb surface, the public entry point lands here as a thin wrapper
-//! over the same engine.
+//! The `hybrid_recall()` public entry point mirrors Swift's
+//! `hybridRecall(_:handle:on:tuning:)`. It routes through the GLK
+//! `EstateCoordinator::recall` verb (the only legal substrate boundary
+//! per B-1), applies RRF + MMR reranking per spec § 4.1, emits
+//! three telemetry metrics (`neuronkit.recall.latency_ms`,
+//! `neuronkit.recall.candidate_count`, `neuronkit.recall.result_count`)
+//! matching the Swift boundary, and returns paged results.
+//!
+//! The pure data-in / data-out reranking math (`rerank`) and the
+//! deterministic shingle similarity match the Swift version bit-for-bit
+//! against shared test vectors.
 //!
 //! `shingles` and `shingle_similarity` are thin public wrappers that
 //! delegate to `substrate_ml::shingle_similarity` — the substrate-owned
 //! kernel (I-25). NeuronKit re-exports them unchanged so callers and the
 //! public surface are unaffected.
 
+use std::collections::HashMap;
+use std::time::Instant;
+
+use genius_locus_kit::{EstateCoordinator, EstateHandle, VerbDispatchError};
+use intellectus_lib::{report, StatSample};
+use locus_kit::filter::RecallFrame;
 use serde::{Deserialize, Serialize};
 use substrate_ml::shingle_similarity as substrate_shingle;
+
+/// Hybrid recall over the estate addressed by `handle`. Wraps the GLK
+/// `EstateCoordinator::recall` verb (the only legal substrate boundary
+/// per B-1), applies RRF + MMR per spec § 4.1, emits telemetry at the
+/// operation boundary, and returns paged results.
+///
+/// Mirrors Swift's `hybridRecall(_:handle:on:tuning:)`. The three
+/// telemetry metrics (`neuronkit.recall.latency_ms`,
+/// `neuronkit.recall.candidate_count`, `neuronkit.recall.result_count`)
+/// use the estate UUID hex as the tag, matching the Swift boundary.
+///
+/// `now` is the deterministic epoch-seconds timestamp for the recall
+/// verb and the telemetry `ts` field. Callers supply the timestamp;
+/// the function never reads a system clock for data operations.
+///
+/// Returns `Err` if the handle is stale or the estate verb fails.
+pub fn hybrid_recall(
+    coordinator: &EstateCoordinator,
+    handle: &EstateHandle,
+    frame: RecallFrame,
+    tuning: &RecallFrameTuning,
+    now: i64,
+) -> Result<Vec<RecallPage>, VerbDispatchError> {
+    let wall_start = Instant::now();
+
+    let drawers = coordinator.recall(handle, frame, now)?;
+
+    let drawer_rows: Vec<DrawerRow> = drawers
+        .iter()
+        .map(|d| DrawerRow {
+            id: d.id.clone(),
+            content: d.content.clone(),
+        })
+        .collect();
+
+    let reranked = rerank(&drawer_rows, tuning);
+    let pages = page_recall(&reranked, tuning.page_size);
+
+    let elapsed_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
+    let estate_tag = handle
+        .estate_uuid
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let ts = now as f64;
+
+    report!(StatSample::metric(
+        "neuronkit.recall.latency_ms".into(),
+        elapsed_ms,
+        HashMap::from([("estate".into(), estate_tag.clone())]),
+        ts,
+    ));
+    report!(StatSample::metric(
+        "neuronkit.recall.candidate_count".into(),
+        drawers.len() as f64,
+        HashMap::from([("estate".into(), estate_tag.clone())]),
+        ts,
+    ));
+    report!(StatSample::metric(
+        "neuronkit.recall.result_count".into(),
+        reranked.len() as f64,
+        HashMap::from([("estate".into(), estate_tag)]),
+        ts,
+    ));
+
+    Ok(pages)
+}
 
 /// Mirror of `LocusKit.Drawer` reduced to the fields the reranking
 /// engine consumes. The Rust version is conformance-gated against the
@@ -403,5 +478,87 @@ mod tests {
             .collect();
         let pages = page_recall(&rows, 0);
         assert_eq!(pages.len(), 3);
+    }
+
+    // ── GLK integration ──────────────────────────────────────────
+
+    use std::sync::Arc;
+    use genius_locus_kit::{EstateCoordinator, EstateHandle};
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
+    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
+    use locus_kit::frames::CaptureFrame;
+
+    fn make_coordinator_and_handle() -> (EstateCoordinator, EstateHandle) {
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        (coord, handle)
+    }
+
+    fn capture_row(coord: &EstateCoordinator, handle: &EstateHandle, content: &str, now: i64) {
+        let frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "test-room",
+            LatticeAnchor::udc("000"),
+            "test",
+            "no-embedding",
+        );
+        coord.capture(handle, frame, now).expect("capture");
+    }
+
+    #[test]
+    fn hybrid_recall_routes_through_glk_and_pages() {
+        let (coord, handle) = make_coordinator_and_handle();
+        capture_row(&coord, &handle, "alpha concept", 1000);
+        capture_row(&coord, &handle, "beta concept", 1001);
+        capture_row(&coord, &handle, "gamma concept", 1002);
+
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        frame.hydration_level = HydrationLevel::Full;
+        frame.ordering = Ordering::ByCaptureTimeDesc;
+        let tuning = RecallFrameTuning {
+            page_size: 2,
+            ..Default::default()
+        };
+
+        let pages = hybrid_recall(&coord, &handle, frame, &tuning, 2000)
+            .expect("hybrid_recall");
+        assert_eq!(pages.len(), 2, "3 rows at page_size 2 → 2 pages");
+        assert!(!pages[0].is_last);
+        assert!(pages[1].is_last);
+        assert_eq!(pages[0].rows.len(), 2);
+        assert_eq!(pages[1].rows.len(), 1);
+        let all_ids: Vec<_> = pages
+            .iter()
+            .flat_map(|p| p.rows.iter().map(|r| r.id.clone()))
+            .collect();
+        assert_eq!(all_ids.len(), 3, "all drawers present after rerank+page");
+    }
+
+    #[test]
+    fn hybrid_recall_empty_estate_returns_one_empty_page() {
+        let (coord, handle) = make_coordinator_and_handle();
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        frame.hydration_level = HydrationLevel::Full;
+        frame.ordering = Ordering::ByCaptureTimeDesc;
+
+        let pages = hybrid_recall(
+            &coord,
+            &handle,
+            frame,
+            &RecallFrameTuning::default(),
+            1000,
+        )
+        .expect("hybrid_recall");
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].rows.is_empty());
+        assert!(pages[0].is_last);
     }
 }

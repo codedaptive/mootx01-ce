@@ -39,11 +39,11 @@ extension NeuronKit {
             // --- pairwise / combination compositions ---
             // hamming + the fine numeric discriminator.
             .init(name: "hamming+tokenExact", terms: [.init(.hamming), .init(.tokenExact)]),
-            // dense closeness + content-word match.
+            // SimHash-Hamming similarity + content-word match.
             .init(name: "hamming+text", terms: [.init(.hamming), .init(.text)]),
             // content-word match + co-occurrence.
             .init(name: "text+matrix", terms: [.init(.text), .init(.matrix)]),
-            // knowledge-region proximity + dense closeness.
+            // knowledge-region proximity + SimHash-Hamming similarity.
             .init(name: "lattice+hamming", terms: [.init(.lattice), .init(.hamming)]),
             // the precise discriminator pair: content match + exact token match.
             .init(name: "text+tokenExact", terms: [.init(.text), .init(.tokenExact)]),
@@ -91,8 +91,8 @@ extension NeuronKit {
             .init(name: "matrix+hamming", terms: [.init(.matrix), .init(.hamming)]),
 
             // --- T2 / T5 semantic: the TRUE dense float lane (Lane D) ---
-            // dense-fused is the real dense column that replaces the removed
-            // "vector" alias (which was byte-identical to "hamming" — a 256-bit
+            // dense-fused is the production semantic lane; "vector" is retained
+            // as the SimHash ablation baseline (byte-identical to "hamming" — a 256-bit
             // SimHash projection that scored 0.00 found@k on answer-vs-question-
             // echo). The `dense` signal carries the cosine over the pooled float
             // embedding, which IS scale-invariant, so an answer statement ranks

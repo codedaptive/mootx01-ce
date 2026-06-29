@@ -2,7 +2,7 @@
 //
 // Package.swift — GeniusLocus reference Swift library.
 //
-// The 45 glref-swift-*.swift files in this directory compile as
+// The glref-swift-*.swift files in this directory compile as
 // a single library target named GeniusLocusReference. Filenames
 // keep the glref-swift- prefix for cookbook cross-reference; the
 // public types they export are visible under the

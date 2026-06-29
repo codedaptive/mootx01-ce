@@ -1,6 +1,6 @@
 // brain/signals/training.rs — Rust mirror of `TrainingSignal.swift`.
 //
-// Architecture spec §11.2, signal 9. Wired per ADR-017 F1: the training
+// Architecture spec §11.2, signal 9. Wired per ADR-018 F1: the training
 // daemon was previously an orphan (zero production callers); this signal
 // registers it in the default standing-signal set so the autonomic governor
 // drives it on an hourly cadence.
@@ -29,7 +29,7 @@ impl TrainingSignal {
     /// Mirrors Swift's `TrainingSignal.defaultCadenceSeconds`.
     pub const DEFAULT_CADENCE_SECONDS: u64 = 3_600;
 
-    /// Stable name surfaced in `SignalReport.name` (signal 9, ADR-017 F1).
+    /// Stable name surfaced in `SignalReport.name` (signal 9, ADR-018 F1).
     /// Mirrors Swift's `TrainingSignal.signalName`.
     pub const SIGNAL_NAME: &'static str = "training-daemon";
 

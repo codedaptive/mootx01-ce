@@ -47,12 +47,16 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v2 adds the nullable `.json` `ext`
-/// forward-compatibility slot to the `keys` table (ADR-012), bringing
-/// every persistent entity table to the one-`ext`-column convention.
-/// There is no migration ladder — no estate data has shipped, so each
-/// bump re-declares the full column set fresh. Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 2;
+/// Current schema version. v8 changes nodes.merkle_root from TEXT
+/// to BLOB (NT-Q1 — eliminates hex encoding waste). v7 added
+/// content_hash BLOB nullable to drawers (NT-L3) and
+/// snapshot_registry + snapshot_attestations tables (NT-L3 Part 3).
+/// v6 added order_key REAL nullable to tunnels (ADR-017 §11,
+/// mission NT-L5). v5 added erasure_ledger (NT-L4). v4 replaced
+/// wing/room with parent_node_id (NT-L2). v3 added nodes (NT-L1).
+/// v2 added keys.ext (ADR-012). No migration ladder — no estate
+/// data has shipped. Matches Swift `LocusKitSchema.version`.
+pub const SCHEMA_VERSION: i32 = 8;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -78,6 +82,10 @@ pub fn schema() -> SchemaDeclaration {
             container_fingerprints_table(),
             recall_trace_table(),
             keys_table(),
+            nodes_table(),
+            erasure_ledger_table(),
+            snapshot_registry_table(),
+            snapshot_attestations_table(),
         ],
         indices: indices(),
         migrations: Vec::new(),
@@ -102,8 +110,9 @@ fn drawers_table() -> TableDeclaration {
         columns: vec![
             ColumnDeclaration::text("id"),
             ColumnDeclaration::text("content"),
-            ColumnDeclaration::text("wing"),
-            ColumnDeclaration::text("room"),
+            // FK to nodes.id (the room node containing this drawer).
+            // Replaces the stored wing/room text columns (ADR-017 NT-L2).
+            ColumnDeclaration::text("parent_node_id"),
             ColumnDeclaration::text("sourceFile").nullable(),
             ColumnDeclaration::int("chunkIndex").nullable(),
             ColumnDeclaration::text("addedBy"),
@@ -131,6 +140,16 @@ fn drawers_table() -> TableDeclaration {
             // Absorbs unforeseeable per-drawer typed attributes (future
             // axes, experimental fields) with no migration.
             ColumnDeclaration::json("ext").nullable(),
+            // At-rest encryption key identifier (Mission ENC-01;
+            // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1).
+            // NULL = plaintext row. Nullable so plaintext estates write
+            // nothing here.
+            ColumnDeclaration::text("keyID").nullable(),
+            // Per-row content hash computed by the hash-on-write hook
+            // (NT-P2 HashingRowStore). BLOB nullable: NULL for rows
+            // written before hash-on-write was wired. The Merkle rollup
+            // (NT-L3) reads this column to build room/wing/estate roots.
+            ColumnDeclaration::blob("content_hash").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -180,6 +199,7 @@ fn drawers_table() -> TableDeclaration {
             ),
         ],
         append_only: false,
+        hashable: true,
     }
 }
 
@@ -211,12 +231,16 @@ fn tunnels_table() -> TableDeclaration {
             ColumnDeclaration::bitmap("adjectiveBitmap"),
             ColumnDeclaration::bitmap("operationalBitmap"),
             ColumnDeclaration::bitmap("provenanceBitmap"),
+            // Fractional-index sibling ordering for Parent tunnels
+            // (ADR-017 §11, NT-L5). REAL nullable; None for non-parent kinds.
+            ColumnDeclaration::float("order_key").nullable(),
             ColumnDeclaration::json("ext").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -260,6 +284,7 @@ fn diary_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -278,6 +303,7 @@ fn manifest_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -323,6 +349,7 @@ fn kg_facts_table() -> TableDeclaration {
             ),
         ],
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -378,6 +405,7 @@ fn proposals_table() -> TableDeclaration {
             ),
         ],
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -426,6 +454,7 @@ fn associations_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -472,6 +501,7 @@ fn learned_references_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -509,6 +539,7 @@ fn source_catalog_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -545,6 +576,7 @@ fn node_bundles_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -577,6 +609,7 @@ fn container_fingerprints_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -613,6 +646,7 @@ fn recall_trace_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
     }
 }
 
@@ -658,6 +692,115 @@ pub fn keys_table() -> TableDeclaration {
         unique_constraints: Vec::new(),
         generated_columns: Vec::new(),
         append_only: false,
+        hashable: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// nodes (ADR-017 §2)
+// ---------------------------------------------------------------------------
+
+/// Container nodes for the estate's containment tree. Estate
+/// (depth 0), wing (depth 1), room (depth 2). Drawers reference
+/// their parent room via `parent_node_id` on the drawers table
+/// (NT-L2). The `merkle_root` column stores a 32-byte BLOB
+/// populated by the Merkle rollup on every capture, expunge,
+/// and withdraw.
+///
+/// HLC columns (`created_hlc`, `tombstoned_hlc`) are tagged with
+/// ColumnRole so PersistenceKit's as-of filter operates over nodes
+/// identically to drawers (ADR-017 §15).
+fn nodes_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "nodes".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("id"),
+            ColumnDeclaration::text("parent_id").nullable(),
+            ColumnDeclaration::text("display_name"),
+            ColumnDeclaration::text("lookup_name"),
+            ColumnDeclaration::int("depth"),
+            ColumnDeclaration::int("lifecycle"),
+            ColumnDeclaration::created_hlc("created_hlc"),
+            ColumnDeclaration::tombstoned_hlc("tombstoned_hlc"),
+            ColumnDeclaration::timestamp("tombstoned_at").nullable(),
+            ColumnDeclaration::blob("merkle_root").nullable(),
+            ColumnDeclaration::timestamp("created_at"),
+            ColumnDeclaration::timestamp("updated_at"),
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+        hashable: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// erasure_ledger (ADR-017 §17, NT-L4)
+// ---------------------------------------------------------------------------
+
+/// Append-only ledger recording THAT a drawer was erased. Mirrors
+/// Swift PersistenceKit ErasureLedgerSchema.ledgerTable.
+fn erasure_ledger_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "erasure_ledger".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("drawer_id"),
+            ColumnDeclaration::hlc("erased_hlc"),
+        ],
+        primary_key: vec!["drawer_id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: true,
+        hashable: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// snapshot_registry + snapshot_attestations (NT-L3 Part 3)
+// ---------------------------------------------------------------------------
+
+/// Snapshot registry table. Mirrors Swift
+/// `SnapshotSchema.registryTable`.
+fn snapshot_registry_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "snapshot_registry".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("snapshot_id"),
+            ColumnDeclaration::hlc("hlc"),
+            ColumnDeclaration::text("label").nullable(),
+            ColumnDeclaration::timestamp("created_at"),
+        ],
+        primary_key: vec!["snapshot_id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+        hashable: false,
+    }
+}
+
+/// Snapshot attestations table. Mirrors Swift
+/// `SnapshotSchema.attestationsTable`.
+fn snapshot_attestations_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "snapshot_attestations".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("snapshot_id"),
+            ColumnDeclaration::text("subject_kind"),
+            ColumnDeclaration::text("subject_id"),
+            ColumnDeclaration::text("merkle_root"),
+            ColumnDeclaration::int("key_version").nullable(),
+        ],
+        primary_key: vec![
+            "snapshot_id".to_string(),
+            "subject_kind".to_string(),
+            "subject_id".to_string(),
+        ],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+        hashable: false,
     }
 }
 
@@ -670,13 +813,11 @@ pub fn keys_table() -> TableDeclaration {
 /// rather than inline "column & mask" SQL expressions.
 fn indices() -> Vec<IndexDeclaration> {
     vec![
-        // drawers
-        IndexDeclaration::new("idx_drawers_wing", "drawers", vec!["wing".to_string()]),
-        IndexDeclaration::new("idx_drawers_room", "drawers", vec!["room".to_string()]),
+        // drawers — parent_node_id replaces the wing/room indices (ADR-017 NT-L2)
         IndexDeclaration::new(
-            "idx_drawers_wing_room",
+            "idx_drawers_parent_node_id",
             "drawers",
-            vec!["wing".to_string(), "room".to_string()],
+            vec!["parent_node_id".to_string()],
         ),
         IndexDeclaration::new(
             "idx_drawers_sourceFile",
@@ -729,6 +870,18 @@ fn indices() -> Vec<IndexDeclaration> {
             "idx_tunnels_target",
             "tunnels",
             vec!["targetWing".to_string(), "targetRoom".to_string()],
+        ),
+        // Parent-edge lookup: find the parent tunnel for a child drawer,
+        // and find all children of a parent drawer (ADR-017 §11, NT-L5).
+        IndexDeclaration::new(
+            "idx_tunnels_kind_source_drawer",
+            "tunnels",
+            vec!["kind_id".to_string(), "sourceDrawerId".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_tunnels_kind_target_drawer",
+            "tunnels",
+            vec!["kind_id".to_string(), "targetDrawerId".to_string()],
         ),
         // diary
         IndexDeclaration::new("idx_diary_agent", "diary", vec!["agentName".to_string()]),
@@ -821,6 +974,25 @@ fn indices() -> Vec<IndexDeclaration> {
             "recall_trace",
             vec!["recalledAt".to_string()],
         ),
+        // nodes — ADR-017 §2: parent_id for child queries,
+        // (parent_id, lookup_name) supports I-NT-4 active-uniqueness lookup
+        // (app-layer enforcement only — partial unique not DB-enforceable),
+        // (depth, lookup_name) for depth-scoped resolution.
+        IndexDeclaration::new(
+            "idx_nodes_parent_id",
+            "nodes",
+            vec!["parent_id".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_nodes_parent_lookup",
+            "nodes",
+            vec!["parent_id".to_string(), "lookup_name".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_nodes_depth_lookup",
+            "nodes",
+            vec!["depth".to_string(), "lookup_name".to_string()],
+        ),
     ]
 }
 
@@ -838,18 +1010,23 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v2 of the schema, no migrations. v2 added `keys.ext` (ADR-012),
-    /// completing the one-`ext`-column-per-persistent-entity convention.
-    /// No migration ladder — no estate data has shipped.
+    /// v8 changed nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added
+    /// content_hash BLOB to drawers and snapshot tables (NT-L3). v6 added
+    /// order_key to tunnels (ADR-017 §11, NT-L5). v5 added erasure_ledger
+    /// (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2). No
+    /// migration ladder — no estate data has shipped.
     #[test]
-    fn schema_version_is_two() {
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_is_eight() {
+        assert_eq!(SCHEMA_VERSION, 8);
         assert!(schema().migrations.is_empty());
     }
 
     /// Tables in the declared order, matching the Swift declaration.
     /// `proposals` follows `kg_facts` (both noun tables). `keys` is the
-    /// ENC-01 encryption-key registry. 13 tables total.
+    /// ENC-01 encryption-key registry. `nodes` is the ADR-017
+    /// containment tree. `erasure_ledger` is the NT-L4 append-only
+    /// erasure record. `snapshot_registry` and `snapshot_attestations`
+    /// are the NT-L3 Part 3 snapshot tables. 17 tables total.
     #[test]
     fn table_count_and_order() {
         let names: Vec<String> = schema().tables.iter().map(|t| t.name.clone()).collect();
@@ -869,6 +1046,10 @@ mod tests {
                 "container_fingerprints",
                 "recall_trace",
                 "keys",
+                "nodes",
+                "erasure_ledger",
+                "snapshot_registry",
+                "snapshot_attestations",
             ]
         );
     }
@@ -980,8 +1161,7 @@ mod tests {
             vec![
                 "id",
                 "content",
-                "wing",
-                "room",
+                "parent_node_id",
                 "sourceFile",
                 "chunkIndex",
                 "addedBy",
@@ -999,6 +1179,8 @@ mod tests {
                 "wikidataQID",
                 "wikidataQidsSecondary",
                 "ext",
+                "keyID",
+                "content_hash",
             ]
         );
     }
@@ -1116,9 +1298,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "idx_drawers_wing",
-                "idx_drawers_room",
-                "idx_drawers_wing_room",
+                "idx_drawers_parent_node_id",
                 "idx_drawers_sourceFile",
                 "idx_drawers_tombstoned",
                 "idx_drawers_lineageID",
@@ -1129,6 +1309,8 @@ mod tests {
                 "idx_drawers_state_cluster",
                 "idx_tunnels_source",
                 "idx_tunnels_target",
+                "idx_tunnels_kind_source_drawer",
+                "idx_tunnels_kind_target_drawer",
                 "idx_diary_agent",
                 "idx_diary_wing",
                 "idx_diary_filedAt",
@@ -1147,6 +1329,9 @@ mod tests {
                 "idx_source_catalog_handle",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
+                "idx_nodes_parent_id",
+                "idx_nodes_parent_lookup",
+                "idx_nodes_depth_lookup",
             ]
         );
     }

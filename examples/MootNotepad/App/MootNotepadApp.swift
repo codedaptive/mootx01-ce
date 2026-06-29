@@ -86,10 +86,10 @@ struct MootNotepadApp: App {
         // STEP 2 — Point the process-wide runtime at that file.
         //
         // `GatewayRuntime.shared` is a singleton actor that holds the ONE
-        // MootBridge for the whole process. The App Intents (which the *system*
-        // instantiates, with no chance to inject a bridge) reach the estate
-        // through this same runtime. Configuring it here, before the UI asks
-        // for its bridge, guarantees the UI and Siri share one estate.
+        // MootBridge for the whole process. Calling `bridge()` here registers
+        // it with `IntentRuntimeBridge`; App Intents (instantiated by the
+        // system) then resolve through `IntentRuntimeBridge.shared.bridge()`.
+        // Configuring before the UI asks guarantees the UI and Siri share one estate.
         await GatewayRuntime.shared.configure(databaseURL: dbURL)
 
         // STEP 3 — Acquire the bridge and hand it to the UI.

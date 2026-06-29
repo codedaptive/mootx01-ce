@@ -1,5 +1,5 @@
 // standing_signals_parity.rs — conformance gate for the Rust mirror
-// of the nine v1 standing signals (GLK-05 + ADR-017 F1).
+// of the nine v1 standing signals (GLK-05 + ADR-018 F1).
 //
 // Mirrors `StandingSignalsTests.swift`. The gate asserts:
 //
@@ -11,7 +11,7 @@
 //    scan-summary diagnostic (zero associate emissions) — parity with
 //    the Swift empty-store test.
 // 5. TrainingSignal fires TrainingDaemon::run_once and emits exactly
-//    one diagnostic per tick regardless of gate state (ADR-017 F1).
+//    one diagnostic per tick regardless of gate state (ADR-018 F1).
 
 use std::sync::Arc;
 
@@ -23,13 +23,35 @@ use genius_locus_kit::{
     TrainingSignal, VectorSimilaritySignal,
 };
 use persistence_kit::inmemory::InMemoryStorage;
+use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
+use substrate_types::hlc::HLCGenerator;
 use vectorkit::VectorStore;
 
 const T0_NANOS: i64 = 1_700_000_000_000_000_000;
 const NANOS_PER_SEC: i64 = 1_000_000_000;
 
+/// Build a transient in-memory signals queue for tests. See scheduler_parity.rs
+/// for the rationale. Fixed store UUID for determinism.
+fn inmem_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, HLCGenerator) {
+    let store_id = uuid::Uuid::from_u128(0x5348_4544_5545_5245_0000_0000_0000_0002);
+    let storage = std::sync::Arc::new(InMemoryStorage::with_estate(store_id));
+    PersistenceKitBackend::open_schema(storage.as_ref())
+        .expect("InMemoryStorage open_schema cannot fail");
+    let backend = PersistenceKitBackend::new(storage);
+    let queue: QueueKit<Box<dyn QueueBackend>> =
+        QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+    (queue, HLCGenerator::new(1))
+}
+
 fn make_scheduler() -> SerialLaneScheduler<SchedulerNoopDispatcher> {
-    SerialLaneScheduler::new("estate-signals-parity".to_string(), SchedulerNoopDispatcher)
+    let (queue, hlc) = inmem_signals_queue();
+    SerialLaneScheduler::new(
+        "estate-signals-parity".to_string(),
+        SchedulerNoopDispatcher,
+        queue,
+        None,
+        hlc,
+    )
 }
 
 /// Open a fresh in-memory VectorStore for tests that need a VectorStore
@@ -73,7 +95,7 @@ fn default_signal_names_and_cadences_match_swift_reference() {
     );
     assert_eq!(EndOfDayTournamentSignal::DEFAULT_CADENCE_SECONDS, 86_400);
 
-    // Signal 7 — added 2026-06-20 per ADR-017 F1 (mirrors DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04).
+    // Signal 7 — added 2026-06-20 per ADR-018 F1 (mirrors DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04).
     assert_eq!(
         TemporalCausalitySignal::SIGNAL_NAME,
         "temporal-causality-fold"
@@ -81,12 +103,12 @@ fn default_signal_names_and_cadences_match_swift_reference() {
     assert_eq!(TemporalCausalitySignal::DEFAULT_CADENCE_SECONDS, 3_600,
         "temporal-causality-fold runs hourly per design-council 2026-06-04 decision");
 
-    // Signal 8 — added 2026-06-20 per ADR-017 F1.
+    // Signal 8 — added 2026-06-20 per ADR-018 F1.
     assert_eq!(DistillationSignal::SIGNAL_NAME, "distillation-sweep");
     assert_eq!(DistillationSignal::DEFAULT_CADENCE_SECONDS, 3_600,
         "distillation sweep runs hourly per architecture spec §11.2");
 
-    // Signal 9 — wired per ADR-017 F1 (training daemon was an orphan before).
+    // Signal 9 — wired per ADR-018 F1 (training daemon was an orphan before).
     assert_eq!(TrainingSignal::SIGNAL_NAME, "training-daemon");
     assert_eq!(TrainingSignal::DEFAULT_CADENCE_SECONDS, 3_600,
         "training-daemon runs hourly matching distillation and temporal-causality rhythm");
@@ -94,7 +116,7 @@ fn default_signal_names_and_cadences_match_swift_reference() {
 
 #[test]
 fn default_standing_signal_names_helper_returns_canonical_order() {
-    // ADR-017 F1 added signals 7–9: TemporalCausalitySignal, DistillationSignal,
+    // ADR-018 F1 added signals 7–9: TemporalCausalitySignal, DistillationSignal,
     // TrainingSignal. Any future addition must update this assertion and
     // extend default_standing_signal_names() in default_set.rs.
     let names = default_standing_signal_names();
@@ -118,7 +140,7 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
 fn default_standing_signal_specs_returns_nine_specs_with_interval_triggers() {
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(store, "test-model");
-    // ADR-017 F1 added signals 7–9; any future addition must update this count.
+    // ADR-018 F1 added signals 7–9; any future addition must update this count.
     assert_eq!(specs.len(), 9);
     for spec in &specs {
         match spec.trigger {
@@ -316,7 +338,7 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 
 #[test]
 fn registering_all_nine_default_specs_produces_nine_reports() {
-    // ADR-017 F1: nine signals now. Any future addition must update this count.
+    // ADR-018 F1: nine signals now. Any future addition must update this count.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
     for spec in default_standing_signal_specs(store, "test-model") {
@@ -338,7 +360,7 @@ fn registering_all_nine_default_specs_produces_nine_reports() {
     }
 }
 
-// ─── ADR-017 F1: TrainingSignal parity tests ─────────────────────────────────
+// ─── ADR-018 F1: TrainingSignal parity tests ─────────────────────────────────
 
 /// Parity with Swift's `trainingSignalFiresTrainingDaemonRunOnce`.
 /// The training signal's live spec must invoke `TrainingDaemon::run_once`

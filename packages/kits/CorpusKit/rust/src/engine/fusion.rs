@@ -270,7 +270,7 @@ mod tests {
         };
         let hits = fuse(&ranked, None, &weights, 60.0);
         assert_eq!(hits.len(), 2);
-        // Both have identical fused scores (weight/62); tie-break = item_id ASC.
+        // Both have identical fused scores (weight/61, as rank=1, rrf_k=60); tie-break = item_id ASC.
         assert_eq!(hits[0].item_id, "aaa-item");
         assert_eq!(hits[1].item_id, "zzz-item");
     }
@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn rrf_k_zero_amplifies_rank1() {
-        // rrf_k = 0: score = weight/rank. rank-1 item is weight times
-        // more relevant than rank-2. With rrf_k=60 (default) the
+        // rrf_k near 0 (0.01): score ≈ weight/rank, making rank-1 weight
+        // times more relevant than rank-2. With rrf_k=60 (default) the
         // difference is smaller. Verifies the parameter flows through.
         let mut scored: HashMap<LaneTag, Vec<(String, f32)>> = HashMap::new();
         scored.insert(

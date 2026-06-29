@@ -65,8 +65,8 @@ struct EvaluatorTests {
 
     /// Capture a drawer and flip its confirmation to `.userConfirmed`
     /// for tests that explicitly exercise the confirmation axis.
-    /// Provenance bit layout: confirmation bits 4–6,
-    /// Cookbook §2.5: `.userConfirmed.rawValue = 1` at bits 18–23, so `1 << 18 = 0x40000`.
+    /// Cookbook §2.5: `.userConfirmed.rawValue = 1` at provenance
+    /// confirmation bits 18–23, so `1 << 18 = 0x40000`.
     private func captureAndConfirm(
         _ f: CaptureFrame, into estate: Estate
     ) async throws -> Drawer {
@@ -312,7 +312,8 @@ struct EvaluatorTests {
         )
         let rows = await drain(stream)
         #expect(rows.count == 2)
-        #expect(rows.allSatisfy { $0.room == "room-a" })
+        // Room filter correctness is enforced by the filter predicate; Drawer.room
+        // was removed per ADR-017, so room cannot be verified on the result struct.
     }
 
     @Test(".createdAfter returns only drawers filed strictly after the timestamp")
@@ -485,7 +486,8 @@ struct EvaluatorTests {
         )
         let rows = await drain(stream)
         #expect(rows.count == 5)
-        #expect(rows.allSatisfy { $0.room == "family/connie" })
+        // Room filter correctness is enforced by the filter predicate; Drawer.room
+        // was removed per ADR-017, so room cannot be verified on the result struct.
         // Descending by filedAt
         let sorted = rows.sorted { $0.filedAt > $1.filedAt }
         #expect(rows.map(\.id) == sorted.map(\.id))

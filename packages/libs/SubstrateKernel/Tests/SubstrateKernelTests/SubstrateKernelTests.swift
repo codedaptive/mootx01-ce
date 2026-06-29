@@ -2,8 +2,9 @@
 //
 // SubstrateKernel package-level smoke suite. Confirms the kernel
 // protocol is importable and ScalarKernel produces deterministic
-// output. Per-type behavior coverage lives in the peer suites
-// (BitFieldTests, SHA256Tests, HammingNNTests, PortableKernelTests),
+// output. Per-type behavior coverage lives in the peer suites:
+// BitFieldTests, SHA256Tests, HammingNNTests, HammingNNTopKTieBreakTests,
+// PortableKernelTests, FloatVecOpsTests, HKDFTests, KernelTelemetryTests,
 // each mirroring the behavior set its Rust `#[test]` module asserts.
 // Full bit-identical conformance against the canonical vector files
 // lives in docs/validation/substrate_math_performance/ (out of scope

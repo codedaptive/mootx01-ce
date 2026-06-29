@@ -1,7 +1,8 @@
 // CompositionGridSyncTests.swift
 //
-// GRID SYNC ENFORCEMENT — asserts that NeuronKit.CompositionGrid.all produces
-// exactly the composition name set recorded in the package-local fixture file:
+// GRID SYNC ENFORCEMENT — asserts that every name in the package-local fixture
+// appears in NeuronKit.CompositionGrid.all, in order (subset check, not exact
+// equality; the fixture is the benchmarker list which omits standalone "vector"):
 //
 //   packages/kits/NeuronKit/conformance/composition-grid.json
 //

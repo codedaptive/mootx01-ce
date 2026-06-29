@@ -183,8 +183,7 @@ fn sample_drawer(label: &str) -> Drawer {
     Drawer {
         id: tid(label),
         lineage_id: Uuid::new_v4(),
-        wing: "wing-tel".to_string(),
-        room: "room-tel".to_string(),
+        parent_node_id: "test-parent".to_string(),
         content: "Test content for telemetry".to_string(),
         added_by: "test-agent".to_string(),
         embedding_model_id: "minilm-v2".to_string(),
@@ -227,6 +226,7 @@ fn sample_tunnel(source_label: &str, target_label: &str) -> Tunnel {
         tombstoned_at: None,
         added_by: "test-agent".to_string(),
         removed_by_batch: None,
+        order_key: None,
     }
 }
 
@@ -676,7 +676,7 @@ fn add_drawer_result_identical_with_monitoring_on_and_off() {
 
 /// drawers_in_wing results are identical with monitoring on and off.
 /// Set equality (not order) is asserted because two separate in-memory
-/// stores do not guarantee identical SQLite row ordering.
+/// stores do not guarantee identical insertion ordering.
 #[test]
 fn drawers_in_wing_results_identical_with_monitoring_on_and_off() {
     let _guard = global_lock();

@@ -22,17 +22,19 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 60.
-    /// 19 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 1 maintenance.
+    /// Hard contract gate: the total tool count must be exactly 62.
+    /// 19 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 3 maintenance.
     /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
     /// ADR-DIFFUSION-001) added alongside moot_lens_contradiction.
-    /// The 11th recipe tool is moot_expand_memory (DA1 — three distillation tools:
-    /// moot_consolidate, moot_recall_distilled, moot_expand_memory); the maintenance
-    /// tool is moot_reindex (corpus/vector backfill).
+    /// The 11th recipe tool is moot_recollect (DA1 — three distillation tools:
+    /// moot_consolidate, moot_recall_distilled, moot_recollect). The three
+    /// maintenance tools are moot_reindex (corpus/vector backfill),
+    /// moot_drain_status (background drain progress), and moot_palace_import
+    /// (PAR-PB-1, direct palace import).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools().count == 60,
-                "tools() must return exactly 60 tools; got \(ToolProjection.tools().count)")
+        #expect(ToolProjection.tools().count == 62,
+                "tools() must return exactly 62 tools; got \(ToolProjection.tools().count)")
     }
 
     /// All 19 interface tools must be present.
@@ -84,18 +86,28 @@ struct ToolProjectionTests {
 
     /// The federation tool must be present, carry `.federation` provenance,
     /// and use the renamed `federatedSearchToolName` constant.
+    ///
+    /// Item 2 hardening: `requesterEstateID` is now optional (anti-spoof gate
+    /// binds the requester to the default estate when omitted). The required
+    /// list must be empty. The property is still present in the schema so
+    /// callers can supply it for verification (it must match the default).
     @Test func testFederationToolIsPresentAboveTheProjection() throws {
         let federation = ToolProjection.tools().filter { $0.provenance == .federation }
         #expect(federation.count == 1, "exactly one federation tool is expected")
         let tool = try #require(federation.first)
         #expect(tool.name == ToolDispatcher.federatedSearchToolName)
         #expect(tool.name == "moot_federated_search")
-        // Federation tool requires the requester identity and carries no estateID
-        // (it fans across estates rather than targeting one).
         let schema = tool.inputSchema.objectValue
+        // requesterEstateID is optional; required must be empty (Item 2 hardening).
         let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(required.contains("requesterEstateID"))
-        #expect(schema?["properties"]?.objectValue?["estateID"] == nil)
+        #expect(!required.contains("requesterEstateID"),
+            "requesterEstateID must not be required after Item 2 anti-spoof hardening")
+        #expect(required.isEmpty, "federation tool has no required fields after Item 2")
+        // The property is present in the schema (so clients know it exists).
+        #expect(schema?["properties"]?.objectValue?["requesterEstateID"] != nil,
+            "requesterEstateID must remain in properties as an optional field")
+        #expect(schema?["properties"]?.objectValue?["estateID"] == nil,
+            "federation tool fans across estates, not a single estateID target")
     }
 
     /// `moot_file_memory` must require `content` and `location`, and must
@@ -173,12 +185,23 @@ struct ToolProjectionTests {
         )
     }
 
+    /// `moot_palace_import` must pass the `InterfaceTools.isInterfaceTool` membership
+    /// gate so the serve host routes it to `runPalaceImport` instead of throwing
+    /// "Unknown tool" (-32601). Regression gate matching `testMootReindexPassesMembershipGate`.
+    @Test func testMootPalaceImportPassesMembershipGate() {
+        #expect(
+            InterfaceTools.isInterfaceTool("moot_palace_import"),
+            "moot_palace_import must be in the InterfaceTools membership gate"
+        )
+    }
+
     /// Every tool in the `InterfaceTools` dispatch switch must also be in the
     /// membership gate — the two sets must stay in sync. This catches the class
     /// of bug where a case is added to the switch but omitted from `names`.
     ///
-    /// The expected set is the canonical 19 Tier 1–5 tools plus `moot_reindex`
-    /// (Maintenance). If a new tool is added to the switch, add it here too.
+    /// The expected set is the canonical 19 Tier 1–5 tools plus maintenance
+    /// tools (`moot_reindex`, `moot_drain_status`, `moot_palace_import`). If a
+    /// new tool is added to the switch, add it here too.
     @Test func testMembershipGateCoversAllDispatchCases() {
         // All tools that appear in the InterfaceTools dispatch switch.
         let dispatchCases: [String] = [
@@ -196,7 +219,7 @@ struct ToolProjectionTests {
             // Tier 5
             "moot_estate_status", "moot_estate_map", "moot_estate_ping",
             // Maintenance / admin
-            "moot_reindex",
+            "moot_reindex", "moot_drain_status", "moot_palace_import",
         ]
         for name in dispatchCases {
             #expect(

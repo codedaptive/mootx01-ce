@@ -37,10 +37,10 @@ import Foundation
 
 // MARK: - Model partition
 
-/// One entry in the model partition index: a modelID and the range of
-/// indices in `keys`/storage that belong to that model. Ranges are
-/// non-overlapping, sorted by modelID ascending, and together cover
-/// 0..<count with no gaps.
+/// One entry in the model partition index: a modelID and the min/max
+/// live-slot span for that model. Spans are computed by the partition
+/// builders in `BruteForceIndex` and `ResidentArrayStore`; tombstoned
+/// slots between the min and max may be included in the span.
 public struct ModelPartitionEntry: Sendable, Equatable {
     /// The model this partition covers.
     public let modelID: String
@@ -75,11 +75,11 @@ public struct ResidentVectorArray: Sendable {
     /// Fixed for the lifetime of the array.
     public let stride: UInt32
 
-    /// Number of live (non-tombstoned) vector slots.
+    /// Total vector slot count (including tombstoned slots).
     ///
-    /// Note: after tombstoning, count may differ from
-    /// storage.count / stride. The scan must respect the tombstone
-    /// bitmap. Compaction resets count to equal the live slot count.
+    /// Scans iterate `0..<count` and check the tombstone bitmap per slot.
+    /// `liveCount` is the separate computed count of non-tombstoned slots.
+    /// Compaction rebuilds the array from live slots only, resetting count.
     public let count: UInt32
 
     /// Raw vector bytes: count × stride bytes, contiguous, packed.

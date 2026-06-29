@@ -40,9 +40,13 @@ final class AwaitDrainTests {
     }
 
     private func makeJob(_ tag: String) -> Job {
+        makeJob(stream: "encode", tag)
+    }
+
+    private func makeJob(stream: String, _ tag: String) -> Job {
         Job(
             id: JobID.generate(),
-            streamID: StreamID(rawValue: "encode"),
+            streamID: StreamID(rawValue: stream),
             submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
             priority: 50,
             payload: Data(tag.utf8))
@@ -104,6 +108,45 @@ final class AwaitDrainTests {
         // awaitDrain with a short timeout must throw drainTimeout, proving it
         // treats an unreplied in-flight job as "not yet drained" and does not
         // release early.
+        await #expect(throws: QueueError.self) {
+            try await kit.awaitDrain(
+                pollInterval: .milliseconds(10), timeout: .milliseconds(120))
+        }
+    }
+
+    // MARK: - Stream-scoped barrier ignores other streams (Bug A: encode-stall)
+
+    // On a SHARED queue carrying more than one stream, awaitDrain(stream:) must
+    // release once the TARGET stream is clear and must NOT block on other
+    // streams' pending jobs (e.g. dreaming enqueued on recall) that a
+    // stream-scoped drainer never processes. The GLOBAL awaitDrain WOULD block
+    // on them — the post-T4/T6 encode-stall where every capture's encode barrier
+    // hung on pending dreaming jobs. Rust twin:
+    // await_drain_for_stream_ignores_other_streams.
+    @Test func awaitDrainStreamIgnoresOtherStreams() async throws {
+        let kit = try makeKit()
+        // One encode job + two dreaming jobs on the same (shared) queue.
+        try await kit.send(makeJob(stream: "encode", "e"))
+        try await kit.send(makeJob(stream: "dreaming", "d1"))
+        try await kit.send(makeJob(stream: "dreaming", "d2"))
+
+        // Drain + reply ONLY the encode stream.
+        let batch = try await kit.drain(stream: StreamID(rawValue: "encode"))
+        #expect(batch.count == 1)
+        for pair in batch {
+            try await kit.reply(to: pair.job.id, status: .done, artifacts: [])
+        }
+
+        // The encode stream is clear; dreaming still has 2 pending. The
+        // stream-scoped barrier must release promptly anyway.
+        let start = ContinuousClock.now
+        try await kit.awaitDrain(
+            stream: StreamID(rawValue: "encode"),
+            pollInterval: .milliseconds(20), timeout: .seconds(5))
+        #expect((ContinuousClock.now - start) < .seconds(1))
+
+        // Sanity: the GLOBAL barrier WOULD time out — proving the bug the
+        // stream-scoped barrier fixes (dreaming jobs still pending).
         await #expect(throws: QueueError.self) {
             try await kit.awaitDrain(
                 pollInterval: .milliseconds(10), timeout: .milliseconds(120))

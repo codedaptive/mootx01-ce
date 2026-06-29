@@ -150,6 +150,20 @@ public struct FormalConcepts: Recipe {
 
     public init() {}
 
+    // Maximum number of mined concepts fed to the O(N²) cover-delta step.
+    // ConceptCoverDeltas.covering() compares every concept pair; beyond this
+    // cap the structural-lens value degrades faster than the CPU cost grows.
+    // CK-6 planned hardening: prevents moot_lens_concepts from triggering a
+    // degenerate O(N²) sweep on a large estate recall.
+    private static let coverDeltaConceptCap: Int = 100
+
+    // Maximum number of mined concepts fed to ConceptImplications. The
+    // implication engine iterates over all supplied concepts to enumerate
+    // pseudo-intents; the outer cap bounds the enumeration even when the
+    // caller's maxImplications budget has not been exhausted. CK-5 planned
+    // hardening: prevents unbounded closure computation on large concept sets.
+    private static let implicationConceptCap: Int = 100
+
     public let name = "formal_concepts"
     public let version = "1.0.0"
     public let description =
@@ -209,14 +223,27 @@ public struct FormalConcepts: Recipe {
         // 5. Derive cover deltas over the mined concept set (structural lens
         //    over the concept order — not a sound implication basis). Empty
         //    when fewer than two concepts exist.
-        let coverDeltas = ConceptCoverDeltas.covering(concepts: rawConcepts)
+        //
+        //    CK-6: cap the concept set at coverDeltaConceptCap before calling
+        //    covering(). covering() is O(N²) in concept count; uncapped, a
+        //    large estate recall hands the engine an unbounded pair enumeration
+        //    through the moot_lens_concepts MCP path.
+        let conceptsForCover = Array(rawConcepts.prefix(Self.coverDeltaConceptCap))
+        let coverDeltas = ConceptCoverDeltas.covering(concepts: conceptsForCover)
 
         // 6. Compute the bounded D-G canonical basis — sound logical implications
         //    over the drawer context. `over:` receives the mined concepts so the
         //    engine can reuse already-computed closures; `context:` provides the
         //    full closure operator for pseudo-intent enumeration.
+        //
+        //    CK-5: cap the concept set at implicationConceptCap before calling
+        //    conceptImplications(). The engine iterates over ALL supplied concepts
+        //    to enumerate pseudo-intents; the caller's maxImplications bounds
+        //    OUTPUT count but not the enumeration over rawConcepts. The cap here
+        //    bounds the enumeration cost itself.
+        let conceptsForImplications = Array(rawConcepts.prefix(Self.implicationConceptCap))
         let implications = ConceptImplications.conceptImplications(
-            over: rawConcepts,
+            over: conceptsForImplications,
             context: context,
             maxImplications: input.maxImplications,
             maxPremiseSize: input.maxPremiseSize
@@ -259,7 +286,7 @@ func formalAttributesForDrawer(_ drawer: Drawer) -> [FormalAttribute] {
         FormalAttribute(namespace: "locus", key: "channel",
                         value: captureChannelValue(drawer.captureChannel)),
         FormalAttribute(namespace: "locus", key: "room",
-                        value: drawer.room),
+                        value: drawer.parentNodeId),
     ]
     // Spine — about-ness: the lattice anchors locating the drawer in
     // knowledge space. Omit-on-absent is load-bearing: an unanchored drawer

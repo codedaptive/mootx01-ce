@@ -31,11 +31,11 @@ impl Estate {
     // audit_trail (per-row)
     // -----------------------------------------------------------------------
 
-    /// All bitmap audit rows for a single row, ordered by `changed_at`
-    /// ascending. Returns an empty `Vec` when no mutations have been
-    /// recorded — a freshly-captured drawer's trail is empty until its
-    /// first `withdraw` / `mutate_adjective` / `mutate_operational` call
-    /// (capture is an INSERT, not a mutation).
+    /// All audit events for a single row, ordered by `changed_at`
+    /// ascending. A freshly-captured drawer's trail is non-empty: the
+    /// gated capture writes a sealed genesis `AuditEvent` immediately.
+    /// Subsequent mutations (`withdraw`, `mutate_adjective`,
+    /// `mutate_operational`) each append one additional sealed event.
     ///
     /// # Parameters
     ///

@@ -1,14 +1,13 @@
 //! `Corpus` — the unified RAG entry point for corpus-kit.
 //!
-//! Mirrors Swift's `Corpus` actor. Composes `BundleStore`, `BM25Index`,
-//! `VectorStore`, and an `EmbeddingProvider` internally; no VectorKit
-//! type appears in the public API. Callers see documents and queries
-//! only.
+//! Mirrors Swift's `Corpus` actor. Composes `BundleStore`,
+//! `InvertedIndexStore` (SQLite-backed BM25 keyword recall), `VectorStore`,
+//! and an `EmbeddingProvider` internally; no VectorKit type appears in
+//! the public API. Callers see documents and queries only.
 //!
-//! Concurrency: `Corpus` wraps the in-memory `BM25Index` in a `Mutex`
-//! because BM25Index requires `&mut self` for mutations. `VectorStore`
-//! and `BundleStore` handle their own interior mutability through
-//! `Arc<dyn Storage>`. The struct is `Send + Sync`.
+//! Concurrency: `InvertedIndexStore` wraps its own internal `Mutex<State>`;
+//! `VectorStore` and `BundleStore` handle their own interior mutability
+//! through `Arc<dyn Storage>`. The struct is `Send + Sync`.
 //!
 //! Platform note: model inference is host-supplied on BOTH ports. The
 //! Swift `EmbeddingModel` cases `miniLM`/`mpNet`/`embeddingGemma` accept
@@ -22,20 +21,27 @@
 //! vector) the engram is bit-identical Swift/Rust (SPEC § 8.2).
 
 use crate::basis_store::{BasisStore, PersistedBasis};
-use crate::bm25_index::BM25Index;
+use crate::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
+use crate::removed_source_store::RemovedSourceStore;
 use crate::bundle_store::BundleStore;
+use crate::engine::inverted_index::Algorithm;
+use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::chunk::{Chunk, ScoredChunk};
 use crate::chunker::{chunk_with_default_hlc, ChunkerConfiguration};
+use crate::corpus_ingest_queue::{IngestQueueState, OnEncoded};
+#[cfg(any(test, feature = "test-seams"))]
+use crate::corpus_ingest_queue::IngestFailureHook;
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::hybrid_recall::{recall as hybrid_recall, HybridRecallConfiguration};
-use crate::tokenizer::{default_keyword_tokens, Tokenizer};
+use crate::tokenizer::default_keyword_tokens;
 use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use engram_lib::Engram;
+use substrate_types::merkle_root::MerkleRoot;
 use intellectus_lib::{report, StatSample};
 use std::sync::{Arc, Mutex};
 use substrate_ml::float_simhash;
 use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
-use vectorkit::vector_store::VectorStore;
+use vectorkit::vector_store::{VectorPayloadInput, VectorStore};
 use vectorkit::EmbeddingProvider;
 use vectorkit::SearchDirection;
 use vectorkit::VectorKitError;
@@ -317,6 +323,16 @@ const FNV_PRIME_64: u64 = 1_099_511_628_211;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 
+// ingest_batch transaction-window sizes. The corpus shares the estate's primary
+// SQLite connection (single-writer at the file level), so the per-chunk commits
+// bound how long a `BEGIN IMMEDIATE` holds the write lock — long enough to
+// amortise the fsync/WAL-checkpoint cost ~chunk-fold, short enough not to starve
+// concurrent LocusKit captures / the governor. Items are coarser than rows
+// (~providers × lanes × sub-chunks per item), so the row window is larger.
+// Mirrored by the Swift twin's COMMIT_CHUNK_ITEMS / COMMIT_CHUNK_ROWS.
+const COMMIT_CHUNK_ITEMS: usize = 512;
+const COMMIT_CHUNK_ROWS: usize = 4096;
+
 fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
     // FNV-1a 64-bit hash of the input text, then LCG for 32 floats in
     // [-1, 1]. Mirrors the Swift EmbeddingModel.deterministic closure
@@ -413,17 +429,35 @@ struct ProviderSlot {
     /// a freshly-trained provider through `&self`. A `ProviderHandle`, not a
     /// bare box, so the trainable capability survives (see `ProviderHandle`).
     handle: Mutex<ProviderHandle>,
-    /// The serialized basis of a FRESH (untrained) trainable provider, captured
-    /// ONLY when this slot was built from a fresh trainable provider with no
-    /// persisted basis. Each training pass reconstructs a FRESH provider from
-    /// this blob and trains from scratch (`train_on_corpus` is additive).
-    /// `None` for non-trainable providers and for a reopened-from-basis slot.
-    /// Mirrors Swift's `ProviderSlot.freshBasisBlob`.
+    /// The serialized EMPTY (untrained) basis of a trainable provider — the
+    /// from-scratch factory. `Some` for EVERY trainable slot, whether built fresh
+    /// OR reopened from a persisted basis; `None` only for non-trainable slots.
+    /// Each training pass reconstructs a FRESH provider from this blob and trains
+    /// from scratch (`train_on_corpus` is additive). Keeping it for a reopened-
+    /// from-basis slot (rather than dropping it) is the frozen-after-restart fix:
+    /// a restarted corpus can retrain on `reindex`. Mirrors Swift's
+    /// `ProviderSlot.freshBasisBlob`.
     fresh_basis_blob: Option<Vec<u8>>,
+    /// The dedicated maintained-counts accumulator for a trainable slot (P3),
+    /// held SEPARATELY from `handle` behind its own `Mutex` so it can be folded
+    /// through `&self`. `None` for non-trainable slots. It must NOT be the serving
+    /// provider: for LSA/NMF, growing the maintained vocabulary would desync the
+    /// serving provider's basis-aligned vocab from its frozen factors. Mirrors
+    /// Swift's `ProviderSlot.countsAccumulator` + `countsDocumentCount`.
+    counts: Mutex<Option<CountsState>>,
     /// Cached provider modelID. Stable for the corpus's lifetime (training
     /// mutates the basis, not the identity). Lets the corpus key the float lane
     /// and basis rows without locking the handle Mutex.
     model_id: String,
+}
+
+/// A trainable slot's maintained-counts state: the accumulator plus its
+/// document-count growth anchor. The doc count is tracked here (not read off the
+/// provider) so it is uniform across RI/PPMI/LSA/NMF, whose providers track
+/// document count inconsistently. Mirrors the two Swift slot fields.
+struct CountsState {
+    accumulator: Box<dyn TrainableEmbeddingBasis>,
+    document_count: usize,
 }
 
 // MARK: - Corpus
@@ -431,29 +465,70 @@ struct ProviderSlot {
 /// Unified RAG entry point for corpus-kit.
 ///
 /// Rust mirror of Swift's `Corpus` actor. Composes `BundleStore`,
-/// `BM25Index`, `VectorStore`, and an `EmbeddingProvider` internally.
-/// No VectorKit type appears in any public method signature.
+/// `InvertedIndexStore` (SQLite-backed BM25), `VectorStore`, and an
+/// `EmbeddingProvider` internally. No VectorKit type appears in any
+/// public method signature.
 ///
 /// Lifecycle: construct via `Corpus::open`, then call `ingest` to add
 /// documents and `recall` to query. `BundleStore` is append-only, so
 /// `remove` clears the recall index without deleting content rows.
 ///
 /// `chunk_source_map` is an in-memory reverse map from chunk UUID to
-/// source_id (drawer ID). It is maintained in lockstep with the BM25
-/// index during `ingest` and `remove`, mirroring the Swift `Corpus` actor's
-/// `chunkSourceMap` dictionary. This allows `bm25_top_k_by_source` to
-/// aggregate chunk-level BM25 scores to source (drawer) level without
-/// a secondary storage query, matching the Swift path exactly.
+/// source_id (drawer ID). It is warm-loaded from a compact (id, source_id)
+/// projection on open (no body text loaded) and maintained in lockstep
+/// with InvertedIndexStore during ingest and remove. This allows
+/// `bm25_top_k_by_source` to aggregate chunk-level BM25 scores to source
+/// (drawer) level without a secondary storage query.
+
+/// The encode SPEED a corpus's ingest drain runs its embedding work at — the
+/// user/AI-declared knob. SPEED axis ONLY; the write strategy (bulk transaction
+/// vs stream) is chosen automatically by source size, never by this. Mirrors
+/// Swift `EncodeSpeed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncodeSpeed {
+    /// Push the cores: the embed fan-out uses all logical cores. Default — the
+    /// user is waiting for content to become searchable.
+    Foreground,
+    /// Yield to the machine: the embed fan-out is capped to ~a quarter of cores,
+    /// for very large imports where draining hard would saturate the host.
+    Background,
+}
+
 pub struct Corpus {
+    /// The estate's backing storage, retained so the ingest queue can choose a
+    /// durable on-disk maildir backend when the estate is file-backed (SQLite)
+    /// versus a transient in-memory queue when the estate is in-memory. See
+    /// `mount_ingest_queue`. `pub(crate)` so the `corpus_ingest_queue` module can
+    /// read the backend kind.
+    pub(crate) storage: Arc<dyn Storage>,
     bundle_store: BundleStore,
-    /// Mutex guards mutable BM25 index operations (index_documents / remove).
-    bm25: Mutex<BM25Index>,
+    /// SQLite-backed durable inverted index — replaces the former in-memory
+    /// BM25Index. Shares its own internal Mutex for thread-safety; state
+    /// persists across process restarts via the iix_termfreqs + iix_doclens
+    /// tables in the same SQLite file as the rest of the estate.
+    inverted_index: InvertedIndexStore,
     /// In-memory reverse map: chunk UUID → source_id (drawer ID).
-    /// Maintained in lockstep with the BM25 index during ingest and remove.
-    /// Mirrors Swift's `chunkSourceMap: [UUID: String]` on the Corpus actor.
+    /// Warm-loaded on every open via a compact (id, source_id) projection —
+    /// no body text is scanned. Maintained in lockstep with InvertedIndexStore
+    /// during ingest and remove. Mirrors Swift's `chunkSourceMap: [UUID: String]`.
     chunk_source_map: Mutex<std::collections::HashMap<uuid::Uuid, String>>,
-    vector_store: VectorStore,
+    /// The estate's single dense vector store, held behind `Arc` so the
+    /// composition layer (GeniusLocusKit) can BORROW this exact instance for its
+    /// scored-recall vector lane via `shared_vector_store()` rather than
+    /// constructing a second `VectorStore` over the same `vectors` table. One
+    /// store, one resident array, one on-disk sidecar kept in sync by every write.
+    vector_store: Arc<VectorStore>,
     basis_store: BasisStore,
+    /// Persisted, incrementally-maintained per-provider statistics (the counts
+    /// table) — Rust twin of Swift `Corpus.countsStore`. Durable home for each
+    /// trainable provider's additive state (grown on write, read at refactor).
+    counts_store: CorpusProviderCountsStore,
+    /// Records which source ids are removed (recall-suppressed) — Rust twin of
+    /// Swift `Corpus.removedSourceStore`. The chunks table is append-only, so
+    /// `remove` cannot delete chunk rows; this lets every rebuild path (reindex,
+    /// BM25-rebuild-on-open, first-ingest train, count) exclude removed sources
+    /// so they cannot resurface. Re-ingest clears the row (reactivation).
+    removed_source_store: RemovedSourceStore,
     /// The ordered per-provider slots, one per held `EmbeddingModelConfig`, in
     /// construction order (mission 6a-iii-core). `slots[0]` is the DEFAULT signal
     /// that the single-signal entry points (`recall`, `float_nearest`, `embed`,
@@ -472,11 +547,64 @@ pub struct Corpus {
     /// [dev-dependencies] by any crate that needs force-testing). Mirrors the
     /// Swift `_forcedFloatError: Error?` seam on the `Corpus` actor (gate-2).
     /// Production builds have no knowledge of this field.
+    /// The Corpus-owned ingest queue + drain worker pool. `None` until
+    /// `mount_ingest_queue`. Behind a Mutex because both `&self` enqueue/drain
+    /// and the background drain thread touch it. Mirrors Swift's
+    /// `Corpus.ingestQueue` + `ingestDrainWorker`. See corpus_ingest_queue.rs.
+    pub(crate) ingest_queue: Mutex<Option<IngestQueueState>>,
+    /// Invoked AFTER each drained batch finishes ingesting, with the sourceIDs
+    /// encoded. `None` when the corpus runs standalone; the orchestrator
+    /// (GeniusLocusKit) sets it to roll up the touched LocusKit rooms —
+    /// coordination only; CorpusKit never reaches into LocusKit itself. Mirrors
+    /// Swift's `Corpus.onEncoded`.
+    pub(crate) on_encoded: Mutex<Option<OnEncoded>>,
+    /// The encode drain's SPEED (user/AI-declared via the import `mode`).
+    /// Foreground embeds across all cores; background caps to ~a quarter (see
+    /// `embed_concurrency_cap`) so a very large import leaves the machine
+    /// headroom. SPEED axis only — write strategy is size-gated, not set here.
+    /// Behind a Mutex for `&self` interior mutation via `set_encode_speed`.
+    /// Mirrors Swift `Corpus.encodeSpeed`.
+    pub(crate) encode_speed: Mutex<EncodeSpeed>,
+    /// Test-only ingest failure hook (exercises the at-least-once retry path).
+    /// `None` in production. Mirrors Swift's `_ingestFailureHook`; gated like
+    /// `forced_float_error` so production builds carry no knowledge of it.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub(crate) ingest_failure_hook: Mutex<Option<IngestFailureHook>>,
     #[cfg(any(test, feature = "test-seams"))]
     pub forced_float_error: Mutex<Option<String>>,
 }
 
 impl Corpus {
+    /// Set the drain's encode SPEED. Called by the import path mapping the `mode`
+    /// arg of `moot_palace_import`; affects embed fan-outs sized after this call.
+    /// Mirrors Swift `Corpus.setEncodeSpeed`.
+    pub fn set_encode_speed(&self, speed: EncodeSpeed) {
+        if let Ok(mut guard) = self.encode_speed.lock() {
+            *guard = speed;
+        }
+    }
+
+    /// Max concurrent embed operations for the current `encode_speed` (T1 QoS
+    /// throttle). Foreground uses all logical cores (push hard); background uses
+    /// `cores / 4` (floor 1) so a large background import leaves ~75% of the
+    /// machine free for the resident daemon / the user. Uniform across
+    /// Windows/Linux via `available_parallelism`; identical formula to the Swift
+    /// port. The `/ 4` divisor (x=4) is the one tuning knob.
+    fn embed_concurrency_cap(&self) -> usize {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let speed = self
+            .encode_speed
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(EncodeSpeed::Foreground);
+        match speed {
+            EncodeSpeed::Foreground => cores.max(1),
+            EncodeSpeed::Background => (cores / 4).max(1),
+        }
+    }
+
     /// Construct a Corpus against a PersistenceKit Storage.
     ///
     /// Opens the BundleStore and VectorStore schemas on the supplied
@@ -540,15 +668,42 @@ impl Corpus {
         storage
             .migrate(&BasisStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // Additive maintained-counts table (P3): created via migrate like the
+        // BasisStore pair so it exists regardless of the other schemas' gates.
+        storage
+            .migrate(&CorpusProviderCountsStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // Additive removed-sources table: created via migrate like the others.
+        storage
+            .migrate(&RemovedSourceStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
 
         let bundle_store = BundleStore::new(Arc::clone(&storage));
         // No sidecar path for the CorpusKit Rust path — memory-only resident array.
         // The SQLite table remains the durable source of truth; the resident array
         // is rebuilt from the table on first find_nearest call.
-        let vector_store = VectorStore::new(Arc::clone(&storage), None);
+        let vector_store = Arc::new(VectorStore::new(
+            Arc::clone(&storage),
+            VectorStore::default_sidecar_path(&storage),
+        ));
         let basis_store = BasisStore::new(Arc::clone(&storage));
+        let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+        let removed_source_store = RemovedSourceStore::new(Arc::clone(&storage));
 
-        let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
+        // Open the durable InvertedIndexStore. For SQLite backends this connects
+        // to the same on-disk file and loads persisted term-freq rows — O(terms +
+        // docs) cold start, no chunk body scan. For InMemory backends the connection
+        // is ephemeral (InMemory storage itself does not persist across restarts).
+        let inverted_index = InvertedIndexStore::open_for_storage(&storage)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+
+        // Warm-load chunk_source_map via a compact (id, source_id) projection —
+        // no body text is fetched. O(N) rows instead of O(N·body).
+        let pairs = bundle_store.chunk_source_pairs()?;
+        let mut initial_csm = std::collections::HashMap::with_capacity(pairs.len());
+        for (uuid, source_id) in pairs {
+            initial_csm.insert(uuid, source_id);
+        }
 
         // Build one slot per model. The per-slot build is exactly the
         // single-provider construction (handle + load-on-open + fresh-blob +
@@ -556,19 +711,29 @@ impl Corpus {
         // single-slot state.
         let mut slots: Vec<ProviderSlot> = Vec::with_capacity(models.len());
         for model in models {
-            slots.push(Self::build_slot(model, &basis_store)?);
+            slots.push(Self::build_slot(model, &basis_store, &counts_store)?);
         }
 
-        Ok(Corpus {
+        let corpus = Corpus {
+            storage: Arc::clone(&storage),
             bundle_store,
-            bm25: Mutex::new(bm25),
-            chunk_source_map: Mutex::new(std::collections::HashMap::new()),
+            inverted_index,
+            chunk_source_map: Mutex::new(initial_csm),
             vector_store,
             basis_store,
+            counts_store,
+            removed_source_store,
             slots,
+            ingest_queue: Mutex::new(None),
+            encode_speed: Mutex::new(EncodeSpeed::Foreground),
+            on_encoded: Mutex::new(None),
+            #[cfg(any(test, feature = "test-seams"))]
+            ingest_failure_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
-        })
+        };
+
+        Ok(corpus)
     }
 
     /// Build one `ProviderSlot` from a model config, resolving load-on-open and
@@ -577,6 +742,7 @@ impl Corpus {
     fn build_slot(
         model: EmbeddingModelConfig,
         basis_store: &BasisStore,
+        counts_store: &CorpusProviderCountsStore,
     ) -> CorpusKitResult<ProviderSlot> {
         // Build the ProviderHandle. The trainable distributional cases are kept
         // as `Trainable(Box<dyn TrainableEmbeddingBasis>)` — NOT upcast to a
@@ -639,6 +805,34 @@ impl Corpus {
             }
         };
 
+        // Capture the FRESH (untrained) basis factory and build the maintained-
+        // counts accumulator BEFORE load-on-open: load converts a trainable handle
+        // to Plain, so the trainable capability must be harvested here.
+        //   - factory blob: captured for EVERY trainable slot (frozen-after-restart
+        //     fix) so reindex can always retrain from scratch.
+        //   - accumulator: a SEPARATE fresh trainable provider (reconstructed from
+        //     the factory, retaining trainability), restored from the counts table
+        //     if a row exists. Held apart from the serving handle so growing the
+        //     maintained vocabulary never desyncs an LSA/NMF serving basis.
+        let mut fresh_basis_blob: Option<Vec<u8>> = None;
+        let mut counts: Option<CountsState> = None;
+        if let Some(trainable) = handle.as_trainable() {
+            let factory = trainable.serialize_basis();
+            let mut accumulator = trainable.reconstruct_trainable_basis(&factory)?;
+            let mut document_count = 0usize;
+            if let Some(persisted) =
+                counts_store.load(trainable.model_id(), trainable.model_version())?
+            {
+                accumulator.restore_counts(&persisted.counts)?;
+                document_count = persisted.document_count;
+            }
+            fresh_basis_blob = Some(factory);
+            counts = Some(CountsState {
+                accumulator,
+                document_count,
+            });
+        }
+
         // Load-on-open: if the provider is trainable AND a basis was previously
         // persisted for its (model_id, model_version), reconstruct the trained
         // provider from that blob so the dense lane is trained-ready immediately
@@ -651,16 +845,10 @@ impl Corpus {
         // Cache the (stable) provider modelID for `model_id()` without locking.
         let model_id = handle.provider().model_id().to_string();
 
-        // Capture the FRESH (untrained) basis blob when the handle is still
-        // Trainable — i.e. no persisted basis was loaded (load makes it Plain).
-        // reindex/first-ingest reconstruct a fresh trainable provider from this
-        // blob and train from scratch (train_on_corpus is additive). A loaded /
-        // non-trainable handle has no fresh-basis blob.
-        let fresh_basis_blob = handle.as_trainable().map(|t| t.serialize_basis());
-
         Ok(ProviderSlot {
             handle: Mutex::new(handle),
             fresh_basis_blob,
+            counts: Mutex::new(counts),
             model_id,
         })
     }
@@ -725,11 +913,35 @@ impl Corpus {
         storage
             .migrate(&BasisStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // Additive maintained-counts table (P3): created via migrate like the
+        // BasisStore pair so it exists regardless of the other schemas' gates.
+        storage
+            .migrate(&CorpusProviderCountsStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // Additive removed-sources table: created via migrate like the others.
+        storage
+            .migrate(&RemovedSourceStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
 
         let bundle_store = BundleStore::new(Arc::clone(&storage));
-        let vector_store = VectorStore::new(Arc::clone(&storage), None);
+        let vector_store = Arc::new(VectorStore::new(
+            Arc::clone(&storage),
+            VectorStore::default_sidecar_path(&storage),
+        ));
         let basis_store = BasisStore::new(Arc::clone(&storage));
-        let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
+        let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+        let removed_source_store = RemovedSourceStore::new(Arc::clone(&storage));
+
+        // Open the durable InvertedIndexStore (same pattern as open_many).
+        let inverted_index = InvertedIndexStore::open_for_storage(&storage)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+
+        // Warm-load chunk_source_map via compact (id, source_id) projection.
+        let pairs = bundle_store.chunk_source_pairs()?;
+        let mut initial_csm = std::collections::HashMap::with_capacity(pairs.len());
+        for (uuid, source_id) in pairs {
+            initial_csm.insert(uuid, source_id);
+        }
 
         // The test seam receives a plain Box<dyn EmbeddingProvider>; Rust has no
         // runtime downcast to a trait object, so an injected provider is always
@@ -738,21 +950,33 @@ impl Corpus {
         // the corpus's single (default) slot — N=1.
         let model_id = provider.model_id().to_string();
 
-        Ok(Corpus {
+        let corpus = Corpus {
+            storage: Arc::clone(&storage),
             bundle_store,
-            bm25: Mutex::new(bm25),
-            chunk_source_map: Mutex::new(std::collections::HashMap::new()),
+            inverted_index,
+            chunk_source_map: Mutex::new(initial_csm),
             vector_store,
             basis_store,
+            counts_store,
+            removed_source_store,
             slots: vec![ProviderSlot {
                 handle: Mutex::new(ProviderHandle::Plain(provider)),
-                // The injected test provider is Plain (non-trainable) — no fresh blob.
+                // The injected test provider is Plain (non-trainable) — no fresh
+                // blob, no maintained-counts accumulator.
                 fresh_basis_blob: None,
+                counts: Mutex::new(None),
                 model_id,
             }],
+            ingest_queue: Mutex::new(None),
+            encode_speed: Mutex::new(EncodeSpeed::Foreground),
+            on_encoded: Mutex::new(None),
+            #[cfg(any(test, feature = "test-seams"))]
+            ingest_failure_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
-        })
+        };
+
+        Ok(corpus)
     }
 
     // MARK: - Public API
@@ -773,25 +997,47 @@ impl Corpus {
             return Ok(());
         }
 
-        self.bundle_store.insert(&chunks)?;
+        // (Re-)ingesting a source reactivates it: clear any prior removed-row so
+        // it returns to the active set (its vectors + BM25 postings are restored
+        // by this ingest). No-op when the source was never removed.
+        self.removed_source_store.clear_removed(source_id)?;
 
-        {
-            let mut bm25 = self
-                .bm25
-                .lock()
-                .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
-            bm25.index_documents(chunks.iter().map(|c| (c.id, c.text.as_str())));
+        // Idempotent insert returns only the newly-inserted chunks (dedups by
+        // id) so derived per-chunk state does not double-count on re-ingest.
+        let inserted_chunks = self.bundle_store.insert(&chunks)?;
+
+        // Index each chunk into the durable InvertedIndexStore (SQLite-backed).
+        // Idempotent: re-indexing an existing chunk replaces its term frequencies
+        // atomically. Uses the same default_keyword_tokens vocabulary as ingest
+        // time so queries produce byte-identical BM25 scores.
+        let now_iso = {
+            let secs = now_millis / 1000;
+            let dt = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
+            let secs_since_epoch = dt.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            format!("{}", secs_since_epoch) // ISO-style timestamp string for the IIX API
+        };
+        for chunk in &chunks {
+            let tokens = default_keyword_tokens(&chunk.text);
+            self.inverted_index.index(&chunk.id.to_string(), &tokens, &now_iso)
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         }
 
-        // Maintain the chunk→source_id reverse map in lockstep with the BM25
-        // index. This mirrors Swift's chunkSourceMap update in Corpus.ingest.
-        // The map allows bm25_top_k_by_source to aggregate chunk-level scores
-        // to source (drawer) level without a secondary storage query.
+        // Maintain the chunk→source_id reverse map in lockstep with
+        // InvertedIndexStore. Mirrors Swift's chunkSourceMap update in
+        // Corpus.ingest. Allows bm25_top_k_by_source to aggregate chunk-level
+        // scores to source (drawer) level without a secondary storage query.
         if let Ok(mut csm) = self.chunk_source_map.lock() {
             for chunk in &chunks {
                 csm.insert(chunk.id, source_id.to_string());
             }
         }
+
+        // Maintained-counts write path (P3): fold only the NEWLY-inserted chunks
+        // into each trainable slot's accumulator — folding a re-ingested duplicate
+        // would inflate the additive counts and the vocab-growth anchor.
+        // Independent of the embed fan-out (the accumulator is separate from the
+        // serving provider); persisted once at the end of this ingest.
+        self.fold_chunks_into_counts(&inserted_chunks)?;
 
         let filed_at_secs = now_millis / 1000;
 
@@ -803,6 +1049,9 @@ impl Corpus {
         // take the first-ingest train path (the corpus snapshot is identical for
         // every provider). Mirrors Swift's `Corpus.ingest` per-slot loop.
         let mut cached_all_chunks: Option<Vec<Chunk>> = None;
+        // Fold-in slots are deferred to a concurrent compute phase (phase 2);
+        // first-ingest training stays serial in this loop (phase 1).
+        let mut fold_in_slots: Vec<usize> = Vec::new();
         for slot_index in 0..self.slots.len() {
             // First-ingest auto-train (mission 6a-ii-β): when this slot has a
             // fresh-basis blob (trainable provider) AND no basis has been
@@ -813,9 +1062,11 @@ impl Corpus {
             // path below: `embed_float` projects new chunks onto the FROZEN basis
             // without retraining — LSA/NMF cannot incrementally refactor a basis,
             // so a per-ingest retrain would be both wrong and wasteful. Explicit
-            // `reindex` retrains on growth. A reopened-from-blob slot has no
-            // fresh-basis blob, so it always takes the fold-in path here (already
-            // trained on open). Mirrors Swift's first-ingest branch.
+            // `reindex` retrains on growth. The auto-train gate is the `!has_basis`
+            // check below, NOT the factory blob's presence: a reopened-from-basis
+            // slot keeps its factory blob (frozen-after-restart fix) but already
+            // has a persisted basis, so it falls through to the fold-in path and
+            // does not auto-train on ingest. Mirrors Swift's first-ingest branch.
             if self.slots[slot_index].fresh_basis_blob.is_some() {
                 let slot = &self.slots[slot_index];
                 let has_basis = self
@@ -824,7 +1075,8 @@ impl Corpus {
                     .is_some();
                 if !has_basis {
                     if cached_all_chunks.is_none() {
-                        cached_all_chunks = Some(self.bundle_store.all_chunks()?);
+                        // Active chunks only — exclude removed sources from the train.
+                        cached_all_chunks = Some(self.active_chunks()?);
                     }
                     let all_chunks = cached_all_chunks.as_ref().expect("just populated");
                     // Train a fresh basis + persist, then re-embed the whole
@@ -837,59 +1089,532 @@ impl Corpus {
             }
 
             // Fold-in path: a basis already exists (or the provider is not
-            // trainable). Embed only the NEW chunks; for a trainable provider
-            // `embed_float` projects them onto the frozen basis (no retrain).
-            //
-            // Fan-out: embed each chunk and store the vector. The
-            // chunk.id == vector.item_id join is maintained here;
-            // the caller never sees it (sealed-vector principle).
-            let guard = self.slots[slot_index]
-                .handle
-                .lock()
-                .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
-            let provider = guard.provider();
-            for chunk in &chunks {
-                let engram = provider
-                    .embed(&chunk.text)
-                    .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?;
-                self.vector_store
-                    .add_vector(
-                        &chunk.id.to_string(),
-                        &engram,
-                        provider.model_id(),
-                        provider.model_version(),
-                        filed_at_secs,
-                    )
-                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+            // trainable). Embed only the NEW chunks; deferred to the concurrent
+            // compute phase below (`embed_float` projects new chunks onto the
+            // frozen basis — no retrain — for trainable providers).
+            fold_in_slots.push(slot_index);
+        }
 
-                // Float lane (Lane D): RETAIN, don't recompute. The provider's
-                // float vector is the SAME pooled embedding `embed` already ran
-                // through the SimHash projection for the binary engram — one
-                // inference pass, two stored rows. The float row is a SECOND row
-                // per chunk under the same item_id at vector_index=1 (the binary
-                // engram is vector_index=0), tagged kind=float32. Written only
-                // when the provider supports embed_float; the default provider
-                // opts out by erroring, so a non-float provider stores the binary
-                // lane only and the dense float lane stays dark for it. Cosine
-                // over this true embedding ranks an answer above a near-duplicate
-                // of the question, which the 256-bit SimHash projection cannot.
-                if let Ok(floats) = provider.embed_float(&chunk.text) {
-                    if !floats.is_empty() {
-                        self.vector_store
-                            .add_payload(
-                                &chunk.id.to_string(),
-                                1,
-                                &VectorPayload::from_f32(&floats),
-                                provider.model_id(),
-                                provider.model_version(),
-                                filed_at_secs,
-                            )
-                            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+        // Phase 2: compute the fold-in slots CONCURRENTLY via scoped threads.
+        // Each provider slot is independent (its own handle Mutex, model_id, and
+        // rows), so one thread per slot holds that slot's lock and runs embed_pair
+        // — the dominant CPU cost — in parallel. Providers are Send + Sync. The
+        // WRITES stay serial: add_payloads locks the VectorStore's internal Mutex
+        // and SQLite is single-writer. Determinism: each slot's rows are built in
+        // chunk order (binary v0 then float v1) and written in slot order, so
+        // stored rows are byte-identical to the serial path. The chunk.id ==
+        // vector.item_id join is maintained here (sealed-vector principle).
+        // Mirrors Swift's TaskGroup-per-fold-in-slot phase.
+        if !fold_in_slots.is_empty() {
+            let chunks_ref = &chunks;
+            let slots_ref = &self.slots;
+            let cap = self.embed_concurrency_cap();
+            // Embed fold-in slots concurrently, throttled to `cap` (T1): foreground
+            // fans across all cores, background to ~a quarter. Slots are processed in
+            // contiguous batches of `cap` (a barrier between batches), preserving slot
+            // order so the flattened write stays deterministic. Mirrors Swift's
+            // boundedConcurrentMap.
+            let mut per_slot_rows: Vec<Vec<VectorPayloadInput>> =
+                Vec::with_capacity(fold_in_slots.len());
+            for batch in fold_in_slots.chunks(cap) {
+                let batch_rows: Vec<Vec<VectorPayloadInput>> = std::thread::scope(
+                    |scope| -> Result<Vec<Vec<VectorPayloadInput>>, CorpusKitError> {
+                        let handles: Vec<_> = batch
+                            .iter()
+                            .map(|&slot_index| {
+                                scope.spawn(move || -> Result<Vec<VectorPayloadInput>, CorpusKitError> {
+                                    let guard = slots_ref[slot_index].handle.lock().map_err(|_| {
+                                        CorpusKitError::StoreUnavailable("provider lock poisoned".into())
+                                    })?;
+                                    let provider = guard.provider();
+                                    let mut rows: Vec<VectorPayloadInput> =
+                                        Vec::with_capacity(chunks_ref.len() * 2);
+                                    for chunk in chunks_ref {
+                                        // Single inference pass: embed_pair computes the
+                                        // provider's pooled vector ONCE and returns both
+                                        // the binary engram and the dense float vector.
+                                        let (engram, floats) =
+                                            provider.embed_pair(&chunk.text).map_err(|e| {
+                                                CorpusKitError::EmbeddingFailed(format!("{:?}", e))
+                                            })?;
+                                        // Binary engram row (vector_index=0) — always written.
+                                        rows.push(VectorPayloadInput {
+                                            item_id: chunk.id.to_string(),
+                                            vector_index: 0,
+                                            payload: VectorPayload::from_engram(&engram),
+                                            model_id: provider.model_id().to_string(),
+                                            model_version: provider.model_version().to_string(),
+                                            filed_at_unix_secs: filed_at_secs,
+                                        });
+                                        // Float lane (Lane D): vector_index=1 (kind=float32),
+                                        // present only when the provider's float lane is live
+                                        // and the chunk resolved (`floats` non-empty).
+                                        if !floats.is_empty() {
+                                            rows.push(VectorPayloadInput {
+                                                item_id: chunk.id.to_string(),
+                                                vector_index: 1,
+                                                payload: VectorPayload::from_f32(&floats),
+                                                model_id: provider.model_id().to_string(),
+                                                model_version: provider.model_version().to_string(),
+                                                filed_at_unix_secs: filed_at_secs,
+                                            });
+                                        }
+                                    }
+                                    Ok(rows)
+                                })
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .map(|h| h.join().expect("embed worker thread panicked"))
+                            .collect()
+                    },
+                )?;
+                per_slot_rows.extend(batch_rows);
+            }
+            // One batched write for the whole document (all provider slots
+            // flattened). A single add_payloads call means a single resident-index
+            // rebuild for the document instead of one per slot; under the drain's
+            // deferred-index window the rebuild is deferred to burst end entirely.
+            let all_rows: Vec<VectorPayloadInput> =
+                per_slot_rows.into_iter().flatten().collect();
+            if !all_rows.is_empty() {
+                self.vector_store
+                    .add_payloads(&all_rows)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+            }
+        }
+
+        // Batch boundary: persist the maintained counts + growth anchors once for
+        // this document (not per chunk).
+        self.persist_maintained_counts(filed_at_secs)?;
+        Ok(())
+    }
+
+    /// All chunks EXCLUDING those of removed (recall-suppressed) sources. Every
+    /// chunk-replay path — reindex, the first-ingest basis train — reads this
+    /// instead of `bundle_store.all_chunks` so a source cleared
+    /// by `remove` cannot resurface (the chunks table is append-only, so removed
+    /// chunks remain stored for audit but are filtered out here). Re-ingesting a
+    /// source clears its removed-row, returning it to the active set. Mirrors
+    /// Swift's `Corpus.activeChunks`.
+    fn active_chunks(&self) -> CorpusKitResult<Vec<Chunk>> {
+        let removed = self.removed_source_store.removed_ids()?;
+        let all = self.bundle_store.all_chunks(None)?;
+        if removed.is_empty() {
+            return Ok(all);
+        }
+        Ok(all
+            .into_iter()
+            .filter(|c| !removed.contains(&c.source_id))
+            .collect())
+    }
+
+    // MARK: - Maintained counts (incremental-counts change set, P3)
+
+    /// Fold the written chunks into every trainable slot's maintained-counts
+    /// accumulator — the per-chunk "increment as we go" write path
+    /// (`add_to_counts`). Cheap (O(chunk·vocab)); non-trainable slots are skipped.
+    /// Does NOT persist: persistence batches at the caller's boundary
+    /// (`persist_maintained_counts`), because re-serializing the whole counts blob
+    /// per chunk would be O(N·vocab) over an import. Mirrors Swift's
+    /// `foldChunksIntoCounts`.
+    fn fold_chunks_into_counts(&self, chunks: &[Chunk]) -> CorpusKitResult<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        for slot in &self.slots {
+            let mut guard = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("counts accumulator lock poisoned".into())
+            })?;
+            if let Some(state) = guard.as_mut() {
+                for chunk in chunks {
+                    state.accumulator.add_to_counts(&chunk.text);
+                }
+                state.document_count += chunks.len();
+            }
+        }
+        Ok(())
+    }
+
+    /// The maximum maintained vocabulary size across all trainable slots — the
+    /// cheap anchor the autonomic governor's vocab-growth retrain trigger reads
+    /// (P3, item 5). Returns 0 when no trainable slot is present, so the trigger
+    /// never fires for a non-trainable corpus. Reads the in-memory accumulators
+    /// (current as of the last folded chunk). Mirrors Swift's
+    /// `Corpus.maintainedVocabAnchor`.
+    pub fn maintained_vocab_anchor(&self) -> CorpusKitResult<usize> {
+        let mut max_vocab = 0usize;
+        for slot in &self.slots {
+            let guard = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("counts accumulator lock poisoned".into())
+            })?;
+            if let Some(state) = guard.as_ref() {
+                max_vocab = max_vocab.max(state.accumulator.counts_vocabulary_size());
+            }
+        }
+        Ok(max_vocab)
+    }
+
+    /// Persist every trainable slot's maintained counts + growth anchors to the
+    /// counts table. Called at BATCH boundaries (end of ingest / ingest_batch /
+    /// reindex), never per chunk. Keyed by the slot's serving (model_id,
+    /// model_version) — the accumulator shares that key. `now_secs` is the
+    /// caller's instant (determinism). Mirrors Swift's `persistMaintainedCounts`.
+    fn persist_maintained_counts(&self, now_secs: i64) -> CorpusKitResult<()> {
+        for slot in &self.slots {
+            let guard = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("counts accumulator lock poisoned".into())
+            })?;
+            let Some(state) = guard.as_ref() else { continue };
+            let model_version = Self::slot_model_version(slot)?;
+            self.counts_store.upsert(&PersistedCounts {
+                model_id: slot.model_id.clone(),
+                model_version,
+                counts: state.accumulator.serialize_counts(),
+                document_count: state.document_count,
+                vocab_size: state.accumulator.counts_vocabulary_size(),
+                updated_at_secs: now_secs,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Batch ingest for the drain worker pool: ingest many sources with the
+    /// embedding COMPUTE parallelized across documents (the CPU-bound cost) while
+    /// the chunk/BM25/bundle/vector WRITES stay serial (single-writer). Output is
+    /// identical to calling `ingest` once per item — same chunks, same vectors,
+    /// same content-addressed idempotency. This is the cross-document parallelism
+    /// the per-corpus ingest drain drives (the 1.0 separate-pump fix; the global
+    /// cross-estate cap is the 1.1 central drain master,
+    /// DECISION_CENTRAL_DRAIN_MASTER_2026-06-23). Rust mirror of Swift
+    /// `Corpus.ingestBatch`.
+    ///
+    /// First-ingest training cannot run concurrently (it mutates a slot's basis),
+    /// so when a trainable slot still lacks a persisted basis the batch trains it
+    /// ONCE on the full just-chunked corpus (Phase 1b) before the parallel embed —
+    /// not item-by-item, which would train on a single document and yield a
+    /// degenerate basis. Every subsequent batch (basis frozen) skips the bootstrap.
+    ///
+    /// Each item is `(text, source_id, now_millis)`.
+    pub fn ingest_batch(&self, items: &[(String, String, i64)]) -> CorpusKitResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 1 (serial): chunk + bundle + BM25 + source map per item. Two
+        // sequential transaction windows so a bulk batch commits PER CHUNK
+        // instead of autocommitting per item/chunk. Live driving a ~49.5k-drawer
+        // drain showed the worker thread pinned in sqlite3_step →
+        // PagerCommitPhaseOne + WalCheckpoint (per-statement commits +
+        // WAL-checkpoint storms), idling the cores regardless of embed
+        // parallelism.
+        //
+        // The window is CHUNKED, not one transaction over the whole batch: the
+        // corpus shares the estate's PRIMARY SQLite connection (provision passes
+        // corpus_storage = None), and SQLite is single-writer at the file level,
+        // so a `BEGIN IMMEDIATE` held across thousands of rows would starve
+        // concurrent LocusKit captures / the governor (busy_timeout → BUSY).
+        // Committing every COMMIT_CHUNK_ITEMS bounds the held write lock to a few
+        // milliseconds while still amortising the fsync/checkpoint ~chunk-fold.
+        //
+        // Window 1 brackets the storage-connection writes (bundle insert + source
+        // reactivation + maintained-counts fold); window 2 brackets the BM25
+        // sidecar's PRIVATE connection. They run sequentially — two held write
+        // locks on the two connections (same file) on one thread would deadlock.
+        let mut per_item_chunks: Vec<Vec<Chunk>> = Vec::with_capacity(items.len());
+        // BM25 index work deferred to window 2: (chunk_id, tokens, now_secs_str).
+        let mut index_jobs: Vec<(String, Vec<String>, String)> = Vec::new();
+
+        // Window 1 — storage connection, committed per item-chunk.
+        let row_store = self.storage.row_store();
+        for item_chunk in items.chunks(COMMIT_CHUNK_ITEMS) {
+            row_store
+                .begin_transaction()
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+            let res = (|| -> CorpusKitResult<()> {
+                for (text, source_id, now_millis) in item_chunk {
+                    let chunks = chunk_with_default_hlc(
+                        text,
+                        source_id,
+                        ChunkerConfiguration::default(),
+                        *now_millis,
+                    );
+                    if !chunks.is_empty() {
+                        // (Re-)ingesting reactivates the source (clears any removed-row).
+                        self.removed_source_store.clear_removed(source_id)?;
+                        // Idempotent insert returns only newly-inserted chunks; fold
+                        // counts over those (a re-ingested duplicate must not inflate them).
+                        let inserted_chunks = self.bundle_store.insert(&chunks)?;
+                        // Defer the durable BM25 writes to window 2 (separate
+                        // connection): collect each chunk's tokens now while we hold
+                        // its text.
+                        let now_str = format!("{}", now_millis / 1000);
+                        for chunk in &chunks {
+                            let tokens = default_keyword_tokens(&chunk.text);
+                            index_jobs.push((chunk.id.to_string(), tokens, now_str.clone()));
+                        }
+                        if let Ok(mut csm) = self.chunk_source_map.lock() {
+                            for chunk in &chunks {
+                                csm.insert(chunk.id, source_id.clone());
+                            }
+                        }
+                        // Maintained-counts write path (P3): fold this item's NEWLY-inserted
+                        // chunks into each trainable slot's accumulator. Persisted ONCE at
+                        // the end of the batch (the batch boundary) — never per chunk.
+                        self.fold_chunks_into_counts(&inserted_chunks)?;
+                    }
+                    per_item_chunks.push(chunks);
+                }
+                Ok(())
+            })();
+            match res {
+                Ok(()) => row_store
+                    .commit_transaction()
+                    .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?,
+                Err(e) => {
+                    let _ = row_store.rollback_transaction();
+                    return Err(e);
+                }
+            }
+        }
+
+        // Window 2 — BM25 sidecar (private connection), committed per chunk.
+        // Runs after window 1 has committed and released the storage write lock.
+        for job_chunk in index_jobs.chunks(COMMIT_CHUNK_ITEMS) {
+            self.inverted_index
+                .begin_batch()
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+            let res = (|| -> Result<(), rusqlite::Error> {
+                for (chunk_id, tokens, now_str) in job_chunk {
+                    self.inverted_index.index(chunk_id, tokens, now_str)?;
+                }
+                Ok(())
+            })();
+            match res {
+                Ok(()) => self
+                    .inverted_index
+                    .commit_batch()
+                    .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?,
+                Err(e) => {
+                    let _ = self.inverted_index.rollback_batch();
+                    return Err(CorpusKitError::StoreUnavailable(e.to_string()));
+                }
+            }
+        }
+
+        // Phase 1b — batch-aware first-basis bootstrap (mirror Swift). When a
+        // trainable slot (RI/PPMI/LSA/NMF) still has no persisted basis, train it
+        // ONCE on the FULL corpus now in the bundle store — every chunk just
+        // inserted, not the first item alone. The prior per-item serial fallback
+        // trained on item 1's chunks (often a single document) → a degenerate
+        // basis (e.g. a rank-1 LSA SVD that folds in to zero). Training is serial
+        // (it mutates the slot handle) and runs BEFORE the parallel embed below,
+        // which then folds every chunk onto the trained basis. A subsequent
+        // full-corpus reindex still retrains on the complete corpus once a bulk
+        // import has drained — this only fixes first-batch quality.
+        let needs_bootstrap = self.slots.iter().try_fold(false, |acc, slot| {
+            if acc {
+                return Ok::<bool, CorpusKitError>(true);
+            }
+            if slot.fresh_basis_blob.is_some() {
+                let has_basis = self
+                    .basis_store
+                    .load(&slot.model_id, &Self::slot_model_version(slot)?)?
+                    .is_some();
+                Ok(!has_basis)
+            } else {
+                Ok(false)
+            }
+        })?;
+        if needs_bootstrap {
+            // Active chunks only — exclude removed sources from the first-basis train.
+            let all_chunks = self.active_chunks()?;
+            if !all_chunks.is_empty() {
+                let now_secs = items[0].2 / 1000;
+                for slot_index in 0..self.slots.len() {
+                    if self.slots[slot_index].fresh_basis_blob.is_none() {
+                        continue;
+                    }
+                    let already = self
+                        .basis_store
+                        .load(
+                            &self.slots[slot_index].model_id,
+                            &Self::slot_model_version(&self.slots[slot_index])?,
+                        )?
+                        .is_some();
+                    if !already {
+                        // Trains on the full chunk set and installs the trained
+                        // provider into the slot handle, so the embed phase folds in.
+                        self.train_and_persist_basis(slot_index, &all_chunks, now_secs)?;
                     }
                 }
             }
         }
+
+        // Lock every slot handle ONCE up front and collect the provider refs.
+        // Locking inside each item-thread would serialize on each slot's handle
+        // Mutex (the documented trap); locking once and sharing the Send + Sync
+        // `&dyn EmbeddingProvider` lets the per-item threads run truly parallel.
+        let guards: Vec<_> = self
+            .slots
+            .iter()
+            .map(|s| {
+                s.handle.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable("provider lock poisoned".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let providers: Vec<&dyn EmbeddingProvider> =
+            guards.iter().map(|g| g.provider()).collect();
+        let providers_ref = &providers;
+
+        // Phase 2 (parallel across items): fan the embeds over `cap` worker
+        // threads, each taking ONE CONTIGUOUS SLICE of ~len/cap items.
+        //
+        // The earlier model spawned one short-lived scoped thread PER ITEM in
+        // cap-sized barriered batches; profiling a bulk drain showed ~⅓ of the
+        // phase spent in thread spawn/join and only ~2.8 effective cores of 18 —
+        // each thread did a single cheap item's embed and joined before the batch
+        // siblings overlapped. Here `cap` threads are spawned ONCE for the whole
+        // batch and each embeds its slice serially, so the spawn cost is paid
+        // `cap` times total and every worker runs continuously. Slices are
+        // contiguous and joined in spawn order, so the flattened rows are
+        // byte-identical to the per-item serial path (determinism preserved).
+        let cap = self.embed_concurrency_cap();
+        let n = per_item_chunks.len();
+        // Items per worker: ceil(n / cap) → at most `cap` contiguous slices.
+        let slice_len = ((n + cap - 1) / cap).max(1);
+        let per_item_rows: Vec<Vec<VectorPayloadInput>> = std::thread::scope(
+            |scope| -> Result<Vec<Vec<VectorPayloadInput>>, CorpusKitError> {
+                let handles: Vec<_> = per_item_chunks
+                    .chunks(slice_len)
+                    .enumerate()
+                    .map(|(s, slice)| {
+                        let base = s * slice_len;
+                        scope.spawn(
+                            move || -> Result<Vec<Vec<VectorPayloadInput>>, CorpusKitError> {
+                                let mut slice_rows: Vec<Vec<VectorPayloadInput>> =
+                                    Vec::with_capacity(slice.len());
+                                for (local, chunks) in slice.iter().enumerate() {
+                                    let filed_at_secs = items[base + local].2 / 1000;
+                                    let mut rows: Vec<VectorPayloadInput> = Vec::with_capacity(
+                                        chunks.len() * providers_ref.len() * 2,
+                                    );
+                                    for provider in providers_ref.iter() {
+                                        for chunk in chunks {
+                                            // Single inference pass: embed_pair computes the
+                                            // provider's pooled vector ONCE and returns both
+                                            // the binary engram and the dense float vector.
+                                            let (engram, floats) = provider
+                                                .embed_pair(&chunk.text)
+                                                .map_err(|e| {
+                                                    CorpusKitError::EmbeddingFailed(format!(
+                                                        "{:?}", e
+                                                    ))
+                                                })?;
+                                            rows.push(VectorPayloadInput {
+                                                item_id: chunk.id.to_string(),
+                                                vector_index: 0,
+                                                payload: VectorPayload::from_engram(&engram),
+                                                model_id: provider.model_id().to_string(),
+                                                model_version: provider.model_version().to_string(),
+                                                filed_at_unix_secs: filed_at_secs,
+                                            });
+                                            if !floats.is_empty() {
+                                                rows.push(VectorPayloadInput {
+                                                    item_id: chunk.id.to_string(),
+                                                    vector_index: 1,
+                                                    payload: VectorPayload::from_f32(&floats),
+                                                    model_id: provider.model_id().to_string(),
+                                                    model_version: provider
+                                                        .model_version()
+                                                        .to_string(),
+                                                    filed_at_unix_secs: filed_at_secs,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    slice_rows.push(rows);
+                                }
+                                Ok(slice_rows)
+                            },
+                        )
+                    })
+                    .collect();
+                // Join in spawn order → slices reassemble in item order.
+                let mut all: Vec<Vec<VectorPayloadInput>> = Vec::with_capacity(n);
+                for h in handles {
+                    all.extend(h.join().expect("embed worker thread panicked")?);
+                }
+                Ok(all)
+            },
+        )?;
+        drop(guards);
+
+        // Phase 3 (serial): ONE batched write for the whole drain batch (every
+        // item's rows flattened, preserving item-then-chunk order). A single
+        // add_payloads call collapses the per-item resident-index rebuilds into
+        // one; under the drain's deferred-index window even that one rebuild is
+        // deferred to burst end (publish_resident_index), so a bulk import pays
+        // O(N) total index work instead of O(N²).
+        let all_rows: Vec<VectorPayloadInput> = per_item_rows.into_iter().flatten().collect();
+
+        // Phase 3 write window — storage connection: the batch's vector upserts
+        // (~providers × lanes × chunks rows), committed per row-chunk instead of
+        // every row autocommitting. Chunked for the same shared-connection reason
+        // as Phase 1 (bound the held write lock). The resident vector-index
+        // rebuild stays deferred to publish_vector_index() at burst end, so each
+        // window pays only the row writes; add_payloads in deferred mode appends
+        // to the resident array across calls and is safe to call per chunk.
+        let write_store = self.storage.row_store();
+        for row_chunk in all_rows.chunks(COMMIT_CHUNK_ROWS) {
+            write_store
+                .begin_transaction()
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+            let res = (|| -> CorpusKitResult<()> {
+                self.vector_store
+                    .add_payloads(row_chunk)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))
+            })();
+            match res {
+                Ok(()) => write_store
+                    .commit_transaction()
+                    .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?,
+                Err(e) => {
+                    let _ = write_store.rollback_transaction();
+                    return Err(e);
+                }
+            }
+        }
+
+        // Batch boundary: persist the maintained counts + growth anchors once for
+        // the whole drained batch (a single counts-blob write; autocommits).
+        // `items[0].2` (first item's now) matches the first-basis bootstrap's
+        // training instant above.
+        self.persist_maintained_counts(items[0].2 / 1000)?;
         Ok(())
+    }
+
+    /// Enter deferred-index mode on the vector store for a drain burst. The
+    /// ingest drain (corpus_ingest_queue) calls this before ingesting a drained
+    /// batch so the burst's resident-index rebuilds collapse into a single rebuild
+    /// at `publish_vector_index()` — O(N) bulk import instead of O(N²). `vector_store`
+    /// is module-private, so the ingest-queue module reaches it through this seam.
+    /// Mirrors the Swift `Corpus.beginDeferredVectorIndex`.
+    pub(crate) fn begin_deferred_vector_index(&self) -> CorpusKitResult<()> {
+        self.vector_store
+            .begin_deferred_index()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))
+    }
+
+    /// Publish the deferred resident vector index (one rebuild) at the end of a
+    /// drain burst / drain barrier. No-op when nothing was deferred. Mirrors the
+    /// Swift `Corpus.publishVectorIndex`.
+    pub(crate) fn publish_vector_index(&self) -> CorpusKitResult<()> {
+        self.vector_store
+            .publish_resident_index()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))
     }
 
     /// Retrain the embedding basis on the full corpus and re-embed every chunk.
@@ -904,26 +1629,29 @@ impl Corpus {
     ///   4. re-embeds every chunk (binary lane v0 + float lane v1), REPLACING
     ///      stale vectors in place (delete-all then re-add — no duplicate rows).
     ///
-    /// When the provider is NOT trainable, or the corpus was reopened from a
-    /// persisted basis (Plain handle), no basis is persisted; the chunks are
-    /// simply (re)embedded so the call is a well-defined vector refresh.
+    /// When the provider is NOT trainable, no basis is persisted; the chunks are
+    /// simply (re)embedded so the call is a well-defined vector refresh. A
+    /// trainable slot ALWAYS retrains from its empty-basis factory here, including
+    /// after a restart (the frozen-after-restart fix: the factory is retained on
+    /// reopen, so a restarted corpus is no longer stuck serving its loaded basis).
     ///
     /// Deterministic: `now_millis` is the only clock source — never reads the
     /// system clock. Training is a pure function of the corpus texts and the
     /// provider's fixed seeds (the seam contract).
     ///
-    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger
-    /// is the first-ingest auto-train in `ingest`. A growth-threshold
-    /// auto-retrain (retraining once the live chunk count grows materially past
-    /// `trained_chunk_count`) is a DOCUMENTED FOLLOW-UP KNOB, NOT wired here:
-    /// LSA/NMF cannot incrementally refactor a frozen basis, so an automatic
-    /// mid-stream retrain policy needs its own decision. The staleness anchor
-    /// (`trained_chunk_count`) is persisted so future policy can compute the delta.
+    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger is
+    /// the first-ingest auto-train in `ingest`. Deciding WHEN to call reindex on
+    /// growth (the vocab-growth trigger that reads the maintained counts anchor)
+    /// is the caller's policy (the autonomic governor) — a documented follow-up
+    /// knob, not wired in this method. The maintained counts table persists the
+    /// vocab/doc growth anchors so that policy can compute the delta cheaply.
     ///
     /// `now_millis`: Unix epoch in milliseconds for the basis `trained_at` stamp
     /// (converted to seconds) and the re-embedded vectors' filing timestamps.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
-        let chunks = self.bundle_store.all_chunks()?;
+        // Active chunks only: a source cleared by `remove` must NOT be re-embedded
+        // back into recall by a (possibly auto-triggered) reindex.
+        let chunks = self.active_chunks()?;
         let filed_at_secs = now_millis / 1000;
 
         // Fan out: refresh every held provider slot. For N=1 this loops once over
@@ -940,11 +1668,15 @@ impl Corpus {
 
             // Re-embed every chunk under this slot's (now possibly retrained)
             // provider, replacing stale vectors. Done whether or not a retrain
-            // occurred: for a non-trainable provider — or a reopened-from-blob
-            // slot with no fresh-basis blob — reindex is a vector refresh under
-            // the current basis.
+            // occurred: for a non-trainable slot (no factory blob) reindex is a
+            // pure vector refresh under the current basis.
             self.reembed_chunks(slot_index, &chunks, filed_at_secs)?;
         }
+
+        // Persist the maintained counts + growth anchors after the refresh. The
+        // accumulators were kept current by the ingest fold path; persisting here
+        // re-anchors the growth trigger to the just-reindexed state.
+        self.persist_maintained_counts(filed_at_secs)?;
         Ok(())
     }
 
@@ -972,17 +1704,24 @@ impl Corpus {
         };
         // Reconstruct a fresh trainable provider from the empty-basis blob, train
         // it from scratch, then install it as this slot's live serving provider.
+        // Reconstruct via the maintained-counts ACCUMULATOR, not the serving
+        // handle: after a reopen the serving handle is `Plain` (Rust cannot
+        // downcast a `Box<dyn EmbeddingProvider>` back to trainable, unlike
+        // Swift's `as?`), so harvesting trainability from it would fail. The
+        // accumulator is always trainable for a slot whose `fresh_basis_blob` is
+        // Some, so it is the reliable trainable witness — and using it here is the
+        // frozen-after-restart fix's Rust leg.
         let mut trained = {
             let guard = self.slots[slot_index]
-                .handle
+                .counts
                 .lock()
-                .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
-            let trainable = guard.as_trainable().ok_or_else(|| {
+                .map_err(|_| CorpusKitError::StoreUnavailable("counts accumulator lock poisoned".into()))?;
+            let state = guard.as_ref().ok_or_else(|| {
                 CorpusKitError::NotTrainable(
-                    "provider is not trainable — basis seam invariant violated".into(),
+                    "slot has no counts accumulator — basis seam invariant violated".into(),
                 )
             })?;
-            trainable.reconstruct_trainable_basis(fresh_blob)?
+            state.accumulator.reconstruct_trainable_basis(fresh_blob)?
         };
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
         trained.train_on_corpus(&texts);
@@ -1023,40 +1762,45 @@ impl Corpus {
             .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
         let provider = guard.provider();
         let model_id = provider.model_id().to_string();
+        let mut batch: Vec<VectorPayloadInput> = Vec::with_capacity(chunks.len() * 2);
         for chunk in chunks {
             // Delete-all before re-adding so a chunk that already had vectors
             // under a previous basis ends up with exactly the new vectors, not a
             // mix. delete_all_vectors clears both lanes (v0 binary + v1 float).
+            // The re-adds are batched below.
             self.vector_store
                 .delete_all_vectors(&chunk.id.to_string(), &model_id)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-            let engram = provider
-                .embed(&chunk.text)
+            // Single inference pass (see ingest): embed_pair returns the engram
+            // and float vector from ONE computation; compute-then-project
+            // providers override it.
+            let (engram, floats) = provider
+                .embed_pair(&chunk.text)
                 .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?;
-            self.vector_store
-                .add_vector(
-                    &chunk.id.to_string(),
-                    &engram,
-                    provider.model_id(),
-                    provider.model_version(),
-                    filed_at_secs,
-                )
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-            if let Ok(floats) = provider.embed_float(&chunk.text) {
-                if !floats.is_empty() {
-                    self.vector_store
-                        .add_payload(
-                            &chunk.id.to_string(),
-                            1,
-                            &VectorPayload::from_f32(&floats),
-                            provider.model_id(),
-                            provider.model_version(),
-                            filed_at_secs,
-                        )
-                        .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-                }
+            batch.push(VectorPayloadInput {
+                item_id: chunk.id.to_string(),
+                vector_index: 0,
+                payload: VectorPayload::from_engram(&engram),
+                model_id: model_id.clone(),
+                model_version: provider.model_version().to_string(),
+                filed_at_unix_secs: filed_at_secs,
+            });
+            if !floats.is_empty() {
+                batch.push(VectorPayloadInput {
+                    item_id: chunk.id.to_string(),
+                    vector_index: 1,
+                    payload: VectorPayload::from_f32(&floats),
+                    model_id: model_id.clone(),
+                    model_version: provider.model_version().to_string(),
+                    filed_at_unix_secs: filed_at_secs,
+                });
             }
         }
+        // Single batched write: O(1) sidecar + index rebuild for the whole
+        // re-embed, after all per-chunk deletes have cleared the old rows.
+        self.vector_store
+            .add_payloads(&batch)
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
         Ok(())
     }
 
@@ -1108,18 +1852,13 @@ impl Corpus {
                 .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?
         };
 
-        let bm25 = self
-            .bm25
-            .lock()
-            .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
-
         hybrid_recall(
             &probe,
             query,
             &slot.model_id,
             limit,
             &self.vector_store,
-            &bm25,
+            &self.inverted_index,
             &self.bundle_store,
             HybridRecallConfiguration::default(),
         )
@@ -1157,6 +1896,17 @@ impl Corpus {
         // lifetime) so the signature stays `-> &str` without locking the handle
         // Mutex.
         &self.default_slot().model_id
+    }
+
+    /// The estate's single dense vector store (binary Engram + float32 lanes),
+    /// owned by this Corpus. The composition layer (GeniusLocusKit) borrows THIS
+    /// instance for its scored-recall vector lane instead of constructing a second
+    /// `VectorStore` over the same `vectors` table — one store, one resident array,
+    /// one on-disk sidecar. CorpusKit owns the dense vector lane; the orchestrator
+    /// reaches it through this accessor rather than reaching around the kit.
+    /// Mirrors Swift `Corpus.sharedVectorStore`.
+    pub fn shared_vector_store(&self) -> Arc<VectorStore> {
+        Arc::clone(&self.vector_store)
     }
 
     /// Embed the query text into the pooled dense float vector (Lane D) — the
@@ -1639,36 +2389,46 @@ impl Corpus {
             return vec![];
         }
 
-        // Chunk-level BM25 hits: (chunk_uuid, bm25_score). Over-fetch by 4×
-        // before source-level aggregation so after deduplication we still have
-        // at least `limit` distinct sources. Mirrors Swift's 4× over-fetch.
-        // Pre-tokenise query before releasing the lock so top_k receives
-        // compatible tokens from the index's own tokenizer vocabulary.
-        let chunk_hits = {
-            let bm25 = match self.bm25.lock() {
-                Ok(guard) => guard,
-                Err(_) => return vec![],
-            };
-            let tokens = bm25.tokenize_query(query);
-            bm25.top_k(limit.saturating_mul(4), &tokens)
-        };
+        // Tokenise using the same vocabulary as the indexed chunks.
+        // `default_keyword_tokens` is the canonical tokenizer shared by
+        // InvertedIndexStore.index calls at ingest time.
+        let tokens = default_keyword_tokens(query);
+        if tokens.is_empty() {
+            return vec![];
+        }
 
-        if chunk_hits.is_empty() {
+        // Chunk-level BM25 hits via the durable InvertedIndexStore. Over-fetch
+        // by 4× before source-level aggregation (same as Swift).
+        // Returns SparseHit (item_id: String, impact: f32) sorted by score DESC.
+        let sparse_hits = self.inverted_index.top_k(
+            &tokens,
+            limit.saturating_mul(4),
+            Default::default(),  // BM25Parameters::default()
+            Algorithm::BlockMaxWand,
+        );
+
+        if sparse_hits.is_empty() {
             return vec![];
         }
 
         // Aggregate chunk-level scores to source level using the in-memory
         // reverse map. Take max chunk score per source (same as Swift).
+        // chunk_source_map is keyed by uuid::Uuid; SparseHit.item_id is a
+        // UUID string — parse it before the lookup.
         let csm = match self.chunk_source_map.lock() {
             Ok(guard) => guard,
             Err(_) => return vec![],
         };
         let mut source_scores: std::collections::HashMap<String, f32> =
             std::collections::HashMap::new();
-        for (chunk_uuid, score) in &chunk_hits {
-            if let Some(source_id) = csm.get(chunk_uuid) {
+        for hit in &sparse_hits {
+            let uuid = match uuid::Uuid::parse_str(&hit.item_id) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            if let Some(source_id) = csm.get(&uuid) {
                 let entry = source_scores.entry(source_id.clone()).or_insert(0.0_f32);
-                *entry = entry.max(*score as f32);
+                *entry = entry.max(hit.impact);
             }
         }
         drop(csm);
@@ -1697,15 +2457,10 @@ impl Corpus {
     /// PersistenceKit schema invariant. The verbatim content survives for audit;
     /// the recall capability is destroyed. Mirrors Swift `Corpus.destroyRecallIndex()`.
     pub fn destroy_recall_index(&self) -> CorpusKitResult<()> {
-        // Step 1: Collect all chunk IDs and clear BM25 index.
-        let all_chunks = self.bundle_store.all_chunks()?;
-        let mut bm25 = self
-            .bm25
-            .lock()
-            .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
-        for chunk in &all_chunks {
-            bm25.remove(chunk.id);
-        }
+        // Step 1: Clear the durable InvertedIndexStore in one call — no per-chunk
+        // iteration needed. Mirrors Swift `InvertedIndexStore.deleteAll()`.
+        self.inverted_index.clear_all()
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
 
         // Step 2: Clear the chunk_source_map.
         if let Ok(mut csm) = self.chunk_source_map.lock() {
@@ -1723,6 +2478,8 @@ impl Corpus {
         // any stored vectors. The basis table is not append-only, so deletion is
         // permitted. Mirrors Swift `Corpus.destroyRecallIndex` step 3.
         self.basis_store.delete_all()?;
+        self.counts_store.delete_all()?;
+        self.removed_source_store.delete_all()?;
 
         Ok(())
     }
@@ -1730,21 +2487,20 @@ impl Corpus {
     /// Remove a source document from the recall index.
     ///
     /// Removes the source's chunks from BM25 and deletes their vectors
-    /// from VectorStore. BundleStore is append-only so content rows are
-    /// preserved; the source will no longer appear in recall results.
+    /// from VectorStore. Content rows are preserved in the chunks table;
+    /// the source will no longer appear in recall results. To erase
+    /// verbatim chunk content, use `expunge(source_id)` instead.
     pub fn remove(&self, source_id: &str) -> CorpusKitResult<()> {
-        let chunks = self.bundle_store.chunks_for_source(source_id)?;
+        let chunks = self.bundle_store.chunks_for_source(source_id, None)?;
         // Vector deletion fans out across every held provider's model_id so no
         // slot leaves orphan rows for a removed source. For N=1 this inner loop
         // runs once. model_ids are gathered once up front (stable for the corpus
         // lifetime) so the per-chunk loop does not re-borrow `slots`.
         let model_ids: Vec<&str> = self.slots.iter().map(|s| s.model_id.as_str()).collect();
-        let mut bm25 = self
-            .bm25
-            .lock()
-            .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
         for chunk in &chunks {
-            bm25.remove(chunk.id);
+            // Remove from the durable InvertedIndexStore.
+            self.inverted_index.remove(&chunk.id.to_string())
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
             // Delete ALL vector_index rows for this chunk under EVERY held
             // model_id, not just the binary engram at vector_index=0: the float
             // lane (Lane D) stores a second row at vector_index=1 under the same
@@ -1764,16 +2520,50 @@ impl Corpus {
                 csm.remove(&chunk.id);
             }
         }
+        // Record the source as removed so a subsequent reindex / BM25-rebuild /
+        // first-ingest train (incl. the auto-triggered governor reindex) does NOT
+        // re-embed it back into recall from the chunks table.
+        // `removed_at` is audit-only metadata — mirrors BundleStore's `created_at`
+        // SystemTime stamp; not a deterministic computation input.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.removed_source_store.mark_removed(source_id, now_secs)?;
         Ok(())
     }
 
-    /// Count the total chunks in the bundle store across all sources.
+    // ── Hard-delete erasure (secfix/ws2-coredelete) ──
+
+    /// Zero all verbatim chunk text for `source_id` and remove it from recall.
     ///
-    /// Because BundleStore is append-only, this count does not decrease
-    /// when `remove` is called — removed chunks are still stored but no
-    /// longer appear in recall results.
+    /// Hard-delete variant of `remove()`. `remove()` suppresses recall but
+    /// leaves chunk text in the chunks table. `expunge()` additionally zeroes
+    /// the `text` column for every chunk of this source via
+    /// `BundleStore::scrub_text()`, ensuring content is unrecoverable.
+    ///
+    /// Call sequence: scrub text first so content is gone even if the
+    /// subsequent remove steps fail. Mirrors Swift `Corpus.expunge(sourceID:)`.
+    /// (secfix/ws2-coredelete: hard-delete destruction contract)
+    pub fn expunge(&self, source_id: &str) -> CorpusKitResult<()> {
+        // Step 1: zero verbatim text in the chunks table.
+        self.bundle_store.scrub_text(source_id)?;
+        // Step 2: remove from recall — invertedIndex, vectorStore, removedSourceStore.
+        self.remove(source_id)
+    }
+
+    /// Count the chunks in the bundle store across all ACTIVE sources.
+    ///
+    /// A removed source's chunks remain stored; they are excluded here so the
+    /// count reflects live recall content. Fast path (a plain row count) when
+    /// nothing is removed.
     pub fn count(&self) -> CorpusKitResult<usize> {
-        self.bundle_store.count()
+        let removed = self.removed_source_store.removed_ids()?;
+        if removed.is_empty() {
+            return self.bundle_store.count(None);
+        }
+        let all = self.bundle_store.all_chunks(None)?;
+        Ok(all.iter().filter(|c| !removed.contains(&c.source_id)).count())
     }
 
     /// Return the set of drawer IDs that have at least one chunk in the store —
@@ -1781,47 +2571,21 @@ impl Corpus {
     /// to identify already-indexed drawers and skip them in the backfill.
     /// Mirrors Swift `CorpusKit.indexedSourceIDs()`.
     pub fn indexed_source_ids(&self) -> CorpusKitResult<std::collections::HashSet<String>> {
-        self.bundle_store.all_source_ids()
+        self.bundle_store.all_source_ids(None)
     }
-}
 
-// MARK: - BM25 tokenizer
+    // -- Merkle attestation (NT-C1) --
 
-/// FNV-1a keyword tokenizer for the BM25 index. Uses the default
-/// `keyword_tokens` function (lowercase + Unicode word split), matching
-/// the Swift CorpusDefaultTokenizer's keyword token behavior.
-struct CorpusBm25Tokenizer;
+    /// Per-corpus Merkle root for a given source.
+    /// Returns `MerkleRoot::empty()` when no metadata row exists.
+    pub fn corpus_merkle_root(&self, source_id: &str) -> CorpusKitResult<MerkleRoot> {
+        self.bundle_store.corpus_merkle_root(source_id)
+    }
 
-impl Tokenizer for CorpusBm25Tokenizer {
-    fn vocab_id(&self) -> &str {
-        "corpus-bm25-v1"
-    }
-    fn max_tokens(&self) -> usize {
-        128
-    }
-    fn pad_token_id(&self) -> i32 {
-        0
-    }
-    fn unknown_token_id(&self) -> i32 {
-        1
-    }
-    fn tokenize(&self, text: &str) -> Vec<i32> {
-        // FNV-1a 32-bit fold into [2, 30520). Only called if a caller
-        // requests raw token ids; BM25Index calls keyword_tokens instead.
-        const VOCAB_RANGE: u32 = 30520;
-        self.keyword_tokens(text)
-            .iter()
-            .take(self.max_tokens())
-            .map(|word| {
-                let h = word
-                    .bytes()
-                    .fold(2_166_136_261u32, |acc, b| (acc ^ u32::from(b)).wrapping_mul(1_677_619));
-                2 + (h % VOCAB_RANGE) as i32
-            })
-            .collect()
-    }
-    fn keyword_tokens(&self, text: &str) -> Vec<String> {
-        default_keyword_tokens(text)
+    /// Estate-level corpus Merkle root — interior hash over all per-corpus roots.
+    /// Returns `MerkleRoot::empty()` when no corpora exist.
+    pub fn global_corpus_merkle_root(&self) -> CorpusKitResult<MerkleRoot> {
+        self.bundle_store.global_corpus_merkle_root()
     }
 }
 
@@ -1911,5 +2675,22 @@ impl EmbeddingProvider for CorpusTextProvider {
         }
         let tokens = self.tokenize(text);
         (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)
+    }
+
+    /// Single-inference override: `embed` and `embed_float` both tokenize and
+    /// run the same inference pass — `embed` projects the pooled vector to the
+    /// 256-bit engram, `embed_float` returns it raw. Running both separately
+    /// pays for two inference passes over identical tokens. This computes the
+    /// pooled vector ONCE and returns both the projected engram and the floats,
+    /// halving inference cost on the capture/reembed path. Output is identical
+    /// to calling `embed` and `embed_float` separately: empty input opts out of
+    /// the float lane (`vec![]`) and yields `Engram::ZERO`, matching both.
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        if text.is_empty() {
+            return Ok((Engram::ZERO, Vec::new()));
+        }
+        let tokens = self.tokenize(text);
+        let pooled = (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+        Ok((float_simhash::project(&pooled, self.projection_seed), pooled))
     }
 }

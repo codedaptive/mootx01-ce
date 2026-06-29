@@ -5,8 +5,8 @@
 //
 // A single audit row. Cookbook § 5.1 (G-Set CRDT). Stored by
 // GSetAuditLog under HLC ordering. Pure data; the audit gate
-// that admits AuditEvents (and the CRDT log that holds them)
-// stay in SubstrateLib.
+// that admits AuditEvents stays in SubstrateLib. GSetAuditLog
+// (the CRDT log itself) lives here in SubstrateTypes.
 
 import Foundation
 

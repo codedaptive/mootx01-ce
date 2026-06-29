@@ -5,9 +5,9 @@
 // primitives are constructible, and that round-trip operations
 // on the public types behave as documented.
 //
-// Mathematical correctness is verified by the conformance tests
-// in Tests/SubstrateLibConformanceTests/, which exercise the
-// kit against the bit-identical fixtures from Phase 2 closure.
+// Deeper verification is in Tests/SubstrateLibConformanceTests/,
+// which gates cookbook §2.8 verification-table constants and
+// cross-port wire-format parity.
 
 import Testing
 @testable import SubstrateLib

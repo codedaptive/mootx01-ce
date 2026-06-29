@@ -17,8 +17,8 @@
 //                          similar_moments_by_summary,
 //                          partial_match, by_latent_factor,
 //                          loading_on_factor
-//   C graph-derived:       keystone, community (v0.37),
-//                          exploratory (v0.37)
+//   C graph-derived:       keystone, community,
+//                          exploratory
 //   D federation-aware:    federated, about_peer
 //   E audit/explanation:   explain
 //
@@ -204,7 +204,7 @@ public enum CognitionKit {
     /// a wrapper over AuditLogFold.projectStateAt.
     public static func recallAsOf(hlc: HLC,
                                   auditLog: GSetAuditLog) -> RecallResult {
-        // The canonical `AuditLogFold.projectStateAt` operates
+        // STUB — pre-v1.1: The canonical `AuditLogFold.projectStateAt` operates
         // per-row (rowId:, nounType:, events:, asOf:). A full
         // recall_as_of pass would iterate all known rowIds,
         // project each, then collect non-tombstoned hits. The
@@ -362,9 +362,9 @@ public enum CognitionKit {
                             primitiveName: "recall_keystone")
     }
 
-    /// 14. recall_community — DEFERRED to v0.37 per cookbook § 19.1.
-    /// Returns rows in the same Louvain community as the probe once
-    /// CommunityDetection phase-2 lands.
+    /// 14. recall_community — returns rows in the same Louvain community
+    /// as the probe. Performs a same-community lookup and scoring pass
+    /// against the provided community-label map.
     public static func recallCommunity(probe: RowId,
                                        communityLabels: [RowId: Int]) -> RecallResult {
         guard let probeLabel = communityLabels[probe] else {
@@ -378,9 +378,9 @@ public enum CognitionKit {
                             primitiveName: "recall_community")
     }
 
-    /// 15. recall_exploratory — DEFERRED to v0.37 per cookbook § 19.1.
-    /// Random-walk-with-restart aggregate that surfaces rows
-    /// reachable via co-activation paths from the seed.
+    /// 15. recall_exploratory — random-walk-with-restart aggregate that
+    /// surfaces rows reachable via co-activation paths from the seed,
+    /// delegating to RandomWalks.walkWithRestart.
     public static func recallExploratory(seed: RowId,
                                          steps: Int,
                                          restartProbability: Float32,
@@ -451,10 +451,9 @@ public enum CognitionKit {
                                        sharedFamily: HyperplaneFamily,
                                        weights: CompositeDistanceWeights,
                                        k: Int) -> RecallResult {
-        // Recompute probe fingerprint under shared family. Production
-        // code reads the probe's pre-computed shared fingerprint
-        // from the row's secondary fingerprint slot; the reference
-        // recomputes inline.
+        // Note: `sharedFamily` is accepted as a parameter but not used here;
+        // the probe is forwarded directly into recallAbout with the original
+        // fingerprint. Production code would apply the shared family before recall.
         let result = recallAbout(probe: probe,
                                  weights: weights,
                                  k: k,

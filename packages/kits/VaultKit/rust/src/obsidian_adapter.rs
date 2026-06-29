@@ -1,15 +1,16 @@
 //! ObsidianAdapter — Obsidian-flavoured Markdown ⇄ `NoteIR`, and a superset
 //! of Google's Open Knowledge Format (OKF) v0.1 in default mode.
 //!
-//! One `.md` file is one `NoteIR`. The adapter understands the four Obsidian
-//! surface features the bridge round-trips in V1:
+//! One `.md` file is one `NoteIR`. The adapter handles:
 //!
 //! - **YAML frontmatter** (`--- … ---` at the top of the file) → the
 //!   `frontmatter` map. A flat `key: value` reader; nested YAML is not an
 //!   Obsidian frontmatter idiom and is out of scope.
-//! - **Wikilinks** `[[Target]]` / `[[Target|Alias]]` → `links`.
+//! - **Wikilinks** `[[Target]]` / `[[Target|Alias]]` → `links` (pure-Obsidian
+//!   mode); standard Markdown links `[alias](path.md)` → `links` (OKF mode).
 //! - **Tags** `#tag` (inline, not the `# heading` form) → `tags`.
 //! - **Folder path** → `original_path` and `stable_source_key`.
+//! - **index.md / log.md** are emitted in OKF mode and skipped on read.
 //!
 //! ## OKF compatibility (default mode: `pure_obsidian_links = false`)
 //!
@@ -31,18 +32,19 @@
 //!
 //! ## Round-trip contract
 //!
-//! `to_ir(from_ir(x)) == x` for the fields each flavour represents.
+//! Partial round-trip for the fields each flavour represents: core fields
+//! (body, links, tags, stable key) survive. Raw link encoding may change
+//! between OKF and pure-Obsidian mode; `type:` is not re-parsed into `kind`.
 //!
-//! This is a mechanical port of `ObsidianAdapter.swift`. All parsing logic
-//! is reproduced with Rust idioms; the observable contract (round-trip
-//! equality, deterministic sort order, `.skipsHiddenFiles` equivalence) is
-//! identical.
+//! This is a mechanical port of `ObsidianAdapter.swift`. Parsing logic is
+//! reproduced with Rust idioms; deterministic sort order and
+//! `.skipsHiddenFiles` equivalence are preserved.
 
 use crate::error::VaultKitError;
 use crate::note_ir::{Block, NoteIR, OccurredAt, WikiLink};
 use crate::vault_adapter::VaultAdapter;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// The first `VaultAdapter`: Obsidian-flavoured Markdown ⇄ `NoteIR`.
 ///
@@ -97,6 +99,18 @@ impl VaultAdapter for ObsidianAdapter {
     // MARK: - Write: IR → vault
 
     fn from_ir(&self, notes: &[NoteIR], vault_path: &Path) -> Result<(), VaultKitError> {
+        self.from_ir_with_progress(notes, vault_path, None)
+    }
+
+    /// Writes notes to the vault with optional per-item progress reporting.
+    ///
+    /// Fires `progress(processed, total)` every 100 items and at the final item.
+    fn from_ir_with_progress(
+        &self,
+        notes: &[NoteIR],
+        vault_path: &Path,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+    ) -> Result<(), VaultKitError> {
         std::fs::create_dir_all(vault_path)?;
 
         // Build a name → stableSourceKey map for standard-md link resolution.
@@ -111,22 +125,34 @@ impl VaultAdapter for ObsidianAdapter {
         // Track which folders receive notes, for index.md emission.
         let mut folder_notes: HashMap<String, Vec<&NoteIR>> = HashMap::new();
 
+        let total = notes.len();
+        let mut processed = 0usize;
         for note in notes {
             // The note is written at `<stable_source_key>.md`, so the folder
             // tree mirrors the wing/room path that `DrawerMapping` encoded
             // into the key on export. Re-reading recovers the same
             // `stable_source_key` and `original_path`.
             let relative = format!("{}.md", note.stable_source_key);
-            let file_path = vault_path.join(&relative);
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+            // Containment gate — two layers, matching the Swift implementation:
+            // Layer 1 (lexical):  contained_vault_path rejects traversal
+            //   components (.. / absolute / backslash) before touching the disk.
+            // Layer 2 (symlink):  write_contained_file canonicalizes the parent
+            //   after create_dir_all and verifies it stays inside the vault root,
+            //   catching pre-existing symlinks in the vault tree.
+            let file_path = contained_vault_path(vault_path, &relative)?;
             let text = render(note, self.pure_obsidian_links, &key_by_name);
-            std::fs::write(&file_path, text.as_bytes())?;
+            write_contained_file(vault_path, &file_path, text.as_bytes())?;
 
             // Record this note under its folder for index generation.
             let folder = parent_folder(&note.stable_source_key);
             folder_notes.entry(folder).or_default().push(note);
+
+            processed += 1;
+            if let Some(cb) = progress {
+                if processed % 100 == 0 || processed == total {
+                    cb(processed, total);
+                }
+            }
         }
 
         // Emit one index.md per folder that contains notes. Folders in sorted
@@ -144,16 +170,122 @@ impl VaultAdapter for ObsidianAdapter {
                 index_content.push_str(&format!("- [{filename}]({filename}.md)\n"));
             }
 
-            let index_path = if folder.is_empty() {
-                vault_path.join("index.md")
+            // Same containment gate as note writes. The index folder already
+            // exists (created when notes were written above), so
+            // write_contained_file can canonicalize immediately.
+            let index_relative = if folder.is_empty() {
+                "index.md".to_owned()
             } else {
-                vault_path.join(folder).join("index.md")
+                format!("{folder}/index.md")
             };
-            std::fs::write(&index_path, index_content.as_bytes())?;
+            let index_path = contained_vault_path(vault_path, &index_relative)?;
+            write_contained_file(vault_path, &index_path, index_content.as_bytes())?;
         }
 
         Ok(())
     }
+}
+
+// MARK: - Vault containment helpers
+
+/// Resolve a vault-relative output path to an absolute `PathBuf` that remains
+/// inside `vault_path`. Used for both note writes and index-file generation.
+///
+/// **Layer 1 — lexical**: each path component is validated via
+/// `std::path::Component`. `ParentDir` (`..`), `RootDir` (`/`), `Prefix`
+/// (Windows drive letter), `CurDir` (`.`), and embedded backslashes are
+/// rejected before any filesystem access.
+///
+/// This function builds the target path but does NOT create directories or
+/// write files. Call `write_contained_file` to perform the symlink-layer
+/// check (Layer 2) after directory creation.
+///
+/// Mirrors Swift `ObsidianAdapter.containedVaultURL(forRelativePath:under:)`.
+fn contained_vault_path(
+    vault_path: &Path,
+    relative: &str,
+) -> Result<PathBuf, VaultKitError> {
+    // Backslash is a path separator on Windows but valid in POSIX filenames.
+    // Reject it unconditionally so imported Windows metadata cannot sneak a
+    // traversal through a POSIX build.
+    if relative.contains('\\') {
+        return Err(VaultKitError::AdapterError(format!(
+            "vault-relative path must use '/' separators only: '{relative}'"
+        )));
+    }
+    let rel_path = Path::new(relative);
+    if rel_path.is_absolute() {
+        return Err(VaultKitError::AdapterError(format!(
+            "vault-relative path must be relative, not absolute: '{relative}'"
+        )));
+    }
+    let mut clean = PathBuf::new();
+    for component in rel_path.components() {
+        match component {
+            Component::Normal(part) => clean.push(part),
+            // Every other component class is a traversal or absolute-path
+            // marker: CurDir (.), ParentDir (..), RootDir (/), Prefix (C:\).
+            _ => {
+                return Err(VaultKitError::AdapterError(format!(
+                    "vault-relative path contains a forbidden component: '{relative}'"
+                )));
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(VaultKitError::AdapterError(format!(
+            "vault-relative path is empty after normalization: '{relative}'"
+        )));
+    }
+    Ok(vault_path.join(clean))
+}
+
+/// Write `bytes` to `file_path`, verifying after parent-directory creation
+/// that the canonicalized parent remains inside `vault_root`.
+///
+/// This is the **symlink layer** (Layer 2) of the two-layer containment check:
+/// `contained_vault_path` is purely lexical; this function catches pre-existing
+/// symlinks in the vault tree (e.g. `vault/link -> /tmp`) that would pass the
+/// lexical check for `link/note.md` but redirect the write outside the vault.
+///
+/// The file path itself is also checked for a pre-existing symlink so an
+/// attacker cannot redirect an otherwise-safe write by planting a symlink at
+/// the exact output path.
+///
+/// Mirrors Swift `ObsidianAdapter.ensureContainedInVault(_:under:)`.
+fn write_contained_file(
+    vault_root: &Path,
+    file_path: &Path,
+    bytes: &[u8],
+) -> Result<(), VaultKitError> {
+    let canonical_root = vault_root.canonicalize()?;
+    let parent = file_path.parent().ok_or_else(|| {
+        VaultKitError::AdapterError(format!(
+            "vault output path has no parent: '{}'",
+            file_path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let canonical_parent = parent.canonicalize()?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(VaultKitError::AdapterError(format!(
+            "vault output path resolves outside vault root: '{}'",
+            file_path.display()
+        )));
+    }
+    // Reject a pre-planted symlink at the exact output file path — such a
+    // symlink could redirect an otherwise-safe write outside the vault root.
+    if std::fs::symlink_metadata(file_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(VaultKitError::AdapterError(format!(
+            "vault output path is a pre-existing symlink: '{}'",
+            file_path.display()
+        )));
+    }
+    std::fs::write(file_path, bytes)?;
+    Ok(())
 }
 
 // MARK: - Filesystem traversal
@@ -178,6 +310,15 @@ fn collect_md_files(
         }
         let path = entry.path();
         let file_type = entry.file_type().map_err(VaultKitError::Io)?;
+        // Skip symbolic links unconditionally — following a symlink on import
+        // could read content from outside the vault root. On Unix, file_type()
+        // uses lstat(2) semantics (does not follow symlinks), so a symlinked
+        // directory would return is_dir() == false and be silently skipped. The
+        // explicit is_symlink() check documents the intent and guards other
+        // platforms where file_type() may follow symlinks.
+        if file_type.is_symlink() {
+            continue;
+        }
         if file_type.is_dir() {
             collect_md_files(&path, vault_root, out)?;
         } else if file_type.is_file() && name.ends_with(".md") {
@@ -1075,5 +1216,99 @@ mod tests {
     #[test]
     fn relative_md_path_cross_folder() {
         assert_eq!(relative_md_path("A/B", "C/D.md"), "../../C/D.md");
+    }
+
+    // MARK: - Symlink boundary hardening (PR #42 parity)
+
+    /// to_ir must skip a symlinked markdown file inside the vault — following it
+    /// could read content from outside the vault root.
+    #[test]
+    fn to_ir_skips_symlinked_markdown_files() {
+        let base = temp_vault();
+        let vault = base.join("vault");
+        let outside = base.join("outside-secret.md");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(&outside, "EXFILTRATED_SECRET").unwrap();
+        // Pre-plant a symlink inside the vault pointing to the file outside.
+        std::os::unix::fs::symlink(&outside, vault.join("secret.md")).unwrap();
+        write_note(&vault, "safe.md", "safe");
+
+        let adapter = ObsidianAdapter::new();
+        let notes = adapter.to_ir(&vault).unwrap();
+
+        std::fs::remove_dir_all(&base).ok();
+
+        // Only the legitimate note must be returned; the symlinked file must be skipped.
+        assert_eq!(notes.len(), 1, "symlinked .md file must be skipped");
+        assert_eq!(notes[0].stable_source_key, "safe");
+        assert_eq!(notes[0].flattened_body(), "safe");
+    }
+
+    /// from_ir must refuse to write to a path that is already a symlink —
+    /// write_contained_file guards this via symlink_metadata before fs::write.
+    #[test]
+    fn from_ir_rejects_pre_existing_symlinked_output_file() {
+        let base = temp_vault();
+        let vault = base.join("vault");
+        let outside = base.join("outside.md");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(&outside, "original-outside-content").unwrap();
+        // Pre-plant the symlink at the exact export target path.
+        std::os::unix::fs::symlink(&outside, vault.join("note.md")).unwrap();
+
+        let adapter = ObsidianAdapter::new();
+        let result = adapter.from_ir(
+            &[crate::note_ir::NoteIR::with_moot_id(
+                "note".to_owned(),
+                vec![crate::note_ir::Block::markdown("changed".to_owned())],
+                std::collections::HashMap::new(),
+                vec![],
+                vec![],
+                "".to_owned(),
+                None,
+                None,
+                None,
+            )],
+            &vault,
+        );
+
+        // The write must fail because a symlink exists at the target path.
+        assert!(result.is_err(), "from_ir must reject a pre-existing symlinked output path");
+        // The file outside the vault must be untouched.
+        let content = std::fs::read_to_string(&outside).unwrap();
+        assert_eq!(content, "original-outside-content", "outside file must not be modified");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// from_ir must succeed for a normal (non-symlink) export to a clean vault.
+    #[test]
+    fn from_ir_accepts_legitimate_non_symlink_export() {
+        let vault = temp_vault();
+
+        let adapter = ObsidianAdapter::new();
+        adapter
+            .from_ir(
+                &[crate::note_ir::NoteIR::with_moot_id(
+                    "Wing/Room/note".to_owned(),
+                    vec![crate::note_ir::Block::markdown("hello".to_owned())],
+                    std::collections::HashMap::new(),
+                    vec![],
+                    vec![],
+                    "Wing/Room".to_owned(),
+                    None,
+                    None,
+                    None,
+                )],
+                &vault,
+            )
+            .unwrap();
+
+        let expected = vault.join("Wing/Room/note.md");
+        assert!(expected.exists(), "legitimate export must create the note file inside the vault");
+        let content = std::fs::read_to_string(&expected).unwrap();
+        assert!(content.contains("hello"), "exported note must contain the body text");
+
+        std::fs::remove_dir_all(&vault).ok();
     }
 }

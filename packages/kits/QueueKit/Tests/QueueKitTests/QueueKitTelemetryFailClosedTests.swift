@@ -8,7 +8,7 @@
 // FORCE-TEST: drive reportQueueStats with a QueueBackend whose pendingCount
 // throws, capture the emitted StatSamples via RecentWindowSink, and assert:
 //   - NO `queue.depth` metric is emitted (no fabricated floor).
-//   - a `queue.depth_unavailable` error counter IS emitted.
+//   - a `queue.depth_unavailable` metric sentinel IS emitted.
 //   - the depth-derived `queue.idle_nonempty` metric is suppressed.
 // Control: a backend whose pendingCount succeeds emits `queue.depth` and no
 // `queue.depth_unavailable`.

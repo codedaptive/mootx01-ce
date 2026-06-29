@@ -17,11 +17,10 @@ import MootGateway   // CaptureDrawerIntent + RecallDrawerIntent live in the lib
 // HOW THESE REACH THE SAME NOTES AS THE UI
 // ----------------------------------------
 // When Siri fires `CaptureDrawerIntent`, the SYSTEM creates the intent — our
-// app code never sees the constructor. The intent's `perform()` reaches the
-// estate through `GatewayRuntime.shared.bridge()` — the exact same singleton
-// our app configured in MootNotepadApp.bootstrapMOOT(). That is why a note
-// captured by voice shows up in the app's list, and vice versa: one estate,
-// reached two ways.
+// app code never sees the constructor. The intent's `perform()` resolves the
+// estate through `IntentRuntimeBridge.shared.bridge()`. The app's launch path
+// calls `GatewayRuntime.shared.bridge()`, which registers the bridge into
+// `IntentRuntimeBridge`, so the UI and Siri share one estate.
 //
 // THE TWO VERBS WE PUBLISH
 // ------------------------

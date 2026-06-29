@@ -63,13 +63,15 @@ fn add_coverage_guarantee_all_three_bitmaps() {
 
     let drawer = estate.capture(frame, NOW).unwrap();
 
-    // The wing for this estate is derived from the owner identifier.
-    let wing = &drawer.wing;
-    let room = &drawer.room;
+    // ADR-017: wing/room resolved from node tree via parent_node_id.
+    let names = store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+    let (wing, room) = names.get(&drawer.parent_node_id).expect("node must resolve");
+    let wing = wing.clone();
+    let room = room.clone();
 
     // Room-level aggregate must cover all three fields.
     let room_fp = store
-        .get_container_fingerprint(wing, room)
+        .get_container_fingerprint(&wing, &room)
         .unwrap()
         .expect("room aggregate must exist after capture");
     assert_eq!(
@@ -90,7 +92,7 @@ fn add_coverage_guarantee_all_three_bitmaps() {
 
     // Wing-level rollup (room == "") must also cover all three fields.
     let wing_fp = store
-        .get_container_fingerprint(wing, "")
+        .get_container_fingerprint(&wing, "")
         .unwrap()
         .expect("wing aggregate must exist after capture");
     assert_eq!(
@@ -141,7 +143,9 @@ fn add_coverage_two_drawers_same_room() {
     let d1 = estate.capture(frame1, NOW).unwrap();
     let d2 = estate.capture(frame2, NOW + 1).unwrap();
 
-    let wing = &d1.wing;
+    // ADR-017: wing resolved from node tree via parent_node_id.
+    let names = store.resolve_node_names(&[d1.parent_node_id.clone()]).unwrap();
+    let (wing, _) = names.get(&d1.parent_node_id).expect("node must resolve");
 
     let room_fp = store
         .get_container_fingerprint(wing, "r-cov2")

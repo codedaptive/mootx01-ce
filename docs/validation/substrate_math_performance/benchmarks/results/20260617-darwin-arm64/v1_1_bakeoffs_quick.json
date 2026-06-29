@@ -1,0 +1,397 @@
+{
+  "bakeoffs": [
+    {
+      "bitslice_build_ms": 6.343125,
+      "candidates": [
+        {
+          "candidate": "sqlite_row_scan",
+          "correct": true,
+          "query_p50_ms": 0.570375,
+          "query_p95_ms": 0.59425,
+          "result_count": 2477
+        },
+        {
+          "candidate": "sqlite_indexed_predicate",
+          "correct": true,
+          "query_p50_ms": 0.034375,
+          "query_p95_ms": 0.040333,
+          "result_count": 2477
+        },
+        {
+          "candidate": "python_int_bitslice",
+          "correct": true,
+          "query_p50_ms": 0.000708,
+          "query_p95_ms": 0.001166,
+          "result_count": 2477
+        },
+        {
+          "candidate": "row_id_set_intersection",
+          "correct": true,
+          "query_p50_ms": 0.227167,
+          "query_p95_ms": 0.270625,
+          "result_count": 2477
+        }
+      ],
+      "expected_count": 2477,
+      "finding": "Bit-sliced integer predicates win the warm filter path; SQLite indexed predicates are the durable fallback.",
+      "id": "B1",
+      "name": "Bitmap Predicate Storage Bakeoff",
+      "winner": "python_int_bitslice",
+      "workload": {
+        "predicate": "adj bit3 AND op bit7 AND prov bit11",
+        "rows": 20000
+      }
+    },
+    {
+      "bytes_per_provider": 1152000,
+      "candidates": [
+        {
+          "candidate": "sqlite_blob_scan",
+          "frontier_k": 32,
+          "last_threshold": 0.22948663441635475,
+          "nearest_p50_ms": 9.11125,
+          "p95_ms": 9.185,
+          "status": "measured"
+        },
+        {
+          "candidate": "mmap_row_aligned_pages",
+          "frontier_k": 32,
+          "last_threshold": 0.22948663441635475,
+          "nearest_p50_ms": 8.948334,
+          "p95_ms": 8.968375,
+          "status": "measured"
+        },
+        {
+          "candidate": "in_memory_flat_pages",
+          "frontier_k": 32,
+          "last_threshold": 0.22948663441635475,
+          "nearest_p50_ms": 8.801667,
+          "p95_ms": 8.874875,
+          "status": "measured"
+        },
+        {
+          "candidate": "in_memory_flat_farthest",
+          "farthest_p50_ms": 8.8235,
+          "frontier_k": 32,
+          "last_threshold": -0.2348852408000737,
+          "nearest_p50_ms": null,
+          "p95_ms": 8.840625,
+          "status": "measured"
+        }
+      ],
+      "finding": "Flat binary pages avoid SQLite BLOB parse cost; mmap is the storage-shaped path, in-memory pages are the latency ceiling.",
+      "id": "B2",
+      "name": "Dense Vector Storage and Frontier Bakeoff",
+      "winner": "in_memory_flat_pages",
+      "workload": {
+        "dimension": 96,
+        "frontier_k": 32,
+        "vectors": 3000
+      }
+    },
+    {
+      "candidates": [
+        {
+          "abs_error_vs_scalar": 0.0,
+          "candidate": "scalar_loop",
+          "dot_p50_ms": 0.03375,
+          "p95_ms": 0.037458
+        },
+        {
+          "abs_error_vs_scalar": 1.3877787807814457e-17,
+          "candidate": "builtin_sum_generator",
+          "dot_p50_ms": 0.025584,
+          "p95_ms": 0.027209
+        },
+        {
+          "abs_error_vs_scalar": 1.0408340855860843e-17,
+          "candidate": "unrolled4_loop",
+          "dot_p50_ms": 0.033542,
+          "p95_ms": 0.034334
+        }
+      ],
+      "finding": "Pure Python unrolling is not a proxy for Swift SIMD; keep scalar as correctness reference and add real Swift/Rust backend sweeps before changing production.",
+      "id": "B3",
+      "name": "FloatVecOps Backend Sweep",
+      "winner": "builtin_sum_generator",
+      "workload": {
+        "dimension": 768,
+        "operation": "dot/cosine over normalized vectors"
+      }
+    },
+    {
+      "candidates": [
+        {
+          "build_p50_ms": 13.269625,
+          "candidate": "sweeps_10_rank_16",
+          "offdiag_ratio": 1.0974972758197142e-10,
+          "retained_energy": 0.888297744785444,
+          "score": 13.269625001456339
+        },
+        {
+          "build_p50_ms": 20.607875,
+          "candidate": "sweeps_20_rank_16",
+          "offdiag_ratio": 1.0974972758197142e-10,
+          "retained_energy": 0.888297744785444,
+          "score": 20.60787500226171
+        },
+        {
+          "build_p50_ms": 28.716333,
+          "candidate": "sweeps_30_rank_16",
+          "offdiag_ratio": 1.0974972758197142e-10,
+          "retained_energy": 0.888297744785444,
+          "score": 28.71633300315161
+        },
+        {
+          "build_p50_ms": 43.841834,
+          "candidate": "sweeps_50_rank_16",
+          "offdiag_ratio": 1.0974972758197142e-10,
+          "retained_energy": 0.888297744785444,
+          "score": 43.84183400481163
+        }
+      ],
+      "finding": "Ten sweeps clears the small-matrix quality bar in this first-pass run; thirty or fifty sweeps are conservative but materially slower.",
+      "id": "B4",
+      "name": "JacobiSVD / LSA Basis Build Bakeoff",
+      "winner": "sweeps_10_rank_16",
+      "workload": {
+        "matrix_m": 56,
+        "matrix_n": 24
+      }
+    },
+    {
+      "candidates": [
+        {
+          "candidate": "direct_rowattribute_pair_count",
+          "emitted_count": 473,
+          "p95_ms": 3.093375,
+          "query_p50_ms": 3.053917
+        },
+        {
+          "candidate": "vertical_bitset_pair_count",
+          "emitted_count": 473,
+          "p95_ms": 0.127166,
+          "query_p50_ms": 0.121167
+        },
+        {
+          "candidate": "vertical_bitset_apriori_k3",
+          "emitted_count": 47,
+          "p95_ms": 0.906625,
+          "query_p50_ms": 0.898084
+        }
+      ],
+      "finding": "Vertical bitsets should be the derived row-replay cache; direct RowAttributeView scans are fine only for tiny fixtures.",
+      "id": "B5",
+      "name": "Association / Apriori / FCA Row-Replay Bakeoff",
+      "vertical_projection_build_ms": 0.529958,
+      "winner": "vertical_bitset_pair_count",
+      "workload": {
+        "items": 64,
+        "min_support_count": 30,
+        "rows": 1500
+      }
+    },
+    {
+      "candidates": [
+        {
+          "candidate": "request_time_rowid_adjacency",
+          "last_value": 148,
+          "latency_p50_ms": 0.49475,
+          "p95_ms": 0.916583
+        },
+        {
+          "candidate": "cached_rowid_adjacency",
+          "last_value": 148,
+          "latency_p50_ms": 0.233333,
+          "p95_ms": 0.240792
+        },
+        {
+          "candidate": "dense_int_adjacency",
+          "last_value": 148,
+          "latency_p50_ms": 0.2115,
+          "p95_ms": 0.215375
+        },
+        {
+          "candidate": "producer_graph_cache_lookup",
+          "last_value": 4,
+          "latency_p50_ms": 8.3e-05,
+          "p95_ms": 0.000125
+        }
+      ],
+      "finding": "Producer cache lookup wins for cached scores; among true walks, dense adjacency is fastest and request-time rebuild is avoidable overhead.",
+      "id": "B6",
+      "name": "RandomWalk Exploratory Recall Bakeoff",
+      "winner": "producer_graph_cache_lookup",
+      "workload": {
+        "edges": 9998,
+        "nodes": 2500,
+        "steps": 1000
+      }
+    },
+    {
+      "candidates": [
+        {
+          "artifact_bytes": 47080,
+          "candidate": "json_direct_edges_bfs_memo",
+          "closure_p50_ms": 2.232167,
+          "p95_ms": 2.232583,
+          "total_ancestors": 11636
+        },
+        {
+          "artifact_bytes": 449288,
+          "candidate": "precomputed_closure_table",
+          "closure_p50_ms": 0.003667,
+          "p95_ms": 0.003916,
+          "total_ancestors": 11636
+        },
+        {
+          "artifact_bytes": 28736,
+          "candidate": "compact_binary_adjacency",
+          "closure_p50_ms": 0.917625,
+          "p95_ms": 0.950959,
+          "total_ancestors": 11636
+        },
+        {
+          "artifact_bytes": 94208,
+          "candidate": "sqlite_adjacency_table",
+          "closure_p50_ms": 43.803166,
+          "p95_ms": 45.727375,
+          "total_ancestors": 11636
+        }
+      ],
+      "finding": "Precomputed closures dominate lookup latency but cost more artifact space; compact adjacency is the best storage/latency compromise.",
+      "id": "B7",
+      "name": "Q-ID Closure Artifact Bakeoff",
+      "precompute_ms": 21.285625,
+      "winner": "precomputed_closure_table",
+      "workload": {
+        "qids": 1800,
+        "queries": 120
+      }
+    },
+    {
+      "candidates": [
+        {
+          "accuracy": 0.6243781094527363,
+          "candidate": "word_class_table_only",
+          "latency_p50_ms": 0.030792,
+          "p95_ms": 0.03725
+        },
+        {
+          "accuracy": 1.0,
+          "candidate": "hmm_suffix_fallback",
+          "latency_p50_ms": 0.581333,
+          "p95_ms": 0.73625
+        },
+        {
+          "candidate": "apple_nltagger_path",
+          "reason": "Requires Swift NaturalLanguage bridge; this Python runner records the required comparison but does not invoke Apple NLTagger.",
+          "status": "not_measured"
+        }
+      ],
+      "finding": "The HMM-style suffix fallback decisively beats table-only for novel tokens; Apple NLTagger still needs the dedicated Swift bridge run.",
+      "id": "B8",
+      "name": "HMM Novel-Token Tagger Validation",
+      "winner": "hmm_suffix_fallback",
+      "workload": {
+        "known_table_fraction": 0.1,
+        "tokens": 804
+      }
+    },
+    {
+      "candidates": [
+        {
+          "candidate": "balanced_union_best",
+          "latency_p50_ms": 0.114792,
+          "overhead_vs_balanced_pct": 0.0
+        },
+        {
+          "candidate": "signed_weights_only",
+          "latency_p50_ms": 0.11425,
+          "overhead_vs_balanced_pct": -0.4721583385601802,
+          "p95_ms": 0.115542
+        },
+        {
+          "candidate": "anti_similarity_scan",
+          "latency_p50_ms": 0.341375,
+          "overhead_vs_balanced_pct": 197.38570632099797,
+          "p95_ms": 0.361292
+        },
+        {
+          "candidate": "anti_similarity_precomputed",
+          "latency_p50_ms": 0.114791,
+          "overhead_vs_balanced_pct": -0.000871140846048224,
+          "p95_ms": 0.119833
+        }
+      ],
+      "finding": "Signed weights are cheap; anti-similarity should use precomputed/index-supported farthest frontiers rather than sorting at recall time.",
+      "id": "B9",
+      "name": "RecallShape Anti-Similarity and Fusion Bakeoff",
+      "winner": "signed_weights_only",
+      "workload": {
+        "items": 3000,
+        "lane_frontier": 256
+      }
+    },
+    {
+      "candidates": [
+        {
+          "avg_staleness": 394.4269662921348,
+          "candidate": "fixed_interval",
+          "cost_units": 15.0,
+          "meets_staleness_budget": false,
+          "p95_staleness": 742.0,
+          "rebuilds": 15,
+          "score": 11117.0,
+          "simulation_p50_ms": 0.098334
+        },
+        {
+          "avg_staleness": 284.1011235955056,
+          "candidate": "dirty_threshold",
+          "cost_units": 19.0,
+          "meets_staleness_budget": false,
+          "p95_staleness": 566.0,
+          "rebuilds": 19,
+          "score": 11041.0,
+          "simulation_p50_ms": 0.106
+        },
+        {
+          "avg_staleness": 221.82771535580525,
+          "candidate": "hybrid",
+          "cost_units": 26.0,
+          "meets_staleness_budget": true,
+          "p95_staleness": 431.0,
+          "rebuilds": 26,
+          "score": 1081.0,
+          "simulation_p50_ms": 0.138917
+        },
+        {
+          "avg_staleness": 0,
+          "candidate": "on_demand",
+          "cost_units": 267.0,
+          "meets_staleness_budget": true,
+          "p95_staleness": 0.0,
+          "rebuilds": 267,
+          "score": 6675.0,
+          "simulation_p50_ms": 0.10325
+        }
+      ],
+      "finding": "Hybrid cadence best balances stale recall columns against rebuild cost; on-demand keeps columns fresh but overpays during recall.",
+      "id": "B10",
+      "name": "Graph / Preference Producer Cadence Bakeoff",
+      "winner": "hybrid",
+      "workload": {
+        "events": 3000,
+        "recall_probability": 0.08
+      }
+    }
+  ],
+  "command": "python3 bakeoffs/run_v1_1_bakeoffs.py --scale quick",
+  "dataset_hash": "43ee0ced6b547a39",
+  "generated_at": "2026-06-18T00:39:26Z",
+  "hardware_tag": "darwin-arm64",
+  "json_path": "benchmarks/results/20260617-darwin-arm64/v1_1_bakeoffs_quick.json",
+  "scale": "quick",
+  "schema": "mootx01.v1_1_bakeoffs.1",
+  "seed": 1592594689
+}

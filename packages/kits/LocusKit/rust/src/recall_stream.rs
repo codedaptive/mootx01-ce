@@ -11,9 +11,8 @@
 //! `HydrationLevel` is applied at page-emission time (on each
 //! `next_page()` call). `BitmapOnly` strips the `content` field so
 //! callers receive only the bitmap / metadata surface (spec § 7.3
-//! lightest tier); `Structured` and `Full` return rows unchanged at
-//! this tier — `Full` becomes distinct from `Structured` only when the
-//! blob tier ships in a later mission.
+//! lightest tier); `Structured` and `Full` both return rows unchanged
+//! at this tier — both pass through the full in-memory `Drawer`.
 //!
 //! ## Empty corpus
 //!
@@ -188,8 +187,8 @@ fn hydrate(d: &Drawer, level: HydrationLevel) -> Drawer {
             d2.content = String::new();
             d2
         }
-        // Structured and Full are identical at this tier; Full becomes
-        // distinct only when the blob tier ships in a later mission.
+        // Structured and Full both pass rows through unchanged at this
+        // tier — no additional blob hydration is performed.
         HydrationLevel::Structured | HydrationLevel::Full => d.clone(),
     }
 }
@@ -207,8 +206,7 @@ mod tests {
         Drawer::new(
             id,
             content,
-            "wing",
-            "room",
+            "test-parent",
             "alice",
             1_700_000_000,
             "test-v1",

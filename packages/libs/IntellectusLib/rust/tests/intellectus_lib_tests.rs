@@ -8,8 +8,9 @@
 //!   §3 NoOpSink discard is safe
 //!   §4 Thread safety — concurrent install and set_enabled
 //!   §5 StatSample accessors
-//!   §6 EventKind exhaustiveness
+//!   §6 EventKind as_str values and equality
 //!   §7 Performance gate — off-path cost
+//!   §8 RecentWindowSink — bounded recent window, eviction, downstream forwarding
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -83,7 +84,7 @@ fn side_effect_counter_stays_zero_after_many_disabled_reports() {
 #[test]
 fn report_macro_does_not_evaluate_closure_when_disabled() {
     let sink = Arc::new(CountingSink::new());
-    // Use a fresh holder via the global — reset state first.
+    // Use the global Intellectus singleton — reset its enabled flag first.
     Intellectus::set_enabled(false);
     // Install counting sink on the global for this test.
     Intellectus::install(Arc::clone(&sink) as Arc<dyn StatsSink>);

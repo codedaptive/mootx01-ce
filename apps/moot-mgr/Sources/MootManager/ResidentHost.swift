@@ -47,6 +47,10 @@ public struct ResidentHostConfig: Sendable {
     /// `fromEnvironment` path; false for memberwise (test/embedded) hosts so
     /// parallel tests never touch the live machine's port file.
     public let writePortFile: Bool
+    /// Override for the HTTP concurrency cap. `nil` means use the default
+    /// (`MootMgrMaxLoopbackConnections` / env var). Set only in tests that need
+    /// precise cap control without mutating the process environment.
+    public let httpMaxConnections: Int?
 
     public init(
         manager: ManagerConfig,
@@ -55,7 +59,8 @@ public struct ResidentHostConfig: Sendable {
         controlSocketPath: String,
         estatesDirectory: URL,
         httpPortExplicit: Bool = true,
-        writePortFile: Bool = false
+        writePortFile: Bool = false,
+        httpMaxConnections: Int? = nil
     ) {
         self.manager = manager
         self.httpPort = httpPort
@@ -64,6 +69,7 @@ public struct ResidentHostConfig: Sendable {
         self.estatesDirectory = estatesDirectory
         self.httpPortExplicit = httpPortExplicit
         self.writePortFile = writePortFile
+        self.httpMaxConnections = httpMaxConnections
     }
 
     // MARK: - Environment variable names / defaults
@@ -183,7 +189,8 @@ public actor ResidentHost {
                 controlToken: config.controlToken,
                 startInstant: startInstant,
                 clock: clock,
-                admin: admin
+                admin: admin,
+                maxConnections: config.httpMaxConnections
             )
             do {
                 try await api.start()

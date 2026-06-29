@@ -160,6 +160,29 @@ fn embed_float_via_seam(
     inference(&tokens).map_err(VectorKitError::EmbeddingFailed)
 }
 
+/// Single-pass override: run the host inference seam ONCE, then derive
+/// BOTH outputs from the one pooled vector — the projected engram and
+/// the float-lane vector. This replaces the two independent seam calls
+/// that `embed` and `embed_float` would each make (Corpus ingest needs
+/// both per chunk; for a real NN model that is the most expensive
+/// double-pass). Outputs are byte-identical to calling `embed` and
+/// `embed_float` separately: empty input short-circuits before the seam
+/// returning `(Engram::ZERO, vec![])`, the engram is
+/// `float_simhash::project(pooled)`, and the float row is `pooled`.
+fn embed_pair_via_seam(
+    text: &str,
+    tokenizer: &dyn Tokenizer,
+    inference: &InferenceFn,
+    seed: u64,
+) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    if text.is_empty() {
+        return Ok((Engram::ZERO, Vec::new()));
+    }
+    let tokens = tokenizer.tokenize(text);
+    let pooled = inference(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+    Ok((float_simhash::project(&pooled, seed), pooled))
+}
+
 // MARK: - MiniLMTextProvider
 
 /// MiniLM-L6 v2 text embedding provider. 384-dimensional pooled
@@ -227,6 +250,9 @@ impl EmbeddingProvider for MiniLMTextProvider {
     }
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
+    }
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
 
@@ -297,6 +323,9 @@ impl EmbeddingProvider for MPNetTextProvider {
     }
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
+    }
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
 
@@ -369,6 +398,9 @@ impl EmbeddingProvider for EmbeddingGemmaProvider {
     }
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
+    }
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
 

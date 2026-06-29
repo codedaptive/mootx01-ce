@@ -43,11 +43,12 @@ import Foundation
 ///
 /// ## Round-trip contract
 ///
-/// `toIR(fromIR(x)) == x` for the fields each flavour represents.
-/// - In default mode: standard-md links in the body are parsed back into
-///   `links` on re-read; the `type:` and frontmatter `tags:` are stored as
-///   frontmatter keys and survive the round-trip through the frontmatter map.
-/// - In pure-Obsidian mode: wikilinks are parsed back as before.
+/// Partial round-trip for represented fields: `links`, `tags`, and frontmatter
+/// keys that survive re-read are preserved. The OKF `type:` key is written on
+/// export but is not rehydrated into `NoteIR.kind` on import — it is preserved
+/// in the frontmatter map only. Standard-md links in the body are parsed back
+/// into `links` on re-read in default mode; wikilinks are parsed back in
+/// pure-Obsidian mode.
 public struct ObsidianAdapter: VaultAdapter {
 
     /// When `false` (default), the adapter writes OKF-compatible output:
@@ -77,16 +78,36 @@ public struct ObsidianAdapter: VaultAdapter {
 
     public func toIR(vaultURL: URL) throws -> [NoteIR] {
         let fm = FileManager.default
+        // Request isSymbolicLinkKey and isDirectoryKey in addition to
+        // isRegularFileKey so we can detect and skip symbolic links before
+        // reading any file content. Following a symlink on import could
+        // read content from outside the vault root; we reject it.
         guard let enumerator = fm.enumerator(
             at: vaultURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
             return []
         }
 
         var notes: [NoteIR] = []
-        for case let fileURL as URL in enumerator where fileURL.pathExtension == "md" {
+        for case let fileURL as URL in enumerator {
+            let values = try fileURL.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey])
+            // Skip symbolic links entirely. A symlinked directory is also
+            // told to skip its descendants so we don't recurse into it.
+            // Following any symlink on import risks reading outside the vault.
+            if values.isSymbolicLink == true {
+                if values.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            // Only process regular .md files.
+            guard fileURL.pathExtension == "md", values.isRegularFile == true else {
+                continue
+            }
+
             let filename = fileURL.deletingPathExtension().lastPathComponent
             // Skip OKF navigation files — index.md and log.md are emitted by
             // fromIR for OKF progressive disclosure and diary purposes; they
@@ -140,6 +161,13 @@ public struct ObsidianAdapter: VaultAdapter {
     // MARK: - Write: IR → vault
 
     public func fromIR(_ notes: [NoteIR], to vaultURL: URL) throws {
+        try fromIR(notes, to: vaultURL, progress: nil)
+    }
+
+    /// Writes notes to the vault with optional per-item progress reporting.
+    ///
+    /// Fires `progress(processed, total)` every 100 items and at the final item.
+    public func fromIR(_ notes: [NoteIR], to vaultURL: URL, progress: VaultProgress?) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: vaultURL, withIntermediateDirectories: true)
 
@@ -159,6 +187,8 @@ public struct ObsidianAdapter: VaultAdapter {
         // Track which folders receive at least one note, for index.md emission.
         var folderNotes: [String: [NoteIR]] = [:] // folder → notes in that folder
 
+        let total = notes.count
+        var processed = 0
         for note in notes {
             // The note is written at `<stableSourceKey>.md`, so the folder
             // tree mirrors the wing/room path that `DrawerMapping` encoded
@@ -166,15 +196,34 @@ public struct ObsidianAdapter: VaultAdapter {
             // `stableSourceKey` and `originalPath` — this is what makes the
             // round-trip path-faithful without a second source of truth.
             let relativePath = note.stableSourceKey + ".md"
-            let fileURL = vaultURL.appendingPathComponent(relativePath)
+            // Containment gate: two-layer check before any filesystem write.
+            // Layer 1 (lexical): containedVaultURL rejects traversal components
+            // (..  / absolute markers / backslashes) before touching the disk.
+            // Layer 2 (symlink): ensureContainedInVault verifies the real
+            // (symlink-resolved) parent stays inside the vault root after
+            // createDirectory, catching pre-existing symlinks in the tree.
+            let fileURL = try ObsidianAdapter.containedVaultURL(
+                forRelativePath: relativePath, under: vaultURL)
             let folderURL = fileURL.deletingLastPathComponent()
             try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
+            try ObsidianAdapter.ensureContainedInVault(folderURL, under: vaultURL)
+            // Final target check: if a file already exists at fileURL, reject
+            // it when it is a symbolic link. An attacker may pre-plant a symlink
+            // at the exact export path (e.g. vault/Wing/Room/slug.md → /etc/passwd)
+            // that survives the parent-folder containment check above; this guard
+            // catches it before write follows the link outside the vault root.
+            try ObsidianAdapter.ensureWritableFileTarget(fileURL, under: vaultURL)
             let text = ObsidianAdapter.render(note, pureObsidianLinks: pureObsidianLinks, keyByName: keyByName)
             try text.write(to: fileURL, atomically: true, encoding: .utf8)
 
             // Record this note under its folder for index generation.
             let folder = (note.stableSourceKey as NSString).deletingLastPathComponent
             folderNotes[folder, default: []].append(note)
+
+            processed += 1
+            if let progress, processed % 100 == 0 || processed == total {
+                progress(processed, total)
+            }
         }
 
         // Emit one index.md per folder that contains notes. The index lists
@@ -188,12 +237,16 @@ public struct ObsidianAdapter: VaultAdapter {
                 // Link text is the filename; path is relative within the same folder.
                 indexContent += "- [\(filename)](\(filename).md)\n"
             }
-            let indexURL: URL
-            if folder.isEmpty {
-                indexURL = vaultURL.appendingPathComponent("index.md")
-            } else {
-                indexURL = vaultURL.appendingPathComponent(folder).appendingPathComponent("index.md")
-            }
+            // Use the same containment gate as note writes.  The index folder
+            // already exists (created when notes were written above), so
+            // ensureContainedInVault can resolve symlinks immediately.
+            let indexRelative = folder.isEmpty ? "index.md" : "\(folder)/index.md"
+            let indexURL = try ObsidianAdapter.containedVaultURL(
+                forRelativePath: indexRelative, under: vaultURL)
+            try ObsidianAdapter.ensureContainedInVault(
+                indexURL.deletingLastPathComponent(), under: vaultURL)
+            // Same pre-existing-symlink guard applied to index files.
+            try ObsidianAdapter.ensureWritableFileTarget(indexURL, under: vaultURL)
             try indexContent.write(to: indexURL, atomically: true, encoding: .utf8)
         }
     }
@@ -310,9 +363,9 @@ public struct ObsidianAdapter: VaultAdapter {
     /// Derive the OKF `type:` value from a NoteIR kind string.
     ///
     /// Mapping: `"note"→"Note"`, `"fact"→"Fact"`, `"journal"→"Journal"`,
-    /// else the kind with its first character uppercased. Deterministic and
-    /// reversible: the kind string is preserved in the `kind` NoteIR field,
-    /// not re-derived from `type:` on import.
+    /// else the kind with its first character uppercased. Deterministic on
+    /// export. The `type:` key is not re-parsed into `NoteIR.kind` on import;
+    /// `kind` retains its default value after a round-trip.
     static func okfType(from kind: String) -> String {
         switch kind {
         case "note":    return "Note"
@@ -407,8 +460,9 @@ public struct ObsidianAdapter: VaultAdapter {
     /// as flat `key: value` YAML; the body is everything after. With no
     /// opening fence the whole file is the body and the map is empty.
     static func splitFrontmatter(_ raw: String) -> ([String: String], String) {
-        // Normalise only for fence detection; the body is sliced from the
-        // original so content bytes are preserved verbatim.
+        // Normalise only for fence detection; the body is reconstructed by
+        // splitting into lines and rejoining, so content is logically
+        // preserved but not a verbatim byte-range slice of the original.
         guard raw.hasPrefix("---\n") || raw.hasPrefix("---\r\n") else {
             return ([:], raw)
         }
@@ -567,5 +621,120 @@ public struct ObsidianAdapter: VaultAdapter {
     /// Drop a trailing `.md` extension from a vault-relative path.
     static func dropMarkdownExtension(_ path: String) -> String {
         path.hasSuffix(".md") ? String(path.dropLast(3)) : path
+    }
+
+    // MARK: - Vault containment helpers
+
+    /// Resolve a vault-relative output path to a `URL` that is guaranteed to
+    /// stay inside `root`.
+    ///
+    /// Two-layer check:
+    ///   - **Layer 1 — lexical**: every `/`-separated component is validated.
+    ///     Absolute-path prefixes (`/`, `~`), Windows separators (`\`), empty
+    ///     components (double-slash or leading/trailing slash), current-directory
+    ///     (`.`), and parent-directory (`..`) components are rejected before any
+    ///     filesystem access.
+    ///   - **Layer 2 — canonical**: the assembled URL is standardized via
+    ///     `standardizedFileURL` and verified to share the vault root's component
+    ///     prefix, collapsing any residual dot sequences the lexical layer missed.
+    ///
+    /// This is the **single containment gate** for all export write paths —
+    /// note files and index files both pass through here. Paired with
+    /// `ensureContainedInVault` (the symlink layer) for defense-in-depth.
+    static func containedVaultURL(
+        forRelativePath relativePath: String,
+        under root: URL
+    ) throws -> URL {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !relativePath.hasPrefix("~"),
+              !relativePath.contains("\\") else {
+            throw VaultKitError.adapterError(
+                "vault export path rejected — absolute or malformed: '\(relativePath)'")
+        }
+        // Split on "/" preserving empty fields so leading/trailing/double slashes
+        // produce empty strings that the guard below catches.
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw VaultKitError.adapterError(
+                "vault export path contains a forbidden component: '\(relativePath)'")
+        }
+        // Build URL component-by-component to avoid appendingPathComponent's
+        // special handling of leading "/" or "~" in the path string.
+        let rootStd = root.standardizedFileURL
+        var url = rootStd
+        for component in components {
+            url.appendPathComponent(String(component), isDirectory: false)
+        }
+        // Layer 2: standardize and verify the assembled URL stays inside root.
+        let candidate = url.standardizedFileURL
+        let rootPath  = rootStd.path
+        let candPath  = candidate.path
+        guard candPath == rootPath || candPath.hasPrefix(rootPath + "/") else {
+            throw VaultKitError.adapterError(
+                "vault export path escapes the vault root: '\(relativePath)'")
+        }
+        return candidate
+    }
+
+    /// Verify that `directoryURL` resolves inside `root` after following real
+    /// filesystem symlinks.
+    ///
+    /// Call this after `createDirectory` so the path exists and
+    /// `resolvingSymlinksInPath` can fully resolve any symlink chain.
+    /// This is the **symlink layer** of the two-layer containment check:
+    /// `containedVaultURL` is purely lexical; this function catches
+    /// pre-existing symlinks in the vault tree that could redirect an
+    /// otherwise-valid relative path outside the vault root.
+    static func ensureContainedInVault(
+        _ directoryURL: URL,
+        under root: URL
+    ) throws {
+        // resolvingSymlinksInPath follows real filesystem symlinks (unlike
+        // standardizedFileURL, which is purely lexical). The result is the
+        // physical path on disk.
+        let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let dirResolved  = directoryURL.resolvingSymlinksInPath().standardizedFileURL.path
+        guard dirResolved == rootResolved || dirResolved.hasPrefix(rootResolved + "/") else {
+            throw VaultKitError.adapterError(
+                "vault export path resolves outside the vault root after symlink expansion")
+        }
+    }
+
+    /// Verify that an output file target is safe to write.
+    ///
+    /// The parent-directory containment check (`ensureContainedInVault`) catches
+    /// symlinked folders in the path. This final target check guards against a
+    /// pre-existing symlinked FILE at the exact export path: an attacker who
+    /// pre-places a symlink at `<vault>/Wing/Room/slug.md` pointing outside the
+    /// vault root would cause a naive `write(to:atomically:)` to follow the
+    /// link and write outside the vault. Calling this before every file write
+    /// makes the guard complete.
+    ///
+    /// If no file exists at `fileURL`, the check is a no-op (the path is fresh).
+    /// If a regular file exists, its resolved path is verified against `root`.
+    /// If a symlink exists, the write is refused unconditionally.
+    static func ensureWritableFileTarget(
+        _ fileURL: URL,
+        under root: URL
+    ) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else { return }
+
+        let values = try fileURL.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey])
+        // Reject any pre-existing symlink at the exact output path, regardless
+        // of where it points — we never follow a symlink placed at the write target.
+        guard values.isSymbolicLink != true else {
+            throw VaultKitError.adapterError(
+                "vault export path targets a symbolic link")
+        }
+        // Reject non-regular files (devices, sockets, etc.) for the same reason.
+        guard values.isRegularFile == true else {
+            throw VaultKitError.adapterError(
+                "vault export path targets a non-regular file")
+        }
+        // Containment double-check: even a regular file must still resolve
+        // inside the vault root (defensive, in case the lexical check was wrong).
+        try ensureContainedInVault(fileURL, under: root)
     }
 }

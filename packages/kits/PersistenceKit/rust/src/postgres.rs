@@ -2,8 +2,10 @@
 //! target, over the synchronous `postgres` crate (matching the sync Storage
 //! trait). A fixed-size lazy connection pool (matching `PostgreSQLPool.swift`)
 //! guards per-estate connections. Schema DDL, predicate compilation, and the
-//! value codec match the Swift backend so both versions produce identical
-//! observable results.
+//! value codec are designed to match the Swift backend for identical observable
+//! results. Exception: HLC values are decoded via a local `unpack_hlc` bit-split
+//! rather than the Swift `HLC.fromPacked` API; the bit layout is identical so
+//! observable results agree for well-formed HLC values.
 //!
 //! NOTE: this backend is **unverified locally** — its conformance test only
 //! runs when `PERSISTENCEKIT_PG_URL` points at a live PostgreSQL server;
@@ -20,6 +22,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use postgres::types::ToSql;
 use postgres::{Client, NoTls};
+use postgres_native_tls::MakeTlsConnector;
+use native_tls::TlsConnector as NativeTlsConnector;
+use crate::postgres_tls::{effective_sslmode, PostgresTlsMode};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
@@ -30,6 +35,7 @@ use crate::{
     Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
     StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
+use crate::error::validate_sql_identifier;
 // Mode 2 (RowEncryption) content seam — shared with the SQLite backend so the
 // client-side AES-GCM-256 envelope is byte-identical across backends. Postgres
 // has no whole-file analogue (the server owns the schema), so per-row content
@@ -484,6 +490,36 @@ struct Pool {
     condvar: Condvar,
 }
 
+// ── TLS transport helpers ──────────────────────────────────────────────────
+
+/// Build a default TLS connector backed by the platform TLS stack.
+///
+/// Uses `native_tls::TlsConnector::builder().build()`, which delegates to:
+/// - Security.framework on macOS / iOS
+/// - SChannel on Windows
+/// - OpenSSL (system-installed) on Linux
+///
+/// Certificate verification is enabled by default (the platform trust store
+/// is used). For custom CAs or mutual TLS, extend the builder before calling
+/// `build()`. The connector is intentionally constructed here — one place,
+/// easy to extend — rather than at each call site.
+fn build_tls_connector() -> StorageResult<MakeTlsConnector> {
+    let connector = NativeTlsConnector::builder()
+        .build()
+        .map_err(|e| StorageError::InvalidConfiguration {
+            reason: format!("failed to build TLS connector (native-tls): {e}"),
+        })?;
+    Ok(MakeTlsConnector::new(connector))
+}
+
+// set_sslmode removed — replaced by postgres_tls::effective_sslmode, which
+// computes the effective mode as max(env_rank, dsn_rank) and returns the
+// rewritten connection string. The key security property: the env var may
+// raise the sslmode above the DSN's value but may never lower it. See
+// postgres_tls.rs for the full implementation and the SslModeRank ordering.
+
+// ──────────────────────────────────────────────────────────────────────────
+
 impl Pool {
     fn new(
         connection_string: String,
@@ -510,11 +546,58 @@ impl Pool {
 
     /// Open one new connection and pin it to the estate's schema namespace.
     /// Caller must hold no lock when calling this (it does real I/O).
+    ///
+    /// # TLS transport selection (SECFIX-WS2-PK F3 — CAND-029; c-pg-tls-downgrade)
+    ///
+    /// The effective sslmode is `max(env_rank, dsn_rank)`, computed by
+    /// `effective_sslmode` in `postgres_tls.rs`. This enforces a strict
+    /// no-downgrade rule: the env var (`ARIA_MCP_POSTGRES_TLS`) may raise
+    /// security above what the DSN specifies, but it can never lower an
+    /// operator-specified `sslmode=require` or stronger to `prefer`/`disable`.
+    ///
+    /// Transport selection follows the **effective** mode, not the raw env mode:
+    /// - effective `disable` → `NoTls` (plaintext only — loopback/Unix-socket)
+    /// - effective anything else → `MakeTlsConnector` (platform TLS via
+    ///   `native-tls`; the `sslmode=` in the connection string instructs the
+    ///   `postgres` crate on the exact policy — optional/mandatory/cert-verified).
+    ///
+    /// The critical case fixed by c-pg-tls-downgrade: env=absent(Prefer) +
+    /// DSN `sslmode=require` now correctly preserves `require` (TLS connector,
+    /// no plaintext fallback) instead of silently overwriting it with `prefer`.
+    ///
+    /// Transport is `postgres-native-tls = "0.5"` (C-1 exception approved:
+    /// `DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md`). It wraps the
+    /// platform TLS stack (Security.framework / SChannel / OpenSSL) rather
+    /// than bundling a cryptographic implementation.
     fn open_connection(conn_str: &str, namespace: &str) -> StorageResult<Client> {
-        let mut client =
-            Client::connect(conn_str, NoTls).map_err(|e| StorageError::BackendError {
+        let env_mode = PostgresTlsMode::from_env();
+        // Compute the effective sslmode: max(env rank, DSN rank).
+        // Returns the (possibly-rewritten) connection string and whether to
+        // use a TLS connector. The DSN is the security floor — never overwrite
+        // a stronger operator-specified sslmode with a weaker env default.
+        let (effective_conn_str, use_tls) = effective_sslmode(conn_str, env_mode);
+
+        let mut client = if !use_tls {
+            // Effective mode is disable — plaintext connection. Appropriate only
+            // for loopback or Unix-socket connections where the OS provides
+            // equivalent process isolation to TLS. Note: this path is reached
+            // ONLY when the effective mode (max of env + DSN) is disable; if the
+            // DSN specifies require or higher, effective_sslmode returns use_tls=true
+            // even when env=disable, preventing a plaintext downgrade.
+            Client::connect(&effective_conn_str, NoTls).map_err(|e| StorageError::BackendError {
                 underlying: format!("postgres connect: {e}"),
-            })?;
+            })?
+        } else {
+            // Effective mode is prefer, allow, require, verify-ca, or verify-full.
+            // Supply a TLS-capable connector; the sslmode= in the connection string
+            // instructs the postgres crate on the exact policy (optional fallback vs
+            // mandatory vs certificate-verified). One connector handles all TLS
+            // levels — the policy enforcement comes from the sslmode= parameter.
+            let connector = build_tls_connector()?;
+            Client::connect(&effective_conn_str, connector).map_err(|e| StorageError::BackendError {
+                underlying: format!("postgres connect (TLS): {e}"),
+            })?
+        };
         // Pin search_path to the estate's schema (namespace) so all DDL and
         // DML target the correct per-estate tables. `public` stays on the
         // path so shared extensions (e.g. pgvector) resolve.
@@ -806,6 +889,7 @@ fn apply_schema(
     for index in &schema.indices {
         batch(client, &create_index_sql(index))?;
     }
+    // Record global schema version (max across all kits).
     client
         .execute(
             r#"INSERT INTO "_storagekit_meta" ("key", "value") VALUES ('schema_version', $1)
@@ -814,6 +898,17 @@ fn apply_schema(
         )
         .map_err(|e| StorageError::BackendError {
             underlying: format!("record version: {e}"),
+        })?;
+    // Record per-kit schema version (keyed by kit_id).
+    let kit_key = format!("schema_version:{}", schema.kit_id);
+    client
+        .execute(
+            r#"INSERT INTO "_storagekit_meta" ("key", "value") VALUES ($1, $2)
+               ON CONFLICT ("key") DO UPDATE SET "value" = excluded.value"#,
+            &[&kit_key, &schema.version.to_string()],
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("record kit version: {e}"),
         })?;
     Ok(())
 }
@@ -897,6 +992,35 @@ impl Storage for PostgresStorage {
             }
         }
     }
+    fn current_schema_version_for(&self, kit_id: &str) -> StorageResult<i32> {
+        let mut conn = self.checkout()?;
+        let kit_key = format!("schema_version:{}", kit_id);
+        let rows = conn
+            .get_mut()
+            .query(
+                r#"SELECT "value" FROM "_storagekit_meta" WHERE "key" = $1"#,
+                &[&kit_key],
+            )
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("kit schema version: {e}"),
+            })?;
+        match rows.first() {
+            None => Ok(0),
+            Some(r) => {
+                let s: String = r.try_get::<_, String>(0).map_err(|e| {
+                    StorageError::BackendError {
+                        underlying: format!("kit schema version decode: {e}"),
+                    }
+                })?;
+                s.parse::<i32>().map_err(|_| StorageError::CorruptStoredValue {
+                    table: "_storagekit_meta".to_string(),
+                    column: "value".to_string(),
+                    stored_text: s.clone(),
+                })
+            }
+        }
+    }
+
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut conn = self.checkout()?;
         apply_schema(&mut conn, &self.schema, schema)
@@ -1364,9 +1488,15 @@ impl RowStore for TxRowStore {
         if columns.is_empty() {
             return self.query(table, predicate, order_by, limit, offset);
         }
+        // Validate all caller-supplied column names before embedding them in SQL
+        // (SECFIX-WS2-PK F1). See validate_sql_identifier in error.rs.
+        for c in columns {
+            validate_sql_identifier(c)?;
+        }
         let mut guard = self.conn.lock().unwrap();
         // Explicit column list so the omitted columns (notably the content
         // blob) are never read off disk — the no-blob recall path's I/O win.
+        // Column names are validated and quoted identifiers.
         let select_list = columns
             .iter()
             .map(|c| format!("\"{c}\""))
@@ -1909,6 +2039,15 @@ impl RowStore for PgRowStore {
         // Empty projection means "no projection" — fall back to SELECT *.
         if columns.is_empty() {
             return self.query(table, predicate, order_by, limit, offset);
+        }
+        // Validate every caller-supplied column name against the safe-identifier
+        // allowlist [A-Za-z_][A-Za-z0-9_]* before interpolating into SQL.
+        // Double-quoting alone is insufficient: a name containing '"' escapes
+        // the delimiter and can alter the query (SQL-injection vector).
+        // Mirrors the guard already present in TxRowStore::query_projected and
+        // in the SQLite backend (SECFIX-WS2-PK F2 — CAND-047).
+        for c in columns {
+            validate_sql_identifier(c)?;
         }
         let mut conn = self.pool.checkout()?;
         // Explicit column list so the omitted columns (notably the content

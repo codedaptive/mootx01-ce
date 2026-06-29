@@ -1,9 +1,9 @@
 // ConceptBagTests.swift
 //
 // Drives BagBuilder Steps 2–3 (canonicalize + accumulate) deterministically.
-// Step 1 (NLTagger noun/verb filter) is non-deterministic across OS versions,
-// so these tests keep all word classes — the tagger filter is exercised
-// separately by WordClassTaggerTests.
+// Step 1 (word-class filter via the deterministic HMM tagger) is exercised
+// separately by WordClassTaggerTests; these tests keep all word classes to
+// isolate Steps 2–3 from tagger behavior.
 
 import Testing
 @testable import LatticeLib

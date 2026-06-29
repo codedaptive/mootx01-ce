@@ -19,20 +19,25 @@ LLM context tokens.
 - `moot_estate_map` - browse structure and memory counts by location.
 - `moot_read_journal` - resume recent agent continuity.
 - `moot_list_lenses` - discover available reasoning lenses and recipes.
+- `moot_list_recipes` - browse the full recipe catalog with descriptions and required capabilities.
 
 ## Recall
 
 - `moot_memory_search` - ordinary memory recall; broad, high-recall search.
-- `moot_recall_precise` - exact recall when names, numbers, paths, dates, versions, identifiers, or near-duplicates matter.
+- `moot_recall_precise` - exact recall when names, numbers, paths, dates, versions, identifiers, or near-duplicates matter. Supports named reduction compositions for re-ranking.
+- `moot_recall_shaped` - shaped recall with fusion presets (balanced, precise, conceptual, broad, lexical, associative, consensus, temporal, structural, anti_redundant, and others). Use when the recall mode matters more than a specific query string.
+- `moot_recall_distilled` - dense recall from the distilled factoid layer. Returns compact factoids with confidence scores. Use after `moot_consolidate` has populated the distilled tier.
+- `moot_recollect` - recollect: fan-out from a distilled factoid to its source memories. Use when the user needs the full episodic detail behind a factoid.
 - `moot_fact_search` - structured entity/relation/fact lookup.
 - `moot_fact_timeline` - trace how structured facts changed over time.
 
 ## Writing
 
 - `moot_file_memory` - file a durable memory with content and location.
+- `moot_move_memory` - reanchor a memory to a different location or wing.
 - `moot_file_fact` - store a stable subject-predicate-object assertion.
 - `moot_write_journal` - record session continuity and handoff notes.
-- `moot_link_memories` - create typed relationships between memories.
+- `moot_link_memories` - create typed relationships between memories. Accepted kinds: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo.
 
 ## Trust And Correction
 
@@ -63,7 +68,15 @@ LLM context tokens.
 - `moot_lens_anticipate` - likely actions/outcomes.
 - `moot_lens_overlap` and `moot_lens_divergence` - authorized federated comparison.
 - `moot_lens_associations`, `moot_lens_apriori`, `moot_lens_concepts` - association rules and formal concepts.
+- `moot_lens_node_motion` - how a single memory has moved over time: volatility, topic trajectory, reanchor detection.
+- `moot_lens_cohesion` - flag memories whose content cohesion with peers is anomalously low.
 - `moot_lens_moment`, `moot_lens_rhythm`, `moot_lens_precedence`, `moot_lens_complexity` - temporal and information-theoretic analysis.
+
+## Distillation And Maintenance
+
+- `moot_consolidate` - run one distillation sweep, producing compact factoids in the distilled tier. Run periodically or after significant memory growth.
+- `moot_reindex` - backfill BM25 and vector indexes for memories captured before encode-on-capture or after a batch import. Semantic recall is dark until reindex completes.
+- `moot_palace_import` - import a MemPalace directly into the estate (drawers, tunnels, KG triples). After import: run `moot_reindex` then `moot_dream`.
 
 ## Synthesis And Dreaming
 
@@ -77,6 +90,11 @@ LLM context tokens.
 - `moot_vault_status` - inspect vault manifest state.
 - `moot_vault_reconcile` - detect drift between vault projection and manifest.
 - `moot_vault_job` - poll long-running import/export jobs.
+
+## Migration
+
+- `moot_run_migration` - benchmark migration plans against a corpus with the zero-silent-loss gate. Returns ranked survivors with branch ids.
+- `moot_confirm_migration` - promote the winning migration branch and discard losers. Requires explicit confirmation.
 
 ## Federation
 

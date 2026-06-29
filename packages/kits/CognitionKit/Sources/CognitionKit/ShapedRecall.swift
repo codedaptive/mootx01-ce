@@ -145,7 +145,7 @@ public struct ShapedRecall: Recipe {
         // fusion's rank order; we preserve that order. `score.final` is the fused
         // score the shape produced — surfaced as the reported precision.
         let matches = result.hits.map { hit -> PreciseMatch in
-            let room = hit.drawer?.room ?? ""
+            let room = hit.drawer?.parentNodeId ?? ""
             let content = hit.drawer?.content ?? ""
             return PreciseMatch(
                 id: hit.id,

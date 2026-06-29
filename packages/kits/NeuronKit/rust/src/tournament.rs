@@ -46,9 +46,10 @@ const Z95: f64 = 1.96;
 pub struct PairwiseOutcome {
     pub winner: String,
     pub loser: String,
-    /// Times this exact outcome occurred. Non-positive contributes
-    /// nothing to the fit (Rust has no default arguments; use `single`
-    /// for the `count == 1` case).
+    /// Times this exact outcome occurred. Non-positive contributes no
+    /// tally weight to the fit, but winner and loser are still added
+    /// to the competitor set — can influence the connectivity gate.
+    /// (Rust has no default arguments; use `single` for `count == 1`.)
     pub count: i64,
 }
 

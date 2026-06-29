@@ -54,6 +54,15 @@ public final class GraphCentralityCache: GraphCache, Sendable {
 /// and obtain bit-identical centralities.
 public enum GraphCentralityAdjacency {
 
+    /// Maximum number of drawers per KGFact subject group included in the
+    /// centrality graph edge set. Planned hardening: prevents O(n²) edge
+    /// explosion on generic subjects shared by many drawers. Drawers beyond
+    /// the cap are excluded from this subject's bonds but still appear as
+    /// isolated or tunnel-bonded nodes (score 0.0 per spec C-16). Parity:
+    /// matches `KGFACT_CLIQUE_CAP` in topology_analysis.rs and
+    /// `NeuronKit.kgFactCliqueCap` in TopologyAnalysis.swift.
+    public static let kgFactGroupCap = 50
+
     /// The (nodeIDs, edges) pair for `keystones`.
     public struct Graph: Sendable {
         /// Live drawer IDs, sorted ascending (stable index space — keystones
@@ -110,14 +119,27 @@ public enum GraphCentralityAdjacency {
         }
 
         // 2. KGFact edges — drawers sharing a subject. Group, sort, pair.
+        //
+        // Planned hardening: cap each subject group at kgFactGroupCap drawers
+        // to prevent O(n²) edge explosion on generic subjects shared by many
+        // drawers. Drawers beyond the cap are excluded from the centrality
+        // graph for that subject — they still appear as isolated or
+        // tunnel-bonded nodes and receive graph score 0.0 (C-16). Cap
+        // value matches NeuronKit.kgFactCliqueCap in TopologyAnalysis.swift
+        // for consistency across the two functions that build KGFact edges.
         var bySubject: [String: Set<String>] = [:]
         for fact in facts where live.contains(fact.sourceDrawerID) {
             bySubject[fact.subject, default: []].insert(fact.sourceDrawerID)
         }
         // Subjects sorted for a deterministic edge sequence.
         for subject in bySubject.keys.sorted() {
-            let members = bySubject[subject]!.sorted()
-            guard members.count >= 2 else { continue }
+            let allMembers = bySubject[subject]!.sorted()
+            guard allMembers.count >= 2 else { continue }
+            // Cap group size: a generic subject bonding hundreds of drawers
+            // would generate O(n²) pairs; kgFactGroupCap keeps it bounded.
+            let members = allMembers.count > GraphCentralityAdjacency.kgFactGroupCap
+                ? Array(allMembers.prefix(GraphCentralityAdjacency.kgFactGroupCap))
+                : allMembers
             for i in 0..<members.count {
                 for j in (i + 1)..<members.count {
                     edges.append((members[i], members[j]))

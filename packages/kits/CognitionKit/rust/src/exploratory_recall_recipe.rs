@@ -44,11 +44,6 @@ use uuid::Uuid;
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 use crate::error::{RecipeRunError, SubstrateError};
 
-/// Restart probability from cookbook § 7.4 (mirrors Swift's
-/// `RandomWalks.defaultRestartProb` and the Rust constant in
-/// `random_walks.rs`).
-const DEFAULT_RESTART_PROB: f32 = 0.15;
-
 // MARK: - Result type
 
 /// One recalled drawer from an exploratory walk: the drawer id and its
@@ -92,6 +87,13 @@ pub struct ExploratoryRecallOutput {
 /// - `restart_probability`  — teleport-home probability per step, in [0, 1).
 /// - `k`                    — top-k results to return (0 = all except seed).
 ///
+/// Maximum walk steps accepted from caller input. Walks beyond this bound
+/// exhaust CPU proportionally (O(steps)) and offer diminishing visit-count
+/// differentiation past ~50k steps on any realistic estate graph. Clamped,
+/// not rejected, so callers requesting absurdly large walks degrade
+/// gracefully rather than panic. CK-4 planned hardening.
+const MAX_WALK_STEPS: usize = 50_000;
+
 /// Returns an `ExploratoryRecallOutput` or a `RecipeRunError`.
 pub fn run_exploratory_recall(
     coord: &EstateCoordinator,
@@ -108,6 +110,17 @@ pub fn run_exploratory_recall(
         &shipped_capabilities(),
     )
     .map_err(|e| SubstrateError::new("capability_gate", format!("{e:?}")))?;
+
+    // CK-4: Sanitise walk parameters before passing to walk_with_restart.
+    // Unvalidated inputs can cause:
+    //   • steps == 0    → empty visit map (silently useless)
+    //     steps >> N    → O(steps) CPU proportional to caller input (DoS)
+    //   • restart_probability >= 1.0 → walk always teleports, never progresses
+    //     restart_probability < 0.0  → undefined PRNG behaviour in the engine
+    //
+    // Clamp rather than return Err: degrades gracefully, matches Swift parity.
+    let safe_steps = steps.clamp(1, MAX_WALK_STEPS);
+    let safe_restart = restart_probability.clamp(0.0_f32, 0.999_f32);
 
     // 1. Read the tunnel graph via the coordinator (I-2: no direct substrate).
     let tunnels = coord
@@ -154,10 +167,11 @@ pub fn run_exploratory_recall(
     let rng_seed = fnv::hash64(seed_drawer_id);
 
     // 6. Run the walk (engine owns all math; B-1, I-1).
+    // Use safe_steps / safe_restart — clamped to valid bounds above (CK-4).
     let visits = RandomWalks::walk_with_restart(
         seed_row_id,
-        steps,
-        restart_probability,
+        safe_steps,
+        safe_restart,
         rng_seed,
         &adjacency,
     );
@@ -258,7 +272,7 @@ mod tests {
         add_directed_edge(&coord, &h, "e2", A_ID, B_ID);
         add_directed_edge(&coord, &h, "e3", B_ID, SEED_ID);
 
-        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, DEFAULT_RESTART_PROB, 0)
+        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, RandomWalks::DEFAULT_RESTART_PROB as f32, 0)
             .unwrap();
         // The seed is excluded from results.
         assert!(!out.results.iter().any(|r| r.drawer_id == SEED_ID));
@@ -276,7 +290,7 @@ mod tests {
         // Only A→B edge; SEED_ID has no edge.
         add_directed_edge(&coord, &h, "e1", A_ID, B_ID);
 
-        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, DEFAULT_RESTART_PROB, 10)
+        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, RandomWalks::DEFAULT_RESTART_PROB as f32, 10)
             .unwrap();
         assert!(out.results.is_empty());
         assert_eq!(out.visited_count, 0);
@@ -291,10 +305,10 @@ mod tests {
         add_directed_edge(&coord, &h, "e3", B_ID, SEED_ID);
 
         let first =
-            run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, DEFAULT_RESTART_PROB, 0)
+            run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, RandomWalks::DEFAULT_RESTART_PROB as f32, 0)
                 .unwrap();
         let second =
-            run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, DEFAULT_RESTART_PROB, 0)
+            run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, RandomWalks::DEFAULT_RESTART_PROB as f32, 0)
                 .unwrap();
         assert_eq!(first, second);
     }
@@ -308,7 +322,7 @@ mod tests {
         add_directed_edge(&coord, &h, "e2", A_ID, B_ID);
         add_directed_edge(&coord, &h, "e3", B_ID, SEED_ID);
 
-        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, DEFAULT_RESTART_PROB, 1)
+        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, RandomWalks::DEFAULT_RESTART_PROB as f32, 1)
             .unwrap();
         assert_eq!(out.results.len(), 1);
     }
@@ -324,7 +338,7 @@ mod tests {
         add_directed_edge(&coord, &h, "e3", B_ID, C_ID);
         add_directed_edge(&coord, &h, "e4", C_ID, B_ID);
 
-        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, DEFAULT_RESTART_PROB, 0)
+        let out = run_exploratory_recall(&coord, &h, WING, SEED_ID, LEN, RandomWalks::DEFAULT_RESTART_PROB as f32, 0)
             .unwrap();
         assert!(!out.results.iter().any(|r| r.drawer_id == B_ID));
         assert!(!out.results.iter().any(|r| r.drawer_id == C_ID));
@@ -344,7 +358,8 @@ mod tests {
     // CK-ER-7: conformance anchor — canonical seed/graph on a three-node
     // directed cycle. Swift and Rust produce the same visit distribution.
     // The recipe excludes the seed from results; A and B both appear.
-    // This fixture uses the canonical RNG seed 0xCAFEBABEDEADBEEF.
+    // The rng_seed is derived inside run_exploratory_recall via
+    // fnv::hash64(seed_drawer_id); this test does not pass a fixed seed.
     //
     // Graph: SEED_ID→A_ID, A_ID→B_ID, B_ID→SEED_ID.
     // steps=1000, restart=0.15, rng derived from FNV.hash64(SEED_ID).
@@ -356,7 +371,7 @@ mod tests {
         add_directed_edge(&coord, &h, "e3", B_ID, SEED_ID);
 
         let out =
-            run_exploratory_recall(&coord, &h, WING, SEED_ID, 1000, DEFAULT_RESTART_PROB, 0)
+            run_exploratory_recall(&coord, &h, WING, SEED_ID, 1000, RandomWalks::DEFAULT_RESTART_PROB as f32, 0)
                 .unwrap();
         // Both A and B must appear in a three-node cycle.
         assert!(out.results.iter().any(|r| r.drawer_id == A_ID));

@@ -38,4 +38,16 @@ struct LexRankTests {
                  + "Zeta eta theta. Gamma delta beta alpha. Unrelated words here now."
         #expect(LexRank.reduce(text, sentences: 2) == LexRank.reduce(text, sentences: 2))
     }
+
+    @Test("negative sentence count returns text unchanged (no trap)")
+    func negativeNReturnsUnchanged() {
+        // Before the guard fix, `.prefix(n)` with a negative n was undefined
+        // behavior in Swift (Int subscript). The n >= 0 guard in reduce(_:sentences:)
+        // now catches this and returns the original text.
+        let text = "The cat sat on the mat. Quantum chromodynamics is hard."
+        // n = -1 must not trap and must return the original text.
+        #expect(LexRank.reduce(text, sentences: -1) == text)
+        // n = Int.min is the extreme case.
+        #expect(LexRank.reduce(text, sentences: Int.min) == text)
+    }
 }

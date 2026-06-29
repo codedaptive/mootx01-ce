@@ -338,7 +338,7 @@ struct DistillationPipelineRunTests {
         let output = DistillationPipeline.run(input: input, extractFeatures: combinedExtractor)
 
         // The SNR gate must pass and Stage 2.5 must exercise the CONVERGENT rescue path.
-        // "status:approved" (df=0.4 < τ=0.6) is rescued by CONVERGENT analysis;
+        // "status:approved" (df=0.2 < τ=0.4 = 2/M with M=5) is rescued by CONVERGENT analysis;
         // all passing features have positive PMI → one component → conf ≥ 0.4 → succeeded=true.
         #expect(output.succeeded == true)
         #expect(output.deltaType == .convergent)

@@ -26,17 +26,17 @@ pub struct CaptureFrame {
     /// Verbatim content to store (rung 1 — exact bytes preserved).
     pub content: String,
 
-    /// How this content was captured. Lands in bits 0–3 of the
-    /// resulting drawer's `operational_bitmap`.
+    /// How this content was captured. Lands in bits 0–5 of the
+    /// resulting drawer's `operational_bitmap` (6-bit field).
     pub channel: CaptureChannel,
 
     /// Adjective sensitivity tier. Defaults to `Normal`.
     ///
-    /// Scale-gapped raw values (0/4/8/12) are shifted left by 4 in
-    /// the adjective bitmap assembly to land in bits 4–7.
+    /// Scale-gapped raw values (0/16/32/48) are packed into bits 6–11
+    /// of the adjective bitmap via `bit_field::write_field`.
     pub sensitivity: AdjectiveSensitivity,
 
-    /// Content kind. Defaults to `Prose`. Lands in bits 4–7 of the
+    /// Content kind. Defaults to `Prose`. Lands in bits 6–11 of the
     /// resulting drawer's `operational_bitmap`.
     pub kind: ContentKind,
 

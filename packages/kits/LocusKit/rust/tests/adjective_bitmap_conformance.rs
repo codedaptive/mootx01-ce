@@ -273,14 +273,14 @@ fn composite_four_axis_roundtrip() {
 }
 
 // ============================================================
-// dreaming_recalc_required (cookbook §2.3 bit 26, §2.8 row 23, F17 cascade)
+// dreaming_recalc_required (cookbook §2.3 bit 26, F17 cascade)
 // ============================================================
 
 #[test]
 fn dreaming_recalc_required_at_bit_26() {
     use locus_kit::drawer::Drawer;
     // Default zero ⇒ flag false.
-    let mut d = Drawer::new("d", "c", "w", "r", "test", 0, "minilm-v6");
+    let mut d = Drawer::new("d", "c", "test-parent", "test", 0, "minilm-v6");
     assert!(!d.dreaming_recalc_required());
 
     // Bit 26 set ⇒ flag true.
@@ -297,7 +297,7 @@ fn dreaming_recalc_required_composes_with_other_fields() {
     use locus_kit::adjectives::{State, Trust};
     use locus_kit::drawer::Drawer;
     let raw: i64 = State::Active.raw_value() | (Trust::Canonical.raw_value() << 18) | (1i64 << 26);
-    let mut d = Drawer::new("d", "c", "w", "r", "test", 0, "minilm-v6");
+    let mut d = Drawer::new("d", "c", "test-parent", "test", 0, "minilm-v6");
     d.adjective_bitmap = raw;
     assert_eq!(d.adjective_bitmap & 0x3F, State::Active.raw_value());
     assert_eq!(

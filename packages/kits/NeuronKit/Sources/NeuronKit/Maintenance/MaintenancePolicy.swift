@@ -106,6 +106,52 @@ public protocol MaintenancePolicyStore: Sendable {
 
     /// Persist the policy. Subsequent `loadPolicy()` calls return it.
     func savePolicy(_ policy: MaintenancePolicy) async throws
+
+    /// Load the persisted daemon cycle state, or `nil` if none has been saved
+    /// (the daemon then starts from its in-memory defaults). Loaded once on
+    /// `loadPersistedPolicy()` so a restart continues from the prior run's
+    /// idempotency/cycle memory (F6 / ADR-020).
+    func loadDaemonState() async throws -> MaintenanceDaemonState?
+
+    /// Persist the daemon cycle state. The daemon calls this after each cycle.
+    /// The default implementation is a no-op (in-memory only, lost on restart);
+    /// the manifest-backed store overrides it to persist across restarts.
+    func saveDaemonState(_ state: MaintenanceDaemonState) async throws
+}
+
+public extension MaintenancePolicyStore {
+    /// Default: no daemon state persisted (returns nil, start fresh each run).
+    func loadDaemonState() async throws -> MaintenanceDaemonState? { nil }
+    /// Default: discard — production hosts override to persist across restarts.
+    func saveDaemonState(_ state: MaintenanceDaemonState) async throws {}
+}
+
+/// The maintenance daemon's actor-local cycle state, captured for persistence
+/// so a restart continues from where the prior run left off instead of
+/// repeating suppressed proposals or resetting its counters (F6 / ADR-020).
+///
+/// - `lastTickAt`: the timer-path cadence baseline.
+/// - `lastAuditCheckAt`: the last time the audit-integrity check ran.
+/// - `proposedKeys`: maintenance proposal keys already emitted (never repeated).
+///   Stored as a SORTED array so the serialized manifest value is byte-stable.
+/// - `cycleCount`: number of cycles run.
+public struct MaintenanceDaemonState: Sendable, Equatable, Codable {
+    public var lastTickAt: Date?
+    public var lastAuditCheckAt: Date?
+    public var proposedKeys: [String]
+    public var cycleCount: Int
+
+    public init(
+        lastTickAt: Date?,
+        lastAuditCheckAt: Date?,
+        proposedKeys: [String],
+        cycleCount: Int
+    ) {
+        self.lastTickAt = lastTickAt
+        self.lastAuditCheckAt = lastAuditCheckAt
+        self.proposedKeys = proposedKeys
+        self.cycleCount = cycleCount
+    }
 }
 
 /// In-memory `MaintenancePolicyStore` for tests and for hosts that do

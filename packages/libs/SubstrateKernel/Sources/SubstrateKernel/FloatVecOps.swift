@@ -42,8 +42,8 @@
 //   Engram.zero through FloatSimHash.
 //
 // dot(a, b):
-//   sum = 0.0f; for (x, y) in zip(a, b): sum = sum + x*y; return sum
-//   Precondition: a.count == b.count. Caller is responsible.
+//   sum = 0.0f; for i in 0..<a.count: sum += a[i] * b[i]; return sum
+//   Precondition: a.count == b.count (hard-aborts via precondition).
 //
 // cosine(a, b):
 //   Defined ONLY for L2-normalised inputs (norm ≈ 1.0). For unit
@@ -112,10 +112,9 @@ public enum FloatVecOps {
 
     /// Dot product of two equal-length float vectors.
     ///
-    /// Precondition: `a.count == b.count`. The precondition is
-    /// enforced in Debug builds; Release builds will produce
-    /// a truncated result if the lengths differ (the shorter
-    /// vector's length is used via `zip`).
+    /// Precondition: `a.count == b.count`. Dimension mismatch triggers
+    /// a `precondition` failure. The implementation uses direct index
+    /// access over `a.count` — no truncation occurs on mismatch.
     ///
     /// - Returns: `sum(a[i] * b[i])` over all indices.
     @inlinable

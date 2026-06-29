@@ -39,9 +39,11 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
     /// scope for this scaffold and arrive with the Brain layer.
     case rejectedByLexicon(verb: String, noun: String)
 
-    /// A `reanchor` frame supplied neither `toRoom` nor `toLattice`.
-    /// Raised at the GLK boundary before dispatch so an empty reanchor
-    /// does not reach the substrate as a no-op write.
+    /// A `reanchor` frame supplied none of `toRoom`, `toWing`, or
+    /// `toLattice`. Raised at the GLK boundary before dispatch so an
+    /// empty reanchor (no destination specified at all) does not reach
+    /// the substrate as a no-op write. The verb surface accepts a frame
+    /// when any one of the three optional fields is non-nil.
     case emptyReanchor(rowID: RowID)
 
     /// An `expunge` frame's `confirmation` flag was false. Raised at
@@ -71,7 +73,7 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
         case let .rejectedByLexicon(verb, noun):
             return "verb '\(verb)' is not accepted on noun '\(noun)' by the AriaLexicon §7.2 acceptance matrix"
         case let .emptyReanchor(rowID):
-            return "reanchor on row '\(rowID)' supplied neither toRoom nor toLattice"
+            return "reanchor on row '\(rowID)' supplied none of toRoom, toWing, or toLattice"
         case let .expungeNotConfirmed(rowID):
             return "expunge on row '\(rowID)' requires confirmation=true"
         case let .crossKitVectorDeleteFailed(rowID, reason):

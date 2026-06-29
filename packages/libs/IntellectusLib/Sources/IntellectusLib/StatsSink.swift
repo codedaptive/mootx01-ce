@@ -37,9 +37,11 @@ public protocol StatsSink: Sendable {
 
     /// Deliver one telemetry sample to this sink.
     ///
-    /// Called only when monitoring is enabled (`Intellectus.isEnabled`
-    /// is `true`). Never called when monitoring is disabled — the
-    /// short-circuit gate in `Intellectus.report(_:)` prevents it.
+    /// Callers routed through `Intellectus.report(_:)` only reach this
+    /// method when `Intellectus.isEnabled` is `true` — that facade owns
+    /// the short-circuit gate. The protocol method is public; concrete
+    /// sink implementations do not enforce the gate themselves and may
+    /// be called directly.
     ///
     /// - Parameter sample: The telemetry datum to receive.
     func receive(_ sample: StatSample)

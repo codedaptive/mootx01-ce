@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-05-18
-last_updated: 2026-06-14
+last_updated: 2026-06-20
 phase: B
 ---
 
@@ -21,6 +21,14 @@ the kernel layer with new backends or new ops.
 ```
 substrate_math_performance/
 ├── README.md                              this file
+├── V1_1_IMPLEMENTATION_BAKEOFFS_2026-06-17.md
+│                                             v1.1 tests for choosing between
+│                                             competing correct implementations
+├── V1_1_BAKEOFF_FINDINGS_2026-06-17.md
+│                                             generated B1-B10 findings
+├── bakeoffs/
+│   └── run_v1_1_bakeoffs.py                 deterministic B1-B10 runner
+├── benchmarks/results/                       generated measurement JSON
 ├── GeniusLocusReference/                  Swift reference port (library only)
 │   ├── Package.swift
 │   ├── glref-swift-PortableKernel.swift   trait + dispatcher + KernelKind
@@ -33,9 +41,9 @@ substrate_math_performance/
 ├── metal/                                 Metal compute shaders
 │   └── glref-metal-hamming_nn.metal       (rejected at large N,
 │                                           retained; see Phase 2.δ-2)
-└── test-harness/                          conformance harness (benchmark
+└── test-harness/                          conformance harness (kernel
     │                                       sweep not yet ported — see below)
-    ├── vectors/                            28 JSON test-vector files
+    ├── vectors/                            29 JSON test-vector files
     │                                       (+ locuskit/ subdir, 4 files)
     ├── swift/                              Swift harness (SwiftPM)
     │   ├── Package.swift
@@ -51,10 +59,7 @@ substrate_math_performance/
     │   └── src/bin/
     │       ├── gen_vectors.rs
     │       └── validate_vectors.rs
-    └── (benchmarks/results/)               NOT PRESENT — the benchmark
-                                            sweep is not yet ported here;
-                                            this gitignored output tree
-                                            appears only once it lands
+    └── vectors/...
 ```
 
 The Rust reference port is no longer a single `rust/` tree here. After
@@ -191,7 +196,7 @@ algorithm changes), regenerate every vector:
 
 ```sh
 cd docs/validation/substrate_math_performance/test-harness/swift
-.build/release/gen-vectors ../vectors/         # overwrites all 28 vectors
+.build/release/gen-vectors ../vectors/         # overwrites all 29 vectors
 ```
 
 Every kernel's `validate-vectors` then re-runs and must PASS.
@@ -261,16 +266,32 @@ Decision records cite the hardware tag in measurement tables so
 that a future reader on different hardware knows whether the
 result transfers.
 
-Benchmark JSONs are gitignored. The schema and its `writeJSON`
-emitter live in the `StressTest` / `TopKBench` sweep sources, which
-are not yet ported into this repo (see the directory-layout note
-above); they land together with the sweep. To compare a current
+Kernel sweep JSONs from `StressTest` / `TopKBench` are not present
+because those executables are not yet ported into this repo. The v1.1
+implementation bakeoff runner writes its own JSON contract under
+`benchmarks/results/{date}-{hardware}/`. To compare a current
 measurement against a historical one, check out the historical
-commit, run
-the same stress-test invocation on the same hardware, and
-compare.
+commit, run the same invocation on the same hardware, and compare.
 
-## Sample sizes and noise
+## v1.1 implementation bakeoffs
+
+The conformance vectors decide whether an implementation is correct.
+The v1.1 bakeoffs decide which correct implementation should ship
+when storage layouts, dense vector indexes, graph caches, SVD
+settings, or recall steering paths compete. The plan is
+`V1_1_IMPLEMENTATION_BAKEOFFS_2026-06-17.md`; the executable runner
+is `bakeoffs/run_v1_1_bakeoffs.py`.
+
+```sh
+python3 bakeoffs/run_v1_1_bakeoffs.py --scale quick
+python3 bakeoffs/run_v1_1_bakeoffs.py --scale standard
+```
+
+The generated findings are written to
+`V1_1_BAKEOFF_FINDINGS_2026-06-17.md`, with per-scale JSON in
+`benchmarks/results/20260617-{hardware}/`.
+
+## Kernel sweep sample sizes and noise
 
 - `--quick` mode uses 10 ms warmup + 40 ms measurement. Suitable
   for iteration; ±5% noise is typical.

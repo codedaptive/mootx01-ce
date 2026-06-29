@@ -10,7 +10,11 @@
 // across processes. Bit-identity guaranteed against the Swift
 // implementation given the same (vector, seed) tuple.
 
+use std::sync::OnceLock;
+
 use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::float_simhash_planes::FloatSimHashPlanes;
+use substrate_kernel::kernel::{PortableKernel, SubstrateKernel};
 use crate::random_walks::SplitMix64;
 
 /// Project a float vector to a 256-bit Fingerprint256 via
@@ -27,26 +31,53 @@ pub fn project(vector: &[f32], seed: u64) -> Fingerprint256 {
     if vector.is_empty() {
         return Fingerprint256::ZERO;
     }
-    let dim = vector.len();
-    let mut blocks: [u64; 4] = [0, 0, 0, 0];
-    let mut rng = SplitMix64::new(seed);
+    // Single canonical leaf: project routes through the SubstrateKernel dispatch
+    // op (SUBSTRATEKERNEL_SPEC § 5.4) rather than an inline loop. `planes`
+    // materializes the ±1 hyperplane set; the kernel applies it (pure
+    // signed-sum-and-sign). The platform kernel is selected once and cached — the
+    // projection is on the hot encode path, so re-selecting per call would re-run
+    // backend detection. A SIMD float backend (1.1) drops in at the kernel with no
+    // change to this call site.
+    let p = planes(seed, vector.len());
+    dispatch_kernel().float_simhash_project(vector, &p)
+}
 
-    for bit_index in 0..256 {
-        let mut sum: f32 = 0.0;
-        for &v_i in vector.iter().take(dim) {
-            // Rademacher (+1/-1) hyperplane entries via the
-            // low bit of the next PRNG output. Matches Swift.
+/// The platform kernel, selected once and reused. On aarch64 (with the SIMD
+/// feature) this is `SimdKernel`, which inherits the scalar
+/// `float_simhash_project` reference until the 1.1 SIMD float backend overrides
+/// it; elsewhere it is `ScalarKernel`.
+fn dispatch_kernel() -> &'static (dyn SubstrateKernel + 'static) {
+    static KERNEL: OnceLock<Box<dyn SubstrateKernel>> = OnceLock::new();
+    KERNEL
+        .get_or_init(PortableKernel::for_current_platform)
+        .as_ref()
+}
+
+/// Materialize the ±1 hyperplane set `project` uses for `dim`, as a
+/// `FloatSimHashPlanes` for the SubstrateKernel dispatch op
+/// `float_simhash_project` (SUBSTRATEKERNEL_SPEC § 5.4).
+///
+/// Generated in the SAME SplitMix64 draw order `project` consumes — 256
+/// hyperplanes outer, `dim` coordinates inner — so the kernel op fed these
+/// planes reproduces `project(vector, seed)` bit for bit. A sign bit is set
+/// when the draw's low bit is 1 (plane = +1), matching `project`'s
+/// `if (u & 1) == 0 { -1.0 } else { 1.0 }`. Deterministic and seed-immutable;
+/// callers cache it per (seed, dim).
+pub fn planes(seed: u64, dim: usize) -> FloatSimHashPlanes {
+    let total = 256 * dim;
+    let mut words = vec![0u64; (total + 63) / 64];
+    let mut rng = SplitMix64::new(seed);
+    let mut bit_index = 0usize;
+    for _ in 0..256 {
+        for _ in 0..dim {
             let u = rng.next();
-            let plane: f32 = if (u & 1) == 0 { -1.0 } else { 1.0 };
-            sum += plane * v_i;
-        }
-        if sum > 0.0 {
-            let block_index = bit_index / 64;
-            let bit_in_block = bit_index % 64;
-            blocks[block_index] |= 1u64 << bit_in_block;
+            if (u & 1) == 1 {
+                words[bit_index >> 6] |= 1u64 << (bit_index & 63);
+            }
+            bit_index += 1;
         }
     }
-    Fingerprint256::new(blocks[0], blocks[1], blocks[2], blocks[3])
+    FloatSimHashPlanes::new(dim, words)
 }
 
 #[cfg(test)]

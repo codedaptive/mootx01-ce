@@ -250,7 +250,7 @@ fn decode_trained_at_secs(value: Option<&TypedValue>) -> Option<i64> {
 /// 'Z' form the SQLite backend writes is supported; any fractional part is
 /// ignored (the kit stores whole-second precision). Returns `None` on a
 /// malformed string.
-fn parse_iso8601_utc(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso8601_utc(s: &str) -> Option<i64> {
     // Expected shape: YYYY-MM-DDTHH:MM:SS optionally followed by .fff and 'Z'.
     let bytes = s.as_bytes();
     if bytes.len() < 19 {

@@ -1,0 +1,18 @@
+[package]
+name = "aria-mcp-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "aria-mcp-server — the standalone reference MCP server binary. A thin stdin/stdout wrapper over the aria_mcp library (packages/kits/AriaMcpKit/rust); the same runtime mootx01 serve runs by linking the library directly. Per the no-FFI law, this is a COMPLETE Rust vertical — it never calls Swift, Swift never calls it."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The reference-server binary. All server logic is in the aria_mcp library;
+# this bin is the stdin/stdout entry point (aria_mcp::runtime::run).
+[[bin]]
+name = "aria-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# The server-logic library lives in AriaMcpKit; this binary just wires it to I/O.
+aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }

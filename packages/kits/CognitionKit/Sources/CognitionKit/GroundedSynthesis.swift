@@ -90,12 +90,10 @@ public struct GroundedSynthesis: Recipe {
         // Spec B-5: verify capabilities before any substrate touch.
         try verifyCapabilities(required: requiredCapabilities)
 
-        // Capture the recipe-start timestamp once at the entry boundary.
-        // Using timeIntervalSince1970 here (not inside the autoclosure) keeps
-        // the ts deterministic per the determinism contract — the emit macro
-        // would evaluate it lazily, which would be fine too, but this is
-        // explicit. When monitoring is disabled, emitRecipeStart is a single
-        // atomic load + branch: zero allocation, no clock read wasted.
+        // Capture the recipe-start timestamp once at the entry boundary for
+        // paired start/complete telemetry. The clock is read unconditionally
+        // regardless of whether monitoring is enabled; it does not affect the
+        // returned value.
         let startTs = Date().timeIntervalSince1970
         // Emit cognitionkit.recipe.run with status "start". Pairs with the
         // "complete" emit at the function exit. When monitoring is off, the

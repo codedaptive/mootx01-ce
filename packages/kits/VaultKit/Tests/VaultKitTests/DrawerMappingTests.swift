@@ -67,8 +67,7 @@ struct DrawerMappingTests {
         let drawer = Drawer(
             id: "drawer-1",
             content: "# Aromatics\nA study of arene rings.",
-            wing: "wing_owner",
-            room: "research",
+            parentNodeId: "test-room-node",
             addedBy: "tester",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "m",
@@ -88,7 +87,9 @@ struct DrawerMappingTests {
             filedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
 
-        let note = DrawerMapping.noteIR(from: drawer, references: [tunnel])
+        // Wing and room are resolved from the node tree (ADR-017); in tests
+        // they are passed directly to the pure projection function.
+        let note = DrawerMapping.noteIR(from: drawer, wing: "wing_owner", room: "research", references: [tunnel])
         // Path: <wing>/<room>/<slug>.md — ADR-016 vault layout; wing is the
         // top-level vault folder. Slug derived from first heading.
         #expect(note.stableSourceKey == "wing_owner/research/aromatics")

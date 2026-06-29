@@ -55,9 +55,9 @@ struct QueryPrecisionTests {
         #expect(NeuronKit.queryPrecision(query: "anything", candidate: "") == 0)
     }
 
-    // QP-5: a query with no distinctive token falls back to coarse Jaccard
-    // and is still total — a fully-overlapping candidate outscores a
-    // disjoint one.
+    // QP-5: when no distinctive token (number or proper noun) is present
+    // the score is driven by content-token overlap — a candidate sharing
+    // more query tokens outscores a disjoint one.
     @Test("no distinctive token falls back to coarse overlap")
     func noDistinctiveFallsBack() {
         let query = "the quick brown fox"
@@ -72,5 +72,46 @@ struct QueryPrecisionTests {
         let a = NeuronKit.queryPrecision(query: "46 marks at Versailles", candidate: "the 46 marks at Versailles")
         let b = NeuronKit.queryPrecision(query: "46 marks at Versailles", candidate: "the 46 marks at Versailles")
         #expect(a == b)
+    }
+
+    // QP-7: sentence-initial stopwords must NOT be treated as distinctive proper
+    // nouns. Before this fix, "What", "Who", "The" at sentence start were flagged
+    // as distinctive (they have uppercase letters), causing the containment gate
+    // in moot_recall_precise to suppress all results for ordinary sentence queries.
+    @Test("sentence-initial stopwords are not distinctive")
+    func sentenceInitialStopwordsAreNotDistinctive() {
+        // "What" is a stopword with a capital letter — not distinctive.
+        let whatDistinctive = NeuronKit.hasDistinctiveTokens("What is the indemnity")
+        #expect(!whatDistinctive,
+            "'What' is a stopword: must not be flagged as a distinctive proper noun")
+
+        // "Who" is a stopword but "Versailles" is not — the query IS distinctive.
+        #expect(NeuronKit.hasDistinctiveTokens("Who signed the Versailles treaty"),
+            "query WITH non-stopword proper noun 'Versailles' IS distinctive even though 'Who' is a stopword")
+        #expect(!NeuronKit.hasDistinctiveTokens("The reserve value of the fund"),
+            "'The' is a stopword: must not be classified as distinctive")
+
+        // The proper noun in the same sentence still makes the query distinctive.
+        #expect(NeuronKit.hasDistinctiveTokens("What happened at Versailles"),
+            "'Versailles' is not a stopword: query IS distinctive")
+
+        // Numeric token is always distinctive regardless of sentence-initial stopword.
+        #expect(NeuronKit.hasDistinctiveTokens("What is the 46 million marks indemnity"),
+            "'46' is a number: query IS distinctive even with leading stopword")
+    }
+
+    // QP-8: containment gate passes for sentence-form queries with no distinctive
+    // tokens (the indemnity recall case — no number, no proper noun after stopword filter).
+    @Test("sentence query without distinctive tokens yields candidates not suppressed")
+    func sentenceQueryDoesNotSuppressCandidates() {
+        // After fix: "What is the indemnity" has no distinctive tokens → gate passes.
+        let satisfied = NeuronKit.containmentSatisfied(
+            query: "What is the indemnity",
+            candidateContents: [
+                "the indemnity was 46 million marks",
+                "indemnity clause three"
+            ])
+        #expect(satisfied,
+            "sentence query with no distinctive tokens must pass the gate (candidates not suppressed)")
     }
 }

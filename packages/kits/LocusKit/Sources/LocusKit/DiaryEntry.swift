@@ -6,11 +6,12 @@ import Foundation
 /// MemPalace surface but are queried separately so that an
 /// agent's diary can be read back chronologically.
 ///
-/// `wing` defaults conventionally to `wing_<agentName>` and
-/// `room` to `"diary"` (callers honour the convention; the
-/// type does not enforce it). The wing-per-agent convention
-/// exists so that one agent's diary cannot leak into another's
-/// search results when wing filtering is applied.
+/// `wing` and `room` are required string fields; callers supply
+/// them directly. No default derivation exists in the type or its
+/// store. The wing-per-agent convention (`wing_<agentName>`,
+/// `room: "diary"`) is a naming suggestion only — callers honour
+/// it to prevent one agent's diary from appearing in another's
+/// wing-filtered recall results.
 ///
 /// `embeddingModelID` is present from Rev 1.0 for the same
 /// reason as on `Drawer`: the modelID-tagging contract must be

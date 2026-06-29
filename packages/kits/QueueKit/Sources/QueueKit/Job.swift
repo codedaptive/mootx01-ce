@@ -1,7 +1,8 @@
 // Job.swift
 //
-// Per QUEUEKIT_SPEC §7. Job, identifier types, ArtifactRef,
-// MissionContext, and the snake_case JSON wire format from §6.
+// Per QUEUEKIT_SPEC §7. Job, identifier types, and ArtifactRef use the
+// snake_case JSON wire format from §6. MissionContext uses default Swift
+// Codable key synthesis (camelCase property names; no custom CodingKeys).
 
 import Foundation
 // ─────────────────────────────────────────────────────────────────

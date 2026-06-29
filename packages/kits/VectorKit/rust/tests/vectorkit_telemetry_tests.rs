@@ -328,7 +328,7 @@ fn find_nearest_metric_shapes() {
 fn find_by_keyword_metric_shape() {
     let _guard = global_lock();
 
-    // Insert 3 drawers with monitoring off.
+    // Insert 3 vector items with monitoring off.
     Intellectus::set_enabled(false);
     let store = make_fresh_store();
     for i in 1u64..=3 {

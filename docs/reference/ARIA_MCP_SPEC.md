@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.4.0
+version: 1.9.0
 status: active
-date: 2026-06-19
+date: 2026-06-28
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -692,6 +692,91 @@ On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
 ## Changelog
+
+### 1.9.0 -- 2026-06-28
+Security hardening — three ARIA tool gate changes (secfix/batch2-aria). Framed as
+planned hardening to lock down prompt-injection attack surfaces.
+
+(1) **`moot_erase_memory` gate** — the `confirmed=true` + `reason` requirement is
+now enforced at the AriaMcpKit boundary BEFORE calling the substrate. A prompt-injected
+agent that receives `confirmed=false` (or omits `confirmed`) cannot trigger irreversible
+erasure regardless of any other argument. Tool stays on the surface; gate is the defense.
+Both ports updated. Schema unchanged; field was already present.
+
+(2) **Federated-search requester anti-spoof** — `requesterEstateID` in
+`moot_federated_search` is now OPTIONAL. When omitted the requester is bound to the
+default (authenticated caller) estate. When supplied it must match the default estate's
+UUID exactly; a different UUID is refused (anti-spoof gate). This prevents a prompt-injected
+agent from spoofing another estate's identity to escalate cross-estate read scope.
+`required` array changed from `["requesterEstateID"]` to `[]`. Both ports updated.
+
+(3) **Direct estate routing restricted to default estate** — `estateID` in direct MCP
+tool calls (all Tier 1–5 interface tools, recipe tools, vault tools, lens primary estate)
+is restricted to the default estate. A present `estateID` that names any registered
+non-default estate is refused with `invalidParams`. Callers must use `moot_federated_search`
+for grant-authorized cross-estate reads. Lens comparison tools (`moot_lens_overlap`,
+`moot_lens_divergence`) are explicitly exempted for their `estateIDB` argument. Both ports
+updated.
+
+### 1.8.1 -- 2026-06-28
+Security (HTTP transport — both ports, both surfaces):
+
+(1) **Origin-check hardening** — `HTTPServer.isOriginAllowed` and `HTTPReadAPI.isOriginAllowed`
+now validate the suffix after the loopback scheme+host prefix (must be empty or `:PORT`) instead
+of a bare prefix check. A bare prefix check accepted attacker-owned names like `localhost.evil`
+or `127.0.0.1.evil` DNS-resolved to loopback (the DNS-rebinding prefix-spoof vector). Both
+ports (Swift + Rust) updated in lockstep: AriaMcpKit `HTTPServer`, moot-mgr `HTTPReadAPI`.
+Tests added in `HTTPServerTests`, `HTTPReadAPITests`, `http_transport_tests.rs`,
+`http_control_tests.rs`.
+
+(2) **`moot_palace_import` vault gate** — `moot_palace_import` is now hidden from `tools/list`
+and refused at dispatch when `MOOTX01_VAULT=0` (installed with `--vault-off`). The tool opens
+arbitrary SQLite files from the local filesystem; gating it under the vault surface matches the
+security posture of vault import/export and mitigates an arbitrary-path-traversal vector
+(a caller could pass any filesystem path). Vault-off tool count: 57 → 56. Both ports updated.
+
+### 1.8.0 -- 2026-06-25
+Changed (T5 — drain lifecycle): (1) **daemon resume-on-restart** — opening an
+estate now EAGER-mounts the corpus's lease-gated drain worker, so a restarted
+resident drains a non-empty persisted queue immediately instead of waiting for a
+fresh capture. (Swift already eager-mounted via `wireSubstores`; Rust now mounts
+in `wire_sqlite_semantic_recall` rather than lazily on first capture — a fixed
+Swift/Rust parity gap.) (2) **detached stdio finisher** — a direct-open stdio
+`serve`, on exit with encode work still queued, spawns a detached `mootx01 drain`
+that takes the T3 lease and drains to empty, so a client SIGKILL on disconnect no
+longer abandons the queue. The finisher detaches via `setsid` (unix) /
+`DETACHED_PROCESS` (windows) and is gated on the maildir actually having pending
+work. Both ports.
+
+### 1.7.0 -- 2026-06-25
+Changed (T4 — serve lease-aware transport): an stdio `serve` now **forwards** to a
+live resident that serves the same estate instead of opening a second direct
+writer. On start it checks a resident-written estate marker (`mootx01.estate`)
+against its own estate and, on match, probes the resident port (`daemon.port`);
+if the resident answers it runs the stdin→loopback-HTTP bridge (the `proxy`
+path), so all traffic funnels through the one resident writer and the resident's
+in-RAM derived state stays coherent. If no resident answers (stale marker) it
+opens the estate directly. Detection is a port probe + estate-marker match
+(uniform Swift↔Rust, dep-free) — not PID-liveness. Both ports.
+
+### 1.6.0 -- 2026-06-25
+Changed (T1 — encode mode): `moot_palace_import`'s caller-facing knob is now
+`mode` (foreground/background encode SPEED), not `batch`. Contract: the caller
+declares SPEED only; the server chooses the WRITE strategy automatically by
+source size. Foreground/background select the drain's embed concurrency (all
+cores vs ~a quarter) and never change the encoded output — byte-identical either
+way. Unknown `mode` is a fail-closed invalid-params error. Both ports conform.
+
+### 1.5.0 -- 2026-06-25
+Additive (T6 — drain status): new maintenance tool `moot_drain_status` joins the
+behavioral surface. It is a read-only observer of the estate's long-running
+background drains (today only `corpus_encode`, the encode/ingest queue): it reads
+each drain's pending + in-flight frontiers and reports a draining/idle state plus
+optional detail, never claiming or draining. Contract guarantees: (1) read-only —
+polling it has no effect on drain progress and is safe from any process; (2)
+honest empties — `drains: none` (no drain registered, e.g. a bare estate) is
+distinct from a drain listed at `pending: 0, in_flight: 0` (idle); (3) no
+session-protocol block, so it is cheap to poll. Both ports conform.
 
 ### 1.3.0 -- 2026-06-17
 Additive (mission BRAIN-PREF-PRODUCER — Bradley-Terry preference producer, both

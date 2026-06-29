@@ -111,6 +111,13 @@ extension SQLiteStorage: StorageIntrospection {
 actor SQLiteBackend {
     let connection: SQLiteConnection
     private var inTransaction: Bool = false
+    /// Blob change notifications buffered while a transaction is open.
+    ///
+    /// putBlob/deleteBlob append here instead of calling notifyBlobChange
+    /// directly when `inTransaction == true`. On COMMIT they are flushed to
+    /// observers; on ROLLBACK they are discarded. This ensures rolled-back blob
+    /// writes never reach incremental replication sessions (SECFIX-WS2-PK F3).
+    private var pendingBlobNotifications: [BlobChange] = []
     let observerRegistry: SQLiteObserverRegistry?
     /// Retained on openSchema so queryRows can resolve declared
     /// column types (bool, uuid, timestamp, bitmap, hlc, generated)
@@ -145,6 +152,39 @@ actor SQLiteBackend {
     private func notifyBlobChange(_ change: BlobChange) {
         if let r = observerRegistry {
             Task { await r.notifyBlob(change) }
+        }
+    }
+
+    // MARK: - SQL identifier validation (SECFIX-WS2-PK F1)
+
+    /// Validate a caller-supplied SQL identifier (column or table name).
+    ///
+    /// Accepts only names matching `[A-Za-z_][A-Za-z0-9_]*`. This is the safe
+    /// subset of SQLite identifier syntax: no spaces, no `"` characters, no
+    /// SQL keywords embedded via special characters. Any name that LocusKit's
+    /// schema declares will pass this check; the gate rejects adversarial inputs
+    /// before they can be embedded in a dynamically-constructed SELECT list.
+    private func validateSQLIdentifier(_ name: String) throws {
+        guard !name.isEmpty else {
+            throw StorageError.invalidIdentifier(name: name)
+        }
+        for (index, char) in name.unicodeScalars.enumerated() {
+            let valid: Bool
+            if index == 0 {
+                // First character: letter or underscore.
+                valid = (char >= "A" && char <= "Z")
+                    || (char >= "a" && char <= "z")
+                    || char == "_"
+            } else {
+                // Subsequent characters: letter, digit, or underscore.
+                valid = (char >= "A" && char <= "Z")
+                    || (char >= "a" && char <= "z")
+                    || (char >= "0" && char <= "9")
+                    || char == "_"
+            }
+            guard valid else {
+                throw StorageError.invalidIdentifier(name: name)
+            }
         }
     }
 
@@ -253,6 +293,12 @@ actor SQLiteBackend {
         case .dropTable(let name):
             try connection.exec("DROP TABLE IF EXISTS \"\(name)\"")
         case .addColumn(let table, let column):
+            // Idempotent (mirrors CREATE TABLE IF NOT EXISTS): the fresh-DB path
+            // creates every table at the latest schema before replaying migrations
+            // from version 0, so an addColumn migration may target a column that
+            // already exists. SQLite has no ADD COLUMN IF NOT EXISTS, so probe the
+            // table's existing columns and skip when the column is already present.
+            if try columnExists(table: table, column: column.name) { break }
             var sql = "ALTER TABLE \"\(table)\" ADD COLUMN \"\(column.name)\" \(SQLiteSchema.nativeType(column.type))"
             if !column.nullable { sql += " NOT NULL DEFAULT " + SQLiteSchema.literalSQL(column.defaultValue ?? .null) }
             try connection.exec(sql)
@@ -267,6 +313,19 @@ actor SQLiteBackend {
         case .custom(let sqliteSQL, _):
             if let sql = sqliteSQL { try connection.exec(sql) }
         }
+    }
+
+    /// True when `table` already has a column named `column`.
+    /// Used to make `.addColumn` idempotent (SQLite lacks ADD COLUMN IF NOT
+    /// EXISTS). PRAGMA table_info returns one row per column; column index 1 is
+    /// the column name.
+    private func columnExists(table: String, column: String) throws -> Bool {
+        let stmt = try connection.prepare("PRAGMA table_info(\"\(table)\")")
+        defer { stmt.finalize() }
+        while try stmt.step() {
+            if stmt.columnText(1) == column { return true }
+        }
+        return false
     }
 
     func currentSchemaVersion(kitID: String?) throws -> Int {
@@ -318,17 +377,72 @@ actor SQLiteBackend {
             let result = try await block(txn)
             try connection.exec("COMMIT")
             inTransaction = false
+            // Flush blob notifications now that the transaction has committed to disk.
+            // These were buffered during the transaction so a ROLLBACK would discard
+            // them (SECFIX-WS2-PK F3): rolled-back blob writes must not reach
+            // replication sessions.
+            let pending = pendingBlobNotifications
+            pendingBlobNotifications.removeAll()
+            for change in pending { notifyBlobChange(change) }
             return result
         } catch {
             try? connection.exec("ROLLBACK")
             inTransaction = false
+            // Discard blob notifications for the rolled-back transaction.
+            pendingBlobNotifications.removeAll()
             throw error
         }
+    }
+
+    // MARK: - Explicit transaction boundary (GLK_BATCH1)
+
+    /// Open a serializable write transaction on the underlying SQLite connection.
+    ///
+    /// Uses `BEGIN IMMEDIATE` so that the write lock is acquired upfront,
+    /// preventing "cannot start a transaction within a transaction" failures
+    /// under WAL mode. Callers must pair every `beginTransactionDirect` with
+    /// exactly one `commitTransactionDirect` or `rollbackTransactionDirect`.
+    func beginTransactionDirect() throws {
+        if inTransaction {
+            throw StorageError.transactionConflict(detail: "nested transactions not supported")
+        }
+        try connection.exec("BEGIN IMMEDIATE")
+        inTransaction = true
+    }
+
+    /// Commit the transaction opened by `beginTransactionDirect`.
+    ///
+    /// Flushes any blob change notifications buffered during the transaction
+    /// to observers now that the writes are durably committed (SECFIX-WS2-PK F3).
+    func commitTransactionDirect() throws {
+        try connection.exec("COMMIT")
+        inTransaction = false
+        let pending = pendingBlobNotifications
+        pendingBlobNotifications.removeAll()
+        for change in pending { notifyBlobChange(change) }
+    }
+
+    /// Roll back the transaction opened by `beginTransactionDirect`,
+    /// discarding all changes since `BEGIN IMMEDIATE`.
+    ///
+    /// Discards buffered blob notifications — the rolled-back writes must not
+    /// reach replication sessions (SECFIX-WS2-PK F3).
+    func rollbackTransactionDirect() throws {
+        try? connection.exec("ROLLBACK")
+        inTransaction = false
+        pendingBlobNotifications.removeAll()
     }
 
     // MARK: - Row operations
 
     func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
+        // SQL-identifier injection guard (CAND-047): column names from the
+        // caller-supplied `values` map reach the INSERT column list directly.
+        // A name containing `"` or `;` can escape double-quote delimiters and
+        // alter the query. The shared `validateSQLIdentifier` (same check used
+        // by `queryProjected` and the Postgres backend) rejects any name outside
+        // `[A-Za-z_][A-Za-z0-9_]*` — one seam, no forked validator.
+        for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2/3): encrypt the content column
         // and stamp the key identifier before binding. No-op for mode 1.
         let values = try encryptedForWrite(values, config: encryptionConfig)
@@ -370,6 +484,12 @@ actor SQLiteBackend {
     // extend the encryption seam symmetrically with insertRow before this
     // guard would let such a write through.
     func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
+        // SQL-identifier injection guard (CAND-047): validate both the value-map
+        // column names and the conflict-column list before interpolating into the
+        // INSERT … ON CONFLICT … DO UPDATE SQL. Mirrors the Rust backend guard
+        // and the Postgres backend guard — shared seam, no forked validator.
+        for name in values.keys { try validateSQLIdentifier(name) }
+        for name in conflictColumns { try validateSQLIdentifier(name) }
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         let sortedKeys = values.keys.sorted()
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
@@ -396,6 +516,11 @@ actor SQLiteBackend {
     }
 
     func updateRows(table: String, values: [String: TypedValue], where predicate: StoragePredicate) throws -> Int {
+        // SQL-identifier injection guard (CAND-047): column names from the
+        // caller-supplied `values` map reach the UPDATE SET clause directly.
+        // Mirrors the Rust backend guard and the Postgres backend guard —
+        // shared seam, no forked validator.
+        for name in values.keys { try validateSQLIdentifier(name) }
         // Structural content/keyID invariant (FUP-D): updateRows does not run
         // the encryption seam, so a content update on an encrypting estate
         // would write plaintext with a null keyID. Guard it like the other
@@ -465,10 +590,19 @@ actor SQLiteBackend {
         // Column projection (no-blob read): a non-nil `columns` list emits an
         // explicit SELECT of exactly those columns, so an unnamed column (e.g.
         // "content") is never read out of SQLite. A nil projection is the
-        // historical full `SELECT *`. Identifiers are quoted; an empty list
-        // degrades to `*` rather than producing invalid SQL.
+        // historical full `SELECT *`. Identifiers are validated and quoted; an
+        // empty list degrades to `*` rather than producing invalid SQL.
+        //
+        // Validation gate (SECFIX-WS2-PK F1): caller-supplied column names are
+        // embedded into the SQL SELECT list. Double-quoting is not sufficient
+        // protection if a name contains `"` — the quote can escape the
+        // double-quote delimiter and alter the query. Reject any name that is
+        // not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
         let projection: String
         if let columns, !columns.isEmpty {
+            for name in columns {
+                try validateSQLIdentifier(name)
+            }
             projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
         } else {
             projection = "*"
@@ -867,10 +1001,16 @@ actor SQLiteBackend {
         try stmt.bind(.text(key), at: 1)
         try stmt.bind(.blob(bytes), at: 2)
         _ = try stmt.step()
-        // Notify blob subscribers after a successful write. The bytes are
-        // carried in the notification so the incremental replication session
-        // can propagate the value without a second round-trip to the source.
-        notifyBlobChange(BlobChange(key: key, event: .put, bytes: bytes))
+        // Buffer the notification when inside a transaction (SECFIX-WS2-PK F3).
+        // The SQLite row is written but not yet committed; emitting now would let
+        // replication sessions see a row that may be rolled back. The notification
+        // is flushed on COMMIT or discarded on ROLLBACK.
+        let change = BlobChange(key: key, event: .put, bytes: bytes)
+        if inTransaction {
+            pendingBlobNotifications.append(change)
+        } else {
+            notifyBlobChange(change)
+        }
     }
 
     func getBlob(_ key: BlobKey) throws -> Data? {
@@ -886,10 +1026,14 @@ actor SQLiteBackend {
         defer { stmt.finalize() }
         try stmt.bind(.text(key), at: 1)
         _ = try stmt.step()
-        // Notify blob subscribers after a successful delete. bytes is nil for
-        // delete events — the incremental session only needs the key to issue
-        // a delete on the destination.
-        notifyBlobChange(BlobChange(key: key, event: .delete, bytes: nil))
+        // Buffer the notification when inside a transaction (SECFIX-WS2-PK F3).
+        // Mirrors the put path: flush on COMMIT, discard on ROLLBACK.
+        let change = BlobChange(key: key, event: .delete, bytes: nil)
+        if inTransaction {
+            pendingBlobNotifications.append(change)
+        } else {
+            notifyBlobChange(change)
+        }
     }
 
     func blobExists(_ key: BlobKey) throws -> Bool {

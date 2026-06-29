@@ -144,6 +144,10 @@ impl PostgresDrawerStore {
 // ---------------------------------------------------------------------------
 
 impl DrawerStore for PostgresDrawerStore {
+    fn storage(&self) -> Option<std::sync::Arc<dyn persistence_kit::storage::Storage>> {
+        self.0.storage()
+    }
+
     fn read_manifest(&self) -> Result<crate::manifest::ManifestValues, LocusKitError> {
         self.0.read_manifest()
     }
@@ -209,6 +213,27 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.all_drawers_bounded_projected(limit)
     }
 
+    // Forwarding overrides for the DESC bounded scan methods. Without these,
+    // trait-object dispatch (Arc<dyn DrawerStore>) hits the O(estate) default
+    // (load all_drawers, reverse, truncate) instead of the efficient
+    // (filed_at DESC, id DESC, LIMIT) query in DrawerStoreCore. Forwarding
+    // here ensures PostgreSQL estates also take the O(cap) bounded path
+    // (c-recall-portable fix).
+
+    fn all_drawers_bounded_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.all_drawers_bounded_desc(limit)
+    }
+
+    fn all_drawers_bounded_projected_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.all_drawers_bounded_projected_desc(limit)
+    }
+
     fn drawer_ids(&self) -> Result<Vec<crate::estate_types::RowID>, LocusKitError> {
         self.0.drawer_ids()
     }
@@ -260,6 +285,10 @@ impl DrawerStore for PostgresDrawerStore {
     ) -> Result<(), LocusKitError> {
         self.0
             .mutate_state(drawer_id, new_state, via, changed_by, reason, now)
+    }
+
+    fn lineage_chain(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.0.lineage_chain(drawer_id)
     }
 
     fn expunge_gated(
@@ -333,6 +362,36 @@ impl DrawerStore for PostgresDrawerStore {
         // (Estate::all_tunnels), so the read is delegated to DrawerStoreCore's
         // real backend implementation.
         self.0.all_tunnels()
+    }
+
+    // Retirement methods forward to DrawerStoreCore — T13 / ADR-021 Phase 7.
+    fn retire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
+        self.0.retire_tunnel(tunnel_id, changed_by, now)
+    }
+
+    fn unretire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
+        self.0.unretire_tunnel(tunnel_id, changed_by, now)
+    }
+
+    fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.0.outline_children(parent_drawer_id)
+    }
+
+    fn outline_ancestors(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.0.outline_ancestors(drawer_id)
+    }
+
+    fn reparent_drawer(
+        &self,
+        child_id: &str,
+        new_parent_id: Option<&str>,
+        order_key: f64,
+        wing: &str,
+        room: &str,
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.reparent_drawer(child_id, new_parent_id, order_key, wing, room, added_by, now)
     }
 
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
@@ -568,6 +627,13 @@ impl DrawerStore for PostgresDrawerStore {
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.0.seal_expunge_orphan_for_sweep(drawer_id, changed_by, now)
+    }
+
+    fn wipe_all_content(&self) -> Result<(), LocusKitError> {
+        // DrawerStoreCore::wipe_all_content runs UPDATE drawers SET content=''
+        // WHERE 1=1 via the shared Arc<dyn Storage>. Forwards to the core
+        // rather than duplicating the UPDATE logic here.
+        self.0.wipe_all_content()
     }
 
     fn list_wings(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {

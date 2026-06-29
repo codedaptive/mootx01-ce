@@ -23,9 +23,11 @@
 // §8  hybrid.getDrawers — hybrid lane (#55): forced getDrawers failure
 // §9  corpusOnly.getDrawers — corpusOnly lane (#61): forced getDrawers failure
 //
-// §10 Happy path — degradedStages is empty when no seam fires
+// §10 Happy path — degradedStages always empty when no seam fires
 // §11 Counter gate — each degraded stage emits its metric name
-// §12 Happy path unchanged — scores from un-degraded stages are present
+// §12 Counter gate (MARK level) — counters increment per forced failure
+// §13 Scoring-fallback disposition — matrixAware/rrf surfaced as degraded
+// §11 (separate suite) LocusKit recall internal-read failures (P0-5 sites 1-5)
 //
 // INTELLECTUS LOCK: all tests that toggle Intellectus or call GLK methods
 // that cross telemetry emit sites hold withIntellectusLock for their entire
@@ -422,8 +424,9 @@ struct PoolGetDrawersDegradationTests {
 
     @Test("happy path: degradedStages empty and matrix columns can be non-zero with a registered MatrixTier")
     func happyPathWithMatrix() async throws {
-        // Build an estate, force-feed a matrix tier so fieldFit/coOccurrence have data,
-        // then confirm degradedStages is empty and the matrix column values are not all zero.
+        // Build an estate with a registered MatrixTier and confirm degradedStages is empty.
+        // The matrix is rebuilt from an empty audit log so all scores are 0; the coverage
+        // proves healthy matrix-tier non-degradation, not non-zero matrix columns.
         let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "pool-hp")
 
         // Build a minimal MatrixTier from an empty audit log (all scores will be 0 — the
@@ -805,6 +808,107 @@ struct ScoringFallbackDispositionTests {
         let result = try await kit.recall(handle, hybridRequest())
         #expect(!result.degradedStages.contains("hybrid.matrixAware"),
             "rrf on hybrid is real fusion, not a fallback; got \(result.degradedStages)")
+    }
+}
+
+// MARK: - §14 corpusOnly → locusOnly allowDegraded stage vocabulary
+
+/// Verifies that when `corpusOnly` with `allowDegraded` degrades to `locusOnly`
+/// (no corpus registered), the result carries the CORPUS-LEVEL stage vocabulary,
+/// not the LOCUS-LEVEL vocabulary the inner recallLocusOnly call would emit.
+///
+/// Before the Part 6 fix: `recallLocusOnly` appended "locusOnly.matrixAware"
+/// even when it was being called as a corpusOnly degradation. The caller had
+/// requested a corpusOnly recall; the correct stages are:
+///   "corpusOnly.degraded" — corpus was unavailable, fell back to locusOnly
+///   "corpusOnly.matrixAware" — matrixAware requested; applied RRF fallback
+/// The wrong stage "locusOnly.matrixAware" must NOT appear.
+@Suite("§14 Degradation — corpusOnly allowDegraded stage vocabulary", .serialized)
+struct CorpusOnlyAllowDegradedVocabularyTests {
+
+    /// Open a bare locusOnly estate (no corpus registered). The kit has a Locus
+    /// store and one drawer but no CorpusKit — triggering the allowDegraded path
+    /// in recallCorpusOnly when the caller requests mode=.corpusOnly.
+    private func openLocusOnlyEstateForDegradTest(
+        ownerSuffix: String
+    ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "degrad-co-vocab-\(ownerSuffix)")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        // Capture one drawer so the locus lane has something to return.
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "vocabulary stage test content",
+            channel: .typed,
+            room: "vocab-test",
+            latticeAnchor: .udc("000"),
+            addedBy: "vocab-test",
+            embeddingModelID: "test-model-v1"
+        ))
+        // NO corpus registered → corpusOnly with allowDegraded degrades to locusOnly.
+        return (kit: kit, handle: handle)
+    }
+
+    /// corpusOnly + allowDegraded + matrixAware:
+    ///   MUST contain "corpusOnly.degraded" and "corpusOnly.matrixAware".
+    ///   MUST NOT contain "locusOnly.matrixAware" (the inner lane's label).
+    @Test("corpusOnly allowDegraded + matrixAware: corpus-level stage labels, not locus-level")
+    func corpusOnlyAllowDegradedMatrixAwareVocabulary() async throws {
+        let (kit, handle) = try await openLocusOnlyEstateForDegradTest(ownerSuffix: "ma")
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                ordering: .byCaptureTimeDesc
+            ),
+            mode: .corpusOnly,
+            scoring: .matrixAware,
+            limit: 5,
+            fallback: .allowDegraded,
+            queryText: "stage vocabulary test",
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        // Corpus lane was unavailable — must record the corpus-level degradation.
+        #expect(result.degradedStages.contains("corpusOnly.degraded"),
+            "corpusOnly allowDegraded must record 'corpusOnly.degraded'; got \(result.degradedStages)")
+        // matrixAware was requested — the fallback stage must name the corpus context.
+        #expect(result.degradedStages.contains("corpusOnly.matrixAware"),
+            "matrixAware on degraded corpusOnly must record 'corpusOnly.matrixAware'; got \(result.degradedStages)")
+        // "locusOnly.matrixAware" must NOT appear — caller issued a corpusOnly request,
+        // not a locusOnly request; the inner lane's vocabulary must not leak out.
+        #expect(!result.degradedStages.contains("locusOnly.matrixAware"),
+            "'locusOnly.matrixAware' must not appear in corpusOnly allowDegraded result; got \(result.degradedStages)")
+    }
+
+    /// corpusOnly + allowDegraded + rrf (no matrixAware):
+    ///   MUST contain "corpusOnly.degraded".
+    ///   MUST NOT contain "locusOnly.matrixAware" or "corpusOnly.matrixAware".
+    @Test("corpusOnly allowDegraded + rrf: records corpusOnly.degraded, no matrixAware stage")
+    func corpusOnlyAllowDegradedRRFVocabulary() async throws {
+        let (kit, handle) = try await openLocusOnlyEstateForDegradTest(ownerSuffix: "rrf")
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                ordering: .byCaptureTimeDesc
+            ),
+            mode: .corpusOnly,
+            scoring: .rrf,
+            limit: 5,
+            fallback: .allowDegraded,
+            queryText: "stage vocabulary test rrf",
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.degradedStages.contains("corpusOnly.degraded"),
+            "corpusOnly allowDegraded must record 'corpusOnly.degraded'; got \(result.degradedStages)")
+        #expect(!result.degradedStages.contains("locusOnly.matrixAware"),
+            "'locusOnly.matrixAware' must not appear for rrf scoring; got \(result.degradedStages)")
+        #expect(!result.degradedStages.contains("corpusOnly.matrixAware"),
+            "'corpusOnly.matrixAware' must not appear when scoring is rrf; got \(result.degradedStages)")
     }
 }
 

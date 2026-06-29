@@ -138,9 +138,10 @@ public struct Vocabulary: Sendable {
     /// interpret, so they must be identical everywhere (the federation
     /// minimum). Adjective layout per cookbook §2.3 (F11): state 0-5,
     /// sensitivity 6-11, exportability 12-17, trust 18-23, flags 24-25.
-    /// Basis fields carry no enumerated value set; their legal
-    /// combinations are governed by RowStateAutomaton / I-22, not by a
-    /// per-field list.
+    /// Basis fields derive their legal value sets from the SubstrateLib
+    /// adjective enums (AuditState, AuditSensitivity, AuditExportability,
+    /// AuditTrust) via `allCases.map { $0.rawValue }`. State additionally
+    /// gets the verb-consistency check in `admit`.
     public static let basis: Set<FieldSlot> = [
         // Enumerated value sets per cookbook §2.3: a basis field admits
         // only its declared raws, so the gate refuses a non-scale-gapped

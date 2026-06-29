@@ -2,8 +2,11 @@
 ///
 /// Fields not populated by the active lane are 0.0. The locusOnly lane
 /// sets `locus` to 1.0 for every returned hit. The `fieldFit`, `coOccurrence`,
-/// `temporal`, and `graph` fields are populated by the matrix and graph lanes,
-/// which are reserved for a future mission.
+/// `temporal`, and `graph` fields are live in the `.unionBest` lane under
+/// `.matrixAware` scoring: matrix step 5.6 populates `fieldFit`,
+/// `coOccurrence`, and `temporal`; graph and preference caches (step 5.7)
+/// populate `graph` and `preference`; the final weighted score reads all
+/// populated columns.
 public struct RecallScoreVector: Sendable {
     /// Score contribution from the LocusKit bitmap lane.
     public let locus: Float

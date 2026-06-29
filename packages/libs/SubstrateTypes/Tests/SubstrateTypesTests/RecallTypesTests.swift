@@ -3,19 +3,18 @@
 // Per-type suite for the recall-result vocabulary: RecallScore,
 // DistanceBreakdown, RecallResult, RowProjection.
 //
-// INTENTIONAL SWIFT/RUST ASYMMETRY (verified in RecallTypes.swift:43–53):
-// these four types are Swift-only. The Rust port deliberately does NOT
-// mirror them in substrate-types — the federation query path materializes
-// only RecallScoreLite / RecallResultLite inside SubstrateML/rust, and
-// DistanceBreakdown / RowProjection have no Rust equivalent. This suite
-// therefore asserts ONLY the Swift contract and does NOT assert Rust
-// parity (per mission Part 2 / the documented asymmetry).
+// SWIFT/RUST CONTRACT (verified in RecallTypes.swift):
+// Rust now has mirrors for RecallScore, DistanceBreakdown, RecallResult,
+// and RowProjection in packages/libs/SubstrateTypes/rust/src/recall_types.rs.
+// This suite asserts the Swift recall-type contract and parity surface;
+// the Rust port carries equivalent type definitions for the conformance-gated
+// wire path.
 
 import Foundation
 import Testing
 @testable import SubstrateTypes
 
-@Suite("RecallTypes (Swift-only recall vocabulary)")
+@Suite("RecallTypes — recall vocabulary (mirrored in Rust)")
 struct RecallTypesTests {
 
     @Test("RecallScore stores its (rowId, score) pair and is Equatable")

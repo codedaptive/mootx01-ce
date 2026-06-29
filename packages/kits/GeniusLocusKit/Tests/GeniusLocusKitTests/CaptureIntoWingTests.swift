@@ -63,7 +63,9 @@ struct CaptureIntoWingTests {
         // Use .impatient so the drawer returns synchronously with no drain wait
         // — we only need the LocusKit Drawer from capture, not BM25 indexing.
         let drawer = try await kit.capture(handle, frame, mode: .impatient)
-        #expect(drawer.wing == "User Canon",
+        let estate = try await kit.estate(for: handle)
+        let names = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        #expect(names[drawer.parentNodeId]?.wing == "User Canon",
             "GLK capture must thread the explicit wing through to the stored drawer")
     }
 
@@ -82,7 +84,9 @@ struct CaptureIntoWingTests {
             wing: "Personal"
         )
         let drawer = try await kit.capture(handle, frame, mode: .impatient)
-        #expect(drawer.wing == "Personal")
+        let estate = try await kit.estate(for: handle)
+        let names = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        #expect(names[drawer.parentNodeId]?.wing == "Personal")
     }
 
     // MARK: - Default wing (nil)
@@ -102,7 +106,9 @@ struct CaptureIntoWingTests {
             embeddingModelID: "test-model-v1"
         )
         let drawer = try await kit.capture(handle, frame, mode: .impatient)
-        #expect(drawer.wing == defaultWingName,
+        let estate = try await kit.estate(for: handle)
+        let names = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        #expect(names[drawer.parentNodeId]?.wing == defaultWingName,
             "nil wing must fall through to the estate default '\(defaultWingName)'")
     }
 }

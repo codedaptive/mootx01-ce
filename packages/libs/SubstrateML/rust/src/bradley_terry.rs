@@ -94,11 +94,10 @@ impl BradleyTerryEstimator {
     /// the winner and all losers; cost is O(|losers|).
     pub fn observe(&mut self, obs: &PreferenceObservation) {
         let winner_theta = *self.theta.get(&obs.winner_id).unwrap_or(&0.0);
-        // Accumulate winner updates across all losers before
-        // applying, so multiple losers in one observation produce
-        // the same result as the Swift implementation's sequential
-        // update.  (We compute the winner adjustment once per
-        // loser using the snapshot winner_theta value.)
+        // Apply winner and loser updates sequentially: each
+        // iteration reuses the running winner_new value so
+        // multiple losers in one observation produce the same
+        // result as the Swift implementation's sequential update.
         let mut winner_new = winner_theta;
         let losers_clone = obs.losers.clone();
         for loser_id in losers_clone {

@@ -36,9 +36,8 @@
 // `now` is an ISO 8601 date string (YYYY-MM-DD) — injected for determinism,
 // matching the Swift `now: Date` parameter convention.
 //
-// Trigger host recommendation: the autonomic governor (GeniusLocusKit
-// scheduling layer) or an operator CLI in ARIA_MCP. Do NOT invoke from the
-// hot word_class path.
+// Current trigger host: `NeuronKit::AutonomicGovernor` or an operator CLI
+// in ARIA_MCP. Do NOT invoke from the hot word_class path.
 
 use std::collections::HashSet;
 use std::fs;

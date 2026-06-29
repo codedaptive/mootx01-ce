@@ -24,12 +24,12 @@
 // NOVEL-TOKEN RECORDING
 // After classifying a novel token via `hmm_tag`, the result is recorded into
 // SHARED_NOVEL_CACHE — mirroring `tagNovelToken` in WordClassTagger.swift which
-// calls `sharedNovelCache.record(token: lowered, wordClass: tagged)` for both
-// the Apple and non-Apple paths. The cache is initialized by `fdc_runtime.rs`
-// when the bundled artifacts are loaded (stamped with the table version). If the
-// cache has not been initialized yet (SHARED_NOVEL_CACHE not set), the record
-// call is silently skipped — this matches the Swift behavior when
-// `WordClassTableCache.table` is nil (tableVersion defaults to "").
+// calls `sharedNovelCache.record(token: lowered, wordClass: tagged)` after tagging.
+// The cache is initialized by `fdc_runtime.rs` when the bundled artifacts are
+// loaded (stamped with the table version). If the cache has not been initialized
+// yet (SHARED_NOVEL_CACHE not set), the record call is silently skipped; the pool
+// submission's `tableVersion` defaults to `""` at cache construction time if the
+// table is unavailable.
 //
 // WRITABLE-ARTIFACT LOAD PRECEDENCE (cookbook §1.3/§2.2)
 // The PoolReducer merges novel-token observations into a writable copy of the
@@ -143,11 +143,10 @@ impl WordClassTableCache {
     ///
     /// Novel tokens (not in either set) are classified via the deterministic
     /// HMM/Viterbi tagger (`word_class::hmm_tag`) — the byte-identical port of
-    /// Swift's `HMMTagger.tag`. This is the non-Apple novel-token path: Rust runs
-    /// only on non-Apple platforms (Linux/Windows), so the HMM is always the
-    /// correct fallback. The HMM result (noun/verb/other) is recorded into
-    /// `SHARED_NOVEL_CACHE` (mirroring `tagNovelToken` in WordClassTagger.swift
-    /// which records for both Apple-NLTagger and non-Apple-HMM paths).
+    /// Swift's `HMMTagger.tag`. HMM is the cross-port baseline; in Swift, HMM
+    /// is also the default novel-token path on all platforms (Apple `NLTagger`
+    /// is explicit opt-in). The HMM result (noun/verb/other) is recorded into
+    /// `SHARED_NOVEL_CACHE` (mirroring `tagNovelToken` in WordClassTagger.swift).
     ///
     /// The FDC conformance fixture (`fdc_conformance.json`) contains only
     /// table-resident tokens and is unaffected by this path. The HMM

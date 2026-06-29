@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Concordance-completeness audit for the MOOTx01 Swift/Rust parity surface.
 
-Every kit/lib under ``packages/libs/*`` and ``packages/kits/*`` carries a
-``Swift/Rust Concordance`` section in its interface doc
+Kits and libs under ``packages/libs/*`` and ``packages/kits/*`` (excluding
+``CONCORDANCE_EXEMPT`` entries, currently ``AriaMcpKit``) are expected to
+carry a ``Swift/Rust Concordance`` section in their interface doc
 (``docs/reference/<NAME>_INTERFACE*.md``). That section maps each public
 contract concept Swift<->Rust. This tool detects DRIFT: top-level public
 declarations present in the CODE but ABSENT from the concordance table.
@@ -165,8 +166,9 @@ def parse_concordance_names(doc: Path) -> set[str]:
     Swift/Rust Concordance section of the doc.
 
     A concordance section runs from its heading to the next heading of the
-    same-or-shallower depth (or any heading — we stop at the next heading to
-    stay conservative, then resume if another concordance heading appears).
+    same-or-shallower depth. Deeper headings are skipped as heading lines but
+    do not end the active section; names in body lines beneath them are still
+    collected.
     """
     names: set[str] = set()
     in_section = False

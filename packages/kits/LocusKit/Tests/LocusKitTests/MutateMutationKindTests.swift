@@ -271,13 +271,15 @@ struct MutateMutationKindTests {
         #expect(reason.contains("already live"))
     }
 
-    // Note: the `.rejected`, `.pending`, and `.contested` refusal branches
-    // of the revive guard are not exercised E2E here because a Drawer
-    // cannot legally reach those states — drawers are born `.active`, and
-    // the only terminal drawer state reachable through Estate verbs is
-    // `.tombstoned` (via expunge). Those guard branches are correct domain
-    // rules (cookbook §9.3) and the rejected→active refusal is covered at
-    // the automaton level by `StateTransitionTests.illegalRejectedToActive`.
+    // Note: the `.rejected` and `.pending` refusal branches of the revive
+    // guard are not exercised E2E here because a Drawer cannot legally reach
+    // those states through Estate verbs — drawers are born `.active` and the
+    // only reachable terminal is `.tombstoned` (via expunge). Those guard
+    // branches are correct domain rules (cookbook §9.3) and the
+    // rejected→active refusal is covered at the automaton level by
+    // `StateTransitionTests.illegalRejectedToActive`. The `.contested`
+    // refusal branch is also unexercised here (the revive-from-contested
+    // guard fires, but no test drives that path end-to-end).
 
     @Test("revive: tombstoned (Cluster C terminal) REFUSED — content erased")
     func revive_fromTombstoned_throwsUnrecoverable() async throws {

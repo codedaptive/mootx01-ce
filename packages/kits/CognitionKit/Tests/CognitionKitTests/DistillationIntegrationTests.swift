@@ -116,9 +116,12 @@ struct DistillationIntegrationTests {
         // Resolve the factoid: the only drawer in room "_distilled" whose
         // lineageID equals the source item's id (set by distillItemsSweep
         // via captureFactoid using the source drawer's UUID as lineageID).
+        // Drawer no longer carries wing/room — resolve via the node tree.
         let allDrawers = try await kit.allDrawers(in: handle)
+        let estate = try await kit.estate(for: handle)
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: allDrawers.map(\.parentNodeId))
         guard let factoid = allDrawers.first(where: {
-            $0.room == "_distilled" && $0.lineageID.uuidString == sourceID
+            nodeNames[$0.parentNodeId]?.room == "_distilled" && $0.lineageID.uuidString == sourceID
         }) else {
             throw IntegrationSetupError.noDistilledDrawer
         }
@@ -203,35 +206,35 @@ struct DistillationIntegrationTests {
         }
     }
 
-    // MARK: - CK-INT-3: Expand memory
+    // MARK: - CK-INT-3: Recollect
 
-    /// CK-INT-3: moot_expand_memory(factoidID) → the single source item.
+    /// CK-INT-3: moot_recollect(factoidID) → the single source item.
     ///
-    /// Verifies the expand path: factoid hydration → DIST header validation →
+    /// Verifies the recollect path: factoid hydration → DIST header validation →
     /// tunnel graph traversal → source hydration. Under the intra-item model the
     /// factoid links back to exactly one source (the item it was distilled from).
-    @Test("CK-INT-3: expand memory returns the single source item")
-    func expandMemory() async throws {
+    @Test("CK-INT-3: recollect returns the single source item")
+    func recollect() async throws {
         try await withCognitionLock {
             let estate = try await setUpDistilledEstate()
 
-            let out = try await ExpandMemory().run(
-                input: ExpandMemory.Input(factoidDrawerID: estate.factoidID),
+            let out = try await Recollect().run(
+                input: Recollect.Input(factoidDrawerID: estate.factoidID),
                 estate: estate.handle, kit: estate.kit)
 
             #expect(out.factoidID == estate.factoidID,
-                "ExpandMemory.Output.factoidID must match the requested factoid drawer ID")
+                "Recollect.Output.factoidID must match the requested factoid drawer ID")
             #expect(out.sources.count == 1,
-                "expand must return the single source item linked by the _distilled_from tunnel")
+                "recollect must return the single source item linked by the _distilled_from tunnel")
 
             // The source item ID must appear in the expansion.
             let expandedIDs = Set(out.sources.map(\.id))
             #expect(expandedIDs == Set([estate.sourceID]),
-                "the original source item ID must appear in ExpandMemory output")
+                "the original source item ID must appear in Recollect output")
 
             // Prose is the dominant feature extracted by the pipeline.
             #expect(!out.prose.isEmpty,
-                "ExpandMemory.Output.prose must be non-empty for a successful factoid")
+                "Recollect.Output.prose must be non-empty for a successful factoid")
             #expect(out.confidence > 0.4,
                 "factoid confidence must exceed the 0.4 distillation gate")
         }

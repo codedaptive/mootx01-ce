@@ -46,6 +46,12 @@ public struct SyncedTable: Sendable, Codable {
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
 
+    /// Explicit CodingKeys documenting the cross-port JSON contract.
+    /// Rust serde renames match these exact strings.
+    private enum CodingKeys: String, CodingKey {
+        case name, direction, primaryKeyColumn, conflictPolicy
+    }
+
     public init(
         name: String,
         direction: SyncDirection = .bidirectional,
@@ -67,6 +73,12 @@ public struct SyncManifest: Sendable, Codable {
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
+
+    /// Explicit CodingKeys documenting the cross-port JSON contract.
+    /// Rust serde renames match these exact strings.
+    private enum CodingKeys: String, CodingKey {
+        case kitID, schemaVersion, zoneIdentifier, tables
+    }
 
     public init(
         kitID: String,

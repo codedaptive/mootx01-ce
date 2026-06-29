@@ -106,6 +106,14 @@ impl StatsStoreSchema {
 
     /// TEXT NOT NULL — JSON-encoded ARIAGraphPayload bytes. Served verbatim by /api/graph.
     pub const PAYLOAD_COLUMN: &'static str = "payload";
+
+    /// TEXT NULL (v3) — stable topology-inputs fingerprint for the persisted snapshot.
+    /// The autonomic governor writes this alongside the payload so that, on restart,
+    /// it can compare the persisted fingerprint against freshly-computed topology
+    /// inputs WITHOUT re-reading all drawers/tunnels/facts when nothing changed.
+    /// Nullable so snapshots written without a fingerprint read back as None.
+    /// Mirrors Swift `StatsStoreSchema.topologyFingerprintColumn`.
+    pub const TOPOLOGY_FINGERPRINT_COLUMN: &'static str = "topology_fingerprint";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,6 +128,7 @@ fn make_schema() -> SchemaDeclaration {
             column_type: ColumnType::Uuid,
             nullable: false,
             default_value: None,
+            role: None,
         }
     }
     fn col_text(name: &str) -> ColumnDeclaration {
@@ -128,6 +137,16 @@ fn make_schema() -> SchemaDeclaration {
             column_type: ColumnType::Text,
             nullable: false,
             default_value: None,
+            role: None,
+        }
+    }
+    fn col_text_nullable(name: &str) -> ColumnDeclaration {
+        ColumnDeclaration {
+            name: name.to_string(),
+            column_type: ColumnType::Text,
+            nullable: true,
+            default_value: None,
+            role: None,
         }
     }
     fn col_float(name: &str) -> ColumnDeclaration {
@@ -136,6 +155,7 @@ fn make_schema() -> SchemaDeclaration {
             column_type: ColumnType::Float,
             nullable: false,
             default_value: None,
+            role: None,
         }
     }
     fn col_int(name: &str) -> ColumnDeclaration {
@@ -144,6 +164,7 @@ fn make_schema() -> SchemaDeclaration {
             column_type: ColumnType::Int,
             nullable: false,
             default_value: None,
+            role: None,
         }
     }
     fn col_timestamp(name: &str) -> ColumnDeclaration {
@@ -152,6 +173,7 @@ fn make_schema() -> SchemaDeclaration {
             column_type: ColumnType::Timestamp,
             nullable: false,
             default_value: None,
+            role: None,
         }
     }
 
@@ -177,6 +199,7 @@ fn make_schema() -> SchemaDeclaration {
                 unique_constraints: vec![],
                 generated_columns: vec![],
                 append_only: false,
+                hashable: false,
             },
 
             // MARK: event_samples
@@ -198,6 +221,7 @@ fn make_schema() -> SchemaDeclaration {
                 unique_constraints: vec![],
                 generated_columns: vec![],
                 append_only: false,
+                hashable: false,
             },
 
             // MARK: control
@@ -213,6 +237,7 @@ fn make_schema() -> SchemaDeclaration {
                 unique_constraints: vec![],
                 generated_columns: vec![],
                 append_only: false,
+                hashable: false,
             },
 
             // MARK: topology_snapshots (v2)
@@ -223,7 +248,7 @@ fn make_schema() -> SchemaDeclaration {
             // `generated_at` is TEXT (ISO-8601 UTC) per the schema timestamp invariant.
             // `payload` is TEXT storing JSON-encoded ARIAGraphPayload bytes served verbatim.
             //
-            // Added by v1→v2 migration.
+            // Added by v1→v2 migration (table); topology_fingerprint added by v2→v3.
             TableDeclaration {
                 name: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
                 columns: vec![
@@ -233,11 +258,15 @@ fn make_schema() -> SchemaDeclaration {
                     col_timestamp(StatsStoreSchema::GENERATED_AT_COLUMN),
                     // JSON payload bytes (TEXT). Served verbatim; no decode on read path.
                     col_text(StatsStoreSchema::PAYLOAD_COLUMN),
+                    // Stable topology-inputs fingerprint (v3). Nullable — pre-v3 rows
+                    // and snapshots written without a fingerprint read back as None.
+                    col_text_nullable(StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN),
                 ],
                 primary_key: vec![StatsStoreSchema::ESTATE_COLUMN.to_string()],
                 unique_constraints: vec![],
                 generated_columns: vec![],
                 append_only: false,
+                hashable: false,
             },
         ],
         indices: vec![
@@ -275,7 +304,27 @@ fn make_schema() -> SchemaDeclaration {
                         unique_constraints: vec![],
                         generated_columns: vec![],
                         append_only: false,
+                        hashable: false,
                     }),
+                ],
+            },
+            // v2 → v3: add the nullable topology_fingerprint column.
+            // Additive migration — existing snapshot rows keep their payload and
+            // read back the fingerprint as None (governor recomputes once, then
+            // backfills the fingerprint on its next topology duty cycle).
+            //
+            // NOTE: the SQLite backend creates every table at the latest schema on
+            // open (CREATE TABLE IF NOT EXISTS) and does not replay these operations,
+            // so a fresh SQLite DB already carries the column; the InMemory backend
+            // replays them (idempotently). This entry mirrors the Swift declaration.
+            Migration {
+                from_version: 2,
+                to_version: 3,
+                operations: vec![
+                    SchemaOperation::AddColumn {
+                        table: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
+                        column: col_text_nullable(StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN),
+                    },
                 ],
             },
         ],
@@ -286,11 +335,30 @@ fn make_schema() -> SchemaDeclaration {
 // ISO-8601 helpers — mirrors Swift's `StatsStore.iso8601Formatter`
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Minimum and maximum Unix epoch seconds that map to displayable ISO-8601
+/// years in the 0001–9999 range.  PersistenceKit's timestamp encoder
+/// enforces the same bounds; matching them here keeps TEXT timestamps
+/// consistent across all write paths.
+///
+/// MIN_EPOCH: 0001-01-01T00:00:00Z (year 0001)
+/// MAX_EPOCH: 9999-12-31T23:59:59Z (year 9999)
+const MIN_EPOCH_SECS: i64 = -62_135_596_800;
+const MAX_EPOCH_SECS: i64 =  253_402_300_799;
+
 /// Encode epoch seconds (f64) to ISO-8601 UTC TEXT with millisecond precision.
 /// Mirrors Swift: `DateFormatter` with `"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"`.
+///
+/// Clamps the timestamp to years 0001–9999 before formatting, matching
+/// PersistenceKit's epoch clamping. Out-of-range epoch values (negative
+/// extremes, NaN, infinity) produce malformed TEXT years outside the four-digit
+/// range that ISO-8601 mandates, which breaks SQLite's datetime() functions and
+/// downstream parsers. Clamping prevents that without rejecting the write.
 pub(crate) fn epoch_to_iso8601(secs: f64) -> String {
-    let whole_secs = secs.floor() as i64;
-    let nanos = ((secs - secs.floor()) * 1_000_000_000.0) as u32;
+    // Saturating cast: in Rust ≥ 1.45, f64-as-i64 saturates at i64 bounds
+    // for out-of-range values (including ±∞ and NaN → 0). The subsequent
+    // clamp then brings the value into the year 0001–9999 epoch window.
+    let whole_secs = (secs.floor() as i64).clamp(MIN_EPOCH_SECS, MAX_EPOCH_SECS);
+    let nanos = ((secs - secs.floor()).clamp(0.0, 0.999_999_999) * 1_000_000_000.0) as u32;
     match Utc.timestamp_opt(whole_secs, nanos) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         _ => "1970-01-01T00:00:00.000Z".to_string(),
@@ -349,7 +417,9 @@ impl StatsStore {
     /// Mirrors `StatsStore.schemaVersion` in Swift.
     /// v1: initial schema (metric_samples, event_samples, control).
     /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
-    pub const SCHEMA_VERSION: i32 = 2;
+    /// v3: added topology_snapshots.topology_fingerprint (nullable) so the governor
+    ///     can skip the full topology read on restart when inputs are unchanged.
+    pub const SCHEMA_VERSION: i32 = 3;
 
     // MARK: - Initialisation
 
@@ -540,10 +610,13 @@ impl StatsStore {
             StatsStoreSchema::TAGS_COLUMN.to_string(),
             TypedValue::Text(encode_tags_json(tags)),
         );
-        // Epoch-seconds ts encoded as ISO-8601 TEXT (schema invariant).
+        // Epoch-seconds ts encoded as ISO-8601 TEXT with millisecond precision
+        // (schema invariant). Swift uses `.timestamp(Date(timeIntervalSince1970: ts))`
+        // which preserves sub-second precision; we must do the same via our ISO-8601
+        // encoder which formats with %.3f fractional seconds.
         row.insert(
             StatsStoreSchema::TS_COLUMN.to_string(),
-            TypedValue::Timestamp(ts as i64),
+            TypedValue::Text(epoch_to_iso8601(ts)),
         );
         row.insert(
             StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
@@ -587,9 +660,10 @@ impl StatsStore {
             StatsStoreSchema::ESTATE_COLUMN.to_string(),
             TypedValue::Text(estate.to_string()),
         );
+        // ISO-8601 TEXT with millisecond precision (matches metric insert path).
         row.insert(
             StatsStoreSchema::TS_COLUMN.to_string(),
-            TypedValue::Timestamp(ts as i64),
+            TypedValue::Text(epoch_to_iso8601(ts)),
         );
         row.insert(
             StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
@@ -669,6 +743,67 @@ impl StatsStore {
             None,
         )?;
         Ok(rows.into_iter().filter_map(EventRow::from_storage_row).collect())
+    }
+
+    /// Query metric samples matching any of the given `names`, optionally
+    /// filtered by `dropbox_id`.
+    ///
+    /// Returns rows ordered by `ts` ascending.
+    /// Mirrors Swift `StatsStore.queryMetricsByNames(_:dropboxID:)`.
+    pub fn query_metrics_by_names(
+        &self,
+        names: &[&str],
+        dropbox_id: Option<&str>,
+    ) -> Result<Vec<MetricRow>, persistence_kit::StorageError> {
+        if names.is_empty() {
+            return Ok(vec![]);
+        }
+        let rs = self.storage.row_store();
+        let name_col = Column {
+            table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+            name: StatsStoreSchema::NAME_COLUMN.to_string(),
+        };
+        let name_predicate = StoragePredicate::In(
+            name_col,
+            names.iter().map(|n| TypedValue::Text(n.to_string())).collect(),
+        );
+        let predicate = if let Some(id) = dropbox_id {
+            let db_col = Column {
+                table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                name: StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+            };
+            StoragePredicate::And(vec![
+                name_predicate,
+                StoragePredicate::Eq(db_col, TypedValue::Text(id.to_string())),
+            ])
+        } else {
+            name_predicate
+        };
+        let order = vec![PkOrderClause {
+            column: Column {
+                table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                name: StatsStoreSchema::TS_COLUMN.to_string(),
+            },
+            direction: OrderDirection::Ascending,
+        }];
+        let rows = rs.query(
+            StatsStoreSchema::METRIC_SAMPLES_TABLE,
+            Some(&predicate),
+            &order,
+            None,
+            None,
+        )?;
+        Ok(rows.into_iter().filter_map(MetricRow::from_storage_row).collect())
+    }
+
+    /// Count total metric rows without reading their content.
+    ///
+    /// Delegates to `RowStore.count(table:predicate:)` — maps to SQL `COUNT(*)`
+    /// with no row decoding.
+    /// Mirrors Swift `StatsStore.countMetrics()`.
+    pub fn count_metrics(&self) -> Result<usize, persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        rs.count(StatsStoreSchema::METRIC_SAMPLES_TABLE, None)
     }
 
     // MARK: - Retention
@@ -794,13 +929,26 @@ impl StatsStore {
     /// produced the snapshot. Stored as ISO-8601 TEXT (schema timestamp invariant).
     /// No `SystemTime::now()` call inside the store (determinism rule).
     ///
-    /// `payload` is the JSON-encoded ARIAGraphPayload bytes (UTF-8 string slice).
-    /// Mirrors Swift `StatsStore.writeTopologySnapshot(estate:generatedAt:payload:)`.
+    /// `payload` is the JSON-encoded ARIAGraphPayload string.
+    ///
+    /// Rust's `&str` type guarantees valid UTF-8 at compile time, which is
+    /// strictly stronger than Swift's runtime `String(data:encoding:)` guard.
+    /// Both ports reject invalid UTF-8 before storage — Swift at runtime, Rust
+    /// at the type-system level. Callers with raw bytes should use
+    /// `write_topology_snapshot_bytes` which performs lossy UTF-8 conversion.
+    ///
+    /// `fingerprint` is the stable topology-inputs fingerprint (FNV-1a based,
+    /// process independent) so a restarting governor can skip the full topology
+    /// read when inputs are unchanged. `None` leaves the column null (e.g.
+    /// callers that do not compute a fingerprint).
+    ///
+    /// Mirrors Swift `StatsStore.writeTopologySnapshot(estate:generatedAt:payload:fingerprint:)`.
     pub fn write_topology_snapshot(
         &self,
         estate: &str,
         generated_at_secs: f64,
         payload: &str,
+        fingerprint: Option<&str>,
     ) -> Result<(), persistence_kit::StorageError> {
         let rs = self.storage.row_store();
         let generated_at_iso = epoch_to_iso8601(generated_at_secs);
@@ -818,12 +966,34 @@ impl StatsStore {
             StatsStoreSchema::PAYLOAD_COLUMN.to_string(),
             TypedValue::Text(payload.to_string()),
         );
+        // Null when the caller supplies no fingerprint.
+        row.insert(
+            StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN.to_string(),
+            match fingerprint {
+                Some(fp) => TypedValue::Text(fp.to_string()),
+                None => TypedValue::Null,
+            },
+        );
         rs.upsert(
             StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE,
             row,
             &[StatsStoreSchema::ESTATE_COLUMN.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Bytes variant of `write_topology_snapshot`. Accepts raw bytes and
+    /// performs lossy UTF-8 conversion (invalid bytes → U+FFFD). Use when
+    /// the caller cannot guarantee valid UTF-8 at compile time.
+    pub fn write_topology_snapshot_bytes(
+        &self,
+        estate: &str,
+        generated_at_secs: f64,
+        payload: &[u8],
+        fingerprint: Option<&str>,
+    ) -> Result<(), persistence_kit::StorageError> {
+        let payload_str = String::from_utf8_lossy(payload);
+        self.write_topology_snapshot(estate, generated_at_secs, &payload_str, fingerprint)
     }
 
     /// Read the latest topology snapshot bytes for `estate`, or — with
@@ -877,6 +1047,46 @@ impl StatsStore {
                 row.values.get(StatsStoreSchema::PAYLOAD_COLUMN)
             {
                 return Ok(Some(payload.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Read the persisted topology fingerprint for `estate`.
+    ///
+    /// The autonomic governor calls this once on startup so it can compare the
+    /// persisted topology-inputs fingerprint against freshly-computed inputs and
+    /// skip the full drawer/tunnel/fact read when they match. Returns `None` when
+    /// no snapshot exists yet, when the row predates v3 (column null), or when a
+    /// snapshot was written without a fingerprint.
+    ///
+    /// Mirrors Swift `StatsStore.loadTopologyFingerprint(estate:) -> String?`.
+    pub fn load_topology_fingerprint(
+        &self,
+        estate: &str,
+    ) -> Result<Option<String>, persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let predicate = StoragePredicate::Eq(
+            Column {
+                table: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
+                name: StatsStoreSchema::ESTATE_COLUMN.to_string(),
+            },
+            TypedValue::Text(estate.to_string()),
+        );
+        let rows = rs.query(
+            StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE,
+            Some(&predicate),
+            &[],
+            None,
+            None,
+        )?;
+        // PRIMARY KEY lookup yields ≤1 row. The column is written as Text or Null;
+        // any non-text representation (null, absent) yields None.
+        if let Some(row) = rows.first() {
+            if let Some(TypedValue::Text(fp)) =
+                row.values.get(StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN)
+            {
+                return Ok(Some(fp.clone()));
             }
         }
         Ok(None)
@@ -1013,5 +1223,80 @@ impl EventRow {
             ts_epoch,
             dropbox_id,
         })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — epoch_to_iso8601 clamping
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod epoch_iso_tests {
+    use super::epoch_to_iso8601;
+
+    /// A normal epoch (Unix time for 2024-01-01T00:00:00Z) must produce a
+    /// valid 4-digit-year ISO-8601 string.
+    #[test]
+    fn normal_epoch_produces_valid_iso8601() {
+        let s = epoch_to_iso8601(1_704_067_200.0); // 2024-01-01T00:00:00Z
+        assert!(s.starts_with("2024-"), "expected year 2024, got: {s}");
+        assert!(s.ends_with('Z'), "must end with Z");
+    }
+
+    /// An epoch value far in the past (year < 0001) must be clamped to
+    /// year 0001, not produce a negative-year string or panic.
+    #[test]
+    fn far_past_epoch_clamped_to_year_0001() {
+        let s = epoch_to_iso8601(-1e18); // far before 0001-01-01
+        assert!(s.starts_with("0001-"), "expected year 0001, got: {s}");
+    }
+
+    /// An epoch value far in the future (year > 9999) must be clamped to
+    /// year 9999, not produce a 5-digit-year string or panic.
+    #[test]
+    fn far_future_epoch_clamped_to_year_9999() {
+        let s = epoch_to_iso8601(1e18); // far after 9999-12-31
+        assert!(s.starts_with("9999-"), "expected year 9999, got: {s}");
+    }
+
+    /// f64::MAX must not panic — saturating cast to i64 then clamp handles it.
+    #[test]
+    fn f64_max_does_not_panic() {
+        let s = epoch_to_iso8601(f64::MAX);
+        assert!(!s.is_empty(), "f64::MAX must not produce an empty string");
+        assert!(s.starts_with("9999-"), "f64::MAX should clamp to year 9999, got: {s}");
+    }
+
+    /// f64::NEG_INFINITY must not panic.
+    #[test]
+    fn neg_infinity_does_not_panic() {
+        let s = epoch_to_iso8601(f64::NEG_INFINITY);
+        assert!(!s.is_empty(), "NEG_INFINITY must not produce an empty string");
+        assert!(s.starts_with("0001-"), "NEG_INFINITY should clamp to year 0001, got: {s}");
+    }
+
+    /// NaN must not panic — the saturating cast of NaN to i64 in Rust >= 1.45
+    /// produces 0, which lies within the 0001–9999 epoch window.
+    #[test]
+    fn nan_does_not_panic() {
+        let s = epoch_to_iso8601(f64::NAN);
+        assert!(!s.is_empty(), "NaN must not produce an empty string");
+        assert!(s.ends_with('Z'), "must end with Z");
+    }
+
+    /// The produced ISO-8601 string must always have a 4-digit year.
+    #[test]
+    fn output_always_has_4_digit_year_component() {
+        for secs in [
+            -62_135_596_800.0_f64, // MIN_EPOCH_SECS (year 0001)
+            253_402_300_799.0_f64, // MAX_EPOCH_SECS (year 9999)
+            0.0_f64,               // Unix epoch (year 1970)
+        ] {
+            let s = epoch_to_iso8601(secs);
+            let year_part = &s[..4];
+            assert_eq!(year_part.len(), 4, "year must be 4 digits in {s}");
+            assert!(year_part.chars().all(|c| c.is_ascii_digit()),
+                    "year must be all digits in {s}");
+        }
     }
 }

@@ -9,11 +9,9 @@
 //      - Sparsity: exactly K=10 nonzero positions.
 //      - Ternary values: only 0, +1, -1 in output.
 //      - Seed isolation: different terms → different vectors.
-//      - Cross-port canonical vectors: precomputed expected values
-//        checked against known-correct outputs (the vectors in
-//        riIndexVectorCanonicals below are derived from a reference
-//        trace of the SplitMix64 + FNV pipeline and MUST match the
-//        Rust leg bit-for-bit).
+//      - Cross-port canonical vectors: no inline canonical table exists
+//        in this file; the tests assert cross-call stability (same term →
+//        same vector) as a prerequisite for cross-port identity.
 //
 //   2. Context vector accumulation (train):
 //      - A term that co-occurs with known neighbours accumulates
@@ -324,12 +322,8 @@ struct RandomIndexingTests {
     }
 
     /// Canonical document embedding gate: fixed corpus + fixed text →
-    /// known Engram block values. Swift is canonical source; Rust reads
-    /// the same expected blocks.
-    ///
-    /// The expected block values are pre-computed below by running the
-    /// full pipeline once (see `emitCanonicalIfRequested`). They are
-    /// stored inline so this test runs without filesystem access.
+    /// deterministic, non-zero Engram. Checks determinism and non-zero
+    /// output; no inline block-value constants are compared in this test.
     @Test("canonical document embedding for corpus-trained 'car engine'")
     func canonicalDocumentEmbedding() async throws {
         let provider = RandomIndexingProvider()

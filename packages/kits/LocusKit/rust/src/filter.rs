@@ -39,12 +39,14 @@ pub type WikidataQID = String;
 /// § 6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateCluster {
-    /// State in {Active, Pending, Contested} — the "know now" cluster.
+    /// State in {Active, Pending, Contested, Accepted} — the "know now"
+    /// cluster (Cluster A; raw 0–15).
     KnowNow,
     /// State in {Superseded, Decayed, Withdrawn, Expired} — the
-    /// "knew past" cluster.
+    /// "knew past" cluster (Cluster B; raw 16–31).
     KnewPast,
-    /// State in {Rejected, Accepted, Tombstoned} — the terminal cluster.
+    /// State in {Rejected, Tombstoned} — the terminal cluster
+    /// (Cluster C; raw ≥ 32).
     Terminal,
 }
 
@@ -97,12 +99,12 @@ pub enum Ordering {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filter {
     // ---------- State queries ----------
-    /// Rows in the know-now cluster (state < 3). Prepended as the
-    /// default when no state filter is present.
+    /// Rows in Cluster A (raw < 16; Active, Pending, Contested, Accepted).
+    /// Prepended as the default when no state filter is present.
     CurrentlyBelieve,
-    /// Rows in the knew-past cluster (3 ≤ state < 7).
+    /// Rows in Cluster B (16 ≤ raw < 32; Superseded, Decayed, Withdrawn, Expired).
     UsedToBelieve,
-    /// Rows in the terminal cluster (state ≥ 7).
+    /// Rows in Cluster C (raw ≥ 32; Rejected, Tombstoned).
     KnewOnceAndErased,
     /// Rows with exactly this state value.
     State(State),
@@ -150,13 +152,13 @@ pub enum Filter {
     ConfidenceAtLeast(Confidence),
 
     // ---------- Operational queries ----------
-    /// Rows captured via this channel (operational bitmap bits 0–3).
+    /// Rows captured via this channel (operational bitmap bits 0–5).
     CaptureChannel(CaptureChannel),
     /// Rows with this content kind.
     ContentKind(ContentKind),
     /// Rows where any of the specified feature-flag bits are set.
     /// `flags` is an `i64` bitset already positioned in the
-    /// operational bitmap's feature-flag region (bits 8–15) — pass any
+    /// operational bitmap's feature-flag region (bits 12–23) — pass any
     /// of the `DrawerFeatureFlags::*` constants or a bitwise-OR
     /// composition.
     HasFeatureFlag(i64),

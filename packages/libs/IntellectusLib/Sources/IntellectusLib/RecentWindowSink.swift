@@ -108,9 +108,11 @@ public final class RecentWindowSink: StatsSink, @unchecked Sendable {
     /// Record `sample` in the window (evicting the oldest if full), then forward
     /// it to the wrapped sink if one is installed.
     ///
-    /// Called only when `Intellectus.isEnabled` is true (the gate short-circuits
-    /// otherwise). The ring mutation is O(1) under the lock; the forward call
-    /// runs outside the lock.
+    /// Records every direct call regardless of the global gate. The gate
+    /// short-circuit lives in `Intellectus.report(_:)`; callers that go through
+    /// that facade only reach this method when monitoring is enabled, but this
+    /// sink is also callable directly (e.g., in unit tests). The ring mutation
+    /// is O(1) under the lock; the forward call runs outside the lock.
     public func receive(_ sample: StatSample) {
         lock.lock()
         ring[head] = sample

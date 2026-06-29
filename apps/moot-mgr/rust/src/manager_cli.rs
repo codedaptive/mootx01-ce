@@ -29,8 +29,8 @@ pub enum ManagerCommand {
     RetentionRun,
     /// Print the full read/status surface.
     Status,
-    /// Run the resident host (loopback HTTP read-API + gated UDS control channel
-    /// + retention loop) until the process is signalled. The long-running surface
+    /// Run the resident host (loopback HTTP read-API + gated local IPC control
+    /// channel + retention loop) until the process is signalled. The long-running surface
     /// handled by the binary's `main`, not by `run` (which covers one-shot store
     /// operations).
     Serve,

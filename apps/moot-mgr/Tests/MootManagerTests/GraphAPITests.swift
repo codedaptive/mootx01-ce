@@ -206,6 +206,24 @@ struct GraphAPITests {
         #expect((obj["communities"] as? [Any])?.isEmpty == true)
         #expect((obj["structurePending"] as? Bool) == true)
     }
+
+    @Test("community.assignment value is capped at 10,000 — guards unbounded allocation")
+    func communityCountCap() async throws {
+        // A crafted metric with a value far above any sane community count.
+        // The cap (10_000) prevents an unbounded allocation loop in graphPayload().
+        let (host, port) = try await makeStartedHost { store in
+            try await store.insertMetric(
+                name: "community.assignment", value: 999_999,
+                tags: ["estate": "home", "node_count": "12", "community_count": "999999"],
+                ts: 100, dropboxID: "substrateml")
+        }
+        defer { Task { await host.stop() } }
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        let communities = obj["communities"] as? [[String: Any]] ?? []
+        // The cap is 10,000 — never more than that regardless of the stored value.
+        #expect(communities.count <= 10_000)
+        #expect(communities.count == 10_000)
+    }
 }
 
 // MARK: - Topology renderer asset wiring

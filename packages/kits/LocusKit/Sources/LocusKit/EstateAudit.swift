@@ -24,13 +24,11 @@ import SubstrateTypes
 /// the verb surface and to keep `DrawerStore` access inside the
 /// actor's isolation boundary.
 ///
-/// The XOR-fold reconstruction in `bitmapState` re-implements the
-/// spec § 6.8 formula inline rather than calling
-/// `BitmapEvaluator.reconstructBitmap` — that helper is `private` on
-/// `BitmapEvaluator` and the mission explicitly chose not to broaden
-/// its visibility. Holding the two implementations apart costs ~6
-/// lines of duplication and avoids a cross-file private->internal
-/// rewrite that would expand the mission's blast radius.
+/// `bitmapState` delegates to `AuditLogFold.projectStateAt`
+/// (the substrate primitive) to reconstruct the bitmap state at a
+/// given HLC. The projection folds events at or before `asOf` in
+/// HLC order, producing the `(adjective, operational, provenance)`
+/// snapshot from the genesis capture event forward.
 public extension Estate {
 
     // MARK: - auditTrail

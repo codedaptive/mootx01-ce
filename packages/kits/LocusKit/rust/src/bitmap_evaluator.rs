@@ -16,7 +16,7 @@
 //!    those concerns. Confirmation is not defaulted: unconfirmed captures
 //!    are recallable unless the caller explicitly asks for `UserConfirmed`.
 //!    Tombstone exclusion is always enforced and is independent of the
-//!    chain (`state == 9` rejected at the bitmap tier).
+//!    chain (`STATE_TOMBSTONE = 33` rejected at the bitmap tier).
 //! 2. **Bitmap-tier evaluation** (§ 7.9.2 / § 7.9.3) — each `Filter`
 //!    case compiles to a predicate over `(adjective_bitmap,
 //!    operational_bitmap, provenance)` and is applied via the
@@ -43,8 +43,9 @@
 //!
 //! - `async throws -> [Drawer]` → `Result<Vec<Drawer>, LocusKitError>`.
 //!   The Rust trait surface is sync; the bitmap evaluator follows.
-//! - `Date asOf` → `Option<i64>` epoch-seconds. The audit timestamps
-//!   already use epoch seconds across the LocusKit Rust port.
+//! - `Date asOf` → `Option<HLC>`. Reconstruction folds the audit log
+//!   by HLC via `AuditLogFold::project_state_at`; state is keyed on HLC,
+//!   not wall-clock.
 //! - Swift `localizedCaseInsensitiveContains` →
 //!   `to_lowercase().contains(...)`. For ASCII corpora (the LP-0
 //!   vectors) the two are byte-identical; for non-ASCII content the
@@ -55,6 +56,8 @@
 //!   mandate M1 (e.g. `kernel`-layer popcount on Fingerprint256-packed
 //!   columns). `bitmap_ops` no longer ships a `hamming_distance`
 //!   function.
+
+use std::collections::BTreeMap;
 
 use crate::adjectives::AdjectiveExportability;
 use crate::bitmap_ops::{and_mask, shift_extract, threshold_compare, ThresholdOp};
@@ -160,6 +163,7 @@ impl BitmapEvaluator {
         frame: &RecallFrame,
         drawers: &[Drawer],
         store: &dyn DrawerStore,
+        node_names: &BTreeMap<String, (String, String)>,
     ) -> Result<Vec<Drawer>, LocusKitError> {
         let chain = Self::insert_defaults(&frame.filter_chain);
 
@@ -204,7 +208,8 @@ impl BitmapEvaluator {
         }
 
         // 2. Structured-tier filters (room / wing / time / lattice).
-        candidates.retain(|d| Self::evaluate_structured_tier(&chain, d));
+        // ADR-017: wing/room resolved from node_names map keyed by parent_node_id.
+        candidates.retain(|d| Self::evaluate_structured_tier(&chain, d, node_names));
 
         // 3. Content-tier filters (substring match).
         let mut result = Vec::with_capacity(candidates.len());
@@ -215,7 +220,7 @@ impl BitmapEvaluator {
         }
 
         // 4. Ordering.
-        Ok(Self::sort(result, frame.ordering))
+        Ok(Self::sort(result, frame.ordering, node_names))
     }
 
     // -----------------------------------------------------------------
@@ -285,20 +290,6 @@ impl BitmapEvaluator {
             | Filter::TrustAtMost(_) => true,
             Filter::All(fs) | Filter::Any(fs) => fs.iter().any(Self::is_bitmap_trust_filter),
             Filter::Not(inner) => Self::is_bitmap_trust_filter(inner),
-            _ => false,
-        }
-    }
-
-    fn is_bitmap_prov_filter(f: &Filter) -> bool {
-        match f {
-            Filter::UserConfirmed
-            | Filter::AutomatedConfirmedOnly
-            | Filter::Unconfirmed
-            | Filter::SourceType(_)
-            | Filter::Channel(_)
-            | Filter::ConfidenceAtLeast(_) => true,
-            Filter::All(fs) | Filter::Any(fs) => fs.iter().any(Self::is_bitmap_prov_filter),
-            Filter::Not(inner) => Self::is_bitmap_prov_filter(inner),
             _ => false,
         }
     }
@@ -537,8 +528,12 @@ impl BitmapEvaluator {
     // Structured-tier evaluation (§ 7.9.4 step 3)
     // -----------------------------------------------------------------
 
-    fn evaluate_structured_tier(chain: &[Filter], drawer: &Drawer) -> bool {
-        chain.iter().all(|f| Self::evaluate_structured(f, drawer))
+    fn evaluate_structured_tier(
+        chain: &[Filter],
+        drawer: &Drawer,
+        node_names: &BTreeMap<String, (String, String)>,
+    ) -> bool {
+        chain.iter().all(|f| Self::evaluate_structured(f, drawer, node_names))
     }
 
     /// Classifier — does `f` (or any of its children) name a
@@ -563,10 +558,19 @@ impl BitmapEvaluator {
         }
     }
 
-    fn evaluate_structured(filter: &Filter, drawer: &Drawer) -> bool {
+    fn evaluate_structured(
+        filter: &Filter,
+        drawer: &Drawer,
+        node_names: &BTreeMap<String, (String, String)>,
+    ) -> bool {
+        // ADR-017: wing/room display names resolved from the node tree via
+        // the caller-supplied node_names map, keyed by drawer.parent_node_id.
+        let names = node_names.get(&drawer.parent_node_id);
+        let empty = (String::new(), String::new());
+        let (wing, room) = names.unwrap_or(&empty);
         match filter {
-            Filter::InRoom(r) => drawer.room == *r,
-            Filter::InWing(w) => drawer.wing == *w,
+            Filter::InRoom(r) => *room == *r,
+            Filter::InWing(w) => *wing == *w,
             Filter::LineageID(l) => drawer.lineage_id == *l,
             Filter::CreatedAfter(d) => drawer.filed_at > *d,
             Filter::CreatedBefore(d) => drawer.filed_at < *d,
@@ -599,7 +603,7 @@ impl BitmapEvaluator {
             Filter::All(fs) => fs
                 .iter()
                 .filter(|f| Self::is_structural_filter(f))
-                .all(|f| Self::evaluate_structured(f, drawer)),
+                .all(|f| Self::evaluate_structured(f, drawer, node_names)),
             Filter::Any(fs) => {
                 let structural: Vec<&Filter> = fs
                     .iter()
@@ -610,13 +614,13 @@ impl BitmapEvaluator {
                 }
                 structural
                     .iter()
-                    .any(|f| Self::evaluate_structured(f, drawer))
+                    .any(|f| Self::evaluate_structured(f, drawer, node_names))
             }
             // Not(f): if f is not a structural filter it passes at this tier
             // (bitmap/content filters evaluate to true here); if f IS structural,
             // the Not inverts the structural evaluation.
             Filter::Not(f) => {
-                !Self::is_structural_filter(f) || !Self::evaluate_structured(f, drawer)
+                !Self::is_structural_filter(f) || !Self::evaluate_structured(f, drawer, node_names)
             }
             // Bitmap and content cases pass at this tier.
             _ => true,
@@ -727,7 +731,11 @@ impl BitmapEvaluator {
     // Ordering
     // -----------------------------------------------------------------
 
-    fn sort(mut drawers: Vec<Drawer>, ordering: Ordering) -> Vec<Drawer> {
+    fn sort(
+        mut drawers: Vec<Drawer>,
+        ordering: Ordering,
+        node_names: &BTreeMap<String, (String, String)>,
+    ) -> Vec<Drawer> {
         // All orderings apply an `id` tie-break (smaller id wins, lexicographic
         // ascending) so results are deterministic when the primary key ties.
         // This matches Swift's `sorted { }` which is stable — stable sort in
@@ -752,8 +760,12 @@ impl BitmapEvaluator {
                 });
             }
             Ordering::ByRoomAsc => {
+                // ADR-017: room display name resolved from node_names map.
+                let empty = String::new();
                 drawers.sort_by(|a, b| {
-                    a.room.cmp(&b.room).then_with(|| a.id.cmp(&b.id))
+                    let r_a = node_names.get(&a.parent_node_id).map(|n| &n.1).unwrap_or(&empty);
+                    let r_b = node_names.get(&b.parent_node_id).map(|n| &n.1).unwrap_or(&empty);
+                    r_a.cmp(r_b).then_with(|| a.id.cmp(&b.id))
                 });
             }
         }
@@ -784,11 +796,11 @@ mod tests {
     }
 
     fn base_drawer(id: &str) -> Drawer {
-        let mut d = Drawer::new(id, "content", "w", "kitchen", "alice", NOW, "test-v1");
+        let mut d = Drawer::new(id, "content", "test-parent", "alice", NOW, "test-v1");
         // Default the state/trust/sensitivity axes so the evaluator's
         // implicit-default filters do not eliminate the sample row:
         //
-        // - state = Active (raw 0, in know-now cluster < 3) ✓
+        // - state = Active (raw 0, in know-now cluster A; cluster = (raw >> 4) & 0x3 == 0) ✓
         // - sensitivity ≤ Normal (raw 0) ✓
         // - trust = Verbatim (raw 0, < 4) ✓
         // - confirmation = UserConfirmed for tests that exercise the
@@ -811,7 +823,7 @@ mod tests {
         let d = base_drawer("d1");
         let frame = make_frame(vec![]);
         let result =
-            BitmapEvaluator::evaluate(&frame, std::slice::from_ref(&d), store.as_ref()).unwrap();
+            BitmapEvaluator::evaluate(&frame, std::slice::from_ref(&d), store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -821,7 +833,7 @@ mod tests {
         let mut d = base_drawer("d1");
         d.adjective_bitmap = State::Superseded.raw_value();
         let frame = make_frame(vec![]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -833,7 +845,7 @@ mod tests {
         // Caller explicitly asks for Contested — the
         // CurrentlyBelieve default must NOT also be ANDed.
         let frame = make_frame(vec![Filter::State(State::Contested)]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -857,6 +869,7 @@ mod tests {
             &frame,
             &[d_elevated.clone(), d_restricted.clone()],
             store.as_ref(),
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -883,7 +896,7 @@ mod tests {
 
         let frame = make_frame(vec![]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[d_secret, d_normal], store.as_ref()).unwrap();
+            BitmapEvaluator::evaluate(&frame, &[d_secret, d_normal], store.as_ref(), &BTreeMap::new()).unwrap();
 
         assert!(
             !result.iter().any(|d| d.id == "secret"),
@@ -917,6 +930,7 @@ mod tests {
             &frame,
             &[d_secret_unconfirmed.clone()],
             store.as_ref(),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert!(
@@ -936,6 +950,7 @@ mod tests {
             &frame,
             &[d_secret_matching, d_normal_matching],
             store.as_ref(),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert!(
@@ -964,7 +979,7 @@ mod tests {
         // Exact-match form.
         let frame = make_frame(vec![Filter::Sensitivity(AdjectiveSensitivity::Secret)]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[d_secret.clone()], store.as_ref()).unwrap();
+            BitmapEvaluator::evaluate(&frame, &[d_secret.clone()], store.as_ref(), &BTreeMap::new()).unwrap();
         assert!(
             result.iter().any(|d| d.id == "secret"),
             "secret drawer must be present under explicit Sensitivity(Secret) constraint"
@@ -973,7 +988,7 @@ mod tests {
         // Ceiling form.
         let frame = make_frame(vec![Filter::SensitivityAtMost(AdjectiveSensitivity::Secret)]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[d_secret.clone()], store.as_ref()).unwrap();
+            BitmapEvaluator::evaluate(&frame, &[d_secret.clone()], store.as_ref(), &BTreeMap::new()).unwrap();
         assert!(
             result.iter().any(|d| d.id == "secret"),
             "secret drawer must be present under explicit SensitivityAtMost(Secret) constraint"
@@ -992,7 +1007,7 @@ mod tests {
         // Even if the caller asks for the terminal cluster, the
         // tombstone is dropped at the bitmap tier per § 7.9.4.
         let frame = make_frame(vec![Filter::StateInCluster(StateCluster::Terminal)]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1008,7 +1023,7 @@ mod tests {
         let mut past = base_drawer("p");
         past.adjective_bitmap = State::Withdrawn.raw_value();
         let frame = make_frame(vec![Filter::StateInCluster(StateCluster::KnowNow)]);
-        let result = BitmapEvaluator::evaluate(&frame, &[active, past], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[active, past], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "a");
     }
@@ -1022,7 +1037,7 @@ mod tests {
         withdrawn.adjective_bitmap = State::Withdrawn.raw_value();
         let frame = make_frame(vec![Filter::StateInCluster(StateCluster::KnewPast)]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[active, withdrawn], store.as_ref()).unwrap();
+            BitmapEvaluator::evaluate(&frame, &[active, withdrawn], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "w");
     }
@@ -1041,7 +1056,7 @@ mod tests {
         // Trust::Derived = 4 → not trustworthy, default excludes.
         hi.adjective_bitmap = Trust::Derived.raw_value() << 18;
         let frame = make_frame(vec![]);
-        let result = BitmapEvaluator::evaluate(&frame, &[low, hi], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[low, hi], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "low");
     }
@@ -1053,7 +1068,7 @@ mod tests {
         hi.adjective_bitmap = Trust::Derived.raw_value() << 18;
         // Caller widens — Derived is now allowed.
         let frame = make_frame(vec![Filter::RequiresConfirmation]);
-        let result = BitmapEvaluator::evaluate(&frame, &[hi], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[hi], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -1068,7 +1083,7 @@ mod tests {
         // Override the helper's default — leave confirmation at 0.
         unconfirmed.provenance = 0;
         let frame = make_frame(vec![]);
-        let result = BitmapEvaluator::evaluate(&frame, &[unconfirmed], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[unconfirmed], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -1078,7 +1093,7 @@ mod tests {
         let mut unconfirmed = base_drawer("u");
         unconfirmed.provenance = 0;
         let frame = make_frame(vec![Filter::UserConfirmed]);
-        let result = BitmapEvaluator::evaluate(&frame, &[unconfirmed], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[unconfirmed], store.as_ref(), &BTreeMap::new()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1089,7 +1104,7 @@ mod tests {
         model.provenance = Confirmation::AutomatedConfirmed.raw_value() << 18;
         let user = base_drawer("u"); // base_drawer already sets UserConfirmed
         let frame = make_frame(vec![Filter::AutomatedConfirmedOnly]);
-        let result = BitmapEvaluator::evaluate(&frame, &[model, user], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[model, user], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "m");
     }
@@ -1100,7 +1115,7 @@ mod tests {
         let mut d = base_drawer("d");
         d.provenance |= SourceType::Canonical.raw_value(); // F13: was SourceType::Instruction in v0.35
         let frame = make_frame(vec![Filter::SourceType(SourceType::Canonical)]); // F13
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -1113,7 +1128,7 @@ mod tests {
                                                             // 0xFC00 / 10, not the older 0x7000 / 12. This test asserts
                                                             // the Rust port matches the canonical encoding.
         let frame = make_frame(vec![Filter::Channel(Channel::McpAgent)]); // F13
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -1125,7 +1140,7 @@ mod tests {
         let mut low = base_drawer("low");
         low.provenance |= Confidence::Low.raw_value() << 24;
         let frame = make_frame(vec![Filter::ConfidenceAtLeast(Confidence::Medium)]);
-        let result = BitmapEvaluator::evaluate(&frame, &[hi, low], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[hi, low], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "hi");
     }
@@ -1142,7 +1157,7 @@ mod tests {
         let frame = make_frame(vec![Filter::HasFeatureFlag(
             DrawerFeatureFlags::IS_PINNED | DrawerFeatureFlags::HAS_VOICE,
         )]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         // At least one bit set → matches.
         assert_eq!(result.len(), 1);
     }
@@ -1153,10 +1168,10 @@ mod tests {
         let mut pub_ = base_drawer("pub");
         pub_.adjective_bitmap = AdjectiveExportability::Public.raw_value() << 12;
         let frame = make_frame(vec![Filter::Exportable]);
-        let result = BitmapEvaluator::evaluate(&frame, &[pub_.clone()], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[pub_.clone()], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         let frame = make_frame(vec![Filter::Contained]);
-        let result = BitmapEvaluator::evaluate(&frame, &[pub_], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[pub_], store.as_ref(), &BTreeMap::new()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1167,13 +1182,18 @@ mod tests {
     #[test]
     fn in_room_and_in_wing_filters() {
         let store = make_store();
+        // ADR-017: room/wing resolved from node_names map, not drawer fields.
+        // Give each drawer a distinct parent_node_id so they map to different rooms.
         let mut k = base_drawer("k");
-        k.room = "kitchen".to_string();
+        k.parent_node_id = "parent-k".to_string();
         let mut s = base_drawer("s");
-        s.room = "study".to_string();
+        s.parent_node_id = "parent-s".to_string();
+        let mut node_names = BTreeMap::new();
+        node_names.insert("parent-k".to_string(), ("wing".to_string(), "kitchen".to_string()));
+        node_names.insert("parent-s".to_string(), ("wing".to_string(), "study".to_string()));
         let frame = make_frame(vec![Filter::InRoom("kitchen".to_string())]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[k.clone(), s.clone()], store.as_ref()).unwrap();
+            BitmapEvaluator::evaluate(&frame, &[k.clone(), s.clone()], store.as_ref(), &node_names).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "k");
     }
@@ -1186,7 +1206,7 @@ mod tests {
         a.lineage_id = target;
         let b = base_drawer("b");
         let frame = make_frame(vec![Filter::LineageID(target)]);
-        let result = BitmapEvaluator::evaluate(&frame, &[a, b], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[a, b], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "a");
     }
@@ -1200,12 +1220,12 @@ mod tests {
         late.filed_at = NOW + 100;
         let frame = make_frame(vec![Filter::CreatedAfter(NOW + 50)]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[early.clone(), late.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[early.clone(), late.clone()], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "late");
         let frame = make_frame(vec![Filter::CreatedBefore(NOW + 50)]);
-        let result = BitmapEvaluator::evaluate(&frame, &[early, late], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[early, late], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "early");
     }
@@ -1218,7 +1238,7 @@ mod tests {
         let mut sibling = base_drawer("s");
         sibling.udc_code = "612.0".to_string();
         let frame = make_frame(vec![Filter::LatticeUnder("547".to_string())]);
-        let result = BitmapEvaluator::evaluate(&frame, &[child, sibling], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[child, sibling], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "c");
     }
@@ -1236,7 +1256,7 @@ mod tests {
         q1_only.wikidata_qid = Some("Q1".to_string());
         let frame = make_frame(vec![Filter::WikidataConcept("Q11351".to_string())]);
         let result =
-            BitmapEvaluator::evaluate(&frame, &[primary, secondary, q1_only], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[primary, secondary, q1_only], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         assert_eq!(result.len(), 2);
     }
@@ -1251,7 +1271,7 @@ mod tests {
         let mut d = base_drawer("d");
         d.content = "Hello World".to_string();
         let frame = make_frame(vec![Filter::ContentMatches("WORLD".to_string())]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -1263,26 +1283,30 @@ mod tests {
     fn all_combinator_requires_every_child() {
         let store = make_store();
         let mut d = base_drawer("d");
-        d.room = "kitchen".to_string();
         d.content = "pasta recipe".to_string();
+        // ADR-017: room resolved from node_names map via parent_node_id.
+        let mut node_names = BTreeMap::new();
+        node_names.insert("test-parent".to_string(), ("wing".to_string(), "kitchen".to_string()));
         let frame = make_frame(vec![Filter::All(vec![
             Filter::InRoom("kitchen".to_string()),
             Filter::ContentMatches("pasta".to_string()),
         ])]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &node_names).unwrap();
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn any_combinator_short_circuits_on_first_match() {
         let store = make_store();
-        let mut d = base_drawer("d");
-        d.room = "study".to_string();
+        let d = base_drawer("d");
+        // ADR-017: room resolved from node_names map via parent_node_id.
+        let mut node_names = BTreeMap::new();
+        node_names.insert("test-parent".to_string(), ("wing".to_string(), "study".to_string()));
         let frame = make_frame(vec![Filter::Any(vec![
             Filter::InRoom("kitchen".to_string()),
             Filter::InRoom("study".to_string()),
         ])]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref(), &node_names).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -1303,7 +1327,7 @@ mod tests {
         // Trust::Derived = 4 → not trustworthy.
         hi.adjective_bitmap = Trust::Derived.raw_value() << 18;
         let frame = make_frame(vec![Filter::Not(Box::new(Filter::Trustworthy))]);
-        let result = BitmapEvaluator::evaluate(&frame, &[low, hi], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[low, hi], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "hi");
     }
@@ -1375,7 +1399,7 @@ mod tests {
             trace_limit: None,
         };
         let result =
-            BitmapEvaluator::evaluate(&frame, &[early.clone(), late.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[early.clone(), late.clone()], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         assert_eq!(result[0].id, "late");
         assert_eq!(result[1].id, "early");
@@ -1396,7 +1420,7 @@ mod tests {
             as_of: None,
             trace_limit: None,
         };
-        let result = BitmapEvaluator::evaluate(&frame, &[late, early], store.as_ref()).unwrap();
+        let result = BitmapEvaluator::evaluate(&frame, &[late, early], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result[0].id, "early");
         assert_eq!(result[1].id, "late");
     }
@@ -1404,10 +1428,15 @@ mod tests {
     #[test]
     fn order_by_room_asc() {
         let store = make_store();
+        // ADR-017: room resolved from node_names map, not drawer fields.
+        // Give each drawer a distinct parent_node_id so they map to different rooms.
         let mut k = base_drawer("k");
-        k.room = "kitchen".to_string();
+        k.parent_node_id = "parent-k".to_string();
         let mut s = base_drawer("s");
-        s.room = "den".to_string();
+        s.parent_node_id = "parent-s".to_string();
+        let mut node_names = BTreeMap::new();
+        node_names.insert("parent-k".to_string(), ("wing".to_string(), "kitchen".to_string()));
+        node_names.insert("parent-s".to_string(), ("wing".to_string(), "den".to_string()));
         let frame = RecallFrame {
             filter_chain: vec![],
             hydration_level: crate::filter::HydrationLevel::Structured,
@@ -1416,9 +1445,10 @@ mod tests {
             as_of: None,
             trace_limit: None,
         };
-        let result = BitmapEvaluator::evaluate(&frame, &[k, s], store.as_ref()).unwrap();
-        assert_eq!(result[0].room, "den");
-        assert_eq!(result[1].room, "kitchen");
+        let result = BitmapEvaluator::evaluate(&frame, &[k, s], store.as_ref(), &node_names).unwrap();
+        // Verify ordering: "den" < "kitchen" lexicographically.
+        assert_eq!(result[0].id, "s");
+        assert_eq!(result[1].id, "k");
     }
 
     // -----------------------------------------------------------------
@@ -1449,10 +1479,10 @@ mod tests {
         };
         // Regardless of input order the tie-break must produce "a-id" before "z-id".
         let result_fwd =
-            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         let result_rev =
-            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         assert_eq!(result_fwd[0].id, "a-id", "tie-break: smaller id first (fwd)");
         assert_eq!(result_fwd[1].id, "z-id", "tie-break: larger id second (fwd)");
@@ -1476,10 +1506,10 @@ mod tests {
             trace_limit: None,
         };
         let result_fwd =
-            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         let result_rev =
-            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref(), &BTreeMap::new())
                 .unwrap();
         assert_eq!(result_fwd[0].id, "a-id", "tie-break asc: smaller id first (fwd)");
         assert_eq!(result_rev[0].id, "a-id", "tie-break asc: smaller id first (rev)");
@@ -1489,10 +1519,13 @@ mod tests {
     fn order_by_room_asc_tiebreak_by_id() {
         let store = make_store();
         // Two drawers in the same room — "a-id" < "z-id".
-        let mut d_z = base_drawer("z-id");
-        d_z.room = "kitchen".to_string();
-        let mut d_a = base_drawer("a-id");
-        d_a.room = "kitchen".to_string();
+        // ADR-017: room resolved from node_names map, not drawer.room field.
+        let d_z = base_drawer("z-id");
+        let d_a = base_drawer("a-id");
+        // Both drawers share the same parent_node_id (from base_drawer),
+        // so they sort to the same room name — tie-break by id applies.
+        let mut node_names = BTreeMap::new();
+        node_names.insert(d_z.parent_node_id.clone(), ("wing".to_string(), "kitchen".to_string()));
         let frame = RecallFrame {
             filter_chain: vec![],
             hydration_level: crate::filter::HydrationLevel::Structured,
@@ -1502,10 +1535,10 @@ mod tests {
             trace_limit: None,
         };
         let result_fwd =
-            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref(), &node_names)
                 .unwrap();
         let result_rev =
-            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref())
+            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref(), &node_names)
                 .unwrap();
         assert_eq!(result_fwd[0].id, "a-id", "tie-break room: smaller id first (fwd)");
         assert_eq!(result_rev[0].id, "a-id", "tie-break room: smaller id first (rev)");

@@ -98,6 +98,14 @@ Use `moot_link_memories` when a relationship should be durable:
 - `extends`
 - `precedes`
 - `exemplifies`
+- `supersedes`
+- `references`
+- `blocks`
+- `validates`
+- `derivesFrom`
+- `covers`
+- `elaborates`
+- `respondsTo`
 - `relates`
 
 ## Corrections

@@ -316,22 +316,53 @@ pub fn encode_signal(sig: &SignalFile) -> Vec<u8> {
 }
 
 pub fn decode_job(bytes: &[u8]) -> Result<Job, serde_json::Error> {
+    use serde::de::Error as DeError;
     let v: Value = serde_json::from_slice(bytes)?;
-    let obj = v.as_object().expect("object");
-    let id = JobId(obj["id"].as_str().unwrap().to_string());
-    let stream_id = StreamId(obj["stream_id"].as_str().unwrap().to_string());
-    let sa = obj["submitted_at"].as_object().unwrap();
-    let unsigned = sa["node_id"].as_u64().unwrap() as u32;
-    let signed = unsigned as i32;
+    let obj = v.as_object()
+        .ok_or_else(|| serde_json::Error::custom("expected JSON object at root"))?;
+
+    let id = JobId(obj.get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| serde_json::Error::custom("missing or non-string 'id'"))?
+        .to_string());
+
+    let stream_id = StreamId(obj.get("stream_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| serde_json::Error::custom("missing or non-string 'stream_id'"))?
+        .to_string());
+
+    let sa = obj.get("submitted_at")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| serde_json::Error::custom("missing or non-object 'submitted_at'"))?;
+    let unsigned = sa.get("node_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| serde_json::Error::custom("missing or non-u64 'submitted_at.node_id'"))?
+        as u32;
     let hlc = HLC {
-        physical_time: sa["physical_time"].as_i64().unwrap(),
-        logical_count: sa["logical_count"].as_i64().unwrap() as i32,
-        node_id: signed,
+        physical_time: sa.get("physical_time")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| serde_json::Error::custom("missing or non-i64 'submitted_at.physical_time'"))?,
+        logical_count: sa.get("logical_count")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| serde_json::Error::custom("missing or non-i64 'submitted_at.logical_count'"))?
+            as i32,
+        node_id: unsigned as i32,
     };
-    let priority = obj["priority"].as_i64().unwrap() as i32;
-    let payload = base64url_decode(obj["payload"].as_str().unwrap())
+
+    let priority = obj.get("priority")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| serde_json::Error::custom("missing or non-i64 'priority'"))?
+        as i32;
+
+    let payload_str = obj.get("payload")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| serde_json::Error::custom("missing or non-string 'payload'"))?;
+    let payload = base64url_decode(payload_str).unwrap_or_default();
+
+    let extensions = obj.get("extensions")
+        .and_then(|v| v.as_object())
+        .cloned()
         .unwrap_or_default();
-    let extensions = obj["extensions"].as_object().cloned().unwrap_or_default();
-    Ok(Job { id, stream_id, submitted_at: hlc, priority,
-             payload, extensions })
+
+    Ok(Job { id, stream_id, submitted_at: hlc, priority, payload, extensions })
 }

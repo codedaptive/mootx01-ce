@@ -62,12 +62,25 @@ fn started_host() -> ResidentHost {
 }
 
 /// Issue a raw HTTP request to 127.0.0.1:port and return (status_line, body).
+/// Tolerates a connection reset after the response is written (the server may
+/// RST rather than FIN when it drops the stream after writing the response,
+/// which happens on the 503 shed path on some platforms).
 fn http_request(port: u16, raw: &str) -> (String, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream.write_all(raw.as_bytes()).unwrap();
     stream.flush().unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    let mut response = Vec::new();
+    // Read until EOF or an error. A connection-reset-by-peer after a complete
+    // response (the shed 503 path) is treated as EOF so the response is parsed.
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,            // clean EOF
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,           // RST or other error; parse what we have
+        }
+    }
+    let response = String::from_utf8_lossy(&response).into_owned();
     let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
     let status_line = head.lines().next().unwrap_or("").to_string();
     (status_line, body.to_string())
@@ -98,9 +111,10 @@ fn read_endpoints_return_json() {
 fn estates_endpoint_merges_host_admin_section() {
     let mut host = started_host();
     let port = host.bound_http_port();
-    // The host's own EstateAdmin section is merged in (the manager's base.admin
-    // is null; HttpReadApi substitutes the host's admin payload). With nothing
-    // provisioned the admin section is present but empty.
+    // HttpReadApi overwrites admin with the local EstateAdmin payload (the
+    // manager's base.admin may be non-null when the daemon proxy succeeds, but
+    // this route replaces it). With nothing provisioned the admin section is
+    // present but the hosted list is empty.
     let (status, body) = get(port, "/api/estates");
     assert!(status.contains("200"));
     assert!(body.contains("\"admin\""));
@@ -164,6 +178,21 @@ fn http_control_rejects_cross_origin() {
     );
     let (status, _b) = http_request(port, &raw);
     assert!(status.contains("403"), "cross-origin must be 403, got {status}");
+    host.stop();
+}
+
+/// Loopback-prefix spoofing: `localhost.evil` DNS-resolves to 127.0.0.1 and the
+/// page sends its own origin. The old prefix-only check would allow this; the
+/// suffix-validated check rejects it before the token is examined.
+#[test]
+fn http_control_rejects_loopback_prefix_spoof_origin() {
+    let mut host = started_host();
+    let port = host.bound_http_port();
+    let raw = format!(
+        "POST /api/control/monitoring/on HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost.evil\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let (status, _b) = http_request(port, &raw);
+    assert!(status.contains("403"), "spoofed loopback origin must be 403, got {status}");
     host.stop();
 }
 
@@ -293,6 +322,175 @@ fn admin_provision_over_uds_lights_corpus_and_appears_in_estates() {
         }
         assert_eq!(admin.backing_estate_has_corpus(uuid), Some(true));
     }
+
+    host.stop();
+}
+
+// ─────────────────────── concurrency cap (CAND-011) ──────────────────────────
+
+// These tests exercise the LoopbackConnGate directly and through the real HTTP
+// server, confirming:
+//   (a) connections beyond the cap are shed with HTTP 503 + Retry-After,
+//   (b) a completed connection releases its slot so a new one is accepted,
+//   (c) the accept loop itself never stalls (the gate is non-blocking on the
+//       accept thread).
+//
+// Test isolation: cap=2 is used for the server-level tests so only three
+// connections are needed — fast and deterministic. The gate unit test drives
+// the gate internals directly without a real socket.
+
+use moot_mgr::http_read_api::LoopbackConnGate;
+
+/// Gate unit test: depth tracking and shed behaviour without a real server.
+#[test]
+fn conn_gate_tracks_depth_and_sheds_at_cap() {
+    let gate = LoopbackConnGate::new_for_test(2);
+    // Below cap: two enqueues succeed.
+    assert!(gate.try_enqueue(), "first slot");
+    assert!(gate.try_enqueue(), "second slot");
+    assert_eq!(gate.current_depth(), 2);
+    // At cap: third enqueue fails (shed path).
+    assert!(!gate.try_enqueue(), "third should be shed — cap=2");
+    assert_eq!(gate.current_depth(), 2, "depth unchanged after shed");
+    // Release one slot; now a new enqueue succeeds.
+    gate.release();
+    assert_eq!(gate.current_depth(), 1);
+    assert!(gate.try_enqueue(), "slot freed by release");
+    assert_eq!(gate.current_depth(), 2);
+    // Release all.
+    gate.release();
+    gate.release();
+    assert_eq!(gate.current_depth(), 0);
+}
+
+/// Slot-release-on-spawn-failure invariant: a reserved slot must be returned
+/// to the gate if the worker closure is dropped before it executes (the
+/// `std::thread::Builder::spawn` failure path).
+///
+/// The fix (commit secfix/c-mootmgr-slotleak) binds the release guard on the
+/// accept thread immediately after `try_enqueue` succeeds, then MOVES it into
+/// the spawn closure. If `spawn` returns `Err`, the closure (and guard) is
+/// dropped by the `Err` destructor, calling `release()` — no slot leak.
+///
+/// This test models that path: reserve a slot, create a "spawn closure" that
+/// owns an RAII guard, drop the closure without running it, and verify the
+/// gate depth returns to 0. The RAII pattern here mirrors `OnDrop` in
+/// http_read_api.rs (the production guard type), but is defined locally so
+/// integration tests have no dependency on the private http_read_api internals.
+#[test]
+fn slot_is_released_when_spawn_closure_is_dropped_before_running() {
+    use std::sync::Arc;
+
+    let gate = Arc::new(LoopbackConnGate::new_for_test(2));
+    assert_eq!(gate.current_depth(), 0, "gate starts empty");
+
+    // Reserve a slot (as the accept loop does after try_enqueue succeeds).
+    assert!(gate.try_enqueue(), "slot reservation must succeed");
+    assert_eq!(gate.current_depth(), 1, "depth is 1 after reservation");
+
+    // Build the "spawn closure": an RAII guard bound on the accept thread,
+    // moved into a closure that will be discarded without running — exactly
+    // what happens when std::thread::Builder::spawn returns Err.
+    //
+    // SlotGuard mirrors the OnDrop pattern from http_read_api.rs: the closure
+    // calls gate.release() when dropped, on ANY path (normal or panic).
+    struct SlotGuard(Arc<LoopbackConnGate>);
+    impl Drop for SlotGuard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    let guard = SlotGuard(Arc::clone(&gate));
+    // Wrap in a closure that owns the guard — this is the "spawn closure".
+    // In production the closure is passed to thread::Builder::spawn; here we
+    // simulate spawn failure by dropping the closure without calling it.
+    let spawn_closure: Box<dyn FnOnce()> = Box::new(move || {
+        let _g = guard; // guard lives in the closure; releases on closure exit
+        // (worker body would go here)
+    });
+
+    // Simulate spawn failure: drop the closure without executing it.
+    // The guard inside should fire release().
+    drop(spawn_closure);
+
+    assert_eq!(
+        gate.current_depth(),
+        0,
+        "slot must be released when spawn closure is dropped (spawn-failure path)"
+    );
+
+    // Sanity: new connections are accepted again after the leak is fixed.
+    assert!(gate.try_enqueue(), "gate accepts new slot after release");
+    assert_eq!(gate.current_depth(), 1);
+    gate.release();
+    assert_eq!(gate.current_depth(), 0);
+}
+
+/// Server-level test: connections beyond cap=2 are shed with HTTP 503.
+/// Completing a connection frees a slot so the next one is accepted.
+#[test]
+fn excess_connections_are_shed_503() {
+    // Build a host with cap=2 so we only need 3 connections.
+    let dir = scratch_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = scratch_socket();
+    let cfg = ResidentHostConfig::new(
+        ManagerConfig::new(format!("{dir}/stats.sqlite"), 100_000, 3600),
+        0,
+        TOKEN,
+        socket,
+        format!("{dir}/estates"),
+    );
+    // Build the host with an explicit cap of 2 (test-only constructor).
+    let mut host = ResidentHost::new_with_http_cap(cfg, NOW, 2);
+    host.start().expect("host must start");
+    let port = host.bound_http_port();
+
+    // Open two connections and send only a partial HTTP request (no CRLF CRLF
+    // terminator). The server's `read_request` blocks in the header-read loop
+    // waiting for the end-of-headers marker, keeping the worker thread alive
+    // and its gate slot occupied.
+    let mut conn1 = TcpStream::connect(("127.0.0.1", port)).expect("conn1");
+    conn1.write_all(b"GET /api/server HTTP/1.1\r\nHost: 127.0.0.1\r\n").unwrap();
+    // Do NOT write the final \r\n — the server blocks reading headers.
+
+    let mut conn2 = TcpStream::connect(("127.0.0.1", port)).expect("conn2");
+    conn2.write_all(b"GET /api/server HTTP/1.1\r\nHost: 127.0.0.1\r\n").unwrap();
+
+    // Yield so the accept loop has processed conn1 + conn2 and their worker
+    // threads are past try_enqueue / wait_for_slot (holding slots, blocked in
+    // read_request). 50 ms is far below the 3-min test limit and reliable.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Third connection: gate is at cap — must be shed with 503 immediately
+    // without any request headers being read on the accept thread.
+    let (status3, body3) = get(port, "/api/server");
+    assert!(
+        status3.contains("503"),
+        "connection beyond cap should be shed with 503, got: {status3}\nbody: {body3}"
+    );
+    assert!(
+        body3.contains("service_unavailable") || body3.contains("retry_after"),
+        "503 body should contain shed fields, got: {body3}"
+    );
+
+    // Drop conn1 and conn2 — closing the sockets causes read_request to return
+    // None (EOF), the worker threads complete, and the OnDrop guards release
+    // their slots.
+    drop(conn1);
+    drop(conn2);
+
+    // Allow the worker threads to call release() via OnDrop. 50 ms is enough;
+    // the threads complete as soon as they observe EOF from read_request.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Now a new connection should succeed — slots were freed by the drops.
+    let (status4, _) = get(port, "/api/server");
+    assert!(
+        status4.contains("200"),
+        "post-release connection should succeed with 200, got: {status4}"
+    );
 
     host.stop();
 }

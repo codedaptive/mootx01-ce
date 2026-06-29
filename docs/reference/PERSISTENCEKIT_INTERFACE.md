@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-18
-version: 1.1.1
+date: 2026-06-28
+version: 1.6.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -580,6 +580,14 @@ public enum StorageError: Error, Sendable, Equatable {
     case invalidQuery(detail: String)
     case appendOnlyViolation(table: String)
     case backendError(underlying: String)
+    case corruptStoredValue(table: String, column: String, storedText: String)
+    case invalidConfiguration(reason: String)
+    case featureGated(feature: String)
+    /// A caller-supplied SQL identifier (column or table name) contains
+    /// characters outside `[A-Za-z_][A-Za-z0-9_]*`. Thrown by insert,
+    /// upsert, update, and queryProjected before any SQL is constructed
+    /// (SPEC I-21 — CAND-047, landed 2026-06-28).
+    case invalidIdentifier(name: String)
 }
 ```
 
@@ -599,6 +607,14 @@ pub enum StorageError {
     InvalidQuery { detail: String },
     AppendOnlyViolation { table: String },
     BackendError { underlying: String },
+    CorruptStoredValue { table: String, column: String, stored_text: String },
+    InvalidConfiguration { reason: String },
+    FeatureGated { feature: String },
+    /// A caller-supplied SQL identifier (column or table name) contains
+    /// characters outside `[A-Za-z_][A-Za-z0-9_]*`. Thrown by insert,
+    /// upsert, update, and query_projected before any SQL is constructed
+    /// (SPEC I-21 — CAND-047, landed 2026-06-28).
+    InvalidIdentifier { name: String },
 }
 pub type StorageResult<T> = Result<T, StorageError>;
 ```
@@ -717,7 +733,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `Storage` (protocol) | `Storage` (trait) | Top-level backend protocol/trait. Swift: `async throws` methods. Rust: synchronous `StorageResult<T>` — sanctioned async/sync seam (§ 1). |
 | `StorageTransaction` (protocol) | `StorageTransaction` (trait) | Transaction handle carrying `rowStore`, `blobStore`, `auditLog`. Rust `transaction` is non-generic (object-safety; block returns `StorageResult<()>`). |
 | `IsolationLevel` | `IsolationLevel` | Three cases: `readCommitted`/`ReadCommitted`, `repeatableRead`/`RepeatableRead`, `serializable`/`Serializable`. |
-| `RowStore` (protocol) | `RowStore` (trait) | Typed row I/O. `insert`, `upsert`, `update`, `delete`, `query`, `count`. Swift `async throws` / Rust `StorageResult`. |
+| `RowStore` (protocol) | `RowStore` (trait) | Typed row I/O. `insert`, `upsert`, `update`, `delete`, `query`, `count`, plus default as-of temporal query methods (`query(..., asOf:)` / `query_as_of`, `query(..., columns:, asOf:)` / `query_projected_as_of`, `querySkipCorrupt(..., asOf:)` / `query_skip_corrupt_as_of`). Swift `async throws` / Rust `StorageResult`. |
 | `RowKey` (typealias `UUID`) | `RowKey` (type alias `uuid::Uuid`) | Primary key type. |
 | `StorageRow` | `StorageRow` | `values: [String: TypedValue]` / `HashMap<String, TypedValue>`. |
 | `RowHandle` | `RowHandle` | `table: String`, `key: RowKey`. |
@@ -738,7 +754,8 @@ struct inside `IncrementalReplicationSession.swift`.
 | `OrderClause` | `OrderClause` | `column: Column`, `direction: OrderDirection`. |
 | `SchemaDeclaration` | `SchemaDeclaration` | Schema manifest: `kitID`/`kit_id`, `version`, `tables`, `indices`, `migrations`. |
 | `TableDeclaration` | `TableDeclaration` | Table manifest: `name`, `columns`, `primaryKey`/`primary_key`, `uniqueConstraints`/`unique_constraints`, `generatedColumns`/`generated_columns`, `appendOnly`/`append_only`. |
-| `ColumnDeclaration` | `ColumnDeclaration` | Column manifest: `name`, `type`/`col_type`, `nullable`, `defaultValue`/`default_value`. |
+| `ColumnDeclaration` | `ColumnDeclaration` | Column manifest: `name`, `type`/`col_type`, `nullable`, `defaultValue`/`default_value`, `role: ColumnRole?`/`role: Option<ColumnRole>`. |
+| `ColumnRole` | `ColumnRole` | Semantic role for temporal filtering (ADR-017 §15). Two cases: `createdHlc`/`CreatedHlc`, `tombstonedHlc`/`TombstonedHlc`. |
 | `IndexDeclaration` | `IndexDeclaration` | Index manifest: `name`, `table`, `columns`, `unique`. |
 | `Migration` | `Migration` | Schema migration step: `fromVersion`/`from_version` (Int/i32), `toVersion`/`to_version` (Int/i32), `operations` ([SchemaOperation]/Vec<SchemaOperation>). |
 | `SchemaOperation` | `SchemaOperation` | Closed migration-operation enum: `createTable`/`CreateTable`, `dropTable`/`DropTable`, `addColumn`/`AddColumn`, `dropColumn`/`DropColumn`, `renameColumn`/`RenameColumn`, `addIndex`/`AddIndex`, `dropIndex`/`DropIndex`, `custom(sqlite:postgresql:)`/`Custom{sqlite,postgresql}` (per-backend SQL escape hatch). |
@@ -747,7 +764,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `EstateConfiguration` | `EstateConfiguration` | See EstateConfiguration field parity table below. |
 | `BackendConfiguration` | `BackendConfiguration` | Three cases: `sqlite(url:busyTimeout:)`/`Sqlite{…}`, `postgresql(…)`/`Postgresql{…}`, `inMemory`/`InMemory`. |
 | `NovelTokenTaggerChoice` | `NovelTokenTaggerChoice` | See NovelTokenTaggerChoice parity table below. |
-| `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Twelve cases, case-for-case identical. |
+| `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Fifteen cases, case-for-case identical. |
 | `InMemoryStorage` | `InMemoryStorage` | In-memory `Storage` conformer/implementor. |
 | `SQLiteStorage` | `SqliteStorage` | SQLite backend (name idiom: `SQLite`/`Sqlite`). |
 | `PostgreSQLStorage` | `PostgresStorage` | PostgreSQL backend (name idiom: `PostgreSQL`/`Postgres`). |
@@ -764,8 +781,19 @@ struct inside `IncrementalReplicationSession.swift`.
 | `IncrementalReplicationSession` | `IncrementalReplicationSession` | Session-oriented incremental replication: wires `StorageObserver` subscriptions to dirty-set accumulators and runs sync passes. Swift: `public final class IncrementalReplicationSession: Sendable`. Rust: `pub struct IncrementalReplicationSession`. |
 | `BlobDirtySet` (Swift) | `BlobDirtyAccumulator` (Rust) | Blob-change dirty accumulator. The name differs by port convention; the contract is identical: accumulate `BlobChange` notifications, drain to get the (key, bytes) set to sync. |
 | `EstateCacheConfig` | `EstateCacheConfig` | Cache layer config: `enabled`, byte ceiling, sensitivity threshold (clamped ≤ 2). |
-| `CachingRowStore` | `CachingRowStore` | Decorating `RowStore` with InMemory hot tier and LRU eviction (SPEC I-11/I-12). |
+| `CachingRowStore` | `CachingRowStore` | Decorating `RowStore` with InMemory hot tier and LRU eviction (SPEC I-11/I-12). Present and as-of reads key separately (SPEC B-16). Accepts an optional `ParentChainProvider` callback for Merkle-aggregate chain invalidation (SPEC B-17). Swift: `init(backing:config:parentChainProvider:)` with `parentChainProvider` defaulting to `nil`. Rust: `new(backing, config)` (no callback) or `with_parent_chain(backing, config, provider)`. |
+| `ParentChainProvider` | `ParentChainProvider` | Public typealias / type alias for the parent-chain callback passed to `CachingRowStore` at construction. Swift: `public typealias ParentChainProvider = @Sendable (String, RowKey) -> [RowHandle]`. Rust: `pub type ParentChainProvider = Box<dyn Fn(&str, RowKey) -> Vec<RowHandle> + Send + Sync>`. Must return synchronously; must not re-enter the same `CachingRowStore` (SPEC B-17). |
 | `CacheInvalidator` | `CacheInvalidator` | Subscribes to `StorageObserver` and invalidates cache entries on `TableChange` (SPEC B-14). |
+
+### Hash-on-write decorator (NT-P2)
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `HashingRowStore` | `HashingRowStore` | `RowStore` decorator that intercepts writes to hashable tables, computes a `ContentHash` via an injected callback, and emits `DirtyChainEvent` notifications. Swift: `public final class HashingRowStore: RowStore, @unchecked Sendable`. Rust: `pub struct HashingRowStore`. PersistenceKit does not import substrate-lib; the hash function is supplied by the consuming kit (e.g. LocusKit passes `MerkleHash::leaf`). NT-P2. |
+| `HashOnWriteConfig` | `HashOnWriteConfig` | Configuration for the `HashingRowStore` decorator. Swift: `public struct HashOnWriteConfig: Sendable`. Rust: `pub struct HashOnWriteConfig`. Three fields: `hashableTables`/`hashable_tables` (set of table names to intercept), `hashProvider`/`hash_provider` (`ContentHashProvider` callback), `parentChainProvider`/`parent_chain_provider` (`HashParentChainProvider` callback). NT-P2. |
+| `ContentHashProvider` | `ContentHashProvider` | Callback type that computes a `ContentHash` for a row. Swift: `public typealias ContentHashProvider = @Sendable (_ table: String, _ rowKey: RowKey, _ values: [String: TypedValue]) -> ContentHash`. Rust: `pub type ContentHashProvider = Box<dyn Fn(&str, RowKey, &BTreeMap<String, TypedValue>) -> ContentHash + Send + Sync>`. Caller (e.g. LocusKit) supplies `MerkleHash::leaf` or an accelerated kernel variant. NT-P2. |
+| `HashParentChainProvider` | `HashParentChainProvider` | Callback type that returns the Merkle containment parent chain for a row. Swift: `public typealias HashParentChainProvider = @Sendable (...) -> (parentNodeId: UUID, grandparentNodeId: UUID)?`. Rust: `pub type HashParentChainProvider = Box<dyn Fn(&str, RowKey) -> Option<(uuid::Uuid, uuid::Uuid)> + Send + Sync>`. Returns `nil`/`None` for rows without a parent chain (root nodes, non-Merkle tables). NT-P2. |
+| `DirtyChainEvent` | `DirtyChainEvent` | Three-identifier dirty-chain event emitted by `HashingRowStore` on every write to a hashable table. Swift: `public struct DirtyChainEvent: Sendable`. Rust: `pub struct DirtyChainEvent`. Five fields: `changedRowId`/`changed_row_id`, `parentNodeId`/`parent_node_id`, `grandparentNodeId`/`grandparent_node_id` (UUID/Uuid), `contentHash`/`content_hash` (ContentHash), `table` (String). Consumed by `CachingRowStore` (Merkle invalidation, NT-P4) and Merkle rollup (NT-L3). NT-P2. |
 
 ### Rust-only types (no Swift public counterpart)
 
@@ -778,6 +806,13 @@ struct inside `IncrementalReplicationSession.swift`.
 | Swift type | Source file | Reason for Swift-only |
 |---|---|---|
 | `StorageReplicator` | `Sources/PersistenceKitReplication/StorageReplicator.swift` | Caseless-enum namespace for the full-snapshot replication entry points (`replicate(from:to:schema:)`, `flush(from:into:schema:)`, `hydrate(into:from:schema:)`). Rust exposes identical operations as free functions (`replicate`, `flush`, `hydrate`) in `replication.rs`; there is no named namespace type. The audit regex does not match free functions by default; this is a shape-idiom difference, not a parity gap. |
+| `ErasureLedgerEntry` | `Sources/PersistenceKit/ErasureLedger.swift:15` | Ledger row for expunge provenance (ADR-017 §13). Swift: `public struct ErasureLedgerEntry: Sendable, Equatable`. Records that a row id was erased — stores the fact of erasure, never the content. Rust parity pending; NT-P3/L4. |
+| `ErasureOverlay` | `Sources/PersistenceKit/ErasureOverlay.swift:50` | Read-path decorator (caseless enum namespace) that hides expunged content. Swift: `public enum ErasureOverlay`. Two-phase fail-closed: any row id in the erasure ledger returns payload nulled regardless of which temporal version was selected (ADR-017 §14). Rust parity pending; NT-P3. |
+| `ErasureOverlayConfig` | `Sources/PersistenceKit/ErasureOverlay.swift:22` | Configuration for the `ErasureOverlay` decorator. Swift: `public struct ErasureOverlayConfig: Sendable`. Rust parity pending; NT-P3. |
+| `GCPin` | `Sources/PersistenceKit/GCPin.swift:17` | Snapshot-aware garbage collection pin (caseless enum namespace). Swift: `public enum GCPin`. Prevents a snapshot's referenced rows from being GC'd while the snapshot pin is live (ADR-017 §12). Rust parity pending; NT-P3. |
+| `SnapshotId` | `Sources/PersistenceKit/SnapshotRegistry.swift:18` | UUID wrapper for snapshot identity. Swift: `public struct SnapshotId: Sendable, Hashable, CustomStringConvertible`. Typed wrapper over a `UUID`; exposes `value: UUID` and `CustomStringConvertible` for diagnostics. Rust parity pending; NT-P1. |
+| `SnapshotRecord` | `Sources/PersistenceKit/SnapshotRegistry.swift:32` | Snapshot metadata row. Swift: `public struct SnapshotRecord: Sendable, Equatable`. Records the snapshot registry entry (id, label, hlc, createdAt). **Layering note:** Rust port places a type of the same name in `LocusKit/merkle_rollup.rs` (see LocusKit concordance). Swift placement in PersistenceKit is correct per ADR-017 PersistenceKit-first layering; Rust should be relocated from LocusKit. NT-P1/L4. |
+| `SnapshotAttestation` | `Sources/PersistenceKit/SnapshotRegistry.swift:47` | Attestation row with `subjectKind` (estate/wing/corpus), `subjectId`, `merkleRoot`. Swift: `public struct SnapshotAttestation: Sendable, Equatable`. Records WHAT the Merkle roots were at snapshot time (registry records WHEN). **Layering note:** Rust port places a type of the same name in `LocusKit/merkle_rollup.rs` (see LocusKit concordance). Swift placement in PersistenceKit is correct; Rust should be relocated. NT-P1/L4. |
 
 ### Encryption types
 
@@ -1140,6 +1175,55 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 *End of PersistenceKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-06-28
+SECFIX-WS2-PK: Added `StorageError.invalidIdentifier(name:)` /
+`StorageError::InvalidIdentifier { name }` to the public error enum in both
+ports (§ 4). The case was introduced by a prior mission but missing from this
+document. Thrown by `insert`, `upsert`, `update`, and `queryProjected` when a
+caller-supplied column name falls outside `[A-Za-z_][A-Za-z0-9_]*` (SPEC
+I-21 — CAND-047). Also documents SPEC I-22 (CAND-052): SQLite backend refuses
+a symlink at the DB path and sets 0600 on newly-created estate files.
+
+### 1.5.0 -- 2026-06-25
+Additive (ADR-021 Decision 7, T3): `EstateConfiguration.queueSibling(filename:)`
+(Swift `throws`) / `queue_sibling(&self, filename:)` (Rust `StorageResult`).
+Derives a sibling-DB config for the per-estate queue — for a `.sqlite` estate, a
+`.sqlite` config at the same directory with the leaf replaced by `filename`,
+**carrying the estate's `encryptionConfig` verbatim** (the queue DB is encrypted
+with the same key); InMemory → InMemory sibling; PostgreSQL → throws/returns
+`StorageError.featureGated` (deferred to the ADR-021 Postgres pass). The sibling
+estate-id is derived deterministically (XOR-fold of the filename into the parent
+UUID — byte-identical across ports), no `UUID()`/random. Lets mootx01 open the
+one encrypted per-estate `queue.sqlite`.
+
+### 1.4.0 -- 2026-06-21
+NT-DOC-1: Added 12 concordance rows for ADR-017 node-tree migration types. New
+`### Hash-on-write decorator (NT-P2)` subsection documents `HashingRowStore`,
+`HashOnWriteConfig`, `ContentHashProvider`, `HashParentChainProvider`, and
+`DirtyChainEvent` (Swift+Rust, 5 rows). Expanded `### Swift-only types` section
+with `ErasureLedgerEntry`, `ErasureOverlay`, `ErasureOverlayConfig`, `GCPin`,
+`SnapshotId`, `SnapshotRecord`, and `SnapshotAttestation` (7 rows; latter two
+include layering note documenting that Rust counterparts currently reside in
+`LocusKit/merkle_rollup.rs`, parity debt NT-P1/L4).
+
+### 1.3.0 -- 2026-06-20
+NT-P4: Added `ParentChainProvider` to the § 7 concordance table (new public
+typealias/type alias). Updated the `CachingRowStore` row to document temporal key
+isolation (SPEC B-16), the `ParentChainProvider` callback contract (SPEC B-17),
+and the Swift vs Rust constructor shape difference (`init` default-nil param vs
+`new`/`with_parent_chain` two-constructor pattern).
+
+### 1.2.0 -- 2026-06-20
+NT-P1: Added `ColumnRole` enum (`createdHlc`/`CreatedHlc`,
+`tombstonedHlc`/`TombstonedHlc`) and `role: ColumnRole?` field on
+`ColumnDeclaration`. Added three as-of temporal query default methods to
+`RowStore` (`query(..., asOf:)` / `query_as_of`, projected and skip-corrupt
+variants). Added three error cases to `StorageError`: `corruptStoredValue`,
+`invalidConfiguration`, `featureGated` (the latter gates the as-of query
+surface per ADR-017 §17). Updated § 7 parity table: `StorageError` fifteen
+cases; `ColumnDeclaration` includes `role`; new `ColumnRole` row; `RowStore`
+notes as-of default methods.
 
 ### 1.1.1 -- 2026-06-18
 Mode 3 is SQLCipher on every platform (CommonCrypto on Apple, implemented).

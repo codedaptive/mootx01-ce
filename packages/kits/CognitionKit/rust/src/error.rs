@@ -233,10 +233,10 @@ mod tests {
 
     #[test]
     fn all_six_recipe_error_cases_exist() {
-        // Structural parity gate: every case that exists in the Swift
-        // `RecipeError` enum must also exist in the Rust port. An exhaustive
-        // match here is a compile-time check — adding a case to one port and
-        // forgetting the other produces a Rust compile error.
+        // Structural exhaustiveness check: this match covers every Rust
+        // `RecipeError` variant. It is a Rust compile-time gate only — it does
+        // not detect a Swift-only enum change. A Swift-side addition requires a
+        // matching Rust case plus an update to this list.
         use crate::capability::NeuronKitCapability;
         let cases: Vec<RecipeError> = vec![
             RecipeError::MissingCapability(NeuronKitCapability::HybridRecall),
@@ -356,8 +356,10 @@ mod tests {
 
     #[test]
     fn recipe_run_error_exhaustive_match() {
-        // Compile-time case parity gate: if a variant is added to one port and
-        // forgotten in the other, this match produces a Rust compile error.
+        // Rust exhaustiveness check over RecipeRunError variants. Protects the
+        // Rust enum only — a Swift-only variant addition does not produce a Rust
+        // compile error; it requires a manual update to both the Rust enum and
+        // this match.
         fn classify(e: &RecipeRunError) -> &'static str {
             match e {
                 RecipeRunError::Recipe(_) => "recipe",

@@ -19,8 +19,8 @@
 //                             timed_out, not_attempted, plus growth}.
 //
 // Decay: action_outcome HAS decay (cookbook § 6.8 table). Half-life:
-// 90 days. Decay applied lazily by the dreaming daemon via MatrixDecay
-// (glref-*-MatrixDecay).
+// 365 days (per MatrixDecay.swift's per-matrix half-life table).
+// Decay applied lazily by the dreaming daemon via MatrixDecay.swift.
 //
 // Storage estimate: 64 actions × 64 outcomes × 16 bytes = 64 KiB at
 // full saturation; typical estates populate < 5% of cells.

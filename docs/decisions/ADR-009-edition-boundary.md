@@ -113,15 +113,15 @@ never see it.
 
 ## Update — 2026-06-15: branch names superseded
 
-The branch names used above (under "splitting the version lines" and in the flow
-diagram) are superseded. The repository now follows the `VERSIONING.md` §2.1
-branch scheme:
+Both editions now follow the `VERSIONING.md` §2.1 branch scheme; the names used
+above ("EE branch (`build`/`develop`)", "CE branch (`main`)") are superseded:
 
-- **CE** uses `stable/1.0.x` — the default, permanent 1.0 line, where release
-  tags land — and `develop/1.0.x` for active development. The former CE `main`
-  branch has been retired.
-- **EE** uses `develop`. The former `build` branch has been retired.
+- **CE** uses `stable/1.0.x` (default; release tags land here) and `develop/1.0.x`
+  for active patch development. The former CE `main` branch has been retired.
+- **EE** uses `stable/1.0.x` (the shared 1.0 stable line) and `develop/1.1.x`
+  (default; the next-minor feature line). The former `build` and bare `develop`
+  branches have been retired.
 
-The version-line **decision is unchanged**: CE patches (v1.0.x) are cut from the
-published baseline, EE minors (v1.x.0) carry features. Only the branch *names*
-changed. See `VERSIONING.md` for the authoritative branch and tag conventions.
+The version-line **decision is unchanged**: CE patches (v1.0.x) cut from the
+published baseline, EE minors (v1.x.0) carry features — EE's develop line is one
+minor ahead by design. Only the branch *names* changed. See `VERSIONING.md`.

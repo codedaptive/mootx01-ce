@@ -8,13 +8,14 @@ import PersistenceKitInMemory
 @testable import CognitionKit
 
 /// MindOverlapLens — federated lens (category 9, SPEC § 4.2),
-/// privacy-preserving. Each estate's drawers are fingerprinted under a
-/// SHARED hyperplane family and reduced to ONE differentially-private
-/// aggregate; only the aggregates are compared — never either estate's
-/// individual memories. "The moat." Estates are opened with FIXED
-/// estate UUIDs so the shared family + DP seed (derived from both
-/// UUIDs) are deterministic — random UUIDs would make the seeded noise,
-/// and the test, flaky. Swift peer of run_mind_overlap.
+/// privacy-preserving. Each estate's drawers are recalled and fingerprinted
+/// locally under a SHARED hyperplane family, then reduced to ONE
+/// differentially-private aggregate. The final overlap comparison uses only
+/// the two aggregates; no individual drawer content crosses the estate
+/// boundary. Estates are opened with FIXED estate UUIDs so the shared
+/// family + DP seed (derived from both UUIDs) are deterministic — random
+/// UUIDs would make the seeded noise, and the test, flaky. Swift peer of
+/// run_mind_overlap.
 @Suite("MindOverlapLensTests")
 struct MindOverlapLensTests {
 

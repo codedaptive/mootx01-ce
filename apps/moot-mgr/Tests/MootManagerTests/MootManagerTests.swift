@@ -264,6 +264,34 @@ struct MootManagerRetentionPersistenceTests {
         #expect(windowAfterReject == validWindow,
                 "failed setRetention must leave the existing override intact")
     }
+
+    @Test("retention sidecar uses the store stem — not a fixed name — preventing path collision")
+    func retentionPrefsUsesStoreStem() async throws {
+        // Two managers in the SAME parent directory with DIFFERENT store filenames must
+        // write distinct sidecar files (stem-derived), not collide on a shared fixed name.
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("moot-mgr-stem-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let storeURL = parent.appendingPathComponent("mystore.sqlite", isDirectory: false)
+        let config = ManagerConfig(storeURL: storeURL)
+        let manager = MootManager(config: config)
+        try await manager.start()
+        defer { Task { await manager.stop() } }
+
+        // Trigger a persistence write.
+        let window: TimeInterval = 7200
+        try await manager.setRetention(window: window)
+
+        // Sidecar must be `mystore-prefs.json` (stem-derived).
+        let expected = parent.appendingPathComponent("mystore-prefs.json", isDirectory: false)
+        let wrongFixed = parent.appendingPathComponent("moot-mgr-prefs.json", isDirectory: false)
+
+        #expect(FileManager.default.fileExists(atPath: expected.path),
+                "stem-derived sidecar mystore-prefs.json must exist")
+        #expect(!FileManager.default.fileExists(atPath: wrongFixed.path),
+                "fixed-name sidecar moot-mgr-prefs.json must NOT exist (collision hazard)")
+    }
 }
 
 // MARK: - Retention
@@ -528,5 +556,28 @@ struct ManagerCLITests {
 
         let retention = try await ManagerCLI.run(.retentionRun, manager: manager, now: now)
         #expect(retention.hasPrefix("retention: rolled off "))
+    }
+}
+
+// MARK: - Stats store directory security (planned hardening)
+
+struct MootManagerStoreSecurityTests {
+
+    @Test("start() creates the stats store directory with 0700 permissions on POSIX")
+    func storeDirectoryIsOwnerOnly() async throws {
+        // The stats store directory must not be world- or group-readable so that
+        // other local users cannot access SQLite WAL/SHM files. Planned hardening:
+        // createDirectory uses [.posixPermissions: 0o700].
+        let storeURL = makeTempStoreURL()
+        let manager = MootManager(config: ManagerConfig(storeURL: storeURL))
+        try await manager.start()
+        defer { Task { await manager.stop() } }
+
+        let dir = storeURL.deletingLastPathComponent()
+        let attrs = try FileManager.default.attributesOfItem(atPath: dir.path)
+        let mode = (attrs[.posixPermissions] as? Int) ?? -1
+        // Mask to the standard rwxrwxrwx bits (9 bits) and assert owner-only (0o700).
+        #expect(mode & 0o777 == 0o700,
+                "stats store directory must have 0700 permissions; got \(String(mode, radix: 8))")
     }
 }

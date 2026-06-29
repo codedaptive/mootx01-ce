@@ -74,7 +74,7 @@ fn sensitivity_label(s: AdjectiveSensitivity) -> &'static str {
 /// case-name) vocabulary so both versions emit identical labels.
 fn field_value_labels(d: &Drawer) -> Vec<String> {
     let mut fv = vec![
-        format!("room:{}", d.room),
+        format!("room:{}", d.parent_node_id),
         format!("kind:{}", kind_label(d.content_kind())),
         format!("channel:{}", channel_label(d.capture_channel())),
         format!(
@@ -134,6 +134,7 @@ mod tests {
     use std::sync::Arc;
 
     use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::drawer::Drawer;
     use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -160,7 +161,7 @@ mod tests {
         kind: ContentKind,
         channel: CaptureChannel,
         sensitivity: AdjectiveSensitivity,
-    ) {
+    ) -> Drawer {
         let mut frame = CaptureFrame::new(
             "content",
             channel,
@@ -171,7 +172,7 @@ mod tests {
         );
         frame.kind = kind;
         frame.sensitivity = sensitivity;
-        coord.capture(h, frame, NOW).unwrap();
+        coord.capture(h, frame, NOW).unwrap()
     }
 
     fn unconfirmed() -> RecallFrame {
@@ -203,8 +204,9 @@ mod tests {
     #[test]
     fn ck_lt1_two_regimes_separate_into_themes() {
         let (coord, h) = coord_with_parent();
+        let mut study_node = String::new();
         for _ in 0..3 {
-            capture(
+            let d = capture(
                 &coord,
                 &h,
                 "study",
@@ -212,9 +214,11 @@ mod tests {
                 CaptureChannel::Typed,
                 AdjectiveSensitivity::Normal,
             );
+            study_node = d.parent_node_id;
         }
+        let mut work_node = String::new();
         for _ in 0..3 {
-            capture(
+            let d = capture(
                 &coord,
                 &h,
                 "work",
@@ -222,18 +226,21 @@ mod tests {
                 CaptureChannel::Voiced,
                 AdjectiveSensitivity::Elevated,
             );
+            work_node = d.parent_node_id;
         }
 
         let t = run_latent_themes(&coord, &h, unconfirmed(), 2, NOW).expect("themes");
         assert_eq!(t.k, 2);
         // The study/prose field-values cluster together, distinct from work/code.
-        let study = dominant(&t, "room:study");
+        let study_label = format!("room:{study_node}");
+        let work_label = format!("room:{work_node}");
+        let study = dominant(&t, &study_label);
         assert_eq!(
             dominant(&t, "kind:prose"),
             study,
             "study & prose share a theme"
         );
-        let work = dominant(&t, "room:work");
+        let work = dominant(&t, &work_label);
         assert_eq!(dominant(&t, "kind:code"), work, "work & code share a theme");
         assert_ne!(
             study, work,

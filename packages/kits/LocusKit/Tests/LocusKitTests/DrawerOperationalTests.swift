@@ -8,11 +8,11 @@ import Testing
 /// behavior of `Drawer.operationalBitmap` for callers that omit
 /// the parameter.
 ///
-/// No SQLite work in this mission (LOCI_V035_02); the schema
-/// migration that persists `operationalBitmap` ships in
-/// LOCI_V035_02B. These tests therefore exercise pure value
-/// types — enum raw values, bit-extraction accessors, OptionSet
-/// membership, and Codable equality — without touching DrawerStore.
+/// `operationalBitmap` persistence is implemented in `DrawerStore`
+/// and covered by the store-level test suites. This file exercises
+/// pure value types — enum raw values, bit-extraction accessors,
+/// OptionSet membership, and Codable equality — without touching
+/// DrawerStore.
 @Suite("DrawerOperationalTests")
 struct DrawerOperationalTests {
 
@@ -144,8 +144,7 @@ struct DrawerOperationalTests {
     func defaultZero() {
         let drawer = Drawer(
             content: "c",
-            wing: "w",
-            room: "r",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "minilm-v6"
@@ -170,8 +169,7 @@ struct DrawerOperationalTests {
     private func makeDrawer(operationalBitmap: Int64) -> Drawer {
         Drawer(
             content: "c",
-            wing: "w",
-            room: "r",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "minilm-v6",

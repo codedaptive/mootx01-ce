@@ -2,9 +2,10 @@
 //
 // Portable kernel layer per cookbook § 4.4 and paper § 11.3.
 //
-// The substrate's hot operations (Hamming-NN, OR-reduction,
-// bit-sliced field scan, SimHash) compile to one of three CPU
-// kernels depending on the platform:
+// The substrate's hot operations (Hamming-NN, OR-reduction, SimHash)
+// compile to one of several CPU kernels depending on the platform.
+// (Note: bit-sliced field scan is not part of the SubstrateKernel
+// protocol in this reference; the list below covers what is present.)
 //
 //   - NEON          (ARMv8.2 SIMD, Apple silicon, ARM64 Linux/Windows)
 //   - AVX-512       (Intel/AMD x86-64 with AVX-512BW)
@@ -25,15 +26,15 @@
 //   - the ScalarKernel reference impl (always available)
 //   - the kernelForCurrentPlatform() factory
 //
-// NEON, AVX-512, and AVX2 specializations live in:
+// NEON and SIMD specializations live in:
 //
-//   glref-swift-PortableKernel-NEON.swift   (Apple silicon)
-//   glref-swift-PortableKernel-AVX512.swift (Intel/AMD x86-64)
-//   glref-swift-PortableKernel-AVX2.swift   (Intel/AMD x86-64)
+//   glref-swift-PortableKernel-NEON.swift   (Apple silicon — Swift simd types)
+//   glref-swift-PortableKernel-SIMD.swift   (packed SIMD)
+//   glref-swift-PortableKernel-Metal.swift  (GPU, embedded shader)
 //
-// Each is compiled conditionally with #if canImport(simd) or
-// platform predicates and links via the same SubstrateKernel
-// protocol.
+// AVX-512 and AVX2 files are not present in this package; those
+// platform targets fall through to the scalar kernel.
+// Each is linked via the same SubstrateKernel protocol.
 //
 // Used by:
 //   § 4.4 cookbook   Portable kernel definition (this file)

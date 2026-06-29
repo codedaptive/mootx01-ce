@@ -1,9 +1,12 @@
 // InstallerTests.swift
 //
-// Tests for Installer: install/uninstall round-trips, idempotency,
-// Continue YAML writing, MOOT.md creation, placeBinary force parameter,
-// and LaunchAgent.restart. All I/O uses sandbox home and working
-// directories; no real user configs are touched.
+// Tests for Installer: proxy bridge wiring, headless stdio guards,
+// config discovery and merging (JSON/JSONC/YAML/TOML clients),
+// install/uninstall round-trips, idempotency, refusal paths,
+// backup behavior, bundle-copy behavior, MOOT.md creation,
+// placeBinary placement and force parameter, Continue/Hermes/Codex/
+// opencode client wiring, and local-mode installs. All I/O uses
+// sandbox home and working directories; no real user configs are touched.
 
 import Testing
 import Foundation
@@ -37,10 +40,10 @@ struct InstallerTests {
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let servers = obj?["mcpServers"] as? [String: Any]
         let entry = servers?[client.serverName] as? [String: Any]
-        // Claude Code is HTTP-wired to the resident daemon: {"type":"http","url":...}.
-        #expect(entry?["type"] as? String == "http")
-        #expect(entry?["url"] as? String == MootPaths.residentEndpointURL)
-        #expect(entry?["command"] == nil, "HTTP client must not get a stdio command entry")
+        // Claude Code uses a command entry so it does not trust a fixed unauthenticated loopback URL.
+        #expect(entry?["command"] as? String == binaryPath)
+        #expect(entry?["args"] as? [String] == [])
+        #expect(entry?["url"] == nil, "default client wiring must not trust a fixed HTTP url")
     }
 
     @Test("Claude Desktop gets a stdio command entry (no native local-HTTP)")
@@ -488,16 +491,11 @@ struct InstallerTests {
                 "useProxyBridge: true → not headless")
     }
 
-    @Test("no supported client is in headless stdio mode — all use HTTP or proxy bridge")
-    func noSupportedClientIsHeadless() {
-        // Regression guard: as new clients are added, this test confirms every
-        // new canonical entry consciously chooses HTTP or proxy (not bare stdio).
-        // A supported client landing in headless mode is a deliberate choice that
-        // should be accompanied by a test update explaining the reason.
-        for client in MCPClients.supported {
-            #expect(client.isHeadlessStdio == false,
-                    "\(client.displayName) must not be in headless stdio mode")
-        }
+    @Test("supported clients do not trust fixed unauthenticated loopback URLs")
+    func supportedClientsDoNotUseDirectHTTP() {
+        let offenders = MCPClients.supported.filter(\.supportsLocalHTTP).map(\.id)
+        #expect(offenders.isEmpty,
+                "supported clients must not be wired to direct HTTP by default: \(offenders)")
     }
 
     // MARK: - Continue YAML
@@ -519,9 +517,7 @@ struct InstallerTests {
 
         let configURL = home.appendingPathComponent(client.configPath)
         let content = try String(contentsOf: configURL, encoding: .utf8)
-        // Continue is HTTP-wired to the resident daemon: streamable-http + url.
-        #expect(content.contains("type: streamable-http"))
-        #expect(content.contains("url: \(MootPaths.residentEndpointURL)"))
+        #expect(content == "command: \(binaryPath)\nargs: []\n")
     }
 
     // MARK: - Claude Code --local mode
@@ -740,8 +736,8 @@ struct InstallerTests {
         #expect(entry?["url"] == nil, "proxy-bridge entry must not have a url field")
     }
 
-    @Test("mergeIntoJSONConfig writes correct HTTP entry for supportsLocalHTTP client")
-    func mergeIntoJSONConfigHTTP() throws {
+    @Test("mergeIntoJSONConfig writes command entry for default supported client")
+    func mergeIntoJSONConfigDefaultCommand() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
@@ -755,10 +751,9 @@ struct InstallerTests {
 
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
-        // Claude Code: {"type":"http","url":...}
-        #expect(entry?["type"] as? String == "http")
-        #expect(entry?["url"] as? String == MootPaths.residentEndpointURL)
-        #expect(entry?["command"] == nil, "HTTP entry must not have a command field")
+        #expect(entry?["command"] as? String == "/usr/local/bin/mootx01")
+        #expect(entry?["args"] as? [String] == [])
+        #expect(entry?["url"] == nil, "default JSON wiring must not trust a fixed HTTP url")
     }
 
     @Test("mergeIntoJSONConfig is idempotent: second call produces identical file content")
@@ -834,8 +829,8 @@ struct InstallerTests {
 
     // MARK: - mergeIntoTOMLConfig (Codex)
 
-    @Test("mergeIntoTOMLConfig writes a fresh [mcp_servers.mootx01] HTTP table")
-    func mergeIntoTOMLFreshHTTP() throws {
+    @Test("mergeIntoTOMLConfig writes a fresh [mcp_servers.mootx01] command table")
+    func mergeIntoTOMLFreshCommand() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
@@ -849,7 +844,9 @@ struct InstallerTests {
 
         let text = try String(contentsOf: configURL, encoding: .utf8)
         #expect(text.contains("[mcp_servers.mootx01]"), "TOML server table must be present")
-        #expect(text.contains("url = \"\(MootPaths.residentEndpointURL)\""), "HTTP url must be set")
+        // Codex uses a command entry — does not trust a fixed unauthenticated loopback URL.
+        #expect(text.contains("command = \"/usr/local/bin/mootx01\""), "command entry must be set")
+        #expect(text.contains("args = []"), "args entry must be present")
         #expect(text.first != "{", "must be TOML, not JSON")
     }
 
@@ -1006,9 +1003,8 @@ struct InstallerTests {
         defer { cleanupSandbox(home) }
 
         let continueClient = MCPClients.supported.first { $0.id == "continue" }!
-        // Even if a Parall instance directory contains a file named like Continue's config,
-        // the Parall scan block guards on client.id != "continue", so it must return no paths.
-        // Verify parallConfigPaths itself doesn't find them (there's no Parall directory anyway).
+        // No Parall directory is created in this test. parallConfigPaths must return []
+        // when the Parall root does not exist, regardless of which client is passed.
         let paths = Installer.parallConfigPaths(client: continueClient, homeDirectory: home)
         #expect(paths.isEmpty, "No Parall directory for Continue test → must return []")
     }
@@ -1035,10 +1031,10 @@ struct InstallerTests {
         try "{}".write(to: dir.appendingPathComponent(targetFilename),
                        atomically: true, encoding: .utf8)
 
-        // The scan block guard (!client.isHeadlessStdio) means these paths are never
-        // consumed. Verify the underlying parallConfigPaths finds the file (the guard
-        // lives in InstallCommand, not in parallConfigPaths itself), then confirm
-        // that isHeadlessStdio is the correct predicate to skip.
+        // This test calls parallConfigPaths directly — it does not exercise the
+        // InstallCommand guard (!client.isHeadlessStdio). parallConfigPaths returns
+        // matching paths regardless of transport; the guard that prevents merging
+        // into headless clients lives in InstallCommand, not in parallConfigPaths.
         let paths = Installer.parallConfigPaths(client: headlessClient, homeDirectory: home)
         #expect(paths.count == 1, "parallConfigPaths finds the file regardless of transport")
         // The InstallCommand guard: !client.isHeadlessStdio — skips this client.
@@ -1107,8 +1103,8 @@ struct InstallerTests {
 
     // MARK: - opencode (schema: top-level "mcp", type:"remote", .jsonc preference)
 
-    @Test("opencode writes type:remote under top-level mcp key")
-    func opencodeUsesMcpKeyAndRemoteType() throws {
+    @Test("opencode writes command entry under top-level mcp key (no fixed loopback URL)")
+    func opencodeUsesMcpKeyAndCommandEntry() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
         let client = MCPClients.supported.first { $0.id == "opencode" }!
@@ -1120,10 +1116,14 @@ struct InstallerTests {
         let configURL = home.appendingPathComponent(client.configPath)
         let obj = try JSONSerialization.jsonObject(
             with: Data(contentsOf: configURL)) as? [String: Any]
+        // Opencode config uses the top-level "mcp" key (not "mcpServers").
         #expect(obj?["mcpServers"] == nil)
         let entry = (obj?["mcp"] as? [String: Any])?["mootx01"] as? [String: Any]
-        #expect(entry?["type"] as? String == "remote")
-        #expect(entry?["url"] as? String == "http://127.0.0.1:4242")
+        // Default install uses a command entry so opencode does not trust a fixed
+        // unauthenticated loopback URL (ADR-LOOPBACKHTTP-001).
+        #expect(entry?["command"] as? String == "/b")
+        #expect(entry?["args"] as? [String] == [])
+        #expect(entry?["url"] == nil, "command entry must not carry a url field")
         #expect(client.wired(homeDirectory: home))
 
         try Installer.uninstall(
@@ -1172,7 +1172,8 @@ struct InstallerTests {
             homeDirectory: home, workingDirectory: home, local: false)
 
         let got = try String(contentsOf: configURL, encoding: .utf8)
-        #expect(got == "model:\n  default: \"x\"\n\nmcp_servers:\n  mootx01:\n    url: http://127.0.0.1:4242\n")
+        // Hermes now gets a command entry (no fixed loopback URL).
+        #expect(got == "model:\n  default: \"x\"\n\nmcp_servers:\n  mootx01:\n    command: /b\n    args: []\n")
         #expect(client.wired(homeDirectory: home))
     }
 
@@ -1258,7 +1259,8 @@ struct InstallerTests {
 
         let configURL = home.appendingPathComponent(client.configPath)
         let text = try String(contentsOf: configURL, encoding: .utf8)
-        #expect(text == "type: streamable-http\nurl: http://127.0.0.1:4242\n")
+        // Continue now gets a command entry (no fixed loopback URL); trailing newline is POSIX.
+        #expect(text == "command: /b\nargs: []\n")
     }
 
     private func makeSandboxHome() throws -> URL {

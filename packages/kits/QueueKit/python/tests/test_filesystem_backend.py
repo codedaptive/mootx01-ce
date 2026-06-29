@@ -1,4 +1,9 @@
-"""Tests for the Python FilesystemBackend (spec §5,6,8,9)."""
+"""Python QueueKit wire-format, facade, and FilesystemBackend tests (spec §5,6,8,9).
+
+Covers wire-format helpers (base64url, HLC format, filename spec), the QueueKit
+facade (send, drain, reply), and FilesystemBackend operations (maildir init,
+drain ordering, stale-tmp cleanup).
+"""
 
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ from queuekit import (
     encode_job,
     decode_job,
 )
-from queuekit.filesystem_backend import InvalidTerminalStatus, JobNotFound
+from queuekit.filesystem_backend import InvalidTerminalStatus, JobNotFound, InvalidIdentifier
 
 
 def make_job(
@@ -146,3 +151,138 @@ def test_stale_tmp_cleanup_on_reinit():
         # Re-init
         FilesystemBackend(tmp)
         assert not stale.exists()
+
+
+def test_job_file_mode_is_0o600():
+    """Job files must be owner read/write only (0o600), matching Swift/Rust ports.
+
+    Job files carry encoded payloads (estate paths, content) and must not be
+    group- or world-readable. This test verifies the file mode after write()
+    creates the job in new/ via atomic rename from tmp/.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_job(payload=b"secret-data")
+        backend.write(job)
+        # Find the file in new/
+        files = list((Path(tmp) / "new").iterdir())
+        assert len(files) == 1, "expected one job file in new/"
+        mode = files[0].stat().st_mode & 0o777
+        assert mode == 0o600, f"job file mode must be 0o600, got 0o{mode:o}"
+
+
+def test_signal_file_mode_is_0o600():
+    """Signal files must be owner read/write only (0o600), matching job files.
+
+    Signal files are written by complete() before the job is moved to done/.
+    They carry completion metadata and must not be group- or world-readable.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_job()
+        backend.write(job)
+        backend.drain_available()
+        backend.complete(job.id, ObservationStatus.DONE, [])
+        signal = Path(tmp) / "done" / f"{job.id}.signal"
+        assert signal.exists(), "signal file must exist after complete()"
+        mode = signal.stat().st_mode & 0o777
+        assert mode == 0o600, f"signal file mode must be 0o600, got 0o{mode:o}"
+
+
+# --- Identifier validation (CAND-023 — planned security hardening) ---
+
+def make_unsafe_job(stream_id: str = "encode", job_id: str = "abc123") -> Job:
+    """Build a minimal Job with the given raw stream_id and job_id strings."""
+    return Job(
+        id=job_id,
+        stream_id=stream_id,
+        submitted_at=HLC(physical_time=1, logical_count=0, node_id=1),
+        priority=50,
+        payload=b"",
+        extensions={},
+    )
+
+
+def test_rejects_dotdot_stream_id():
+    # ".." as a stream_id would escape the queue root via path traversal
+    # when embedded in the job filename.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(stream_id="..")
+        with pytest.raises(InvalidIdentifier):
+            backend.write(job)
+
+
+def test_rejects_dotdot_job_id():
+    # ".." as a job id would escape the queue root in signal file paths
+    # (e.g. "..".signal resolved against done/).
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(job_id="..")
+        with pytest.raises(InvalidIdentifier):
+            backend.write(job)
+
+
+def test_rejects_forward_slash_in_stream_id():
+    # "/" injects a directory separator into the filename component.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(stream_id="evil/stream")
+        with pytest.raises(InvalidIdentifier):
+            backend.write(job)
+
+
+def test_rejects_backslash_in_job_id():
+    # "\\" is the Windows path separator; reject to maintain cross-platform safety.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(job_id="bad\\id")
+        with pytest.raises(InvalidIdentifier):
+            backend.write(job)
+
+
+def test_rejects_absolute_path_as_stream_id():
+    # An absolute path starts with "/" — caught by the separator check.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(stream_id="/etc/passwd")
+        with pytest.raises(InvalidIdentifier):
+            backend.write(job)
+
+
+def test_rejects_control_character_in_job_id():
+    # Control characters (0x00–0x1F) produce problematic filenames.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(job_id="bad\x01id")
+        with pytest.raises(InvalidIdentifier):
+            backend.write(job)
+
+
+def test_accepts_legitimate_identifiers():
+    # 32-char hex job ids and kebab-case stream names must not be rejected.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        job = make_unsafe_job(
+            stream_id="encode-corpus",
+            job_id="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+        )
+        backend.write(job)  # must not raise
+        results = backend.drain_available()
+        assert len(results) == 1
+
+
+def test_rejects_dotdot_job_id_on_complete():
+    # complete() constructs a signal file path from the job id;
+    # ".." would escape done/.
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        with pytest.raises(InvalidIdentifier):
+            backend.complete("..", ObservationStatus.DONE, [])
+
+
+def test_rejects_forward_slash_job_id_on_complete():
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = FilesystemBackend(tmp)
+        with pytest.raises(InvalidIdentifier):
+            backend.complete("a/b", ObservationStatus.DONE, [])

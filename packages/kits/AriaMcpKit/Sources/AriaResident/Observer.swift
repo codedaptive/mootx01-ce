@@ -34,9 +34,10 @@ import ObserverSink
 /// sample to the durable stats store.
 ///
 /// One instance lives for the lifetime of the resident daemon. It is installed
-/// once at startup (`AriaResident.installManagerTelemetry`) and its
-/// `refreshEnabled(from:)` is called on the monitoring-gate poll interval so a
-/// moot-mgr on/off flip takes effect without a daemon restart.
+/// once at startup (`AriaResident.installManagerTelemetry`). The daemon's
+/// `runResidentDaemon` reads the store flag and calls `Observer.shouldEnable`
+/// plus `setEnabled(_:)` directly to apply monitoring-gate changes without a
+/// daemon restart.
 ///
 /// ## Thread safety
 ///
@@ -55,8 +56,9 @@ public final class Observer: Sendable {
 
     // MARK: - State
 
-    /// The bounded recent window. Public so the daemon's status surface can read
-    /// `snapshot()`, `count`, and `totalReceived`.
+    /// The bounded recent window. `runResidentDaemon` reads `count` and
+    /// `totalReceived` on monitoring-gate transitions; tests read `snapshot()`.
+    /// No daemon status surface currently reads this property.
     public let window: RecentWindowSink
 
     // MARK: - Initialisation

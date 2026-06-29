@@ -98,4 +98,60 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// - Throws: `CorpusKitError.decodingFailure` on a truncated blob, an
     ///   unknown format version, or a provider-magic mismatch — never crashes.
     func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable
+
+    // MARK: - Maintained counts (incremental-counts change set, P3)
+    //
+    // The counts seam lets `Corpus` keep each trainable provider's raw additive
+    // statistics current AS CHUNKS ARE WRITTEN — the "increment as we go" table —
+    // instead of rebuilding them from scratch by re-reading the whole corpus on
+    // every reindex. `Corpus` holds the provider type-erased, so these uniform
+    // methods are the bridge: each conformer routes them to its own
+    // method-specific accumulation (RI/PPMI fold term sequences; LSA/NMF fold
+    // documents). The accumulated state is the SAME state `finalize()` consumes;
+    // maintaining it incrementally is what makes a future refactor cheap.
+    //
+    // Persistence is the caller's job and happens at BATCH boundaries, never per
+    // chunk: re-serializing the whole counts blob on every chunk would be
+    // O(N·vocab) over an import — the very wall this change set removes. The
+    // provider accumulates in memory; `Corpus` snapshots via `serializeCounts()`
+    // when a batch closes and on shutdown points, and `restoreCounts(from:)`
+    // resumes that snapshot on open. NOTE: the maintained-counts path is
+    // infrastructure only; Corpus.reindex currently still trains from active
+    // chunk text via trainOnCorpus(texts:), not from these maintained counts.
+
+    /// Fold one chunk's raw text into the maintained accumulated counts.
+    ///
+    /// The conformer tokenizes with the canonical `defaultKeywordTokens` where
+    /// its accumulation consumes term sequences (RI, PPMI), or folds the raw
+    /// document where it consumes documents (LSA, NMF). This is the per-chunk
+    /// half of the same additive logic `trainOnCorpus` runs over a whole corpus,
+    /// surfaced so `Corpus` can drive it once per chunk at write time.
+    ///
+    /// Deterministic: never reads wall-clock time. Does NOT finalize — the
+    /// derived basis is produced separately at refactor.
+    ///
+    /// - Parameter text: one chunk's raw document text.
+    func addToCounts(text: String)
+
+    /// Serialize the maintained accumulated counts to a versioned blob.
+    ///
+    /// Distinct from `serializeBasis()`: this is the RAW additive state (the
+    /// maintained statistics table), not the derived basis. Persisted in
+    /// `corpus_provider_counts` (vs. the basis in `corpus_provider_basis`) so a
+    /// refactor can read the table instead of re-tokenizing the corpus. The byte
+    /// layout is the cross-port conformance contract.
+    func serializeCounts() -> Data
+
+    /// Restore maintained counts from a blob, resuming incremental upkeep across
+    /// a restart. Mutates this provider's accumulation in place; does NOT rebuild
+    /// the derived basis (reconstructed separately from the basis blob).
+    ///
+    /// - Throws: `CorpusKitError.decodingFailure` on a truncated blob, an unknown
+    ///   format version, or a provider-magic mismatch — never crashes.
+    func restoreCounts(from data: Data) throws
+
+    /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
+    /// trigger reads to decide when a basis has drifted enough to warrant a
+    /// refactor. Reflects the current accumulated state, not the derived basis.
+    var countsVocabularySize: Int { get }
 }

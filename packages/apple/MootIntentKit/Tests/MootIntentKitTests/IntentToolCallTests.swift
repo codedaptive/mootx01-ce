@@ -281,9 +281,8 @@ struct CaptureSinkTests {
 // Tests exercise recallDrawers() (the MootToolCalling protocol extension) and
 // MootToolCalling.parseDrawerLines() directly on a live TestBridge, avoiding
 // the IntentRuntimeBridge singleton (which is one-write and shared across
-// the process). DrawerEntityQuery.entities(for:) is also tested by calling
-// it with an explicit bridge via the extension method, sidestepping the
-// singleton resolution path.
+// the process). Direct DrawerEntityQuery.entities(for:) coverage is not
+// included here.
 
 @Suite("DrawerEntity — structured recall via gateway-layer text parse")
 struct DrawerEntityRecallTests {

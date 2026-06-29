@@ -186,7 +186,7 @@ struct EstateDreamingSinkTests {
         }
     }
 
-    // MARK: - § 3  Integration: DreamingDaemon with real sink + stub reader
+    // MARK: - § 3  Integration: DreamingDaemon with real sink + real reader
 
     // triggerDreamingCycle() emits to the global Intellectus singleton.
     // Acquires the process-wide lock to prevent races with concurrent
@@ -196,13 +196,30 @@ struct EstateDreamingSinkTests {
         try await withIntellectusLock {
             let (kit, handle) = try await makeKit()
 
-            // Populate the estate with two drawers in the same room so the
-            // co-occurrence algorithm in EstateDreamingReader can see a pair.
-            let room = "cooc-room"
-            _ = try await kit.capture(handle, captureFrame(content: "drawer A", room: room))
-            _ = try await kit.capture(handle, captureFrame(content: "drawer B", room: room))
+            // Capture two drawers so the external-origin recall can surface them.
+            let room = "dreaming-test-room"
+            _ = try await kit.capture(handle, captureFrame(content: "dreaming test drawer A", room: room))
+            _ = try await kit.capture(handle, captureFrame(content: "dreaming test drawer B", room: room))
 
-            // Build the production adapter pair.
+            // Fire an external-origin recall to enqueue a DreamingItem.
+            // B-10a: dreaming enqueue fires ONLY on external-origin requests.
+            // Filter: `currentlyBelieve` — returns all live drawers in the estate.
+            // Both captured drawers surface, so enqueueDreamingItem is called
+            // with ≥ 2 distinct ids and a DreamingItem lands in the queue.
+            let recallRequest = GLKRecallRequest(
+                frame: RecallFrame(
+                    filterChain: [.currentlyBelieve],
+                    limit: 10
+                ),
+                mode: .locusOnly,
+                scoring: .raw,
+                limit: 10,
+                fallback: .failClosed,
+                origin: .external
+            )
+            _ = try await kit.recall(handle, recallRequest)
+
+            // Build the production adapter pair (reader drains the enqueued item).
             let reader = EstateDreamingReader(handle: handle, kit: kit)
             let sink = EstateDreamingSink(handle: handle, kit: kit)
             let policyStore = InMemoryDreamingPolicyStore()
@@ -212,7 +229,7 @@ struct EstateDreamingSinkTests {
                 policyStore: policyStore
             )
 
-            // Set a lenient policy so the pair clears the confidence gate.
+            // Lenient policy: min_attempts=1 so one co-recall event is sufficient.
             try await daemon.registerDreamingPolicy(
                 minSuccessRate: 0.0,
                 minConfidence: 0.0,
@@ -221,9 +238,9 @@ struct EstateDreamingSinkTests {
 
             let report = try await daemon.triggerDreamingCycle(now: testNow)
 
-            // The cycle must have considered the co-occurrence pair and emitted
-            // exactly one diary entry regardless of proposal count.
-            #expect(report.candidatesConsidered >= 1, "should consider the drawer pair")
+            // The cycle must have drained the enqueued window, considered the
+            // pair, and emitted exactly one diary entry.
+            #expect(report.candidatesConsidered >= 1, "should consider the drained drawer pair")
             #expect(report.diaryEntry.agentName == "dreaming-daemon")
 
             // Diary entry must be in the estate.

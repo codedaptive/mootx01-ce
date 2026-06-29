@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.4.0
+version: 1.13.0
 status: active
-date: 2026-06-19
+date: 2026-06-29
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -144,7 +144,8 @@ public enum JSONValueError: Error, Equatable { /* unsupported value, etc. */ }
 
 The lexicon-projected surface was replaced with a five-tier
 AI-client-oriented interface. `ToolProjection.tools()` assembles all
-55 tools across four provenance tiers (plus the maintenance tool `moot_reindex`).
+56 tools across four provenance tiers (including the maintenance tools
+`moot_reindex`, `moot_drain_status`, and `moot_palace_import`).
 
 ```swift
 public enum ToolProvenance: Sendable, Equatable {
@@ -368,6 +369,27 @@ result counts (import: `drawersWritten`, `drawersUpdated`, `itemsSkipped`,
 (`isError:true`) with text `"unknown job_id: <id>"`. The Rust backend records
 completed jobs in a bounded in-process `VaultJobLedger` (last 100 jobs) — jobs
 are always `complete` when polled because the Rust vault ops are synchronous.
+
+**Vault job concurrency cap and slot-release invariant (availability hardening).**
+The Swift port caps concurrent vault import + export jobs at 4 (`maxConcurrentVaultJobs`).
+`moot_vault_import` acquires a slot via `checkAndRegister` BEFORE running `hashAllNotes`
+so the cap bounds the expensive preflight (filesystem traversal + full-file reads +
+SHA-256 hashing). Running `hashAllNotes` outside the cap allowed up to the HTTP transport
+concurrency limit worth of parallel hashing before the cap was consulted.
+If `hashAllNotes` throws after the slot is acquired (e.g. permission-denied on a regular
+`.md` file), `fail(jobID:)` releases the slot immediately so the error never permanently
+consumes cap capacity. Non-regular `.md` entries (directories, symlinks) are silently
+skipped in `hashAllNotes` rather than causing a fatal error — a caller-controlled vault
+may contain a directory or symlink named `something.md`. `moot_vault_export` has no
+throwable preflight between `checkAndRegister` and the background Task. Slot-release
+invariant: every successful `checkAndRegister` is matched by exactly one terminal `fail()`
+or `complete()` on every code path — the pre-Task catch handles preflight throws; the
+Task's catch handles bridge throws. The Rust backend has no "running" ledger state —
+`run_import` records the job only after the bridge completes, and `collect_and_hash`
+checks `file_type.is_file()` before reading so a directory named `directory.md` is
+recursed (not hashed) and a broken symlink is skipped. The `Dispatcher` `Arc<Mutex<>>`
+serializes all dispatch calls so at most one import runs at a time — no concurrent
+preflight fan-out is possible and no slot can leak in the Rust port.
 
 ### `moot_estate_status` — sync field vocabulary
 
@@ -779,6 +801,91 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 
 ## Changelog
 
+### 1.11.0 -- 2026-06-28
+Security hardening — three ARIA tool gate changes (secfix/batch2-aria).
+
+(1) **`moot_erase_memory` AriaMcpKit gate** — `confirmed=true` check enforced at the
+AriaMcpKit boundary before the substrate is called. Schema unchanged; `confirmed` was
+already present in `required`. Error message updated to name `confirmed=true` explicitly
+and explain the owner-review intent. Both ports updated.
+
+(2) **`moot_federated_search` requester anti-spoof** — `requesterEstateID` changed from
+required to optional. When omitted the requester is the default estate. When supplied it
+must match the default estate's UUID. Schema: `required` array changed from
+`["requesterEstateID"]` to `[]`; property description updated to document the optional
+binding and the anti-spoof refusal. Both ports updated.
+
+### 1.10.1 -- 2026-06-28
+Security (HTTP transport — both ports, both surfaces):
+
+(1) **Origin-check hardening** — `isOriginAllowed` in `HTTPServer.swift` / `http_server.rs`
+and `HTTPReadAPI.swift` / `http_read_api.rs` now validate the suffix after the loopback host
+prefix instead of a bare prefix check, blocking DNS-rebinding prefix-spoof origins like
+`localhost.evil`. Tests added on all four files.
+
+(2) **`moot_palace_import` vault gate** — when `MOOTX01_VAULT=0`, `moot_palace_import` is
+absent from `tools/list` and returns a clear refusal at dispatch (same as vault tools). The
+tool reads arbitrary local SQLite files; gating it matches the vault-surface security posture.
+Vault-off surface count: 57 → 56. Both ports updated (`ToolProjection`, `ToolDispatch`,
+`tool_list.rs`, `dispatch.rs`).
+
+### 1.10.0 -- 2026-06-25
+Docs/guidance (T8 — teachme reconcile): the teachme `palace_import` guide no
+longer tells the AI that `moot_reindex` + `moot_dream` are a REQUIRED two-step
+finish — that contradicted the tool's own description (the import triggers its
+own background indexing; the resident dreams on cadence). Guides now say
+indexing is automatic, point at `moot_drain_status` to watch convergence, and
+note `moot_dream` is only needed manually when running without a resident.
+Residual `batch`/`non-batch` wording from the T1/T7 rename swept out of both
+ports' teachme and the `moot-agent-skills` HOW_TO. No surface change.
+
+### 1.9.0 -- 2026-06-25
+Changed (T7 — one ingest engine, many gates): `moot_vault_import` takes a `mode`
+(foreground/background encode SPEED) arg, replacing the Swift-only `batch` flag,
+and the Rust vault-import tool now exposes `mode` too (it previously had no such
+arg — a fixed Swift/Rust parity gap). All import gates (palace + vault/Obsidian/
+OKF) now share one policy: caller declares SPEED, write strategy is size-gated
+automatically. No new tool. Both ports.
+
+### 1.8.0 -- 2026-06-25
+Added (T5 — drain lifecycle): new internal CLI subcommand `mootx01 drain [--db]`
+— opens an estate, drains its encode queue to empty, then exits. It is the
+detached finisher a direct-open stdio `serve` spawns on exit (setsid/detached);
+rarely run by hand. Also: estate open now eager-mounts the corpus drain worker so
+a restarted daemon resumes a non-empty queue (daemon resume-on-restart). No
+`moot_*` tool-surface change. Both ports.
+
+### 1.7.0 -- 2026-06-25
+Changed (T4 — serve transport): an stdio `serve` forwards to a live resident
+serving the same estate (estate-marker match + `daemon.port` probe → the `proxy`
+stdin→HTTP bridge) instead of opening a second direct writer; falls back to a
+direct open when no resident answers. Resident writes a `mootx01.estate` marker
+(removed on exit). No tool-surface change; transport behavior only. Both ports.
+
+### 1.6.0 -- 2026-06-25
+Changed (T1 — encode mode): `moot_palace_import` replaces its `batch` (bool) arg
+with `mode` (string `"foreground"` | `"background"`, default `"foreground"`).
+`mode` selects the post-import encode SPEED (drain QoS) only — foreground drains
+the encode queue across all cores, background caps to ~a quarter for very large
+imports. The WRITE strategy (bulk transaction vs per-item stream) is now chosen
+AUTOMATICALLY by source size (≤250k rows → bulk; larger → stream), not by the
+caller. Unknown `mode` is rejected (fail-closed). Both ports.
+
+### 1.5.0 -- 2026-06-25
+Additive (T6 — drain status): new maintenance tool `moot_drain_status` (both
+ports) — a read-only, pollable report of every long-running background drain the
+estate runs. Today the only drain is `corpus_encode` (the encode/ingest queue);
+each drain reports pending + in-flight job counts, a draining/idle state, and
+optional drain-specific detail (the corpus drain reports its live encoded-chunk
+count). Unlike `moot_estate_status` it does NOT append the session-protocol
+block, so it is cheap to poll while a drain settles (e.g. after
+`moot_palace_import`). The report is list-shaped so additional drains surface
+automatically. The whole surface grows 55 → 56. Reachable from the CLI as
+`mootx01 query drain_status`. Also fixed a stale `moot_reindex` doc-comment that
+pointed callers at `moot_estate_status` for encode-queue depth (it never reported
+it) — now points at `moot_drain_status`. Conformance: dispatch tool-count/name-set
+gates (Swift `ToolProjection` / Rust `tool_list.rs`).
+
 ### 1.3.0 -- 2026-06-17
 Additive (mission BRAIN-GRAPH-PRODUCER — graph-centrality producer, both ports).
 New `AutonomicGovernor` PRODUCER DUTY on both ports: Swift
@@ -817,6 +924,35 @@ and the governor benign-skips, parity with the Swift resident). Conformance:
 `tests/governor_standing_signals.rs` (benign skip / registered-defaults fire /
 queryable emission / interval cadence) over the existing GLK
 `tests/scheduler_parity.rs` engine gate. Swift behavior unchanged.
+
+### 1.13.0 -- 2026-06-29
+Vault cap ordering fix (secfix/c-vault-cap): corrected `moot_vault_import` preflight
+ordering in the Swift port. Previously `hashAllNotes` ran BEFORE `checkAndRegister`,
+allowing up to the HTTP transport concurrency limit worth of concurrent expensive
+filesystem/SHA-256 preflight work outside the cap. The cap now binds the preflight:
+`checkAndRegister` runs FIRST, then `hashAllNotes` runs while holding the slot. A new
+pre-Task do/catch releases the slot via `fail(jobID:)` when `hashAllNotes` throws, so a
+throwing preflight never permanently consumes a cap slot. §Vault job concurrency cap
+updated to reflect the new ordering. Rust port unchanged — `Dispatcher` `Arc<Mutex<>>`
+already serializes all calls (effective cap of 1, no concurrent preflight fan-out
+possible). New tests: `import_cap_enforced_before_expensive_preflight`,
+`import_throwing_preflight_releases_slot` (Swift). Supersedes/refines secfix/c-vault-jobslot
+(1.12.0) which established the slot-release invariant but placed the preflight before
+the cap acquisition.
+
+### 1.12.0 -- 2026-06-28
+Vault availability hardening (secfix/c-vault-jobslot): documented the vault job
+concurrency cap (4 slots, Swift port) and the slot-release invariant. In the Swift
+port, `moot_vault_import` ran `hashAllNotes` preflight BEFORE `checkAndRegister`
+so a preflight failure never consumed a slot. Non-regular `.md` entries (directories,
+symlinks) are skipped in `hashAllNotes` rather than causing a fatal throw. The Rust
+port is safe by construction (`run_import` records jobs only after bridge completion;
+`collect_and_hash` skips non-files). Both behaviors and the concurrency contract are
+described in §Vault tools above. New tests: `hashAllNotes_skips_directory_named_md`,
+`import_cap_not_exhausted_after_directory_md_vault` (Swift); `hash_all_notes_skips_directory_named_md`,
+`import_with_directory_md_vault_does_not_exhaust_ledger` (Rust). Note: the preflight-
+before-cap ordering in this version left `hashAllNotes` outside the cap — corrected in
+1.13.0 (secfix/c-vault-cap).
 
 ### 1.4.0 -- 2026-06-19
 `moot_estate_ping` response now includes a build serial segment:

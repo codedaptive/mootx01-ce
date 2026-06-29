@@ -99,11 +99,13 @@ public struct DrawerMapping: Sendable {
     /// - Parameters:
     ///   - kit: the open `GeniusLocusKit` instance.
     ///   - handle: the estate handle.
-    ///   - scope: which drawers to include. Defaults to `.believed`.
+    ///   - scope: which drawers to include. Defaults to `.exportable`
+    ///     (CAND-032) — only explicitly-exportable drawers; broader scopes are
+    ///     explicit opt-ins so a default export never writes private/non-exportable rows.
     public func export(
         kit: GeniusLocusKit,
         handle: EstateHandle,
-        scope: VaultExportScope = .believed
+        scope: VaultExportScope = .exportable
     ) async throws -> ExportProjection {
         // VK-EXPORT-FIX: pass an explicit limit so the GLK convenience overload
         // does not apply its default cap of 50. Export is a full projection of
@@ -173,6 +175,13 @@ public struct DrawerMapping: Sendable {
             }
         }
 
+        // Resolve display names (wing, room) for all recalled drawers in one
+        // batch. ADR-017 removed wing/room from the Drawer struct; consumers
+        // obtain them from the node tree via Estate.resolveNodeNames.
+        let estate = try await kit.estate(for: handle)
+        let allNodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: recalled.map(\.parentNodeId))
+
         // ADR-007 Decision 2 tier partition. The predicates encode the
         // normative 4→3 mapping (Normal → normal+elevated, Private →
         // restricted, Secret → secret) — see AdjectiveSensitivity in LocusKit.
@@ -180,17 +189,9 @@ public struct DrawerMapping: Sendable {
         var excludedSecret = 0
         var excludedPrivate = 0
         for drawer in recalled {
-            // Bug M fix: system charter drawers (room == charterRoom, i.e. "_charter")
-            // are estate-structural — they are auto-seeded at provision time for every
-            // new estate and must NOT be included in the vault export. Exporting them
-            // and then importing into a freshly-provisioned target estate duplicates all
-            // 7 charter drawers (target already has its own seeded set; the import adds
-            // 7 more with different lineage IDs because the vault's moot_id is from the
-            // source estate). Charter drawers carry no user-authored content; they are
-            // regenerated on provision. `charterRoom` == "_charter" (LocusKit constant).
-            if drawer.room == charterRoom {
-                continue
-            }
+            // Hint drawers (AI_Charter_Hint room) are normal drawers and export
+            // normally. They are user-deletable and recallable like any other
+            // drawer, so exporting them reflects the estate's actual content.
             let tier = drawer.adjectiveSensitivity
             if tier.isExcludedFromBulk {
                 // Secret never rides bulk channels, under any scope.
@@ -204,28 +205,43 @@ public struct DrawerMapping: Sendable {
         }
 
         // Fetch tunnels once per distinct source wing, not once per drawer.
+        // Wing names are resolved from the node tree (ADR-017).
         var tunnelsByWing: [String: [Tunnel]] = [:]
-        for wing in Set(drawers.map(\.wing)) {
+        let resolvedWings = Set(drawers.compactMap { allNodeNames[$0.parentNodeId]?.wing })
+        for wing in resolvedWings {
             tunnelsByWing[wing] = try await kit.recallTunnels(handle, wing: wing)
         }
 
         // Query all KG facts once for the estate, then group by sourceDrawerID
         // so each drawer's tags and kind can be reconstructed without an
         // N-per-drawer round-trip. Drawers with no KG facts get an empty slice.
+        //
+        // CAND-050: Filter facts to only those anchored to a tier-included drawer.
+        // A KG fact anchored to a secret or (scope-excluded) private drawer must
+        // not appear in export output, consistent with ADR-007 Decision 2 tier
+        // rules. Without this guard, a secret drawer's tags and kind would leak
+        // into export even after the drawer itself was excluded. The included-
+        // drawer ID set is computed from the post-partition `drawers` array so
+        // the exact same ADR-007 rules apply to facts that apply to their anchors.
+        let includedDrawerIDs = Set(drawers.map(\.id))
         let allKGFacts = try await kit.recallKGFacts(handle)
         var kgFactsByDrawerID: [String: [KGFact]] = [:]
         for fact in allKGFacts {
-            if !fact.sourceDrawerID.isEmpty {
-                kgFactsByDrawerID[fact.sourceDrawerID, default: []].append(fact)
-            }
+            // Skip facts whose source anchor was excluded by the tier partition.
+            // Facts with an empty sourceDrawerID are estate-level (no anchor);
+            // they are not used by the export path and are dropped here silently.
+            guard !fact.sourceDrawerID.isEmpty,
+                  includedDrawerIDs.contains(fact.sourceDrawerID) else { continue }
+            kgFactsByDrawerID[fact.sourceDrawerID, default: []].append(fact)
         }
 
         let notes = drawers.map { drawer in
-            let outgoing = (tunnelsByWing[drawer.wing] ?? []).filter {
+            let names = allNodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
+            let outgoing = (tunnelsByWing[names.wing] ?? []).filter {
                 $0.sourceDrawerId == drawer.id && $0.kind == .references
             }
             let drawerFacts = kgFactsByDrawerID[drawer.id] ?? []
-            return Self.noteIR(from: drawer, references: outgoing, kgFacts: drawerFacts)
+            return Self.noteIR(from: drawer, wing: names.wing, room: names.room, references: outgoing, kgFacts: drawerFacts)
         }
         return ExportProjection(
             notes: notes,
@@ -237,6 +253,11 @@ public struct DrawerMapping: Sendable {
     /// Pure projection of one drawer (+ its outgoing `.references` tunnels
     /// + its anchored KG facts) to a `NoteIR`. No substrate access beyond
     /// the pre-fetched parameters — testable in isolation.
+    ///
+    /// `wing` and `room` are the display names resolved from the estate's
+    /// node tree via `Estate.resolveNodeNames(parentNodeIds:)`. ADR-017
+    /// removed these stored properties from `Drawer`; callers resolve them
+    /// once in batch and pass them in.
     ///
     /// `kgFacts` is the subset of KG facts whose `sourceDrawerID` matches
     /// `drawer.id`. The export path pre-fetches all facts once and groups
@@ -252,9 +273,9 @@ public struct DrawerMapping: Sendable {
     ///
     /// The vault path is `"<wing>/<room>/<slug>.md"` — the wing is the
     /// top-level folder so the vault tree mirrors the estate's wing structure
-    /// and export/import is wing-scopable (ADR-016 Consequences). Charter
-    /// memories (`_charter` room) export as `<wing>/_charter/<slug>.md` so
-    /// each wing folder ships its own charter alongside its content drawers.
+    /// and export/import is wing-scopable (ADR-016 Consequences). Hint
+    /// memories (`AI_Charter_Hint` room) export as `<wing>/AI_Charter_Hint/<slug>.md`
+    /// alongside regular content drawers — hint drawers are normal vault entries.
     ///
     /// The slug is derived from the first markdown heading or the first
     /// non-empty content line, sanitized to a safe filename character set. On
@@ -278,16 +299,16 @@ public struct DrawerMapping: Sendable {
     /// so the capture verb routes the drawer into the correct named wing.
     /// The round-trip is fully faithful: a drawer exported from "User Canon"
     /// re-imports into "User Canon", not into `defaultWingName`.
-    static func noteIR(from drawer: Drawer, references: [Tunnel], kgFacts: [KGFact] = []) -> NoteIR {
+    static func noteIR(from drawer: Drawer, wing: String, room: String, references: [Tunnel], kgFacts: [KGFact] = []) -> NoteIR {
         // Path: <wing>/<room>/<slug>.md — wing is the top-level vault folder.
-        // ADR-016 Consequences: "wing = top folder; each folder ships its own
-        // `_charter`". This makes the vault layout wing-aware and wing-scopable.
+        // ADR-016 Consequences: wing = top folder; all drawers (including hint
+        // memories in AI_Charter_Hint room) export normally. Layout is wing-aware.
         let slug = Self.slug(from: drawer.content, id: drawer.lineageID)
-        let stableKey = "\(drawer.wing)/\(drawer.room)/\(slug)"
+        let stableKey = "\(wing)/\(room)/\(slug)"
 
         var frontmatter: [String: String] = [
-            "wing": drawer.wing,
-            "room": drawer.room,
+            "wing": wing,
+            "room": room,
             "udc": drawer.udcCode,
             "addedBy": drawer.addedBy,
             "embeddingModelID": drawer.embeddingModelID,
@@ -367,7 +388,7 @@ public struct DrawerMapping: Sendable {
             frontmatter: frontmatter,
             links: links,
             tags: tags,
-            originalPath: drawer.room,
+            originalPath: room,
             originDate: OccurredAt(date: drawer.eventTime),
             source: nil,
             mootID: drawer.lineageID,
@@ -475,6 +496,17 @@ public struct DrawerMapping: Sendable {
         /// (withdrawn) in the estate. The tombstone is respected;
         /// the note is NOT resurrected.
         case skippedTombstoned
+        /// A DisciplineViolation was raised AFTER the supersession cascade
+        /// already wrote the successor drawer row but before the predecessor
+        /// state flip completed (e.g. Contested predecessor whose transition
+        /// Active→Superseded is illegal). The estate contains an orphaned
+        /// successor row alongside the un-flipped predecessor. Unlike plain
+        /// `.skipped`, the write was partially applied and the caller must
+        /// know: the count is surfaced in `ImportReport.drawersSkippedPartialWrite`
+        /// so reconciliation passes can detect the gap. This outcome is NOT
+        /// silent — it is reported even though the surface-visible content
+        /// appears unchanged.
+        case skippedWithPartialWrite(reason: String)
     }
 
     /// Import one note: build a `CaptureFrame`, capture the drawer through
@@ -509,6 +541,179 @@ public struct DrawerMapping: Sendable {
     /// believed drawer (across ALL tiers) so the sensitivity FLOOR can be
     /// enforced: a re-import may RAISE a drawer's tier but never LOWER it.
     /// This closes the supersession-downgrade attack (ADR-007 Decision 2).
+    // MARK: - Batch helpers (GLK_BATCH1)
+
+    /// Apply import guards and build a `CaptureFrame` for `note` without
+    /// calling `kit.capture`. Returns `nil` (with `report` counters updated
+    /// for the skip) when any guard fires. The caller is responsible for
+    /// incrementing `drawersWritten`/`drawersUpdated` on a non-nil return.
+    ///
+    /// Used by `importNotes`' bulk path (when the size gate selects one
+    /// transaction): frames are collected first, then submitted in a single
+    /// `captureBatch` call; post-capture work (KG
+    /// facts, tunnels) runs afterward via `applyNotePostCapture`.
+    func buildNoteFrame(
+        for note: NoteIR,
+        existingLineageIDs: Set<UUID>,
+        existingSensitivityByLineage: [UUID: AdjectiveSensitivity],
+        tombstonedLineageIDs: Set<UUID>,
+        existingContentByLineage: [UUID: String],
+        existingStableSourceKeyByLineage: [UUID: String],
+        report: inout ImportReport
+    ) -> (frame: CaptureFrame, isUpdate: Bool, classified: Bool)? {
+        let content = note.flattenedBody
+        guard !content.isEmpty else {
+            report.itemsSkipped += 1
+            return nil
+        }
+        var (frame, classified) = makeCaptureFrame(for: note, content: content)
+
+        // Security: moot_id lineage-hijack guard. A crafted `moot_id` in
+        // imported frontmatter can claim an existing in-estate lineage, causing
+        // a hostile note to silently overwrite another note's content.
+        //
+        // The guard fires when ALL THREE conditions hold:
+        //   1. The claimed UUID is already in the estate (it targets an existing
+        //      lineage rather than introducing a new one), AND
+        //   2. The note's vault path does NOT match the export path that was
+        //      recorded for the claimed lineage (path-identity discriminator:
+        //      a legitimate round-trip comes back from the SAME file the export
+        //      wrote; a hostile note comes from a DIFFERENT path while claiming
+        //      the victim's moot_id). Fallback when no export path is recorded:
+        //      the claimed UUID does not match FNV(stableSourceKey) — the old
+        //      discriminator, retained only for drawers whose export path is
+        //      unknown (e.g. first-time import with no prior export state), AND
+        //   3. The incoming CONTENT differs from what the estate has for that
+        //      lineage (a content-replacement is being attempted).
+        //
+        // Condition 3 permits sensitivity-only upgrades on unchanged content —
+        // the common and legitimate case where an export/re-import cycle needs
+        // to raise a drawer's tier without altering its body. It blocks the
+        // higher-priority attack: replacing an existing drawer's body with
+        // attacker-controlled content via a spoofed moot_id.
+        let fnvLineage = Self.lineageID(forStableSourceKey: note.stableSourceKey)
+        if let claimedID = frame.lineageID,
+           existingLineageIDs.contains(claimedID),
+           existingContentByLineage[claimedID] != content {
+            // Determine whether the note's vault path is foreign to the claimed
+            // lineage. Primary check: path-identity. Fallback: FNV check when
+            // no export path is recorded for this lineage.
+            let isPathForeign: Bool
+            if let recordedKey = existingStableSourceKeyByLineage[claimedID] {
+                isPathForeign = recordedKey != note.stableSourceKey
+            } else {
+                isPathForeign = claimedID != fnvLineage
+            }
+            if isPathForeign {
+                // Foreign path claiming an existing lineage with different body —
+                // reject the moot_id claim and file under the note's own FNV lineage.
+                frame.lineageID = fnvLineage
+            }
+        }
+
+        let lineage = frame.lineageID ?? fnvLineage
+        if tombstonedLineageIDs.contains(lineage) {
+            report.drawersSkippedTombstoned += 1
+            return nil
+        }
+        let isUpdate = existingLineageIDs.contains(lineage)
+        let requestedSensitivity = frame.sensitivity
+        let existingTier = existingSensitivityByLineage[lineage]
+        let isSensitivityUpgrade = existingTier.map { requestedSensitivity.rawValue > $0.rawValue } ?? false
+        if isUpdate, let existingContent = existingContentByLineage[lineage],
+           existingContent == content, !isSensitivityUpgrade {
+            report.drawersSkippedUnchanged += 1
+            return nil
+        }
+        if let existingTier = existingSensitivityByLineage[lineage],
+           existingTier.rawValue > frame.sensitivity.rawValue {
+            frame.sensitivity = existingTier
+        }
+        return (frame, isUpdate, classified)
+    }
+
+    /// Apply post-capture work (KG facts + tunnels) for a note whose drawer
+    /// was already inserted by `kit.captureBatch`. Called per-note AFTER the
+    /// batch transaction commits so `drawer.id` is available.
+    func applyNotePostCapture(
+        note: NoteIR,
+        frame: CaptureFrame,
+        drawer: Drawer,
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        existingTunnelSignatures: inout Set<String>,
+        now: Date
+    ) async throws -> Int {
+        for fact in note.facts {
+            _ = try await kit.captureKGFact(
+                handle,
+                subject: fact.subject, predicate: fact.predicate, object: fact.object,
+                sourceDrawerID: drawer.id, now: now)
+        }
+        for (key, value) in note.scope {
+            _ = try await kit.captureKGFact(
+                handle,
+                subject: "scope:\(key)", predicate: "has_value", object: value,
+                sourceDrawerID: drawer.id, now: now)
+        }
+        for tag in note.tags {
+            _ = try await kit.captureKGFact(
+                handle,
+                subject: "tag:\(tag)", predicate: "tagged", object: drawer.id,
+                sourceDrawerID: drawer.id, now: now)
+        }
+        if note.kind != "note" {
+            _ = try await kit.captureKGFact(
+                handle,
+                subject: "record:kind", predicate: "is", object: note.kind,
+                sourceDrawerID: drawer.id, now: now)
+        }
+        let estate = try await kit.estate(for: handle)
+        let drawerNodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        let drawerWing = drawerNodeNames[drawer.parentNodeId]?.wing ?? ""
+        let drawerRoom = drawerNodeNames[drawer.parentNodeId]?.room ?? ""
+        var tunnelsCreated = 0
+        if let sourcesStr = note.frontmatter["distilled_from_sources"], !sourcesStr.isEmpty {
+            for source in sourcesStr.split(separator: ";").map(String.init) {
+                let parts = source.split(separator: "/", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { continue }
+                let targetWing = parts[0]; let targetRoom = parts[1]
+                let signature = Self.tunnelSignature(
+                    sourceWing: drawerWing, sourceRoom: drawerRoom,
+                    targetRoom: targetRoom, label: "_distilled_from", kind: .references)
+                guard !existingTunnelSignatures.contains(signature) else { continue }
+                let tunnelFrame = TunnelCaptureFrame(
+                    sourceWing: drawerWing, sourceRoom: drawerRoom,
+                    targetWing: targetWing, targetRoom: targetRoom,
+                    label: "_distilled_from", addedBy: frame.addedBy,
+                    sourceDrawerId: drawer.id, targetDrawerId: nil,
+                    kind: .references, originClass: .imported)
+                _ = try await estate.capture(tunnelFrame)
+                existingTunnelSignatures.insert(signature)
+                tunnelsCreated += 1
+            }
+        }
+        for link in note.links {
+            let targetRoom = link.target.isEmpty ? "unresolved" : link.target
+            let signature = Self.tunnelSignature(
+                sourceWing: drawerWing, sourceRoom: drawerRoom,
+                targetRoom: targetRoom, label: link.raw, kind: .references)
+            guard !existingTunnelSignatures.contains(signature) else { continue }
+            let tunnelFrame = TunnelCaptureFrame(
+                sourceWing: drawerWing, sourceRoom: drawerRoom,
+                targetWing: drawerWing, targetRoom: targetRoom,
+                label: link.raw, addedBy: frame.addedBy,
+                sourceDrawerId: drawer.id, targetDrawerId: nil,
+                kind: .references, originClass: .imported)
+            _ = try await estate.capture(tunnelFrame)
+            existingTunnelSignatures.insert(signature)
+            tunnelsCreated += 1
+        }
+        return tunnelsCreated
+    }
+
+    // MARK: - Per-item import
+
     public func importNote(
         _ note: NoteIR,
         kit: GeniusLocusKit,
@@ -517,6 +722,7 @@ public struct DrawerMapping: Sendable {
         existingSensitivityByLineage: [UUID: AdjectiveSensitivity],
         tombstonedLineageIDs: Set<UUID>,
         existingContentByLineage: [UUID: String],
+        existingStableSourceKeyByLineage: [UUID: String] = [:],
         existingTunnelSignatures: inout Set<String>,
         now: Date
     ) async throws -> ImportOutcome {
@@ -528,7 +734,32 @@ public struct DrawerMapping: Sendable {
         }
 
         var (frame, classified) = makeCaptureFrame(for: note, content: content)
-        let lineage = frame.lineageID ?? Self.lineageID(forStableSourceKey: note.stableSourceKey)
+
+        // Security: moot_id lineage-hijack guard. Mirrors the path-identity
+        // discriminator in buildNoteFrame — see that function for the full
+        // rationale. Fires when (1) the claimed UUID targets an existing lineage,
+        // (2) the note's vault path is FOREIGN to the claimed lineage (path does
+        // not match the export path recorded for that lineage; FNV fallback when
+        // no export path is recorded), AND (3) the incoming body differs from
+        // what the estate has for that lineage. Condition 3 permits
+        // sensitivity-only upgrades on unchanged content while blocking
+        // content-replacement attacks via a spoofed moot_id.
+        let fnvLineage = Self.lineageID(forStableSourceKey: note.stableSourceKey)
+        if let claimedID = frame.lineageID,
+           existingLineageIDs.contains(claimedID),
+           existingContentByLineage[claimedID] != content {
+            let isPathForeign: Bool
+            if let recordedKey = existingStableSourceKeyByLineage[claimedID] {
+                isPathForeign = recordedKey != note.stableSourceKey
+            } else {
+                isPathForeign = claimedID != fnvLineage
+            }
+            if isPathForeign {
+                frame.lineageID = fnvLineage
+            }
+        }
+
+        let lineage = frame.lineageID ?? fnvLineage
 
         // TOMBSTONE-AWARE: if this lineage was previously erased (withdrawn),
         // do not resurrect it. Respect the tombstone and surface the skip count.
@@ -573,7 +804,7 @@ public struct DrawerMapping: Sendable {
             frame.sensitivity = existingTier
         }
 
-        // mode: .regular — enqueues an EncodeJob onto the estate's encode queue
+        // mode: .regular — enqueues the drawer onto the Corpus's own ingest queue
         // so the drain worker ingests the drawer into the Corpus (BM25 + vector).
         // The legacy no-mode overload stored the drawer row only, leaving the
         // BM25/vector semantic lanes dark for all imported content (the bug proven
@@ -583,16 +814,44 @@ public struct DrawerMapping: Sendable {
         //
         // Idempotency: re-importing an export that was already imported into the
         // same estate triggers a belief-state DisciplineViolation (e.g. Contested
-        // → Supersede is an illegal transition). This is expected for idempotent
-        // re-imports and must not abort the whole batch. Gracefully skip the note
-        // and continue. Other errors (storage, I/O) still propagate.
+        // → Supersede is an illegal transition). This can arise in two distinct
+        // cases that callers must distinguish:
+        //
+        //   A. NEW lineage (isUpdate == false): the DisciplineViolation fired before
+        //      any row was written (e.g. secret+exportable forbidden combination),
+        //      or the capture verb itself rejected. No partial write occurred.
+        //      Surface as plain `.skipped`.
+        //
+        //   B. UPDATE path (isUpdate == true): the supersession cascade in
+        //      `add_drawer_with_cascade` writes the SUCCESSOR row (Step 1:
+        //      `gated_capture`) BEFORE it attempts to flip the predecessor's
+        //      belief state (Step 4: `mutate_state`). When Step 4 raises
+        //      DisciplineViolation (predecessor in Contested or another non-Active
+        //      state), the successor row is already durably committed but the
+        //      predecessor is NOT flipped. The estate now has two rows sharing a
+        //      lineage with no clean active head. This is NOT a clean skip —
+        //      surface as `.skippedWithPartialWrite` so the caller's import report
+        //      makes the gap visible. The gap is structural (no transactional
+        //      rollback at the PersistenceKit level); a reconciliation pass that
+        //      calls `reindexMissing` and inspects the orphaned successor is the
+        //      intended remediation path (ADR-015 owner-key ceremony, v1.1).
         let drawer: Drawer
         do {
             drawer = try await kit.capture(handle, frame, mode: .regular)
         } catch let verbErr as VerbError {
             if case .underlyingEstateFailure(_, let reason) = verbErr,
                reason.contains("DisciplineViolation") {
-                return .skipped(reason: "belief-state transition not permitted (re-import of existing content): \(reason)")
+                // Case A vs B: distinguish by whether we were on the update path.
+                // An update path (existing lineage) means the cascade was running
+                // and may have committed the successor row before the violation.
+                if isUpdate {
+                    return .skippedWithPartialWrite(
+                        reason: "belief-state transition not permitted after successor write "
+                            + "(predecessor in non-Active state, supersession cascade Step 4 failed): \(reason)"
+                    )
+                } else {
+                    return .skipped(reason: "belief-state transition not permitted (capture rejected): \(reason)")
+                }
             }
             throw verbErr
         }
@@ -667,6 +926,14 @@ public struct DrawerMapping: Sendable {
         // Fetched once here and shared by both the provenance-tunnel path
         // (Bug N fix) and the content-wikilink path below.
         let estate = try await kit.estate(for: handle)
+
+        // Resolve the captured drawer's display names from the node tree
+        // (ADR-017: Drawer no longer stores wing/room). These names are
+        // needed for tunnel source endpoints and de-duplication signatures.
+        let drawerNodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: [drawer.parentNodeId])
+        let drawerWing = drawerNodeNames[drawer.parentNodeId]?.wing ?? ""
+        let drawerRoom = drawerNodeNames[drawer.parentNodeId]?.room ?? ""
         var tunnelsCreated = 0
 
         // Bug N fix — reconstruct _distilled_from provenance tunnels from frontmatter.
@@ -684,16 +951,16 @@ public struct DrawerMapping: Sendable {
                 let targetWing = parts[0]
                 let targetRoom = parts[1]
                 let signature = Self.tunnelSignature(
-                    sourceWing: drawer.wing,
-                    sourceRoom: drawer.room,
+                    sourceWing: drawerWing,
+                    sourceRoom: drawerRoom,
                     targetRoom: targetRoom,
                     label: "_distilled_from",
                     kind: .references
                 )
                 guard !existingTunnelSignatures.contains(signature) else { continue }
                 let tunnelFrame = TunnelCaptureFrame(
-                    sourceWing: drawer.wing,
-                    sourceRoom: drawer.room,
+                    sourceWing: drawerWing,
+                    sourceRoom: drawerRoom,
                     targetWing: targetWing,
                     targetRoom: targetRoom,
                     label: "_distilled_from",
@@ -717,17 +984,17 @@ public struct DrawerMapping: Sendable {
         for link in note.links {
             let targetRoom = link.target.isEmpty ? "unresolved" : link.target
             let signature = Self.tunnelSignature(
-                sourceWing: drawer.wing,
-                sourceRoom: drawer.room,
+                sourceWing: drawerWing,
+                sourceRoom: drawerRoom,
                 targetRoom: targetRoom,
                 label: link.raw,
                 kind: .references
             )
             guard !existingTunnelSignatures.contains(signature) else { continue }
             let tunnelFrame = TunnelCaptureFrame(
-                sourceWing: drawer.wing,
-                sourceRoom: drawer.room,
-                targetWing: drawer.wing,
+                sourceWing: drawerWing,
+                sourceRoom: drawerRoom,
+                targetWing: drawerWing,
                 targetRoom: targetRoom,
                 label: link.raw,
                 addedBy: frame.addedBy,

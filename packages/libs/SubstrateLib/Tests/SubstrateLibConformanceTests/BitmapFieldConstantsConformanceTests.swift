@@ -6,12 +6,11 @@
 // from spec."
 //
 // This file enforces that gate for the constants SubstrateLib
-// owns. As of F11 (2026-05-27) that's the ten RowState raw
-// values (cookbook § 2.3 / § 2.8 rows 1-10). The remaining
-// §2.8 entries (Sensitivity, Exportability, Trust, Drawer
-// feature flags, Provenance source/channel) are declared in
-// LocusKit and will be added to a sibling LocusKit conformance
-// test as part of the LocusKit cascade that follows F11.
+// owns. Currently that covers the ten RowState raw values
+// (cookbook § 2.3 / § 2.8 rows 1-10). SubstrateLib also defines
+// AuditSensitivity, AuditExportability, and AuditTrust constants
+// in AuditGate.swift; conformance coverage for those is pending
+// expansion of this test file.
 //
 // When this test fails, the failure message names the specific
 // (constant, expected, actual) triple per §2.8 row so the diff

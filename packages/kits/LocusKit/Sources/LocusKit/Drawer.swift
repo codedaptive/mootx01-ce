@@ -8,11 +8,11 @@ import Foundation
 /// pillar of MemPalace requires that retrieval surface exactly
 /// what was filed.
 ///
-/// Wing and room are metadata-only strings. They participate in
-/// taxonomy queries (`listWings`, `listRooms`) by `SELECT DISTINCT`
-/// at query time; there is no `wings` or `rooms` table. This
-/// matches MemPalace's runtime behavior — wings emerge from the
-/// data rather than being declared up front.
+/// Every drawer belongs to a room node in the estate's containment
+/// tree (ADR-017). The `parentNodeId` field is the UUID of the room
+/// node that contains this drawer. Display names (wing, room) are
+/// resolved via `DrawerStore.resolveNodeNames(parentNodeIds:)` when
+/// needed — they are not stored on the Drawer struct.
 ///
 /// `embeddingModelID` is present from day one even though no
 /// embeddings are generated in this mission. The modelID-tagging
@@ -24,11 +24,11 @@ import Foundation
 /// wires embedding generation in.
 ///
 /// `tombstonedAt` and `removedByBatch` belong to the soft-delete
-/// machinery added in Rev 2.0. They are present on the schema
-/// from Rev 1.0 so the layout never needs to migrate; both are
-/// nil on every drawer written today and
-/// are not read by any query.
-public struct Drawer: Equatable, Hashable, Codable, Sendable {
+/// machinery. `tombstonedAt` is stamped by `expunge` and is filtered
+/// or enumerated by multiple read paths (`DrawerStore.expungeGated`
+/// and recall tombstone checks). `removedByBatch` is reserved and
+/// remains nil until the batch-removal workflow lands.
+public struct Drawer: Equatable, Hashable, Sendable {
 
     /// Stable identifier supplied by the caller. Defaults to a
     /// fresh UUID string when omitted; callers ingesting
@@ -48,14 +48,10 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     /// The content as filed. Verbatim, no transformation.
     public let content: String
 
-    /// Top-level taxonomy bucket. Free-form string;
-    /// `listWings` aggregates whatever values are present in the
-    /// store rather than checking against a closed set.
-    public let wing: String
-
-    /// Sub-taxonomy bucket inside a wing. Free-form string,
-    /// scoped under `wing` only by convention.
-    public let room: String
+    /// UUID of the room node that contains this drawer (ADR-017 §3).
+    /// Foreign key to nodes.id; the referenced node has depth=2
+    /// (room level) in the estate containment tree.
+    public let parentNodeId: String
 
     /// Optional path of the file this drawer was ingested from.
     /// The directory walker (LOCI-6) writes this; manually-added
@@ -184,8 +180,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public init(
         id: String = UUID().uuidString,
         content: String,
-        wing: String,
-        room: String,
+        parentNodeId: String,
         sourceFile: String? = nil,
         chunkIndex: Int? = nil,
         addedBy: String,
@@ -210,8 +205,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
         self.id = id
         self.lineageID = lineageID
         self.content = content
-        self.wing = wing
-        self.room = room
+        self.parentNodeId = parentNodeId
         self.sourceFile = sourceFile
         self.chunkIndex = chunkIndex
         self.addedBy = addedBy
@@ -227,5 +221,65 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
         self.udcFacets = udcFacets
         self.wikidataQID = wikidataQID
         self.wikidataQidsSecondary = wikidataQidsSecondary
+    }
+}
+
+// MARK: - Codable
+
+/// Custom Codable conformance.
+extension Drawer: Codable {
+
+    private enum CodingKeys: String, CodingKey {
+        case id, lineageID, content, parentNodeId
+        case sourceFile, chunkIndex, addedBy, filedAt, eventTime
+        case embeddingModelID, tombstonedAt, removedByBatch
+        case provenance, adjectiveBitmap, operationalBitmap
+        case udcCode, udcFacets, wikidataQID, wikidataQidsSecondary
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        lineageID = try c.decode(UUID.self, forKey: .lineageID)
+        content = try c.decode(String.self, forKey: .content)
+        parentNodeId = try c.decode(String.self, forKey: .parentNodeId)
+        sourceFile = try c.decodeIfPresent(String.self, forKey: .sourceFile)
+        chunkIndex = try c.decodeIfPresent(Int.self, forKey: .chunkIndex)
+        addedBy = try c.decode(String.self, forKey: .addedBy)
+        filedAt = try c.decode(Date.self, forKey: .filedAt)
+        eventTime = try c.decodeIfPresent(Date.self, forKey: .eventTime) ?? filedAt
+        embeddingModelID = try c.decode(String.self, forKey: .embeddingModelID)
+        tombstonedAt = try c.decodeIfPresent(Date.self, forKey: .tombstonedAt)
+        removedByBatch = try c.decodeIfPresent(String.self, forKey: .removedByBatch)
+        provenance = try c.decodeIfPresent(Int64.self, forKey: .provenance) ?? 0
+        adjectiveBitmap = try c.decodeIfPresent(Int64.self, forKey: .adjectiveBitmap) ?? 0
+        operationalBitmap = try c.decodeIfPresent(Int64.self, forKey: .operationalBitmap) ?? 0
+        udcCode = try c.decodeIfPresent(String.self, forKey: .udcCode) ?? ""
+        udcFacets = try c.decodeIfPresent(String.self, forKey: .udcFacets)
+        wikidataQID = try c.decodeIfPresent(String.self, forKey: .wikidataQID)
+        wikidataQidsSecondary = try c.decodeIfPresent(String.self, forKey: .wikidataQidsSecondary)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(lineageID, forKey: .lineageID)
+        try c.encode(content, forKey: .content)
+        try c.encode(parentNodeId, forKey: .parentNodeId)
+        try c.encodeIfPresent(sourceFile, forKey: .sourceFile)
+        try c.encodeIfPresent(chunkIndex, forKey: .chunkIndex)
+        try c.encode(addedBy, forKey: .addedBy)
+        try c.encode(filedAt, forKey: .filedAt)
+        try c.encode(eventTime, forKey: .eventTime)
+        try c.encode(embeddingModelID, forKey: .embeddingModelID)
+        try c.encodeIfPresent(tombstonedAt, forKey: .tombstonedAt)
+        try c.encodeIfPresent(removedByBatch, forKey: .removedByBatch)
+        try c.encode(provenance, forKey: .provenance)
+        try c.encode(adjectiveBitmap, forKey: .adjectiveBitmap)
+        try c.encode(operationalBitmap, forKey: .operationalBitmap)
+        try c.encode(udcCode, forKey: .udcCode)
+        try c.encodeIfPresent(udcFacets, forKey: .udcFacets)
+        try c.encodeIfPresent(wikidataQID, forKey: .wikidataQID)
+        try c.encodeIfPresent(wikidataQidsSecondary, forKey: .wikidataQidsSecondary)
     }
 }

@@ -49,7 +49,7 @@ import SubstrateLib
 /// axes — bit-extraction accessors with safe fallbacks for
 /// unrecognised raw values (which can happen when a future-version
 /// row encodes a case that does not exist in this build). Feature
-/// flags differ in shape: bits 8–15 are a non-exclusive set, so
+/// flags differ in shape: bits 12–23 are a non-exclusive set, so
 /// `DrawerFeatureFlags` is an `OptionSet` rather than an enum.
 
 /// Capture channel — how the drawer's content entered the system.

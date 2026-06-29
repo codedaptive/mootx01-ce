@@ -1,9 +1,9 @@
 //! IntellectusLib — substrate self-report telemetry faculty.
 //!
-//! Zero-dependency leaf library. Depends on `std` only so that the
-//! lowest substrate crates (substrate-types, substrate-kernel,
-//! substrate-lib) can depend on it in a later mission without creating
-//! a layering cycle. It becomes the new floor of the dependency tree.
+//! Zero-dependency leaf library. Depends on `std` only. The lowest
+//! substrate crates (substrate-types, substrate-kernel, substrate-lib,
+//! substrate-ml) declare `intellectus-lib` dependencies, making this
+//! crate the floor of the dependency tree with no layering cycle.
 //!
 //! ## Public surface
 //!

@@ -93,9 +93,9 @@ fn run_vector_file(file_name: &str) {
     }
 }
 
-/// Replay one case against a fresh estate. The `ops` and `observations`
-/// arrays must have matching lengths (one observation per op result, but
-/// the schema allows ops that produce no observation — we track a cursor).
+/// Replay one case against a fresh estate. Observations are consumed via
+/// `obs_cursor` in order; after all ops the runner asserts that all
+/// observations were consumed (each op result advances the cursor by one).
 fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value) {
     // Fresh estate for each case — InMemoryDrawerStore allocates its own
     // InMemoryStorage internally; backend identity is visible at the type.
@@ -168,8 +168,13 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                     "[{}] captured content mismatch",
                     case_id
                 );
+                // ADR-017: room resolved from node tree via parent_node_id.
+                let node_names = store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+                let resolved_room = node_names.get(&drawer.parent_node_id)
+                    .map(|(_, r)| r.as_str())
+                    .unwrap_or("");
                 assert_eq!(
-                    drawer.room,
+                    resolved_room,
                     obs_entry["expectRoom"].as_str().unwrap_or(""),
                     "[{}] captured room mismatch",
                     case_id

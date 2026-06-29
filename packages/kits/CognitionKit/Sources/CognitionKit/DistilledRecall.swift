@@ -138,7 +138,7 @@ extension DistilledMatch {
 /// Hydrates matched drawers, parses DIST headers, and returns factoid prose
 /// with a confidence-based discrimination signal.
 ///
-/// RecipeCatalog registration is deferred to the Dc4 mission.
+/// RecipeCatalog registration is present.
 public struct DistilledRecall: Recipe {
 
     // MARK: Input
@@ -146,8 +146,10 @@ public struct DistilledRecall: Recipe {
     public struct Input: Sendable {
         /// Query text — feature-extracted and fingerprinted at query time.
         public let query: String
-        /// ARIA adjective filter. Included for API parity with other recipes;
-        /// the distillation Hamming NN lane does not apply adjective filtering.
+        /// ARIA adjective filter applied during frame-aware hydration. The
+        /// distillation Hamming NN lane only produces candidate ids; normal
+        /// recall liveness, trust, and sensitivity defaults are enforced before
+        /// any factoid body is returned.
         public let filter: LocusKit.Filter
         /// Maximum factoids to return. Default 20.
         public let limit: Int
@@ -219,8 +221,14 @@ public struct DistilledRecall: Recipe {
             return Output(matches: [], discrimination: .single)
         }
 
-        // 3. Hydrate matched drawers in one round-trip.
-        let bodyMap = try await kit.hydrate(estate, ids: matches.map(\.itemID))
+        // 3. Hydrate matched drawers in one frame-aware round-trip. This
+        //    applies the same liveness/trust/sensitivity defaults as normal
+        //    recall and excludes tombstoned rows before DIST content is parsed.
+        let frame = RecallFrame(
+            filterChain: [input.filter], hydrationLevel: .full, limit: input.limit)
+        let bodies = try await kit.hydrate(
+            estate, ids: matches.map(\.itemID), matchingFrame: frame, hydrationLevel: .full)
+        let bodyMap = Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0.content) })
 
         // 4. Parse DIST header per match, build DistilledMatch array.
         //    Drawers absent from bodyMap or lacking a DIST header are silently

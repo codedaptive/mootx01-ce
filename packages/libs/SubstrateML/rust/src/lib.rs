@@ -66,7 +66,7 @@ pub mod delta_feature_extractor;
 pub mod typed_decay_weighting;
 
 // Core distillation scoring per DISTILLATION_DESIGN.md §2.1 and DISTILLATION_MATH_SSA.md §2–6.
-// Rust port of DistillationScorer.swift (Ds3). Parity to be verified in Dp1.
+// Rust port of DistillationScorer.swift (Ds3). Parity verified; raw-df SNR path confirmed.
 pub mod distillation_scorer;
 
 // Five-stage cold-path distillation algorithm per DISTILLATION_DESIGN.md §2.1,

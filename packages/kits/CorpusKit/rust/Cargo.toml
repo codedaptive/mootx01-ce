@@ -2,7 +2,9 @@
 name = "corpus-kit"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# P8-secfix: trait-object upcasting (dyn Trait as dyn SuperTrait) requires 1.86;
+# CorpusKit uses this pattern so the 1.75 declaration was wrong.
+rust-version = "1.86"
 description = "Rust port of the Swift CorpusKit: Chunk, sentence-aware chunker (fallback path), BM25 inverted index, BundleStore on persistence-kit, hybrid recall (RRF fusion of vector kNN + BM25), CorpusKitSync manifest."
 license = "MIT OR Apache-2.0"
 publish = false
@@ -13,6 +15,13 @@ path = "src/lib.rs"
 
 [dependencies]
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# SubstrateLib: MerkleHash::leaf for the ContentHashProvider callback
+# that HashingRowStore invokes on every chunk insert (ADR-017 §16).
+# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + ADR-017 §19.
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+# SubstrateKernel: sha256::hash for deterministic corpus UUID derivation,
+# used by the HashParentChainProvider (chunk → corpus parent chain).
+substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 # B2-5: the named EmbeddingModelConfig cases (MiniLM/MPNet/EmbeddingGemma)
 # project pooled vectors through substrate_ml::float_simhash::project — the
 # conformance-gated, bit-identical Swift/Rust SimHash. The Swift CorpusKit
@@ -25,6 +34,15 @@ eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 convergence-kit = { path = "../../ConvergenceKit/rust" }
 vectorkit = { path = "../../VectorKit/rust" }
+# QueueKit: CorpusKit owns its own ingest queue + drain worker pool, so it
+# mounts a QueueKit-backed encode queue (transient in-memory PersistenceKit
+# backend) and drains it directly — the SDK-standalone ingest pipeline (a
+# Corpus queues, drains, and encodes itself with no GeniusLocusKit). Mirrors
+# the Swift `import QueueKit` in CorpusKit. QueueKit is a low-level primitive
+# (substrate-types + persistence-kit + intellectus-lib); corpus-kit → queuekit
+# is downstream→upstream, no inversion.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 # IntellectusLib: zero-dependency telemetry leaf. Added for P2
 # self-report coverage (cp-corpuskit-report). When monitoring is
 # disabled (the default), the report! macro expands to a single

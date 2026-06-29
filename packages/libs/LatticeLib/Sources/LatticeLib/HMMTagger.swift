@@ -114,10 +114,9 @@ enum HMMTagger {
     /// `Bundle.module`'s `HMMTaggerModel.json`. Mirrors the `QIDClosure`
     /// and `FDCRuntime` resource-load pattern.
     ///
-    /// `nonisolated(unsafe)` — `let` semantics: written once at first access
-    /// under `lazy static let`, never mutated. Thread-safe after
-    /// initialization because `lazy static let` uses Swift's native atomic
-    /// once-initializer (the same guarantee as `DispatchOnce`).
+    /// Written once at first access under `static let`, never mutated.
+    /// Thread-safe after initialization because `static let` uses Swift's
+    /// native atomic once-initializer (the same guarantee as `DispatchOnce`).
     private static let model: ModelArtifact? = {
         guard
             let url = Bundle.module.url(
@@ -126,10 +125,10 @@ enum HMMTagger {
             ),
             let data = try? Data(contentsOf: url)
         else {
-            // The artifact is checked in and bundled at build time.
-            // Returning nil here means the tagger will degenerate to
-            // all-noun output (index 0). This should never happen in a
-            // correctly built binary.
+            // The artifact is checked in and bundled at build time; this
+            // path should never be reached in a correctly built binary.
+            // If it is, `initialWeights` and `emissionWeights` fall back
+            // to compiled-in trained values rather than emitting all nouns.
             return nil
         }
         return try? JSONDecoder().decode(ModelArtifact.self, from: data)
@@ -138,7 +137,7 @@ enum HMMTagger {
     /// Initial (prior) log-weights per state, index-aligned with `states`.
     /// Loaded from the frozen artifact. Trained on MASC 3.0.0 PTB corpus.
     ///
-    /// Falls back to `[-1480, -1884, -478]` if the artifact is unavailable
+    /// Falls back to `[-643, -1562, -1329]` if the artifact is unavailable
     /// (build-time invariant — the artifact is always present). These are
     /// exactly the trained values so the fallback preserves correctness even
     /// if Bundle.module resolution fails in an unusual host environment.

@@ -1,8 +1,10 @@
 // SQLiteObserver.swift
 //
-// SQLite change notification via sqlite3_update_hook. Each
-// connection can register one update hook; we route through a
-// shared registry that fans out to subscribers per table.
+// SQLite row change notification via sqlite3_update_hook; blob
+// changes are emitted directly by put/delete call sites (the hook
+// does not carry column values). Both paths route through a shared
+// registry with separate row subscribers (per table) and blob
+// subscribers (global).
 //
 // BLOB OBSERVATION: sqlite3_update_hook fires for every SQLite table,
 // including _storagekit_blobs. However, the hook does not carry column

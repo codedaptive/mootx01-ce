@@ -11,14 +11,15 @@ import Foundation
 //
 // `queryPrecision` composes two pure, deterministic signals into one
 // score in [0, 1]:
-//   1. word-token Jaccard of query vs candidate — coarse lexical overlap,
-//      the "are we even talking about the same thing" floor.
-//   2. a discriminative exact-match rate — of the query's DISTINCTIVE
-//      tokens (numbers and capitalised / mixed-case proper nouns), what
-//      fraction appear verbatim in the candidate. This is the signal that
-//      lifts found@1: among look-alikes, the candidate that actually
-//      contains the queried "46" / "Versailles" / "Q3" scores strictly
-//      higher than the one that contains "11" / "Vienna" / "Q4".
+//   1. `contentMatch` — the fraction of the query's non-stopword content
+//      tokens that appear in the candidate. The lead signal: content words
+//      ("reserve", "value") discriminate look-alikes that share an entity
+//      but differ in attribute.
+//   2. a bounded DISTINCTIVE-token bonus — of the query's distinctive
+//      tokens (numbers and capitalised / mixed-case proper nouns), the
+//      fraction present in the candidate scaled by `distinctiveBonus`.
+//      A tie-breaker for the case where the query names a specific figure
+//      ("46 million") and two candidates otherwise tie on content words.
 //
 // Owns no SubstrateML gate — this is pure text math, like
 // `shingleSimilarity`. Total: every input yields a finite score; empty
@@ -113,8 +114,8 @@ extension NeuronKit {
     /// Whether at least one of `candidateContents` satisfies the distinctive-
     /// token containment gate for `query`. Returns `true` when:
     ///   - the query has no distinctive tokens (gate does not apply), OR
-    ///   - at least one candidate's content contains every distinctive token
-    ///     in the query (i.e. `tokenExactRate` for that candidate > 0).
+    ///   - at least one candidate's content shares any distinctive token with
+    ///     the query (i.e. `!distinctive.isDisjoint(with: tokens)`).
     ///
     /// When this returns `false`, the recall set is a confident non-match and
     /// the caller should suppress results with `not_found` discrimination rather
@@ -163,16 +164,28 @@ extension NeuronKit {
     /// lowercase words are NOT distinctive: they appear in every
     /// near-duplicate and so cannot tell them apart. Returned case-folded
     /// to match against the candidate's folded token set.
+    ///
+    /// Stopwords (the `stopwords` set) are excluded BEFORE the uppercase
+    /// check so sentence-initial function words ("What", "Who", "The")
+    /// are not incorrectly classified as distinctive proper nouns. Only a
+    /// token that is BOTH capitalised AND not in the stopword list is treated
+    /// as a proper noun.
     static func distinctiveTokens(_ s: String) -> Set<String> {
         // Split the ORIGINAL string (casing preserved) so proper-noun
         // detection can see the uppercase letters.
         let rawTokens = s.split { !$0.isLetter && !$0.isNumber }.map(String.init)
         var out = Set<String>()
         for token in rawTokens {
+            let lower = token.lowercased()
+            // Exclude stopwords before the uppercase/digit check: sentence-
+            // initial function words like "What", "Who", "The" carry an
+            // uppercase letter but are NOT distinctive proper nouns. A stopword
+            // can still be distinctive if it contains a digit (rare but possible).
             let hasDigit = token.contains { $0.isNumber }
             let hasUpper = token.contains { $0.isUppercase }
-            if hasDigit || hasUpper {
-                out.insert(token.lowercased())
+            let isStopword = Self.stopwords.contains(lower)
+            if hasDigit || (hasUpper && !isStopword) {
+                out.insert(lower)
             }
         }
         return out

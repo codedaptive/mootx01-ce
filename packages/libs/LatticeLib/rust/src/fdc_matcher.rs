@@ -14,8 +14,8 @@
 //
 // SCORING MODES
 // FDCMatcher supports four ScoreMode variants (mirrors Swift FDCMatcher.ScoreMode):
-//   Raw:       Σ_{t∈O} bag[t]                            (default; ship behavior)
-//   Idf:       Σ_{t∈O} bag[t] · idf(t)
+//   Raw:       Σ_{t∈O} bag[t]                     (direct-init default)
+//   Idf:       Σ_{t∈O} bag[t] · idf(t)            (shipped runtime mode via FdcRuntime)
 //   Cosine:    (Σ_{t∈O} bag[t]) / sqrt(|sig|)
 //   IdfCosine: (Σ_{t∈O} bag[t] · idf(t)) / sqrt(Σ_{t∈sig} idf(t)²)
 // where idf(t) = ln(N / df(t)), N = total code signatures, df(t) = # signatures

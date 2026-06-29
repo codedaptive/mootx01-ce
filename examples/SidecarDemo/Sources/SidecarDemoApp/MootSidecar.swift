@@ -8,9 +8,9 @@ import OSLog
 
 // MARK: - Agent-readable wiring notes
 //
-// This file is the sidecar attachment in ~50 lines. An agent that reads
-// this file alone can wire a MOOT into any existing macOS application
-// without consulting the rest of the repository.
+// This file is the sidecar attachment. An agent that reads this file alone
+// can wire a MOOT into any existing macOS application without consulting
+// the rest of the repository.
 //
 // The pattern is three steps, in order:
 //

@@ -1,4 +1,4 @@
-//! core/clients.rs — the MCP client registry (spec §4.2's 12-agent table).
+//! core/clients.rs — the MCP client registry (spec §4.2's 11-agent table).
 //!
 //! Ported from Swift MootInstallerCore/ClientConfig.swift (the reference).
 //! `config_path` is home-relative except where a platform demands otherwise
@@ -245,7 +245,8 @@ impl McpClient {
     /// Whether this client's config currently carries the mootx01 entry.
     /// Format-aware: JSON looks for `<servers_key>.mootx01` (matching the
     /// Swift installer's merge key), TOML for the `[mcp_servers.mootx01]`
-    /// table, YAML (Continue's per-server file) for file existence.
+    /// table, YAML for file existence (Continue per-server file) or a
+    /// two-space-indented `mootx01:` entry line (Hermes shared YAML).
     pub fn wired(&self, home: &Path) -> bool {
         let Some(path) = self.config_path(home) else {
             return false;

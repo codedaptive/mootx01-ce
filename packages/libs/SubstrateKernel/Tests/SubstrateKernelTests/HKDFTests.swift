@@ -5,8 +5,9 @@
 // to verify the implementation is standard-compliant and therefore byte-
 // identical to CryptoKit's `HKDF<SHA256>` on the same inputs.
 //
-// Vector source: RFC 5869 Appendix A.1 and A.2 (IETF, 2010).
-// Additional: a grant-domain vector matching the Rust port's conformance test.
+// Vector sources: RFC 5869 Appendix A.1, A.2, and A.3 (IETF, 2010);
+// RFC 4231 TC-1 and TC-2 for standalone HMAC-SHA256;
+// and a grant-domain vector matching the Rust port's conformance test.
 
 import Testing
 @testable import SubstrateKernel

@@ -24,12 +24,11 @@
 //   resolved config is threaded into every `EstateConfiguration` the engine
 //   builds, so the backing storage wraps the tested `CachingRowStore` LRU tier.
 //
-// DEBT-2 (provision-with-corpus): the Rust ARIA_MCP server opens estates via
-//   `coord.open(...)` with no corpus registered, so semantic (BM25) recall is
-//   DARK through the Rust server. This engine constructs estates via
-//   `coord.provision(...)` — the GLK path that wires + registers a Corpus — so
-//   a captured drawer becomes semantically searchable. That is the correct
-//   estate-construction (cache + corpus registration) the Rust host must use.
+// PROVISION vs OPEN: the current ARIA registry wires semantic recall (BM25 +
+//   vector) after `coord.open` for all backend constructors, so a bare open is
+//   no longer dark. This engine still uses `coord.provision(...)` — the GLK path
+//   that explicitly wires + registers a Corpus — which remains the correct
+//   estate-construction path for the admin plane (cache + corpus registration).
 //
 // Determinism: provisioning carries no time-dependent computation. The engine
 // threads an explicit `now` (epoch seconds) into provision/capture so no clock

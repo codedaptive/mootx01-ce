@@ -19,17 +19,22 @@ Windows (x86_64). The Swift build targets macOS 26+; the Rust port is under
 
 ## Installing
 
-End users don't build this directly — the prebuilt binary is installed by the
-one-liner. Full guide:
+End users should follow the source install path in the full guide:
 [`docs/start-here/INSTALLING_MOOTX01.md`](../../docs/start-here/INSTALLING_MOOTX01.md).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
+# macOS 26+
+swift build -c release --package-path apps/aria-mcp-server
+
+# PC/Linux
+cd apps/aria-mcp-server/rust && cargo build --release
+
 mootx01 install        # wire it into your MCP clients (interactive)
 ```
 
-The binary lands in `~/.mootx01/bin`. Re-run to upgrade; uninstall with
-`… | sh -s -- --uninstall`.
+Do not pipe a mutable remote installer into a shell. Use prebuilt binaries only
+when they are pinned to a release artifact and authenticated before any installer
+code runs.
 
 ## Client wiring
 
@@ -46,7 +51,7 @@ writer.
 
 ## Removing it
 
-`… | sh -s -- --uninstall` removes the binaries and `~/.mootx01`. It **leaves
+`sh ./install.sh --uninstall` from an authenticated checkout removes the binaries and `~/.mootx01`. It **leaves
 your MCP-client config entries intact** — run `mootx01 uninstall` first if you
 want those removed too. It does **not** touch your estate database; your
 substrate data is yours, not the installer's to discard.

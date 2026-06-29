@@ -6,10 +6,15 @@ import Foundation
 // `initialize` handshake, call `tools/list`, and call `tools/call`.
 //
 // Wire protocol: JSON-RPC 2.0, newline-delimited (one JSON object per line) —
-// the MCP stdio framing. The server is launched via /usr/bin/env so the
-// command string may carry leading `KEY=value` env-var assignments (used by
-// the pump's scratch-palace integration test to point MemPalace at a /tmp
-// palace via MEMPALACE_PALACE_PATH).
+// the MCP stdio framing. The server is launched via Process() with an explicit
+// program + argv array + env dict — never as a whitespace-split command
+// string. Splitting a command string on whitespace causes palace paths
+// containing spaces to corrupt the argument list, and concatenating env-var
+// prefixes into a single string (e.g. "KEY=val cmd --arg") relies on shell
+// interpretation which is both fragile and a shell-injection surface. The
+// caller passes the program, arguments, and extra env vars separately so each
+// value is delivered byte-for-byte to the child process without any
+// shell-metacharacter interpretation.
 //
 // Concurrency: an actor, so JSON-RPC requests over the single transport are
 // serialized — request ids stay monotonic and stdio reads/writes never
@@ -46,12 +51,20 @@ public struct MCPCallResult: Sendable, Equatable {
 /// A client bound to one local stdio MCP server. Launch with ``connect()``,
 /// then call ``listTools()`` / ``callTool(_:arguments:)``, then
 /// ``disconnect()``.
+///
+/// The server is spawned directly (no shell) with the supplied `program`,
+/// `args`, and extra `env` entries. Values are delivered byte-for-byte to the
+/// child — no whitespace splitting, no shell interpretation.
 public actor MCPStdioClient {
 
-    /// The launch command — program plus arguments, optionally prefixed with
-    /// `KEY=value` env assignments (honored via /usr/bin/env). Operator/test
-    /// input, treated at CLI-argument trust level.
-    private let command: String
+    /// The MCP server binary path or name (resolved via PATH by Process).
+    private let program: String
+    /// Positional arguments to pass to the server (e.g. ["--palace", "/tmp/p"]).
+    private let args: [String]
+    /// Extra environment variables injected into the child process in addition
+    /// to the inherited environment. Use this for keys such as
+    /// `MEMPALACE_PALACE_PATH` instead of embedding them in a command string.
+    private let extraEnv: [String: String]
 
     private var process: Process?
     private var inputPipe: Pipe?
@@ -59,10 +72,17 @@ public actor MCPStdioClient {
     private var outputBuffer = Data()
     private var nextRequestID = 1
 
-    /// - Parameter command: the stdio launch command (e.g.
-    ///   `"mempalace-mcp"` or `"MEMPALACE_PALACE_PATH=/tmp/p mempalace-mcp"`).
-    public init(command: String) {
-        self.command = command
+    /// - Parameters:
+    ///   - program: the MCP server binary (e.g. `"mempalace-mcp"`).
+    ///   - args: positional arguments (e.g. `["--palace", "/tmp/p"]`).
+    ///   - env: extra environment variables for the child process (e.g.
+    ///     `["MEMPALACE_PALACE_PATH": "/tmp/p"]`). Merged over the inherited
+    ///     environment; the caller is responsible for not overriding critical
+    ///     keys such as `PATH`.
+    public init(program: String, args: [String] = [], env: [String: String] = [:]) {
+        self.program = program
+        self.args = args
+        self.extraEnv = env
     }
 
     /// Launch the server and perform the MCP `initialize` handshake
@@ -148,16 +168,25 @@ public actor MCPStdioClient {
     // MARK: - stdio transport
 
     private func launch() throws {
-        // Split the command on whitespace into program + args (env-var
-        // prefixes ride as leading `KEY=value` tokens, which /usr/bin/env
-        // applies before exec'ing the program). CLI-argument trust level.
-        let parts = command.split(separator: " ").map(String.init)
-        guard !parts.isEmpty else {
-            throw MCPClientError("empty stdio command")
+        // Resolve the program through /usr/bin/env so plain binary names like
+        // "mempalace-mcp" are found via PATH, matching the behaviour callers
+        // expect. The argv array is passed intact — no whitespace splitting, no
+        // shell. Extra env vars from `extraEnv` are merged over the inherited
+        // environment so each key=value pair is delivered to the child
+        // byte-for-byte without any shell-metacharacter interpretation.
+        guard !program.isEmpty else {
+            throw MCPClientError("empty program name")
         }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = parts
+        // /usr/bin/env receives [program, arg1, arg2, ...]; it resolves
+        // `program` via PATH and exec's it with the remaining args.
+        proc.arguments = [program] + args
+        if !extraEnv.isEmpty {
+            var env = ProcessInfo.processInfo.environment
+            for (k, v) in extraEnv { env[k] = v }
+            proc.environment = env
+        }
         let input = Pipe()
         let output = Pipe()
         proc.standardInput = input

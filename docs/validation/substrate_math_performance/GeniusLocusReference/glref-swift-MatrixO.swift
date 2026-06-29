@@ -22,9 +22,9 @@
 // the other, but the reference stores both for clarity and
 // directness.
 //
-// Decay: O HAS decay (cookbook § 6.8 table). Half-life: 365 days.
-// Decay is applied lazily by the dreaming daemon via MatrixDecay
-// (glref-*-MatrixDecay).
+// Decay: O HAS decay (cookbook § 6.8 table). Half-life: 60 days
+// per glref-swift-MatrixDecay. The MatrixO decay adapter in
+// ReferenceRuleExecutor is currently a no-op.
 //
 // Storage estimate: ~5K populated cells × (8 bytes key + 8 bytes value)
 //                   = ~80 KB at v0.36 (well within bitmap-tier budget).

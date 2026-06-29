@@ -13,11 +13,11 @@
 //
 //   2. Differential privacy: a bit's per-bit popcount is perturbed
 //      by Laplace noise of scale 1/ε before the k threshold is
-//      applied. The (ε, δ) budget is consumed at the aggregation
-//      point and recorded in the privacy ledger.
+//      applied. `delta` is validated and stored in `DPParameters`
+//      but not used in the Laplace mechanism implementation.
 //
-// The combination provides (ε, δ)-DP with k-anonymity layered on
-// top. Default parameters: ε = 1.0, δ = 1e-9, k = 3.
+// The combination provides Laplace (ε)-DP with k-anonymity layered
+// on top. Default parameters: ε = 1.0, δ = 1e-9 (held, not consumed), k = 3.
 //
 // Used by:
 //   § 12.6   DP definition (this file)

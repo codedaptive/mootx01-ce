@@ -36,8 +36,8 @@
 //
 // Column dot products and norms are computed with the same flat-storage
 // loop order as NMFAlternatingLeastSquares, so no new substrate
-// primitive is needed. FloatVecOps.l2Normalize (SubstrateKernel) is
-// used to normalise the left singular vectors.
+// primitive is needed. Left singular vectors are normalized by dividing
+// each entry by σ (not via FloatVecOps.l2Normalize).
 //
 // ## LSA position
 //

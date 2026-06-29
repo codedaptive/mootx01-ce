@@ -3,10 +3,11 @@
 //! high = they diverge. The coordinator holds both estates, so it's one recipe
 //! over two handles.
 //!
-//! This is NOT the brainstorm's MindOverlap (Lens 9). MindOverlap's defining
-//! property is PRIVACY-PRESERVING federation — divergence over the shared
-//! hyperplane family computed WITHOUT either side reading the other's content,
-//! via the pairing handshake + DP-OR-reduce. That lives in `mind_overlap_recipe`.
+//! This is NOT the brainstorm's MindOverlap (Lens 9). MindOverlap recalls each
+//! estate's drawers, fingerprints them locally under a shared hyperplane family,
+//! and reduces each set to a DP summary before comparing the summaries — the
+//! final comparison uses only the summaries, but the local computation still
+//! touches individual drawers. That lives in `mind_overlap_recipe`.
 //! This recipe reads BOTH estates' distributions directly — it is the
 //! non-private, same-device divergence, useful in its own right but not the
 //! federated lens. Named for what it actually does.
@@ -32,10 +33,21 @@ pub struct EstateDivergence {
     pub b_count: usize,
 }
 
-fn room_counts(drawers: &[locus_kit::drawer::Drawer]) -> BTreeMap<String, f64> {
+/// Room display name → drawer count. Uses the display name resolved
+/// from the node tree (not the raw parent_node_id) because this recipe
+/// compares distributions ACROSS estates — parent_node_ids are per-estate
+/// UUIDs with no shared vocabulary between estates.
+fn room_counts(
+    drawers: &[locus_kit::drawer::Drawer],
+    node_names: &std::collections::HashMap<String, (String, String)>,
+) -> BTreeMap<String, f64> {
     let mut m = BTreeMap::new();
     for d in drawers {
-        *m.entry(d.room.clone()).or_insert(0.0) += 1.0;
+        let (_wing, room) = node_names
+            .get(&d.parent_node_id)
+            .cloned()
+            .unwrap_or_default();
+        *m.entry(room).or_insert(0.0) += 1.0;
     }
     m
 }
@@ -57,6 +69,7 @@ pub fn run_estate_divergence<F>(
     handle_b: &EstateHandle,
     make_frame: F,
     now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
 ) -> Result<EstateDivergence, RecipeRunError>
 where
     F: Fn() -> RecallFrame,
@@ -80,8 +93,8 @@ where
         });
     }
 
-    let a_rooms = room_counts(&da);
-    let b_rooms = room_counts(&db);
+    let a_rooms = room_counts(&da, node_names);
+    let b_rooms = room_counts(&db, node_names);
     let mut vocab: BTreeSet<String> = BTreeSet::new();
     for k in a_rooms.keys().chain(b_rooms.keys()) {
         vocab.insert(k.clone());
@@ -110,6 +123,26 @@ mod tests {
     use locus_kit::frames::CaptureFrame;
 
     const NOW: i64 = 1_700_000_000;
+
+    /// Build a node-name map from the coordinator's node tree for all
+    /// drawers currently held by the given handles. Resolves actual
+    /// parent_node_id UUIDs to (wing, room) display names.
+    fn build_names(
+        coord: &EstateCoordinator,
+        handles: &[&EstateHandle],
+    ) -> std::collections::HashMap<String, (String, String)> {
+        let mut names = std::collections::HashMap::new();
+        for h in handles {
+            let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+            frame.hydration_level = HydrationLevel::Structured;
+            frame.ordering = Ordering::ByCaptureTimeDesc;
+            let drawers = coord.recall(h, frame, NOW).expect("recall");
+            let ids: Vec<String> = drawers.iter().map(|d| d.parent_node_id.clone()).collect();
+            let resolved = coord.resolve_drawer_node_names(h, &ids);
+            names.extend(resolved);
+        }
+        names
+    }
 
     fn open_estate(coord: &mut EstateCoordinator) -> EstateHandle {
         // InMemoryDrawerStore::new allocates InMemoryStorage internally.
@@ -151,7 +184,8 @@ mod tests {
         for _ in 0..3 {
             capture(&coord, &b, "cooking");
         }
-        let mo = run_estate_divergence(&coord, &a, &b, all, NOW).expect("overlap");
+        let names = build_names(&coord, &[&a, &b]);
+        let mo = run_estate_divergence(&coord, &a, &b, all, NOW, &names).expect("overlap");
         assert_eq!((mo.a_count, mo.b_count), (3, 3));
         assert!(
             mo.divergence.jensen_shannon > 0.5,
@@ -168,7 +202,8 @@ mod tests {
         let b = open_estate(&mut coord);
         capture(&coord, &a, "philosophy");
         capture(&coord, &b, "philosophy");
-        let mo = run_estate_divergence(&coord, &a, &b, all, NOW).expect("overlap");
+        let names = build_names(&coord, &[&a, &b]);
+        let mo = run_estate_divergence(&coord, &a, &b, all, NOW, &names).expect("overlap");
         assert!(
             mo.divergence.jensen_shannon.abs() < 1e-5,
             "aligned minds converge, got {}",

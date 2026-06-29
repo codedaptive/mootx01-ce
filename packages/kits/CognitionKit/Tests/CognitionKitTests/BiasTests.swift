@@ -28,10 +28,11 @@ struct BiasTests {
         return (kit, handle)
     }
 
-    /// Capture a drawer into `room`; return its minted id.
+    /// Capture a drawer into `room`; return the minted Drawer.
+    @discardableResult
     private func capture(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, room: String
-    ) async throws -> String {
+    ) async throws -> Drawer {
         let frame = CaptureFrame(
             content: "content",
             channel: .typed,
@@ -39,7 +40,7 @@ struct BiasTests {
             latticeAnchor: .udc("0"),
             addedBy: "alice",
             embeddingModelID: "test-v1")
-        return try await kit.capture(handle, frame).id
+        return try await kit.capture(handle, frame)
     }
 
     // CK-BI-1: the estate over-weights philosophy and never touches
@@ -48,19 +49,26 @@ struct BiasTests {
     @Test("over-weighted room is for; never-captured room is most avoided")
     func forAndAgainstRepresentation() async throws {
         let (kit, handle) = try await openEstate()
-        for _ in 0..<4 { _ = try await capture(kit, handle, room: "philosophy") }
-        _ = try await capture(kit, handle, room: "cooking")
+        var philosophyNodeId = ""
+        for _ in 0..<4 {
+            let d = try await capture(kit, handle, room: "philosophy")
+            philosophyNodeId = d.parentNodeId
+        }
+        let cookingDrawer = try await capture(kit, handle, room: "cooking")
+        let cookingNodeId = cookingDrawer.parentNodeId
 
+        // Reference uses parentNodeIds for captured rooms; "never-captured-node"
+        // has no matching parentNodeId and appears as bias-against.
         let report = try await Bias.run(
             kit: kit, handle: handle,
-            reference: [("philosophy", 1.0), ("cooking", 1.0), ("finance", 1.0)])
+            reference: [(philosophyNodeId, 1.0), (cookingNodeId, 1.0), ("never-captured-node", 1.0)])
 
-        #expect(report.biasedFor.contains { $0.label == "philosophy" },
+        #expect(report.biasedFor.contains { $0.label == philosophyNodeId },
                 "over-weighted → for")
-        #expect(report.biasedAgainst.contains { $0.label == "finance" },
+        #expect(report.biasedAgainst.contains { $0.label == "never-captured-node" },
                 "never-captured → against")
-        #expect(report.biasedAgainst.last?.label == "finance",
-                "finance is the most avoided (last by bias)")
+        #expect(report.biasedAgainst.last?.label == "never-captured-node",
+                "never-captured is the most avoided (last by bias)")
     }
 
     // CK-BI-2: withdrawing memories from a room registers a dismissal
@@ -68,15 +76,16 @@ struct BiasTests {
     @Test("withdrawal registers as dismissal")
     func withdrawalIsDismissal() async throws {
         let (kit, handle) = try await openEstate()
-        let first = try await capture(kit, handle, room: "doubts")
+        let firstDrawer = try await capture(kit, handle, room: "doubts")
+        let doubtsNodeId = firstDrawer.parentNodeId
         _ = try await capture(kit, handle, room: "doubts")
         _ = try await capture(kit, handle, room: "doubts")
-        try await kit.withdraw(handle, WithdrawFrame(rowID: first, reason: "reconsidered"))
+        try await kit.withdraw(handle, WithdrawFrame(rowID: firstDrawer.id, reason: "reconsidered"))
 
         let report = try await Bias.run(
-            kit: kit, handle: handle, reference: [("doubts", 1.0)])
+            kit: kit, handle: handle, reference: [(doubtsNodeId, 1.0)])
 
-        let doubts = try #require(report.dismissal.first { $0.room == "doubts" })
+        let doubts = try #require(report.dismissal.first { $0.nodeId == doubtsNodeId })
         #expect(doubts.rate > 0, "dismissal rate is positive")
     }
 
@@ -88,29 +97,34 @@ struct BiasTests {
     func confirmAndWithdrawDriveLearnedPreference() async throws {
         let (kit, handle) = try await openEstate()
         // "kept": captured then confirmed (endorsed).
+        var keptNodeId = ""
         for _ in 0..<3 {
-            let id = try await capture(kit, handle, room: "kept")
-            try await kit.mutate(handle, MutateFrame(rowID: id, kind: .confirm))
+            let d = try await capture(kit, handle, room: "kept")
+            keptNodeId = d.parentNodeId
+            try await kit.mutate(handle, MutateFrame(rowID: d.id, kind: .confirm))
         }
         // "dropped": captured then withdrawn (dismissed).
+        var droppedNodeId = ""
         for _ in 0..<3 {
-            let id = try await capture(kit, handle, room: "dropped")
-            try await kit.withdraw(handle, WithdrawFrame(rowID: id, reason: "reconsidered"))
+            let d = try await capture(kit, handle, room: "dropped")
+            droppedNodeId = d.parentNodeId
+            try await kit.withdraw(handle, WithdrawFrame(rowID: d.id, reason: "reconsidered"))
         }
         // "untouched": captured and left alone (no curation signal).
-        _ = try await capture(kit, handle, room: "untouched")
+        let untouchedDrawer = try await capture(kit, handle, room: "untouched")
+        let untouchedNodeId = untouchedDrawer.parentNodeId
         _ = try await capture(kit, handle, room: "untouched")
 
         let report = try await Bias.run(
-            kit: kit, handle: handle, reference: [("kept", 1.0)])
+            kit: kit, handle: handle, reference: [(keptNodeId, 1.0)])
 
         // Endorsed leads, dismissed trails, neutral sits between.
-        #expect(report.learned.map(\.label) == ["kept", "untouched", "dropped"],
+        #expect(report.learned.map(\.label) == [keptNodeId, untouchedNodeId, droppedNodeId],
                 "curation orders preference")
 
-        let kept = try #require(report.learned.first { $0.label == "kept" })
-        let dropped = try #require(report.learned.first { $0.label == "dropped" })
-        let untouched = try #require(report.learned.first { $0.label == "untouched" })
+        let kept = try #require(report.learned.first { $0.label == keptNodeId })
+        let dropped = try #require(report.learned.first { $0.label == droppedNodeId })
+        let untouched = try #require(report.learned.first { $0.label == untouchedNodeId })
         #expect(kept.strength > 0, "confirmed room preferred")
         #expect(dropped.strength < 0, "withdrawn room disfavored")
         #expect(abs(untouched.strength) < 1e-6, "uncurated room neutral")

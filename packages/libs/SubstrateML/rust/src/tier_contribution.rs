@@ -9,6 +9,15 @@
 //   bytes 20..23  row count (u32 BE)
 //   bytes 24..55  OR-reduced fingerprint (32 bytes)
 //   bytes 56..63  HLC packed (u64 BE)
+//
+// This layer emits the bare 64-byte payload — it neither checksums
+// nor signs. Authenticity is a federation-egress concern, not a
+// substrate one: the originating estate signs the outbound payload
+// and encrypts it to the recipient scope at the share point
+// (sign-then-encrypt-to-scope, DECISION_FEDERATION_SHARING_MODEL).
+// That signature is ECDSA P-256 (ADR-013, EE FIPS requirement) and
+// is built with the federation transport in v1.1; nothing signs
+// this payload before then.
 
 use substrate_types::hlc::HLC;
 use substrate_types::fingerprint256::Fingerprint256;

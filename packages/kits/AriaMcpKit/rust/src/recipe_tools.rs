@@ -25,12 +25,13 @@
 //! ## Step 2 — Dreaming cycle
 //!
 //! The dreaming cycle is fully available: `EstateDreamingReader::new` snapshots the
-//! estate seams through `EstateCoordinator`, `EstateDreamingSink::new` writes
-//! proposals and diary entries through `DrawerStore`, and `DreamingDaemon::run_cycle`
-//! runs the 7-step NEURONKIT_SPEC § 3.1 algorithm. The cycle writes ZERO recall-trace
-//! rows — B-10a is enforced by the seam design: `EstateDreamingReader` reads through
-//! `coordinator.all_drawers` (no `trace_limit`) and `EstateDreamingSink` writes
-//! through `store.add_proposal` / `store.add_diary_entry` (not the recall_scored path).
+//! estate seams through `EstateCoordinator`, `EstateDreamingSink::new` routes all
+//! writes through the GLK `EstateCoordinator` verb surface (B-1 compliant), and
+//! `DreamingDaemon::run_cycle` runs the 7-step NEURONKIT_SPEC § 3.1 algorithm. The
+//! cycle writes ZERO recall-trace rows — B-10a is enforced by the seam design:
+//! `EstateDreamingReader` reads through `coordinator.all_drawers` (no `trace_limit`)
+//! and `EstateDreamingSink` writes through `coordinator.propose` /
+//! `coordinator.add_diary_entry` (not the recall_scored path).
 //!
 //! ## Tool surface is on-demand only — by design, not by omission
 //!
@@ -68,7 +69,6 @@
 //! `MigrationBenchmark.confirmPromotion` by-id overload as the behavioral reference.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use cognition_kit::{
     recipe_catalog, run_grounded_synthesis, run_precise_recall, run_shaped_recall, OriginEntry,
@@ -84,8 +84,8 @@ use neuron_kit::RecallFrameTuning;
 use uuid::Uuid;
 
 use crate::dispatch::{
-    decode_filter_chain, error_result, optional_integer, optional_string, require_string,
-    text_result,
+    clamp_limit, decode_filter_chain, error_result, optional_integer, optional_string,
+    require_string, text_result, LIMIT_HARD_CEILING,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
@@ -108,9 +108,16 @@ const DREAM: &str = "moot_dream";
 const CONSOLIDATE: &str = "moot_consolidate";
 /// Distilled recall via Hamming NN — mirrors Swift `RecipeTools.recallDistilledToolName`.
 const RECALL_DISTILLED: &str = "moot_recall_distilled";
-/// Expand a distilled factoid to its source drawers — mirrors Swift
-/// `RecipeTools.expandMemoryToolName`.
-const EXPAND_MEMORY: &str = "moot_expand_memory";
+/// Fan-out from a distilled factoid to its source drawers — mirrors Swift
+/// `RecipeTools.recollectToolName`.
+const RECOLLECT: &str = "moot_recollect";
+
+/// Preview cap for distilled prose output. Distilled factoids are compressed
+/// by definition, but `m.prose` can still be arbitrarily long. Cap at 300 chars
+/// to prevent a single high-confidence factoid from overwhelming the LLM context.
+/// Normal drawers use 120 chars (see `run_memory_search`). 300 is generous.
+/// Parity: mirrors `distilledProseCap` in Swift `ToolDispatch.swift`.
+const DISTILLED_PROSE_PREVIEW_CAP: usize = 300;
 
 /// True when `name` is one of the recipe tools.
 pub fn is_recipe_tool(name: &str) -> bool {
@@ -126,7 +133,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | DREAM
             | CONSOLIDATE
             | RECALL_DISTILLED
-            | EXPAND_MEMORY
+            | RECOLLECT
     )
 }
 
@@ -147,7 +154,7 @@ pub fn dispatch(
         DREAM => run_dream_tool(args, registry),
         CONSOLIDATE => run_consolidate_tool(args, registry),
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
-        EXPAND_MEMORY => run_expand_memory_tool(args, registry),
+        RECOLLECT => run_recollect_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -160,23 +167,59 @@ pub fn dispatch(
 // ---------------------------------------------------------------------------
 
 fn run_list_recipes() -> serde_json::Value {
-    let catalog = recipe_catalog();
-    let mut lines = vec![format!("recipes: {}", catalog.len())];
-    for d in &catalog {
-        let caps: Vec<&str> = d
-            .required_capabilities
-            .iter()
-            .map(|c| {
-                // The capability rawValue — matches the Swift .rawValue string.
-                // Delegates to the capability's own raw_value() to stay in sync
-                // with declaration order and avoid exhaustive match maintenance.
-                c.raw_value()
-            })
-            .collect();
-        lines.push(format!("  - {} v{}", d.name, d.version));
-        lines.push(format!("      {}", d.description));
-        lines.push(format!("      capabilities: {}", caps.join(", ")));
+    // Mirrors Swift runListRecipes: project the 27 cognition tools (4 Tier-6
+    // recipe tools + 23 lens tools) from the tool surface, showing name,
+    // description, and required args for each. NOT a catalog dump — the tool
+    // surface is the authority for what the caller can invoke.
+    let tier6_recipe_names: &[&str] = &[
+        LIST_LENSES, SYNTHESIZE, RECALL_PRECISE, RECALL_SHAPED,
+    ];
+
+    let all_tools = crate::tool_list::build_tool_list();
+    let empty = vec![];
+    let all_arr = all_tools.as_array().unwrap_or(&empty);
+
+    // Collect the 4 Tier-6 recipe tools in declaration order.
+    let recipe_tools: Vec<&serde_json::Value> = tier6_recipe_names
+        .iter()
+        .filter_map(|&n| all_arr.iter().find(|t| t["name"].as_str() == Some(n)))
+        .collect();
+
+    // Collect the 23 lens tools in LENS_TOOLS declaration order.
+    let lens_tools: Vec<&serde_json::Value> = crate::lens_tools::LENS_TOOLS
+        .iter()
+        .filter_map(|&n| all_arr.iter().find(|t| t["name"].as_str() == Some(n)))
+        .collect();
+
+    let cognition_tools: Vec<&serde_json::Value> =
+        recipe_tools.into_iter().chain(lens_tools).collect();
+
+    let mut lines: Vec<String> = vec![format!(
+        "{}: {} cognition tools",
+        LIST_LENSES,
+        cognition_tools.len()
+    )];
+
+    for tool in &cognition_tools {
+        let name = tool["name"].as_str().unwrap_or("?");
+        let desc = tool["description"].as_str().unwrap_or("");
+        let required: Vec<&str> = tool["inputSchema"]["required"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let req_text = if required.is_empty() {
+            "none".to_string()
+        } else {
+            required.join(", ")
+        };
+        lines.push(String::new());
+        lines.push(name.to_string());
+        lines.push(format!("  {desc}"));
+        lines.push(format!("  Required: {req_text}."));
     }
+
+    lines.push(String::new());
+    lines.push("Call any tool with teachme:true for a full usage guide.".to_string());
     text_result(&lines.join("\n"))
 }
 
@@ -217,31 +260,43 @@ fn run_grounded_synthesis_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let filter_chain = decode_filter_chain(args)?;
-    let limit = optional_integer(args, "limit")?.map(|i| i as usize);
+    // Route through clamp_limit so negative and over-ceiling values are
+    // rejected/clamped at the MCP boundary. Parity: Swift runGroundedSynthesis
+    // uses ToolDispatcher.clampLimit with the same ceiling.
+    let limit = clamp_limit(
+        optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
+    )?;
 
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = HydrationLevel::Structured;
     frame.ordering = Ordering::ByCaptureTimeDesc;
-    if let Some(l) = limit {
-        frame.limit = Some(l);
-    }
+    frame.limit = Some(limit);
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
+    // Build the node-name map so DrawerRowMeta carries real wing/room names.
+    // Collect all drawer parent_node_ids up-front; resolve in one batch call.
+    let all_drawers_for_names = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let all_node_ids: Vec<String> = all_drawers_for_names
+        .iter()
+        .map(|d| d.parent_node_id.clone())
+        .collect();
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &all_node_ids);
     let out = run_grounded_synthesis(
         &coord,
         &estate.handle,
         frame,
         RecallFrameTuning::default(),
         now,
+        &node_names,
     )
     .map_err(error_from_recipe)?;
 
     let doc = &out.context;
     let body = format!(
-        "grounded_synthesis: {} drawer(s)\nsummary: {}\npatterns: {}\nsuccessRate: {}\nrecommendations:\n{}\nkeyInsights:\n{}",
+        "grounded_synthesis: {} drawer(s)\nsummary: {}\npatterns: {}\nsuccessRate: {:.1}\nrecommendations:\n{}\nkeyInsights:\n{}",
         out.drawer_count,
         doc.summary,
         doc.patterns.join(", "),
@@ -272,20 +327,27 @@ fn run_precise_recall_tool(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use locus_kit::filter::Filter;
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let query = require_string(args, "query")?;
-    // 20 is moot_memory_search's own default limit; keep parity.
-    let limit = optional_integer(args, "limit")?
-        .map(|i| i as usize)
-        .unwrap_or(20);
+    // Clamp to [1, 500]: reject negative/zero (crash downstream range ops) and
+    // cap absurdly-large values (DoS via unbounded substrate scan).
+    // Parity: Swift runPreciseRecall uses ToolDispatcher.clampLimit.
+    let limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "limit")?, "limit", 20, crate::dispatch::LIMIT_HARD_CEILING
+    )?;
     // Default coarse pool is CognitionKit's own default (30); honour an explicit
     // override. The recipe clamps pool >= limit internally.
-    let pool = optional_integer(args, "pool")?
-        .map(|i| i as usize)
-        .unwrap_or(PRECISE_DEFAULT_POOL);
+    // Pool is also clamped: an unbounded pool drives an unbounded substrate scan.
+    let pool = crate::dispatch::clamp_limit(
+        optional_integer(args, "pool")?,
+        "pool",
+        PRECISE_DEFAULT_POOL,
+        crate::dispatch::LIMIT_HARD_CEILING,
+    )?;
     // ADR-016 §4: optional `wing` scopes recall to a single wing.
     // When present, compose with the explicit filter via Filter::All.
     // When absent, the base filter stands alone (existing behavior unchanged).
+    // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit filter API.
     let base_filter = decode_precise_filter(args)?;
     let filter = match optional_string(args, "wing")? {
         Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
@@ -309,6 +371,17 @@ fn run_precise_recall_tool(
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
+    // ADR-017 §3: resolve parentNodeIds to room display names via the
+    // node tree, matching moot_memory_search's resolution path.
+    let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        all_drawers.iter()
+            .filter(|d| seen.insert(d.parent_node_id.clone()))
+            .map(|d| d.parent_node_id.clone())
+            .collect()
+    };
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
     let matches = run_precise_recall(
         &coord,
         &estate.handle,
@@ -318,6 +391,7 @@ fn run_precise_recall_tool(
         pool,
         composition.as_deref(),
         now,
+        &node_names,
     )
     .map_err(error_from_recipe)?;
 
@@ -351,9 +425,10 @@ fn run_precise_recall_tool(
     let precise_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
     let discrimination = crate::recall_discrimination::classify(&precise_scores);
 
+    // m.room is the resolved room display name, populated by from_hit
+    // using the node_names map built above.
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
     for m in matches.iter().take(50) {
-        // Match moot_memory_search's preview: first 120 chars of content.
         let preview: String = m.content.chars().take(120).collect();
         let room = if m.room.is_empty() { "?" } else { &m.room };
         lines.push(format!("{}  [{}]  {}", m.id, room, preview));
@@ -391,14 +466,17 @@ fn run_shaped_recall_tool(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use locus_kit::filter::Filter;
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let query = require_string(args, "query")?;
-    // 20 is moot_memory_search's own default limit; keep parity.
-    let limit = optional_integer(args, "limit")?
-        .map(|i| i as usize)
-        .unwrap_or(20);
+    // Clamp to [1, 500]: reject negative/zero, cap absurdly-large values.
+    // DoS prevention at the MCP boundary before the substrate is touched.
+    // Parity: Swift runShapedRecall uses ToolDispatcher.clampLimit.
+    let limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "limit")?, "limit", 20, crate::dispatch::LIMIT_HARD_CEILING
+    )?;
     // ADR-016 §4: optional `wing` scopes recall to a single wing.
     // When present, compose with the explicit filter via Filter::All.
+    // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit filter API.
     let base_filter = decode_precise_filter(args)?;
     let filter = match optional_string(args, "wing")? {
         Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
@@ -421,16 +499,28 @@ fn run_shaped_recall_tool(
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
-    let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now)
+    // ADR-017 §3: resolve parentNodeIds to room display names via the
+    // node tree, matching moot_memory_search's resolution path.
+    let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        all_drawers.iter()
+            .filter(|d| seen.insert(d.parent_node_id.clone()))
+            .map(|d| d.parent_node_id.clone())
+            .collect()
+    };
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
+    let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now, &node_names)
         .map_err(error_from_recipe)?;
 
     // Compute discrimination over the full ordered list before the display prefix.
     let shaped_scores: Vec<f64> = out.matches.iter().map(|m| m.score).collect();
     let discrimination = crate::recall_discrimination::classify(&shaped_scores);
 
+    // m.room is the resolved room display name, populated by from_hit
+    // using the node_names map built above.
     let mut lines = vec![format!("found {} memory(s)", out.matches.len())];
     for m in out.matches.iter().take(50) {
-        // Match moot_memory_search's preview: first 120 chars of content.
         let preview: String = m.content.chars().take(120).collect();
         let room = if m.room.is_empty() { "?" } else { &m.room };
         lines.push(format!("{}  [{}]  {}", m.id, room, preview));
@@ -447,7 +537,7 @@ fn run_migration_benchmark_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let corpus_name = require_string(args, "corpusName")?;
     let entries_value = args
         .get("entries")
@@ -582,7 +672,7 @@ fn run_confirm_promotion_tool(
     let disqualified_bids = parse_uuid_array(args, "disqualifiedBranchIDs")?;
 
     // Resolve estate — absent estateID → default estate (v1 single-estate path).
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let now = crate::dispatch::wall_now();
     let mut coord = estate.coord.lock().unwrap();
 
@@ -626,8 +716,8 @@ fn run_confirm_promotion_tool(
 /// The dreaming cycle writes ZERO recall-trace rows. The cycle reads through
 /// `EstateDreamingReader::new` which calls `coordinator.all_drawers` and
 /// `coordinator.all_tunnels` — neither of which sets a `trace_limit`, so no
-/// trace rows are written. The write path (`EstateDreamingSink`) only calls
-/// `store.add_proposal` and `store.add_diary_entry`. The `recall_scored` path
+/// trace rows are written. The write path (`EstateDreamingSink`) routes through
+/// `coordinator.propose` and `coordinator.add_diary_entry`. The `recall_scored` path
 /// (the only path that writes trace rows) is never invoked. This is the
 /// literal proof: grep `run_dream_tool` for `recall_scored` — zero hits.
 ///
@@ -655,18 +745,37 @@ fn run_dream_tool(
     };
 
     // Resolve estate — absent estateID → default estate.
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
 
     // Deterministic `now` when supplied; otherwise the wall clock. A malformed
     // ISO8601 instant is an out-of-band client error (invalidParams), NOT a
     // silent fallback — mirroring Swift's identical check.
+    //
+    // Upper-bound guard: a future `now` causes pruneRecallTraces(olderThan: now - 30.days)
+    // to delete ALL recall traces (every trace is older than a far-future minus 30 days).
+    // Reject any `now` more than 24 hours (86400 seconds) in the future. Parity with
+    // Swift RecipeTools.runDream.
     let now_epoch_secs: i64 = if let Some(raw) = optional_string(args, "now")? {
-        parse_iso8601_to_epoch(raw).ok_or_else(|| {
+        let parsed = parse_iso8601_to_epoch(raw).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
                 format!("now is not a valid ISO8601 instant: {raw}"),
             )
-        })?
+        })?;
+        // Future-now guard: reject timestamps more than 86400s (24 h) ahead of wall
+        // clock. A far-future `now` causes pruneRecallTraces(olderThan: now − 30 days)
+        // to prune recent real recall traces, corrupting the reward signal.
+        // Hard ceiling: 24 h. Parity: Swift RecipeTools.runDream applies the same guard.
+        let wall = crate::dispatch::wall_now();
+        if parsed.saturating_sub(wall) > 86400 {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "now is more than 24 hours in the future; \
+                 pass a timestamp close to the current time"
+                    .to_string(),
+            ));
+        }
+        parsed
     } else {
         crate::dispatch::wall_now()
     };
@@ -682,7 +791,7 @@ fn run_dream_tool(
     // rebuild_derived_accelerators returns VerbDispatchError (no Display impl) —
     // route through describe_verb_dispatch_error for a clean English reason.
     coord
-        .rebuild_derived_accelerators(&estate.handle)
+        .rebuild_derived_accelerators(&estate.handle, now_epoch_secs)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -691,24 +800,29 @@ fn run_dream_tool(
         })?;
 
     // Step 2 — One dreaming cycle over the live estate seams.
-    // EstateDreamingReader snapshots the three reads (recall traces, co-occurrence
-    // observations, existing tunnels) from the estate at construction time.
-    // The since/now window uses the injected epoch as both bounds (single-instant
-    // window), consistent with the B-10a contract: no recall-scored call is made.
-    // EstateDreamingReader::new returns VerbDispatchError (no Display impl) —
-    // route through describe_verb_dispatch_error for a clean English reason.
-    let reader =
-        EstateDreamingReader::new(&coord, &estate.handle, &now_iso, &now_iso).map_err(|e| {
+    // EstateDreamingReader snapshots recall traces and existing tunnels from the
+    // estate at construction time; the co-recall windows are drained lazily from
+    // the dreaming queue during the cycle (T8). The since/now window uses the
+    // injected epoch as both bounds (single-instant window), consistent with the
+    // B-10a contract: no recall-scored call is made. `now_epoch_secs` is passed
+    // for drain telemetry. EstateDreamingReader::new returns VerbDispatchError
+    // (no Display impl) — route through describe_verb_dispatch_error for a clean
+    // English reason.
+    let reader = EstateDreamingReader::new(
+        &coord, &estate.handle, &now_iso, &now_iso, now_epoch_secs as f64,
+    )
+    .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
                 format!("dream: failed to snapshot estate seams: {}", crate::interface_tools::describe_verb_dispatch_error(&e)),
             )
         })?;
 
-    // EstateDreamingSink writes proposals and diary entries through DrawerStore
-    // directly — no GLK coordinator involvement, no recall-scored calls, no
-    // trace-row writes. This is the B-10a write path (internal-origin proof).
-    let mut sink = EstateDreamingSink::new(Arc::clone(&estate.store), now_epoch_secs);
+    // EstateDreamingSink routes all writes through the GLK EstateCoordinator
+    // verb surface (B-1 compliant). The coordinator stamps canonical
+    // dreaming-daemon provenance. No recall-scored calls, no trace-row writes
+    // (B-10a internal-origin proof).
+    let mut sink = EstateDreamingSink::new(&coord, estate.handle.clone(), now_epoch_secs);
 
     let reward = RecallTraceRewardSource;
     let policy = DreamingPolicy::default();
@@ -726,8 +840,10 @@ fn run_dream_tool(
         format!("\nwrite_warnings: {}", sink.write_errors.join("; "))
     };
 
+    // Parity with Swift RecipeTools.runDreamTool: single-line summary
+    // ("rebuilt" not "rebuild"), then newline-separated stats.
     let body = format!(
-        "moot_dream: matrix rebuild complete\ndreaming cycle complete\nconsideredCandidates: {}\nproposalsEmitted: {}\nsuppressedDuplicates: {}\nbelowThreshold: {}{}",
+        "moot_dream: matrix rebuilt, dreaming cycle complete\nconsideredCandidates: {}\nproposalsEmitted: {}\nsuppressedDuplicates: {}\nbelowThreshold: {}{}",
         report.candidates_considered,
         report.proposals_emitted.len(),
         report.suppressed_duplicates,
@@ -836,11 +952,13 @@ fn parse_uuid_array(
 // moot_consolidate
 // ---------------------------------------------------------------------------
 
-/// Run one intra-item distillation sweep via `EstateCoordinator::distill_items_sweep`.
+/// Run one intra-item distillation sweep via the CognitionKit `run_consolidate`
+/// recipe body.
 ///
-/// Mirrors Swift `RecipeTools.runConsolidate`. Drives the GLK sweep entry point
-/// directly — CognitionKit Rust `ConsolidateInput` is the parameter type but the
-/// sweep I/O is owned by the coordinator.
+/// Mirrors Swift `RecipeTools.runConsolidate`. Routes through the CognitionKit
+/// library recipe surface (`cognition_kit::run_consolidate`) rather than calling
+/// `EstateCoordinator::distill_items_sweep` directly — parity with the Swift handler
+/// which calls `Consolidate.run(input:estate:kit:)` rather than the GLK verb directly.
 ///
 /// Returns text in the same format as the Swift handler:
 ///   "moot_consolidate: sweep complete\nfactoidsProduced: N"
@@ -848,11 +966,13 @@ fn run_consolidate_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
-    let produced = coord
-        .distill_items_sweep(&estate.handle, now, None)
+    // Route through the CognitionKit library recipe — parity with Swift's
+    // `Consolidate.run(input:estate:kit:)` call chain.
+    let input = cognition_kit::ConsolidateInput::default();
+    let out = cognition_kit::run_consolidate(&input, &coord, &estate.handle, now)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -863,7 +983,8 @@ fn run_consolidate_tool(
             )
         })?;
     Ok(text_result(&format!(
-        "moot_consolidate: sweep complete\nfactoidsProduced: {produced}"
+        "moot_consolidate: sweep complete\nfactoidsProduced: {}",
+        out.factoids_produced
     )))
 }
 
@@ -874,34 +995,28 @@ fn run_consolidate_tool(
 /// Recall distilled factoids for `query` via Hamming NN on the
 /// `distillation-features-v1` VectorKit lane.
 ///
-/// Mirrors Swift `RecipeTools.runRecallDistilled`. Produces the query
-/// fingerprint via `DistillationPipeline::query_fingerprint`, dispatches to
-/// `EstateCoordinator::find_nearest_distilled`, and reads the matching factoid
-/// drawers from the estate. Returns a discrimination signal.
+/// Mirrors Swift `RecipeTools.runRecallDistilled`. Routes through the
+/// CognitionKit `run_distilled_recall` library recipe, which produces the
+/// query fingerprint, calls `find_nearest_distilled`, parses DIST headers, and
+/// classifies discrimination using confidence-score thresholds (parity with
+/// Swift DistilledRecall.run). Returns structured text for the MCP caller.
 fn run_recall_distilled_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    use substrate_ml::distillation_pipeline::{DistilledHeader, DistillationPipeline};
-
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let query = require_string(args, "query")?;
-    let limit = optional_integer(args, "limit")?
-        .map(|i| i as usize)
-        .unwrap_or(10);
-
-    // Build the search Engram (= Fingerprint256) from the query text —
-    // no embedding model inference required. `Engram` is a type alias for
-    // `Fingerprint256` (engram_lib::lib.rs line 47), so the return value
-    // from query_fingerprint is already the correct type for find_nearest_distilled.
-    let engram = DistillationPipeline::query_fingerprint(
-        query,
-        DistillationPipeline::default_extractor,
-    );
+    // Clamp to [1, 500]: same DoS gate as moot_memory_search and the other recall
+    // tools. Parity: Swift runRecallDistilled uses ToolDispatcher.clampLimit.
+    let limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "limit")?, "limit", 10, crate::dispatch::LIMIT_HARD_CEILING
+    )?;
 
     let coord = estate.coord.lock().unwrap();
-    let matches = coord
-        .find_nearest_distilled(&estate.handle, &engram, limit)
+    // Route through the CognitionKit library recipe — parity with Swift's
+    // DistilledRecall.run(input:estate:kit:) call chain.
+    let input = cognition_kit::DistilledRecallInput::with_limit(query, limit);
+    let out = cognition_kit::run_distilled_recall(&input, &coord, &estate.handle)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -912,138 +1027,117 @@ fn run_recall_distilled_tool(
             )
         })?;
 
-    if matches.is_empty() {
+    if out.matches.is_empty() {
         return Ok(text_result(&format!(
             "found 0 distilled factoid(s) for: {query}\ndiscrimination: not_found"
         )));
     }
 
-    // Fetch the actual factoid drawers by reading all drawers and filtering by id.
-    // (RecallFrame has no row_ids field; all_drawers + local filter is the correct path.)
-    let all = coord.all_drawers(&estate.handle).unwrap_or_default();
-    let match_ids: std::collections::HashSet<&str> =
-        matches.iter().map(|m| m.item_id.as_str()).collect();
-    let factoid_map: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> = all
-        .iter()
-        .filter(|d| match_ids.contains(d.id.as_str()))
-        .map(|d| (d.id.as_str(), d))
-        .collect();
-
-    let mut lines = vec![format!("found {} distilled factoid(s) for: {}", matches.len(), query)];
-    for hit in &matches {
-        if let Some(drawer) = factoid_map.get(hit.item_id.as_str()) {
-            let parsed = DistilledHeader::parse(&drawer.content);
-            match parsed {
-                Some(h) => {
-                    lines.push(format!(
-                        "{}  conf={:.2} | src={} | {}",
-                        drawer.id,
-                        h.confidence,
-                        h.source_count,
-                        h.prose,
-                    ));
-                }
-                None => {
-                    // Content present but not a DIST header — show raw preview.
-                    let preview: String = drawer.content.chars().take(120).collect();
-                    lines.push(format!("{}  {}", drawer.id, preview));
-                }
-            }
+    let mut lines = vec![format!(
+        "found {} distilled factoid(s) for: {}",
+        out.matches.len(),
+        query
+    )];
+    for (idx, m) in out.matches.iter().enumerate() {
+        lines.push(String::new());
+        lines.push(format!("[{}] drawer_id: {}", idx + 1, m.id));
+        // Preview cap: distilled prose can be arbitrarily long; cap at 300 chars to
+        // prevent context-window overflow. Parity: Swift distilledProseCap = 300.
+        let prose: String = m.prose.chars().take(DISTILLED_PROSE_PREVIEW_CAP).collect();
+        lines.push(format!("    {prose}"));
+        // Build metadata line — snr and delta are shown when present.
+        let mut meta = format!(
+            "    confidence: {:.2} | sources: {} | snr: {:.1}",
+            m.confidence, m.source_count, m.snr,
+        );
+        if let Some(ref dt) = m.delta_type {
+            meta.push_str(&format!(" | delta: {dt}"));
         }
+        if m.uncertain {
+            meta.push_str(" [uncertain]");
+        }
+        lines.push(meta);
     }
 
-    // Discrimination over Hamming distances. Lower distance = better match.
-    // Use simple score based on whether any hit has distance <= 64 bits apart.
-    let best_distance = matches.first().map(|m| m.distance).unwrap_or(i32::MAX);
-    let discrimination = if best_distance <= 32 {
-        "high"
-    } else if best_distance <= 96 {
-        "medium"
-    } else {
-        "low"
+    lines.push(String::new());
+    // Discrimination signal from confidence-score thresholds (parity with Swift
+    // DistilledRecall.classifyDistilledDiscrimination):
+    //   HIGH_MARGIN=0.25, LOW_MARGIN=0.05, LOW_SPREAD=0.15.
+    let discrimination_line = match out.discrimination {
+        cognition_kit::DistilledDiscriminationLevel::Single =>
+            "discrimination: single — only one result.",
+        cognition_kit::DistilledDiscriminationLevel::High =>
+            "discrimination: high — clear top result.",
+        cognition_kit::DistilledDiscriminationLevel::Medium =>
+            "discrimination: medium — some separation.",
+        cognition_kit::DistilledDiscriminationLevel::Low =>
+            "discrimination: low — results are effectively unranked.",
     };
-    lines.push(format!("discrimination: {discrimination}"));
+    lines.push(discrimination_line.to_owned());
 
     Ok(text_result(&lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
-// moot_expand_memory
+// moot_recollect
 // ---------------------------------------------------------------------------
 
-/// Expand a distilled factoid drawer back to its source drawers.
+/// Fan-out from a distilled factoid drawer to its source drawers.
 ///
-/// Mirrors Swift `RecipeTools.runExpandMemory`. Reads the factoid drawer,
-/// follows `_distilled_from` tunnels to the source drawer(s), and returns a
-/// summary including the factoid text and source previews.
-fn run_expand_memory_tool(
+/// Mirrors Swift `RecipeTools.runRecollect`. Routes through the CognitionKit
+/// `run_recollect` library recipe, which reads the factoid, validates the
+/// DIST header, follows `_distilled_from` tunnels, and returns source content.
+/// Maps `RecollectError` variants to structured ARIA tool result text.
+fn run_recollect_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    use substrate_ml::distillation_pipeline::DistilledHeader;
-    use genius_locus_kit::brain::distillation_cycle::DISTILLED_FROM_LABEL;
-
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let drawer_id = require_string(args, "drawer_id")?;
 
-    // Resolve the factoid drawer by reading all drawers and finding by id.
-    // (RecallFrame has no row_ids field; all_drawers + local filter is correct.)
     let coord = estate.coord.lock().unwrap();
-    let all = coord.all_drawers(&estate.handle).unwrap_or_default();
-    let factoid = match all.into_iter().find(|d| d.id == drawer_id) {
-        Some(d) => d,
-        None => {
-            return Ok(error_result(&format!(
-                "expand: drawer not found: {drawer_id}"
-            )));
+    let input = cognition_kit::RecollectInput::new(drawer_id);
+    let out = match cognition_kit::run_recollect(&input, &coord, &estate.handle) {
+        Ok(o) => o,
+        Err(cognition_kit::RecollectError::FactoidNotFound { id }) => {
+            return Ok(error_result(&format!("recollect: drawer not found: {id}")));
+        }
+        Err(cognition_kit::RecollectError::NotADistilledDrawer { id }) => {
+            return Ok(error_result(&format!("recollect: drawer is not a distilled factoid: {id}")));
+        }
+        Err(cognition_kit::RecollectError::NoSourceTunnels { id }) => {
+            // Factoid valid but no tunnels — return structured error, not panic.
+            // Matches Swift's `throw RecollectError.noSourceTunnels(id:)` propagation.
+            return Ok(error_result(&format!("recollect: no _distilled_from tunnels for factoid: {id}")));
+        }
+        Err(cognition_kit::RecollectError::VerbDispatch(msg)) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!("recollect: verb dispatch failed: {msg}"),
+            ));
         }
     };
 
-    // Parse the DIST header for the factoid prose and metadata.
-    let (prose, conf_str, src_count) = match DistilledHeader::parse(&factoid.content) {
-        Some(h) => (
-            h.prose.clone(),
-            format!("{:.2}", h.confidence),
-            h.source_count,
-        ),
-        None => (factoid.content.clone(), "?".to_string(), 0),
-    };
-
-    // Recall _distilled_from tunnels: tunnels where source_drawer_id = factoid id.
-    // GLK recall_tunnels reads from the factoid's wing. Try the actual factoid wing.
-    let tunnels = coord
-        .recall_tunnels(&estate.handle, &factoid.wing)
-        .unwrap_or_default();
-
-    let source_tunnel_ids: Vec<String> = tunnels
-        .iter()
-        .filter(|t| {
-            t.label == DISTILLED_FROM_LABEL
-                && t.source_drawer_id.as_deref() == Some(drawer_id)
-        })
-        .filter_map(|t| t.target_drawer_id.clone())
-        .collect();
-
-    // Fetch source drawers by id from the full drawer list.
-    let all_for_sources = coord.all_drawers(&estate.handle).unwrap_or_default();
-    let source_set: std::collections::HashSet<&str> =
-        source_tunnel_ids.iter().map(String::as_str).collect();
-    let mut source_lines: Vec<String> = Vec::new();
-    for sd in all_for_sources.iter().filter(|d| source_set.contains(d.id.as_str())) {
-        let preview: String = sd.content.chars().take(120).collect();
-        source_lines.push(format!("  {} [{}] {}", sd.id, sd.room, preview));
-    }
-
     let mut lines = vec![
-        format!("expand: {drawer_id}"),
-        format!("factoid: {prose}"),
-        format!("confidence: {conf_str} | sources: {src_count}"),
+        format!("expand: {}", out.factoid_id),
+        format!("factoid: {}", out.prose),
     ];
-    if source_lines.is_empty() {
+    // Build metadata line — delta is optional.
+    let mut meta = format!("confidence: {:.2} | sources: {}", out.confidence, out.source_count);
+    if let Some(ref dt) = out.delta_type {
+        meta.push_str(&format!(" | delta: {dt}"));
+    }
+    lines.push(meta);
+
+    if out.sources.is_empty() {
+        lines.push(String::new());
         lines.push("sources: none found".to_string());
     } else {
-        lines.push("sources:".to_string());
-        lines.extend(source_lines);
+        for (n, src) in out.sources.iter().enumerate() {
+            lines.push(String::new());
+            lines.push(format!("source [{}] — room: {} | id: {}", n + 1, src.room, src.id));
+            lines.push(src.content.clone());
+        }
     }
     Ok(text_result(&lines.join("\n")))
 }

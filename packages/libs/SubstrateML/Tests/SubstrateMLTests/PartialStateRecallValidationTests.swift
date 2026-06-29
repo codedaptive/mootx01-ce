@@ -5,8 +5,8 @@
 //     corrupts the denominator (counted) while not contributing to
 //     the Hamming distance (ignored), producing silently wrong scores.
 //     Both score() and topK() assert via precondition.
-//   - k in topK() must be non-negative (precondition, matching
-//     HammingNN.topK's k > 0 style).
+//   - k=0 in topK() is valid and returns an empty result (guard path,
+//     not a precondition).
 //
 // Note: precondition failures terminate the process and cannot be
 // tested directly in Swift Testing. This suite tests:

@@ -14,12 +14,12 @@
 //   existing BM25Index.swift implementation.
 //
 // Refactoring note:
-//   BM25Index.swift is refactored to call BM25Weighting.buildIndex() instead of
-//   implementing its own scoring. The resulting InvertedIndex is stored inside
-//   BM25Index and used for topK queries. The original float-at-query-time path
-//   is replaced by the integer-only WAND path. This preserves the public API of
-//   BM25Index (same signature for topK / index / remove / documentCount) while
-//   routing through the new engine.
+//   BM25Index.swift is refactored to call BM25Weighting.build(...) instead
+//   of implementing its own scoring. The resulting InvertedIndex is stored
+//   inside BM25Index and used for topK queries. The original
+//   float-at-query-time path is replaced by the integer-only WAND path.
+//   This preserves the public API of BM25Index (same signature for topK /
+//   index / remove / documentCount) while routing through the new engine.
 //
 // Parity: Rust twin in CorpusKit/rust/src/engine/bm25_weighting.rs.
 

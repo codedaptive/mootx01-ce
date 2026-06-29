@@ -210,9 +210,10 @@ impl Fdc {
 mod tests {
     use super::*;
 
-    // Tests require the bundled artifacts to be present (include_bytes! at compile time).
-    // All four tests are skipped gracefully when artifacts are unavailable; in practice
-    // they always load since the JSON files are bundled unconditionally.
+    // Tests that call Fdc::label() on non-empty input require the bundled
+    // artifacts (include_bytes! at compile time) and guard with Fdc::is_available().
+    // `label_empty_returns_none` runs unconditionally — it does not need artifacts.
+    // In practice the JSON files are always bundled so all tests run.
 
     #[test]
     fn label_empty_returns_none() {

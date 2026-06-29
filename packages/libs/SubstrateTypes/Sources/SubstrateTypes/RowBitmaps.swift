@@ -15,7 +15,7 @@
 //     adjective    fields  0..<12  → adjective_bitmap  (bits 0–27 used,
 //                                    bits 28–63 reserved per §2.3)
 //     operational  fields 12..<24  → operational_bitmap (bits 0–30 used,
-//                                    bits 26–63 reserved per §2.4)
+//                                    bits 31–63 reserved per §2.4)
 //     provenance   fields 24..<36  → provenance_bitmap  (bits 0–41 used,
 //                                    bits 42–63 reserved per §2.5)
 //
@@ -75,7 +75,25 @@ public struct RowBitmaps: Sendable, Hashable, Codable {
             bitmap = provenance;  localField = idx - 2 * Self.fieldsPerBitmap
         }
         let shift = localField * Self.bitsPerField
-        return UInt8((bitmap >> shift) & Self.fieldValueMask)
+        // Guard against out-of-range shift: fields 10 and 11 in each column
+        // hit shift=60 and shift=66 respectively. Bits 60-63 are reserved in
+        // adjective (§2.3) / operational (§2.4); bits 42-63 are reserved in
+        // provenance (§2.5). Shift=66 falls entirely outside the 64-bit range,
+        // so the correct result is 0.
+        //
+        // Swift masks the shift amount by (bitWidth-1) = 63, so `UInt64 >> 66`
+        // computes as `UInt64 >> 2` — producing wrong results without this guard.
+        // The guard produces the correct zero explicitly. Mirrors Rust's identical
+        // `if shift >= 64 { return 0 }` guard.
+        if shift >= 64 { return 0 }
+        // Cast bitmap to UInt64 before right-shifting: Int64.>> is arithmetic
+        // (sign-extending), which bleeds the sign bit into field bits when bit 63
+        // is set. E.g. Int64.min >> 60 gives 0xFFFFFFFFFFFFFFF8 (arithmetic) and
+        // 0xFFFFFFFFFFFFFFF8 & 0x3F = 0x38 = 56 instead of the correct 0x8 = 8.
+        // Casting to UInt64 makes the shift logical (zero-filling). Mirrors the
+        // identical fix in the Rust port.
+        let ubm = UInt64(bitPattern: bitmap)
+        return UInt8((ubm >> shift) & UInt64(Self.fieldValueMask))
     }
 
     /// Returns whether the `bit`-th bit of field `fieldIdx` is

@@ -29,7 +29,7 @@
 //!   real prose and a human sees their note first.
 //! - The marker is an HTML comment so Markdown viewers hide it; MemPalace
 //!   stores content verbatim, so it survives byte-for-byte.
-//! - The JSON is canonical (sorted keys, serde_json default — no slash
+//! - The JSON is canonical (sorted keys via explicit recursive sort, no slash
 //!   escaping), matching Swift's `.sortedKeys`/`.withoutEscapingSlashes`, so
 //!   both ports emit byte-identical envelopes.
 //! - `v1` is a format version; decode refuses a version it does not know.
@@ -244,15 +244,15 @@ pub fn decode_fields(content: &str) -> Result<DecodedFields, EnvelopeDecodeError
     Ok(DecodedFields { body, fields })
 }
 
-/// Encode a per-noun envelope-field map as canonical JSON: sorted keys (the
-/// `BTreeMap` is already ordered, and serde_json re-emits in that order), no
-/// slash escaping — matching Swift `.sortedKeys`/`.withoutEscapingSlashes`, so
-/// both ports emit byte-identical four-noun envelopes.
+/// Encode a per-noun envelope-field map as canonical JSON: sorted top-level
+/// keys (via `BTreeMap`), no slash escaping — matching Swift
+/// `.sortedKeys`/`.withoutEscapingSlashes` for byte-identical four-noun
+/// envelopes. Note: nested object keys in `serde_json::Value` are serialized
+/// in their existing order; they are not explicitly re-sorted here.
 fn canonical_fields_json(
     fields: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<String, EnvelopeDecodeError> {
-    // Round-trip through a Value so nested object keys are also BTree-sorted,
-    // matching the typed-payload canonical_json path and the Swift output.
+    // Serialize through serde_json::Value to produce the final JSON string.
     let value = serde_json::to_value(fields)
         .map_err(|e| EnvelopeDecodeError::MalformedJson(e.to_string()))?;
     serde_json::to_string(&value).map_err(|e| EnvelopeDecodeError::MalformedJson(e.to_string()))

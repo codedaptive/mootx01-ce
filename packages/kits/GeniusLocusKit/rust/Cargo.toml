@@ -110,7 +110,7 @@ lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 # integration tests that drive recall through the RecallDirector (P0-5 sites
 # 1-5). Without this, the dependency crate's `test` cfg does NOT apply to GLK's
 # integration tests and the seam method would be absent.
-test-seams = ["locus-kit/test-seams"]
+test-seams = ["locus-kit/test-seams", "corpus-kit/test-seams"]
 
 [dev-dependencies]
 # Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
@@ -178,4 +178,13 @@ required-features = ["test-seams"]
 # gated behind test-seams (same pattern as standing_signals_parity above).
 [[test]]
 name = "distillation_signal_tests"
+required-features = ["test-seams"]
+
+# dreaming_queue_parity uses the test-seam accessors dreaming_queue_is_mounted,
+# dreaming_queue_pending_count, and dreaming_queue_drain — gated behind
+# `#[cfg(any(test, feature = "test-seams"))]`. The library's own `test` cfg does
+# NOT apply when compiling an integration test binary, so required-features is
+# needed so cargo test includes the seam methods (same pattern as recall_scored_parity).
+[[test]]
+name = "dreaming_queue_parity"
 required-features = ["test-seams"]

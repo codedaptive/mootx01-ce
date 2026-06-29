@@ -10,9 +10,8 @@
 //!
 //! The four lenses added by TASK-MXE-ASSIGNED (moment, rhythm, precedence,
 //! complexity) are pure math free functions — no new capability cases were
-//! needed. They declare `required_capabilities: []` because their NeuronKit
-//! entry points (moment_signature, rhythm, precedence, complexity) carry no
-//! capability gate of their own.
+//! needed. Their catalog entries in catalog.rs declare empty capability lists
+//! because their NeuronKit entry points carry no capability gate of their own.
 
 use crate::error::RecipeError;
 use serde::{Deserialize, Serialize};
@@ -119,7 +118,7 @@ pub fn verify_capabilities(
 
 #[cfg(test)]
 mod tests {
-    //! Conformance fixtures — mirror Swift `CapabilityGateTests`.
+    //! Conformance fixtures — mirror Swift `NeuronKitCapabilityTests`.
     use super::*;
 
     #[test]

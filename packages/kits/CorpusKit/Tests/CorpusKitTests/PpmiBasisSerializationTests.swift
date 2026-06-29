@@ -114,6 +114,69 @@ struct PpmiBasisSerializationTests {
         try encoder.encode(fixture).write(to: URL(fileURLWithPath: path))
     }
 
+    // MARK: - Counts codec (incremental-counts change set)
+
+    @Test("train → serializeCounts → restore → finalize re-derives identical embeddings")
+    func countsRoundTripReDerives() async throws {
+        let original = PpmiProvider()
+        for doc in ppmiBasisCorpus { original.train(terms: doc, window: ppmiWindow) }
+        // Serialize counts before finalize. finalize() rebuilds ppmiVectors but does not clear the raw count tables.
+        let countsBlob = original.serializeCounts()
+        original.finalize()
+        let restored = try PpmiProvider(deserializingCounts: countsBlob)
+        restored.finalize()
+        for text in ppmiBasisProbeTexts {
+            let f0 = try await original.embedFloat(text)
+            let f1 = try await restored.embedFloat(text)
+            #expect(f0.map { $0.bitPattern } == f1.map { $0.bitPattern },
+                    "re-derived float vector must match after counts round-trip for '\(text)'")
+        }
+    }
+
+    /// The core promise of the counts table: persisted counts can be EXTENDED
+    /// incrementally after restore, and the result equals a from-scratch train
+    /// over the full corpus. This is what lets a maintained table replace the
+    /// rebuild-from-scratch reindex.
+    @Test("counts extend incrementally after restore (== from-scratch over all docs)")
+    func countsIncrementalExtendEqualsFromScratch() async throws {
+        // Maintain: train the first three docs, persist, restore, extend with the rest.
+        let head = PpmiProvider()
+        for doc in ppmiBasisCorpus.prefix(3) { head.train(terms: doc, window: ppmiWindow) }
+        let restored = try PpmiProvider(deserializingCounts: head.serializeCounts())
+        for doc in ppmiBasisCorpus.dropFirst(3) { restored.train(terms: doc, window: ppmiWindow) }
+        restored.finalize()
+        // From-scratch over the full corpus.
+        let scratch = PpmiProvider()
+        for doc in ppmiBasisCorpus { scratch.train(terms: doc, window: ppmiWindow) }
+        scratch.finalize()
+        for text in ppmiBasisProbeTexts {
+            let a = try await restored.embedFloat(text)
+            let b = try await scratch.embedFloat(text)
+            #expect(a.map { $0.bitPattern } == b.map { $0.bitPattern },
+                    "incrementally-extended counts must equal from-scratch for '\(text)'")
+        }
+    }
+
+    @Test("counts blob begins with the PPMC magic and the v1 format byte")
+    func countsBlobHeaderIsVersioned() {
+        let p = PpmiProvider()
+        for doc in ppmiBasisCorpus { p.train(terms: doc, window: ppmiWindow) }
+        let bytes = [UInt8](p.serializeCounts())
+        #expect(bytes.count >= 5)
+        #expect(Array(bytes[0..<4]) == Array("PPMC".utf8))
+        #expect(bytes[4] == basisFormatVersion)
+    }
+
+    @Test("truncated counts blob throws decodingFailure, never crashes")
+    func countsTruncatedBlobThrows() {
+        let p = PpmiProvider()
+        for doc in ppmiBasisCorpus { p.train(terms: doc, window: ppmiWindow) }
+        let blob = p.serializeCounts()
+        #expect(throws: CorpusKitError.self) {
+            _ = try PpmiProvider(deserializingCounts: Data(blob.prefix(blob.count / 2)))
+        }
+    }
+
     @Test("committed PPMI fixture blob reproduces its pinned embeddings")
     func committedFixtureIsSelfConsistent() async throws {
         let url = sharedVectorsURL(for: "ppmi_basis_blob.json")

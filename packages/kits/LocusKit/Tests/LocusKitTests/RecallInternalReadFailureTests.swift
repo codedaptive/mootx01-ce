@@ -19,8 +19,8 @@ struct RecallInternalReadFailureTests {
     // (which only runs when the chain carries a prunable filter) visits a
     // surviving room. provenance confirmation = userConfirmed (raw 1 at
     // bits 18-23) so the default frame admits the row.
-    private func voiceDrawer(id: String, room: String) -> Drawer {
-        Drawer(id: TestStorage.tid(id), content: "c-" + id, wing: "w", room: room, addedBy: "t",
+    private func voiceDrawer(id: String, parentNodeId: String) -> Drawer {
+        Drawer(id: TestStorage.tid(id), content: "c-" + id, parentNodeId: parentNodeId, addedBy: "t",
                filedAt: Date(timeIntervalSince1970: 1_700_000_000),
                embeddingModelID: "m",
                provenance: Int64(1) << 18,
@@ -34,8 +34,13 @@ struct RecallInternalReadFailureTests {
         let storage = TestStorage.sqlite(url)
         _ = try await Estate.create(storage: storage,
                                     owner: OwnerCredentials(ownerIdentifier: "o"))
+        // Seed node tree: root → wing "w" → room "r1"
+        let nodeStore = NodeStore(storage: storage)
+        let root = try await nodeStore.createRoot(displayName: "Estate", now: Date())
+        let wing = try await nodeStore.createNode(displayName: "w", parentId: root.id, now: Date())
+        let room = try await nodeStore.createNode(displayName: "r1", parentId: wing.id, now: Date())
         let drawerStore = try await DrawerStore(storage: storage)
-        try await drawerStore.addDrawer(voiceDrawer(id: "d1", room: "r1"))
+        try await drawerStore.addDrawer(voiceDrawer(id: "d1", parentNodeId: room.id.uuidString))
         return try await Estate.open(storage: storage,
                                      owner: OwnerCredentials(ownerIdentifier: "o"))
     }

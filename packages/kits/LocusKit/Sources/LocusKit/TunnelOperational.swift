@@ -22,7 +22,7 @@ import SubstrateLib
 ///
 /// Five typed axes describe a tunnel's relationship semantics and
 /// operational state. `TunnelKind` is the relationship vocabulary
-/// (9 cases). The remaining four enums — `TunnelDirection`,
+/// (10 cases). The remaining four enums — `TunnelDirection`,
 /// `TunnelLifecycle`, `TunnelOriginClass`, `TunnelStrength` — are
 /// the operational axes packed into the per-row `operationalBitmap`
 /// Int64 column added by LOCI_V035_05B.
@@ -46,11 +46,18 @@ public enum TunnelKind: Int, Sendable, Codable {
     case covers = 6
     case elaborates = 7
     case respondsTo = 8
+    /// Outline containment edge (ADR-017 §11). Source is the child,
+    /// target is the parent. One parent per child enforced in
+    /// `addTunnel` (kit-level constraint, not a DB-level partial
+    /// unique index). The companion `orderKey` on the
+    /// Tunnel struct provides fractional-index sibling ordering.
+    case parent = 9
 }
 
 /// Directionality of a tunnel — whether traversal is meaningful one
 /// way, both ways, fully symmetric, or hub-like. Per spec § 5.6.
-/// Contiguous encoding; 4 used, 12 reserved when packed into 4 bits.
+/// Contiguous encoding; 4 used, 4 reserved when packed into the
+/// 3-bit direction field at bits 0–2 of `operationalBitmap`.
 public enum TunnelDirection: Int, Sendable, Codable {
     case directional = 0
     case bidirectional = 1
@@ -104,6 +111,8 @@ public enum TunnelStrength: Int, Sendable, Codable, Comparable {
 //   bits 6–8   TunnelOriginClass  (3 bits, contiguous, 5 cases)
 //   bits 9–11  TunnelStrength     (3 bits, scale-gapped, raws 0/2/4/6)
 //   bit  12    has_inverse        (1 bit, exclusive)
+//   bit  13    is_retired         (1 bit, exclusive — T13/ADR-021 Phase 7)
+//   bits 14–63 reserved
 // Unknown raw values fall back to the zero case of each axis,
 // matching the `Drawer` adjective accessors in `Adjectives.swift`.
 public extension Tunnel {
@@ -142,5 +151,122 @@ public extension Tunnel {
     var hasInverse: Bool {
         // v0.35 layout: bit 12 flag.
         BitField.extractFlag(operationalBitmap, bit: 12)
+    }
+
+    /// Bit 13 of `operationalBitmap` — retired flag (T13 / ADR-021 Phase 7).
+    ///
+    /// A retired tunnel is a dreamed tunnel whose two endpoints have not been
+    /// co-recalled within the OMEGA reinforcement window (14 days). Retirement
+    /// is REVERSIBLE: setting this bit suspends the tunnel from active reads
+    /// (it is not a tombstone and not a hard delete); clearing it restores the
+    /// tunnel. A later co-recall re-forms the association by proposing it again
+    /// (§ 12.8: "a later co-recall re-forms it"). The bit is backed by
+    /// `operationalBitmap`; there is NO Bool stored property (schema invariant).
+    ///
+    /// Declared constant:
+    ///   `static let isRetiredBit: Int64 = 1 << 13`
+    ///
+    /// Mirrors Rust `TunnelOperational::IS_RETIRED_BIT` (bit 13).
+    static let isRetiredBit: Int64 = 1 << 13
+
+    /// True when this tunnel has been retired by the REM-OMEGA cycle.
+    ///
+    /// Computed from bit 13 of `operationalBitmap` — no Bool stored property.
+    /// A retired tunnel is excluded from active tunnel reads (it is not a live
+    /// graph edge) but remains in the substrate for audit and reversibility.
+    var isRetired: Bool {
+        operationalBitmap & Tunnel.isRetiredBit != 0
+    }
+
+    /// Return a copy of this tunnel with the retired bit set (`isRetired = true`).
+    ///
+    /// Used internally by `DrawerStore.retireTunnel` and its Rust equivalent to
+    /// produce the updated tunnel value before persisting. The caller is
+    /// responsible for the actual `rowStore.update` write.
+    func withRetired() -> Tunnel {
+        Tunnel(
+            id: id,
+            sourceWing: sourceWing, sourceRoom: sourceRoom, sourceDrawerId: sourceDrawerId,
+            targetWing: targetWing, targetRoom: targetRoom, targetDrawerId: targetDrawerId,
+            label: label, kind: kind,
+            adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: operationalBitmap | Tunnel.isRetiredBit,
+            provenanceBitmap: provenanceBitmap,
+            addedBy: addedBy, filedAt: filedAt,
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+        )
+    }
+
+    /// Return a copy of this tunnel with the retired bit cleared (`isRetired = false`).
+    ///
+    /// Used internally by `DrawerStore.unretireTunnel` and its Rust equivalent to
+    /// reverse a prior retirement. The tunnel re-enters active reads once persisted.
+    func withUnretired() -> Tunnel {
+        Tunnel(
+            id: id,
+            sourceWing: sourceWing, sourceRoom: sourceRoom, sourceDrawerId: sourceDrawerId,
+            targetWing: targetWing, targetRoom: targetRoom, targetDrawerId: targetDrawerId,
+            label: label, kind: kind,
+            adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: operationalBitmap & ~Tunnel.isRetiredBit,
+            provenanceBitmap: provenanceBitmap,
+            addedBy: addedBy, filedAt: filedAt,
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+        )
+    }
+}
+
+// MARK: - Tunnel provenance accessors
+
+// Tunnel provenanceBitmap layout (T13 / ADR-021 Phase 7, low-to-high):
+//   bit  0   is_dreamed   (1 bit) — set by dreaming pipeline when the
+//            tunnel was proposed by REM-ALPHA or REM-THETA (emergent channel).
+//            Cleared for declared tunnels (palace tunnels.json, vault wikilinks,
+//            user-explicit `capture` tunnel frames). OMEGA retires only tunnels
+//            where is_dreamed = 1 (§ 12.8 "provenance = dreamed AND not
+//            reinforced by recall"). Declared tunnels (is_dreamed = 0) are
+//            NEVER retired by OMEGA regardless of recall activity.
+//   bits 1–63 reserved for future provenance axes.
+public extension Tunnel {
+
+    /// Bit 0 of `provenanceBitmap` — dreamed-provenance flag (T13 / ADR-021 Phase 7).
+    ///
+    /// Set to 1 when this tunnel entered the substrate through the dreaming
+    /// pipeline (REM-ALPHA or REM-THETA co-recall proposal, subsequently
+    /// accepted). Set to 0 for all declared tunnels (palace `tunnels.json`,
+    /// vault wikilinks, user-explicit `capture` frames). OMEGA's retire predicate
+    /// requires `isDreamed == true` — declared tunnels are never retired (§ 12.8).
+    ///
+    /// Constant:
+    ///   `static let isDreamedBit: Int64 = 1 << 0`
+    ///
+    /// Mirrors Rust `TunnelProvenance::IS_DREAMED_BIT` (bit 0).
+    static let isDreamedBit: Int64 = 1 << 0
+
+    /// True when this tunnel has dreamed provenance (emerged from REM-ALPHA
+    /// or REM-THETA co-recall). False for all declared tunnels.
+    ///
+    /// Computed from bit 0 of `provenanceBitmap` — no Bool stored property.
+    var isDreamed: Bool {
+        provenanceBitmap & Tunnel.isDreamedBit != 0
+    }
+
+    /// Return a copy of this tunnel with `isDreamed` stamped (bit 0 set).
+    ///
+    /// Used when the dreaming pipeline forms a real Tunnel from an accepted
+    /// proposal. Declared tunnels never call this method — their
+    /// `provenanceBitmap` leaves bit 0 at 0.
+    func withDreamedProvenance() -> Tunnel {
+        Tunnel(
+            id: id,
+            sourceWing: sourceWing, sourceRoom: sourceRoom, sourceDrawerId: sourceDrawerId,
+            targetWing: targetWing, targetRoom: targetRoom, targetDrawerId: targetDrawerId,
+            label: label, kind: kind,
+            adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: operationalBitmap,
+            provenanceBitmap: provenanceBitmap | Tunnel.isDreamedBit,
+            addedBy: addedBy, filedAt: filedAt,
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+        )
     }
 }

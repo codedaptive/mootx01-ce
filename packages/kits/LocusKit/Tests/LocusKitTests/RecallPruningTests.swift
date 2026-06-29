@@ -51,12 +51,12 @@ struct RecallPruningTests {
 
     // MARK: - Container-aware recall
 
-    private func drawer(id: String, room: String, op: Int64) -> Drawer {
+    private func drawer(id: String, parentNodeId: String, op: Int64) -> Drawer {
         let content = "c-" + id
         // provenance confirmation = userConfirmed (raw 1 at bits 18-23
         // per cookbook §2.5) for explicit confirmation-axis checks;
         // adjective 0 is active and trustworthy.
-        return Drawer(id: TestStorage.tid(id), content: content, wing: "w", room: room, addedBy: "t",
+        return Drawer(id: TestStorage.tid(id), content: content, parentNodeId: parentNodeId, addedBy: "t",
                       filedAt: Date(timeIntervalSince1970: 1_700_000_000),
                       embeddingModelID: "m",
                       provenance: Int64(1) << 18,
@@ -75,9 +75,15 @@ struct RecallPruningTests {
         // operational flag bits are set directly.
         _ = try await Estate.create(storage: storage,
                                     owner: OwnerCredentials(ownerIdentifier: "o"))
+        // Seed node tree: root → wing "w" → rooms "r1", "r2"
+        let nodeStore = NodeStore(storage: storage)
+        let root = try await nodeStore.createRoot(displayName: "Estate", now: Date())
+        let wing = try await nodeStore.createNode(displayName: "w", parentId: root.id, now: Date())
+        let room1 = try await nodeStore.createNode(displayName: "r1", parentId: wing.id, now: Date())
+        let room2 = try await nodeStore.createNode(displayName: "r2", parentId: wing.id, now: Date())
         let drawerStore = try await DrawerStore(storage: storage)
-        try await drawerStore.addDrawer(drawer(id: "d1", room: "r1", op: 1 << 13))   // hasVoice
-        try await drawerStore.addDrawer(drawer(id: "d2", room: "r2", op: 1 << 14))  // hasImage only
+        try await drawerStore.addDrawer(drawer(id: "d1", parentNodeId: room1.id.uuidString, op: 1 << 13))   // hasVoice
+        try await drawerStore.addDrawer(drawer(id: "d2", parentNodeId: room2.id.uuidString, op: 1 << 14))  // hasImage only
 
         // Reopen so the backfill covers both containers.
         let estate = try await Estate.open(storage: storage,

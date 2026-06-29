@@ -2,12 +2,11 @@ import Foundation
 
 /// Aggregate count for a single wing — produced by `listWings`.
 ///
-/// Wings and rooms are metadata-only strings on drawer rows, not
-/// first-class tables. `WingSummary` and `RoomSummary` are
-/// computed projections built by `SELECT ... GROUP BY` at query
-/// time, mirroring MemPalace's `tool_list_wings` behavior. Their
-/// counts therefore reflect whatever is currently in the store
-/// rather than a separately maintained registry.
+/// Per ADR-017, wings and rooms are node rows in the `nodes` table.
+/// `WingSummary` and `RoomSummary` are produced by
+/// `DrawerStore.listWings`/`listRooms`, which resolve node ids and
+/// count drawers by `parent_node_id`. Their counts therefore reflect
+/// whatever is currently in the store.
 public struct WingSummary: Equatable, Hashable, Codable, Sendable {
 
     /// The wing name, as it appears on drawer rows.

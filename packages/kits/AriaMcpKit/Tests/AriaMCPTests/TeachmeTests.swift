@@ -127,8 +127,8 @@ struct TeachmeTests {
 
     // MARK: - Test 5: long query hint
 
-    /// A 300-character query triggers the "long query" coaching hint on
-    /// `moot_memory_search`. The hint fires before the zero-results check.
+    /// A 320-character query (40 repetitions of "keyword ") triggers the "long query"
+    /// coaching hint on `moot_memory_search`. The hint fires before the zero-results check.
     @Test func longQueryHintAppearsOnSearch() async throws {
         let dispatcher = try await makeDispatcher()
         // 320-char query (8 chars × 40 = 320).
@@ -207,9 +207,9 @@ struct TeachmeTests {
 
     // MARK: - Test 8: normal content no hint
 
-    /// Filing a memory with content under 4000 characters produces no
-    /// coaching hint.
-    @Test func normalContentProducesNoHint() async throws {
+    /// Filing a memory with normal-length content produces the moot_confirm_memory
+    /// coaching hint — moot_file_memory always hints about confirming on success.
+    @Test func normalContentProducesConfirmHint() async throws {
         let dispatcher = try await makeDispatcher()
         let shortContent = String(repeating: "w", count: 200)   // 200 chars
         let result = try await dispatcher.dispatch(
@@ -220,19 +220,21 @@ struct TeachmeTests {
             ])
         )
         #expect(!isError(result), "filing normal content must succeed")
+        // Trigger 3: successful file_memory always hints about confirming.
+        // Matches Rust coaching_engine.rs trigger 3.
+        let resultText = text(of: result)
         #expect(
-            !text(of: result).contains("hint:"),
-            "content under 4000 chars must not produce a hint"
+            resultText.contains("hint:") && resultText.contains("moot_confirm_memory"),
+            "successful file must produce a confirm hint; got: \(resultText)"
         )
     }
 
     // MARK: - Test 9: hint suppressed on error
 
     /// Error results (`isError: true`) never carry a coaching hint.
-    /// `moot_erase_memory` with `confirmed: false` causes a substrate refusal
-    /// (VerbError.expungeNotConfirmed) that surfaces as `isError: true`.
-    /// Despite the CoachingEngine having a hint trigger for this case,
-    /// the hint must not be appended because the result is an error.
+    /// `moot_erase_memory` with `confirmed: false` is refused by the AriaMcpKit
+    /// security gate (Item 1 hardening) before reaching the substrate, surfacing
+    /// as `isError: true`. The hint injection path skips error results entirely.
     @Test func hintSuppressedOnErrorResult() async throws {
         let dispatcher = try await makeDispatcher()
         let result = try await dispatcher.dispatch(
@@ -243,7 +245,7 @@ struct TeachmeTests {
                 "confirmed": .bool(false),
             ])
         )
-        // The substrate refuses the erase without confirmation — expect an error result.
+        // AriaMcpKit security gate refuses the erase without confirmed:true.
         #expect(isError(result), "erase without confirmed:true must return isError:true")
         #expect(
             !text(of: result).contains("hint:"),
@@ -262,7 +264,7 @@ struct TeachmeTests {
     @Test func eraseErrorMessageNamesConfirmedField() async throws {
         let dispatcher = try await makeDispatcher()
 
-        // Pass confirmed:false — triggers the VerbError.expungeNotConfirmed path.
+        // Pass confirmed:false — triggers the AriaMcpKit security gate (Item 1).
         let result = try await dispatcher.dispatch(
             name: "moot_erase_memory",
             arguments: .object([

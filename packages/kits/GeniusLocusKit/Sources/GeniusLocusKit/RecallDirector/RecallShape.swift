@@ -192,9 +192,11 @@ public struct RecallShape: Sendable, Codable, Equatable {
         /// Field-Distribution-Coding provider — `"fdc-v1"`.
         public static let fdc = "dense:fdc-v1"
 
-        /// Every per-signal dense lane key the standard provider stack ships, in
-        /// stable order. Used by the `consensus`/`broad` presets to forward (or
-        /// the leave-one-out pattern to zero) each distributional signal.
+        /// The distributional dense lane keys (ri, ppmi, lsa, nmf) in stable
+        /// order. Used by the `consensus`/`broad` presets to forward (or the
+        /// leave-one-out pattern to zero) each distributional signal. `fdc`
+        /// is intentionally excluded — it is a structural-coding signal and
+        /// is targeted by its own explicit presets rather than bundled here.
         public static let all: [String] = [randomIndexing, ppmi, lsa, nmf]
     }
 
@@ -348,9 +350,11 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "nmf_forward":
             return singleDenseForward(DenseSignal.nmf)
 
-        // Cheapest vote: keep ONLY the 256-bit Hamming lane (a bit-parallel
-        // popcount) and ZERO the float-dense lane so the expensive cosine pass is
-        // skipped. The latency-first shape.
+        // Cheapest vote: boost the 256-bit Hamming lane and set the `dense`
+        // weight to 0. RecallDirector still runs floatNearestPerSignal when a
+        // corpus and query text are present; the zero weight eliminates the
+        // dense column's contribution to the final aggregate score, but dense
+        // candidates can still enter the buffer before scoring. Latency-first shape.
         case "fast":
             return RecallShape(
                 laneWeights: [

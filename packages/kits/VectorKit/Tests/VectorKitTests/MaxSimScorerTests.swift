@@ -106,8 +106,8 @@ private func naiveMaxSim(
 ///
 /// Note: the spec computes with W=8 (sim = 8 − hamming). We use W=256
 /// (sim = 256 − hamming) because we embed 8-bit patterns in 256-bit Engrams.
-/// The RANKING is identical. The absolute scores differ by factor (256−8=248)
-/// per query token — the test asserts the W=256 scores.
+/// The RANKING is identical. Absolute scores differ by an additive offset of
+/// (256−8)=248 per query token — the test asserts the W=256 scores.
 @Test("COLBERT-1: basic MaxSim, 2 docs, correct ranking")
 func colbert1BasicMaxSim() async throws {
     let scorer = MaxSimScorer()

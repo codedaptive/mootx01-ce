@@ -6,30 +6,43 @@
 //! never touches user data.
 
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::cli::Location;
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::{merge, paths, permissions};
 use crate::exit;
 
-pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
+pub fn run(
+    target: Option<Vec<String>>,
+    location: Option<Location>,
+    yes: bool,
+    purge: bool,
+) -> ExitCode {
     let home = super::install::home_dir();
     let registry = clients::supported();
 
     let explicit_target_given = target.as_ref().map(|_| ());
     // Targets: explicit ids, else every client currently wired.
     let selected: Vec<McpClient> = match target {
-        Some(ids) => {
-            match super::install::resolve_targets(&registry, Some(ids), false, &home) {
-                Ok(s) => s,
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    return ExitCode::from(exit::FAILURE);
-                }
+        Some(ids) => match super::install::resolve_targets(&registry, Some(ids), false, &home) {
+            Ok(s) => s,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return ExitCode::from(exit::FAILURE);
             }
-        }
-        None => registry.iter().filter(|c| c.wired(&home)).cloned().collect(),
+        },
+        None => registry
+            .iter()
+            .filter(|c| {
+                (location_allows_global(location) && c.wired(&home))
+                    || (c.id == "claude-code"
+                        && location_allows_local(location)
+                        && local_claude_code_wired())
+            })
+            .cloned()
+            .collect(),
     };
 
     if selected.is_empty() && !purge {
@@ -51,10 +64,11 @@ pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
     }
 
     for client in &selected {
-        match remove_one(client, &home) {
-            Ok(true) => println!("  ✓ removed from {} ({})",
+        match remove_one(client, &home, location) {
+            Ok(true) => println!(
+                "  ✓ removed from {} ({})",
                 client.display_name,
-                client.config_path(&home).map(|p| p.display().to_string()).unwrap_or_default()
+                removed_paths(client, &home, location).join(", ")
             ),
             Ok(false) => println!("  - {} was not wired", client.display_name),
             Err(e) => eprintln!("  ✗ {}: {e}", client.display_name),
@@ -63,16 +77,17 @@ pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
 
     // Revoke Claude Code permissions when it was in scope.
     if selected.iter().any(|c| c.id == "claude-code") {
-        // join_rel produces native separators on every platform — backslash on
-        // Windows, forward-slash on POSIX.
-        let settings = join_rel(&home, ".claude/settings.json");
-        match merge::backup_existing(&settings)
-            .map_err(merge::MergeError::from)
-            .and_then(|_| permissions::revoke(&settings))
-        {
-            Ok(n) if n > 0 => println!("  ✓ revoked {n} tool permissions"),
-            Ok(_) => {}
-            Err(e) => eprintln!("  ✗ permissions: {e}"),
+        for settings in claude_settings_paths(&home, location) {
+            match merge::backup_existing(&settings)
+                .map_err(merge::MergeError::from)
+                .and_then(|_| permissions::revoke(&settings))
+            {
+                Ok(n) if n > 0 => {
+                    println!("  ✓ revoked {n} tool permissions ({})", settings.display())
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("  ✗ permissions {}: {e}", settings.display()),
+            }
         }
     }
 
@@ -120,24 +135,33 @@ pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
     ExitCode::from(exit::OK)
 }
 
-fn remove_one(client: &McpClient, home: &Path) -> Result<bool, merge::MergeError> {
-    let Some(config) = client.config_path(home) else {
-        return Ok(false);
-    };
+fn remove_one(
+    client: &McpClient,
+    home: &Path,
+    location: Option<Location>,
+) -> Result<bool, merge::MergeError> {
+    let mut removed = false;
+    for config in config_paths(client, home, location) {
+        removed |= remove_from_config(client, &config)?;
+    }
+    Ok(removed)
+}
+
+fn remove_from_config(client: &McpClient, config: &Path) -> Result<bool, merge::MergeError> {
     match client.format {
         ConfigFormat::Json => {
             if !config.exists() {
                 return Ok(false);
             }
-            merge::backup_existing(&config)?;
-            merge::remove_from_json_config(&config, client.json_servers_key(), SERVER_NAME)
+            merge::backup_existing(config)?;
+            merge::remove_from_json_config(config, client.json_servers_key(), SERVER_NAME)
         }
         ConfigFormat::Toml => {
             if !config.exists() {
                 return Ok(false);
             }
-            merge::backup_existing(&config)?;
-            merge::remove_from_toml_config(&config, SERVER_NAME)
+            merge::backup_existing(config)?;
+            merge::remove_from_toml_config(config, SERVER_NAME)
         }
         ConfigFormat::Yaml => {
             if client.id == "continue" {
@@ -145,19 +169,74 @@ fn remove_one(client: &McpClient, home: &Path) -> Result<bool, merge::MergeError
                 if !config.exists() {
                     return Ok(false);
                 }
-                merge::backup_existing(&config)?;
-                std::fs::remove_file(&config)?;
+                merge::backup_existing(config)?;
+                std::fs::remove_file(config)?;
                 Ok(true)
             } else {
                 // Hermes' shared config.yaml: remove our block only.
                 if !config.exists() {
                     return Ok(false);
                 }
-                merge::backup_existing(&config)?;
-                merge::remove_from_hermes_yaml(&config, SERVER_NAME)
+                merge::backup_existing(config)?;
+                merge::remove_from_hermes_yaml(config, SERVER_NAME)
             }
         }
     }
+}
+
+fn config_paths(client: &McpClient, home: &Path, location: Option<Location>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if location_allows_global(location) {
+        if let Some(config) = client.config_path(home) {
+            paths.push(config);
+        }
+    }
+    if client.id == "claude-code" && location_allows_local(location) {
+        paths.push(PathBuf::from(".mcp.json"));
+    }
+    paths
+}
+
+fn removed_paths(client: &McpClient, home: &Path, location: Option<Location>) -> Vec<String> {
+    config_paths(client, home, location)
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect()
+}
+
+fn claude_settings_paths(home: &Path, location: Option<Location>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if location_allows_global(location) {
+        // join_rel produces native separators on every platform — backslash on
+        // Windows, forward-slash on POSIX.
+        paths.push(join_rel(home, ".claude/settings.json"));
+    }
+    if location_allows_local(location) {
+        paths.push(PathBuf::from(".claude").join("settings.json"));
+    }
+    paths
+}
+
+fn local_claude_code_wired() -> bool {
+    let path = Path::new(".mcp.json");
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let lossy = String::from_utf8_lossy(&bytes);
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(merge::strip_bom(&lossy)) else {
+        return false;
+    };
+    v.get("mcpServers")
+        .and_then(|s| s.get(SERVER_NAME))
+        .is_some()
+}
+
+fn location_allows_global(location: Option<Location>) -> bool {
+    !matches!(location, Some(Location::Local))
+}
+
+fn location_allows_local(location: Option<Location>) -> bool {
+    !matches!(location, Some(Location::Global))
 }
 
 /// `--purge`: delete the estate databases and config.json. Irreversible.
@@ -220,16 +299,42 @@ mod tests {
 
         // First removal: entry is present → Ok(true).
         assert_eq!(
-            remove_one(&codex, &home).unwrap(),
+            remove_one(&codex, &home, None).unwrap(),
             true,
             "first remove must find and remove the entry"
         );
         // Second removal on the now-empty file: Ok(false) — already gone.
         assert_eq!(
-            remove_one(&codex, &home).unwrap(),
+            remove_one(&codex, &home, None).unwrap(),
             false,
             "second remove on already-cleaned file must return false"
         );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_code_location_paths_cover_local_project_files() {
+        let home =
+            std::env::temp_dir().join(format!("mootx01-claude-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let claude = reg.iter().find(|c| c.id == "claude-code").unwrap().clone();
+
+        assert_eq!(
+            config_paths(&claude, &home, Some(Location::Local)),
+            vec![PathBuf::from(".mcp.json")]
+        );
+        assert_eq!(
+            claude_settings_paths(&home, Some(Location::Local)),
+            vec![PathBuf::from(".claude").join("settings.json")]
+        );
+
+        let both = config_paths(&claude, &home, None);
+        assert!(both.contains(&home.join(".claude.json")));
+        assert!(both.contains(&PathBuf::from(".mcp.json")));
 
         let _ = std::fs::remove_dir_all(&home);
     }

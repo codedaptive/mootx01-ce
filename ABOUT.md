@@ -4,51 +4,51 @@
 
 ---
 
-You have had the moment.
+You've had the moment.
 
-Three weeks into a project with your AI. You have explained the same constraint four times. You explain it a fifth and it nods and forgets again. You come back to the chat that solved the problem last Tuesday and the AI does not know you. You switch tools because a new one is supposedly better, and you have to start over. Every preference, every piece of context, every thing your last AI finally understood. Gone.
+You're three weeks into a project with your AI. You've explained the same constraint four times. You explain it a fifth, and it nods, and on the next prompt it forgets again. Or you come back to the chat that solved the problem last Tuesday and it doesn't know you. Or you switch tools because the new one is supposedly better, and you realize you have to start over. Every preference, every piece of context, every thing your last AI finally understood, gone.
 
-You felt something. A specific kind of anger. Not at the AI. At the waste.
+You felt something. A specific kind of anger. Not at the AI, exactly. At the waste.
 
-That feeling has a cause. The cause has a shape.
+That feeling has a cause. And the cause has a shape.
 
-## The shape of the gap
+Your AI has a context window. It is sharp, expensive, and short. Everything in it has to be there right now, paid for by the token. When the conversation ends, the window closes, and the next conversation starts from nothing. That is short-term memory. It is what your AI thinks with. It is not what your AI remembers from.
 
-Your AI has a context window. The context window is short. It holds only what fits inside one chat. When the chat ends, the window closes. The next chat starts from nothing. That is short-term memory. It is what your AI thinks with. To remember from, your AI needs something else.
+To paper over the forgetting, the industry built RAG. A vector database in deep storage. When the AI needs something obscure, it goes searching. RAG works, as far as it goes, but it is the basement archive, full of raw tape. The AI filters everything at the moment you ask, on every call, from chaos. Slow. Expensive. Context-dependent accuracy at best. And despite billions of dollars in investment, RAG still struggles to feel like memory because it retrieves on demand rather than preparing what you need before you ask.
 
-To work around the forgetting, the AI industry built RAG. RAG is a big database in deep storage. When the AI needs an old fact, it goes searching. RAG works as far as it goes. But it is slow, it costs money on every call, and it gets things wrong often enough that you stop trusting it. Two years and billions of dollars have not made it feel like memory. It still feels like searching.
+The thing your AI is missing isn't a feature. It's a layer.
 
-What your AI is missing is a layer. The layer between the short-term window and the deep archive. The layer that consolidates. The layer that prepares. The layer that already knows what mattered before you ask.
+## You have the layer. You use it every night.
 
-## You have this layer. You use it every night.
+When you go to bed, you don't reason about your day from a flat list of everything that happened. By morning, the day has already been sorted. You know what mattered. You know what to bring forward. You didn't do that work consciously; something else did it while you slept.
 
-When you go to bed, your mind does not start fresh in the morning. The day is already sorted. You know what mattered. You know what to bring forward. You did not do that work consciously. Something else did it while you slept.
+That something is your subconscious. It runs cheap deterministic processes on yesterday's experience. It surfaces themes. It strengthens what repeats. It lets the unimportant fade. When your conscious mind wakes up and reaches for memory, the memory is already prepared.
 
-That something is your subconscious. It runs cheap deterministic passes over yesterday. It surfaces themes. It strengthens what repeats. It lets the small stuff fade. When your conscious mind wakes up, your memory is already prepared.
+Your AI doesn't have a subconscious.
 
-Your AI does not have a subconscious.
+That's the gap. That's why the rage. Every time you re-explain, every time you re-introduce yourself, every time you watch your AI search the basement for the same answer it gave you yesterday. What's missing is the layer between the context window and the archive. The layer that consolidates. The layer that prepares. The layer that already knows what mattered before you ask.
 
-That is the gap. That is why you felt the rage. Every time you re-explain. Every time you re-introduce yourself. Every time you watch your AI search the basement for the same answer it gave you yesterday.
-
-What fills the gap has to be yours. Not parked in someone else's cloud. Not readable by whoever owns the servers. Not gone if the vendor changes their mind. Your memory belongs where you put it. On your laptop. On your phone. On a home server. On a machine in a closet. Wherever you say.
+And whatever fills the gap has to be yours. Not parked in someone else's cloud, rented by the month, readable by whoever owns the servers, gone if the vendor changes their mind. Your memory belongs where you put it: on your laptop, your phone, your home server, a machine in a closet, a tenant you run yourself. Wherever you say. Always under your control.
 
 ## Imagine your AI had that layer.
 
-It captures every conversation exactly as it happened. In the words it happened in. Without paraphrase. Without silent rewriting. What you said stays said.
+It captures every conversation exactly as it happened, in the words it happened in. Verbatim. What you said stays said, in the words you said it, without paraphrase or summary or silent rewriting.
 
-While you sleep, the layer consolidates. Themes surface from your week. Connections strengthen between things that turned out to matter. The map of what connects to what reweighs itself against what actually happened. By morning, the answer to tomorrow's question is already prepared.
+While you sleep, it consolidates. Themes surface from your week. Connections strengthen between things that turned out to matter. The matrix of what-connects-to-what reweighs itself against what actually happened. By morning, the answer to tomorrow's question is already prepared.
 
-When you ask, your AI remembers. It returns ranked signal that the layer organized while you were not looking.
+When you ask, it remembers. It returns ranked, filtered, theme-aware signal that the subconscious already organized while you weren't looking.
 
-You just imagined a system. It has four behaviors. It observes. It remembers. It dreams. And it convenes.
+You just imagined a system. It has four behaviors. It observes, it remembers, it dreams, and it convenes.
 
 That system is MOOTx01.
 
 ## The name
 
-A **moot** was the old assembly where a community brought its memory together — witnessed events, sworn oaths, who decided what last winter. The record lived in the gathering. Modern English kept the word but lost the meaning. We're taking it back, because the older meaning is what memory actually is: observed over time, kept exactly as it was, available across every AI you use.
+The name is a word from old English. A moot was the assembly where a community brought its memory together. An intersection of witnessed events, sworn oaths, who decided what last winter. The record lived in the gathering. The gathering was the record.
 
-**You are x01.** Hex 01, first person — the hero of your story, and your MOOT is the gathering of it. There is no MOOTx02; you don't get upgraded to a later you. Your spouse is x01 in theirs, your calendar app is x01 in its domain, and when you authorize it, the MOOTs convene.
+Modern English kept the word but lost the meaning; moot now means no longer relevant.
+
+We are taking the word back, because the older meaning is what memory actually is: observed over time, kept exactly as it was, available across every AI you use.
 
 ## You are x01
 

@@ -1,7 +1,8 @@
 // In-memory backend tests for persistence-kit. Mirror of the Swift
 // InMemoryStorage test surface: schema management, row CRUD,
-// predicates, ordering, pagination, blob round-trip,
-// audit log idempotence, observer notifications.
+// predicates (equality, bitmask, LIKE), ordering, pagination, blob round-trip,
+// audit log idempotence, observer notifications, generated columns,
+// append-only tables, and introspection (StorageStats).
 
 use persistence_kit::{
     inmemory::InMemoryStorage, AuditEvent, Column, ColumnDeclaration,
@@ -582,8 +583,8 @@ fn generated_column_is_filterable() {
 
 #[test]
 fn generated_sql_renders_for_sql_backends() {
-    // The SQLite/PostgreSQL backends are a follow-on R-mission, but
-    // the rendered DDL is stable today and worth pinning.
+    // The rendered DDL is used by the SQLite and PostgreSQL backends;
+    // this pins the canonical generated-column DDL format.
     let expr = GeneratedExpression::BitAnd(
         Box::new(GeneratedExpression::ShiftRight(
             Box::new(GeneratedExpression::Column("flags".into())),

@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-05-16
-last_updated: 2026-06-14
+last_updated: 2026-06-20
 ---
 
 # Substrate Test Vector Format Specification
@@ -896,6 +896,56 @@ Reference paths:
 - Rust reference: `SubstrateTypes/rust/src/fnv.rs`
 - Harness Swift: `FNVPrimitive.swift`
 - Harness Rust: `src/primitives/fnv.rs`
+
+### 2026-06-20 - merkle_commitment - NT-P0 content-integrity contract
+
+The `merkle_commitment` primitive was added as the NT-P0
+content-integrity extension to the I-27 seal surface. It pins the
+canonical byte contract for:
+
+- leaf payloads over drawer UUID, NFC UTF-8 content, and optional
+  VectorKit sidecar vectors;
+- interior roots over sorted child roots;
+- tombstone roots;
+- the empty subtree root;
+- keyed commitments over canonical leaf payloads.
+
+The reference implementations live in SubstrateKernel and call the
+in-repo SHA-256 primitive. Keyed commitments reuse the existing
+GrantHKDF / hkdf HMAC implementation; this primitive does not add a
+second HMAC construction. The typed 32-byte data wrappers
+(`ContentHash`, `MerkleRoot`, `KeyedCommitment`) live in
+SubstrateTypes, preserving the I-30 package split.
+
+The committed fixture has six semantic cases:
+
+1. leaf hash with zero vectors;
+2. leaf hash with vector records sorted by `(model_id, vector_index)`;
+3. interior root with children sorted by raw UUID bytes;
+4. tombstone hash;
+5. empty root;
+6. keyed commitment with key version.
+
+The seed field is `0xefbeaddebebafeca`, the harness-standard
+little-endian encoding of numeric seed `0xCAFEBABEDEADBEEF`. The
+cases are canonical hand-selected contract cases rather than
+randomized estate-shaped cases; the seed is retained for the
+shared vector-file schema and CI invocation consistency.
+
+- New CRC: `0x2476cee9`
+- Vector cases: 6
+- Seed: `0xCAFEBABEDEADBEEF`
+- Four-way conformance: Swift gen + Swift validate, Swift gen +
+  Rust validate, Rust gen + Swift validate, Rust gen + Rust
+  validate. All four PASS at `0x2476cee9`.
+
+Reference paths:
+- Swift reference: `SubstrateKernel/Sources/SubstrateKernel/MerkleCommitment.swift`
+- Rust reference: `SubstrateKernel/rust/src/merkle_commitment.rs`
+- Swift typed wrappers: `SubstrateTypes/Sources/SubstrateTypes/ContentHash.swift`
+- Rust typed wrappers: `SubstrateTypes/rust/src/content_hash.rs`
+- Harness Swift: `MerkleCommitmentPrimitive.swift`
+- Harness Rust: `src/primitives/merkle_commitment.rs`
 
 ## Per-primitive registration
 

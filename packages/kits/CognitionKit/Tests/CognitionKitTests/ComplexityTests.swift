@@ -58,7 +58,7 @@ struct ComplexityTests {
         // Manually replicate what Complexity.run does for fieldA = "room".
         let drawers = try await kit.recall(handle, unconfirmed)
         var freq: [String: Int] = [:]
-        for d in drawers { freq[d.room, default: 0] += 1 }
+        for d in drawers { freq[d.parentNodeId, default: 0] += 1 }
         let keys = freq.keys.sorted()
         let countsA = keys.map { Float32(freq[$0]!) }
         let expected = NeuronKit.complexity(countsA: countsA, countsB: nil, joint: nil)

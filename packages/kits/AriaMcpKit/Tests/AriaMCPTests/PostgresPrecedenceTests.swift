@@ -25,8 +25,8 @@ import PersistenceKitPostgreSQL
 /// env-var combination. This is the same pattern used by PersistenceTests.swift
 /// (see SEAM_GAP discovery in SWIFT_PERSISTENCE_001_COMPLETION.md).
 ///
-/// Live round-trips: skipped without PERSISTENCEKIT_PG_URL (see
-/// PostgresLiveTests.swift). Construction tests here run unconditionally.
+/// Live round-trips: skipped without PERSISTENCEKIT_PG_URL; no
+/// PostgresLiveTests.swift exists under this kit. Construction tests run unconditionally.
 ///
 /// `.serialized`: serialized to match PersistenceTests convention; these
 /// tests are cheap (no filesystem I/O) so ordering is not critical.

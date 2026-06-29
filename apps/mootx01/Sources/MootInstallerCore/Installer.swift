@@ -4,10 +4,13 @@
 // bash + embedded Python (apps/mootx01/install.sh). Writes the mootx01 MCP
 // server entry into each selected client's config file.
 //
-// JSON clients (Claude Desktop, Claude Code, Cursor, Cline):
-//   Reads the existing config, merges `mcpServers.mootx01` in place,
-//   writes back atomically. Idempotent: a second run with the same
-//   binary path leaves the file byte-identical.
+// JSON clients (Claude Desktop, Claude Code, Cursor, Cline, opencode, Gemini
+// CLI, Kiro, Antigravity, and others):
+//   Reads the existing config and merges the appropriate entry shape. Most
+//   clients use `mcpServers.<name>`; opencode uses top-level `mcp`; HTTP
+//   clients use `{"type":"http","url":...}`; opencode uses `{"type":"remote",...}`.
+//   Writes back atomically; a second run with the same config leaves the file
+//   byte-identical.
 //
 // Continue (YAML):
 //   Continue's per-server MCP config lives at .continue/mcpServers/mootx01.yaml.
@@ -107,6 +110,23 @@ public enum Installer {
                 try fm.removeItem(at: destURL)
             }
             try fm.copyItem(at: realSource, to: destURL)
+
+            // 4. Copy every SPM resource bundle sitting beside the source binary
+            //    into the install dir. A Swift executable that links a target using
+            //    `Bundle.module` fatalErrors at the static-init that first touches
+            //    the bundle if the `<Target>_<Target>.bundle` is not co-located with
+            //    the executable. The release build emits these next to the binary;
+            //    placement must carry them or the placed binary crashes on first use
+            //    of any resource (e.g. moot-mgr's LatticeLib FDC data on /api/graph).
+            //
+            //    This is intentionally inside the copy guard: when the source resolves
+            //    to the same path as the install destination (reinstall-from-placed-
+            //    binary path), the bundles are already present in binDir and there is
+            //    nothing to copy. Running copyResourceBundles in that case would scan
+            //    binDir for *.bundle siblings, then try to copy each into binDir itself
+            //    — which first removes the bundle (step 1 of the copy helper) and then
+            //    fails to copy the now-deleted source, leaving the install broken.
+            try copyResourceBundles(besideSource: realSource, toDir: binDir)
         }
 
         // 2. Mark the placed binary executable (0755). copyItem preserves
@@ -127,15 +147,6 @@ public enum Installer {
             try fm.removeItem(at: symlinkURL)
         }
         try fm.createSymbolicLink(at: symlinkURL, withDestinationURL: destURL)
-
-        // 4. Copy every SPM resource bundle sitting beside the source binary
-        //    into the install dir. A Swift executable that links a target using
-        //    `Bundle.module` fatalErrors at the static-init that first touches
-        //    the bundle if the `<Target>_<Target>.bundle` is not co-located with
-        //    the executable. The release build emits these next to the binary;
-        //    placement must carry them or the placed binary crashes on first use
-        //    of any resource (e.g. moot-mgr's LatticeLib FDC data on /api/graph).
-        try copyResourceBundles(besideSource: realSource, toDir: binDir)
 
         return destURL.path
     }
@@ -355,7 +366,8 @@ public enum Installer {
                     try mergeIntoHermesYAML(
                         at: configURL,
                         serverName: client.serverName,
-                        url: daemonURL
+                        binaryPath: binaryPath,
+                        url: client.supportsLocalHTTP ? daemonURL : nil
                     )
                 } else {
                     // Unknown non-JSON, non-TOML config. Refuse loudly instead
@@ -527,10 +539,12 @@ public enum Installer {
         daemonURL: String
     ) throws {
         let entry: [String: Any]
-        if client.id == "opencode" {
+        if client.id == "opencode" && client.supportsLocalHTTP {
             // Schema-verified (https://opencode.ai/config.json, McpRemoteConfig):
             // remote servers are { "type": "remote", "url": … } under the
             // top-level "mcp" key — not the mcpServers/"http" convention.
+            // Only use this when explicitly enabled; default installs avoid
+            // trusting a fixed unauthenticated loopback URL.
             entry = ["type": "remote", "url": daemonURL]
         } else if client.supportsLocalHTTP {
             entry = client.httpEntryIncludesType
@@ -761,10 +775,16 @@ public enum Installer {
     /// key. Line-based, same discipline as the TOML merge: only our own
     /// block is touched, every other line preserved verbatim. Flow style
     /// (`mcp_servers: {…}`) is refused rather than risked.
+    ///
+    /// When `url` is non-nil the entry is written as a URL entry
+    /// (`url: <url>`). When `url` is nil a command entry is written
+    /// (`command: <binaryPath>\nargs: []`) to avoid trusting a fixed
+    /// unauthenticated loopback address (ADR-LOOPBACKHTTP-001).
     public static func mergeIntoHermesYAML(
         at configURL: URL,
         serverName: String,
-        url: String
+        binaryPath: String,
+        url: String?
     ) throws {
         let existing: String
         if FileManager.default.fileExists(atPath: configURL.path) {
@@ -781,7 +801,12 @@ public enum Installer {
         } else {
             existing = ""
         }
-        let block = "  \(serverName):\n    url: \(url)"
+        let block: String
+        if let url {
+            block = "  \(serverName):\n    url: \(url)"
+        } else {
+            block = "  \(serverName):\n    command: \(binaryPath)\n    args: []"
+        }
         let merged = try replacingHermesBlock(
             in: existing,
             serverName: serverName,
@@ -791,6 +816,22 @@ public enum Installer {
         let dir = configURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try merged.write(to: configURL, atomically: true, encoding: .utf8)
+    }
+
+    /// Backward-compatible overload for call sites that always supply a URL.
+    /// Forwards to the primary implementation with `binaryPath: ""` and a
+    /// non-optional url (the empty binaryPath is unused when url is non-nil).
+    public static func mergeIntoHermesYAML(
+        at configURL: URL,
+        serverName: String,
+        url: String
+    ) throws {
+        try mergeIntoHermesYAML(
+            at: configURL,
+            serverName: serverName,
+            binaryPath: "",
+            url: url
+        )
     }
 
     /// Remove the mootx01 block from Hermes' `config.yaml`. Absent file or

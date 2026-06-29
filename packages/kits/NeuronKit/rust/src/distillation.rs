@@ -10,7 +10,7 @@
 // No pipeline logic in this file. See SubstrateML/distillation_pipeline.rs.
 // Layer discipline: no I/O, no state, no estate access. Pure function.
 //
-// Swift port pending (Dn1). Will mirror NeuronKit/Lenses/Distillation.swift once Dn1 lands.
+// Mirrors NeuronKit/Lenses/Distillation.swift (Swift port, live).
 // InjectionDepth thresholds must stay in lockstep with the Swift port.
 
 use substrate_ml::delta_feature_extractor::DeltaType;
@@ -203,8 +203,9 @@ mod tests {
     #[test]
     fn result_has_injection_depth_field() {
         let input = make_input(vec!["a", "b", "c"]);
+        // None → HMM extractor (production default). Single-character inputs
+        // yield no semantic features, so confidence = 0.0 → FactoidWithProvenance.
         let result = distill_cluster(&input, None);
-        // With confidence 0.0 (stub failure), expect FactoidWithProvenance.
         assert_eq!(result.injection_depth, InjectionDepth::FactoidWithProvenance);
     }
 }

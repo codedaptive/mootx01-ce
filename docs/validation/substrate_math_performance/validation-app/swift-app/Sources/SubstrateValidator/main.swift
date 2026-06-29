@@ -6,9 +6,10 @@
 // lib↔glref agreement.
 //
 // Registry-driven: each Lib_<name>.swift contributes one entry. Primitives land
-// here as their lib-side validator files are added. Subsystems still to wire:
-// backend A/B (2), timing (4), source↔cookbook audit (5), source-CRC drift (6),
-// and the cross-language comparator (3).
+// here as their lib-side validator files are added. Subsystems 2 (backend A/B),
+// 4 (timing), 5 (source↔cookbook audit), and 6 (source-CRC drift) are now wired
+// via `--backends`, `--time`, `--audit`, and `--stamp`/`--drift`. Only the
+// cross-language comparator (3) remains outside this file.
 
 import Foundation
 import Harness

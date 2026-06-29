@@ -22,11 +22,11 @@ public enum JSONRPCErrorCode {
     public static let methodNotFound: Int = -32601
     public static let invalidParams: Int = -32602
     public static let internalError: Int = -32603
-    /// Implementation-defined: the substrate refused the verb. Mapped
-    /// to JSON-RPC error rather than `tools/call` result-isError so
-    /// that clients without a tool-error code path still see a
-    /// machine-readable failure. Tool-level "expected" failures (a
-    /// verb returning an empty recall) stay on the success path.
+    /// Implementation-defined: an unexpected out-of-band failure in the
+    /// dispatch layer. Substrate verb refusals (`VerbError`,
+    /// `GeniusLocusKitError`) are caught by `ToolDispatcher.dispatch`
+    /// and surfaced as `tools/call` `isError` results, not as JSON-RPC
+    /// errors. This code is reserved for failures outside that path.
     public static let toolDispatchFailure: Int = -32010
 }
 

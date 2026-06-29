@@ -112,8 +112,9 @@ impl RecentWindowSink {
 
     /// The total number of samples received since construction, ignoring
     /// eviction. Greater than or equal to `count()`. A value of 0 means no
-    /// sample has ever crossed the gate into this sink — the explicit "nothing
-    /// observed yet" signal.
+    /// sample has ever arrived at this sink — the explicit "nothing observed
+    /// yet" signal. Counts every direct `receive` call, including those not
+    /// routed through the global Intellectus gate.
     pub fn total_received(&self) -> usize {
         let guard = self.state.lock().expect("RecentWindowSink state lock poisoned");
         guard.total_received
@@ -124,8 +125,11 @@ impl StatsSink for RecentWindowSink {
     /// Record `sample` in the window (evicting the oldest if full), then forward
     /// it to the wrapped sink if one is installed.
     ///
-    /// Called only when `Intellectus::is_enabled()` is true. The ring mutation is
-    /// O(1) under the lock; the forward call runs outside the lock.
+    /// Records every direct call regardless of the global gate. The gate
+    /// lives in `report!` / `Intellectus::report_sample`; callers going
+    /// through that facade only reach this method when enabled, but the
+    /// sink is also callable directly. The ring mutation is O(1) under
+    /// the lock; the forward call runs outside the lock.
     fn receive(&self, sample: StatSample) {
         {
             let mut guard = self.state.lock().expect("RecentWindowSink state lock poisoned");

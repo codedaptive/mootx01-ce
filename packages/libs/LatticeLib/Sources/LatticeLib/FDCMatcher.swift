@@ -19,15 +19,15 @@ import Foundation
 
 public struct FDCMatcher: Sendable {
 
-    /// How the per-code overlap is turned into a score (cookbook §5.3 is
-    /// `.raw`; the others are normalization variants under measurement in
-    /// Mission #4). The score function is applied CONSISTENTLY to both the
-    /// Step-4 argmax and the Step-5 descent overlap, so the descent target is
-    /// always scored on the same footing as the argmax winner.
+    /// How the per-code overlap is turned into a score. The score function
+    /// is applied CONSISTENTLY to both the Step-4 argmax and the Step-5
+    /// descent overlap, so the descent target is always scored on the same
+    /// footing as the argmax winner. The direct-construction default is
+    /// `.raw`; `FDCRuntime` opts in to `.idf` (the shipped runtime mode).
     ///
     /// Over the membership signatures (a code's term SET) and the runtime bag
     /// (term -> count `n`), with overlap `O = bag ∩ sig`:
-    ///   - `.raw`:       Σ_{t∈O} bag[t].                       (current ship)
+    ///   - `.raw`:       Σ_{t∈O} bag[t].                 (direct-init default)
     ///   - `.idf`:       Σ_{t∈O} bag[t]·idf(t).
     ///   - `.cosine`:    (Σ_{t∈O} bag[t]) / sqrt(|sig|).
     ///   - `.idfCosine`: (Σ_{t∈O} bag[t]·idf(t)) / sqrt(Σ_{t∈sig} idf(t)²).

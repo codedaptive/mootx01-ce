@@ -64,12 +64,13 @@ struct NovelPoolSubmitterTests {
 
     // MARK: - resolvePoolDirectory
 
-    @Test("LATTICE_POOL_DIR env var takes priority over platform default")
-    func latticePoolDirEnvVarTakesPriority() {
-        // We cannot safely mutate ProcessInfo.environment in-process, so we
-        // verify the make(poolDirectory:) overload works with an arbitrary URL
-        // — the env-var path is exercised via integration (the end-to-end test
-        // below uses a temp dir directly).
+    @Test("make(poolDirectory:) constructs a non-nil submitter closure")
+    func latticePoolDirExplicitOverload() {
+        // Verifies the make(poolDirectory:) overload succeeds with an arbitrary
+        // URL. The env-var resolution path (LATTICE_POOL_DIR takes priority over
+        // platform default) cannot be safely exercised in-process because
+        // ProcessInfo.environment is immutable at runtime; it is covered by
+        // integration tests that launch a subprocess with the env var set.
         let dir = URL(fileURLWithPath: "/tmp/testpool")
         let submitter = NovelPoolSubmitter.make(poolDirectory: dir)
         // Construction must succeed; the submitter is a non-nil closure.

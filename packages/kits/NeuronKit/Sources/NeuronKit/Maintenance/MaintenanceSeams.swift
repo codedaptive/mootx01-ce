@@ -28,9 +28,9 @@ import GeniusLocusKit
 /// reference (a `LearnedReference` source per architecture spec § 10
 /// row 7) points at a source drawer; over time that source's content
 /// can drift away from what the reference was learned against. The
-/// adapter computes `sourceDriftFraction` as the fraction of the
-/// reference's source content that has changed; the daemon proposes a
-/// byReference-drift confirmation once it crosses the policy threshold.
+/// adapter maps the reference's `driftSeverity` operational-bitmap value
+/// (none → 0.0, minor → 0.25, major → 0.50, critical → 1.0) to
+/// `sourceDriftFraction`; the daemon proposes once it crosses the threshold.
 ///
 /// Value type. Carries the reference drawer's RowID (the
 /// proposal target) and the precomputed drift fraction; the daemon does
@@ -53,27 +53,35 @@ public struct LearnedReferenceObservation: Sendable, Equatable {
 }
 
 /// One fingerprint-drift observation, the input to the fingerprint-drift
-/// scan (NEURONKIT_SPEC § 3.2 scan category 4). A room or wing carries a
-/// rolled-up fingerprint; as content is added the live fingerprint
-/// drifts from the recorded baseline by some Hamming-distance fraction.
-/// The adapter computes `driftFraction`; the daemon proposes a
-/// fingerprint-drift review once it crosses the policy threshold.
+/// scan (NEURONKIT_SPEC § 3.2 scan category 4). A container node
+/// (room-level per ADR-017) carries a rolled-up fingerprint OR-aggregate
+/// of its drawers' bitmap lanes; the adapter computes `driftFraction` as
+/// the set-bit density of the OR-aggregate over the three bitmap lanes
+/// (192 bits; no baseline-persistence surface exists). The daemon proposes
+/// a fingerprint-drift review once `driftFraction` crosses the threshold.
 ///
-/// Value type. Carries the room/wing key (the basis for a
-/// stable proposal target) and the precomputed drift fraction.
+/// Value type. Carries the node ID (parentNodeId of the drawers) as the
+/// scope key and the precomputed drift fraction.
 public struct FingerprintDriftObservation: Sendable, Equatable {
 
-    /// The room or wing key whose fingerprint has drifted. The basis
-    /// for the proposal target RowID.
+    /// The parentNodeId (room-level container node per ADR-017) whose
+    /// fingerprint has drifted. Used as the scope key for dedup and
+    /// as the basis for the proposal target.
     public let scopeKey: String
 
+    /// The node ID of the container. Equal to `scopeKey` in the current
+    /// implementation; carried explicitly for forward compatibility with
+    /// multi-level node hierarchies.
+    public let nodeId: String
+
     /// Fraction in `[0, 1]` of fingerprint bits that have drifted from
-    /// baseline (Hamming distance / bit width). Compared to
+    /// baseline (set-bit density / bit width). Compared to
     /// `MaintenancePolicy.fingerprintDriftThreshold`.
     public let driftFraction: Float
 
-    public init(scopeKey: String, driftFraction: Float) {
+    public init(scopeKey: String, nodeId: String, driftFraction: Float) {
         self.scopeKey = scopeKey
+        self.nodeId = nodeId
         self.driftFraction = driftFraction
     }
 }
@@ -81,7 +89,7 @@ public struct FingerprintDriftObservation: Sendable, Equatable {
 // MARK: - Read seam
 
 /// Read surface the maintenance daemon scans (NEURONKIT_SPEC § 3.2). All
-/// five reads are pure inputs — the daemon mutates nothing through this
+/// six reads are pure inputs — the daemon mutates nothing through this
 /// protocol. Dependency seam; the production adapter binds each method to
 /// the corresponding estate read when the GLK surface exposes them.
 public protocol MaintenanceSubstrateReader: Sendable {
@@ -118,8 +126,9 @@ public protocol MaintenanceSubstrateReader: Sendable {
 // MARK: - Write seam
 
 /// Write surface the maintenance daemon emits through (NEURONKIT_SPEC
-/// § 3.2). This is the daemon's ONLY write path. It exposes exactly two
-/// operations — emit a proposal, and record the cycle diary entry — and
+/// § 3.2). This is the daemon's ONLY write path. It exposes exactly three
+/// operations — emit a proposal, record the cycle diary entry, and update
+/// enrichment status — and
 /// deliberately has NO remediation method (no expunge, no withdraw, no
 /// mutate). That absence is how the never-remediate invariant (§ 3.2) is
 /// enforced structurally: the daemon cannot remediate because nothing it
@@ -228,4 +237,12 @@ public struct MaintenanceCycleReport: Sendable, Equatable {
     /// `qid_proposed`. Emitted as the
     /// `neuronkit.enrichment.qid_still_pending` counter.
     public let qidStillPending: Int
+
+    // MARK: - ADR-017 node invariant verification telemetry
+
+    /// Number of ADR-017 node-tree invariant violations detected this
+    /// cycle. Covers I-NT-3 (empty parentNodeId) and sibling display-name
+    /// consistency. Emitted as the
+    /// `neuronkit.node_invariant.violations` counter.
+    public let nodeInvariantViolations: Int
 }

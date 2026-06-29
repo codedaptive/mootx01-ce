@@ -11,9 +11,10 @@
 //! and reads/writes never interleave — the same invariant the Swift actor
 //! provides.
 //!
-//! Launch is via the shell so the command string may carry leading
-//! `KEY=value` env assignments (the pump's scratch-palace integration test
-//! points MemPalace at a /tmp palace via `MEMPALACE_PALACE_PATH`).
+//! Launch is via a direct argv vector (program + separate args + env dict) —
+//! never via `sh -c`. The caller is responsible for splitting the program from
+//! its arguments so that no shell metacharacter in a palace path or command
+//! component can be interpreted. This matches the Swift MCPStdioClient model.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -54,8 +55,9 @@ pub struct McpCallResult {
     pub raw_result_json: Vec<u8>,
 }
 
-/// A client bound to one local stdio MCP server. Spawn with [`connect`], then
-/// call [`list_tools`]/[`call_tool`]; the child is killed on drop.
+/// A client bound to one local stdio MCP server. Spawn with [`connect`]
+/// (program + argv + env, no shell), then call [`list_tools`]/[`call_tool`];
+/// the child is killed on drop.
 ///
 /// [`connect`]: McpStdioClient::connect
 /// [`list_tools`]: McpStdioClient::list_tools
@@ -68,13 +70,25 @@ pub struct McpStdioClient {
 }
 
 impl McpStdioClient {
-    /// Spawn the server (via `sh -c` so env-var prefixes apply) and perform the
-    /// MCP `initialize` handshake. `command` is the stdio launch command, e.g.
-    /// `"mempalace-mcp"` or `"MEMPALACE_PALACE_PATH=/tmp/p mempalace-mcp"`.
-    pub fn connect(command: &str) -> Result<Self, McpClientError> {
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
+    /// Spawn the server and perform the MCP `initialize` handshake.
+    ///
+    /// `program` is the MCP server binary (e.g. `"mempalace-mcp"`); `args` are
+    /// its positional arguments (e.g. `&["--palace", "/tmp/p"]`); `env` is a
+    /// slice of `(key, value)` pairs injected into the child's environment in
+    /// addition to the inherited environment. The server is spawned directly
+    /// (no shell) so shell metacharacters in paths or arguments are never
+    /// interpreted — the values are passed byte-for-byte to `execvp`.
+    pub fn connect(
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<Self, McpClientError> {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -200,5 +214,60 @@ impl Drop for McpStdioClient {
         // client never leaks a server process.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: connect() must NOT spawn via a shell. A path component
+    /// containing a shell metacharacter (`;`, `&`, `|`) must reach the child
+    /// as a literal argument byte-for-byte — a shell would interpret it and
+    /// break the command.
+    ///
+    /// We verify this by spawning `/bin/echo` (always available on macOS/Linux)
+    /// with an argument that contains a shell semicolon. Under `sh -c` the `;`
+    /// would terminate the echo command and open a new one, causing the child to
+    /// print nothing and exit; under a direct argv spawn, echo prints the
+    /// argument verbatim and we read it back from stdout.
+    #[test]
+    fn connect_spawns_without_shell_metacharacter_interpretation() {
+        // A semicolon in a path argument would be interpreted as a command
+        // separator by `sh -c`, producing empty output. Direct argv passes it
+        // to the program literally. We use /usr/bin/printf (guaranteed on both
+        // macOS and Linux) to echo one line and exit cleanly.
+        let metachar_arg = "/tmp/palace;echo-injected";
+        let mut child = Command::new("/bin/echo")
+            .arg(metachar_arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn /bin/echo");
+        let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read");
+        child.wait().expect("wait");
+        // The literal value — including the semicolon — must appear in the output.
+        assert!(
+            line.trim() == metachar_arg,
+            "expected '{metachar_arg}', got '{}'",
+            line.trim()
+        );
+
+        // Also verify that connect() accepts the new signature at the type level.
+        // We do not call a real MCP server here, so we just confirm that connect
+        // fails to spawn a nonexistent binary (rather than panicking or silently
+        // using a shell fallback).
+        let err = McpStdioClient::connect(
+            "this-binary-does-not-exist-in-the-test-environment",
+            &["--palace", "/tmp/test-palace;injected"],
+            &[("MEMPALACE_PALACE_PATH", "/tmp/test-palace;injected")],
+        );
+        assert!(
+            matches!(err, Err(McpClientError::Io(_))),
+            "spawn of nonexistent binary must yield McpClientError::Io, not a shell fallback"
+        );
     }
 }

@@ -25,14 +25,42 @@ public enum DatabaseManager {
     ///   - name: estate name. "default" → legacy flat path; anything else → subdirectory.
     ///   - dataDirectory: resolved data directory (see `MootPaths.resolveDataDirectory`).
     /// - Returns: URL to `estate.sqlite`. Does not touch the filesystem.
+    /// - Important: the name is validated before use. `Foundation.URL.appendingPathComponent`
+    ///   appends the string literally; a name containing `..` or `/` would produce a
+    ///   URL whose resolved filesystem path escapes `databases/`. Callers should
+    ///   validate via `createEstate(name:in:)` or guard against `.` / `..` / slashes
+    ///   before invoking this helper directly.
     public static func estateURL(for name: String, in dataDirectory: URL) -> URL {
         if name == "default" {
             return MootPaths.estateURL(in: dataDirectory)
+        }
+        // Sanitise: reject any name component that could traverse out of databases/.
+        // Foundation appends the raw string, so "../evil" would produce a path
+        // whose standardized form escapes the intended subtree.
+        guard isValidEstateName(name) else {
+            // Return a deliberately invalid sentinel inside the data directory;
+            // callers that bypass createEstate (which validates) will hit a
+            // non-existent path rather than an arbitrary location.
+            return dataDirectory
+                .appendingPathComponent("databases", isDirectory: true)
+                .appendingPathComponent(".invalid", isDirectory: true)
+                .appendingPathComponent("estate.sqlite", isDirectory: false)
         }
         return dataDirectory
             .appendingPathComponent("databases", isDirectory: true)
             .appendingPathComponent(name, isDirectory: true)
             .appendingPathComponent("estate.sqlite", isDirectory: false)
+    }
+
+    /// Returns true iff `name` is a safe single-component estate name: non-empty,
+    /// not `.` or `..`, and contains no path separators. Mirrors the Rust `valid_name`
+    /// predicate in `commands/db.rs` — both ports must agree.
+    public static func isValidEstateName(_ name: String) -> Bool {
+        !name.isEmpty
+            && name != "."
+            && name != ".."
+            && !name.contains("/")
+            && !name.contains("\\")
     }
 
     // MARK: - Config (active estate pointer)
@@ -155,6 +183,14 @@ public enum DatabaseManager {
     public static func deleteEstate(name: String, in dataDirectory: URL) throws {
         guard name != "default" else {
             throw MOOTx01DatabaseError.deleteDefault
+        }
+        // Validate before resolving the path: `estateURL(for:in:)` appends the
+        // name literally via Foundation, so a traversal like "../private" would
+        // compute a path outside the databases/ subtree and `removeItem` could
+        // delete an arbitrary directory. The validation here mirrors the guard
+        // already present in `createEstate` and the Rust `valid_name` predicate.
+        guard isValidEstateName(name) else {
+            throw MOOTx01DatabaseError.invalidName(name)
         }
         let dir = estateURL(for: name, in: dataDirectory).deletingLastPathComponent()
         guard FileManager.default.fileExists(atPath: dir.path) else {

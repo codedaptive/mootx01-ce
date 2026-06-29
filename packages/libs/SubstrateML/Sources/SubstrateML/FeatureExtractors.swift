@@ -74,9 +74,9 @@ public struct AmbientSampleRow: Sendable {
     }
 }
 
-// FNV-1a is now a public SubstrateLib atomic (see FNV.swift); the
-// local `fnv64` helper that used to live here was removed under I-25
-// when F5b promoted the family to public. Callers below use
+// FNV-1a is defined in SubstrateTypes/FNV.swift (imported via SubstrateTypes).
+// The local `fnv64` helper that used to live here was removed when FNV
+// was promoted to a package-level type. Callers below use
 // `FNV.hash64` directly. The bare prime `0x100000001B3` retained in
 // the attendee combiner below is the FNV-1a 64-bit prime, used here
 // as a custom mixing constant rather than as part of a string hash.
@@ -186,6 +186,8 @@ public struct CoreLocationExtractor {
                                 streamSource: StreamSourceFlag.corelocation.rawValue,
                                 fingerprint: fp,
                                 lattice: .udc("914"),
+                                // No human-readable payload — fingerprint carries all
+                                // recall-relevant signal for this stream.
                                 payload: Data())
     }
 
@@ -248,6 +250,8 @@ public struct EventKitExtractor {
                                 streamSource: StreamSourceFlag.eventkit.rawValue,
                                 fingerprint: fp,
                                 lattice: .udc("65.012.4"),
+                                // No human-readable payload — fingerprint carries all
+                                // recall-relevant signal for this stream.
                                 payload: Data())
     }
 }
@@ -297,6 +301,8 @@ public struct ScreenTimeExtractor {
                                 streamSource: StreamSourceFlag.screentime.rawValue,
                                 fingerprint: fp,
                                 lattice: .udc("004.5"),
+                                // No human-readable payload — fingerprint carries all
+                                // recall-relevant signal for this stream.
                                 payload: Data())
     }
 }
@@ -350,6 +356,8 @@ public struct SystemTelemetryExtractor {
                                 streamSource: StreamSourceFlag.systemTelemetry.rawValue,
                                 fingerprint: fp,
                                 lattice: .udc("004.2"),
+                                // No human-readable payload — fingerprint carries all
+                                // recall-relevant signal for this stream.
                                 payload: Data())
     }
 }

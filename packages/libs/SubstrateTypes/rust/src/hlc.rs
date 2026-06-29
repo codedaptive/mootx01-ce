@@ -239,8 +239,8 @@ impl HLCGenerator {
 //   total order:            any two HLCs compare unambiguously.
 //   skew tolerance:         physical-clock skew up to ~i32::MAX
 //                           milliseconds (~25 days); beyond that
-//                           logical counter saturates and
-//                           causality assertions weaken.
+//                           logical counter wraps (via `wrapping_add`)
+//                           and causality assertions weaken.
 //
 // In practice the substrate runs an NTP-synchronized wall clock
 // across replicas; skew is bounded by seconds and HLC behaves

@@ -8,7 +8,8 @@ import SubstrateTypes
 /// Conformance tests for `BitField` — the parametric bit-field
 /// primitives that kits consume (F18 atomic-centralization cascade).
 ///
-/// Mirror of `rust/glref-rust-bit_field.rs` test module. Every test
+/// Mirror of the Rust bit-field tests in
+/// `packages/libs/SubstrateKernel/rust/src/bit_field.rs`. Every test
 /// here has a Rust counterpart with identical semantics; the two
 /// suites guarantee Swift + Rust parity at the bit-math level.
 @Suite("BitField bit-math primitives")

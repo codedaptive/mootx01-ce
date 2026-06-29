@@ -1,12 +1,11 @@
 // DistillationScorer.swift
 //
-// Core distillation scoring: SNR gate, majority vote, PMI graph,
-// dominant component selection, confidence score.
+// Core distillation scoring: SNR gate, structural recurrence threshold,
+// PMI graph, dominant component selection, confidence score.
 // Per DISTILLATION_MATH_SSA.md §2–6.
 //
-// Wave-1 parallel stream: DistillationFeatureType is defined in
-// TypedDecayWeighting.swift (Ds2, same module). This file resolves
-// at wave merge when both streams land together in SubstrateML.
+// DistillationFeatureType is defined in TypedDecayWeighting.swift
+// in this module.
 
 import Foundation
 
@@ -59,7 +58,7 @@ public struct ExtractedFeature: Sendable, Equatable {
 public struct DistillationSNR: Sendable, Equatable {
     /// Ratio of structural signal to episodic noise. Distillation proceeds when snr >= 2.0.
     public let snr: Float32
-    /// Total structural weight from majority-threshold-passing features: Σ df(f) for f in V_thresh.
+    /// Total structural weight from structural-threshold-passing (recurring) features: Σ df(f) for f in V_thresh.
     public let structuralSignal: Float32
     /// Total noise energy from sub-threshold features: Σ df(f) for f not in V_thresh.
     public let episodicNoise: Float32
@@ -67,7 +66,7 @@ public struct DistillationSNR: Sendable, Equatable {
     public let readyToDistill: Bool
 }
 
-/// PMI-based feature coherence graph over the set of majority-threshold-passing features.
+/// PMI-based feature coherence graph over the set of structural-threshold-passing features.
 /// Edges exist between feature pairs whose PMI > 0 (co-occur more than chance).
 public struct FeatureGraph: Sendable {
     /// Threshold-passing features (V_thresh), indexed to match pmiMatrix positions.

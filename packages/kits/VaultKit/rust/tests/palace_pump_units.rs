@@ -1,8 +1,8 @@
 //! Unit tests for the outbound MemPalace pump's pure cores — Rust leg.
 //! Conformance-gated against the Swift `Palace*Tests` (same vectors, same
-//! assertions). No live server; the live scratch-pump path is exercised by the
-//! Swift integration test (guarded) and the manual probe documented in the
-//! completion report.
+//! assertions). No live server required here; the live Rust pump path is
+//! covered by `palace_pump_live.rs` in this directory (guarded integration
+//! test).
 
 use std::collections::{BTreeMap, HashMap};
 use vault_kit::note_ir::{Block, FactIR, NoteIR, OccurredAt, SourceRef, WikiLink};

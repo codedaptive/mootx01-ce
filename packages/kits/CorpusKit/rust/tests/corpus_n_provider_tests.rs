@@ -6,11 +6,11 @@
 //! (RI, PPMI, LSA, NMF trained via `reindex`; FDC stateless), ingests a FIXED
 //! corpus, and calls `float_nearest_per_signal`. The per-signal ranked lists
 //! must equal the Swift-canonical shared fixture
-//! (Tests/SharedVectors/n_provider_per_signal.json) byte/bit-for-bit: same
+//! (Tests/SharedVectors/n_provider_per_signal.json): same
 //! signal order, same modelIDs, same outcome kind per signal, and — for the
-//! `hits` signals — the same `(item_id, similarity_bits)` ranking. This proves
-//! the per-signal nearest seam is cross-port deterministic (the 6b RRF
-//! consumer can rely on identical Swift↔Rust per-signal inputs).
+//! `hits` signals — the same ranked itemID order (raw cosine similarity
+//! is not compared; see lines 118-123). This proves the per-signal
+//! nearest seam is cross-port deterministic for rank identity.
 //!
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as corpus_basis_persistence_tests.

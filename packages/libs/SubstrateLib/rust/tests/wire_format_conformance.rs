@@ -2,13 +2,10 @@
 //!
 //! Mirror of `WireFormatConformanceTests.swift`. Tests
 //! value-equivalence (not byte-identity — see the Swift file's
-//! header for the reasoning). Each type has two tests:
-//!
-//!   1. Round-trip: construct, encode, decode, assert equality.
-//!   2. Key-name fixture: decode a known JSON string with the
-//!      EXPECTED key names (same string as the Swift test
-//!      decodes), assert fields populate correctly. Catches
-//!      rename drift.
+//! header for the reasoning). Most types have a round-trip test
+//! and a key-name fixture test; later types (`AuditValue`,
+//! `AuditEntry`, `GSetAuditLog`) have additional coverage tests,
+//! and `HyperplaneFamily` has only a key-name fixture.
 //!
 //! Gated on the `serde-support` feature; compiles to nothing
 //! otherwise.
@@ -203,7 +200,10 @@ fn audit_verb_raw_value_encoding() {
 // F16.B — AuditValue, AuditEntry, GSetAuditLog
 // ============================================================
 
-use substrate_types::gset::{AuditEntry, AuditValue, GSetAuditLog, RowID};
+use substrate_types::gset::{AuditEntry, AuditValue, GSetAuditLog};
+// RowId is the canonical newtype (struct RowId(pub u128)) from substrate_types::row.
+// The alias `RowID` was removed; import directly from the re-export root.
+use substrate_types::RowId;
 
 // AuditValue ----------------------------------------------------
 
@@ -271,7 +271,7 @@ fn audit_value_decode_from_known_fixture() {
 fn sample_audit_entry(
     before_value: Option<AuditValue>,
     after_value: Option<AuditValue>,
-    origin_row_id: Option<RowID>,
+    origin_row_id: Option<RowId>,
 ) -> AuditEntry {
     AuditEntry {
         id: [0xAB; 32],
@@ -279,7 +279,7 @@ fn sample_audit_entry(
         verb: substrate_types::gset::AuditVerb::Mutate,
         // UUID 550E8400-E29B-41D4-A716-446655440000 as a u128
         // big-endian: 0x550E8400_E29B41D4_A7164466_55440000.
-        row_id: 0x550E8400_E29B41D4_A7164466_55440000_u128,
+        row_id: RowId(0x550E8400_E29B41D4_A7164466_55440000_u128),
         field_path: "adjective.state".into(),
         before_value,
         after_value,
@@ -319,7 +319,7 @@ fn audit_entry_round_trip_retract_boundary() {
 
 #[test]
 fn audit_entry_round_trip_with_origin() {
-    let origin: RowID = 0xDEADBEEF_DEADBEEF_DEADBEEF_DEADBEEF_u128;
+    let origin: RowId = RowId(0xDEADBEEF_DEADBEEF_DEADBEEF_DEADBEEF_u128);
     let entry = sample_audit_entry(
         Some(AuditValue::Integer(1)),
         Some(AuditValue::Integer(2)),
@@ -368,13 +368,13 @@ fn gset_audit_log_round_trip_multiple_sorted() {
 
     let e_high = AuditEntry {
         id: high_id, hlc, verb: substrate_types::gset::AuditVerb::Mutate,
-        row_id: 0, field_path: "f".into(),
+        row_id: RowId(0), field_path: "f".into(),
         before_value: None, after_value: Some(AuditValue::Integer(2)),
         origin_row_id: None,
     };
     let e_low = AuditEntry {
         id: low_id, hlc, verb: substrate_types::gset::AuditVerb::Mutate,
-        row_id: 0, field_path: "f".into(),
+        row_id: RowId(0), field_path: "f".into(),
         before_value: None, after_value: Some(AuditValue::Integer(1)),
         origin_row_id: None,
     };

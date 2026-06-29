@@ -1,7 +1,7 @@
 // InvertedIndex.swift
 //
-// Weighted impact-ordered inverted index with WAND and Block-Max WAND
-// (BMW) exact top-k retrieval.
+// Weighted inverted index with item-id-ordered posting lists, WAND and
+// Block-Max WAND (BMW) exact top-k retrieval.
 //
 // Lane D — Sparse Engine (SPLADE generalization).
 // Retrieval algorithms reference §2 is the authoritative spec for this file.
@@ -98,7 +98,7 @@ private struct PostingCursor {
 
 // MARK: - InvertedIndex
 
-/// Weighted impact-ordered inverted index.
+/// Weighted inverted index with item-id-ordered posting lists.
 ///
 /// Supports WAND and Block-Max WAND exact top-k retrieval.
 /// A query is a set of (termID, queryWeight: Int32) pairs (already quantized).
@@ -110,9 +110,9 @@ private struct PostingCursor {
 /// algorithms reference §2.2).
 ///
 /// Lifecycle: build once via `init(postings:numDocs:)`, then query repeatedly
-/// via `topK(query:k:algorithm:)`. Mutation (add / remove) is supported but
-/// invalidates the block-max structures — caller must call `rebuildBlockMax()`
-/// after mutation.
+/// via `topK(query:k:algorithm:)`. The index has immutable private storage
+/// and exposes no add/remove mutation API; callers rebuild by constructing
+/// a new index with updated postings.
 public struct InvertedIndex: Sendable {
 
     // MARK: - Internal storage

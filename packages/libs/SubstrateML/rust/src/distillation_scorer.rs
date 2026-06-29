@@ -94,9 +94,9 @@ impl ExtractedFeature {
 pub struct DistillationSNR {
     /// Ratio of structural signal to episodic noise. Distillation proceeds when snr >= 2.0.
     pub snr: f32,
-    /// Total structural weight from threshold-passing (recurring) features: Σ σ(f) for f in V_thresh.
+    /// Total structural weight from structural-threshold-passing features: Σ df(f) for f in V_thresh.
     pub structural_signal: f32,
-    /// Total noise energy from sub-threshold features: Σ (1 − df(f)) for f not in V_thresh.
+    /// Total noise energy from sub-threshold features: Σ df(f) for f not in V_thresh.
     pub episodic_noise: f32,
     /// True when snr >= 2.0 — the cluster is coherent enough to distill into a factoid.
     pub ready_to_distill: bool,
@@ -258,6 +258,22 @@ impl DistillationScorer {
                 components: vec![],
             };
         }
+
+        // Bounds guard: the caller is responsible for passing an incidence_matrix
+        // with exactly m rows, each with exactly n columns. If the matrix is
+        // under-sized, indexing incidence_matrix[i][j] would panic. Return an
+        // empty graph rather than panic — the caller sees no edges, which is
+        // the safe degenerate result. The production caller (distillation_pipeline
+        // build_pmi_graph) always constructs the matrix consistently; this guard
+        // protects future callers and fuzz inputs.
+        if incidence_matrix.len() < m || incidence_matrix.iter().any(|row| row.len() < n) {
+            return FeatureGraph {
+                nodes: threshold_features.to_vec(),
+                pmi_matrix: vec![],
+                components: vec![],
+            };
+        }
+
         let m_f = m as f32;
 
         // Compute marginal probabilities p(j) = df(f_j) from incidence columns
@@ -627,5 +643,42 @@ mod tests {
         let all_threshold = vec![ExtractedFeature::new(DistillationFeatureType::Entity, "A", 1.0)];
         let confidence = DistillationScorer::compute_confidence(&[], &all_threshold);
         assert_eq!(confidence, 0.0);
+    }
+
+    // MARK: - build_pmi_graph dimension guard
+
+    #[test]
+    fn build_pmi_graph_malformed_matrix_too_few_rows_returns_empty() {
+        // Caller claims m=3 but supplies only 1 row — the guard must catch this
+        // and return an empty FeatureGraph rather than panic on out-of-bounds
+        // indexing. This exercises the bounds check added to protect against
+        // future callers passing inconsistently-shaped data.
+        let features = vec![
+            ExtractedFeature::new(DistillationFeatureType::Entity, "A", 1.0),
+            ExtractedFeature::new(DistillationFeatureType::Entity, "B", 1.0),
+        ];
+        // Supply only 1 row but claim m=3.
+        let incidence = vec![vec![true, false]]; // 1 row × 2 cols
+        let graph = DistillationScorer::build_pmi_graph(&features, &incidence, 3);
+        assert!(graph.nodes.len() == features.len(),
+            "nodes should equal threshold_features even on malformed input");
+        assert!(graph.pmi_matrix.is_empty(), "pmi_matrix must be empty for malformed input");
+        assert!(graph.components.is_empty(), "components must be empty for malformed input");
+    }
+
+    #[test]
+    fn build_pmi_graph_malformed_matrix_row_too_short_returns_empty() {
+        // Caller claims n=2 features but one row has only 1 column — the guard
+        // must catch this and return an empty FeatureGraph.
+        let features = vec![
+            ExtractedFeature::new(DistillationFeatureType::Entity, "A", 1.0),
+            ExtractedFeature::new(DistillationFeatureType::Entity, "B", 1.0),
+        ];
+        let incidence = vec![
+            vec![true, false], // row 0: 2 cols — ok
+            vec![true],        // row 1: 1 col — short!
+        ];
+        let graph = DistillationScorer::build_pmi_graph(&features, &incidence, 2);
+        assert!(graph.pmi_matrix.is_empty(), "pmi_matrix must be empty for short-row input");
     }
 }

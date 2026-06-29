@@ -21,8 +21,8 @@ public typealias CaptureFrame = LocusKit.CaptureFrame
 public typealias RecallFrame = LocusKit.RecallFrame
 
 /// Slots for the `learn` verb at the GLK surface. Identical to
-/// `LocusKit.LearnFrame`. Scaffold today; the full slot set lands in
-/// LOCI_V035_19.
+/// `LocusKit.LearnFrame`, which carries the full slot set (`source`,
+/// `handle`, `mode`, `refreshPolicy`).
 public typealias LearnFrame = LocusKit.LearnFrame
 
 /// Named mutation operations for the `mutate` verb. Identical to
@@ -84,11 +84,10 @@ public struct MutateFrame: Sendable {
     public let rowID: RowID
     /// Which named mutation to apply.
     public let kind: MutationKind
-    /// Optional payload string. Reserved for mutation variants that
-    /// carry a free-text justification or value beyond what `kind`
-    /// captures; today's substrate ignores it but the slot is here
-    /// so a payload-bearing mutation does not require a frame
-    /// signature change later.
+    /// Optional payload string used by several mutation variants as
+    /// the audit reason or free-text justification. The LocusKit mutate
+    /// implementation passes it as the audit/reason string for
+    /// state transitions including reject, contest, resolve, and accept.
     public let payload: String?
 
     public init(rowID: RowID, kind: MutationKind, payload: String? = nil) {
@@ -207,9 +206,10 @@ public struct ProposeFrame: Sendable, Equatable {
     /// work and not part of this scaffold.
     public let target: RowID
     /// Typed proposal taxonomy. See `ProposalKind` for the full
-    /// vocabulary including production labels and test cases. The
-    /// rawValue string is what the substrate ultimately persists and
-    /// what the Rust port matches against.
+    /// vocabulary including production labels and test cases. The verb
+    /// surface maps this GLK `ProposalKind` to a `LocusKit.ProposalKind`
+    /// via `mapBrainKindToSubstrate`; the substrate-axis enum's rawValue
+    /// is what is persisted and what the Rust port matches against.
     public let kind: ProposalKind
     /// Optional justification for the proposed change.
     public let justification: String?

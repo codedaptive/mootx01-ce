@@ -259,10 +259,13 @@ where
     let dense_ranked: Vec<ReductionCandidate> = dense_scored.into_iter().map(|(c, _)| c).collect();
 
     // Bounded survivor set: a few× the limit, never below `limit`, never above
-    // the pool.
+    // the pool. Use saturating_mul to avoid integer overflow when limit and
+    // survivor_multiple are both large: debug-mode wrapping panics, release-mode
+    // wrap produces a silently wrong negative count. Saturates at usize::MAX then
+    // clamps to pool size. Mirrors Swift safe-multiplication fix. (NK-8 planned hardening)
     let survivor_count = candidates
         .len()
-        .min(limit.max(limit * survivor_multiple.max(1)));
+        .min(limit.max(limit.saturating_mul(survivor_multiple.max(1))));
     let survivors: Vec<ReductionCandidate> = dense_ranked.into_iter().take(survivor_count).collect();
 
     let hydrated = hydrate_candidates(&survivors, &hydrate);
@@ -307,7 +310,13 @@ pub fn mmr_diversity_rerank(pool: &[ReductionCandidate], lambda: f64) -> Vec<Red
     if n <= 1 {
         return pool.to_vec();
     }
-    let lam = lambda.clamp(0.0, 1.0);
+    // Guard NaN: f64::clamp returns NaN when the input is NaN (IEEE 754). A NaN
+    // lambda propagates to every MMR score, making all scores NaN. NaN > NEG_INFINITY
+    // is false, so best_idx stays -1 and `best_idx as usize` wraps to usize::MAX,
+    // causing an out-of-bounds panic. Default NaN to 0.5 (equal weight between
+    // relevance and diversity — the neutral MMR operating point).
+    // Mirrors Swift mmrDiversityRerank NaN guard. (NK-9 planned hardening)
+    let lam = if lambda.is_nan() { 0.5 } else { lambda.clamp(0.0, 1.0) };
 
     // relevance(i) = (n - i) / n, strictly decreasing in (0, 1].
     let relevance: Vec<f64> = (0..n).map(|i| (n - i) as f64 / n as f64).collect();

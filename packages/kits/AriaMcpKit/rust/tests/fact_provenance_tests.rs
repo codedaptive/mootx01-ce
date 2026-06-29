@@ -105,8 +105,12 @@ fn fact_filed_with_mootx01_identity_gets_mootx01_source() {
 /// Mirrors Swift test: factFiledWithAriaMcpIdentityGetsAriaMcpSource.
 #[test]
 fn fact_filed_with_aria_mcp_identity_gets_aria_mcp_source() {
-    // Default server_identity is "aria-mcp-server" — no override needed.
-    let registry = EstateRegistry::new_inmemory_bare();
+    // Set the host identity explicitly (mirrors Swift openBareEstate(identity:
+    // "aria-mcp-server")). The bare registry defaults to "mootx01" (the product
+    // identity), so this test — which verifies the aria-mcp-server identity path
+    // — sets it rather than relying on a default.
+    let mut registry = EstateRegistry::new_inmemory_bare();
+    registry.server_identity = "aria-mcp-server".to_owned();
     let ledger = SurfacedRecallLedger::new();
 
     let file_args = args![

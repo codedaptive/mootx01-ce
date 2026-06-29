@@ -74,4 +74,38 @@ struct JSONRPCTests {
         let decoded = try JSONValue.parse(encoded)
         #expect(decoded == value)
     }
+
+    // MARK: - integerValue overflow guard (Finding 2)
+
+    /// A JSON double far outside Int64 range (1e100) must return nil from
+    /// integerValue — not crash. Before the fix, Int64(d) precondition-trapped
+    /// on any double > Int64.max, killing the server process.
+    @Test func integerValueReturnsNilForOutOfRangeDouble() {
+        let v: JSONValue = .double(1e100)
+        #expect(v.integerValue == nil)
+    }
+
+    /// Negative out-of-range double also returns nil.
+    @Test func integerValueReturnsNilForNegativeOutOfRangeDouble() {
+        let v: JSONValue = .double(-1e100)
+        #expect(v.integerValue == nil)
+    }
+
+    /// +Infinity returns nil (not crash, not garbage).
+    @Test func integerValueReturnsNilForPositiveInfinity() {
+        let v: JSONValue = .double(Double.infinity)
+        #expect(v.integerValue == nil)
+    }
+
+    /// A fractional double returns nil — unchanged behavior.
+    @Test func integerValueReturnsNilForFractionalDouble() {
+        let v: JSONValue = .double(42.5)
+        #expect(v.integerValue == nil)
+    }
+
+    /// A whole-valued double within Int64 range returns the integer — unchanged behavior.
+    @Test func integerValueReturnsSomeForWholeDouble() {
+        let v: JSONValue = .double(42.0)
+        #expect(v.integerValue == 42)
+    }
 }

@@ -3,7 +3,7 @@
 // The loopback HTTP read-API: serves the read-plane endpoints from the
 // ObserverSink stats store, the static dashboard assets, plus a token+Origin-
 // gated control surface. Also exposes `apply_control` — the shared verb
-// dispatcher both gated surfaces (this HTTP control path and the UDS
+// dispatcher both gated surfaces (this HTTP control path and the local IPC
 // ControlChannel) route through, so both behave identically.
 //
 // ============================ SECURITY BOUNDARY =============================
@@ -42,7 +42,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use crate::admin_payloads::{EstateAdminResult, EstateLifecycleRequest, EstateAdminRequest};
@@ -55,6 +55,168 @@ use crate::manager::MootManager;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// Request body cap for control POSTs.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Connection concurrency cap
+//
+// A loopback-only, single-user local control server. 16 concurrent connections
+// is generous for any realistic local dashboard or CLI tool, and low enough to
+// protect against a caller that opens many blocking connections before the
+// auth/control checks run (CAND-011 MEDIUM finding).
+//
+// The gate protocol:
+//   1. try_enqueue() — NON-BLOCKING on the accept thread. Increments the
+//      active count; returns false immediately when the depth limit is hit.
+//      The accept thread then sheds the connection with HTTP 503 + Retry-After
+//      and loops back to accept(). The accept thread NEVER blocks on the gate.
+//   2. release() — called when the connection handler finishes (including on
+//      error/timeout paths). Decrements active count and wakes waiting workers.
+//
+// Slot-leak invariant: every successful try_enqueue() MUST be paired with
+// exactly one release(). The RAII guard (OnDrop) is bound on the ACCEPT
+// THREAD immediately after try_enqueue succeeds, then moved into the worker
+// closure. If std::thread::Builder::spawn fails (OS resource limit), the
+// closure and guard are dropped by the Err destructor — releasing the slot
+// automatically. If spawn succeeds, the guard lives in the worker and
+// releases on any exit path (normal completion, panic, read-timeout).
+//
+// Note: wait_for_slot() is present on LoopbackConnGate for structural parity
+// with AriaMcpKit's two-phase gate. It is NOT called in the accept loop:
+// in the current single-layer design try_enqueue only returns true when a
+// slot is immediately available, and calling wait_for_slot after the guard
+// is bound would risk a double-release on the Condvar path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum concurrent connections for the moot-mgr loopback control/read-API server.
+///
+/// 16 is generous for a single-user local management surface (dashboard, CLI).
+/// Connections beyond this cap are shed with HTTP 503 + `Retry-After: 1` rather
+/// than allowed to accumulate as unbounded blocking threads. Mirrors the cap in
+/// the Swift port (`MootMgrMaxLoopbackConnections`). Adjust via
+/// `MOOT_MGR_HTTP_MAX_CONNECTIONS` env var if needed for unusual deployments.
+const MAX_LOOPBACK_CONNECTIONS: usize = 16;
+
+/// Counting-semaphore gate that bounds the number of simultaneous in-flight
+/// connections on the moot-mgr loopback HTTP server. Thread-safe via
+/// `Mutex<usize>` + `Condvar` (the canonical Rust pattern; std lacks a built-in
+/// semaphore). Mirrors AriaMcpKit's Rust `ConcurrencyGate`.
+///
+/// The accept thread calls `try_enqueue()` (non-blocking); the spawned worker
+/// thread calls `wait_for_slot()` (blocking Condvar wait). Call `release()` when
+/// the connection handler finishes. Missing a `release()` leaks a slot and
+/// eventually deadlocks the server — always pair via RAII (OnDrop guard).
+pub struct LoopbackConnGate {
+    /// Hard limit on simultaneously-served connections.
+    max_concurrent: usize,
+    /// Number of connections currently active (waiting or serving).
+    /// Incremented by `try_enqueue`, decremented by `release`.
+    active: Mutex<usize>,
+    /// Signalled by `release()` whenever a slot becomes free.
+    cvar: Condvar,
+}
+
+impl LoopbackConnGate {
+    pub(crate) fn new(max_concurrent: usize) -> Arc<Self> {
+        Arc::new(Self {
+            max_concurrent,
+            active: Mutex::new(0),
+            cvar: Condvar::new(),
+        })
+    }
+
+    /// Test-only constructor: returns an owned (non-Arc) gate for gate-unit
+    /// tests that don't need shared ownership.
+    #[doc(hidden)]
+    pub fn new_for_test(max_concurrent: usize) -> Self {
+        Self {
+            max_concurrent,
+            active: Mutex::new(0),
+            cvar: Condvar::new(),
+        }
+    }
+
+    /// Phase 1 (accept thread, NON-BLOCKING): test whether a new connection
+    /// fits within the cap. Returns `true` and increments the active count if
+    /// so (caller MUST call `release()` when done); returns `false` if the cap
+    /// is already reached (caller should shed with HTTP 503 and close).
+    ///
+    /// This method NEVER blocks — no Condvar wait, no parking. `&self` is
+    /// accepted so the method works with both `Arc<LoopbackConnGate>` (via
+    /// Deref) and owned values in tests.
+    pub fn try_enqueue(&self) -> bool {
+        let mut count = self.active.lock().unwrap();
+        if *count >= self.max_concurrent {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+
+    /// Phase 2 (worker thread, BLOCKING): wait until a concurrency slot is free.
+    /// Must be called after a successful `try_enqueue()`, before serving the
+    /// request. In the current single-layer design (`max_concurrent` cap, no
+    /// separate queued-but-waiting tier), `try_enqueue` only returns true when a
+    /// slot is immediately available, so this call returns without waiting. It is
+    /// present for structural parity with AriaMcpKit's gate and to support future
+    /// two-tier extension without changing the call sites.
+    pub fn wait_for_slot(&self) {
+        let mut count = self.active.lock().unwrap();
+        while *count > self.max_concurrent {
+            count = self.cvar.wait(count).unwrap();
+        }
+    }
+
+    /// Release a previously acquired slot. Decrements the active count and wakes
+    /// all waiting worker threads so each can re-check the cap condition.
+    /// `notify_all()` is correct here: a single burst of completions should wake
+    /// all eligible waiters, not just one per release event.
+    pub fn release(&self) {
+        let mut count = self.active.lock().unwrap();
+        if *count > 0 {
+            *count -= 1;
+        }
+        self.cvar.notify_all();
+    }
+
+    /// Current active count. Informational; used by tests and gate accessor.
+    pub fn current_depth(&self) -> usize {
+        *self.active.lock().unwrap()
+    }
+}
+
+/// Write an HTTP 503 Service Unavailable response to the stream and close.
+/// Called on the accept thread when the connection cap is reached, before any
+/// request parsing or auth check. Mirrors AriaMcpKit's `send_shed_response`.
+///
+/// The explicit `shutdown(Write)` after flushing ensures the kernel sends a
+/// FIN rather than a RST, so clients receive a clean EOF and can parse the
+/// response body before the connection closes.
+fn send_shed_response(stream: &mut TcpStream) {
+    let body = br#"{"error":"service_unavailable","retry_after":1}"#;
+    let head = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// RAII guard that runs a closure on drop. Used to guarantee slot release even
+/// when the connection handler panics, times out, or returns early. MUST be
+/// bound to a named `let` variable so the drop is deferred to end-of-scope.
+struct OnDrop<F: FnOnce()>(Option<F>);
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+fn defer_on_drop<F: FnOnce()>(f: F) -> OnDrop<F> {
+    OnDrop(Some(f))
+}
 
 /// A pre-encoded control-verb response: the JSON body plus the `ok` flag that
 /// picks the HTTP status code. The gated surfaces both call `apply_control` and
@@ -100,6 +262,9 @@ struct HttpRequest {
     bearer_token: Option<String>,
     /// The Origin header, if present.
     origin: Option<String>,
+    /// The Host header, if present. Used for DNS-rebinding protection on GET
+    /// routes: any Host that is not a loopback address is rejected 421.
+    host: Option<String>,
     /// The request body bytes (control POSTs).
     body: Vec<u8>,
 }
@@ -121,6 +286,11 @@ pub struct HttpReadApi {
     running: Arc<AtomicBool>,
     bound_port: Arc<AtomicU16>,
     accept_thread: Mutex<Option<JoinHandle<()>>>,
+    /// Bounded concurrency gate. Limits simultaneous in-flight connections to
+    /// `MAX_LOOPBACK_CONNECTIONS` (default 16). Connections beyond the cap are
+    /// shed with HTTP 503 + Retry-After before any request parsing runs.
+    /// Configurable via `MOOT_MGR_HTTP_MAX_CONNECTIONS` env var.
+    conn_gate: Arc<LoopbackConnGate>,
 }
 
 impl HttpReadApi {
@@ -133,6 +303,14 @@ impl HttpReadApi {
         control_token: String,
         start_instant_epoch: f64,
     ) -> Self {
+        // Read the connection cap from the environment; default to the module
+        // constant. Clamped to [1, 1024] so a misconfigured value can't make the
+        // server either unsecured (0) or permanently broken (overflow).
+        let max_connections = std::env::var("MOOT_MGR_HTTP_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(MAX_LOOPBACK_CONNECTIONS)
+            .clamp(1, 1024);
         HttpReadApi {
             manager,
             admin,
@@ -142,6 +320,32 @@ impl HttpReadApi {
             running: Arc::new(AtomicBool::new(false)),
             bound_port: Arc::new(AtomicU16::new(0)),
             accept_thread: Mutex::new(None),
+            conn_gate: LoopbackConnGate::new(max_connections),
+        }
+    }
+
+    /// Create the read-API server with an explicit connection cap. Used by
+    /// test harnesses that need precise control over the gate capacity without
+    /// mutating the process environment.
+    #[doc(hidden)]
+    pub fn new_with_cap(
+        manager: Arc<Mutex<MootManager>>,
+        admin: Arc<Mutex<EstateAdmin>>,
+        port: u16,
+        control_token: String,
+        start_instant_epoch: f64,
+        max_connections: usize,
+    ) -> Self {
+        HttpReadApi {
+            manager,
+            admin,
+            requested_port: port,
+            control_token,
+            start_instant_epoch,
+            running: Arc::new(AtomicBool::new(false)),
+            bound_port: Arc::new(AtomicU16::new(0)),
+            accept_thread: Mutex::new(None),
+            conn_gate: LoopbackConnGate::new(max_connections),
         }
     }
 
@@ -155,6 +359,7 @@ impl HttpReadApi {
 
         let this = Arc::clone(&self);
         let running = Arc::clone(&self.running);
+        let gate = Arc::clone(&self.conn_gate);
         let handle = std::thread::Builder::new()
             .name("moot-mgr.HttpReadApi.accept".to_string())
             .spawn(move || {
@@ -163,13 +368,50 @@ impl HttpReadApi {
                         break;
                     }
                     match stream {
-                        Ok(s) => {
+                        Ok(mut s) => {
+                            // Phase 1 (accept thread, NON-BLOCKING): check the
+                            // connection cap. If the cap is reached, shed the
+                            // connection immediately with HTTP 503 + Retry-After.
+                            // The accept loop never parks inside the gate.
+                            if !gate.try_enqueue() {
+                                send_shed_response(&mut s);
+                                continue;
+                            }
+                            // Bind the slot-release guard HERE on the accept thread,
+                            // immediately after try_enqueue succeeds. If
+                            // std::thread::Builder::spawn fails below (OS thread or
+                            // resource limit), the closure passed to spawn is dropped
+                            // with the Err — and this guard is dropped with it —
+                            // releasing the slot automatically. No manual cleanup
+                            // needed on the spawn-failure path.
+                            //
+                            // If spawn succeeds, the guard moves into the worker
+                            // thread and releases the slot on any exit path:
+                            // normal completion, panic, or read-timeout.
+                            let gate_clone = Arc::clone(&gate);
+                            let slot_guard = defer_on_drop(move || gate_clone.release());
                             let served = Arc::clone(&this);
                             // Serve each connection on its own thread so a slow
                             // peer never blocks the accept loop.
-                            let _ = std::thread::Builder::new()
+                            let spawn_result = std::thread::Builder::new()
                                 .name("moot-mgr.HttpReadApi.conn".to_string())
-                                .spawn(move || served.serve(s));
+                                .spawn(move || {
+                                    // slot_guard is dropped (releasing the slot) on
+                                    // any exit path from this closure: normal return,
+                                    // panic, or read-timeout. The named binding is
+                                    // required — an unbound defer_on_drop(...) would
+                                    // drop immediately at the let site.
+                                    let _slot_guard = slot_guard;
+                                    served.serve(s);
+                                });
+                            if let Err(e) = spawn_result {
+                                // Spawn failed (OS thread/resource limit). The closure
+                                // above (and slot_guard) was dropped by the Err
+                                // destructor, so the gate slot is already released.
+                                // The TcpStream s was also dropped with the closure,
+                                // closing the connection from our side.
+                                eprintln!("moot-mgr: worker thread spawn failed: {e}");
+                            }
                         }
                         Err(_) => {
                             if !running.load(Ordering::SeqCst) {
@@ -214,7 +456,15 @@ impl HttpReadApi {
     // MARK: - Connection handling
 
     /// Serve one accepted connection: read the request, route it, respond.
+    ///
+    /// A 30-second read timeout is set on the accepted socket before the
+    /// request parser runs. This bounds the DoS window where a slow peer
+    /// can hold a thread indefinitely by sending bytes one at a time —
+    /// mirrors the Swift port's `SO_RCVTIMEO` setsockopt on the accepted fd.
     fn serve(&self, mut stream: TcpStream) {
+        // Bound blocking reads: a peer that trickles bytes cannot stall a
+        // handler thread longer than this window.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
         let request = match read_request(&mut stream) {
             Some(r) => r,
             None => return,
@@ -238,13 +488,26 @@ impl HttpReadApi {
         let _ = now;
 
         match (request.method.as_str(), request.path.as_str()) {
+            // DNS-rebinding guard: reject any GET whose Host header is present
+            // but not a loopback address. The browser always sends Host; a
+            // rebinding attack uses a non-loopback host that resolves to
+            // 127.0.0.1. 421 Misdirected Request tells the client this virtual
+            // host is not served here. Absent/empty Host is allowed (curl, direct
+            // native connections). POST /api/control/* is already gated by
+            // Origin + Bearer token, which provides stronger protection there.
+            ("GET", _) if !is_loopback_host(request.host.as_deref()) => (
+                421,
+                "application/json".to_string(),
+                br#"{"error":"misdirected_request"}"#.to_vec(),
+            ),
             ("GET", "/api/server") => self.json_response(|m| {
                 m.server_payload(wall_now, uptime).map_err(err_string)
             }),
             ("GET", "/api/estates") => {
-                // Merge the host's own EstateAdmin section into the event-derived
-                // rollups. Priority: local EstateAdmin (host-provisioned) over the
-                // base.admin (which is None in the Rust port — no ARIA proxy).
+                // Keep the manager's event-derived estates list and overwrite admin
+                // with the local EstateAdmin payload. The manager may populate
+                // base.admin from the daemon proxy, but this route always replaces it
+                // with the local admin plane section.
                 let base = self.manager.lock().unwrap().estates_payload();
                 match base {
                     Ok(base) => {
@@ -278,10 +541,10 @@ impl HttpReadApi {
                 self.encode_ok(&payload)
             }
             // GET /api/lattice — lattice address snapshot.
-            // The Rust host has no HTTP client and returns the honest degraded state
-            // (pending: true, addresses: []) — identical to Swift's fallback when
-            // ARIA_MCP is unreachable. See MootManager::lattice_payload for the full
-            // rationale. Infallible (no store I/O).
+            // Delegates to MootManager::lattice_payload, which proxies the daemon's
+            // /api/lattice endpoint and returns live addresses with pending:false on
+            // success. The degraded state (pending:true, addresses:[]) is the fallback
+            // on connection, HTTP, or decode failure.
             ("GET", "/api/lattice") => {
                 let payload = self.manager.lock().unwrap().lattice_payload();
                 self.encode_ok(&payload)
@@ -502,20 +765,78 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// True if the Origin header is acceptable for a control write: absent (curl /
-/// native fetch) or a loopback origin. Any other origin is cross-origin and
-/// rejected (CSRF guard). Mirrors Swift `HTTPReadAPI.isOriginAllowed(_:)`.
+/// native fetch) or an exact loopback origin. Any other origin is rejected
+/// (CSRF / DNS-rebinding guard). Mirrors Swift `HTTPReadAPI.isOriginAllowed(_:)`.
+///
+/// The check parses the scheme prefix and then validates the suffix after the
+/// loopback host is empty or a port (`:<digits>`). Prefix-only comparison would
+/// accept attacker-owned names like `localhost.evil` or `127.0.0.1.evil`.
 pub fn is_origin_allowed(origin: Option<&str>) -> bool {
-    match origin {
-        None => true,
-        Some(o) if o.is_empty() => true,
-        Some(o) => {
-            let lo = o.to_lowercase();
-            lo.starts_with("http://127.0.0.1")
-                || lo.starts_with("http://localhost")
-                || lo.starts_with("https://127.0.0.1")
-                || lo.starts_with("https://localhost")
-                || lo.starts_with("http://[::1]")
-                || lo.starts_with("https://[::1]")
+    match origin.map(str::trim) {
+        None | Some("") => true,
+        Some(o) => is_loopback_origin(o),
+    }
+}
+
+/// True if `origin` is an exact loopback origin: scheme is http/https, host is
+/// `localhost`, `127.0.0.1`, or `[::1]`, and the only suffix after the host is
+/// an optional port (`:` followed by ASCII digits only).
+fn is_loopback_origin(origin: &str) -> bool {
+    let lo = origin.to_ascii_lowercase();
+    [
+        "http://127.0.0.1",
+        "http://localhost",
+        "https://127.0.0.1",
+        "https://localhost",
+        "http://[::1]",
+        "https://[::1]",
+    ]
+    .iter()
+    .any(|prefix| lo.strip_prefix(prefix).is_some_and(is_valid_origin_suffix))
+}
+
+/// True if `suffix` is the remainder of an origin after the loopback host:
+/// either empty (bare host) or `:` followed by one or more ASCII digits (port).
+/// Rejects `.evil`, `@user`, path components, and any other trailing content.
+fn is_valid_origin_suffix(suffix: &str) -> bool {
+    suffix.is_empty()
+        || suffix.strip_prefix(':').is_some_and(|port| {
+            !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// True if the Host header is acceptable for a GET route: absent/empty (curl /
+/// native connections that omit the Host header) or a loopback host+port pair.
+/// Rejects any Host that is not a recognised loopback address.
+///
+/// Unlike `is_origin_allowed`, this does NOT strip a scheme prefix — the Host
+/// header contains only `host` or `host:port`, never a scheme. IPv6 literals
+/// carry brackets: `[::1]` or `[::1]:PORT`. Mirrors Swift
+/// `HTTPReadAPI.isLoopbackHost(_:)`.
+pub fn is_loopback_host(host: Option<&str>) -> bool {
+    match host.map(str::trim) {
+        None | Some("") => true, // absent or empty — allow (curl / direct)
+        Some(h) => {
+            let h_lower = h.to_ascii_lowercase();
+            // Strip port. IPv6 literals `[::1]` or `[::1]:PORT` require special
+            // handling because they contain colons inside the brackets.
+            let bare = if h_lower.starts_with('[') {
+                // Extract content inside the leading `[…]`.
+                let inner = h_lower
+                    .split(']')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches('[');
+                inner.to_string()
+            } else {
+                // IPv4 or hostname: strip port after the LAST colon.
+                // `rfind` not `find` so "127.0.0.1:4242" → "127.0.0.1".
+                match h_lower.rfind(':') {
+                    Some(pos) => h_lower[..pos].to_string(),
+                    None => h_lower,
+                }
+            };
+            matches!(bare.as_str(), "127.0.0.1" | "localhost" | "::1")
         }
     }
 }
@@ -623,6 +944,7 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
 
     let mut bearer_token = None;
     let mut origin = None;
+    let mut host = None;
     let mut content_length = 0usize;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
@@ -635,6 +957,8 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
                     }
                 }
                 "origin" => origin = Some(value.to_string()),
+                // Host header: parsed for DNS-rebinding guard on GET routes.
+                "host" => host = Some(value.to_string()),
                 "content-length" => content_length = value.parse().unwrap_or(0),
                 _ => {}
             }
@@ -659,6 +983,7 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         query,
         bearer_token,
         origin,
+        host,
         body,
     })
 }
@@ -671,6 +996,7 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        421 => "Misdirected Request",
         500 => "Internal Server Error",
         _ => "OK",
     };
@@ -695,4 +1021,55 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn not_found() -> (u16, String, Vec<u8>) {
     (404, "text/plain; charset=utf-8".to_string(), b"not found".to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_host;
+
+    // ── is_loopback_host — DNS-rebinding guard ────────────────────────────────
+
+    #[test]
+    fn loopback_host_allows_absent_or_empty() {
+        // Absent / empty Host: allow — curl and direct native callers omit it.
+        assert!(is_loopback_host(None));
+        assert!(is_loopback_host(Some("")));
+        assert!(is_loopback_host(Some("   ")));
+    }
+
+    #[test]
+    fn loopback_host_accepts_ipv4_loopback() {
+        assert!(is_loopback_host(Some("127.0.0.1")));
+        assert!(is_loopback_host(Some("127.0.0.1:8080")));
+        assert!(is_loopback_host(Some("127.0.0.1:65535")));
+    }
+
+    #[test]
+    fn loopback_host_accepts_localhost_case_insensitive() {
+        assert!(is_loopback_host(Some("localhost")));
+        assert!(is_loopback_host(Some("LOCALHOST")));
+        assert!(is_loopback_host(Some("localhost:9000")));
+        assert!(is_loopback_host(Some("LOCALHOST:4242")));
+    }
+
+    #[test]
+    fn loopback_host_accepts_ipv6_loopback_literal() {
+        // Bare, with brackets, with brackets+port.
+        assert!(is_loopback_host(Some("[::1]")));
+        assert!(is_loopback_host(Some("[::1]:8080")));
+        assert!(is_loopback_host(Some("[::1]:65535")));
+    }
+
+    #[test]
+    fn loopback_host_rejects_cross_origin() {
+        assert!(!is_loopback_host(Some("evil.example.com")));
+        assert!(!is_loopback_host(Some("evil.example.com:8080")));
+        assert!(!is_loopback_host(Some("192.168.1.5")));
+        assert!(!is_loopback_host(Some("192.168.1.5:9000")));
+        // DNS-rebinding spoofs: must not match because they END with loopback tokens.
+        assert!(!is_loopback_host(Some("localhost.evil")));
+        assert!(!is_loopback_host(Some("127.0.0.1.evil")));
+        assert!(!is_loopback_host(Some("fake-localhost")));
+        assert!(!is_loopback_host(Some("not-localhost")));
+    }
 }

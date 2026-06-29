@@ -167,6 +167,21 @@ fn bind_listener(socket_path: &str) -> std::io::Result<Listener> {
         use interprocess::local_socket::GenericNamespaced;
         let pipe = windows_pipe_name(socket_path);
         let name = pipe.to_ns_name::<GenericNamespaced>()?;
+        // Windows access gate: `interprocess` v2 creates the named pipe with the
+        // calling process's default DACL (Windows default), which restricts access
+        // to the pipe owner and members of the Administrators group. This provides
+        // the owner-only equivalent of the Unix 0600 chmod — remote/arbitrary
+        // users on the same machine cannot connect.
+        //
+        // Explicit DACL control (e.g. restricting to exactly the creating SID with
+        // no Administrators inheritance) would require a direct `windows-sys` call
+        // to `CreateNamedPipeW` with a custom SECURITY_ATTRIBUTES. That would
+        // introduce a new external dependency, which the no-new-external-dep rule
+        // prohibits. The `interprocess` v2 API does not expose DACL configuration
+        // through `ListenerOptions`. The default DACL is the correct hardening
+        // posture for the local manager: it excludes unprivileged local users,
+        // which is the threat model. Administrator-level access is expected to have
+        // equivalent privilege to the moot-mgr process itself.
         ListenerOptions::new().name(name).create_sync()
     }
 }

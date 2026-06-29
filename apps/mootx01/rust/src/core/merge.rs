@@ -1,13 +1,14 @@
 //! core/merge.rs — format-dispatched client config merge (spec §4.2).
 //!
 //! Ported from Swift Installer.swift (the reference):
-//!   JSON  — parse, set `mcpServers.<server>`, write pretty + sorted keys.
-//!           Blank file → `{}`; non-JSON content → refuse (never overwrite).
+//!   JSON  — parse, set `<servers_key>.<server>` (per-client key; opencode
+//!           uses top-level `mcp`), write pretty + sorted keys. Blank file →
+//!           `{}`; non-JSON content → refuse (never overwrite).
 //!   TOML  — line-based `[mcp_servers.<server>]` table replace preserving all
 //!           other lines verbatim; JSON-corruption fingerprint → refuse.
 //!   YAML  — Continue's per-server file is written whole (it carries only the
-//!           mootx01 entry). Other YAML configs (Hermes) are refused, same as
-//!           the Swift dispatch refuses unknown formats.
+//!           mootx01 entry). Hermes shared YAML is merged line-by-line under
+//!           the `mcp_servers:` section via `merge_into_hermes_yaml`.
 //!
 //! Backups (spec §4.2): before the first modification of any EXISTING config
 //! file, copy it to `<filename>.bak-<YYYYMMDD-HHMMSS>` in the same directory.

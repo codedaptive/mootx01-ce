@@ -79,7 +79,7 @@ fn legacy_row_event_time_decoded_as_filed_at() {
     // row that carried NULL in the eventTime column.
     let id = "00000000-0000-0000-0000-000000000099";
     let store = InMemoryDrawerStore::new(NOW, None).unwrap();
-    let mut d = Drawer::new(id, "content", "wing_test", "room", "agent", NOW, "model-v1");
+    let mut d = Drawer::new(id, "content", "test-parent", "agent", NOW, "model-v1");
     // event_time is already == filed_at (== NOW) after Drawer::new().
     // This mirrors the post-decode state for a legacy NULL-eventTime row.
     assert_eq!(d.event_time, NOW);
@@ -120,13 +120,13 @@ fn fingerprint_differs_when_event_time_differs_from_filed_at() {
 
     // Two otherwise-identical drawers: one with historical event_time,
     // one with now. Fingerprints must differ (week bucket component).
-    let mut d_hist = Drawer::new("id-hist", "content", "wing", "room", "agent", NOW, "model");
+    let mut d_hist = Drawer::new("id-hist", "content", "test-parent", "agent", NOW, "model");
     d_hist.event_time = HISTORICAL;
     d_hist.udc_code = "613".to_string();
     // Fix lineage so all other block inputs are identical.
     d_hist.lineage_id = uuid::Uuid::nil();
 
-    let mut d_now = Drawer::new("id-now", "content", "wing", "room", "agent", NOW, "model");
+    let mut d_now = Drawer::new("id-now", "content", "test-parent", "agent", NOW, "model");
     d_now.event_time = NOW;
     d_now.udc_code = "613".to_string();
     d_now.lineage_id = uuid::Uuid::nil();

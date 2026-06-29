@@ -86,7 +86,8 @@ pub struct DistillationOutput {
     pub snr: f32,
     /// DeltaType if a delta feature was the dominant contributor; None for static clusters.
     pub delta_type: Option<DeltaType>,
-    /// True when a factoid was successfully produced (conf >= 0.4 and SNR gate passed).
+    /// True when a factoid was successfully produced (conf >= 0.4; intra-item
+    /// path may bypass the SNR gate).
     pub succeeded: bool,
     /// Human-readable reason for failure when succeeded == false.
     pub failure_reason: Option<String>,
@@ -118,7 +119,7 @@ impl DistillationOutput {
 /// Parser for the DIST header on "_distilled" drawers.
 ///
 /// Co-located with the pipeline because the code that writes the format owns the parser.
-/// Consumed by CognitionKit recipes (DistilledRecall, ExpandMemory) and AriaMcpKit
+/// Consumed by CognitionKit recipes (DistilledRecall, Recollect) and AriaMcpKit
 /// injection-depth post-processing.
 ///
 /// Expected content format (from DISTILLATION_DESIGN.md §1):
@@ -795,11 +796,9 @@ mod tests {
 
     // MARK: - Full pipeline run
 
-    // Five-memory cluster: Alice+CERN in 4/5 memories (df=0.8 > τ=0.6), M4 has no features.
-    // No episodic-noise features → episodic=0 → SNR=∞ under the Rust sigma formula.
-    // Note: Swift computeSNR uses sum(df) not sum(sigma), so the same cluster passes
-    // both Rust and Swift. The Rust sigma formula is more conservative; see Dp1 for
-    // parity verification between the two computeSNR implementations.
+    // Five-memory cluster: Alice+CERN in 4/5 memories (df=0.8 > τ=2/5), M4 has no features.
+    // No sub-threshold features → episodic_noise=0 → SNR=∞. Both ports use
+    // raw df for structural_signal and episodic_noise (compute_snr / computeSNR).
     fn five_memory_cluster() -> DistillationInput {
         DistillationInput::new(
             vec![

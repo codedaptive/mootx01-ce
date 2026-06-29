@@ -89,6 +89,7 @@ impl AuditLogFoldPrimitive {
                     before_lattice_anchor: None,
                     after_lattice_anchor: LatticeAnchor::new(e.udc, e.qid),
                     actor: "harness".to_string(),
+                    reason: None,
                 }
             }).collect();
 
@@ -242,6 +243,7 @@ fn validate_case(c: &VectorCase, encoder: &mut CanonicalBinaryEncoder) -> CaseRe
             before_lattice_anchor: None,
             after_lattice_anchor: LatticeAnchor::new(udc, qid),
             actor: "harness".to_string(),
+            reason: None,
         });
     }
 

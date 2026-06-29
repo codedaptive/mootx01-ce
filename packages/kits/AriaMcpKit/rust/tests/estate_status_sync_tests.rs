@@ -289,7 +289,11 @@ macro_rules! args {
 /// not tombstoned), so total = 1 and active = 0.
 #[test]
 fn rejected_memory_not_counted_as_active() {
-    let registry = EstateRegistry::new_inmemory();
+    // _bare: controlled estate — estate_status counts ALL non-erased drawers
+    // (it does not exclude seeded wing hints the way recall does), so a full
+    // provision's 7 AI_Charter_Hint drawers would inflate the active/total
+    // counts this test asserts (0 active, 1 total after reject).
+    let registry = EstateRegistry::new_inmemory_bare();
     let ledger = SurfacedRecallLedger::new();
 
     // File a memory — lands in cluster A (active state).
@@ -362,4 +366,57 @@ fn rejected_memory_not_counted_as_active() {
         body.contains("(1 total)"),
         "Total non-erased count must be 1; got:\n{body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Part 3 parity gate: Syncing direction tokens use camelCase rawValue format.
+//
+// Regression guard for the {direction:?} → {direction} fix in coordinator.rs.
+// Before the fix, Rust used Debug format (PascalCase: "Bidirectional") while
+// Swift used SyncDirection.rawValue (camelCase: "bidirectional"). The canonical
+// vocabulary in SyncEngineAPI.swift calls for camelCase — these tests lock it.
+//
+// Parity: Swift syncStateDescription(state: .syncing(direction: .bidirectional), …)
+//         → "<backend> (syncing, direction: bidirectional)"
+// ---------------------------------------------------------------------------
+
+/// Syncing direction tokens must be camelCase rawValues, not PascalCase Debug.
+/// Mirrors the canonical vocabulary in SyncEngineAPI.swift §Vocabulary contract.
+#[test]
+fn syncing_direction_tokens_are_camelcase_matching_swift_rawvalue() {
+    use convergence_kit::types::SyncDirection;
+
+    // bidirectional — was "Bidirectional" before fix, must be "bidirectional"
+    assert_eq!(
+        format_sync_state_token(&SyncState::Syncing { direction: SyncDirection::Bidirectional }, "cloudkit"),
+        "cloudkit (syncing, direction: bidirectional)",
+        "Bidirectional must use camelCase rawValue to match Swift SyncDirection.rawValue"
+    );
+
+    // pushOnly — was "PushOnly" before fix
+    assert_eq!(
+        format_sync_state_token(&SyncState::Syncing { direction: SyncDirection::PushOnly }, "cloudkit"),
+        "cloudkit (syncing, direction: pushOnly)",
+        "PushOnly must use camelCase rawValue to match Swift SyncDirection.rawValue"
+    );
+
+    // pullOnly — was "PullOnly" before fix
+    assert_eq!(
+        format_sync_state_token(&SyncState::Syncing { direction: SyncDirection::PullOnly }, "cloudkit"),
+        "cloudkit (syncing, direction: pullOnly)",
+        "PullOnly must use camelCase rawValue to match Swift SyncDirection.rawValue"
+    );
+
+    // Guard: PascalCase Debug format must NOT appear in any syncing token
+    let directions = [SyncDirection::Bidirectional, SyncDirection::PushOnly, SyncDirection::PullOnly];
+    let bad_forms = ["Bidirectional", "PushOnly", "PullOnly"];
+    for dir in &directions {
+        let token = format_sync_state_token(&SyncState::Syncing { direction: *dir }, "cloudkit");
+        for bad in &bad_forms {
+            assert!(
+                !token.contains(bad),
+                "PascalCase Debug form '{bad}' must not appear in sync token; got: {token}"
+            );
+        }
+    }
 }

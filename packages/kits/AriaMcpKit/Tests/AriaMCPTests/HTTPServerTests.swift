@@ -40,9 +40,10 @@ struct HTTPServerTests {
     }
 
     /// Bind an HTTPServer on an OS-assigned port and serve connections on a
-    /// dedicated accept thread (mirrors `HTTPServer.run`'s internals). Returns the
-    /// bound port and a stop closure; closing the listener unblocks accept so the
-    /// thread exits.
+    /// dedicated accept thread. Calls `HTTPServer.serve` directly, bypassing the
+    /// two-phase `ConcurrencyGate.tryEnqueue()` accept-thread path in `run()`.
+    /// Returns the bound port and a stop closure; closing the listener unblocks
+    /// accept so the thread exits.
     ///
     /// `topologyReader`: optional closure forwarded to `HTTPServer.serve`. Pass a
     /// pre-built payload closure for tests that exercise GET /api/graph with a live
@@ -56,7 +57,7 @@ struct HTTPServerTests {
         let reader = topologyReader
         let thread = Thread {
             while let cfd = POSIXSocket.acceptOne(listenFD) {
-                Task { await HTTPServer.serve(cfd, dispatcher: dispatcher, maxBodyBytes: 4 * 1024 * 1024, topologyReader: reader) }
+                Task { await HTTPServer.serve(cfd, dispatcher: dispatcher, maxBodyBytes: 4 * 1024 * 1024, topologyReader: reader, sseGate: globalSSEConcurrencyGate) }
             }
         }
         thread.name = "aria-mcp.http.test.accept"
@@ -277,6 +278,23 @@ struct HTTPServerTests {
         #expect(result.status == 403)
     }
 
+    /// Loopback-prefix spoofing: attacker registers `localhost.evil` (or
+    /// `127.0.0.1.evil`) as a domain that DNS-resolves to 127.0.0.1. A page
+    /// served from that domain carries it as Origin. The old prefix check would
+    /// allow this; the URL-parsed host comparison rejects it.
+    @Test func httpLoopbackPrefixSpoofOriginIsRejected() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let reqBody = #"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#
+        for origin in ["http://localhost.evil", "http://127.0.0.1.evil", "http://[::1].evil",
+                       "https://localhost.attacker.test", "http://localhost@evil.example"] {
+            let result = try #require(httpRequest(port: port, method: "POST", body: reqBody, origin: origin))
+            #expect(result.status == 403, "spoofed origin \(origin) must be rejected")
+        }
+    }
+
     @Test func httpLoopbackOriginIsAllowed() async throws {
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(dispatcher)
@@ -314,7 +332,7 @@ struct HTTPServerTests {
     ///
     /// The test verifies the full shape: the response head bytes arrive, the
     /// Content-Type is `text/event-stream`, the connection is `keep-alive`, and
-    /// the `: heartbeat` comment line arrives within the read timeout (200 ms).
+    /// the `: heartbeat` comment line arrives within the read timeout (500 ms).
     @Test func sseStreamSendsHeadAndHeartbeat() throws {
         // Build a real loopback socketpair-equivalent: bind port 0, connect the
         // client, then accept the server side.

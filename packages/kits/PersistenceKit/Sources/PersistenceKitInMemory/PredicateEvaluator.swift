@@ -97,6 +97,11 @@ enum TypedValueComparator {
             return x == y ? 0 : (x < y ? -1 : 1)
         case (.uuid(let x), .uuid(let y)):
             return x.uuidString == y.uuidString ? 0 : (x.uuidString < y.uuidString ? -1 : 1)
+        case (.hlc(let x), .hlc(let y)):
+            // HLC.packed provides a total order over (physicalTime, logicalCount, nodeID).
+            let xp = x.packed
+            let yp = y.packed
+            return xp == yp ? 0 : (xp < yp ? -1 : 1)
         default:
             return nil
         }

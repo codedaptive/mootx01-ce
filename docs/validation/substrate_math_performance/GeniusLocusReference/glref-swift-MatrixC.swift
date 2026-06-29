@@ -9,9 +9,9 @@
 //
 // where N_rows is the count of rows in the estate excluding
 // tombstoned rows. C is derived (not independently mutated); it
-// is recomputed periodically (cookbook recommends weekly,
-// realistic for personal estates) by the dreaming daemon, or on
-// demand by `derive(from:)`.
+// is derived on demand by `derive(from:nRows:)`. The dreaming
+// daemon integration is not implemented in this reference file;
+// the MatrixC decay adapter in ReferenceRuleExecutor is a no-op.
 //
 // Storage: flat [Float] of length 216. Float32 per cookbook
 // (sufficient resolution for marginals; Float64 would be wasteful

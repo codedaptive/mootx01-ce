@@ -12,6 +12,8 @@
 //   6–13. each of the 8 lag bucket boundaries
 //   14. watermark advances correctly through multiple new entries
 //   15. determinism — same input, same output across two calls
+//   16. multiple field coords per entry — cross-product delta count
+//   17. lagBucket function canonical (matches MatrixTier.lagBuckets)
 
 import Testing
 @testable import SubstrateML

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::{EstateCoordinator, EstateHandle};
+use genius_locus_kit::{EstateCoordinator, EstateHandle, Drawer};
 use locus_kit::{
     default_wings::DEFAULT_WING_NAME,
     drawer_operational::CaptureChannel,
@@ -29,6 +29,15 @@ fn open_one() -> (EstateCoordinator, EstateHandle) {
         .open(store, OwnerCredentials::new("wing-test-owner"), 0, 100)
         .expect("open");
     (coord, handle)
+}
+
+/// Resolve (wing_name, room_name) for a drawer via the coordinator's
+/// node-tree lookup (ADR-017: Drawer no longer has wing/room fields).
+fn resolve_wing(coord: &EstateCoordinator, handle: &EstateHandle, drawer: &Drawer) -> String {
+    let names = coord.resolve_drawer_node_names(handle, &[drawer.parent_node_id.clone()]);
+    names.get(&drawer.parent_node_id)
+        .map(|(wing, _room)| wing.clone())
+        .unwrap_or_default()
 }
 
 /// Build a `locus_kit::CaptureFrame` with an optional wing.
@@ -54,8 +63,9 @@ fn glk_capture_explicit_wing_drawer_lands_in_wing() {
     let (coord, handle) = open_one();
     let frame = frame_with_wing("user canon content via GLK", Some("User Canon"));
     let drawer = coord.capture(&handle, frame, NOW).expect("capture");
+    let wing = resolve_wing(&coord, &handle, &drawer);
     assert_eq!(
-        drawer.wing, "User Canon",
+        wing, "User Canon",
         "GLK coordinator capture must thread the explicit wing to the stored drawer"
     );
 }
@@ -65,7 +75,8 @@ fn glk_capture_personal_wing_drawer_lands_in_personal() {
     let (coord, handle) = open_one();
     let frame = frame_with_wing("personal diary entry via GLK", Some("Personal"));
     let drawer = coord.capture(&handle, frame, NOW).expect("capture");
-    assert_eq!(drawer.wing, "Personal");
+    let wing = resolve_wing(&coord, &handle, &drawer);
+    assert_eq!(wing, "Personal");
 }
 
 // -----------------------------------------------------------------------
@@ -77,8 +88,9 @@ fn glk_capture_none_wing_drawer_lands_in_default_wing() {
     let (coord, handle) = open_one();
     let frame = frame_with_wing("agentic capture via GLK", None);
     let drawer = coord.capture(&handle, frame, NOW).expect("capture");
+    let wing = resolve_wing(&coord, &handle, &drawer);
     assert_eq!(
-        drawer.wing, DEFAULT_WING_NAME,
+        wing, DEFAULT_WING_NAME,
         "None wing must fall through to '{}'",
         DEFAULT_WING_NAME
     );
@@ -98,8 +110,9 @@ fn glk_capture_new_frame_default_wing_unchanged() {
     );
     assert!(frame.wing.is_none(), "CaptureFrame::new() must set wing: None");
     let drawer = coord.capture(&handle, frame, NOW).expect("capture");
+    let wing = resolve_wing(&coord, &handle, &drawer);
     assert_eq!(
-        drawer.wing, "Agentic Memory",
+        wing, "Agentic Memory",
         "omitting wing must preserve the 'Agentic Memory' default"
     );
 }

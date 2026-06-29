@@ -42,10 +42,10 @@ public struct TrustGroundedOutput: Sendable {
 /// new substrate, zero new NeuronKit surface. Read-only (B-6, I-6).
 ///
 /// Trust signal: `sourceType` is used (it is settable at capture and
-/// varies), not `confirmation` — the user-confirmed tier can only be
-/// reached through the confirm/mutate verb, which is Brain-layer until
-/// that layer ships. When confirmation goes live, a user-confirmed
-/// boost folds into `trustRank` the same way.
+/// varies). The `confirmation` tier is intentionally ignored by this recipe;
+/// it ranks only by `sourceType` and confidence. The confirm/mutate verb is
+/// live in LocusKit/GeniusLocusKit, but incorporating it into `trustRank`
+/// is deferred.
 ///
 /// Swift version of `run_trust_grounded_synthesis`.
 public enum TrustLens {

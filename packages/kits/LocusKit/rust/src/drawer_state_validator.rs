@@ -4,11 +4,10 @@
 //! owns substrate math; LocusKit consumes).
 //!
 //! F14 cascade (2026-05-27): replaced LocusKit's parallel `TransitionVerb`
-//! enum and `is_legal` table (which permitted 4 transitions cookbook §9
-//! disallows — `contested → superseded`, `withdrawn/expired/superseded → active`,
-//! `any → accepted`, and `any → tombstoned` including the S-3 violation
-//! `accepted → tombstoned`). All four tighten under SubstrateLib's
-//! transition map, which encodes the cookbook §9.2 spec exactly.
+//! enum and `is_legal` table. Now delegates to SubstrateLib's transition
+//! map per cookbook §9.2. Revive paths (`withdrawn/expired → active`) are
+//! legal here; lineage-conflict checks above this validator may block them
+//! for other reasons. `accepted → tombstoned` (S-3) remains forbidden.
 //!
 //! Pure function — no I/O, no side effects. Called by
 //! `DrawerStore::mutate_state` before any storage write so an illegal

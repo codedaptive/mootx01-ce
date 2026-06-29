@@ -135,4 +135,34 @@ struct BiasTests {
             try NeuronKit.learnedPreference(records: records)
         }
     }
+
+    // Part 7 overflow guard: negative endorsements / dismissals must not produce
+    // a non-positive PairwiseOutcome.count, which would defeat the neutral prior
+    // and could drive Bradley-Terry scores to ±Inf or NaN.
+    // The fix: clamp max(0, x) + 1 ensures count ≥ 1 even for corrupted records.
+    @Test("learnedPreference: negative endorsements/dismissals clamped to zero before adding prior")
+    func learnedPreferenceNegativeCountsClamped() throws {
+        // One room with negative counts; without the guard, count for the winner
+        // outcome would be (-5 + 1) = -4 and for the loser outcome (-10 + 1) = -9 —
+        // both non-positive, contributing no tally weight. With only the +1
+        // prior elided, the BT fitter may produce NaN/Inf for the corrupted room.
+        let records = [
+            (label: "corrupted", endorsements: -5, dismissals: -10),
+            (label: "normal", endorsements: 3, dismissals: 1),
+        ]
+        // Must not throw (no selfPairing), must not produce NaN/Inf scores.
+        let prefs = try NeuronKit.learnedPreference(records: records)
+        #expect(prefs.count == 2, "both rooms must appear in the result")
+        for pref in prefs {
+            #expect(pref.strength.isFinite,
+                "strength must be finite even with corrupted negative counts (label: \(pref.label))")
+            #expect(!pref.strength.isNaN,
+                "strength must not be NaN for corrupted negative counts (label: \(pref.label))")
+        }
+        // The corrupted room's raw counts are preserved in PreferenceStrength as-is —
+        // clamping happens only inside the tally construction, not in the output.
+        let corrupted = prefs.first { $0.label == "corrupted" }
+        #expect(corrupted?.endorsements == -5, "raw endorsement count preserved in PreferenceStrength")
+        #expect(corrupted?.dismissals == -10, "raw dismissal count preserved in PreferenceStrength")
+    }
 }

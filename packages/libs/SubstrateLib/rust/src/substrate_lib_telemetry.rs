@@ -23,16 +23,16 @@
 // All names and tag keys in this file must exactly match the Swift
 // `SubstrateLibMetric` constants. The test suite validates parity.
 //
-//   substratelib.audit_gate.admit_count   — per successful AuditGate.admit
-//   substratelib.audit_gate.reject_count  — per rejected AuditGate.admit
-//   substratelib.verb.capture_count       — per successful Substrate::capture
-//   substratelib.verb.mutate_count        — per successful Substrate::mutate
-//   substratelib.verb.withdraw_count      — per successful Substrate::withdraw
-//   substratelib.verb.expunge_count       — per successful Substrate::expunge
-//   substratelib.verb.recall_count        — per Substrate::recall call
-//   substratelib.verb.reanchor_count      — per successful Substrate::reanchor
-//   substratelib.write_gate.admitted_count — per admitted write (AuditGate)
-//   substratelib.write_gate.rejected_count — per rejected write (AuditGate)
+//   substratelib.verb.capture_count       — per successful Substrate::capture (wired)
+//   substratelib.verb.mutate_count        — per successful Substrate::mutate (wired)
+//   substratelib.verb.withdraw_count      — per successful Substrate::withdraw (wired)
+//   substratelib.verb.expunge_count       — per successful Substrate::expunge (wired)
+//   substratelib.verb.recall_count        — per Substrate::recall call (wired)
+//   substratelib.verb.reanchor_count      — per successful Substrate::reanchor (wired)
+//   substratelib.audit_gate.admit_count   — helper defined; no production callers yet
+//   substratelib.audit_gate.reject_count  — helper defined; no production callers yet
+//   substratelib.write_gate.admitted_count — helper defined; no production callers yet
+//   substratelib.write_gate.rejected_count — helper defined; no production callers yet
 
 use intellectus_lib::{StatSample, report};
 

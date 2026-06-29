@@ -1,8 +1,9 @@
 // FederationInboundEventTests.swift
 //
 // Tests for FederationSyncEngine inbound event dispatch.
-// Verifies that applyInbound routes insert, update, and delete
-// records correctly through each conflict policy.
+// Covers insert/update replication through the default LWW setup
+// and delete behavior across several policies; does not exercise
+// insert and update through every conflict policy.
 
 import Testing
 import Foundation

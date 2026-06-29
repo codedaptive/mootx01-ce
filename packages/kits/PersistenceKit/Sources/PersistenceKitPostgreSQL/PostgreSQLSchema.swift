@@ -117,7 +117,12 @@ enum PostgreSQLSchemaEmitter {
     }
 
     static func addColumnSQL(table: String, column: ColumnDeclaration) -> String {
-        "ALTER TABLE \"\(table)\" ADD COLUMN \(columnSQL(column))"
+        // IF NOT EXISTS makes the operation idempotent (mirrors CREATE TABLE IF
+        // NOT EXISTS): the fresh-DB path creates every table at the latest schema
+        // before replaying migrations from version 0, so an addColumn migration
+        // may target a column that already exists. PostgreSQL supports the guard
+        // natively; SQLite/InMemory probe the existing columns instead.
+        "ALTER TABLE \"\(table)\" ADD COLUMN IF NOT EXISTS \(columnSQL(column))"
     }
 
     static func dropColumnSQL(table: String, columnName: String) -> String {

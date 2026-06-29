@@ -125,8 +125,8 @@ struct GateRejectionMessageTests {
     @Test func smokeRejectDispatch() async throws {
         let dispatcher = try await makeDispatcher()
         let id = try await fileActiveMemory(dispatcher)
-        // Use direct dispatch to run_update_memory rather than the top-level
-        // dispatch which involves the full VerbError catch path.
+        // Dispatches via the top-level tools/call path (moot_update_memory),
+        // exercising the full VerbError catch path.
         let result = try await dispatcher.dispatch(
             name: "moot_update_memory",
             arguments: .object([

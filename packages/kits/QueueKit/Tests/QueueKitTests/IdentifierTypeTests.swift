@@ -3,7 +3,9 @@
 // Part 2 peer coverage (QK-TEST-01): source types in Job.swift that
 // had no dedicated suite after the XCTest→swift-testing conversion —
 // StreamID, SessionID, ToolName, and MissionContext (QUEUEKIT_SPEC §7).
-// All deterministic: no filesystem, no timing, no shared state.
+// No filesystem, no timing, no shared state. SessionID.mint() produces
+// fresh UUID values per call; assertions check stable properties
+// (lowercase UUID format, uniqueness) rather than fixed values.
 
 import Testing
 import Foundation

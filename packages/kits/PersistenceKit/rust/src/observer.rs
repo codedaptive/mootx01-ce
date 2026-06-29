@@ -17,6 +17,7 @@ use crate::types::{RowKey, TypedValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
+use substrate_types::content_hash::ContentHash;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -69,6 +70,39 @@ pub struct BlobChange {
     pub bytes: Option<Vec<u8>>,
 }
 
+// MARK: - Dirty-chain event (ADR-017 §16 / NT-P2)
+
+/// A dirty-chain notification emitted by the hash-on-write hook.
+///
+/// When a row in a hashable table is written (insert, update, or upsert),
+/// the `HashingRowStore` computes the row's content hash and emits this
+/// event carrying the three-identifier dirty chain: the changed row's UUID
+/// and its two ancestors in the Merkle containment hierarchy. These IDs are
+/// the minimum payload for dirty-chain incremental re-rooting (NT-L3).
+///
+/// PersistenceKit does not assign meaning to the parent IDs — the consuming
+/// kit's `ParentChainProvider` callback supplies them. A consumer that has
+/// no parent chain (or whose table is not hashable) never sees this event.
+///
+/// Consumed by:
+/// - CachingRowStore (NT-P4) to invalidate cached Merkle roots
+/// - Merkle rollup (NT-L3) to recompute affected subtrees
+#[derive(Debug, Clone)]
+pub struct DirtyChainEvent {
+    /// The row that was written. Named `changed_row_id` (not `changed_drawer_id`)
+    /// because PersistenceKit operates on generic rows — LocusKit maps this
+    /// to drawer/node semantics at its own layer.
+    pub changed_row_id: uuid::Uuid,
+    /// The immediate parent node in the containment hierarchy.
+    pub parent_node_id: uuid::Uuid,
+    /// The grandparent node in the containment hierarchy.
+    pub grandparent_node_id: uuid::Uuid,
+    /// The content hash computed by the hash-on-write hook.
+    pub content_hash: ContentHash,
+    /// The table the row belongs to.
+    pub table: String,
+}
+
 // MARK: - StorageObserver trait
 
 pub trait StorageObserver: Send + Sync {
@@ -91,6 +125,17 @@ pub trait StorageObserver: Send + Sync {
         // Default implementation: return a disconnected receiver.
         // Backends that support blob observation override this method.
         let (_tx, rx) = channel::<BlobChange>();
+        rx
+    }
+
+    /// Subscribe to dirty-chain events from hash-on-write hooks.
+    ///
+    /// Default implementation returns a disconnected (already-closed)
+    /// receiver — backward-compatible for observers that predate
+    /// hash-on-write. Observers that support hash-on-write override
+    /// this to deliver live events.
+    fn observe_dirty_chain(&self) -> Receiver<DirtyChainEvent> {
+        let (_tx, rx) = channel::<DirtyChainEvent>();
         rx
     }
 }
@@ -214,5 +259,37 @@ impl ObserverHub {
             i += 1;
             live
         });
+    }
+}
+
+// MARK: - DirtyChainHub
+
+/// Channel multiplexer for dirty-chain events. Parallel to `BlobObserverHub`
+/// but for `DirtyChainEvent` notifications. Used by `HashingRowStore` to fan
+/// out hash-on-write dirty-chain events to all active subscribers (Merkle
+/// rollup, cache invalidation).
+pub struct DirtyChainHub {
+    subscribers: Mutex<Vec<Sender<DirtyChainEvent>>>,
+}
+
+impl DirtyChainHub {
+    pub fn new() -> Self {
+        DirtyChainHub {
+            subscribers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Register a new subscriber and return its receiver.
+    pub fn subscribe(&self) -> Receiver<DirtyChainEvent> {
+        let (tx, rx) = channel();
+        self.subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Emit a dirty-chain event to all active subscribers. Closed channels
+    /// are pruned on each emit (same pattern as `ObserverHub::emit`).
+    pub fn emit(&self, event: DirtyChainEvent) {
+        let mut subs = self.subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(event.clone()).is_ok());
     }
 }

@@ -5,10 +5,9 @@
 // shape to the Rust version's `LatticeAnchorInference` struct so
 // callers can serialize and conformance-test cross-language.
 //
-// Intended for future use by GeniusLocusKit's capture verb path
-// and the standing-signal enrichment scheduler (GLK-04). That
-// wiring does not exist yet: GeniusLocusKit does not import
-// NeuronKit, so nothing consumes this struct today. When GLK-04
+// Consumed by `NeuronKit.inferLatticeAnchor(_:)` as the return type.
+// The GLK capture verb path and the standing-signal enrichment scheduler
+// (GLK-04) have not yet wired in this type directly. When GLK-04
 // wires it in, the enrichment status bits are designed to be OR'd
 // into the provenance column's bits 36-41 per cookbook section 2.5.
 

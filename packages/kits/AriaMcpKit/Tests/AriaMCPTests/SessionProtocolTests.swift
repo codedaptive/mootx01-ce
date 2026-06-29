@@ -3,7 +3,7 @@
 // Tests for the MCP-INT-03 session orientation protocol:
 //   - estate_status always includes the static protocol block
 //   - estate_status teachme:true returns the full nine-tier orientation guide
-//   - moot_list_lenses returns the full cognition menu (23 tools)
+//   - moot_list_lenses returns the full cognition menu (27 tools)
 //   - moot_list_lenses teachme:true returns the teachme guide, not the menu
 //   - protocol block is identical across consecutive calls (static invariant)
 

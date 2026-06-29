@@ -13,7 +13,7 @@ pub use api::{
     SubscriptionID, EMISSION_CLASS_TAGS,
 };
 pub use schedule::SchedulerError;
-pub use serial_lane::{CoordinatorDispatcher, Dispatcher, SerialLaneScheduler};
+pub use serial_lane::{CoordinatorDispatcher, Dispatcher, SerialLaneScheduler, SIGNAL_STREAM_ID};
 // Test-only stub dispatcher — compiled out of production (see serial_lane.rs).
 // Reachable from integration tests via the `test-seams` feature.
 #[cfg(any(test, feature = "test-seams"))]

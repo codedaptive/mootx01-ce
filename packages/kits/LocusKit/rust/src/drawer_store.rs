@@ -93,6 +93,9 @@ use crate::recall_trace_item::RecallTraceItem;
 use crate::source_catalog_entry::SourceCatalogEntry;
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::tunnel::Tunnel;
+use persistence_kit::storage::Storage;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use substrate_lib::row_state::RowVerb;
 use substrate_types::fingerprint256::Fingerprint256;
 
@@ -112,6 +115,36 @@ use substrate_types::fingerprint256::Fingerprint256;
 /// `DrawerStoreCore`) — override every method.
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
+    // -----------------------------------------------------------------
+    // Storage access (ADR-017 NT-L2)
+    // -----------------------------------------------------------------
+
+    /// The underlying storage backing this store. Used by Estate to
+    /// construct a NodeStore over the same storage. Returns `None` by
+    /// default; concrete production stores override.
+    fn storage(&self) -> Option<Arc<dyn Storage>> {
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Node-name resolution (ADR-017)
+    // -----------------------------------------------------------------
+
+    /// Resolve `parent_node_id` values to `(wing_name, room_name)` pairs
+    /// by querying the nodes table. Used by the bitmap evaluator and
+    /// estate verbs to resolve display names after ADR-017 removed
+    /// wing/room from the Drawer struct.
+    ///
+    /// Mirrors Swift `DrawerStore.resolveNodeNames(parentNodeIds:)`.
+    /// The default returns an empty map; concrete stores that hold a
+    /// node tree override this.
+    fn resolve_node_names(
+        &self,
+        _parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        Ok(BTreeMap::new())
+    }
+
     // -----------------------------------------------------------------
     // Manifest (LP-1B contract, retained verbatim)
     // -----------------------------------------------------------------
@@ -145,8 +178,8 @@ pub trait DrawerStore: Send + Sync {
     /// Insert a drawer. When the drawer's `lineage_id` matches an
     /// active predecessor, the insert runs as a supersession cascade
     /// per spec § 6.2 / § 6.3: capture the new drawer through the
-    /// gate (a genesis `AuditEvent`), flip the predecessor's state
-    /// nibble to `Superseded` via
+    /// gate (a genesis `AuditEvent`), flip the predecessor's 6-bit
+    /// state field to `Superseded` via
     /// `mutate_state(State::Superseded, RowVerb::Supersede)` (which
     /// appends one sealed `AuditEvent`), and file a directional
     /// `supersedes` tunnel. Otherwise a plain gated capture.
@@ -332,6 +365,65 @@ pub trait DrawerStore: Send + Sync {
         Ok(rows)
     }
 
+    // -----------------------------------------------------------------
+    // P4-secfix: DESC-ordered bounded scan variants.
+    //
+    // The recall non-pruning path uses a bounded scan with RECALL_CANDIDATE_CAP
+    // (256) rows. When ordered ASC, an estate with >256 drawers permanently
+    // excludes the newest content from recall — the 256 oldest drawers fill the
+    // candidate window and everything filed after drawer #256 is unreachable.
+    // These DESC variants ensure the cap retains the NEWEST candidates.
+    //
+    // Default impls derive from the ASC counterparts (correct for all backends).
+    // SQLite, Postgres, and InMemory override with efficient ORDER BY filed_at
+    // DESC SQL so the DESC scan does O(cap) I/O, not O(estate)+reverse.
+    // The Arc blanket forwards both methods so Arc<dyn DrawerStore> estates
+    // (GLK's composited estate) work correctly.
+    // -----------------------------------------------------------------
+
+    /// Bounded full-corpus scan ordered by `filed_at` DESCENDING (newest first).
+    ///
+    /// P4-secfix: recall non-pruning path; ensures the bounded candidate window
+    /// retains the most-recent drawers rather than the oldest 256. Mirrors Swift
+    /// `DrawerStore.allDrawers(hydrationLevel:limit:direction: .descending)`.
+    ///
+    /// Default derives from [`all_drawers_bounded`](Self::all_drawers_bounded)
+    /// by loading the full ASC result and reversing; backends override with a
+    /// true DESC SQL query for O(cap) I/O.
+    fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
+        // Load the full (unbounded) set and reverse to get DESC order.
+        // `all_drawers()` uses (filed_at ASC, id ASC) compound ordering
+        // (c-recall-portable fix; id is the declared TEXT primary key,
+        // portable to PostgreSQL where rowid is undefined), so `.reverse()`
+        // yields exactly (filed_at DESC, id DESC) — a deterministic total
+        // order that is the byte-for-byte reverse of the ASC result for any
+        // fixed dataset. This is correct but O(estate) — backends
+        // (DrawerStoreCore) override with an efficient SQL ORDER BY DESC,
+        // LIMIT query for O(cap) I/O.
+        let mut all = self.all_drawers()?;
+        all.reverse();
+        Ok(match limit {
+            Some(n) => all.into_iter().take(n).collect(),
+            None => all,
+        })
+    }
+
+    /// Bounded no-blob full-corpus scan ordered by `filed_at` DESCENDING.
+    ///
+    /// P4-secfix projected variant: same as [`all_drawers_bounded_desc`] but
+    /// clears content (mirrors Swift `.structured` hydration). Default derives
+    /// from `all_drawers_bounded_desc`; backends override for efficiency.
+    fn all_drawers_bounded_projected_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let mut rows = self.all_drawers_bounded_desc(limit)?;
+        for d in &mut rows {
+            d.content = String::new();
+        }
+        Ok(rows)
+    }
+
     /// Batch-insert a slice of recall-trace rows in a single operation.
     ///
     /// Replaces the per-drawer `insert_recall_trace` loop that wrote one
@@ -419,7 +511,7 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Mutate a drawer's state (bits 0–3 of adjective_bitmap),
+    /// Mutate a drawer's state (bits 0–5 of adjective_bitmap),
     /// validating the transition against the spec § 6.2 legal-graph
     /// before any write. Illegal transitions return
     /// `LocusKitError::DisciplineViolation` and leave the row and
@@ -438,9 +530,23 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Expunge a drawer: tombstone the state, set the
-    /// `dreaming_recalc_required` worklist marker (adjective bit 26)
-    /// synchronously, zero the content blob, and stamp `tombstonedAt` — all in
+    /// Return the ids of every drawer sharing the same lineage chain as
+    /// the drawer identified by `drawer_id`.
+    ///
+    /// The lineage chain is all rows whose `lineageID` column matches the
+    /// target drawer's `lineageID`. No state filter — active, superseded,
+    /// and tombstoned rows are all included. The target drawer's own id
+    /// is included in the result.
+    ///
+    /// Returns an empty vec when `drawer_id` does not exist.
+    fn lineage_chain(&self, _drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "lineage_chain not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Expunge a drawer and all its lineage siblings: tombstone the state,
+    /// synchronously zero the content blob, and stamp `tombstonedAt` — all in
     /// one transaction. Cookbook §10.5 storage-layer postconditions. Aggregates
     /// untouched per §9.5.1. The cross-kit RAG vector delete is GLK's
     /// orchestration responsibility.
@@ -602,6 +708,117 @@ pub trait DrawerStore: Send + Sync {
     }
 
     // -----------------------------------------------------------------
+    // Tunnel retirement (T13 / ADR-021 Phase 7)
+    // -----------------------------------------------------------------
+
+    /// All non-tombstoned, non-retired tunnels estate-wide, ordered by `filed_at`.
+    ///
+    /// The active-edge view: retired tunnels (bit 13 of `operational_bitmap` set)
+    /// are excluded so that OMEGA retirement removes a tunnel from the dreaming
+    /// suppression set — allowing a later co-recall to re-propose it. Full history
+    /// (including retired tunnels) remains reachable via `all_tunnels()`.
+    ///
+    /// Default impl fetches `all_tunnels()` and filters in-memory: the bitmap
+    /// filter is not expressible in the StoragePredicate DSL. Backends may
+    /// override if a SQL-level filter is preferred.
+    ///
+    /// Mirrors Swift `DrawerStore.allActiveTunnels()`.
+    fn all_active_tunnels(&self) -> Result<Vec<Tunnel>, LocusKitError> {
+        Ok(self
+            .all_tunnels()?
+            .into_iter()
+            .filter(|t| !t.is_retired())
+            .collect())
+    }
+
+    /// Flip bit 13 of `operational_bitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Fetches the current tunnel, sets `IS_RETIRED_BIT`, and persists the updated
+    /// bitmap. Returns `TunnelNotFound` if no non-tombstoned tunnel with `tunnel_id`
+    /// exists.
+    ///
+    /// Audit: the caller (NeuronKit via the GLK seam) is responsible for writing a
+    /// diary entry that records the retirement decision and OMEGA cycle context.
+    /// This method performs only the bitmap update (B-1 compliant: NeuronKit reaches
+    /// this through the GLK seam, never directly).
+    ///
+    /// Reversible: call `unretire_tunnel` to clear bit 13 when subsequent co-recall
+    /// reinforces the endpoints again.
+    ///
+    /// Mirrors Swift `DrawerStore.retireTunnel(id:changedBy:now:)`.
+    fn retire_tunnel(
+        &self,
+        _tunnel_id: &str,
+        _changed_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "retire_tunnel not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Clear bit 13 of `operational_bitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Reverses a prior `retire_tunnel`. The tunnel re-enters active reads
+    /// (`all_active_tunnels`) and the dreaming suppression set once persisted.
+    /// Returns `TunnelNotFound` if no non-tombstoned tunnel with `tunnel_id` exists.
+    ///
+    /// Mirrors Swift `DrawerStore.unretireTunnel(id:changedBy:now:)`.
+    fn unretire_tunnel(
+        &self,
+        _tunnel_id: &str,
+        _changed_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "unretire_tunnel not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Outline helpers (ADR-017 §11, NT-L5)
+    // -----------------------------------------------------------------
+
+    /// Children of a parent drawer in the outline graph, sorted by
+    /// `order_key` ascending. Returns only active (non-tombstoned)
+    /// `Parent` tunnels where `target_drawer_id == parent_drawer_id`.
+    fn outline_children(&self, _parent_drawer_id: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "outline_children not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Walk parent edges from `drawer_id` to the outline root.
+    /// Returns the ancestor chain ordered root-first (deepest
+    /// ancestor at index 0, `drawer_id` is NOT included).
+    fn outline_ancestors(&self, _drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "outline_ancestors not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Move a child drawer under a new parent in the outline graph.
+    /// Tombstones the existing `Parent` tunnel from `child_id` (if
+    /// any) and creates a new one pointing at `new_parent_id` with
+    /// the given `order_key`. Pass `None` for `new_parent_id` to
+    /// make the child an outline root.
+    #[allow(clippy::too_many_arguments)]
+    fn reparent_drawer(
+        &self,
+        _child_id: &str,
+        _new_parent_id: Option<&str>,
+        _order_key: f64,
+        _wing: &str,
+        _room: &str,
+        _added_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "reparent_drawer not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    // -----------------------------------------------------------------
     // KGFact CRUD
     // -----------------------------------------------------------------
 
@@ -633,9 +850,10 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// All facts from a source drawer whose state cluster is below 7
-    /// (excludes the rejected/accepted/tombstoned post-resolution
-    /// states), ordered by `filed_at` ascending.
+    /// All facts from a source drawer whose state cluster is below
+    /// `RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW` (raw 16; excludes
+    /// Cluster-B retired states and Cluster-C terminal states),
+    /// ordered by `filed_at` ascending.
     ///
     /// ## Default impl — fail-loud, never silently empty
     ///
@@ -1068,6 +1286,29 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Zero the `content` column for every row in the `drawers` table.
+    ///
+    /// Called by `GLKCoordinator::destroy` to erase all drawer content blobs
+    /// from LocusKit's SQLite storage as part of the estate destruction
+    /// sequence (destruction contract, secfix/ws2-coredelete §Cluster E).
+    /// Must be called BEFORE `close()` so the storage connection is still
+    /// open when the bulk UPDATE runs.
+    ///
+    /// Does NOT delete the manifest, audit events, or other metadata tables —
+    /// those remain as a forensic record. The SQLite file itself is removed by
+    /// the application layer (moot-mgr) after the GLK destroy call returns.
+    ///
+    /// ## Default impl — fail-loud
+    ///
+    /// Backends that do not override this return `DatabaseUnavailable` rather
+    /// than silently skipping the wipe. A silent no-op would leave content
+    /// blobs in place, violating the destruction contract.
+    fn wipe_all_content(&self) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "wipe_all_content not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Append an `"expungeOrphan"` audit event synthesized from the drawer's
     /// current on-disk state. Used by `run_expunge_integrity_sweep` when the
     /// original step-1 gate event is unavailable (crash-window recovery).
@@ -1173,8 +1414,9 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// All kg-facts estate-wide where the state cluster is below 7
-    /// (excludes rejected/accepted/tombstoned post-resolution states),
+    /// All kg-facts estate-wide whose state cluster is below
+    /// `RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW` (raw 16; excludes
+    /// Cluster-B retired states and Cluster-C terminal states),
     /// ordered by `filed_at` ascending. Mirrors `kg_facts_for_drawer`
     /// but without the source-drawer predicate.
     ///
@@ -1420,6 +1662,15 @@ pub trait DrawerStore: Send + Sync {
 // concrete object either way.
 #[allow(clippy::too_many_arguments)]
 impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
+    fn storage(&self) -> Option<Arc<dyn Storage>> {
+        self.as_ref().storage()
+    }
+    fn resolve_node_names(
+        &self,
+        parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        self.as_ref().resolve_node_names(parent_node_ids)
+    }
     fn read_manifest(&self) -> Result<ManifestValues, LocusKitError> {
         self.as_ref().read_manifest()
     }
@@ -1455,6 +1706,15 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         limit: Option<usize>,
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().all_drawers_bounded_projected(limit)
+    }
+    fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().all_drawers_bounded_desc(limit)
+    }
+    fn all_drawers_bounded_projected_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().all_drawers_bounded_projected_desc(limit)
     }
     fn drawer_ids(&self) -> Result<Vec<RowID>, LocusKitError> {
         self.as_ref().drawer_ids()
@@ -1499,6 +1759,9 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.as_ref().mutate_state(drawer_id, new_state, via, changed_by, reason, now)
+    }
+    fn lineage_chain(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.as_ref().lineage_chain(drawer_id)
     }
     fn expunge_gated(
         &self,
@@ -1554,6 +1817,15 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn all_tunnels(&self) -> Result<Vec<Tunnel>, LocusKitError> {
         self.as_ref().all_tunnels()
+    }
+    fn all_active_tunnels(&self) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.as_ref().all_active_tunnels()
+    }
+    fn retire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
+        self.as_ref().retire_tunnel(tunnel_id, changed_by, now)
+    }
+    fn unretire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
+        self.as_ref().unretire_tunnel(tunnel_id, changed_by, now)
     }
     fn add_kg_fact(&self, fact: &KGFact) -> Result<(), LocusKitError> {
         self.as_ref().add_kg_fact(fact)
@@ -1761,5 +2033,41 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     ) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError>
     {
         self.as_ref().get_container_fingerprint(wing, room)
+    }
+    // P5-secfix: six methods whose trait defaults return a hard error were missing
+    // from the Arc<dyn DrawerStore> blanket impl, so callers using the Arc surface
+    // always got DatabaseUnavailable instead of delegating to the concrete backend.
+    fn living_successor_in_lineage(
+        &self,
+        lineage_id: &str,
+        excluding_id: &str,
+    ) -> Result<Option<String>, LocusKitError> {
+        self.as_ref().living_successor_in_lineage(lineage_id, excluding_id)
+    }
+    fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.as_ref().outline_children(parent_drawer_id)
+    }
+    fn outline_ancestors(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.as_ref().outline_ancestors(drawer_id)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn reparent_drawer(
+        &self,
+        child_id: &str,
+        new_parent_id: Option<&str>,
+        order_key: f64,
+        wing: &str,
+        room: &str,
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref()
+            .reparent_drawer(child_id, new_parent_id, order_key, wing, room, added_by, now)
+    }
+    fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_drawer_rows()
+    }
+    fn wipe_all_content(&self) -> Result<(), LocusKitError> {
+        self.as_ref().wipe_all_content()
     }
 }

@@ -15,13 +15,12 @@
 //   target tier (peer | fleet_aggregate | industry_aggregate)
 //   privacy budget (epsilon, delta)
 //
-// Five-step protocol:
-//   1. Local: compute the exact local result.
-//   2. Sign: sign the query with the pairing's shared key.
-//   3. Forward: send to paired peers (case 1) or to the fleet
-//      administrator (cases 2 and 3).
-//   4. Aggregate: each peer or aggregator applies DP to its
-//      contribution before returning.
+// Implemented functions (local scope only; signing and forwarding
+// are caller responsibilities):
+//   1. Local: compute the exact local result (computeLocal).
+//   2. Peer-side: apply DP noise to a contribution (applyDPToContribution).
+//   3. Combine: merge local + noised peer results (combine).
+//   4. PrivacyLedger: track per-peer budget consumption.
 //   5. Combine: originating estate combines local + peer/aggregate.
 //
 // Used by:

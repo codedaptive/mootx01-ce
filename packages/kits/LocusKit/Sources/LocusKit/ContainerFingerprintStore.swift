@@ -198,10 +198,15 @@ public actor ContainerFingerprintStore {
     /// Rebuild every container from the full active drawer set, so the
     /// aggregate covers all active rows. Called on open to make an
     /// existing estate's aggregate complete and therefore sound.
-    public func rebuildAll(activeDrawers: [Drawer], now: Date = Date()) async throws {
+    public func rebuildAll(
+        activeDrawers: [Drawer],
+        nodeNames: [String: (wing: String, room: String)],
+        now: Date = Date()
+    ) async throws {
         var byContainer: [String: [String: [Drawer]]] = [:]
         for d in activeDrawers {
-            byContainer[d.wing, default: [:]][d.room, default: []].append(d)
+            let names = nodeNames[d.parentNodeId] ?? (wing: "", room: "")
+            byContainer[names.wing, default: [:]][names.room, default: []].append(d)
         }
         for (wing, rooms) in byContainer {
             for (room, drawers) in rooms {

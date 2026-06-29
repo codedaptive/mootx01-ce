@@ -391,92 +391,103 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// `associate`, `learn`, `dreamCompact`, `migrate`, `reanchor`).
     public static func rebuild(from log: UnifiedAuditLog) -> MatrixTier {
         var tier = MatrixTier()
-        let entries = log.entriesInHLCOrder()
-        // Group bitmap captures per (tier, rowID, hlc) so the
-        // co-occurrence walk over one capture sees all of that row's
-        // fingerprint fields together — the audit log lays them out
-        // as one entry per fieldPath; the matrix tier needs them
-        // bundled to compute O.
+        applyCaptureEntries(into: &tier, entries: log.entriesInHLCOrder())
+        return tier
+    }
+
+    /// Apply capture/expunge/withdraw entries to `tier`'s F/O/C state in HLC
+    /// order, IN PLACE on the passed tier.
+    ///
+    /// Shared by `rebuild` (fresh tier, all entries) and `incrementalUpdate`
+    /// (loaded snapshot, only entries past the cursor). Operating in place on the
+    /// existing tier is the load-bearing correctness point for incremental: an
+    /// expunge/withdraw of a row captured BEFORE the snapshot lands its `-1` on
+    /// the existing `+1`. A delta-rebuild-then-merge would lose that decrement —
+    /// `liveRowCount` clamps at 0 and a fresh delta tier never saw the original
+    /// capture — silently drifting F/O/liveRowCount.
+    ///
+    /// Bitmap captures are grouped per (tier, rowID, hlc) so the co-occurrence
+    /// walk over one capture sees all of that row's fingerprint fields together
+    /// (the audit log lays them out as one entry per fieldPath).
+    static func applyCaptureEntries(
+        into tier: inout MatrixTier,
+        entries: [UnifiedAuditEntry]
+    ) {
         struct RowKey: Hashable {
             let tier: AuditTier
             let rowID: UUID
             let hlc: HLC
         }
+        // Bundle a row's same-HLC capture/expunge fields together (bitmap +
+        // value) so the co-occurrence walk sees the whole fingerprint at once.
         var bundle: [RowKey: [(String, UInt64)]] = [:]
         var valueBundle: [RowKey: [MatrixValueCoord]] = [:]
         var bundleSign: [RowKey: Int64] = [:]
-
-        func flush(_ key: RowKey) {
-            guard let bm = bundle[key], let sign = bundleSign[key]
-            else { return }
-            let vs = valueBundle[key] ?? []
-            tier.applyCapture(
-                bitmapFields: bm,
-                valueFields: vs,
-                hlc: key.hlc,
-                delta: sign
-            )
-            bundle.removeValue(forKey: key)
-            valueBundle.removeValue(forKey: key)
-            bundleSign.removeValue(forKey: key)
-        }
+        var bundleOrder: [RowKey] = []   // first-seen order, for stable equal-HLC apply
+        var withdrawHLCs: [HLC] = []
 
         for entry in entries {
-            let key = RowKey(tier: entry.tier,
-                             rowID: entry.rowID,
-                             hlc: entry.hlc)
-
-            let sign: Int64?
             switch entry.verb {
-            case .capture: sign = +1
-            case .expunge: sign = -1
+            case .capture, .expunge:
+                let key = RowKey(tier: entry.tier, rowID: entry.rowID, hlc: entry.hlc)
+                if bundle[key] == nil && valueBundle[key] == nil {
+                    bundleOrder.append(key)
+                }
+                switch entry.afterValue {
+                case .bitmap(let v):
+                    bundle[key, default: []].append((entry.fieldPath, v))
+                default:
+                    valueBundle[key, default: []].append(
+                        MatrixValueCoord(fieldPath: entry.fieldPath, value: entry.afterValue))
+                }
+                bundleSign[key] = entry.verb == .capture ? 1 : -1
             case .withdraw:
-                // Withdraw is a soft tombstone; it decrements the live
-                // row count without altering F/O for that row's fields.
-                // The next expunge will fold F/O down explicitly.
-                tier.liveRowCount = max(0, tier.liveRowCount - 1)
-                continue
+                // Withdraw is a soft tombstone: it decrements liveRowCount without
+                // touching F/O. Collected here and applied in HLC order below — it
+                // MUST run AFTER the captures that precede it (so the count it
+                // decrements already includes those rows) and it advances lastHLC
+                // (the incremental-hydration cursor is the max applied-entry HLC).
+                withdrawHLCs.append(entry.hlc)
             default:
                 continue
             }
-            guard let s = sign else { continue }
-
-            switch entry.afterValue {
-            case .bitmap(let v):
-                var arr = bundle[key] ?? []
-                arr.append((entry.fieldPath, v))
-                bundle[key] = arr
-            default:
-                var arr = valueBundle[key] ?? []
-                arr.append(MatrixValueCoord(fieldPath: entry.fieldPath,
-                                            value: entry.afterValue))
-                valueBundle[key] = arr
-            }
-            bundleSign[key] = s
         }
 
-        // Flush remaining bundles in HLC order so `lastHLC` advances
-        // monotonically through the rebuild.
-        let keys = bundle.keys.sorted { a, b in a.hlc < b.hlc }
-        for k in keys { flush(k) }
-        // Flush value-only bundles too (those with no bitmap fields).
-        // Keys already drained by the bitmap-flush loop above had their
-        // entry in `bundleSign` removed inside `flush`, so the
-        // `bundleSign[k]` guard below silently skips them — preventing
-        // a double-apply on rows that carried both bitmap and value
-        // fields.
-        let vKeys = valueBundle.keys.sorted { a, b in a.hlc < b.hlc }
-        for k in vKeys {
-            if let sign = bundleSign[k] {
+        // Apply ALL events in strict HLC order. This is the correctness fix that
+        // makes liveRowCount right and makes incremental hydration equal a full
+        // rebuild: a row is always captured before it is expunged/withdrawn, so in
+        // HLC order the running count never goes negative and the defensive clamp
+        // in `applyCapture` never fires (the prior bundle-then-flush-at-end design
+        // applied withdraws/expunges while liveRowCount was still 0, clamping their
+        // decrements away). F/O are additive so their counts are order-independent;
+        // only the count and the clamp depend on order. At equal HLC, capture/
+        // expunge bundles apply before withdraws (the natural capture→withdraw
+        // order, and deterministic).
+        enum Event { case bundle(RowKey); case withdraw(HLC) }
+        var events: [(hlc: HLC, tie: Int, ev: Event)] = []
+        events.reserveCapacity(bundleOrder.count + withdrawHLCs.count)
+        for (i, key) in bundleOrder.enumerated() {
+            events.append((key.hlc, i, .bundle(key)))
+        }
+        let withdrawTieBase = bundleOrder.count
+        for (j, h) in withdrawHLCs.enumerated() {
+            events.append((h, withdrawTieBase + j, .withdraw(h)))
+        }
+        events.sort { a, b in a.hlc != b.hlc ? a.hlc < b.hlc : a.tie < b.tie }
+
+        for e in events {
+            switch e.ev {
+            case .bundle(let key):
                 tier.applyCapture(
-                    bitmapFields: [],
-                    valueFields: valueBundle[k] ?? [],
-                    hlc: k.hlc,
-                    delta: sign
-                )
+                    bitmapFields: bundle[key] ?? [],
+                    valueFields: valueBundle[key] ?? [],
+                    hlc: key.hlc,
+                    delta: bundleSign[key] ?? 1)
+            case .withdraw(let h):
+                tier.liveRowCount = max(0, tier.liveRowCount - 1)
+                if h > tier.lastHLC { tier.lastHLC = h }
             }
         }
-        return tier
     }
 
     // MARK: - rebuildTemporal
@@ -509,7 +520,10 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// The rebuild is idempotent on the same log: replaying the same log
     /// twice from a fresh MatrixTier produces a cell-equal result because
     /// T counts pairs and the fold is deterministic.
-    public static func rebuildTemporal(from log: UnifiedAuditLog) -> MatrixTier {
+    public static func rebuildTemporal(
+        from log: UnifiedAuditLog,
+        startWatermark: HLC = .zero
+    ) -> MatrixTier {
         var tier = MatrixTier()
 
         // Convert UnifiedAuditEntry to TemporalAuditEntry at the GeniusLocusKit
@@ -547,13 +561,16 @@ public struct MatrixTier: Sendable, Equatable, Codable {
                 return TemporalAuditEntry(hlc: entry.hlc, fieldCoords: coords)
             }
 
-        // Full rebuild: start watermark at .zero so the fold processes
-        // every entry as "new". fold() returns a FoldResult (named struct
-        // mirroring Rust); access .deltas and .newWatermark by name.
+        // Full rebuild passes `.zero` (process every entry as "new");
+        // incremental hydration passes the persisted `temporalWatermarkHLC` so
+        // the fold emits only the new cross-pairs — including window-boundary
+        // pairs against pre-watermark entries — which merge additively onto the
+        // loaded T. fold() returns a FoldResult (named struct mirroring Rust);
+        // access .deltas and .newWatermark by name.
         let foldResult = TemporalCausalityFold.fold(
             entries: temporalEntries,
             windowMinutes: Self.temporalWindowMinutes,
-            startWatermark: .zero)
+            startWatermark: startWatermark)
 
         for (foldKey, delta) in foldResult.deltas {
             // Map TemporalCausalityKey → (source, target, deltaMinutes) for
@@ -681,6 +698,42 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         // Advance the temporal watermark to the value computed by the T pass.
         tier.temporalWatermarkHLC = tTier.temporalWatermarkHLC
         return tier
+    }
+
+    /// Fold this (already-loaded snapshot) tier FORWARD over `log`, applying only
+    /// the entries past the persisted cursors — the load-and-incremental-fold
+    /// path that replaces a full rebuild on hydration so the matrix tier is read
+    /// from its on-disk snapshot, never recomputed from the whole audit log on
+    /// launch.
+    ///
+    /// F/O/C: replays capture/expunge/withdraw entries with `hlc > lastHLC`
+    /// directly onto this tier via the shared `applyCaptureEntries` (a row's
+    /// fields share one HLC, so the cursor splits cleanly on row boundaries, and
+    /// a post-snapshot expunge of a pre-snapshot row lands its `-1` on the
+    /// existing count). T: re-folds the full log from `temporalWatermarkHLC`, so
+    /// only the new cross-pairs — including window-boundary pairs against
+    /// pre-watermark entries — are emitted and merged additively via `addT`.
+    ///
+    /// Invariant (conformance-tested): for any split point, a snapshot
+    /// `fullRebuild(prefix)` then `incrementalUpdate(fullLog)` equals
+    /// `fullRebuild(fullLog)` cell-for-cell — including cross-cursor
+    /// expunge/withdraw and temporal window-boundary pairs.
+    public mutating func incrementalUpdate(from log: UnifiedAuditLog) {
+        // F/O/C — replay rows past the field cursor directly onto self.
+        let foCursor = lastHLC
+        let newEntries = log.entriesInHLCOrder().filter { $0.hlc > foCursor }
+        Self.applyCaptureEntries(into: &self, entries: newEntries)
+
+        // T — fold the full log from the persisted temporal watermark; the fold
+        // emits only new cross-pairs, which merge additively onto the loaded T.
+        let tDelta = MatrixTier.rebuildTemporal(
+            from: log, startWatermark: temporalWatermarkHLC)
+        for (key, count) in tDelta.temporalCausality {
+            addT(key: key, delta: count)
+        }
+        if tDelta.temporalWatermarkHLC > temporalWatermarkHLC {
+            temporalWatermarkHLC = tDelta.temporalWatermarkHLC
+        }
     }
 }
 

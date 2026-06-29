@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
-    default_wings::{CHARTER_ROOM, DEFAULT_WING_NAME},
+    default_wings::DEFAULT_WING_NAME,
     estate_types::LatticeAnchor,
     filter::RecallFrame,
     frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
@@ -47,9 +47,11 @@ use locus_kit::{
     provenance::Channel,
 };
 
-use genius_locus_kit::{VerbDispatchError, VerbError, WriteMode};
+use genius_locus_kit::{EncodeSpeed, VerbDispatchError, VerbError, WriteMode};
 
 use substrate_types::{RowState, RowStateCluster};
+
+use vault_kit::palace_bridge::PalaceBridge;
 
 use crate::dispatch::{
     decode_filter_chain, error_result, optional_bool, optional_integer, optional_string,
@@ -81,9 +83,8 @@ const DEFAULT_LATTICE_CODE: &str = "000";
 // Tool surface declaration
 // ---------------------------------------------------------------------------
 
-/// The 19 interface tool names (Tier 1–5) plus the 1 Maintenance tool, in the
-/// order they appear in the tool list. Mirrors Swift `InterfaceTools` enum case
-/// order (19 tools) plus `moot_reindex` (Maintenance, 1 tool).
+/// The 19 interface tool names (Tier 1–5) plus 2 Maintenance tools (21 total),
+/// in the order they appear in the tool list. Mirrors Swift `InterfaceTools`.
 pub const INTERFACE_TOOLS: &[&str] = &[
     // Tier 1 — Core memory (7)
     "moot_file_memory",
@@ -109,12 +110,14 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_estate_status",
     "moot_estate_map",
     "moot_estate_ping",
-    // Maintenance (1)
+    // Maintenance (3)
     "moot_reindex",
+    "moot_drain_status",
+    "moot_palace_import",
 ];
 
-/// True when `name` is one of the 19 Tier 1–5 interface tools or the 1
-/// Maintenance tool (`moot_reindex`). Mirrors Swift `InterfaceTools.isInterfaceTool`.
+/// True when `name` is one of the 19 Tier 1–5 interface tools or the 3
+/// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
 }
@@ -144,6 +147,19 @@ pub(crate) fn describe_verb_dispatch_error(e: &VerbDispatchError) -> String {
             format!("the addressed estate ({}) is not open; open it before issuing verbs",
                 Uuid::from_bytes(*estate_uuid))
         }
+        VerbDispatchError::EstateQuiesced { estate_uuid } => {
+            // Quiesced estates reject all verb calls. The admin plane (moot_quiesce_estate)
+            // must not be followed by additional verb calls on the same estate; the caller
+            // should drain and close before issuing any further operations.
+            format!("the addressed estate ({}) is quiesced and not accepting new work; drain and close it before reuse",
+                Uuid::from_bytes(*estate_uuid))
+        }
+        VerbDispatchError::RecallLaneUnavailable { reason } => {
+            // CorpusOnly + FailClosed: the corpus/vector lane is not wired for this
+            // estate. Surface as a clear user-facing error so callers can open the
+            // estate with a corpus backend or switch to AllowDegraded.
+            format!("recall lane unavailable: {reason}")
+        }
         VerbDispatchError::Verb(ve) => describe_verb_error(ve),
     }
 }
@@ -164,6 +180,14 @@ fn describe_verb_error(ve: &VerbError) -> String {
             if let Some(msg) = describe_gate_rejection(verb, reason) {
                 return msg;
             }
+            // Parity with Swift ToolDispatch: LocusKit Rust formats DrawerNotFound
+            // as "DrawerNotFound: id='{id}'" while Swift formats it as
+            // "drawer not found: {id}". Detect the Rust prefix and reformat to
+            // match the Swift message so AI consumers see one shape.
+            if let Some(rest) = reason.strip_prefix("DrawerNotFound: id='") {
+                let drawer_id = rest.trim_end_matches('\'');
+                return format!("drawer not found: {drawer_id}");
+            }
             // Strip internal Rust type-name prefixes (e.g. "InvalidContent: room
             // must not be empty") that the substrate error chain can prepend.
             // These are implementation-private names that must not appear in
@@ -183,10 +207,11 @@ fn describe_verb_error(ve: &VerbError) -> String {
             format!("reanchor of row {row_id} requires at least one of toRoom or toUDC")
         }
         VerbError::ExpungeNotConfirmed { row_id } => {
+            // Parity with Swift ToolDispatch: no "row" prefix, trailing period.
             // The caller-facing field is "confirmed" — name it exactly so AI consumers
             // can retry with the correct argument rather than dead-ending on a
             // field name mismatch between this message and the tool schema.
-            format!("expunge of row {row_id} requires confirmed=true")
+            format!("expunge of {row_id} requires confirmed=true.")
         }
         VerbError::CrossKitVectorDeleteFailed { row_id, reason } => {
             format!(
@@ -326,6 +351,8 @@ pub fn dispatch(
         "moot_estate_ping" => run_estate_ping(args, registry, build_serial),
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
+        "moot_drain_status" => run_drain_status(args, registry),
+        "moot_palace_import" => run_palace_import(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown interface tool: {name}"),
@@ -350,7 +377,7 @@ fn run_file_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let content = require_string(args, "content")?;
     let location = require_string(args, "location")?;
     let exportability = decode_exportability(args)?;
@@ -430,9 +457,18 @@ fn run_file_memory(
     let mut coord = estate.coord.lock().unwrap();
     match coord.capture_with_mode(&estate.handle, frame, now, mode) {
         Ok(drawer) => {
+            // Resolve room display name from the node tree via parent_node_id.
+            let node_names = coord.resolve_drawer_node_names(
+                &estate.handle,
+                &[drawer.parent_node_id.clone()],
+            );
+            let room = node_names
+                .get(&drawer.parent_node_id)
+                .map(|(_, r)| r.as_str())
+                .unwrap_or("");
             let body = format!(
                 "filed memory {}\nroom: {}\nlineage: {}",
-                drawer.id, drawer.room, drawer.lineage_id
+                drawer.id, room, drawer.lineage_id
             );
             Ok(text_result(&body))
         }
@@ -472,7 +508,7 @@ fn run_memory_search(
         GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
     };
 
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let query = require_string(args, "query")?;
 
     // Decode optional `scoring` argument. Absent/None keeps the documented
@@ -493,10 +529,12 @@ fn run_memory_search(
         }
     };
 
-    // Decode optional `limit` argument. Defaults to 20.
-    let limit = optional_integer(args, "limit")?
-        .map(|n| n.max(1) as usize)
-        .unwrap_or(20_usize);
+    // Clamp to [1, 500]: reject negative/zero (crash downstream range ops) and
+    // cap absurdly-large values (DoS via unbounded substrate recall scan).
+    // Parity: Swift runMemorySearch uses Self.clampLimit with the same ceiling.
+    let limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "limit")?, "limit", 20, crate::dispatch::LIMIT_HARD_CEILING
+    )?;
 
     // Decode optional `ordering` argument. "byRelevanceDesc" is a compatibility
     // spelling: LocusKit's Ordering enum has no relevance case (it has no scoring
@@ -576,14 +614,41 @@ fn run_memory_search(
     // "high — clear top result" is never reported on a lexical-only ranking.
     let dense_lane_dark = result.dense_lane_status.is_some();
 
+    // Resolve room display names from the node tree for all hydrated hit drawers.
+    let hit_node_ids: Vec<String> = result.hits.iter()
+        .filter_map(|h| h.drawer.as_ref().map(|d| d.parent_node_id.clone()))
+        .collect();
+    let hit_node_names = coord.resolve_drawer_node_names(&estate.handle, &hit_node_ids);
+
     let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
     for hit in result.hits.iter().take(50) {
-        let preview: String = hit
-            .drawer
-            .as_ref()
-            .map(|d| d.content.chars().take(120).collect())
-            .unwrap_or_else(|| "(not hydrated)".to_string());
-        let room = hit.drawer.as_ref().map(|d| d.room.as_str()).unwrap_or("");
+        // Sensitivity-aware content preview. LocusKit stores sensitivity in bits
+        // 30–35 of the provenance bitmap; Drawer::sensitivity() decodes them.
+        //
+        // Normal (0) and Elevated (16): show 120-char content preview. These are
+        // the bulk-export tiers and safe to surface to the MCP client.
+        //
+        // Restricted (32) and Secret (48): replace with a redacted placeholder.
+        // A raw content preview at the ARIA boundary leaks text that the
+        // sensitivity designation marks as access-controlled. Recall can return
+        // these rows for relevance ranking without exposing the body; a
+        // dereference verb (moot_retrieve) with explicit id is the correct path
+        // for callers who need the content and have grant-level access to it.
+        // Mirrors the Swift MCP surface's intent for sensitivity-gated previews.
+        let preview: String = hit.drawer.as_ref().map(|d| {
+            use locus_kit::provenance::Sensitivity;
+            match d.sensitivity() {
+                Sensitivity::Restricted => "[sensitivity: restricted — retrieve by id for content]".to_string(),
+                Sensitivity::Secret    => "[sensitivity: secret — content access requires explicit grant]".to_string(),
+                Sensitivity::Normal | Sensitivity::Elevated => {
+                    d.content.chars().take(120).collect()
+                }
+            }
+        }).unwrap_or_else(|| "(not hydrated)".to_string());
+        let room = hit.drawer.as_ref()
+            .and_then(|d| hit_node_names.get(&d.parent_node_id))
+            .map(|(_, r)| r.as_str())
+            .unwrap_or("");
         // Row format matches Swift: "<id>  [<room>]  <preview>" — no score suffix.
         // Swift runMemorySearch emits the score only via the discrimination line,
         // not per-row, so per-row score annotation is removed for output parity.
@@ -704,7 +769,7 @@ fn run_update_memory(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
     let mutation_str = require_string(args, "mutation")?;
 
@@ -726,7 +791,7 @@ fn run_withdraw_memory(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
     let reason = optional_string(args, "reason")?;
 
@@ -748,14 +813,21 @@ fn run_erase_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
     let reason = require_string(args, "reason")?;
     let confirmed = optional_bool(args, "confirmed")?.unwrap_or(false);
 
     if !confirmed {
+        // Security gate (Item 1 hardening): refuse at the AriaMcpKit boundary
+        // before calling the substrate. Prevents prompt-injected agents from
+        // triggering irreversible erasure without explicit owner acknowledgement.
+        // Mirrors Swift ToolDispatcher.runEraseMemory. Both ports enforce this
+        // gate at the ARIA surface rather than relying solely on the substrate.
         return Ok(error_result(
-            "erase_memory requires confirmed: true — this action is irreversible",
+            &format!("expunge of {id} requires confirmed=true and a reason. \
+                Set confirmed=true only after the owner has explicitly reviewed \
+                and approved the deletion."),
         ));
     }
 
@@ -777,7 +849,7 @@ fn run_confirm_memory(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
 
     // Note usage: confirming a surfaced drawer means the user acted on it.
@@ -797,7 +869,7 @@ fn run_move_memory(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
     let location = require_string(args, "location")?;
     // ADR-016 §3: optional `wing` triggers a cross-wing move.
@@ -832,7 +904,7 @@ fn run_link_memories(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let from_id = require_string(args, "from_id")?;
     let to_id = require_string(args, "to_id")?;
     let kind_str = require_string(args, "kind")?;
@@ -864,8 +936,13 @@ fn run_link_memories(
     let coord = estate.coord.lock().unwrap();
 
     // Recall all drawers to resolve wing+room for source and target.
+    // Explicit limit=256 (the engine's RECALL_CANDIDATE_CAP scan bound) so the
+    // coordinator.recall cap doesn't silently truncate to 50 on large estates;
+    // this ID-resolution path needs the full candidate set, not an analytics sample.
+    let mut id_lookup_frame = RecallFrame::new(vec![]);
+    id_lookup_frame.limit = Some(256);
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .recall(&estate.handle, id_lookup_frame, now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
@@ -882,11 +959,24 @@ fn run_link_memories(
     })?;
 
     let tunnel_kind = decode_tunnel_kind(kind_str);
+    // Resolve wing/room display names from node tree for both endpoints.
+    let node_names = coord.resolve_drawer_node_names(
+        &estate.handle,
+        &[source.parent_node_id.clone(), target.parent_node_id.clone()],
+    );
+    let (src_wing, src_room) = node_names
+        .get(&source.parent_node_id)
+        .cloned()
+        .unwrap_or_default();
+    let (tgt_wing, tgt_room) = node_names
+        .get(&target.parent_node_id)
+        .cloned()
+        .unwrap_or_default();
     let mut frame = TunnelCaptureFrame::new(
-        source.wing.clone(),
-        source.room.clone(),
-        target.wing.clone(),
-        target.room.clone(),
+        src_wing,
+        src_room,
+        tgt_wing,
+        tgt_room,
         kind_str,
         // Injected host identity: stamps provenance for the running binary.
         registry.server_identity.as_str(),
@@ -925,15 +1015,20 @@ fn run_connection_search(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let from_id = require_string(args, "from_id")?;
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
     // Recall all drawers to find the source drawer's wing.
+    // Explicit limit=256 (the engine's RECALL_CANDIDATE_CAP scan bound) so the
+    // coordinator.recall cap doesn't silently truncate to 50 on large estates;
+    // this ID-resolution path needs the full candidate set, not an analytics sample.
+    let mut id_lookup_frame = RecallFrame::new(vec![]);
+    id_lookup_frame.limit = Some(256);
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .recall(&estate.handle, id_lookup_frame, now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
@@ -942,7 +1037,15 @@ fn run_connection_search(
             format!("from_id not found: {from_id}"),
         )
     })?;
-    let wing = source.wing.clone();
+    // Resolve wing display name from the node tree for the source drawer.
+    let node_names = coord.resolve_drawer_node_names(
+        &estate.handle,
+        &[source.parent_node_id.clone()],
+    );
+    let wing = node_names
+        .get(&source.parent_node_id)
+        .map(|(w, _)| w.clone())
+        .unwrap_or_default();
 
     let tunnels = coord
         .recall_tunnels(&estate.handle, &wing)
@@ -969,19 +1072,29 @@ fn run_connection_map(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let to_id = require_string(args, "to_id")?;
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
     // Recall all drawers to discover all wings in the estate.
+    // Explicit limit=256 (the engine's RECALL_CANDIDATE_CAP scan bound) so the
+    // coordinator.recall cap doesn't silently truncate to 50 on large estates;
+    // this ID-resolution path needs the full candidate set, not an analytics sample.
+    let mut id_lookup_frame = RecallFrame::new(vec![]);
+    id_lookup_frame.limit = Some(256);
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .recall(&estate.handle, id_lookup_frame, now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    let wings: std::collections::HashSet<&str> =
-        all.iter().map(|d| d.wing.as_str()).collect();
+    // Resolve wing display names from the node tree for all drawers.
+    let all_node_ids: Vec<String> = all.iter().map(|d| d.parent_node_id.clone()).collect();
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &all_node_ids);
+    let wings: std::collections::HashSet<String> = node_names
+        .values()
+        .map(|(w, _)| w.clone())
+        .collect();
 
     // Scan every wing's tunnels for incoming edges to to_id.
     let mut incoming = Vec::new();
@@ -1017,7 +1130,7 @@ fn run_file_fact(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let subject = require_string(args, "subject")?;
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
@@ -1054,7 +1167,7 @@ fn run_fact_search(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let query = optional_string(args, "query")?;
 
     let coord = estate.coord.lock().unwrap();
@@ -1114,7 +1227,7 @@ fn run_retire_fact(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
 
     let now = wall_now();
@@ -1238,7 +1351,7 @@ fn run_fact_timeline(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     // The case-insensitive match is done in recall_kg_fact_timeline, which
     // lowercases both the entity and each fact's subject/object. Pass the raw
     // entity through.
@@ -1288,7 +1401,7 @@ fn run_write_journal(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let entry = require_string(args, "entry")?;
     let agent = optional_string(args, "agent")?.unwrap_or("mcp-agent");
 
@@ -1330,7 +1443,7 @@ fn run_read_journal(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let agent = optional_string(args, "agent")?.unwrap_or("mcp-agent");
     let last_n = optional_integer(args, "last_n")?
         .map(|n| n as usize)
@@ -1373,20 +1486,45 @@ fn run_estate_status(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
-    let now = wall_now();
+    let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
 
-    let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+    // Use all_drawers (unfiltered) then apply Cluster-A bitmap filter for the
+    // active count. Mirrors Swift runEstateStatus which calls estate.allDrawers()
+    // then filters by RowState.cluster(ofRawState:) == .a. Hint drawers
+    // (AI_Charter_Hint room) are normal drawers counted in the active total.
+    let all_drawers = coord
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+
+    // "active" = Cluster-A rows. Cluster A is the partition where
+    // (state_raw >> 4) & 0x3 == 0, with state_raw = adjective_bitmap & 0x3F.
+    // This includes Active(0), Pending(1), Contested(2), Accepted(3).
+    let active: Vec<_> = all_drawers
+        .iter()
+        .filter(|d| {
+            let state_raw = (d.adjective_bitmap & 0x3F) as u8;
+            (state_raw >> 4) & 0x3 == 0
+        })
+        .collect();
+
+    // "total" = all non-erased rows (tombstone = permanently erased).
+    let total: Vec<_> = all_drawers
+        .iter()
+        .filter(|d| d.tombstoned_at.is_none())
+        .collect();
 
     let kg_facts = coord
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    let wings: std::collections::BTreeSet<&str> =
-        drawers.iter().map(|d| d.wing.as_str()).collect();
+    // Resolve wing display names from the active set (mirrors Swift).
+    let active_node_ids: Vec<String> = active.iter().map(|d| d.parent_node_id.clone()).collect();
+    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &active_node_ids);
+    let wings: std::collections::BTreeSet<String> = active_node_names
+        .values()
+        .map(|(w, _)| w.clone())
+        .collect();
 
     let estate_info = coord.estate_for(&estate.handle).ok();
     let (estate_name, estate_uuid) = estate_info
@@ -1415,38 +1553,12 @@ fn run_estate_status(
         .sync_state_token(&estate.handle)
         .unwrap_or_else(|_| "local-only".to_string());
 
-    // "active" = cluster-A believed drawers only. `recall()` with an empty
-    // filter chain returns only currently-believed rows (RowState cluster A,
-    // where (state_raw >> 4) & 0x3 == 0). This matches the Swift fix that
-    // applies `RowState.cluster(ofRawState:) == .a` to filter out rejected/
-    // withdrawn drawers that were previously mis-counted as "active".
-    //
-    // "total" = all non-erased user content rows (tombstone = permanently
-    // erased). Charter drawers (room == "_charter") are wing metadata seeded
-    // at provision time — they are not user content and are excluded from the
-    // total so the count reflects what the user actually filed, matching the
-    // active count's behaviour (recall already excludes charter drawers via the
-    // RECALL-HYGIENE filter in estate_verbs.rs). Best-effort: on error, report
-    // "unavailable" rather than fabricating 0 or failing the status response.
-    let total_count: String = match coord.all_drawers(&estate.handle) {
-        Ok(all) => {
-            let non_erased = all
-                .iter()
-                .filter(|d| d.tombstoned_at.is_none())
-                .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
-                .count();
-            non_erased.to_string()
-        }
-        Err(_) => "unavailable".to_string(),
-    };
-
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
-    // Swift uses "kg facts: N active" (space not underscore, "active" suffix).
     let body = format!(
         "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\n{}",
-        drawers.len(),
-        total_count,
+        active.len(),
+        total.len(),
         wings_list,
         kg_facts.len(),
         trace_rows,
@@ -1459,11 +1571,15 @@ fn run_estate_status(
 /// Return the estate's memory taxonomy as a tree grouped by wing and room.
 ///
 /// Mirrors Swift `runEstateMap`.
+///
+/// Wing and room display names are resolved from the node tree via
+/// `coord.resolve_drawer_node_names`. All drawers (including hint memories
+/// in AI_Charter_Hint) are counted normally — no special-casing.
 fn run_estate_map(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
 
     // Resolve estate name for the header — mirrors Swift `handle.estateName`.
@@ -1473,65 +1589,40 @@ fn run_estate_map(
         .map(|m| m.estate_name)
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Use all_drawers (unfiltered) so charter drawers are visible for the per-wing
-    // charter map below. Mirrors Swift runEstateMap which calls estate.allDrawers()
-    // directly, bypassing liveRows() and its charter exclusion filter. The recall()
-    // path strips CHARTER_ROOM drawers from its candidate stream (recall-hygiene fix),
-    // which is correct for scored recall but wrong here — estate_map NEEDS charters
-    // to emit "charter: <text>" inline for each wing (ADR-016 §3).
-    //
-    // Then filter to active (non-tombstoned) rows only, mirroring Swift's
+    // Use all_drawers (unfiltered) then filter to active (non-tombstoned) rows,
+    // mirroring Swift's:
     //   let active = drawers.filter { $0.tombstonedAt == nil }
     let all = coord
         .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
     let drawers: Vec<_> = all.into_iter().filter(|d| d.tombstoned_at.is_none()).collect();
 
-    // Build a per-wing charter map: wing → charter text (from CHARTER_ROOM drawers).
-    // ADR-016 §3: each wing's charter is surfaced inline so callers can orient to each
-    // wing's role without a separate lookup. The first charter drawer per wing wins;
-    // user-defined wings without a charter drawer show no inline text.
-    let mut charters: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
-    for d in &drawers {
-        if d.room == CHARTER_ROOM && !charters.contains_key(d.wing.as_str()) {
-            charters.insert(d.wing.as_str(), d.content.as_str());
-        }
-    }
+    // Resolve wing/room display names from node tree for all drawers.
+    let map_node_ids: Vec<String> = drawers.iter().map(|d| d.parent_node_id.clone()).collect();
+    let map_node_names = coord.resolve_drawer_node_names(&estate.handle, &map_node_ids);
 
-    // Group by wing then room, counting NON-charter drawers per location.
-    // Charter drawers are excluded from counts — they are structural metadata,
-    // not user-filed memories, mirroring Swift runEstateMap (ADR-016 §3).
-    let mut tree: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, usize>> =
+    // Group by wing then room, counting ALL drawers per location (including hint
+    // memories in AI_Charter_Hint — they are normal memories now).
+    let mut tree: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>> =
         std::collections::BTreeMap::new();
     for d in &drawers {
-        if d.room != CHARTER_ROOM {
-            *tree
-                .entry(d.wing.as_str())
-                .or_default()
-                .entry(d.room.as_str())
-                .or_insert(0) += 1;
-        }
+        let (wing, room) = map_node_names
+            .get(&d.parent_node_id)
+            .cloned()
+            .unwrap_or_default();
+        *tree
+            .entry(wing)
+            .or_default()
+            .entry(room)
+            .or_insert(0) += 1;
     }
 
-    // Header mirrors Swift runEstateMap: "estate map: estateName" (not a raw count).
-    // Per-room counts enumerate non-charter drawers; charter text shown inline per wing.
+    // Header mirrors Swift runEstateMap: "estate map: estateName".
     let mut lines = vec![format!("estate map: {estate_name}")];
     for (wing, rooms) in &tree {
         lines.push(format!("  {wing}/"));
-        // Surface the wing's charter inline per ADR-016 §3.
-        if let Some(charter) = charters.get(wing) {
-            lines.push(format!("    charter: {charter}"));
-        }
         for (room, count) in rooms {
             lines.push(format!("    {room}: {count}"));
-        }
-    }
-    // Also surface wings that have a charter but no non-charter drawers yet —
-    // newly seeded wings with no user content. Mirrors Swift runEstateMap.
-    for (wing, charter) in &charters {
-        if !tree.contains_key(wing) {
-            lines.push(format!("  {wing}/"));
-            lines.push(format!("    charter: {charter}"));
         }
     }
     Ok(text_result(&lines.join("\n")))
@@ -1554,7 +1645,7 @@ fn run_estate_ping(
     registry: &EstateRegistry,
     build_serial: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
 
     // coord.estate_for returns GeniusLocusKitError (not VerbDispatchError), so
@@ -1581,19 +1672,189 @@ fn run_estate_ping(
 /// indexed in the estate. Returns the count enqueued. Idempotent. Mirrors
 /// Swift `ToolDispatch.runReindex`. Requires `&mut` coord because
 /// `reindex_missing` calls `enqueue_encode_job` → `mount_encode_queue`.
+/// Reindex an estate's missing drawers WITHOUT holding the coordinator lock
+/// across the (potentially huge) enqueue loop, so the daemon stays responsive to
+/// other HTTP calls while it runs: brief lock to snapshot the work, LOCK-FREE
+/// enqueue on the Corpus's own queue, brief lock to roll up the Merkle tree.
+/// (Swift's actor coordinator interleaves awaits, so its `reindexMissing` is
+/// already responsive; the Rust Mutex coordinator needs this explicit split —
+/// parity of behavior, not of structure.)
+fn run_reindex_responsive(
+    coord_arc: &std::sync::Arc<std::sync::Mutex<genius_locus_kit::coordinator::EstateCoordinator>>,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    now: i64,
+) -> Result<usize, String> {
+    let (corpus, jobs) = {
+        let mut c = coord_arc
+            .lock()
+            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+        match c
+            .collect_reindex_jobs(handle)
+            .map_err(|e| describe_verb_dispatch_error(&e))?
+        {
+            Some(plan) => plan,
+            None => return Ok(0), // no Corpus registered — nothing to reindex
+        }
+    };
+    // Lock-free: enqueue on the Corpus's own queue (independent of the coord
+    // Mutex), so concurrent HTTP handlers acquire the coord lock between calls
+    // instead of blocking for the whole enqueue. Batch-enqueue in chunks so the
+    // filesystem backend fsyncs new/ ONCE per chunk instead of per job (the
+    // per-job fsync was the last full-core bottleneck of a bulk import), while
+    // the chunk bounds the brief queue-lock / fsync window against concurrent
+    // live captures.
+    const ENQUEUE_CHUNK: usize = 1024;
+    let mut enqueued = 0usize;
+    for chunk in jobs.chunks(ENQUEUE_CHUNK) {
+        if corpus.enqueue_ingest_batch(chunk).is_ok() {
+            enqueued += chunk.len();
+        }
+    }
+    // Brief re-lock for the deferred Merkle full-tree rollup.
+    {
+        let mut c = coord_arc
+            .lock()
+            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+        c.rollup_after_reindex(handle, now)
+            .map_err(|e| describe_verb_dispatch_error(&e))?;
+    }
+    Ok(enqueued)
+}
+
 fn run_reindex(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
-    // mut: reindex_missing calls enqueue_encode_job which calls mount_encode_queue
-    // (&mut self). The standard pattern for write-path tools in this module.
-    let mut coord = estate.coord.lock().unwrap();
+    let estate = registry.resolve_direct(args)?;
     let now = wall_now();
-    match coord.reindex_missing(&estate.handle, now) {
+    // Responsive (lock-free enqueue) so a large reindex does not freeze the daemon.
+    match run_reindex_responsive(&estate.coord, &estate.handle, now) {
         Ok(enqueued) => Ok(text_result(&format!("reindex: enqueued {enqueued} drawers for encoding"))),
-        Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
+        Err(e) => Ok(error_result(&e)),
     }
+}
+
+/// `moot_drain_status` — report every long-running background drain the estate
+/// currently runs, for monitoring asynchronous work (e.g. watching an import's
+/// encode queue converge after `moot_palace_import`).
+///
+/// Lightweight and pollable: unlike `moot_estate_status` it does NOT append the
+/// ARIA session-protocol orientation block, because this tool is meant to be
+/// called repeatedly while a drain settles. Today the only drain is
+/// `corpus_encode`; the report is a LIST so additional drains surface here
+/// automatically when they exist. Read-only. Mirrors Swift `runDrainStatus`.
+fn run_drain_status(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let coord = estate.coord.lock().unwrap();
+    let drains = match coord.drain_statuses(&estate.handle) {
+        Ok(d) => d,
+        Err(e) => return Ok(error_result(&format!("{e:?}"))),
+    };
+    if drains.is_empty() {
+        // No drains registered (a bare estate with no Corpus). Honest empty
+        // report — distinct from "all drains idle", which lists drains at 0.
+        return Ok(text_result("drains: none"));
+    }
+    let mut lines: Vec<String> = vec![format!("drains: {}", drains.len())];
+    for d in &drains {
+        let state = if d.is_draining() { "draining" } else { "idle" };
+        let mut line = format!(
+            "  {}: {} — pending: {}, in_flight: {}",
+            d.name, state, d.pending, d.in_flight
+        );
+        if let Some(detail) = &d.detail {
+            line.push_str(&format!(", {detail}"));
+        }
+        lines.push(line);
+    }
+    Ok(text_result(&lines.join("\n")))
+}
+
+/// `moot_palace_import` — import a MemPalace directly into the estate,
+/// bypassing NoteIR. Reads palace/chroma.sqlite3, tunnels.json, and
+/// knowledge_graph.sqlite3 from `palace_path`, then applies all four
+/// import guards (tombstone, content-idempotent dedup, sensitivity floor,
+/// tunnel signature dedup). Mirrors Swift `runPalaceImport`.
+fn run_palace_import(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let palace_path = require_string(args, "palace_path")?;
+    let palace_root = std::path::Path::new(&palace_path);
+    let now = wall_now();
+    // mut: PalaceBridge holds &mut EstateCoordinator (same pattern as VaultBridge).
+    let mut coord = estate.coord.lock().unwrap();
+    let mut bridge = PalaceBridge::new(&mut coord);
+    // mode (encode SPEED, default foreground): foreground drains the encode queue
+    // hard on the performance cores; background yields for very large imports. The
+    // WRITE strategy (bulk vs stream) is chosen automatically by source size inside
+    // PalaceBridge, never by the caller. Fail-closed on an unknown value.
+    let mode = match args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_lowercase()) {
+        None => EncodeSpeed::Foreground,
+        Some(ref s) if s == "foreground" => EncodeSpeed::Foreground,
+        Some(ref s) if s == "background" => EncodeSpeed::Background,
+        Some(_) => {
+            return Ok(error_result(
+                "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)",
+            ));
+        }
+    };
+    let report = match bridge.import_palace(palace_root, &estate.handle, now,
+        Some(&|processed, total| {
+            // Live progress to stderr, fired by the bridge every 10 records.
+            // The MCP response is returned only at completion, so stderr is the
+            // sole live-progress channel during a long background import.
+            eprintln!("palace import: {processed}/{total} drawers");
+        }),
+        mode)
+    {
+        Ok(report) => report,
+        Err(e) => return Ok(error_result(&format!("palace import failed: {e}"))),
+    };
+    // Release the bridge's &mut borrow AND the lock guard before handing off, so
+    // the background thread can re-acquire the estate lock.
+    drop(bridge);
+    drop(coord);
+    // DESIGN: the import TRIGGERS its own post-import processing in the BACKGROUND
+    // and releases the caller immediately — it does NOT rely on the AI to run
+    // moot_reindex / moot_dream next (that is not the design). A detached worker
+    // thread runs `reindex_missing`, which enqueues an encode job for every imported
+    // drawer (the resident daemon's encode-drain worker then ingests them into the
+    // BM25 + vector lanes and rolls up the touched rooms off the write path) and runs
+    // the O(N) Merkle `rollup_all`; the governor's dreaming duty builds the
+    // association matrix on its cadence. This call returns the moment the import rows
+    // are durable, so the AI is freed while indexing/rollup/dreaming proceed in the
+    // background on the resident daemon. (In a stdio one-shot the process exits when
+    // its input closes, so a caller that needs the background work to finish must keep
+    // the connection open — the resident HTTP daemon is the intended host.)
+    let bg_coord = std::sync::Arc::clone(&estate.coord);
+    let bg_handle = estate.handle;
+    std::thread::Builder::new()
+        .name("palace-import-reindex".into())
+        .spawn(move || {
+            // Lock-free enqueue so the daemon stays responsive to other HTTP
+            // calls during this 49k-drawer reindex (see run_reindex_responsive).
+            match run_reindex_responsive(&bg_coord, &bg_handle, now) {
+                Ok(n) => eprintln!(
+                    "palace import: background processing complete — {n} drawers queued for encode/index, Merkle rolled up"
+                ),
+                Err(e) => eprintln!("palace import: background reindex failed: {e}"),
+            }
+        })
+        .ok();
+    Ok(text_result(&format!(
+        "palace import complete: {} written, {} updated, {} unchanged, {} tombstoned, {} tunnels, {} skipped; background processing started asynchronously (encode/index + Merkle rollup + matrix dreaming run on the resident daemon — no follow-up call needed)",
+        report.drawers_written,
+        report.drawers_updated,
+        report.drawers_skipped_unchanged,
+        report.drawers_skipped_tombstoned,
+        report.tunnels_created,
+        report.items_skipped,
+    )))
 }
 
 // ===========================================================================

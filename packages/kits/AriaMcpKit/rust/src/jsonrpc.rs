@@ -10,7 +10,7 @@
 //! JSON-RPC `params` and `result` fields are dynamic. Rather than fighting
 //! serde's type system with `serde_json::Value` throughout, we carry a
 //! thin typed enum that round-trips through serde_json without loss. The
-//! six variants mirror the Swift `JSONValue` enum: null, bool, integer
+//! seven variants mirror the Swift `JSONValue` enum: null, bool, integer
 //! (i64 — preserves integer tool args like `limit` without converting to
 //! 1.0), double, string, array, object. BTreeMap keys so serialized objects
 //! have deterministic ordering (Swift uses the Foundation default which is
@@ -68,10 +68,21 @@ impl JsonValue {
 
     /// Convenience: extract an integer (also accepts Double that is
     /// whole-valued, matching the Swift `integerValue` accessor).
+    ///
+    /// Uses a round-trip check instead of a plain `as i64` cast: since Rust 1.45
+    /// saturating semantics, `1e100 as i64 == i64::MAX` which is the wrong value.
+    /// The round-trip (`as_i64 as f64 == *d`) ensures the conversion is lossless —
+    /// matching Swift's `Int64(exactly:)` contract. Returns `None` for out-of-range
+    /// values (e.g. 1e100), ±inf, and fractional doubles.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             JsonValue::Integer(i) => Some(*i),
-            JsonValue::Double(d) if d.fract() == 0.0 => Some(*d as i64),
+            JsonValue::Double(d) if d.fract() == 0.0 => {
+                // Saturating cast then round-trip: if `d` is outside i64 range
+                // (e.g. 1e100) or ±inf, the round-trip fails and we return None.
+                let as_i64 = *d as i64;
+                if as_i64 as f64 == *d { Some(as_i64) } else { None }
+            }
             _ => None,
         }
     }
@@ -334,5 +345,56 @@ mod tests {
         let v = serde_json::to_value(&resp).unwrap();
         let e = v["error"].as_object().unwrap();
         assert_eq!(e["code"], serde_json::json!(-32700_i64));
+    }
+
+    // MARK: - as_i64 overflow guard (Finding 2)
+    //
+    // Before the fix, large finite doubles (e.g. 1e100) would pass the
+    // `fract() == 0.0` guard and then `as i64` would silently saturate to
+    // i64::MAX — producing the wrong value. The round-trip check now ensures
+    // any lossy cast returns None, matching Swift's Int64(exactly:) contract.
+
+    /// 1e100 is a valid finite JSON float whose fract() is 0.0 but which
+    /// is far outside i64 range. Must return None, not saturate to i64::MAX.
+    #[test]
+    fn as_i64_returns_none_for_out_of_range_double() {
+        let v = JsonValue::Double(1e100);
+        assert_eq!(v.as_i64(), None, "1e100 must not silently saturate to i64::MAX");
+    }
+
+    /// Negative out-of-range double also returns None.
+    #[test]
+    fn as_i64_returns_none_for_negative_out_of_range_double() {
+        let v = JsonValue::Double(-1e100);
+        assert_eq!(v.as_i64(), None, "-1e100 must not silently saturate to i64::MIN");
+    }
+
+    /// +Infinity: fract() is 0.0 in IEEE 754; the round-trip check must still
+    /// return None (inf as i64 saturates to i64::MAX, and i64::MAX as f64 ≠ inf).
+    #[test]
+    fn as_i64_returns_none_for_positive_infinity() {
+        let v = JsonValue::Double(f64::INFINITY);
+        assert_eq!(v.as_i64(), None, "+inf must return None");
+    }
+
+    /// A fractional double returns None — the fract() guard excludes it.
+    #[test]
+    fn as_i64_returns_none_for_fractional_double() {
+        let v = JsonValue::Double(42.5);
+        assert_eq!(v.as_i64(), None, "42.5 must return None");
+    }
+
+    /// A whole-valued double within i64 range returns the integer.
+    #[test]
+    fn as_i64_returns_some_for_whole_valued_double_in_range() {
+        let v = JsonValue::Double(42.0);
+        assert_eq!(v.as_i64(), Some(42));
+    }
+
+    /// Zero is a whole-valued double and must return Some(0).
+    #[test]
+    fn as_i64_returns_some_zero_for_zero_double() {
+        let v = JsonValue::Double(0.0);
+        assert_eq!(v.as_i64(), Some(0));
     }
 }

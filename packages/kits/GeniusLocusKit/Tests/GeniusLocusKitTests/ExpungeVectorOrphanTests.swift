@@ -15,8 +15,8 @@
 //
 //   E1 — Corpus recall no longer returns the expunged drawer (end-to-end).
 //   E2 — The vector row is gone from the VectorStore backing table after expunge.
-//   E3 — A fault-injected corpus.remove failure causes expunge to THROW
-//        `VerbError.crossKitVectorDeleteFailed` (fail-closed: no silent orphan).
+//   E3 — A defensive `crossKitVectorDeleteFailed` path fires when model ID
+//        resolution is impossible (standalone VectorStore, no Corpus registered).
 //   E4 — .locusOnly estate expunge is unaffected (no Corpus, no VectorStore
 //        registered — the cross-kit step is a no-op).
 

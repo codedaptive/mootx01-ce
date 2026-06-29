@@ -126,9 +126,8 @@ public enum HammingNN {
 
 // MARK: - GPU implementation
 //
-// A Metal kernel for Hamming-NN lives in
-// `glref-metal-hamming_nn.metal`. The Metal version becomes the
-// preferred backend on M-series and A-series chips when the
-// candidate count exceeds ~100K rows (the threshold where GPU
-// dispatch overhead amortizes). Below that threshold AMX/NEON
-// dominate.
+// The Metal kernel for Hamming-NN is embedded as a string in
+// `glref-swift-PortableKernel-Metal.swift` (no separate .metal file
+// in this directory). The Metal backend becomes preferred on M-series
+// and A-series chips when the candidate count exceeds ~100K rows.
+// Below that threshold AMX/NEON dominate.

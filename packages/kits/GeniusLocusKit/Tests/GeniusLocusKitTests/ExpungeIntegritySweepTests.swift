@@ -87,10 +87,10 @@ struct ExpungeIntegritySweepTests {
     }
 
     /// Seed a crash-window state: capture a drawer, tombstone it via the
-    /// LocusKit estate directly with `sealAudit: false`, and discard the
-    /// returned unsealed event without calling `sealExpungeAudit`. The row
-    /// is left tombstoned with no audit event — simulating a process crash
-    /// between step 1 (storage expunge) and step 3 (audit seal).
+    /// LocusKit estate directly using `expungeReturningUnsealedEvent`, and
+    /// discard the returned unsealed event without calling `sealExpungeAudit`.
+    /// The row is left tombstoned with no audit event — simulating a process
+    /// crash between step 1 (storage expunge) and step 3 (audit seal).
     private func seedCrashWindow(
         kit: GeniusLocusKit,
         handle: EstateHandle,
@@ -99,14 +99,13 @@ struct ExpungeIntegritySweepTests {
         let drawer = try await kit.capture(handle, captureFrame(content: content))
 
         let estate = try await kit.estate(for: handle)
-        // expunge with sealAudit:false — tombstones without sealing.
+        // expungeReturningUnsealedEvent — tombstones without sealing.
         // Discard the event to simulate a crash before the seal call.
-        let _ = try await estate.expunge(
+        let _ = try await estate.expungeReturningUnsealedEvent(
             rowID: drawer.id,
             reason: "crash-window-sim",
             confirmation: true,
-            now: Self.now,
-            sealAudit: false
+            now: Self.now
         )
         // Event deliberately not sealed — crash-window state established.
         return drawer.id
@@ -133,12 +132,11 @@ struct ExpungeIntegritySweepTests {
 
         // Tombstone WITHOUT sealing any audit (crash-window simulation).
         let estate = try await kit.estate(for: handle)
-        let _ = try await estate.expunge(
+        let _ = try await estate.expungeReturningUnsealedEvent(
             rowID: drawer.id,
             reason: "crash-window-sim",
             confirmation: true,
-            now: Self.now,
-            sealAudit: false
+            now: Self.now
         )
 
         // Pre-condition: no tombstone or expungeOrphan audit event yet.

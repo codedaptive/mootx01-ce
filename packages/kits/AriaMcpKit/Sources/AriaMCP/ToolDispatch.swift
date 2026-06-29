@@ -2,6 +2,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import SubstrateML
+import VaultKit
 // Scoped imports: pull ONLY the lifecycle-cluster classifier from
 // SubstrateTypes. A blanket `import SubstrateTypes` collides with LocusKit
 // on `LatticeAnchor.udc` (both modules export `LatticeAnchor`), so we import
@@ -207,14 +208,51 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    /// Resolve the estate a tool call targets from its `estateID`
-    /// argument. The default (omitted `estateID`) returns the default
-    /// estate's handle, so the single-estate v1.0 behavior is identical
-    /// to today. A present `estateID` must be a UUID string naming a
-    /// registered estate; a malformed or unregistered value is an
-    /// out-of-band client error (`invalidParams`), consistent with the
-    /// other enum decoders in this file.
+    /// Resolve the estate a direct tool call targets from its `estateID` argument.
+    ///
+    /// Omitted `estateID` → default estate (preserves single-estate v1.0 behavior).
+    ///
+    /// Direct MCP tools are intentionally default-estate only. Additional registered
+    /// estates are addressable through `moot_federated_search`, which enforces active,
+    /// unexpired, scope-narrowing grants before any cross-estate read or write.
+    /// Allowing `estateID` to target any registered estate would bypass that grant gate;
+    /// therefore a present `estateID` is accepted only when it names the default estate.
+    ///
+    /// This is the security gate for Item 3 of secfix/batch2-aria: planned hardening
+    /// to prevent a prompt-injected agent from routing reads/writes to estates the
+    /// caller is not explicitly authorized to access through the federation surface.
     private func resolveHandle(_ args: [String: JSONValue]) throws -> EstateHandle {
+        guard let raw = try optionalString(args["estateID"], argument: "estateID") else { return handle }
+        guard let uuid = UUID(uuidString: raw) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Malformed estateID (not a UUID): \(raw)"
+            )
+        }
+        guard estates[uuid] != nil else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown estateID: \(raw)"
+            )
+        }
+        guard uuid == handle.estateUUID else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Direct estateID routing is limited to the default estate; use moot_federated_search for grant-authorized cross-estate reads."
+            )
+        }
+        return handle
+    }
+
+    /// Resolve any registered estate from an `estateID` argument.
+    ///
+    /// Unlike `resolveHandle`, this function allows targeting any registered estate
+    /// — it is used exclusively by the federated comparison lenses (`moot_lens_overlap`,
+    /// `moot_lens_divergence`) whose `estateIDB` argument is a peer comparison target,
+    /// not a CRUD routing target. Cross-estate reads/writes must go through the federation
+    /// surface (`moot_federated_search`) with its grant gate; lens comparisons are
+    /// read-only metadata operations that must see both estates.
+    internal func resolveAnyRegistered(_ args: [String: JSONValue]) throws -> EstateHandle {
         guard let raw = try optionalString(args["estateID"], argument: "estateID") else { return handle }
         guard let uuid = UUID(uuidString: raw) else {
             throw JSONRPCError(
@@ -263,9 +301,12 @@ public struct ToolDispatcher: Sendable {
                     resolveHandle: resolveHandle)
             } else if LensTools.isLensTool(name) {
                 // Reasoning-lens tools dispatched by name.
+                // resolveHandle: restricted to default estate (direct routing gate, Item 3).
+                // resolvePeer: unrestricted — lens overlap/divergence need cross-estate access.
                 runnerResult = try await LensTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
-                    resolveHandle: resolveHandle)
+                    resolveHandle: resolveHandle,
+                    resolvePeer: resolveAnyRegistered)
             } else if VaultTools.isVaultTool(name) {
                 // VaultKit control-surface tools dispatched by name.
                 runnerResult = try await VaultTools.dispatch(
@@ -358,7 +399,11 @@ public struct ToolDispatcher: Sendable {
             hydration = try decodeHydration(args["hydrationLevel"])
         }
         let ordering = try decodeOrdering(args["ordering"])
-        let limit = try optionalInt(args["limit"], argument: "limit")
+        // Route through clampLimit so negative and over-ceiling values are
+        // rejected/clamped at the MCP boundary on the federated surface.
+        // Parity: Rust run_federated_search uses clamp_limit with the same ceiling.
+        let limit = try Self.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         let frame = RecallFrame(
             filterChain: filterChain,
             hydrationLevel: hydration,
@@ -379,9 +424,12 @@ public struct ToolDispatcher: Sendable {
                 if case .crossEstateReadRefused = error { continue }
                 throw error
             }
-            let scoped = Self.narrow(result.drawers, to: result.grant.scope)
-            sections.append(Self.renderContribution(
-                source: source, grant: result.grant, drawers: scoped
+            let sourceEstate = try await kit.estate(for: source)
+            let scoped = try await Self.narrow(
+                result.drawers, to: result.grant.scope, estate: sourceEstate)
+            sections.append(try await Self.renderContribution(
+                source: source, grant: result.grant, drawers: scoped,
+                estate: sourceEstate
             ))
         }
         guard !sections.isEmpty else {
@@ -394,23 +442,40 @@ public struct ToolDispatcher: Sendable {
 
     // MARK: - Federation helpers
 
-    /// Resolve the requester estate from the required `requesterEstateID`
-    /// argument. Must name a registered, locally-open estate.
+    /// Resolve the requester estate for a federated search.
+    ///
+    /// `requesterEstateID` is now OPTIONAL (Item 2 hardening). When omitted the
+    /// requester is always the default estate. When supplied it must match the
+    /// default estate exactly — supplying a different estate UUID is refused.
+    ///
+    /// This closes the anti-spoof gap: a caller cannot represent themselves as
+    /// a different estate to bypass cross-estate grant scope checks. The
+    /// requester identity is always bound to the authenticated caller, which is
+    /// the server's own default open estate.
     private func resolveRequester(_ args: [String: JSONValue]) throws -> EstateHandle {
-        let raw = try requireString(args, "requesterEstateID")
+        guard let supplied = args["requesterEstateID"] else {
+            // Omitted: bind to the default estate (the authenticated caller).
+            return handle
+        }
+        guard let raw = supplied.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "requesterEstateID must be a string when supplied; omit it to use the default caller estate"
+            )
+        }
         guard let uuid = UUID(uuidString: raw) else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Malformed requesterEstateID (not a UUID): \(raw)"
             )
         }
-        guard let resolved = estates[uuid] else {
+        guard uuid == handle.estateUUID else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
-                message: "Unknown requesterEstateID: \(raw)"
+                message: "requesterEstateID does not match the authenticated caller estate; omit requesterEstateID to use the default estate"
             )
         }
-        return resolved
+        return handle
     }
 
     /// Narrow a source estate's recalled drawers to the rows inside the
@@ -419,14 +484,25 @@ public struct ToolDispatcher: Sendable {
     /// PRIMARY enforcement is in GLK: `CrossEstateFederation.federatedRecall`
     /// already filtered drawers by `grant.contentLevel` before this is called.
     /// This narrowing is defense-in-depth secondary at the ARIA surface.
-    private static func narrow(_ drawers: [Drawer], to scope: GrantScope) -> [Drawer] {
+    ///
+    /// Grants specify human-readable wing/room names, so name-based filtering
+    /// requires resolving parentNodeIds to display names via the node tree.
+    private static func narrow(
+        _ drawers: [Drawer],
+        to scope: GrantScope,
+        estate: LocusKit.Estate
+    ) async throws -> [Drawer] {
         switch scope {
         case .wholeEstate:
             return drawers
         case .wing(let name):
-            return drawers.filter { $0.wing == name }
+            let nodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: drawers.map(\.parentNodeId))
+            return drawers.filter { (nodeNames[$0.parentNodeId]?.wing ?? "") == name }
         case .room(let name):
-            return drawers.filter { $0.room == name }
+            let nodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: drawers.map(\.parentNodeId))
+            return drawers.filter { (nodeNames[$0.parentNodeId]?.room ?? "") == name }
         case .latticeSubtree(let code):
             // A drawer is inside the subtree when its UDC code equals `code`
             // or descends from it on a dot boundary. The `+ "."` guard prevents
@@ -438,12 +514,17 @@ public struct ToolDispatcher: Sendable {
     }
 
     /// Format one estate's authorized contribution for the federated response.
+    /// Resolves drawer room names from the node tree for display preview.
     private static func renderContribution(
-        source: EstateHandle, grant: Grant, drawers: [Drawer]
-    ) -> String {
+        source: EstateHandle, grant: Grant, drawers: [Drawer],
+        estate: LocusKit.Estate
+    ) async throws -> String {
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawers.prefix(50).map(\.parentNodeId))
         let header = "estate \(source.estateName) [\(source.estateUUID)] — grant \(grant.id), \(drawers.count) row(s)"
         let lines = drawers.prefix(50).map { drawer in
-            "\(drawer.id)  [\(drawer.room)]  \(drawer.content.prefix(80))"
+            let room = nodeNames[drawer.parentNodeId]?.room ?? ""
+            return "\(drawer.id)  [\(room)]  \(drawer.content.prefix(80))"
         }
         return ([header] + lines).joined(separator: "\n")
     }
@@ -491,6 +572,40 @@ public struct ToolDispatcher: Sendable {
             )
         }
         return Int(raw)
+    }
+
+    /// Hard ceiling for all caller-supplied `limit`/`count`/`k` arguments at the
+    /// MCP tool boundary. Every tool that accepts a numeric quantity must clamp
+    /// through `clampLimit` before passing the value into the substrate.
+    /// Parity: mirrors `LIMIT_HARD_CEILING` in Rust `dispatch.rs`.
+    static let limitHardCeiling = 500
+
+    /// Clamp a caller-supplied `limit`/`count`/`k` to the safe MCP boundary range
+    /// `[1, ceiling]`. This is the single clamping funnel for all such arguments
+    /// across the ARIA_MCP tool surface (interface tools, recipe tools, lens tools).
+    ///
+    /// - `nil` (absent arg)  → returns `defaultValue`.
+    /// - raw ≤ 0             → throws `invalidParams`; negative/zero values crash
+    ///                         downstream range and iterator operations.
+    /// - raw > `ceiling`     → silently clamped to `ceiling`; prevents DoS via
+    ///                         unbounded substrate scans.
+    /// - Otherwise           → returned as-is.
+    ///
+    /// Parity: mirrors `clamp_limit` in Rust `dispatch.rs`.
+    static func clampLimit(
+        _ raw: Int?,
+        argument: String,
+        default defaultValue: Int = 20,
+        ceiling: Int = limitHardCeiling
+    ) throws -> Int {
+        guard let raw else { return defaultValue }
+        guard raw > 0 else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be 1 or greater; received \(raw)"
+            )
+        }
+        return min(raw, ceiling)
     }
 
     func decodeChannel(_ value: JSONValue?) throws -> CaptureChannel {
@@ -876,7 +991,9 @@ enum InterfaceTools {
         // Tier 5 — Estate
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
         // Maintenance / admin
-        "moot_reindex",
+        "moot_reindex", "moot_drain_status",
+        // Direct palace import (bypass NoteIR)
+        "moot_palace_import",
     ]
 
     static func isInterfaceTool(_ name: String) -> Bool {
@@ -915,6 +1032,9 @@ enum InterfaceTools {
         case "moot_estate_ping":        return try await dispatcher.runEstatePing(args)
         // Maintenance / admin
         case "moot_reindex":           return try await dispatcher.runReindex(args)
+        case "moot_drain_status":      return try await dispatcher.runDrainStatus(args)
+        // Direct palace import
+        case "moot_palace_import":     return try await dispatcher.runPalaceImport(args)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -994,9 +1114,15 @@ extension ToolDispatcher {
         // Mode-aware capture: regular enqueues the encode job (background
         // semantic indexing); impatient encodes inline before returning.
         let drawer = try await kit.capture(handle, frame, mode: mode)
+        // Resolve the drawer's parentNodeId to a display room name via the
+        // node tree (Drawer no longer carries stored wing/room after ADR-017).
+        let estate = try await kit.estate(for: handle)
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: [drawer.parentNodeId])
+        let roomName = nodeNames[drawer.parentNodeId]?.room ?? ""
         return Self.textResult([
             "filed memory \(drawer.id)",
-            "room: \(drawer.room)",
+            "room: \(roomName)",
             "lineage: \(drawer.lineageID.uuidString)",
         ].joined(separator: "\n"))
     }
@@ -1016,7 +1142,11 @@ extension ToolDispatcher {
     func runMemorySearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let query = try requireString(args, "query")
-        let rawLimit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        // Clamp to [1, 500]: reject negative/zero limits (crash downstream range ops)
+        // and cap absurdly-large values (DoS via unbounded substrate recall scan).
+        // Parity: Rust run_memory_search uses clamp_limit with the same ceiling.
+        let limit = try Self.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         // Build the base filter chain from the `filter` argument.
         var filterChain = try decodeFilterChain(args["filter"])
         // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
@@ -1057,7 +1187,7 @@ extension ToolDispatcher {
         let frame = RecallFrame(
             filterChain: filterChain,
             hydrationLevel: .full,
-            limit: rawLimit,
+            limit: limit,
             // ordering: decoded above. byCaptureTimeDesc is the default and the
             // fallback for "byRelevanceDesc". The scored path (unionBest +
             // queryText) produces relevance-ordered results regardless of this
@@ -1068,7 +1198,7 @@ extension ToolDispatcher {
             frame: frame,
             mode: .unionBest,
             scoring: scoring,
-            limit: rawLimit,
+            limit: limit,
             fallback: .allowDegraded,
             queryText: query,
             origin: .external  // B-10a: ARIA boundary is external origin
@@ -1092,9 +1222,14 @@ extension ToolDispatcher {
         // (which would violate the signal's trustworthiness contract).
         let denseLaneDark = result.denseLaneStatus != nil
 
+        // ADR-017 §3: Drawer no longer carries stored wing/room. Resolve
+        // parentNodeIds to display names via the node tree for result formatting.
+        let estate = try await kit.estate(for: handle)
+        let hitNodeIds = result.hits.compactMap { $0.drawer?.parentNodeId }
+        let hitNodeNames = try await estate.resolveNodeNames(parentNodeIds: hitNodeIds)
         var lines: [String] = ["found \(result.hits.count) memory(s)"]
         for hit in result.hits.prefix(50) {
-            let room = hit.drawer?.room ?? "?"
+            let room = hit.drawer.flatMap { hitNodeNames[$0.parentNodeId]?.room } ?? "?"
             // For _distilled drawers, apply injection-depth formatting so the LLM
             // caller sees factoid prose with calibrated provenance annotations rather
             // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
@@ -1214,6 +1349,16 @@ extension ToolDispatcher {
         // Surface the caller-facing field name "confirmed" but map it to
         // the substrate's ExpungeFrame "confirmation" field.
         let confirmed = try optionalBool(args["confirmed"], argument: "confirmed") ?? false
+        // Security gate (Item 1 hardening): refuse at the AriaMcpKit boundary
+        // before calling the substrate. Prevents prompt-injected agents from
+        // triggering irreversible erasure without an explicit owner acknowledgement.
+        // Mirrors the Rust run_erase_memory gate in dispatch.rs.
+        guard confirmed else {
+            return Self.errorResult(
+                "expunge of \(rowID) requires confirmed=true and a reason. " +
+                "Set confirmed=true only after the owner has explicitly reviewed and approved the deletion."
+            )
+        }
         try await kit.expunge(handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
         return Self.textResult("erased memory \(rowID)")
     }
@@ -1354,11 +1499,17 @@ extension ToolDispatcher {
                 message: "Memory not found: \(toID)"
             )
         }
+        // ADR-017 §3: Drawer no longer carries stored wing/room. Resolve
+        // parentNodeIds via the node tree for TunnelCaptureFrame display names.
+        let linkNodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: [source.parentNodeId, target.parentNodeId])
+        let sourceNames = linkNodeNames[source.parentNodeId] ?? (wing: "", room: "")
+        let targetNames = linkNodeNames[target.parentNodeId] ?? (wing: "", room: "")
         let frame = TunnelCaptureFrame(
-            sourceWing: source.wing,
-            sourceRoom: source.room,
-            targetWing: target.wing,
-            targetRoom: target.room,
+            sourceWing: sourceNames.wing,
+            sourceRoom: sourceNames.room,
+            targetWing: targetNames.wing,
+            targetRoom: targetNames.room,
             label: label,
             addedBy: serverIdentity,
             sourceDrawerId: fromID,
@@ -1686,7 +1837,11 @@ extension ToolDispatcher {
         }
         // "total" counts all non-erased rows (tombstone = erased permanently).
         let total = drawers.filter { $0.tombstonedAt == nil }
-        let wings = Set(active.map { $0.wing }).sorted()
+        // Resolve parentNodeIds to display names for wing listing. Drawer
+        // no longer carries stored wing/room after ADR-017 node-tree migration.
+        let activeNodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: active.map(\.parentNodeId))
+        let wings = Set(active.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
         let facts = try await kit.recallKGFacts(handle)
         // Trace row count — the reward pipeline's read log size. A read failure
         // must not break the whole status response, but it must NOT be reported
@@ -1718,52 +1873,39 @@ extension ToolDispatcher {
 
     /// `moot_estate_map` — return the estate's structural map with memory counts.
     ///
-    /// ADR-016 §3: each wing's charter drawer (room `_charter`) is surfaced
-    /// inline after the wing header so callers can orient to each wing's role
-    /// without a separate lookup. Charter drawers are excluded from the per-room
-    /// counts so the map stays a structural index, not a content dump.
+    /// All drawers (including hint memories in AI_Charter_Hint) are counted
+    /// normally — no special-casing. The map shows wing → rooms → counts.
+    ///
+    /// Drawer no longer carries stored wing/room (ADR-017 node-tree migration).
+    /// All display names are resolved from the node tree via
+    /// `Estate.resolveNodeNames(parentNodeIds:)`.
     func runEstateMap(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
         let active = drawers.filter { $0.tombstonedAt == nil }
 
-        // Build a per-wing charter map: wing → charter text (from the `_charter` room).
-        // A wing may have been created without a charter drawer (e.g. user-defined wings
-        // pre-ADR-016); in that case the charter entry is absent and no inline text is shown.
-        var charters: [String: String] = [:]
-        for d in active where d.room == LocusKit.charterRoom {
-            // Only record the first charter drawer found per wing; duplicates are ignored.
-            if charters[d.wing] == nil {
-                charters[d.wing] = d.content
-            }
-        }
+        // Resolve all active drawers' parentNodeIds to display names once.
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: active.map(\.parentNodeId))
 
-        // Group by wing then room, counting non-charter drawers per location.
-        // Charter drawers are excluded from counts (they are structural metadata,
-        // not user-filed memories; surfacing them in counts would inflate the map).
+        // Group by wing then room, counting ALL drawers per location (including
+        // hint memories in AI_Charter_Hint — they are normal drawers now).
         var map: [String: [String: Int]] = [:]
-        for d in active where d.room != LocusKit.charterRoom {
-            map[d.wing, default: [:]][d.room, default: 0] += 1
+        for d in active {
+            let names = nodeNames[d.parentNodeId]
+            let wing = names?.wing ?? ""
+            let room = names?.room ?? ""
+            map[wing, default: [:]][room, default: 0] += 1
         }
 
         var lines: [String] = ["estate map: \(handle.estateName)"]
         for wing in map.keys.sorted() {
             lines.append("  \(wing)/")
-            // Surface the wing's charter inline so the caller understands its role.
-            if let charter = charters[wing] {
-                lines.append("    charter: \(charter)")
-            }
             for room in (map[wing] ?? [:]).keys.sorted() {
                 let count = map[wing]?[room] ?? 0
                 lines.append("    \(room): \(count)")
             }
-        }
-        // Also surface wings that have a charter but no non-charter drawers yet.
-        // These are newly seeded wings with no user content — still useful to show.
-        for wing in charters.keys.sorted() where map[wing] == nil {
-            lines.append("  \(wing)/")
-            lines.append("    charter: \(charters[wing]!)")
         }
         return Self.textResult(lines.joined(separator: "\n"))
     }
@@ -1784,12 +1926,30 @@ extension ToolDispatcher {
     /// relink and can be overridden via `MOOTX01_BUILD_SERIAL`.
     func runEstatePing(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        // Resolving the handle is the entire check. If the estate were not
-        // open, resolveHandle would throw estateNotOpen and dispatch would
-        // surface it as isError:true before this line runs.
-        return Self.textResult(
-            "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
-        )
+        // resolveHandle checks only the immutable `estates` dictionary (populated
+        // at construction); it cannot detect an estate that was closed or quiesced
+        // at runtime. Verify liveness against the GLK registry via mountState(for:),
+        // which reads the live mountStates dictionary on the actor. An absent entry
+        // or a non-mounted state both indicate the estate is no longer live.
+        let state = await kit.mountState(for: handle)
+        switch state {
+        case .mounted:
+            return Self.textResult(
+                "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
+            )
+        case .quiesced, .draining:
+            // Return a tool-level error (not a JSON-RPC protocol error) so the
+            // caller sees an actionable message through the tools/call result.
+            return Self.errorResult(
+                "estate \(handle.estateName) [\(handle.estateUUID)] is quiesced and not accepting new work"
+            )
+        case .unmounted, .none:
+            // Estate is not in the GLK registry — it may have been closed since
+            // this server instance started. Surface as a tool-level error.
+            return Self.errorResult(
+                "estate \(handle.estateUUID) is not mounted in the GLK registry; re-open or re-provision it"
+            )
+        }
     }
 
     /// `moot_reindex` — enqueue encode jobs for drawers not yet in the Corpus.
@@ -1803,7 +1963,7 @@ extension ToolDispatcher {
     /// as soon as the jobs are enqueued, not after they complete.
     ///
     /// Idempotent: drawers already in the Corpus BundleStore are skipped.
-    /// Callers can poll `moot_estate_status` for encode-queue depth or simply
+    /// Callers can poll `moot_drain_status` for encode-queue depth or simply
     /// wait for the background drain worker to settle.
     ///
     /// Returns a summary: how many drawers were enqueued and how many were
@@ -1813,6 +1973,122 @@ extension ToolDispatcher {
         let now = Date()
         let enqueued = try await kit.reindexMissing(handle: handle, now: now)
         return Self.textResult("reindex: enqueued \(enqueued) drawers for encoding")
+    }
+
+    /// `moot_drain_status` — report every long-running background drain the
+    /// estate currently runs, for monitoring asynchronous work (e.g. watching
+    /// an import's encode queue converge after `moot_palace_import`).
+    ///
+    /// Lightweight and pollable: unlike `moot_estate_status` it does NOT append
+    /// the ARIASessionProtocol orientation block, because this tool is meant to
+    /// be called repeatedly while a drain settles — appending the protocol on
+    /// every poll would bloat the transcript.
+    ///
+    /// Today the only drain is `corpus_encode` — the encode/ingest queue that
+    /// turns captured/imported text into BM25 + vector content asynchronously.
+    /// Each drain reports pending + in-flight job counts, a draining/idle state,
+    /// and optional drain-specific detail (the corpus drain reports its live
+    /// encoded-chunk count, so forward progress is visible). The report is a
+    /// LIST so additional drains surface here automatically when they exist; an
+    /// estate with no Corpus registered reports no drains.
+    func runDrainStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let drains = try await kit.drainStatuses(handle)
+        guard !drains.isEmpty else {
+            // No drains registered (a bare estate with no Corpus). Honest empty
+            // report — distinct from "all drains idle", which lists drains at 0.
+            return Self.textResult("drains: none")
+        }
+        var lines: [String] = ["drains: \(drains.count)"]
+        for d in drains {
+            let state = d.isDraining ? "draining" : "idle"
+            var line = "  \(d.name): \(state) — pending: \(d.pending), in_flight: \(d.inFlight)"
+            if let detail = d.detail {
+                line += ", \(detail)"
+            }
+            lines.append(line)
+        }
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// `moot_palace_import` — import a MemPalace directly into the estate,
+    /// bypassing NoteIR. Reads palace/chroma.sqlite3, tunnels.json, and
+    /// knowledge_graph.sqlite3 from `palace_path`, then applies all four
+    /// import guards (tombstone, content-idempotent dedup, sensitivity floor,
+    /// tunnel signature dedup). Returns a structured import summary.
+    ///
+    /// Gated behind `MOOTX01_VAULT` for the same reason as vault import/export:
+    /// this tool opens arbitrary SQLite files from the local filesystem (a
+    /// potential path-traversal vector if the caller is untrusted). Disabled
+    /// installs (MOOTX01_VAULT=0) return a clear tool-level refusal.
+    func runPalaceImport(_ args: [String: JSONValue]) async throws -> JSONValue {
+        guard ToolProjection.vaultEnabled else {
+            return Self.errorResult(
+                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
+            )
+        }
+        let handle = try resolveHandle(args)
+        let palacePath = try requireString(args, "palace_path")
+        let palaceURL = URL(fileURLWithPath: palacePath, isDirectory: true)
+        let now = Date()
+
+        // mode (encode SPEED, default foreground): foreground drains the encode
+        // queue hard on the performance cores; background yields for very large
+        // imports so the drain does not saturate the host. SPEED only — the WRITE
+        // strategy (bulk transaction vs per-item stream) is chosen automatically
+        // by source size inside PalaceBridge, never by the caller. Fail-closed on
+        // an unknown value rather than silently defaulting.
+        let modeStr = (try optionalString(args["mode"], argument: "mode")) ?? "foreground"
+        let mode: EncodeSpeed
+        switch modeStr.lowercased() {
+        case "foreground": mode = .foreground
+        case "background": mode = .background
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)"
+            )
+        }
+        let bridge = PalaceBridge(kit: kit)
+        let report = try await bridge.importPalace(at: palaceURL, into: handle, now: now,
+            progress: { processed, total in
+                // Live progress to stderr, fired by the bridge every 10 records.
+                // The MCP response is returned only at completion, so stderr is the
+                // sole live-progress channel during a long background import.
+                fputs("palace import: \(processed)/\(total) drawers\n", stderr)
+            },
+            mode: mode)
+
+        // DESIGN: the import TRIGGERS its own post-import processing in the BACKGROUND
+        // and releases the caller immediately — it does NOT rely on the AI to run
+        // moot_reindex / moot_dream next (that is not the design). A detached task runs
+        // `reindexMissing`, which enqueues an encode job for every imported drawer (the
+        // resident daemon's encode-drain worker then ingests them into the BM25 +
+        // vector lanes and rolls up the touched rooms off the write path) and runs the
+        // O(N) Merkle full-tree rollup; the governor's dreaming duty builds the
+        // association matrix on its cadence. This call returns the moment the import
+        // rows are durable, so the AI is freed while indexing/rollup/dreaming proceed
+        // in the background on the resident daemon. (In a stdio one-shot the process
+        // exits when its input closes, so a caller that needs the background work to
+        // finish must keep the connection open — the resident HTTP daemon is the host.)
+        Task.detached { [kit] in
+            do {
+                _ = try await kit.reindexMissing(handle: handle, now: now)
+                fputs("palace import: background processing complete (encode queued, Merkle rolled up)\n", stderr)
+            } catch {
+                fputs("palace import: background reindex failed: \(error)\n", stderr)
+            }
+        }
+
+        return Self.textResult(
+            "palace import complete: \(report.drawersWritten) written, " +
+            "\(report.drawersUpdated) updated, " +
+            "\(report.drawersSkippedUnchanged) unchanged, " +
+            "\(report.drawersSkippedTombstoned) tombstoned, " +
+            "\(report.tunnelsCreated) tunnels, " +
+            "\(report.itemsSkipped) skipped; background processing started asynchronously " +
+            "(encode/index + Merkle rollup + matrix dreaming run on the resident daemon — no follow-up call needed)"
+        )
     }
 }
 
@@ -1839,17 +2115,28 @@ extension ToolDispatcher {
     ///   conf >= 0.7  (factoidOnly):           prose only — confidence is high; no annotation needed.
     ///   conf ∈ [0.4, 0.7) (factoidWithMeta):  prose + source memory count and confidence.
     ///   conf < 0.4  (factoidWithProvenance):  prose + confidence and source drawer ID for full audit trail.
+    /// Preview cap for distilled prose injected into the LLM context.
+    ///
+    /// Distilled factoids are compressed by definition, but `m.prose` can still
+    /// be arbitrarily long. Cap at 300 chars to prevent a single high-confidence
+    /// factoid from overwhelming the context window. 300 chars is generous for
+    /// compressed factoid prose; normal drawers use 120 chars.
+    /// Parity: mirrors `DISTILLED_PROSE_PREVIEW_CAP` in Rust `recipe_tools.rs`.
+    static let distilledProseCap = 300
+
     static func injectionDepthFormatted(header: DistilledHeader, drawerID: RowID) -> String {
         let confStr = String(format: "%.2f", header.confidence)
+        // Preview cap: applied before injection to bound context-window consumption.
+        let prose = String(header.prose.prefix(Self.distilledProseCap))
         if header.confidence >= 0.7 {
             // factoidOnly: prose only; confidence is high enough to trust without annotation
-            return header.prose
+            return prose
         } else if header.confidence >= 0.4 {
             // factoidWithMeta: append memory count and confidence so the caller can weigh certainty
-            return "\(header.prose)\n[distilled from \(header.sourceCount) memories, conf=\(confStr)]"
+            return "\(prose)\n[distilled from \(header.sourceCount) memories, conf=\(confStr)]"
         } else {
             // factoidWithProvenance: append confidence and source drawer ID for full traceability
-            return "\(header.prose)\n[distilled, conf=\(confStr), sources: \(drawerID)]"
+            return "\(prose)\n[distilled, conf=\(confStr), sources: \(drawerID)]"
         }
     }
 }

@@ -219,8 +219,9 @@ fn degraded_stages_none_on_happy_path() {
 /// Mirrors Swift test D: provenanceLinePresentOnZeroResults.
 #[test]
 fn provenance_line_present_on_zero_results() {
-    // Fresh registry with no captures — estate is empty.
-    let registry = EstateRegistry::new_inmemory();
+    // Fresh registry with no captures — estate is empty. _bare: no seeded
+    // AI_Charter_Hint wing drawers, so a no-match query returns "found 0".
+    let registry = EstateRegistry::new_inmemory_bare();
     let ledger = SurfacedRecallLedger::new();
 
     let search_args = args![

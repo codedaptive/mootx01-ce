@@ -8,10 +8,11 @@ import Foundation
 /// reference size, 42ms target). Three scenarios:
 ///   1. `.structured` recall with no content predicate (Fix A: no blob re-fetch)
 ///   2. `.full` recall (still loads blobs — establishes the blob-load cost)
-///   3. `.structured` recall with explicit limit = 20 (Fix B: trace bound = 20)
+///   3. `.structured` recall with explicit `limit = 20` (bounds the result set)
 ///
-/// Uses the public `estate.recall(_:)` → drain-all path so the bench covers
-/// the complete hot path including RecallStream pagination and trace writes.
+/// None of the scenarios set `traceLimit`, so no recall-trace rows are
+/// written. Uses the public `estate.recall(_:)` → drain-all path so the
+/// bench covers the complete hot path including RecallStream pagination.
 /// Single-shot timings; upper bound is generous (500ms) for CI headroom.
 /// The printed values are the meaningful signal for MemPalace comparison.
 @Suite("Recall lane latency bench — 1,040-drawer estate")

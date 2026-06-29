@@ -1,20 +1,20 @@
 // estate_dreaming_sink.rs — Rust parity of
 // `NeuronKit/Sources/NeuronKit/Dreaming/EstateDreamingSink.swift`.
 //
-// Production adapter that implements `DreamingProposalSink` over a
-// synchronous `DrawerStore` reference. The two write methods correspond
-// to NEURONKIT_SPEC § 3.1 steps 6 and 7:
+// Production adapter that implements `DreamingProposalSink` by routing all
+// writes through the GLK `EstateCoordinator` verb surface (B-1 compliant).
+// The three write methods correspond to NEURONKIT_SPEC § 3.1 steps 6 and 7:
 //
-//   6. `propose` — emits a Proposal row via `store.add_proposal`.
-//      Constructs the full `locus_kit::Proposal` from `ProposeFrameOut`
-//      with genuine provenance: a real UDC 005 system-state anchor and the
-//      dreaming-daemon operational axes (kind, target object type
-//      SystemState, generated-by DreamingDaemon, Medium confidence) per
-//      cookbook §2.4. See `dreaming_proposal_operational`.
+//   6. `propose` — delegates to `EstateCoordinator::propose`, which maps
+//      the Brain-layer `ProposalKind` to the substrate's LocusKit kind and
+//      dispatches to `Estate::propose`. The coordinator stamps the canonical
+//      dreaming-daemon provenance (DreamingDaemon / Null confidence).
 //
-//   7. `record_cycle_diary` — writes a DiaryEntry row via
-//      `store.add_diary_entry`, translating the cycle-local
-//      `DreamingDiaryEntry` struct to the full `locus_kit::DiaryEntry`.
+//   7. `record_cycle_diary` — delegates to `EstateCoordinator::add_diary_entry`,
+//      which resolves the handle and writes to the estate's DrawerStore.
+//
+//   post-7. `prune_recall_traces` — delegates to
+//      `EstateCoordinator::prune_recall_traces` (reward-sweep cleanup).
 //
 // ── Write error handling ─────────────────────────────────────────────
 // The `DreamingProposalSink` trait methods are infallible (no `Result`
@@ -26,172 +26,129 @@
 //
 // ── Architecture note ────────────────────────────────────────────────
 // Same layering rationale as `EstateDreamingReader`: lives in NeuronKit
-// because it implements a NeuronKit trait and calls locus-kit methods.
-// The GLK coordinator is not needed here because the Rust DrawerStore
-// trait already exposes `add_proposal` and `add_diary_entry` as the
-// direct write path, bypassing the need for the GLK-level `propose` verb
-// dispatch (which carries the `now` clock that is unavailable in the
-// sync trait signatures anyway).
+// because it implements a NeuronKit trait. All writes route through the
+// GLK coordinator, matching the Swift `EstateDreamingSink` which delegates
+// to `GeniusLocusKit.propose(_:_:)`, `GeniusLocusKit.addDiaryEntry(in:_:)`,
+// and `GeniusLocusKit.pruneRecallTraces(in:olderThan:)`.
 
-use std::sync::Arc;
-
-use locus_kit::diary_entry::DiaryEntry as LkDiaryEntry;
-use locus_kit::drawer_store::DrawerStore;
-use locus_kit::estate_types::LatticeAnchor;
-use locus_kit::proposal::Proposal;
-use locus_kit::proposal_operational::{
-    compose_operational, ProposalConfidenceBucket, ProposalGeneratedByClass, ProposalKind,
-    ProposalTargetObjectType,
-};
+use genius_locus_kit::coordinator::EstateCoordinator;
+use genius_locus_kit::handle::EstateHandle;
+use genius_locus_kit::verbs::frames::ProposeFrame as GlkProposeFrame;
 
 use crate::dreaming_cycle::{DreamingDiaryEntry, DreamingProposalSink, ProposeFrameOut};
 
-/// Map a dreaming-cycle proposal `kind` label to the substrate
-/// `ProposalKind` axis (cookbook §2.4 bits 0–5), then compose the full
-/// operational bitmap with the genuine dreaming-daemon provenance: the
-/// generated-by class is `DreamingDaemon`, the target object type is
-/// `SystemState` (a dreaming proposal targets the estate's own state, not a
-/// single row), and the confidence bucket is `Medium` (an autonomous
-/// proposal is a hypothesis, not a verified fact). Unrecognised labels map
-/// to `MutateDrawer`, the dreaming cycle's dominant proposal shape.
-fn dreaming_proposal_operational(kind: &str) -> i64 {
-    let proposal_kind = match kind {
-        "newTunnel" => ProposalKind::NewTunnel,
-        "mutateCandidate" | "mutateDrawer" => ProposalKind::MutateDrawer,
-        "associationPromotion" => ProposalKind::AssociationPromotion,
-        "miningPattern" | "miningPatternAdjustment" => ProposalKind::MiningPatternAdjustment,
-        "recordObservation" => ProposalKind::RecordObservation,
-        _ => ProposalKind::MutateDrawer,
-    };
-    compose_operational(
-        proposal_kind,
-        ProposalTargetObjectType::SystemState,
-        ProposalGeneratedByClass::DreamingDaemon,
-        ProposalConfidenceBucket::Medium,
-    )
+/// Map a dreaming-cycle proposal `kind` label to the GLK Brain-layer
+/// `ProposalKind`. The dreaming decision emits camelCase labels; the GLK
+/// enum uses snake_case wire values. This mapping bridges the two.
+fn dreaming_kind_to_glk(kind: &str) -> genius_locus_kit::brain::scheduler::api::ProposalKind {
+    use genius_locus_kit::brain::scheduler::api::ProposalKind;
+    match kind {
+        "miningPattern" | "miningPatternAdjustment" => ProposalKind::MiningPattern,
+        "mutateCandidate" | "mutateDrawer" => ProposalKind::MutateCandidate,
+        "enrichment" => ProposalKind::Enrichment,
+        "newTunnel" => ProposalKind::Other("newTunnel".to_string()),
+        "associationPromotion" => ProposalKind::Other("associationPromotion".to_string()),
+        "recordObservation" => ProposalKind::DisciplineViolation,
+        other => ProposalKind::Other(other.to_string()),
+    }
 }
 
-/// Production adapter that binds `DreamingProposalSink` to a live
-/// `DrawerStore`.
+/// Production adapter that binds `DreamingProposalSink` to a live estate
+/// through the GLK `EstateCoordinator` verb surface.
 ///
-/// Mirrors `EstateDreamingSink.swift`. Holds a `DrawerStore` reference and
-/// a deterministic `now` (epoch seconds) for row timestamps. Accumulates
-/// any write errors in `write_errors` — the trait methods are infallible,
-/// but callers should inspect this field after a cycle to detect failures.
-///
-/// Row IDs are generated deterministically: `dreaming-<now>-<counter>`, where
-/// `counter` increments per write. This satisfies the substrate's non-empty ID
-/// requirement and the fleet determinism rule (no RNG inside engines).
-///
-/// The `?Sized` bound on `S` allows `Arc<dyn DrawerStore>` to be used as the
-/// store type — `Arc<dyn DrawerStore>` implements `DrawerStore` via the blanket
-/// impl in `locus_kit::drawer_store`, so callers that hold a type-erased store
-/// (e.g. the AutonomicGovernor, which receives the registry's `Arc<dyn DrawerStore>`)
-/// can pass it directly without a double-Arc wrapper.
-pub struct EstateDreamingSink<S: DrawerStore + ?Sized> {
-    store: Arc<S>,
+/// Mirrors `EstateDreamingSink.swift`. Holds a coordinator reference and
+/// estate handle, routing all writes through GLK (B-1 compliance).
+/// Accumulates any write errors in `write_errors` — the trait methods are
+/// infallible, but callers should inspect this field after a cycle to detect
+/// failures.
+pub struct EstateDreamingSink<'a> {
+    coordinator: &'a EstateCoordinator,
+    handle: EstateHandle,
     /// Deterministic timestamp for all rows written this cycle (epoch
     /// seconds). Passed at construction; not derived from the system clock.
     now: i64,
-    /// Per-instance write counter, used to generate unique deterministic IDs.
-    id_counter: u64,
-    /// Accumulated write errors from `add_proposal` / `add_diary_entry`
-    /// calls. Empty on success.
+    /// Accumulated write errors from GLK coordinator calls. Empty on success.
     pub write_errors: Vec<String>,
 }
 
-impl<S: DrawerStore + ?Sized> EstateDreamingSink<S> {
-    /// Construct a sink over `store` with timestamps at `now`.
+impl<'a> EstateDreamingSink<'a> {
+    /// Construct a sink over `coordinator` and `handle` with timestamps at `now`.
     ///
     /// `now` is explicit for determinism per the fleet rule; callers supply
     /// the epoch-seconds timestamp that the cycle should use for all rows.
-    pub fn new(store: Arc<S>, now: i64) -> Self {
+    pub fn new(coordinator: &'a EstateCoordinator, handle: EstateHandle, now: i64) -> Self {
         Self {
-            store,
+            coordinator,
+            handle,
             now,
-            id_counter: 0,
             write_errors: Vec::new(),
         }
     }
-
-    /// Generate a deterministic row ID of the form `dreaming-<now>-<counter>`.
-    /// Increments the counter on each call so successive calls within a cycle
-    /// produce distinct IDs.
-    fn next_id(&mut self) -> String {
-        let id = format!("dreaming-{}-{}", self.now, self.id_counter);
-        self.id_counter += 1;
-        id
-    }
 }
 
-impl<S: DrawerStore + ?Sized> DreamingProposalSink for EstateDreamingSink<S> {
-    /// Emit a proposal row (step 6). Translates `ProposeFrameOut` to a
-    /// `locus_kit::Proposal` and calls `store.add_proposal`. The proposal
-    /// carries real provenance: its operational bitmap records the genuine
-    /// generated-by class (`DreamingDaemon`), proposal kind (mapped from the
-    /// frame's `kind` label), target object type (`SystemState` — a dreaming
-    /// proposal targets the estate's own state, not one row), and a
-    /// `Medium` confidence bucket. The lattice anchor is the autonomic
-    /// system-state anchor (UDC 005 — "computing, information"; the estate's
-    /// own machinery), satisfying the non-empty invariant with a genuine
-    /// code rather than a label sentinel. Write failures are appended to
-    /// `self.write_errors`.
+impl<'a> DreamingProposalSink for EstateDreamingSink<'a> {
+    /// Emit a proposal row (step 6). Constructs a GLK `ProposeFrame` and
+    /// delegates to `EstateCoordinator::propose`, which maps the Brain-layer
+    /// kind to the substrate kind and stamps the canonical dreaming-daemon
+    /// provenance. Write failures are appended to `self.write_errors`.
     fn propose(&mut self, frame: ProposeFrameOut) {
-        let mut proposal = Proposal::new(
-            self.next_id(),
-            frame.target,
-            // UDC 005 ("computing, information") — the estate's own autonomic
-            // machinery is the genuine subject of a system-state proposal.
-            LatticeAnchor::udc("005"),
-            self.now,
-        );
-        proposal.justification = Some(frame.justification);
-        proposal.operational_bitmap = dreaming_proposal_operational(&frame.kind);
-        if let Err(e) = self.store.add_proposal(&proposal) {
+        let glk_frame = GlkProposeFrame {
+            target: frame.target,
+            kind: dreaming_kind_to_glk(&frame.kind),
+            justification: Some(frame.justification),
+        };
+        if let Err(e) = self.coordinator.propose(&self.handle, glk_frame, self.now) {
             self.write_errors.push(format!("propose: {e:?}"));
         }
     }
 
-    /// Record exactly one diary entry per cycle (step 7). Translates
-    /// `DreamingDiaryEntry` to a `locus_kit::DiaryEntry` and calls
-    /// `store.add_diary_entry`. Write failures are appended to
-    /// `self.write_errors`.
+    /// Record exactly one diary entry per cycle (step 7). Delegates to
+    /// `EstateCoordinator::add_diary_entry`. Write failures are appended
+    /// to `self.write_errors`.
     fn record_cycle_diary(&mut self, entry: DreamingDiaryEntry) {
-        let diary = LkDiaryEntry {
-            id: self.next_id(),
-            agent_name: entry.agent_name,
-            entry: entry.entry,
-            topic: entry.topic,
-            wing: entry.wing,
-            room: entry.room,
-            filed_at: self.now,
-            // Dreaming-cycle diary entries carry no embedding, so the model ID
-            // is the genuine "no-embedding" marker — the same value the Swift
-            // path substitutes for an empty embeddingModelID in addDiaryEntry.
-            // Not a fabricated version string.
-            embedding_model_id: "no-embedding".into(),
-            tombstoned_at: None,
-            removed_by_batch: None,
-            operational_bitmap: 0,
-            // Dreaming-cycle entries are system-generated; no explicit quality
-            // signal is available at write time. Reward is derived from the
-            // recall trace (implicit source) during the next dreaming tick.
-            reward: None,
-            reward_provenance: None,
-        };
-        if let Err(e) = self.store.add_diary_entry(&diary) {
+        if let Err(e) = self.coordinator.add_diary_entry(
+            &self.handle,
+            &entry.agent_name,
+            &entry.entry,
+            &entry.topic,
+            "no-embedding",
+            self.now,
+        ) {
             self.write_errors.push(format!("record_cycle_diary: {e:?}"));
         }
     }
 
     /// Delete recall-trace rows older than `cutoff_iso` (the post-reward-sweep
-    /// prune). Delegates to `DrawerStore::prune_recall_traces`. Write failures
-    /// are appended to `self.write_errors` — the trait method is infallible, so
-    /// a storage fault must not abort the cycle. Mirrors the Swift
-    /// `EstateDreamingSink.pruneRecallTraces(olderThan:)`.
+    /// prune). Delegates to `EstateCoordinator::prune_recall_traces`. Write
+    /// failures are appended to `self.write_errors` — the trait method is
+    /// infallible, so a storage fault must not abort the cycle. Mirrors the
+    /// Swift `EstateDreamingSink.pruneRecallTraces(olderThan:)`.
     fn prune_recall_traces(&mut self, cutoff_iso: &str) {
-        if let Err(e) = self.store.prune_recall_traces(cutoff_iso) {
+        if let Err(e) = self.coordinator.prune_recall_traces(&self.handle, cutoff_iso) {
             self.write_errors.push(format!("prune_recall_traces: {e:?}"));
+        }
+    }
+
+    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap` (T13 / ADR-021 Phase 7).
+    ///
+    /// Called by `run_omega_cycle` for each unreinforced dreamed tunnel. Delegates to
+    /// `EstateCoordinator::retire_tunnel`, which delegates to `Estate::retire_tunnel`
+    /// (B-1: NeuronKit never touches the substrate directly). Infallible — write
+    /// failures are appended to `self.write_errors` so a single retire failure does
+    /// not abort the OMEGA sweep.
+    ///
+    /// `changed_by` is the agent tag ("dreaming-daemon") for audit logs.
+    /// `now_epoch_secs` is the deterministic cycle timestamp (i64 for SQLite TEXT rows).
+    ///
+    /// Mirrors Swift `EstateDreamingSink.retireTunnel(id:changedBy:now:)`.
+    fn retire_tunnel(&mut self, tunnel_id: &str, changed_by: &str, now_epoch_secs: i64) {
+        if let Err(e) = self.coordinator.retire_tunnel(
+            &self.handle,
+            tunnel_id,
+            changed_by,
+            now_epoch_secs,
+        ) {
+            self.write_errors.push(format!("retire_tunnel({tunnel_id}): {e:?}"));
         }
     }
 }
@@ -200,58 +157,67 @@ impl<S: DrawerStore + ?Sized> DreamingProposalSink for EstateDreamingSink<S> {
 mod tests {
     use super::*;
 
-    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use std::sync::Arc;
 
-    fn make_store() -> Arc<InMemoryDrawerStore> {
-        Arc::new(InMemoryDrawerStore::new(0, None).expect("store"))
+    use genius_locus_kit::coordinator::EstateCoordinator;
+    use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
+    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use locus_kit::estate_types::OwnerCredentials;
+
+    fn make_coordinator_and_handle() -> (EstateCoordinator, EstateHandle) {
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        (coord, handle)
+    }
+
+    /// Capture a drawer with the given content and return its assigned row ID.
+    fn capture_drawer(coord: &EstateCoordinator, handle: &EstateHandle, content: &str, now: i64) -> String {
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::frames::CaptureFrame;
+        let frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "test-room",
+            LatticeAnchor::udc("000"),
+            "test",
+            "no-embedding",
+        );
+        coord.capture(handle, frame, now).expect("capture").id
     }
 
     #[test]
-    fn propose_writes_proposal_to_store() {
-        let store = make_store();
-        let mut sink = EstateDreamingSink::new(Arc::clone(&store), 1_000_000);
+    fn propose_writes_proposal_through_glk() {
+        let (coord, handle) = make_coordinator_and_handle();
+        // GLK propose requires the target drawer to exist.
+        let row_id = capture_drawer(&coord, &handle, "test content abc", 999_999);
+        let mut sink = EstateDreamingSink::new(&coord, handle.clone(), 1_000_000);
         let frame = ProposeFrameOut {
-            target: "row-abc".into(),
+            target: row_id.clone(),
             kind: "miningPattern".into(),
-            justification: "dreaming: latent alignment row-abc<->row-xyz".into(),
+            justification: "dreaming: latent alignment".into(),
         };
         sink.propose(frame);
         assert!(sink.write_errors.is_empty(), "write errors: {:?}", sink.write_errors);
-        // Verify the proposal landed: look up by target row id.
-        let proposals = store.proposals_for_target("row-abc").expect("proposals");
+        // Verify the proposal landed via the coordinator's read surface.
+        let proposals = coord.recall_proposals(&handle).expect("proposals");
         assert_eq!(proposals.len(), 1, "expected one proposal");
-        assert_eq!(proposals[0].target_row_id, "row-abc");
+        assert_eq!(proposals[0].target_row_id, row_id);
         assert_eq!(
             proposals[0].justification.as_deref(),
-            Some("dreaming: latent alignment row-abc<->row-xyz")
+            Some("dreaming: latent alignment")
         );
         assert_eq!(proposals[0].filed_at, 1_000_000);
-        // Genuine provenance, not placeholders: a real UDC anchor and the
-        // dreaming-daemon operational axes (cookbook §2.4).
-        use locus_kit::proposal_operational::{
-            ProposalConfidenceBucket, ProposalGeneratedByClass, ProposalKind,
-            ProposalTargetObjectType,
-        };
-        assert_eq!(proposals[0].lattice_anchor.udc_code, "005");
-        assert_eq!(proposals[0].proposal_kind(), ProposalKind::MiningPatternAdjustment);
-        assert_eq!(
-            proposals[0].target_object_type(),
-            ProposalTargetObjectType::SystemState
-        );
-        assert_eq!(
-            proposals[0].generated_by_class(),
-            ProposalGeneratedByClass::DreamingDaemon
-        );
-        assert_eq!(
-            proposals[0].confidence_bucket(),
-            ProposalConfidenceBucket::Medium
-        );
     }
 
     #[test]
-    fn record_cycle_diary_writes_entry_to_store() {
-        let store = make_store();
-        let mut sink = EstateDreamingSink::new(Arc::clone(&store), 2_000_000);
+    fn record_cycle_diary_writes_entry_through_glk() {
+        let (coord, handle) = make_coordinator_and_handle();
+        let mut sink = EstateDreamingSink::new(&coord, handle.clone(), 2_000_000);
         let entry = DreamingDiaryEntry {
             agent_name: "dreaming-daemon".into(),
             entry: "dreaming cycle 1: considered 3, proposed 2, suppressed 0, below-threshold 1"
@@ -262,65 +228,72 @@ mod tests {
         };
         sink.record_cycle_diary(entry);
         assert!(sink.write_errors.is_empty(), "write errors: {:?}", sink.write_errors);
-        // Verify the diary entry landed.
-        let entries = store
-            .read_diary("dreaming-daemon", 10)
-            .expect("read_diary");
+        // Verify the diary entry landed via the coordinator's read surface.
+        let entries = coord
+            .diary_entries(&handle, "dreaming-daemon", 10)
+            .expect("diary_entries");
         assert_eq!(entries.len(), 1, "expected one diary entry");
         assert_eq!(entries[0].agent_name, "dreaming-daemon");
         assert_eq!(entries[0].topic, "dreaming-cycle");
-        assert_eq!(entries[0].wing, "wing_dreaming-daemon");
         assert_eq!(entries[0].filed_at, 2_000_000);
     }
 
     #[test]
     fn round_trip_daemon_cycle_writes_proposal_and_diary() {
         use crate::dreaming_cycle::{
-            CoOccurrenceObservation, DreamingDaemon, DreamingPolicy, DreamingSubstrateReader,
+            DreamingDaemon, DreamingPolicy, DreamingSubstrateReader,
             RecallTraceItem, RecallTraceRewardSource, TunnelLink,
         };
 
-        // Minimal stub reader: one co-occurrence pair with high reward.
-        struct StubReader;
-        impl DreamingSubstrateReader for StubReader {
+        let (coord, handle) = make_coordinator_and_handle();
+        // Capture drawers so the dreaming cycle's proposals can target
+        // real estate rows. The stub reader returns these ids as recall
+        // trace targets and co-occurrence endpoints.
+        let id_a = capture_drawer(&coord, &handle, "content a", 2_999_000);
+        let id_b = capture_drawer(&coord, &handle, "content b", 2_999_001);
+
+        struct IdReader { a: String, b: String }
+        impl DreamingSubstrateReader for IdReader {
             fn recent_recall_traces(&self) -> Vec<RecallTraceItem> {
                 vec![
-                    RecallTraceItem { target: "row-a".into(), used: true },
-                    RecallTraceItem { target: "row-b".into(), used: true },
+                    RecallTraceItem { target: self.a.clone(), used: true },
+                    RecallTraceItem { target: self.b.clone(), used: true },
                 ]
             }
-            fn co_occurrence_observations(&self) -> Vec<CoOccurrenceObservation> {
-                vec![CoOccurrenceObservation {
-                    endpoint_a: "row-a".into(),
-                    endpoint_b: "row-b".into(),
-                    attempts: 5,
-                    evidence_targets: vec!["row-a".into(), "row-b".into()],
-                }]
+            /// Returns 9 windows for pair (a, b) so coRecallCount(a,b)=9 after
+            /// drain. This test calls run_cycle once, so this method is called once.
+            /// min_attempts=1 gate clears easily; traces a+b used → proposal emits.
+            fn drain_dreaming_window(&self) -> Vec<Vec<String>> {
+                (0..9)
+                    .map(|_| vec![self.a.clone(), self.b.clone()])
+                    .collect()
             }
             fn existing_tunnels(&self) -> Vec<TunnelLink> {
                 vec![]
             }
         }
 
-        let store = make_store();
-        let mut sink = EstateDreamingSink::new(Arc::clone(&store), 3_000_000);
-        let reader = StubReader;
+        let mut sink = EstateDreamingSink::new(&coord, handle.clone(), 3_000_000);
+        let reader = IdReader { a: id_a, b: id_b };
         let reward = RecallTraceRewardSource;
-        let policy = DreamingPolicy { min_success_rate: 0.0, min_confidence: 0.7, min_attempts: 1, tick_interval_ms: 30_000, event_observation_threshold: 1 };
+        let policy = DreamingPolicy {
+            min_success_rate: 0.0,
+            min_confidence: 0.7,
+            min_attempts: 1,
+            tick_interval_ms: 30_000,
+            event_observation_threshold: 1,
+        };
         let mut daemon = DreamingDaemon::new(policy);
 
         let report = daemon.run_cycle(3_000_000.0, &reader, &reward, &mut sink);
 
         assert!(sink.write_errors.is_empty(), "write errors: {:?}", sink.write_errors);
-        // Cycle emitted at least one proposal (high-reward pair clears gate).
         assert!(!report.proposals_emitted.is_empty(), "daemon should emit proposals");
-        // One diary entry per cycle.
-        let diary = store.read_diary("dreaming-daemon", 10).expect("read_diary");
+        // One diary entry per cycle, readable through GLK.
+        let diary = coord.diary_entries(&handle, "dreaming-daemon", 10).expect("diary");
         assert_eq!(diary.len(), 1);
-        // Proposals written to store equal emitted count.
-        let proposals = store
-            .proposals_for_target(&report.proposals_emitted[0].target)
-            .expect("proposals");
+        // Proposals readable through GLK.
+        let proposals = coord.recall_proposals(&handle).expect("proposals");
         assert!(!proposals.is_empty());
     }
 }

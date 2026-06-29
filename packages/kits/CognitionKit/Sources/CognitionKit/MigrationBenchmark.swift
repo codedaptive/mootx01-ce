@@ -220,9 +220,8 @@ public struct MigrationBenchmark: Recipe {
         // Capability and guard checks passed — the recipe will execute.
         // Capture the recipe-start timestamp once at the validated entry.
         // Emit is placed AFTER the precondition checks so the start metric
-        // only fires when the recipe body will actually run. When monitoring
-        // is disabled, emitRecipeStart is a single atomic load + branch:
-        // zero allocation, no clock read wasted.
+        // only fires when the recipe body will actually run. The clock is
+        // read unconditionally here regardless of monitoring state.
         let startTs = Date().timeIntervalSince1970
         // Emit cognitionkit.recipe.run with status "start". The step_count
         // for the paired "complete" event will be input.plans.count (the
@@ -232,7 +231,8 @@ public struct MigrationBenchmark: Recipe {
         // Recipe-entry wall clock stamps each benchmark's evaluatedAt. A
         // conscious action happens at a real instant; this value affects
         // only the report timestamp, not any logic. Captured once so every
-        // parallel branch is benchmarked at the same deterministic instant.
+        // parallel branch is benchmarked at the same instant (not deterministic
+        // across runs — it reflects the actual wall clock at invocation time).
         let now = Date()
 
         // Partition the origin ONCE, before the per-plan fan-out. Which

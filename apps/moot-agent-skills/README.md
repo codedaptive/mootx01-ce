@@ -128,7 +128,11 @@ These adapters assume the MOOTx01 MCP surface exposes these tool names:
 - `moot_write_journal`
 - `moot_memory_search`
 - `moot_recall_precise`
+- `moot_recall_shaped`
+- `moot_recall_distilled`
+- `moot_recollect`
 - `moot_file_memory`
+- `moot_move_memory`
 - `moot_update_memory`
 - `moot_confirm_memory`
 - `moot_withdraw_memory`
@@ -141,8 +145,14 @@ These adapters assume the MOOTx01 MCP surface exposes these tool names:
 - `moot_retire_fact`
 - `moot_fact_timeline`
 - `moot_list_lenses`
+- `moot_list_recipes`
 - `moot_synthesize`
+- `moot_consolidate`
 - `moot_dream`
+- `moot_reindex`
+- `moot_palace_import`
+- `moot_run_migration`
+- `moot_confirm_migration`
 - `moot_vault_import`
 - `moot_vault_export`
 - `moot_vault_status`

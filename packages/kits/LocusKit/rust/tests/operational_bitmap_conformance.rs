@@ -16,7 +16,15 @@
 //! Note: Tunnel/KGFact/Diary operational bitmaps are LocusKit-internal
 //! layouts not specified by cookbook §2.4 v0.6 and are not gated here.
 
+use locus_kit::drawer::Drawer;
 use locus_kit::drawer_operational::{CaptureChannel, ContentKind, DrawerFeatureFlags};
+
+/// Helper that matches the `sample()` pattern in `drawer_operational.rs` unit tests.
+fn conformance_drawer(operational_bitmap: i64) -> Drawer {
+    let mut d = Drawer::new("conf-d1", "content", "test-parent", "test", 1_700_000_000, "test-v1");
+    d.operational_bitmap = operational_bitmap;
+    d
+}
 
 // ============================================================
 // CaptureChannel (cookbook §2.4 bits 0-5)
@@ -156,11 +164,47 @@ fn feature_flag_bit_positions_match_cookbook() {
 }
 
 // ============================================================
+// State-extension + lineage-clustering flags (cookbook §2.4 bits 24, 25)
+// ============================================================
+
+/// Mirrors Swift `stateExtensionAtBit24()`: bit 24 sets `state_extension_active`,
+/// does NOT fire `lineage_clustering_active`. Cookbook §2.4 bit 24.
+#[test]
+fn state_extension_active_at_bit_24() {
+    let d = conformance_drawer(1 << 24);
+    assert!(
+        d.state_extension_active(),
+        "bit 24 must set state_extension_active"
+    );
+    assert!(
+        !d.lineage_clustering_active(),
+        "bit 24 must not trigger lineage_clustering_active"
+    );
+}
+
+/// Mirrors Swift `lineageClusteringAtBit25()`: bit 25 sets `lineage_clustering_active`,
+/// does NOT fire `state_extension_active`. Cookbook §2.4 bit 25 (NEW in v0.6).
+#[test]
+fn lineage_clustering_active_at_bit_25() {
+    let d = conformance_drawer(1 << 25);
+    assert!(
+        d.lineage_clustering_active(),
+        "bit 25 must set lineage_clustering_active"
+    );
+    assert!(
+        !d.state_extension_active(),
+        "bit 25 must not trigger state_extension_active"
+    );
+}
+
+// ============================================================
 // Full composite — all axes simultaneously
 // ============================================================
 
 /// captureChannel=Ocr(2) | contentKind=Code(1)<<6 | hasImage(1<<14) | isPinned(1<<16)
 /// = 2 | 0x40 | 0x4000 | 0x10000 = 0x14042.
+/// Mirrors Swift `compositeOperationalRoundtrip()`, including the bit-24/25 absence
+/// assertions: a composite that sets neither bit must return false for both flags.
 #[test]
 fn composite_operational_roundtrip() {
     let raw: i64 = CaptureChannel::Ocr.raw_value()
@@ -183,5 +227,18 @@ fn composite_operational_roundtrip() {
     assert_eq!(
         raw & DrawerFeatureFlags::IS_PINNED,
         DrawerFeatureFlags::IS_PINNED
+    );
+
+    // Bits 24 and 25 are not set in this composite — both flags must be false.
+    // Mirrors Swift compositeOperationalRoundtrip's `!drawer.stateExtensionActive`
+    // and `!drawer.lineageClusteringActive` assertions.
+    let d = conformance_drawer(raw);
+    assert!(
+        !d.state_extension_active(),
+        "composite without bit 24 must not report state_extension_active"
+    );
+    assert!(
+        !d.lineage_clustering_active(),
+        "composite without bit 25 must not report lineage_clustering_active"
     );
 }

@@ -8,8 +8,8 @@
 // lands in the v1.1 model-bundle mission
 // (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
 //
-// Conforms to VectorKit.EmbeddingProvider. Tokenizer held as a
-// private impl detail (see MiniLMTextProvider for the rationale).
+// Conforms to VectorKit.EmbeddingProvider. The stored tokenizer
+// property is public, matching the initializer's public injection seam.
 
 import Foundation
 import SubstrateTypes
@@ -74,5 +74,21 @@ public struct EmbeddingGemmaProvider: EmbeddingProvider {
         guard !text.isEmpty else { return [] }
         let tokens = tokenizer.tokenize(text)
         return try await inference(tokens)
+    }
+
+    /// Single-pass override: run model inference ONCE, then derive BOTH outputs
+    /// from the one pooled vector — the projected engram and the float-lane
+    /// vector. This replaces the two independent `inference(_:)` calls that
+    /// `embed` and `embedFloat` would each make (Corpus ingest needs both per
+    /// chunk; for a real NN model that is the most expensive double-pass).
+    /// Outputs are byte-identical to calling `embed` and `embedFloat`
+    /// separately: empty input short-circuits before the seam returning
+    /// `(.zero, [])`, the engram is `FloatSimHash.project(pooled)`, and the
+    /// float row is `pooled`.
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        guard !text.isEmpty else { return (.zero, []) }
+        let tokens = tokenizer.tokenize(text)
+        let pooled = try await inference(tokens)
+        return (FloatSimHash.project(vector: pooled, seed: projectionSeed), pooled)
     }
 }

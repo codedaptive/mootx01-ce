@@ -393,7 +393,7 @@ fn import_mem_palace_fixture_palace_lands_in_estate_idempotent_on_reimport() {
     let adapter = MemPalaceChromaAdapter::new();
 
     let first = bridge
-        .import_mem_palace(Path::new(FIXTURE_PALACE), &handle, NOW, &adapter)
+        .import_mem_palace(Path::new(FIXTURE_PALACE), &handle, NOW, &adapter, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("first import");
     // All 11 notes have non-empty content (I-5 fallbacks hold), so every
     // one captures; the 2 tunnel notes each carry one wikilink.
@@ -409,7 +409,7 @@ fn import_mem_palace_fixture_palace_lands_in_estate_idempotent_on_reimport() {
     // updated. Tunnels are already present from the first import; no new ones
     // are created. This is FINDING-1a fixed behavior.
     let second = bridge
-        .import_mem_palace(Path::new(FIXTURE_PALACE), &handle, NOW, &adapter)
+        .import_mem_palace(Path::new(FIXTURE_PALACE), &handle, NOW, &adapter, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("second import");
     assert_eq!(second.drawers_written, 0);
     assert_eq!(second.drawers_updated, 0);

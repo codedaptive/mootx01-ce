@@ -2,10 +2,10 @@
 // `NeuronKit/Sources/NeuronKit/Dreaming/EstateDreamingReader.swift`.
 //
 // Production adapter that implements `DreamingSubstrateReader` over a
-// GeniusLocusKit estate handle. Unlike the Swift actor that calls async
-// GLK surface methods, the Rust version snapshots the three reads at
-// construction time — the trait's methods are sync (no time args)
-// and the estate reads are sync, so pre-fetching is the natural fit.
+// GeniusLocusKit estate handle. The adapter calls the GLK coordinator's
+// `drain_dreaming_items` to drain pending dreaming-queue windows (T8 v2);
+// the v1 snapshot-based approach (co-occurrence observations from drawer
+// pairs) is deleted — `DrainDreamingWindow` is the only candidate source.
 //
 // Architecture note: same layering rationale as Swift. `EstateDreamingReader`
 // lives in NeuronKit because it needs to implement `DreamingSubstrateReader`
@@ -16,43 +16,61 @@
 // B-1 compliance: all estate reads route through genius_locus_kit's
 // EstateCoordinator surface — no direct locus_kit storage calls.
 
-use std::collections::BTreeMap;
-
-use genius_locus_kit::{Drawer, EstateCoordinator, EstateHandle, VerbDispatchError};
+use genius_locus_kit::{EstateCoordinator, EstateHandle, VerbDispatchError};
 
 use crate::dreaming_cycle::{
-    CoOccurrenceObservation, DreamingSubstrateReader, RecallTraceItem as CycleRecallTraceItem,
+    DreamingSubstrateReader, DreamingTunnelItem, RecallTraceItem as CycleRecallTraceItem,
     TunnelLink,
 };
 
 /// Snapshot-based production adapter for `DreamingSubstrateReader`.
 ///
-/// Reads are snapshotted from the estate at construction via
-/// `EstateDreamingReader::new`. The three trait methods return
-/// references into those snapshots so no coordinator call is needed after
-/// construction. This matches the Rust `DreamingSubstrateReader` trait
-/// contract (sync, no time parameters).
-pub struct EstateDreamingReader {
+/// `recent_recall_traces` and `existing_tunnels` are snapshotted from the
+/// estate at construction via `EstateDreamingReader::new`. `drain_dreaming_window`
+/// is NOT snapshotted — it calls the GLK coordinator's `drain_dreaming_items`
+/// lazily when the dreaming cycle calls the trait method (T8 v2 drain-fed approach).
+///
+/// `recent_recall_traces` and `existing_tunnels` remain snapshot-based because
+/// they are pure reads (no queue mutation); `drain_dreaming_window` is stateful
+/// (it pops jobs from the queue) so it must be a live call, not a pre-fetch.
+///
+/// `now_epoch_secs` captures the construction instant (epoch-seconds). The
+/// dreaming cycle injects the clock once at reader construction so the drain
+/// telemetry is deterministic — no SystemTime reads inside the reader.
+pub struct EstateDreamingReader<'a> {
     traces: Vec<CycleRecallTraceItem>,
-    observations: Vec<CoOccurrenceObservation>,
     tunnels: Vec<TunnelLink>,
+    /// Dreamed-active tunnels for OMEGA retire evaluation (T13 / ADR-021 Phase 7).
+    /// Snapshotted at construction via `coordinator.all_active_tunnels`, then
+    /// filtered to `is_dreamed() == true`. Pre-fetching keeps `dreamed_active_tunnels()`
+    /// a cheap `Vec::clone()` inside the cycle — consistent with how `traces` and
+    /// `tunnels` are handled.
+    dreamed_active: Vec<DreamingTunnelItem>,
+    /// Live coordinator reference for the drain call.
+    coordinator: &'a EstateCoordinator,
+    /// The estate whose dreaming queue this reader drains.
+    handle: EstateHandle,
+    /// Injected construction timestamp used for drain telemetry.
+    now_epoch_secs: f64,
 }
 
-impl EstateDreamingReader {
-    /// Construct the adapter by snapshotting all three reads from the
-    /// addressed estate through the GeniusLocusKit coordinator surface.
+impl<'a> EstateDreamingReader<'a> {
+    /// Construct the adapter by snapshotting recall traces and tunnels from
+    /// the addressed estate through the GeniusLocusKit coordinator surface.
     ///
     /// `since` and `now` are ISO8601 strings bounding the recall-trace
-    /// reward window (both inclusive). The co-occurrence observations are
-    /// derived from the drawer snapshot using the v1 room-grouping algorithm.
+    /// reward window (both inclusive). `now_epoch_secs` is the same instant
+    /// in epoch-seconds — used for drain telemetry. Dreaming-queue windows are
+    /// NOT snapshotted here — they are drained lazily via `drain_dreaming_window`.
     ///
-    /// All reads go through `coordinator.all_drawers`, `coordinator.all_tunnels`,
-    /// and `coordinator.recent_recall_traces` — B-1 compliant.
+    /// All reads go through `coordinator.recent_recall_traces` and
+    /// `coordinator.all_tunnels` — B-1 compliant.
     pub fn new(
-        coordinator: &EstateCoordinator,
+        coordinator: &'a EstateCoordinator,
         handle: &EstateHandle,
         since: &str,
         now: &str,
+        now_epoch_secs: f64,
     ) -> Result<Self, VerbDispatchError> {
         let raw_traces = coordinator.recent_recall_traces(handle, since, now)?;
         let traces = raw_traces
@@ -63,9 +81,6 @@ impl EstateDreamingReader {
             })
             .collect();
 
-        let drawers = coordinator.all_drawers(handle)?;
-        let observations = build_co_occurrence_observations(&drawers);
-
         let raw_tunnels = coordinator.all_tunnels(handle)?;
         let tunnels = raw_tunnels
             .into_iter()
@@ -75,150 +90,139 @@ impl EstateDreamingReader {
             })
             .collect();
 
+        // Snapshot dreamed-active tunnels for OMEGA retire evaluation (T13 / ADR-021 Phase 7).
+        // `all_active_tunnels` excludes retired tunnels (bit 13 clear); filtering to
+        // `is_dreamed() == true` enforces the §12.8 guard (declared tunnels never retired).
+        // `source_drawer_id` and `target_drawer_id` are Options on the substrate type
+        // (room-level tunnels have None endpoints); drawer-pair tunnels always have Some.
+        // We skip room-level tunnels (None endpoints) — they cannot be dreamed and are
+        // never in the retire population.
+        let raw_active = coordinator.all_active_tunnels(handle)?;
+        let dreamed_active = raw_active
+            .into_iter()
+            .filter(|t| t.is_dreamed())
+            .filter_map(|t| {
+                // Only drawer-pair tunnels (both endpoints Some) enter OMEGA.
+                // Room-level tunnels (either endpoint None) are skipped.
+                match (&t.source_drawer_id, &t.target_drawer_id) {
+                    (Some(src), Some(tgt)) => Some(DreamingTunnelItem {
+                        id: t.id.clone(),
+                        source_drawer_id: src.clone(),
+                        target_drawer_id: tgt.clone(),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect();
+
         Ok(EstateDreamingReader {
             traces,
-            observations,
             tunnels,
+            dreamed_active,
+            coordinator,
+            handle: handle.clone(),
+            now_epoch_secs,
         })
     }
 }
 
-impl DreamingSubstrateReader for EstateDreamingReader {
+impl<'a> DreamingSubstrateReader for EstateDreamingReader<'a> {
     fn recent_recall_traces(&self) -> Vec<CycleRecallTraceItem> {
         self.traces.clone()
     }
 
-    fn co_occurrence_observations(&self) -> Vec<CoOccurrenceObservation> {
-        self.observations.clone()
+    /// Drain pending dreaming-queue windows from the estate (T8 v2).
+    ///
+    /// Each inner Vec is the set of drawer IDs from one DreamingItem — a
+    /// single recall event that co-recalled ≥ 2 distinct drawers. Returns an
+    /// empty Vec when the queue has no pending jobs.
+    ///
+    /// Delegates to `coordinator.drain_dreaming_items`, which drains the queue
+    /// and replies Done to the consumed jobs — drain-once semantics. Matches
+    /// Swift `EstateDreamingReader.drainDreamingWindow()`.
+    fn drain_dreaming_window(&self) -> Vec<Vec<String>> {
+        self.coordinator
+            .drain_dreaming_items(&self.handle, self.now_epoch_secs)
+            .unwrap_or_default()
     }
 
     fn existing_tunnels(&self) -> Vec<TunnelLink> {
         self.tunnels.clone()
     }
-}
 
-// MARK: - Co-occurrence builder (v1 room-grouping algorithm)
-//
-// Mirrors `EstateDreamingReader.buildObservations(from:)` in Swift.
-// Groups non-tombstoned drawers by (wing, room) and emits one
-// CoOccurrenceObservation per pair of drawers that share a room.
-// `attempts` = total drawers in that room (proxy for evidence density).
-
-fn build_co_occurrence_observations(drawers: &[Drawer]) -> Vec<CoOccurrenceObservation> {
-    let mut by_room: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-
-    for drawer in drawers {
-        // `tombstoned_at` is `Option<i64>` (epoch seconds); None means live.
-        if drawer.tombstoned_at.is_some() {
-            continue;
-        }
-        by_room
-            .entry((drawer.wing.clone(), drawer.room.clone()))
-            .or_default()
-            .push(drawer.id.clone());
+    /// All non-retired dreamed tunnels for OMEGA retire evaluation (T13 / ADR-021 Phase 7).
+    ///
+    /// Returns the snapshot taken at reader construction via
+    /// `coordinator.all_active_tunnels` filtered to `is_dreamed() == true`.
+    /// Matches the Swift `EstateDreamingReader.dreamedActiveTunnels()` which
+    /// calls `kit.allActiveTunnels(in:handle)` then filters in-process.
+    fn dreamed_active_tunnels(&self) -> Vec<DreamingTunnelItem> {
+        self.dreamed_active.clone()
     }
-
-    let mut observations: Vec<CoOccurrenceObservation> = Vec::new();
-    for (_, ids) in &by_room {
-        if ids.len() < 2 {
-            continue;
-        }
-        // IDs are already in BTreeMap insertion order but we sort for
-        // determinism (matching Swift's `.sorted()` before enumeration).
-        let mut sorted = ids.clone();
-        sorted.sort();
-        let room_count = sorted.len() as i64;
-
-        for i in 0..sorted.len() {
-            for j in (i + 1)..sorted.len() {
-                observations.push(CoOccurrenceObservation {
-                    endpoint_a: sorted[i].clone(),
-                    endpoint_b: sorted[j].clone(),
-                    attempts: room_count,
-                    evidence_targets: vec![sorted[i].clone(), sorted[j].clone()],
-                });
-            }
-        }
-    }
-
-    // Sort by (endpoint_a, endpoint_b) for determinism.
-    observations.sort_by(|a, b| {
-        a.endpoint_a
-            .cmp(&b.endpoint_a)
-            .then(a.endpoint_b.cmp(&b.endpoint_b))
-    });
-
-    observations
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn build_observations_pairs_same_room_drawers() {
-        let drawers = vec![
-            make_drawer("a", "wing1", "room1"),
-            make_drawer("b", "wing1", "room1"),
-            make_drawer("c", "wing1", "room1"),
-            make_drawer("x", "wing2", "room2"), // solo room
-        ];
-        let obs = build_co_occurrence_observations(&drawers);
-        // C(3,2) = 3 pairs from room1; solo x emits none.
-        assert_eq!(obs.len(), 3);
-        let pairs: Vec<(&str, &str)> = obs.iter().map(|o| (o.endpoint_a.as_str(), o.endpoint_b.as_str())).collect();
-        assert!(pairs.contains(&("a", "b")));
-        assert!(pairs.contains(&("a", "c")));
-        assert!(pairs.contains(&("b", "c")));
+    use std::sync::Arc;
+
+    use genius_locus_kit::coordinator::EstateCoordinator;
+    use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
+    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use locus_kit::estate_types::OwnerCredentials;
+
+    fn make_coordinator_and_handle() -> (EstateCoordinator, EstateHandle) {
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        (coord, handle)
     }
 
+    // T8-RDR-1: fresh estate has no dreaming-queue jobs →
+    // drain_dreaming_window returns empty.
     #[test]
-    fn build_observations_attempts_equals_room_count() {
-        let drawers = vec![
-            make_drawer("a", "w", "r"),
-            make_drawer("b", "w", "r"),
-            make_drawer("c", "w", "r"),
-        ];
-        let obs = build_co_occurrence_observations(&drawers);
-        assert!(obs.iter().all(|o| o.attempts == 3));
+    fn t8_rdr1_drain_returns_empty_on_fresh_estate() {
+        let (coord, handle) = make_coordinator_and_handle();
+        let reader = EstateDreamingReader::new(&coord, &handle, "2000-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z", 1_000_000.0)
+            .expect("new");
+        let windows = reader.drain_dreaming_window();
+        assert!(windows.is_empty(), "fresh estate has no dreaming-queue jobs");
     }
 
+    // T8-RDR-2: second drain returns empty (drain-once semantics — consumed
+    // jobs do not reappear).
     #[test]
-    fn build_observations_empty_when_no_room_has_two_drawers() {
-        let drawers = vec![
-            make_drawer("a", "w1", "r1"),
-            make_drawer("b", "w2", "r2"),
-        ];
-        let obs = build_co_occurrence_observations(&drawers);
-        assert!(obs.is_empty());
+    fn t8_rdr2_second_drain_returns_empty() {
+        let (coord, handle) = make_coordinator_and_handle();
+        let reader = EstateDreamingReader::new(&coord, &handle, "2000-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z", 1_000_000.0)
+            .expect("new");
+        let first = reader.drain_dreaming_window();
+        assert!(first.is_empty(), "first drain: empty on fresh estate");
+        let second = reader.drain_dreaming_window();
+        assert!(second.is_empty(), "second drain: empty (drain-once semantics)");
     }
 
+    // T8-RDR-3: traces snapshot is correct — empty for a fresh estate.
     #[test]
-    fn build_observations_sorted_deterministically() {
-        let drawers = vec![
-            make_drawer("z", "w", "r"),
-            make_drawer("a", "w", "r"),
-            make_drawer("m", "w", "r"),
-        ];
-        let obs = build_co_occurrence_observations(&drawers);
-        for i in 0..(obs.len().saturating_sub(1)) {
-            if obs[i].endpoint_a == obs[i + 1].endpoint_a {
-                assert!(obs[i].endpoint_b <= obs[i + 1].endpoint_b);
-            } else {
-                assert!(obs[i].endpoint_a <= obs[i + 1].endpoint_a);
-            }
-        }
+    fn t8_rdr3_traces_empty_on_fresh_estate() {
+        let (coord, handle) = make_coordinator_and_handle();
+        let reader = EstateDreamingReader::new(&coord, &handle, "2000-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z", 1_000_000.0)
+            .expect("new");
+        let traces = reader.recent_recall_traces();
+        assert!(traces.is_empty());
     }
 
-    fn make_drawer(id: &str, wing: &str, room: &str) -> Drawer {
-        Drawer::new(
-            id,
-            format!("content-{id}"),
-            wing,
-            room,
-            "test",
-            0_i64,
-            "model-v1",
-        )
+    // T8-RDR-4: tunnels snapshot is correct — empty for a fresh estate.
+    #[test]
+    fn t8_rdr4_tunnels_empty_on_fresh_estate() {
+        let (coord, handle) = make_coordinator_and_handle();
+        let reader = EstateDreamingReader::new(&coord, &handle, "2000-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z", 1_000_000.0)
+            .expect("new");
+        let tunnels = reader.existing_tunnels();
+        assert!(tunnels.is_empty());
     }
 }

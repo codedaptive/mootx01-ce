@@ -5,7 +5,8 @@
 //   (b) EstateConfiguration::new_with_tagger(Hmm) succeeds
 //   (c) EstateConfiguration::new_with_tagger(NlTagger) returns InvalidConfiguration
 //   (d) NovelTokenTaggerChoice default is Hmm
-//   (e) StorageError::InvalidConfiguration exists and carries reason
+//   (e) NovelTokenTaggerChoice enum cases are distinct
+//   (f) StorageError::InvalidConfiguration exists and carries reason
 
 use persistence_kit::{
     BackendConfiguration, EstateConfiguration, NovelTokenTaggerChoice, StorageError,

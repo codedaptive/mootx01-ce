@@ -11,8 +11,10 @@ contradiction checks, and durable writeback.
 
 Before answering memory-dependent questions, query MOOTx01. Use
 `moot_memory_search` for broad recall, `moot_recall_precise` for exact details,
-`moot_fact_search` for structured facts, and reasoning lenses when analysis is
-needed. Use `moot_synthesize` for grounded summaries.
+`moot_recall_shaped` for associative or conceptual recall modes,
+`moot_recall_distilled` for compact factoid answers, `moot_fact_search` for
+structured facts, and reasoning lenses when analysis is needed. Use
+`moot_synthesize` for grounded summaries.
 
 At session start, when relevant, call `moot_estate_ping`,
 `moot_estate_status`, `moot_read_journal`, and `moot_estate_map`.
@@ -21,8 +23,8 @@ At session end, file durable decisions with `moot_file_memory`, stable triples
 with `moot_file_fact`, relationships with `moot_link_memories`, corrections
 with trust/update tools, and continuity with `moot_write_journal`.
 
-After bulk import or major memory growth, run `moot_dream` before relying on
-association or matrix-aware recall.
+After bulk import or major memory growth, run `moot_reindex` then `moot_dream`
+before relying on association or matrix-aware recall.
 
 If MOOTx01 is unavailable, say so plainly and answer only from current context.
 Never claim recalled knowledge without querying the substrate.

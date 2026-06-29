@@ -2,14 +2,11 @@
 //
 // Force-tests for PoolReducer — the pool-to-table merger (cookbook §10).
 //
-// Coverage contract (from mission specification):
-//   1. N submissions → reduce → previously-novel token now classified by tagger
-//   2. Idempotent re-run (drained pool → no-op, table unchanged)
-//   3. Malformed submission quarantined, not crashed
-//   4. Dedup across submissions (same token in two files merges once)
-//   5. Version-mismatched submission quarantined
-//   6. ONLY NOUN/VERB tags expand the table; OTHER does not
-//   7. Table-resident tokens are not re-added (skipped)
+// Covers: novel token learning loop, idempotent re-run, malformed/version-
+// mismatched submission quarantine, cross-file dedup, NOUN/VERB-only expansion,
+// table-resident token skip, snapshot_date update, cross-file and intra-file
+// noun/verb conflict resolution, older-file-wins precedence, resident-token
+// reclassification rejection, and absent pool directory edge case.
 
 import Foundation
 import Testing

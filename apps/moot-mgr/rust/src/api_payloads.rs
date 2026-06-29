@@ -119,8 +119,9 @@ pub struct EstatePayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EstatesPayload {
     pub estates: Vec<EstatePayload>,
-    /// Admin-hosted estates with their mount-state badges, or null when the host
-    /// has no admin plane / has provisioned nothing.
+    /// Admin-hosted estates with their mount-state badges. `None` means the
+    /// daemon admin proxy was unavailable (manager path); the HTTP read route
+    /// always returns `Some` for the local admin plane even when `hosted` is empty.
     pub admin: Option<EstateAdminPayload>,
 }
 
@@ -331,12 +332,11 @@ pub struct LatticeAddressPayload {
 /// The lattice address snapshot returned by `GET /api/lattice`. Mirrors Swift
 /// `LatticeSnapshotPayload`.
 ///
-/// The zero-dependency Rust host carries no HTTP client and therefore cannot
-/// proxy the live ARIA daemon's `/api/lattice` endpoint. The honest degraded
-/// state — empty address list with `pending: true` — is returned instead.
-/// This exactly mirrors the Swift host's behaviour when the daemon is
-/// unreachable (see `manager.rs` module header). Do NOT add an HTTP client;
-/// the no-external-dep constraint applies.
+/// The Rust host proxies the live ARIA daemon's `/api/lattice` endpoint through
+/// `daemon_client` and returns live addresses with `pending: false` on success.
+/// The degraded state — empty address list with `pending: true` — is the fallback
+/// returned on connection failure, HTTP error, or decode error. See
+/// `manager.rs::lattice_payload` / `proxy_lattice_snapshot`.
 ///
 /// CONTENT-SAFETY INVARIANT: classification metadata and counts only — never
 /// estate content or rung text.

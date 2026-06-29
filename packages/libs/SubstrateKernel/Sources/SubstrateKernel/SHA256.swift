@@ -3,11 +3,12 @@
 // SHA-256 content-hash primitive for the substrate.
 //
 // Per the F18 atomic-centralization rule: content addressing is a
-// math atomic and lives in SubstrateLib. The audit-log content ID
-// (cookbook §5.1 — entries are content-addressed by SHA-256 over
-// their wire encoding) hashes through this one implementation, so
-// every kit that content-addresses an audit entry produces identical
-// IDs and the G-Set deduplicates correctly across replicas and tiers.
+// math atomic and lives in SubstrateKernel (SubstrateLib consumes
+// it for its AuditGate). The audit-log content ID (cookbook §5.1 —
+// entries are content-addressed by SHA-256 over their wire encoding)
+// hashes through this one implementation, so every kit that content-
+// addresses an audit entry produces identical IDs and the G-Set
+// deduplicates correctly across replicas and tiers.
 //
 // This is a faithful, dependency-free FIPS 180-4 SHA-256. It was
 // lifted verbatim from GeniusLocusKit's in-kit implementation (which
@@ -17,8 +18,8 @@
 // is gated both against the prior in-kit bytes and against the
 // standard.
 //
-// Mirror: rust/glref-rust-sha256.rs. The two legs are conformance-
-// gated against the same vectors.
+// Mirror: rust/src/sha256.rs. The two legs are conformance-gated
+// against the same vectors.
 
 import Foundation
 

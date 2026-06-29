@@ -1,7 +1,7 @@
 // Integration tests for federation inbound event dispatch.
-// Verifies that pull() routes insert, update, and delete records
-// correctly through each conflict policy. Mirrors
-// FederationInboundEventTests.swift.
+// Covers insert replication and delete behavior across several policies;
+// does not exercise update behavior or insert behavior through every
+// conflict policy. Mirrors FederationInboundEventTests.swift.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -93,6 +93,11 @@ fn setup_pair(
 
     engine_a.enable(make_manifest_with_policy(policy), storage_a.clone()).unwrap();
     engine_b.enable(make_manifest_with_policy(policy), storage_b.clone()).unwrap();
+
+    // Symmetric pairing required before push delivers envelopes.
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
 
     (engine_a, engine_b, storage_a, storage_b)
 }

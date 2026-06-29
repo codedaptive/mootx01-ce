@@ -19,6 +19,10 @@ use std::sync::Arc;
 
 use genius_locus_kit::{
     AssociateFrame, EstateCoordinator, EstateHandle,
+    // LearnFrame is the GLK-level verb boundary type — imported here so the
+    // learn→recall round-trip test exercises the public-facing API, not the
+    // LocusKit-internal LocusLearnFrame below the dispatch boundary.
+    LearnFrame,
     ProposeFrame, SchedulerProposalKind as ProposalKind, VerbDispatchError,
 };
 use locus_kit::{
@@ -26,7 +30,7 @@ use locus_kit::{
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::{LatticeAnchor, OwnerCredentials},
-    frames::{CaptureFrame, LearnFrame},
+    frames::CaptureFrame,
     source_catalog_entry::{SourceCatalogEntry, SourceKind},
 };
 

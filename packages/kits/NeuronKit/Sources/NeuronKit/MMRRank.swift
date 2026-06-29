@@ -21,9 +21,9 @@
 //
 // so identical engrams score 1.0 and bit-inverses score 0.0. The
 // engine is pure data-in / data-out — no Drawer, no estate, no clocks,
-// no randomness — so the Swift conformance tests and the future Rust
-// version exercise identical math against shared vectors, matching the
-// `HybridRecallEngine` pattern already in the kit.
+// no randomness — so the Swift conformance tests and the Rust port
+// (`mmr_rank.rs`) exercise identical math against shared vectors,
+// matching the `HybridRecallEngine` pattern already in the kit.
 
 import EngramLib
 

@@ -13,10 +13,11 @@
 //!   └─► framing::read_frames
 //!         └─► jsonrpc::JSONRPCRequest::decode
 //!               └─► dispatcher::Dispatcher::handle
-//!                     ├─► tool_list (5-tier AI-client interface surface, 44 tools)
+//!                     ├─► tool_list (projected AI-client surface)
 //!                     └─► tool_call  ──► dispatch::dispatch_tool
 //!                                         ├─► teachme pre-check (intercepts before any runner)
-//!                                         ├─► interface_tools (Tier 1–5, 19 tools)
+//!                                         ├─► interface_tools (Tier 1–5 + maintenance/admin)
+//!                                         ├─► vault_tools (moot_vault_export, moot_vault_import, …)
 //!                                         ├─► recipe_tools (moot_list_lenses, moot_synthesize, …)
 //!                                         ├─► lens_tools (moot_lens_keystones … moot_lens_concepts)
 //!                                         └─► hint injection (CoachingEngine, non-error results only)
@@ -32,7 +33,7 @@
 //!
 //! # Surface boundary
 //!
-//! 44 tools: 19 interface (Tier 1–5), 1 federation, 4 recipe, 16 lens, 4 vault.
+//! Surface: interface (Tier 1–5 + maintenance/admin), 1 federation, recipe, lens, and vault tools.
 //! Vault tools are backed by `vault-kit` (`VaultBridge`, `ObsidianAdapter`,
 //! `DrawerMapping`). The ARIA layer owns the SHA-256 sidecar manifest for drift
 //! detection (ADR-VAULTKIT-002 decision b).
@@ -42,6 +43,10 @@ pub mod build_serial;
 pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
+// dream_runner: one-shot REM-ALPHA dreaming cycle for `mootx01 dream` (T10,
+// ADR-021 Phase 5). Provides `run_one_dreaming_cycle` so the `dream` subcommand
+// in `mootx01` can invoke dreaming without a direct dep on neuron-kit.
+pub mod dream_runner;
 pub mod estate_registry;
 // governor_topology_adapter: the AriaMcpKit adapter that bridges
 // neuron_kit::GovernorTopologySink → observer_sink::StatsStore.

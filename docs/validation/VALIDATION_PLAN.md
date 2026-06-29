@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-05-22
-last_updated: 2026-06-14
+last_updated: 2026-06-17
 phase: A
 description: The phased validation plan for GeniusLocusKit, closing from spec-level claims down to application-level validation.
 ---
@@ -135,8 +135,10 @@ committed; CI workflow wires it in.
 
 Extends the existing performance-gate pattern to recall,
 dreaming tick, federation handshake, and standing-signals
-dispatch latency. CI-gated so regressions get caught at PR
-time.
+dispatch latency. The v1.1 implementation bakeoffs under
+`docs/validation/substrate_math_performance/` choose between
+competing correct implementations before a metric becomes a
+continuous gate. CI-gated so regressions get caught at PR time.
 
 Entry criteria: Phases B and C complete.
 
@@ -145,7 +147,8 @@ baseline numbers, with the baseline file checked in and the
 threshold per metric documented.
 
 Output: `.github/workflows/geniuslocus-perf-gates.yml` plus
-baseline JSON files, committed.
+baseline JSON files, committed. For v1.1 bakeoff scope, see
+`docs/validation/substrate_math_performance/V1_1_IMPLEMENTATION_BAKEOFFS_2026-06-17.md`.
 
 ## Milestone triggers
 

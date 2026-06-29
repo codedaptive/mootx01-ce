@@ -6,14 +6,14 @@
 //
 // ## Algorithm
 //
-//   1. Build a term-document matrix M (terms × documents) with
+//   1. Build a term-document matrix M (documents × terms) with
 //      TF-IDF weighting (term frequency scaled by inverse document
 //      frequency log((N+1)/(df+1)), clamped to >= 0).
 //      CANONICAL tokenizer: CorpusKit.defaultKeywordTokens.
 //
-//   2. Run JacobiSVD.decompose on Mᵀ (documents × terms) with the
-//      requested rank k:
-//        Mᵀ ≈ U · diag(Σ) · Vᵀ
+//   2. Run JacobiSVD.decompose on M (documents × terms), transposing
+//      only for the wide-matrix case:
+//        M ≈ U · diag(Σ) · Vᵀ
 //      where U is documents × k, Σ is k×k, Vᵀ is k × terms.
 //
 //   3. Document embedding (for document d trained in the corpus):
@@ -356,6 +356,20 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         return lsaVector(for: text) ?? []
     }
 
+    /// Single-pass override: compute the LSA fold-in vector ONCE and return both
+    /// the projected Engram and the float vector, deduping the double pass that
+    /// `embed(_:)` + `embedFloat(_:)` would otherwise run. `lsaVector(for:)` is
+    /// deterministic; a non-nil vector v projects to the same Engram and is
+    /// returned as the float lane; a nil result (no basis, empty/non-tokenisable
+    /// input, all-OOV, or a degenerate all-zero fold-in) yields `(.zero, [])`.
+    /// This override calls `lsaVector(for:)` directly and never invokes the
+    /// default `embedPair` — the all-OOV `embedFloatVocabMiss` path is bypassed
+    /// here, not by the default `try?` collapse.
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        guard let v = lsaVector(for: text), !v.isEmpty else { return (.zero, []) }
+        return (FloatSimHash.project(vector: v, seed: projectionSeed), v)
+    }
+
     // MARK: Private helpers
 
     /// Compute the LSA embedding vector for `text` using the fold-in formula.
@@ -556,6 +570,54 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
             self.svd = SVDResult(U: U, singularValues: sigma, Vt: Vt, rank: effectiveRank)
         }
     }
+
+    // MARK: Counts serialization (incremental-counts change set)
+
+    /// 4-byte magic identifying an LSA COUNTS blob ("LSAC"). Distinct from the
+    /// basis magic ("LSB1"): the counts blob persists only the lightweight
+    /// trigger anchors — the maintained vocabulary and document count — NOT the
+    /// derived SVD basis. LSA's heavy factorization input (the per-document TF
+    /// rows) is re-derived by re-tokenizing the corpus at refactor (Bob's
+    /// re-tokenize-at-refactor decision), so it is deliberately not persisted
+    /// here. The persisted vocab/doc-count let the vocab-growth retrain trigger
+    /// read current vocab size cheaply and survive a restart.
+    static let countsMagic: [UInt8] = Array("LSAC".utf8)
+
+    /// Serialize the maintained trigger anchors (vocabulary + document count) to
+    /// a versioned, little-endian blob. Byte-identical to the Rust
+    /// `serialize_counts` (UTF-8-byte-sorted vocab map, fixed field order).
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | projectionSeed (u64)
+    ///   | documentCount (u32) | vocab (String→u32 map, byte-sorted keys)
+    public func serializeCounts() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(LsaProvider.countsMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU64(projectionSeed)
+        w.writeU32(UInt32(counts.documentCount))
+        w.writeStringU32Map(counts.vocab)
+        return w.data
+    }
+
+    /// Restore the maintained vocabulary + document count from a counts blob
+    /// into this provider, so incremental maintenance resumes across a restart.
+    /// Does not touch the SVD basis (derived separately at refactor). Throws
+    /// `CorpusKitError.decodingFailure` on a truncated blob, unknown version, or
+    /// magic mismatch — never crashes.
+    public func restoreCounts(from data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(LsaProvider.countsMagic)
+        try r.expectVersion(basisFormatVersion)
+        _ = try r.readString()  // modelID — header for validation; row is keyed by it
+        _ = try r.readString()  // modelVersion
+        _ = try r.readU64()     // projectionSeed
+        let documentCount = Int(try r.readU32())
+        let vocab = try r.readStringU32Map()
+        self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
+    }
 }
 
 // MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
@@ -584,4 +646,20 @@ extension LsaProvider: TrainableEmbeddingBasis {
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try LsaProvider(deserializing: basis)
     }
+
+    // MARK: Maintained counts (incremental-counts change set, P3)
+
+    /// Fold one chunk's text into the maintained vocabulary + document count.
+    /// LSA's accumulation consumes a raw document (`train(document:)` tokenizes
+    /// internally via `TermDocumentCounts`), so the text is folded unchanged —
+    /// the same per-document step `trainOnCorpus` runs, minus the finalize/SVD.
+    /// The per-document TF rows are re-derived by re-tokenizing at refactor
+    /// (Bob's re-tokenize-at-refactor decision); what the counts table keeps
+    /// current is the vocab + doc-count growth anchor.
+    public func addToCounts(text: String) {
+        counts.addDocumentForCountsAnchor(text)
+    }
+
+    /// Maintained vocabulary size for the growth trigger.
+    public var countsVocabularySize: Int { counts.vocabularySize }
 }

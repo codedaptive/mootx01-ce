@@ -18,10 +18,9 @@
 // implement and measure rather than assume. This kernel is the
 // instrument; the benchmark sweep is the measurement.
 //
-// Swift-only. The harness skips this kernel on non-Apple
-// platforms via the kernel registry's #if predicates (specifically
-// the canImport(simd) check, which is reliably available only on
-// Darwin platforms).
+// Available wherever `import simd` succeeds — Apple platforms and
+// aarch64 Linux. On unsupported targets, `PortableKernel.kernel(of:
+// .neon)` falls through to ScalarKernel.
 //
 // Conformance: every method must produce byte-identical output
 // to ScalarKernel. The conformance gate verifies this when invoked
@@ -163,11 +162,10 @@ public struct NeonKernel: SubstrateKernel {
         return result
     }
 
-    // ----- Inherited: OR-reduce and SimHash use scalar default
-    //       (NEON byte-level reframing doesn't help these ops;
-    //       the SIMD4<UInt64> path in SimdKernel is the right
-    //       choice for OR-reduce, and SimHash is a Phase 2.γ
-    //       investigation entirely).
+    // ----- orReduce256 / orReduceBatch are implemented directly
+    //       above. Only SimHash still delegates to the scalar default
+    //       (NEON byte-level reframing doesn't help simhashCompute;
+    //       the SimdKernel vertical-SIMD path is the right choice).
 
     public func orReduce256(_ fingerprints: [Fingerprint256]) -> Fingerprint256 {
         var acc = Fingerprint256.zero

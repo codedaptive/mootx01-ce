@@ -1,29 +1,22 @@
 #!/usr/bin/env python3
 """
-check-test-locations.py — verify tests live in the same package as
-their source files, with valid @testable imports.
+check-test-locations.py — verify test files carry valid @testable imports.
 
 For each of the four substrate packages (SubstrateTypes, SubstrateKernel,
 SubstrateML, SubstrateLib), audit:
 
   Swift:
-    - For each Sources/<Pkg>/Foo.swift, is there a Tests/<Pkg>Tests/
-      FooTests.swift OR a more general test file that imports it?
     - Every Tests/<Pkg>Tests/*.swift must contain `@testable import <Pkg>`
       (or `@testable import` of another package the test legitimately
       cross-imports).
+    - This script does NOT check per-source-file coverage (no Foo.swift →
+      FooTests.swift mapping); it only validates import/parse hygiene.
 
   Rust:
-    - For each src/foo.rs, is there a `#[cfg(test)] mod tests` inside
-      the same file or a tests/foo.rs sibling?
+    - Counts src/*.rs files that contain `#[cfg(test)] mod tests`; reports
+      the count but does not flag missing test modules.
 
-Exit 0 = clean. Exit 1 = at least one source file with no Swift
-XCTest in its package. Exit 2 = environment error.
-
-Note: a source file without an explicit test is reported but the
-audit still passes IF the package has *some* test that exercises it
-(via cascading dependency through another tested type). Strict mode
-(--strict) would fail on every untested source file.
+Exit 0 = clean. Exit 1 = import/parse warnings accumulated. Exit 2 = environment error.
 """
 
 from __future__ import annotations

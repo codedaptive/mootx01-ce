@@ -31,19 +31,49 @@ struct BundleMaterializerTests {
 
     private let estateUUID = "33333333-3333-3333-3333-333333333333"
 
-    private func makeStores() async throws -> (DrawerStore, NodeBundleStore, URL) {
+    /// Bundles the stores that share a single SQLite file, plus the
+    /// node tree needed by drawersIn(wing:room:).
+    private struct TestFixture {
+        let drawers: DrawerStore
+        let bundles: NodeBundleStore
+        let nodes: NodeStore
+        let url: URL
+        let root: Node
+        let wing: Node
+        /// Room nodes keyed by display name for multi-room tests.
+        let rooms: [String: Node]
+    }
+
+    private func t(_ epoch: TimeInterval) -> Date {
+        Date(timeIntervalSince1970: epoch)
+    }
+
+    /// Creates DrawerStore, NodeBundleStore, and NodeStore over the same
+    /// SQLite file. Also provisions a root→wing→room(s) node tree so
+    /// drawersIn(wing:room:) can resolve names to node IDs.
+    private func makeFixture(wingName: String = "w",
+                             roomNames: [String] = ["r1"]) async throws -> TestFixture {
         let url = TestStorage.tempURL()
         let storage = TestStorage.sqlite(url)
         let drawers = try await DrawerStore(storage: storage)
         let bundles = try await NodeBundleStore(storage: storage)
-        return (drawers, bundles, url)
+        let nodes = NodeStore(storage: storage)
+        let root = try await nodes.createRoot(displayName: "Estate", now: t(0))
+        let wing = try await nodes.createNode(displayName: wingName, parentId: root.id, now: t(1))
+        var roomMap: [String: Node] = [:]
+        for (i, name) in roomNames.enumerated() {
+            let room = try await nodes.createNode(displayName: name, parentId: wing.id, now: t(Double(i + 2)))
+            roomMap[name] = room
+        }
+        return TestFixture(drawers: drawers, bundles: bundles, nodes: nodes,
+                           url: url, root: root, wing: wing, rooms: roomMap)
     }
 
-    private func drawer(id: String, room: String, adjective: Int64) -> Drawer {
+    private func drawer(id: String, parentNodeId: String, adjective: Int64) -> Drawer {
         let lineage = "00000000-0000-0000-0000-0000000000" + String(id.suffix(2))
         let lineageID = UUID(uuidString: lineage) ?? UUID()
         let content = "c-" + id
-        return Drawer(id: TestStorage.tid(id), content: content, wing: "w", room: room, addedBy: "test",
+        return Drawer(id: TestStorage.tid(id), content: content, parentNodeId: parentNodeId, addedBy: "test",
                       filedAt: Date(timeIntervalSince1970: 1_700_000_000),
                       embeddingModelID: "m",
                       adjectiveBitmap: adjective,
@@ -87,16 +117,17 @@ struct BundleMaterializerTests {
 
     @Test("materializeRoom folds the room's active drawers and stores it")
     func materializeRoomFoldsActiveDrawers() async throws {
-        let (drawers, bundles, url) = try await makeStores()
-        defer { TestStorage.cleanup(url) }
+        let fixture = try await makeFixture(roomNames: ["r1"])
+        defer { TestStorage.cleanup(fixture.url) }
         let families = EstateFingerprintFamilies(estateUUID: estateUUID)
+        let roomId = fixture.rooms["r1"]!.id.uuidString
 
-        let ds = [drawer(id: "01", room: "r1", adjective: 0x01 << 26),
-                  drawer(id: "02", room: "r1", adjective: 0x02 << 26),
-                  drawer(id: "03", room: "r1", adjective: 0x04 << 26)]
-        for d in ds { try await drawers.addDrawer(d) }
+        let ds = [drawer(id: "01", parentNodeId: roomId, adjective: 0x01 << 26),
+                  drawer(id: "02", parentNodeId: roomId, adjective: 0x02 << 26),
+                  drawer(id: "03", parentNodeId: roomId, adjective: 0x04 << 26)]
+        for d in ds { try await fixture.drawers.addDrawer(d) }
 
-        let mat = BundleMaterializer(drawers: drawers, bundles: bundles, families: families)
+        let mat = BundleMaterializer(drawers: fixture.drawers, bundles: fixture.bundles, families: families)
         let cv = try await mat.materializeRoom(wing: "w", room: "r1")
 
         // The stored bundle equals the freshly folded one, and equals
@@ -104,44 +135,45 @@ struct BundleMaterializerTests {
         let expected = CountVector256.fold(ds.map { families.fingerprint(of: $0) })
         #expect(cv == expected)
         #expect(cv.n == 3)
-        let stored = try await bundles.get(wing: "w", room: "r1", kind: .activeA)
+        let stored = try await fixture.bundles.get(wing: "w", room: "r1", kind: .activeA)
         #expect(stored == cv)
     }
 
     @Test("materializeRoom excludes non-Cluster-A drawers from Bundle A")
     func materializeRoomFiltersToClusterA() async throws {
-        let (drawers, bundles, url) = try await makeStores()
-        defer { TestStorage.cleanup(url) }
+        let fixture = try await makeFixture(roomNames: ["r1"])
+        defer { TestStorage.cleanup(fixture.url) }
         let families = EstateFingerprintFamilies(estateUUID: estateUUID)
+        let roomId = fixture.rooms["r1"]!.id.uuidString
 
         // Six drawers, all captured as active (cluster A). Three stay
         // active; three are then transitioned to withdrawn / decayed /
         // expired (cluster B) via mutateState — the legal one-hop
         // transitions from active per cookbook §9.3.
         let clusterARows = [
-            drawer(id: "a1", room: "r1", adjective: 0),
-            drawer(id: "a2", room: "r1", adjective: 0),
-            drawer(id: "a3", room: "r1", adjective: 0),
+            drawer(id: "a1", parentNodeId: roomId, adjective: 0),
+            drawer(id: "a2", parentNodeId: roomId, adjective: 0),
+            drawer(id: "a3", parentNodeId: roomId, adjective: 0),
         ]
         let willMoveOut = [
-            drawer(id: "b1", room: "r1", adjective: 0),
-            drawer(id: "b2", room: "r1", adjective: 0),
-            drawer(id: "b3", room: "r1", adjective: 0),
+            drawer(id: "b1", parentNodeId: roomId, adjective: 0),
+            drawer(id: "b2", parentNodeId: roomId, adjective: 0),
+            drawer(id: "b3", parentNodeId: roomId, adjective: 0),
         ]
         for d in clusterARows + willMoveOut {
-            try await drawers.addDrawer(d)
+            try await fixture.drawers.addDrawer(d)
         }
-        try await drawers.mutateState(drawerId: willMoveOut[0].id,
+        try await fixture.drawers.mutateState(drawerId: willMoveOut[0].id,
                                       to: .withdrawn, via: .retract,
                                       changedBy: "test")
-        try await drawers.mutateState(drawerId: willMoveOut[1].id,
+        try await fixture.drawers.mutateState(drawerId: willMoveOut[1].id,
                                       to: .decayed,   via: .decay,
                                       changedBy: "test")
-        try await drawers.mutateState(drawerId: willMoveOut[2].id,
+        try await fixture.drawers.mutateState(drawerId: willMoveOut[2].id,
                                       to: .expired,   via: .expire,
                                       changedBy: "test")
 
-        let mat = BundleMaterializer(drawers: drawers, bundles: bundles, families: families)
+        let mat = BundleMaterializer(drawers: fixture.drawers, bundles: fixture.bundles, families: families)
         let cv = try await mat.materializeRoom(wing: "w", room: "r1")
 
         // Bundle A folds only the three cluster-A rows. Their
@@ -158,7 +190,7 @@ struct BundleMaterializerTests {
         let postMutation: [Drawer] = try await {
             var out: [Drawer] = []
             for d in willMoveOut {
-                if let fresh = try await drawers.getDrawer(id: d.id) {
+                if let fresh = try await fixture.drawers.getDrawer(id: d.id) {
                     out.append(fresh)
                 }
             }
@@ -171,9 +203,9 @@ struct BundleMaterializerTests {
 
     @Test("An unmaterialized node reads back as nil")
     func absentNodeIsNil() async throws {
-        let (_, bundles, url) = try await makeStores()
-        defer { TestStorage.cleanup(url) }
-        let got = try await bundles.get(wing: "w", room: "nope", kind: .activeA)
+        let fixture = try await makeFixture(roomNames: ["r1"])
+        defer { TestStorage.cleanup(fixture.url) }
+        let got = try await fixture.bundles.get(wing: "w", room: "nope", kind: .activeA)
         #expect(got == nil)
     }
 
@@ -181,32 +213,34 @@ struct BundleMaterializerTests {
 
     @Test("Wing roll-up of stored room bundles equals the direct fold of all active drawers")
     func wingRollUpEqualsDirectFold() async throws {
-        let (drawers, bundles, url) = try await makeStores()
-        defer { TestStorage.cleanup(url) }
+        let fixture = try await makeFixture(roomNames: ["r1", "r2"])
+        defer { TestStorage.cleanup(fixture.url) }
         let families = EstateFingerprintFamilies(estateUUID: estateUUID)
+        let r1Id = fixture.rooms["r1"]!.id.uuidString
+        let r2Id = fixture.rooms["r2"]!.id.uuidString
 
         // Two rooms, uneven membership.
-        let r1 = [drawer(id: "11", room: "r1", adjective: 0x01 << 26),
-                  drawer(id: "12", room: "r1", adjective: 0x02 << 26)]
-        let r2 = [drawer(id: "21", room: "r2", adjective: 0x10 << 26),
-                  drawer(id: "22", room: "r2", adjective: 0x20 << 26),
-                  drawer(id: "23", room: "r2", adjective: 0x40 << 26)]
-        for d in r1 + r2 { try await drawers.addDrawer(d) }
+        let r1 = [drawer(id: "11", parentNodeId: r1Id, adjective: 0x01 << 26),
+                  drawer(id: "12", parentNodeId: r1Id, adjective: 0x02 << 26)]
+        let r2 = [drawer(id: "21", parentNodeId: r2Id, adjective: 0x10 << 26),
+                  drawer(id: "22", parentNodeId: r2Id, adjective: 0x20 << 26),
+                  drawer(id: "23", parentNodeId: r2Id, adjective: 0x40 << 26)]
+        for d in r1 + r2 { try await fixture.drawers.addDrawer(d) }
 
-        let mat = BundleMaterializer(drawers: drawers, bundles: bundles, families: families)
+        let mat = BundleMaterializer(drawers: fixture.drawers, bundles: fixture.bundles, families: families)
         try await mat.materializeRoom(wing: "w", room: "r1")
         try await mat.materializeRoom(wing: "w", room: "r2")
         let wingCV = try await mat.rollUpWing(wing: "w")
 
         // Direct fold of every active drawer in the wing.
-        let allActive = try await drawers.drawersIn(wing: "w")
+        let allActive = try await fixture.drawers.drawersIn(wing: "w")
         let directCV = CountVector256.fold(allActive.map { families.fingerprint(of: $0) })
 
         #expect(wingCV == directCV)
         #expect(wingCV.n == 5)
 
         // The wing roll-up is stored under room == "".
-        let storedWing = try await bundles.get(wing: "w", room: "", kind: .activeA)
+        let storedWing = try await fixture.bundles.get(wing: "w", room: "", kind: .activeA)
         #expect(storedWing == wingCV)
     }
 }

@@ -131,17 +131,70 @@ struct CorpusTests {
         }
     }
 
-    /// Count does not decrease after remove (BundleStore is append-only;
-    /// remove only clears the recall index, not the content store).
-    @Test func countUnchangedAfterRemove() async throws {
+    /// Count excludes removed sources. BundleStore is append-only so the chunk
+    /// rows survive, but `count()` reports live recall content only, so removing
+    /// the sole source drops the count to zero. Re-ingesting reactivates it.
+    @Test func countExcludesRemovedSource() async throws {
         try await GlobalTestLock.shared.withLock {
             let corpus = try await makeCorpus()
             try await corpus.ingest("Some content for removal test.", sourceID: "src-x", now: fixedNow)
             let beforeRemove = try await corpus.count()
+            #expect(beforeRemove >= 1)
             try await corpus.remove(sourceID: "src-x")
-            let afterRemove = try await corpus.count()
-            // BundleStore is append-only: count stays the same.
-            #expect(afterRemove == beforeRemove)
+            #expect(try await corpus.count() == 0, "removed source must not be counted")
+            // Re-ingesting the same source reactivates it.
+            try await corpus.ingest("Some content for removal test.", sourceID: "src-x", now: fixedNow)
+            #expect(try await corpus.count() == beforeRemove, "re-ingest reactivates the source")
+        }
+    }
+
+    /// REGRESSION (Codex finding 2): a reindex after remove must NOT resurrect the
+    /// removed source. The chunks table is append-only, so reindex reads from it;
+    /// it must use ACTIVE chunks only, or the removed source reappears in recall
+    /// (the auto-reindex daemon makes this a normal-operation hazard).
+    @Test func reindexDoesNotResurrectRemovedSource() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let corpus = try await makeCorpus()
+            let textA = "Cryptography secures communication using mathematical algorithms and keys."
+            let textB = "Machine learning trains neural networks on data without explicit rules."
+            try await corpus.ingest(textA, sourceID: "source-crypto", now: fixedNow)
+            try await corpus.ingest(textB, sourceID: "source-ml", now: fixedNow)
+
+            try await corpus.remove(sourceID: "source-crypto")
+            // Reindex (the path the auto-reindex daemon takes) must keep it gone.
+            try await corpus.reindex(now: fixedNow)
+
+            let results = try await corpus.recall("cryptography authentication keys", limit: 10, now: fixedNow)
+            #expect(results.allSatisfy { $0.chunk.sourceID != "source-crypto" },
+                    "reindex must not resurrect the removed source")
+            // source-ml survives the reindex.
+            let mlResults = try await corpus.recall("neural network learning data", limit: 10, now: fixedNow)
+            #expect(mlResults.contains { $0.chunk.sourceID == "source-ml" },
+                    "non-removed source must survive reindex")
+        }
+    }
+
+    /// REGRESSION (Codex finding 2, BATCH import path): same as the non-batch
+    /// resurrection test but the sources arrive via `ingestBatch` (the drain
+    /// path). Confirms the active-chunks fix holds for batch import too.
+    @Test func batchImportReindexDoesNotResurrectRemovedSource() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let corpus = try await makeCorpus()
+            try await corpus.ingestBatch([
+                (text: "Cryptography secures communication using mathematical algorithms and keys.",
+                 sourceID: "source-crypto", now: fixedNow),
+                (text: "Machine learning trains neural networks on data without explicit rules.",
+                 sourceID: "source-ml", now: fixedNow),
+            ])
+            try await corpus.remove(sourceID: "source-crypto")
+            try await corpus.reindex(now: fixedNow)
+
+            let results = try await corpus.recall("cryptography authentication keys", limit: 10, now: fixedNow)
+            #expect(results.allSatisfy { $0.chunk.sourceID != "source-crypto" },
+                    "batch-imported removed source must not resurrect on reindex")
+            let mlResults = try await corpus.recall("neural network learning data", limit: 10, now: fixedNow)
+            #expect(mlResults.contains { $0.chunk.sourceID == "source-ml" },
+                    "non-removed batch-imported source must survive reindex")
         }
     }
 
@@ -236,18 +289,19 @@ struct CorpusTests {
         }
     }
 
-    // MARK: - BM25 restart rebuild
+    // MARK: - BM25 restart rebuild (now durable via InvertedIndexStore)
 
-    /// BM25 index is rebuilt from persisted chunks when a second Corpus
-    /// instance opens the same storage, simulating a process restart.
+    /// Keyword recall survives a process restart because InvertedIndexStore
+    /// persists term frequencies to SQLite and loads them on open — no chunk
+    /// body scan required. A second Corpus on the same storage opens the
+    /// durable inverted index and immediately serves keyword hits from it.
     ///
-    /// Before the fix, `Corpus.init` constructed a fresh empty BM25Index
-    /// and never called `bundleStore.allChunks()`, so keyword recall on a
-    /// second instance returned no BM25 hits for documents ingested in a
-    /// prior session. The regression is caught by verifying that at least
-    /// one result carries a non-nil `keywordScore` — if the BM25 index
-    /// were empty, `keywordScore` would be nil on every result regardless
-    /// of whether vector hits were present.
+    /// The regression this test guards: before InvertedIndexStore, Corpus.init
+    /// rebuilt an in-memory BM25Index by scanning all chunk bodies. That path
+    /// produced wrong results when `decodeChunk` dropped rows for primitive-
+    /// form SQLite reads. Now the keyword state is a first-class persisted
+    /// artefact: `keywordScore` is non-nil on results for text ingested in
+    /// a prior session, proving the index survived the restart.
     @Test func bm25RestartRebuildRoundTrip() async throws {
         try await GlobalTestLock.shared.withLock {
             let storage = try makeScratchStorage()
@@ -260,28 +314,26 @@ struct CorpusTests {
             )
 
             // Second "session": new Corpus on the same storage, simulating restart.
-            // The fix calls bundleStore.allChunks() during init and indexes the
-            // results into the fresh BM25Index so keyword recall is restored.
+            // InvertedIndexStore.open() loads the persisted term-freq rows;
+            // no allChunks() body scan occurs. Keyword recall is immediately live.
             let second = try await Corpus(storage: storage)
             let results = try await second.recall("keyword recall", limit: 5, now: fixedNow)
 
-            // Results must be non-empty and must carry BM25 signal. Without the
-            // fix, the second instance's BM25 index is empty and keywordScore is
-            // nil on every result even when vector hits are present.
+            // Results must be non-empty and must carry a keyword score. The
+            // non-nil keywordScore confirms the durable inverted index was
+            // loaded successfully — not reconstructed from empty state.
             #expect(!results.isEmpty)
             #expect(results.contains { $0.keywordScore != nil })
         }
     }
 
     /// The SQLite-backed twin of `bm25RestartRebuildRoundTrip`. This is the test
-    /// that would have caught the dark-recall-on-reopen bug: the InMemory backend
-    /// preserves the inserted `.uuid`/`.hlc` TypedValues on read, so the InMemory
-    /// version above passed even while `decodeChunk` rejected the PRIMITIVE forms
-    /// (`.text` id, `.int` hlc) that the SQLite backend actually returns. With a
-    /// real on-disk SQLite estate, `allChunks()` returned empty on reopen, the
-    /// BM25 rebuild indexed nothing, and keyword recall was dark — exactly the
-    /// production failure where a fresh process serving a persisted estate fell
-    /// back to query-blind storage-order recall.
+    /// that caught the dark-recall-on-reopen bug (before InvertedIndexStore):
+    /// the InMemory backend preserved `.uuid`/`.hlc` TypedValues on read, so
+    /// the in-memory test passed while `decodeChunk` silently dropped SQLite's
+    /// primitive-form (`.text` id, `.int` hlc) values. The SQLite version
+    /// exposed the real estate failure mode — and now tests InvertedIndexStore's
+    /// on-disk persistence on the same SQLite-backed path.
     @Test func bm25RestartRebuildRoundTripSQLite() async throws {
         try await GlobalTestLock.shared.withLock {
             let url = FileManager.default.temporaryDirectory
@@ -304,9 +356,11 @@ struct CorpusTests {
             }
 
             // Second session: a brand-new Corpus over the SAME on-disk estate,
-            // simulating a process restart. Its BM25 index is rebuilt purely from
-            // the persisted chunks via allChunks() — which only works if the chunk
-            // decoder accepts the SQLite read-back primitives.
+            // simulating a process restart. Keyword recall is served from the
+            // durable InvertedIndexStore: open() loads the persisted term-freq and
+            // doc-length rows into RAM — no allChunks() body scan — and the
+            // chunkSourceMap is warm-loaded via the compact (id, source_id)
+            // projection. Recall is live immediately from the on-disk index.
             let storage = try SQLiteStorage(configuration: EstateConfiguration(
                 estateID: UUID(),
                 backend: .sqlite(url: url, busyTimeout: 5.0)
@@ -316,6 +370,85 @@ struct CorpusTests {
 
             #expect(!results.isEmpty)
             #expect(results.contains { $0.keywordScore != nil })
+        }
+    }
+
+    /// T4 (ADR-021 Decision 7): a file-backed (SQLite) estate persists the Corpus
+    /// ingest queue to a per-estate SQLite file BESIDE the estate — not a plaintext
+    /// maildir. The sibling filename is `<estate-stem>.queue.sqlite` so two estates
+    /// in the same directory never share a queue. Proven by:
+    ///   1. `<estate-stem>.queue.sqlite` appears as a regular FILE beside the estate db.
+    ///   2. No `corpus_ingest_queue/` maildir is created (old FilesystemBackend path is gone).
+    ///   3. The enqueued document is searchable via the per-estate queue path.
+    @Test func ingestQueueIsDurableForSQLiteEstate() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("corpuskit-queue-\(UUID().uuidString).sqlite3")
+            // Derive the per-estate sibling path the same way EstateConfiguration does:
+            // <dir>/<estate-stem>.queue.sqlite — guarantees cross-estate isolation.
+            let stem = url.deletingPathExtension().lastPathComponent
+            let queueSibling = url.deletingLastPathComponent()
+                .appendingPathComponent("\(stem).queue.sqlite")
+            let oldMaildir = url.deletingLastPathComponent()
+                .appendingPathComponent("corpus_ingest_queue")
+            defer {
+                try? FileManager.default.removeItem(at: url)
+                try? FileManager.default.removeItem(at: queueSibling)
+                try? FileManager.default.removeItem(at: oldMaildir)
+            }
+
+            let cfg = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: url, busyTimeout: 5.0)
+            )
+            let storage = try SQLiteStorage(configuration: cfg)
+            let corpus = try await Corpus(storage: storage)
+            try await corpus.enqueueIngest(
+                "durable queue content survives restart",
+                sourceID: "doc-queue",
+                now: fixedNow
+            )
+            try await corpus.awaitIngestDrain()
+
+            // T4: the per-estate queue file must exist as a regular file (not a directory).
+            var isDir: ObjCBool = false
+            #expect(FileManager.default.fileExists(atPath: queueSibling.path, isDirectory: &isDir))
+            #expect(!isDir.boolValue)  // must be a file, not a directory
+
+            // T4: the old plaintext maildir must NOT exist — it was the FilesystemBackend path.
+            #expect(!FileManager.default.fileExists(atPath: oldMaildir.path))
+
+            // The enqueued document is searchable via the shared queue path.
+            let results = try await corpus.recall("durable queue", limit: 5, now: fixedNow)
+            #expect(!results.isEmpty)
+        }
+    }
+
+    /// T4 (ADR-021 Decision 7): the encode drain claims only stream="encode" jobs and
+    /// does not disturb jobs on other streams sharing the same queue.sqlite.
+    @Test func encodeDrainIsStreamScoped() async throws {
+        try await GlobalTestLock.shared.withLock {
+            // Build an in-memory corpus (no file I/O needed; stream isolation is
+            // queue-level, not backend-level).
+            let corpus = try await makeCorpus()
+            try await corpus.mountIngestQueue()
+
+            // Enqueue on the encode stream via the public API.
+            try await corpus.enqueueIngest(
+                "stream scoped encode content",
+                sourceID: "doc-scoped",
+                now: fixedNow
+            )
+            // Drain once — only encode jobs are drained.
+            let drained = try await corpus.drainIngestQueueOnce()
+            #expect(drained == 1)
+
+            // After the drain pass the content must be searchable.
+            try await corpus.awaitIngestDrain()
+            let results = try await corpus.recall("stream scoped encode", limit: 5, now: fixedNow)
+            #expect(!results.isEmpty)
+
+            await corpus.dropIngestQueue()
         }
     }
 }

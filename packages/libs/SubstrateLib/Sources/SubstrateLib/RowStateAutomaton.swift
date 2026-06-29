@@ -335,9 +335,8 @@ public enum ForbiddenCombinations {
 
         // S-3 (cookbook § 9.5.3): accepted MUST NOT transition to
         // tombstoned — enforced by the transition table; no
-        // field-level invariant to check. (KNOWN GAP: verbTable
-        // currently permits (.accepted, "expunge") → .tombstoned;
-        // F14 closes this safety violation.)
+        // field-level invariant to check. The verbTable was aligned
+        // to this constraint in F14 (see § 10 adapter comment above).
 
         // S-4 (cookbook § 9.5.4): sensitivity floor for accepted.
         // Adjective bits 6-11 encode sensitivity (6-bit per §2.3);

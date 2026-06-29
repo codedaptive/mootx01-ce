@@ -26,7 +26,9 @@ extension RecallWeights {
         // Base weights. The active scoring combiner applies: locus, bm25, vector,
         // fieldFit, and graph. `diversity` drives the adaptive MMR λ in step 10:
         // higher diversity weight reduces λ toward 0.5, favouring diverse results.
-        // `matrix` is 0.1 base weight, reserved for a future signal lane.
+        // `matrix` is 0.1 base weight, used by RecallDirector in the
+        // `.matrixAware` final score to weight co-occurrence and temporal
+        // matrix signals (`matrixW` is a constant and is not adapted here).
         var locusW:     Float = 0.2
         var bm25W:      Float = 0.2
         var vectorW:    Float = 0.2

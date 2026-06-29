@@ -11,6 +11,22 @@ pub enum SyncDirection {
     PullOnly,
 }
 
+impl std::fmt::Display for SyncDirection {
+    /// Parity contract: must match Swift `SyncDirection.rawValue` which are
+    /// camelCase string raw values: "bidirectional", "pushOnly", "pullOnly".
+    /// Used in `format_sync_state_token` so sync status tokens are identical
+    /// between Swift and Rust. The `{direction:?}` (Debug) form was wrong:
+    /// it emits PascalCase ("Bidirectional", "PushOnly", "PullOnly") which
+    /// diverges from Swift's camelCase rawValue output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncDirection::Bidirectional => write!(f, "bidirectional"),
+            SyncDirection::PushOnly => write!(f, "pushOnly"),
+            SyncDirection::PullOnly => write!(f, "pullOnly"),
+        }
+    }
+}
+
 /// Conflict resolution policy applied at the receive boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,7 +43,9 @@ pub enum ConflictPolicy {
 }
 
 /// Declaration of a single synced table within a manifest.
+/// JSON contract: camelCase field names matching Swift's property names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncedTable {
     pub name: String,
     #[serde(default = "default_direction")]
@@ -67,8 +85,12 @@ impl SyncedTable {
 }
 
 /// Declarative configuration for a sync session.
+/// JSON contract: camelCase field names matching Swift's property names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncManifest {
+    /// Serializes as "kitID" to match Swift's property name (not "kitId").
+    #[serde(rename = "kitID")]
     pub kit_id: String,
     pub schema_version: i32,
     pub zone_identifier: String,

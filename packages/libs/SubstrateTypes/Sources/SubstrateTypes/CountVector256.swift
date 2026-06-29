@@ -35,10 +35,10 @@ import Foundation
 /// of accumulated members whose bit `j` is set. `n` is the member
 /// count. The all-zero value (no members) is the fold identity.
 ///
-/// Counts are `UInt32`, bounding a single vector to about 4.3 billion
-/// members before a count could saturate, well above any realistic
-/// node subtree size. The merge is plain integer addition; callers
-/// composing pathologically large trees should note the bound.
+/// Counts are `UInt32`; `accumulate` and `merge` use wrapping addition
+/// (`&+=`), so a count wraps rather than traps on overflow. In practice
+/// 4.3 billion members per vector is above any realistic node subtree
+/// size, so wrap is not expected. Mirrors Rust's `wrapping_add`.
 public struct CountVector256: Sendable, Equatable, Codable {
 
     /// Per-bit set counts, exactly 256 entries. `counts[j]` = c_j.

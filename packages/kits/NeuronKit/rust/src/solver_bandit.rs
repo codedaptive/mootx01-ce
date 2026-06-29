@@ -104,7 +104,11 @@ impl Arm {
 /// a Beta(α, β) posterior; the bandit selects an arm by drawing a sample from
 /// each posterior and returning the arm with the highest sample. It learns
 /// the optimal trigger mode per estate from observed dreaming-cycle reward.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Uses a custom `Deserialize` impl that validates the arm count after
+/// decoding, falling back to a fresh uniform-prior bandit on mismatch.
+/// Mirrors the Swift `SolverBandit.init(from:)` guard (NK-11/NK-13 planned hardening).
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SolverBandit {
     /// One arm per `DreamingTriggerMode` case, in `ALL_MODES` order (stable).
     pub arms: Vec<Arm>,
@@ -118,13 +122,37 @@ impl SolverBandit {
         }
     }
 
+    /// Validate the bandit's arm count after deserialisation.
+    ///
+    /// A persisted bandit with the wrong arm count (truncated JSON, schema
+    /// mismatch) would cause `select` to access out-of-range indices or silently
+    /// miss trigger modes. This method returns the bandit unchanged if the arm
+    /// count is correct, or a fresh uniform-prior bandit otherwise. Mirrors
+    /// Swift `SolverBandit.init(from:)` guard. (NK-11 planned hardening)
+    pub fn validate(self) -> Self {
+        if self.arms.len() == ALL_MODES.len() {
+            self
+        } else {
+            Self::new()
+        }
+    }
+
     /// Select the trigger mode for the next cycle using Thompson Sampling.
     ///
     /// Draws θ_i ~ Beta(alpha_i, beta_i) for each arm; returns the arm with
     /// the highest sample. Ties break on stable arm order (ascending
     /// `ALL_MODES` index). `seed` is explicit for determinism — never calls
     /// any non-deterministic source internally.
+    ///
+    /// Guards against a zero-arm bandit (should not occur in production but
+    /// can arise from a corrupt persisted state before `validate()` runs):
+    /// returns `ALL_MODES[0]` (Timer) rather than panicking on an empty slice.
+    /// Mirrors Swift `SolverBandit.select(seed:)` empty-arms guard. (NK-13 planned hardening)
     pub fn select(&self, seed: u64) -> DreamingTriggerMode {
+        // Guard against a zero-arm bandit; fall back to the default mode.
+        if self.arms.is_empty() {
+            return ALL_MODES[0];
+        }
         let mut rng = SplitMix64::new(seed);
         let mut best_sample = f64::NEG_INFINITY;
         let mut best_mode = self.arms[0].mode;
@@ -157,6 +185,23 @@ impl SolverBandit {
 impl Default for SolverBandit {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Custom `Deserialize` that validates arm count after decoding.
+///
+/// A persisted JSON with the wrong number of arms (truncated write,
+/// schema mismatch across versions) falls back to a fresh uniform-prior
+/// bandit rather than leaving a corrupt `select()` state. Mirrors
+/// Swift `SolverBandit.init(from:)` guard (NK-11 planned hardening).
+impl<'de> serde::Deserialize<'de> for SolverBandit {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            arms: Vec<Arm>,
+        }
+        let raw = Raw::deserialize(d)?;
+        Ok(SolverBandit { arms: raw.arms }.validate())
     }
 }
 
@@ -332,18 +377,16 @@ mod tests {
 
     // § 7 Force-tests — substrate swap behavior preservation
     //
-    // These tests pin the exact arm selections produced by a canonical seed on
-    // a fresh uniform-prior bandit. They serve as regression guards: if any
-    // future change to the sampling path (RNG, algorithm, draw order) alters
-    // the output for this seed sequence, these tests will catch it immediately.
+    // These tests verify that select() returns a valid DreamingTriggerMode
+    // and is reproducible for the same seed. A concrete enum pin was planned
+    // (run with --nocapture to record the expected variant) but the current
+    // assertion is validity + same-seed determinism only.
     //
     // Canonical seed: 0xCAFE_BABE_DEAD_BEEF (matches SubstrateML sampling.json
-    // conformance vector seed). The expected selections below were computed from
-    // substrate_ml::sampling — the same primitive that previously lived as
-    // private copies in this file. Bit-identity between the old private copies
-    // and the substrate primitives was verified by algorithm inspection (same
-    // Box-Muller cosine branch, same Marsaglia-Tsang constants 0.0331, same
-    // Ahrens-Dieter draw order, same f64::MIN_POSITIVE clamp).
+    // conformance vector seed). Bit-identity between the old private sampling
+    // copies and the substrate_ml::sampling primitive was verified by algorithm
+    // inspection (same Box-Muller cosine branch, same Marsaglia-Tsang constants
+    // 0.0331, same Ahrens-Dieter draw order, same f64::MIN_POSITIVE clamp).
 
     #[test]
     fn force_test_canonical_seed_pinned_selection() {
@@ -360,10 +403,10 @@ mod tests {
             "selection {:?} is not a valid DreamingTriggerMode",
             selection
         );
-        // Pin the exact value: run this test once with --nocapture to record it,
-        // then replace this assertion with the concrete enum variant.
-        // For now, the determinism test (§4) already covers same-seed stability;
-        // this test adds a concrete sequence pin below.
+        // No concrete variant is pinned yet — this test and the §4 determinism
+        // test both verify same-seed reproducibility. A concrete enum pin would
+        // require running once with --nocapture to record the expected variant
+        // and then hardcoding it here.
         let second = bandit.select(0xCAFE_BABE_DEAD_BEEF);
         assert_eq!(
             selection, second,

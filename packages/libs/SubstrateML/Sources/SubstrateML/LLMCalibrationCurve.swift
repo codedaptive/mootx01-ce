@@ -23,8 +23,9 @@
 //                            over [0, 1] for calibration tracking.
 //
 // Decay: calibration HAS decay (cookbook § 6.8 table). Half-life:
-// 30 days. Decay is fractional rather than count-zeroing so older
-// observations contribute proportionally less.
+// 730 days (per MatrixDecay.swift's per-matrix half-life table).
+// Decay is fractional rather than count-zeroing so older observations
+// contribute proportionally less.
 //
 // Used by:
 //   § 6.6   Calibration curve definition (this file)

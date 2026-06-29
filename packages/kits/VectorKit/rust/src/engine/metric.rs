@@ -14,10 +14,8 @@
 pub enum BinaryMetric {
     /// Popcount of XOR. Range 0..=256 for 256-bit engrams.
     Hamming,
-    /// Hamming distance re-expressed as a ratio: range 0.0–1.0, but
-    /// stored as a fixed-point integer (×10_000) to stay integer-only
-    /// on the critical path. `raw_distance` from a search hit carries
-    /// the scaled integer value.
+    /// Reserved binary metric. Not implemented by `BruteForceIndex` or
+    /// `MIHIndex` — both reject non-Hamming binary metrics at search time.
     Jaccard,
 }
 

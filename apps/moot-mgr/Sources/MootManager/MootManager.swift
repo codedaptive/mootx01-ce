@@ -182,10 +182,13 @@ public actor MootManager {
         // Ensure the parent directory exists. The manager owns its store file;
         // it is responsible for creating the directory tree.
         let parent = config.storeURL.deletingLastPathComponent()
+        // Restrict the stats store directory to the owning user (planned hardening).
+        // SQLite WAL/SHM files land here and must not be readable by other local
+        // users. Mirrors Rust `start()` which calls `set_permissions(0o700)`.
         try FileManager.default.createDirectory(
             at: parent,
             withIntermediateDirectories: true,
-            attributes: nil
+            attributes: [.posixPermissions: 0o700]
         )
 
         let store = try StatsStore(url: config.storeURL)
@@ -356,12 +359,16 @@ public actor MootManager {
 
     /// Sidecar file path for the persisted retention override, alongside the stats store.
     ///
-    /// Placing the prefs file in the same directory as the stats store keeps the
-    /// manager's data self-contained — the manager already creates/owns that directory.
+    /// The filename is derived from the store filename stem (e.g. `moot-mgr.sqlite`
+    /// → `moot-mgr-prefs.json`) so that two manager instances whose stores live in
+    /// the same parent directory do not share the same prefs file (filename collision
+    /// fix). Mirrors Rust `retention_prefs_path()`. The manager owns the directory
+    /// and therefore the sidecar file.
     private var retentionPrefsURL: URL {
-        config.storeURL
+        let storeName = config.storeURL.deletingPathExtension().lastPathComponent
+        return config.storeURL
             .deletingLastPathComponent()
-            .appendingPathComponent("moot-mgr-prefs.json", isDirectory: false)
+            .appendingPathComponent("\(storeName)-prefs.json", isDirectory: false)
     }
 
     /// Persist the retention override to the sidecar JSON file.
@@ -423,23 +430,26 @@ public actor MootManager {
         let estateCount = Set(events.map(\.estate)).count
         let health = try await store.storageStats(now: now)
 
-        // Fetch ALL metric rows so we can both read the latest value of each named
-        // server metric AND compute per-dropbox sample counts and delta-derived rates
-        // in a single store round-trip. The Phase-1 retention window keeps this set
-        // bounded (default 3600 s × ~2 samples/min = a few thousand rows at most).
+        // Full scan for per-dropbox summaries and capability self-reports (by-dropbox
+        // rollups cover every metric name, so a bounded query cannot serve both purposes).
         let allMetrics = try await store.queryMetrics(dropboxID: nil)
 
         // --- Server metric extraction (latest + second-latest per named metric) ---
-        // Keep the two most-recent samples per server metric name so we can compute
-        // delta-based rates without a second query.
+        //
+        // Bounded query: the name set is fixed and small (6 names). Using the targeted
+        // SQL query instead of filtering `allMetrics` in-memory bounds the server-metric
+        // surface to its intended names and avoids the DoS window where a noisy producer
+        // floods arbitrary metric names into the server section. Mirrors the strategy
+        // already used in `estatesPayload()` and `graphPayload()` for their named sets.
         let serverMetricNames: Set<String> = [
             "server.rss_mb", "server.cpu_user_ms", "server.rpc_count",
             "server.connections", "server.proto_version",
             "substrate.kernel.backend_selected",
         ]
+        let serverMetrics = try await store.queryMetricsByNames(serverMetricNames)
         // latestByName[name] = (newer, older) — older is nil until the second sample arrives.
         var latestByName: [String: (MetricRow, MetricRow?)] = [:]
-        for m in allMetrics where serverMetricNames.contains(m.name) {
+        for m in serverMetrics {
             if let (prev, _) = latestByName[m.name] {
                 if m.ts > prev.ts {
                     // m is newer than current best — demote current best to the second slot
@@ -783,7 +793,11 @@ public actor MootManager {
         var communities: [GraphCommunityPayload] = []
         for key in latest.keys.sorted(by: { $0.estate < $1.estate })
             where key.signal == "community.assignment" {
-            let communityCount = max(0, Int(latest[key]!.value.rounded()))
+            // Cap the untrusted metric value to prevent a crafted sample from
+            // triggering an unbounded allocation loop. 10,000 community nodes is
+            // a generous ceiling; legitimate graph analytics never approach it.
+            // Mirrors Rust `graph_payload()` which uses `.max(0.0).min(10_000.0)`.
+            let communityCount = max(0, min(Int(latest[key]!.value.rounded()), 10_000))
             for _ in 0..<communityCount {
                 communities.append(GraphCommunityPayload(
                     id: communities.count, label: nil, size: 0

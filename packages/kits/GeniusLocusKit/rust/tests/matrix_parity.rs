@@ -533,15 +533,13 @@ fn snapshot_persists_temporal_watermark_hlc_round_trip() {
     );
 }
 
-/// Backward-compat: loading a snapshot serialized WITHOUT the
-/// temporal_watermark_hlc trailer (an old-format snapshot) must produce
-/// temporal_watermark_hlc == HLC::ZERO, mirroring Swift's
-/// `decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero`.
-///
-/// We simulate the old format by building the snapshot through the
-/// current save path and then truncating the last 16 bytes before loading.
+/// The Snapshotted file backend rejects schema_version=1 (old format) via a
+/// SchemaVersionMismatch error, not by silently accepting it. This documents
+/// the correct gate: the file backend requires CURRENT_SCHEMA_VERSION (2).
+/// Legacy v1 decode behavior (HLC::ZERO fallback) is tested at the unit level
+/// in matrix/persistence.rs::v2_truncation_tests::v1_blob_decodes_ok_with_zero_watermark_and_empty_timestamps.
 #[test]
-fn snapshot_backward_compat_missing_watermark_falls_back_to_zero() {
+fn snapshot_file_backend_rejects_v1_schema_version() {
     let tmp = std::env::temp_dir().join(format!(
         "matrix-twm-bc-{}.bin",
         std::time::SystemTime::now()
@@ -551,42 +549,81 @@ fn snapshot_backward_compat_missing_watermark_falls_back_to_zero() {
     ));
     let _cleanup = scopeguard_remove(tmp.clone());
 
-    // Save a snapshot with a non-zero watermark so the file has the trailer.
     let h1 = HLC::new(300_000, 0, 1);
-    let row_a = EntryUUID([0xA2; 16]);
-    let row_b = EntryUUID([0xB2; 16]);
-
-    let mut log = UnifiedAuditLog::new();
-    log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), HLC::new(0, 0, 1)));
-    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
-    let t_tier = MatrixTier::rebuild_temporal(&log);
-
     use genius_locus_kit::matrix::MatrixSnapshot;
-    let snap = MatrixSnapshot::new(t_tier, MatrixCalibrationRegistry::new(), h1);
+    let snap = MatrixSnapshot::new(MatrixTier::new(), MatrixCalibrationRegistry::new(), h1);
     let backend =
         MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
     backend.save(&snap).expect("save must succeed");
 
-    // Truncate the last 16 bytes to simulate an old-format snapshot that
-    // lacked the temporal_watermark_hlc trailer.
+    // Patch schema_version byte (first 4 LE bytes) to 1 to simulate an old-format file.
     let mut bytes = std::fs::read(&tmp).expect("read back saved bytes");
-    let original_len = bytes.len();
-    assert!(
-        original_len >= 16,
-        "saved snapshot must be at least 16 bytes"
-    );
-    bytes.truncate(original_len - 16);
-    std::fs::write(&tmp, &bytes).expect("write truncated bytes");
+    bytes[0] = 1; bytes[1] = 0; bytes[2] = 0; bytes[3] = 0;
+    // Strip the 20-byte tail so the blob is also well-formed as schema_version=1 content.
+    let tail_len = 20;
+    if bytes.len() >= tail_len {
+        bytes.truncate(bytes.len() - tail_len);
+    }
+    std::fs::write(&tmp, &bytes).expect("write patched bytes");
 
-    // Load the truncated snapshot — must succeed with watermark == ZERO.
+    // The file backend's schema version gate rejects v1 blobs via SchemaVersionMismatch.
+    // MatrixSnapshotStore.load() (the SQLite path) converts this to Ok(None) → full rebuild.
     let backend2 =
         MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let loaded = backend2.load().expect("load must succeed").expect("snapshot must be present");
+    let result = backend2.load();
+    assert!(
+        result.is_err(),
+        "file backend must reject schema_version=1 blob, got Ok"
+    );
+}
 
-    assert_eq!(
-        loaded.tier.temporal_watermark_hlc,
-        HLC::ZERO,
-        "old-format snapshot without watermark trailer must decode with HLC::ZERO fallback"
+/// Corruption gate (v2 format): a schema_version=2 snapshot truncated before
+/// the temporal_watermark_hlc section must be REJECTED (not silently accepted
+/// with HLC::ZERO). MatrixSnapshotStore.load() treats a decode error as None,
+/// so the caller falls back to a full rebuild — the safe behavior.
+///
+/// Without this guard, a truncated v2 blob with a reset watermark could cause
+/// incremental_update to replay temporal deltas over already-loaded state.
+#[test]
+fn snapshot_truncated_v2_before_watermark_is_rejected() {
+    let tmp = std::env::temp_dir().join(format!(
+        "matrix-twm-trunc-{}.bin",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _cleanup = scopeguard_remove(tmp.clone());
+
+    let h1 = HLC::new(300_000, 0, 1);
+    use genius_locus_kit::matrix::MatrixSnapshot;
+    let snap = MatrixSnapshot::new(MatrixTier::new(), MatrixCalibrationRegistry::new(), h1);
+    // schema_version must be 2 (the current version) for this test to be meaningful.
+    assert_eq!(snap.schema_version, 2, "test requires a v2 snapshot");
+    let backend =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
+    backend.save(&snap).expect("save must succeed");
+
+    let mut bytes = std::fs::read(&tmp).expect("read back saved bytes");
+    let original_len = bytes.len();
+    // Strip the 20-byte v2 tail (watermark + ts count) — leaves schema_version=2
+    // in the header but no temporal_watermark tail. This is the corrupt truncated-v2 case.
+    let tail_len = 20;
+    assert!(original_len >= tail_len, "saved snapshot must be at least {tail_len} bytes");
+    bytes.truncate(original_len - tail_len);
+    std::fs::write(&tmp, &bytes).expect("write truncated bytes");
+
+    // Load the truncated v2 snapshot. The Snapshotted backend propagates
+    // SnapshotDecodeFailed for a truncated blob — callers (MatrixSnapshotStore.load)
+    // then treat the error as None → full rebuild (the safe behavior contract).
+    // Here we verify the error IS returned rather than silently accepting
+    // the truncated blob as Ok(Some(snapshot_with_reset_watermark)).
+    let backend2 =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
+    let result = backend2.load();
+    assert!(
+        result.is_err(),
+        "truncated v2 snapshot must return Err (decode failure), got Ok"
     );
 }
 
@@ -600,4 +637,85 @@ impl Drop for ScopeguardRemove {
 }
 fn scopeguard_remove(p: std::path::PathBuf) -> ScopeguardRemove {
     ScopeguardRemove(p)
+}
+
+// MARK: - Incremental hydration conformance (persist + load-forward)
+
+// Helpers for the incremental conformance test — mirror the Swift
+// `incrementalUpdateMatchesFullRebuildAtEverySplit` cap/exp/wdr helpers.
+fn cap_e(row: EntryUUID, field: &str, bm: u64, h: HLC) -> UnifiedAuditEntry {
+    UnifiedAuditEntry::new(
+        AuditTier::Locus, h, UnifiedAuditVerb::Capture, row, field.to_string(),
+        UnifiedAuditValue::Null, UnifiedAuditValue::Bitmap(bm), None,
+    )
+}
+fn exp_e(row: EntryUUID, field: &str, bm: u64, h: HLC) -> UnifiedAuditEntry {
+    UnifiedAuditEntry::new(
+        AuditTier::Locus, h, UnifiedAuditVerb::Expunge, row, field.to_string(),
+        UnifiedAuditValue::Bitmap(bm), UnifiedAuditValue::Bitmap(bm), None,
+    )
+}
+fn wdr_e(row: EntryUUID, h: HLC) -> UnifiedAuditEntry {
+    UnifiedAuditEntry::new(
+        AuditTier::Locus, h, UnifiedAuditVerb::Withdraw, row, "bm.a".to_string(),
+        UnifiedAuditValue::Null, UnifiedAuditValue::Null, None,
+    )
+}
+
+/// For EVERY whole-HLC split point, a snapshot `full_rebuild(prefix)` then
+/// `incremental_update(full_log)` must equal `full_rebuild(full_log)` cell-for-
+/// cell — F, O, T, live_row_count, and both HLC cursors. Mirrors Swift
+/// `incrementalUpdateMatchesFullRebuildAtEverySplit`. Exercises a cross-cursor
+/// expunge and a withdraw — the cases a naive delta-rebuild-then-merge corrupts.
+///
+/// Splits are whole-HLC only: a row's multi-field capture is one atomic
+/// transaction sharing one HLC, and a snapshot is taken over committed state, so
+/// the cursor never lands mid-row.
+#[test]
+fn incremental_update_matches_full_rebuild_at_every_split() {
+    let row_a = EntryUUID([1u8; 16]);
+    let row_b = EntryUUID([2u8; 16]);
+    let row_c = EntryUUID([3u8; 16]);
+    let row_d = EntryUUID([4u8; 16]);
+
+    let entries: Vec<UnifiedAuditEntry> = vec![
+        cap_e(row_a, "bm.a", 0b101, hlc(1_000)),
+        cap_e(row_b, "bm.a", 0b001, hlc(2_000)),
+        cap_e(row_b, "bm.b", 0b010, hlc(2_000)),
+        cap_e(row_c, "bm.a", 0b111, hlc(3_000)),
+        exp_e(row_a, "bm.a", 0b101, hlc(4_000)), // cross-cursor expunge of row_a
+        wdr_e(row_b, hlc(5_000)),                // withdraw row_b
+        cap_e(row_d, "bm.a", 0b011, hlc(6_000)),
+        cap_e(row_d, "bm.b", 0b100, hlc(6_000)),
+    ];
+
+    let mut full_log = UnifiedAuditLog::new();
+    for e in &entries {
+        full_log.add(e.clone());
+    }
+    let full = MatrixTier::full_rebuild(&full_log);
+
+    let n = entries.len();
+    for k in 1..=n {
+        // Whole-HLC boundary only: skip a split that would cut a same-HLC row.
+        if k != n && entries[k - 1].hlc == entries[k].hlc {
+            continue;
+        }
+        let mut prefix_log = UnifiedAuditLog::new();
+        for e in entries.iter().take(k) {
+            prefix_log.add(e.clone());
+        }
+        let mut snapshot = MatrixTier::full_rebuild(&prefix_log); // persisted state
+        snapshot.incremental_update(&full_log); // load-forward
+
+        assert_eq!(snapshot.field_presence, full.field_presence, "F differs at split {k}");
+        assert_eq!(snapshot.co_occurrence, full.co_occurrence, "O differs at split {k}");
+        assert_eq!(snapshot.temporal_causality, full.temporal_causality, "T differs at split {k}");
+        assert_eq!(snapshot.live_row_count, full.live_row_count, "live_row_count differs at split {k}");
+        assert_eq!(snapshot.last_hlc, full.last_hlc, "last_hlc differs at split {k}");
+        assert_eq!(
+            snapshot.temporal_watermark_hlc, full.temporal_watermark_hlc,
+            "temporal_watermark differs at split {k}"
+        );
+    }
 }

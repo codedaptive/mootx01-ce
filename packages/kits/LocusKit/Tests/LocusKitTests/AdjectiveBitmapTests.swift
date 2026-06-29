@@ -7,11 +7,10 @@ import Testing
 /// predicates per spec § 6.1, and the default-zero behavior of
 /// `Drawer.adjectiveBitmap` for callers that omit the parameter.
 ///
-/// No SQLite work in this mission (LOCI_V035_01A); the schema
-/// migration that persists `adjectiveBitmap` ships in
-/// LOCI_V035_01B. These tests therefore exercise pure value
-/// types — enum raw values, bit-extraction accessors, predicates,
-/// and Codable equality — without touching DrawerStore.
+/// Covers pure value/accessor behavior: enum raw values,
+/// bit-extraction accessors, predicates, and Codable equality.
+/// Persistence coverage for `adjectiveBitmap` lives in
+/// `DrawerStoreTests.swift`.
 @Suite("AdjectiveBitmapTests")
 struct AdjectiveBitmapTests {
 
@@ -178,8 +177,7 @@ struct AdjectiveBitmapTests {
     func defaultZero() {
         let drawer = Drawer(
             content: "c",
-            wing: "w",
-            room: "r",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "minilm-v6"
@@ -199,8 +197,7 @@ struct AdjectiveBitmapTests {
     private func makeDrawer(adjectiveBitmap: Int64) -> Drawer {
         Drawer(
             content: "c",
-            wing: "w",
-            room: "r",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "minilm-v6",

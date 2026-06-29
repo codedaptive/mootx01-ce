@@ -49,8 +49,7 @@ private func sampleDrawer(id: String, lineageID: UUID? = nil) -> Drawer {
     Drawer(
         id: TestStorage.tid(id),
         content: "corrupt read-back test content",
-        wing: "w",
-        room: "r",
+        parentNodeId: "test-parent",
         addedBy: "test",
         filedAt: t(1_700_000_000),
         embeddingModelID: "test-v1",

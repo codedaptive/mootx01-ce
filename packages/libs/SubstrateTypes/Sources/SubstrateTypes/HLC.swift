@@ -190,7 +190,7 @@ public struct HLCGenerator: Sendable {
 //                           via Comparable.
 //   skew tolerance:         physical-clock skew up to ~Int32.max
 //                           milliseconds (~25 days); beyond that
-//                           logical counter saturates and
+//                           logical counter wraps (via `&+`) and
 //                           causality assertions weaken.
 //
 // In practice the substrate runs an NTP-synchronized wall clock

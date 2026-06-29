@@ -22,9 +22,9 @@
 //   bytes 24..55     OR-reduced Fingerprint256 (32 bytes)
 //   bytes 56..63     HLC of the contribution (8 bytes BE)
 //
-// Total: 64 bytes per contribution. CRC32 over the 64 bytes
-// provides integrity; the handshake-established shared key
-// signs the contribution against tampering.
+// Total: 64 bytes per contribution. `encode` writes the 64-byte
+// payload; `decode` reads it back. CRC32 and signatures are not
+// computed or verified in this reference implementation.
 //
 // Used by:
 //   § 12.3    Tier contribution definition (this file)

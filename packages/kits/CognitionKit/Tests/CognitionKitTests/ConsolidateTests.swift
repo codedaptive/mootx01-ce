@@ -13,9 +13,9 @@
 // Layer discipline: estates opened via public GeniusLocusKit API. Items captured
 // via the public GLK verb.
 //
-// Rust mirror: Consolidate is Swift-only at this revision (the Rust port keeps
-// the recipe as pure data types; the per-item sweep storage orchestration lives
-// at the GLK coordinator level).
+// Rust mirror: cognition_kit::consolidate — run_consolidate delegates to
+// EstateCoordinator::distill_items_sweep, mirroring this Swift recipe body.
+// Tests: CK-CON-1..CK-CON-3 in consolidate.rs (IMM-COG-001).
 
 import Testing
 import Foundation
@@ -213,14 +213,14 @@ struct ConsolidateTests {
     }
 
     // CK-CO-8: Source-count invariant — reported src= in the DIST header equals the
-    // number of _distilled_from tunnels, which equals the number of sources expand_memory
+    // number of _distilled_from tunnels, which equals the number of sources recollect
     // returns. For the intra-item model each factoid has exactly ONE source (the item
     // itself), so the invariant is: sourceCount == 1 == tunnels.count == expand.sources.count.
     //
     // This test guards the bug where src=N in the DIST header was set to M (sentence count)
     // instead of sourceIDs.count (source memory count), causing reported sources: 3/5/N
-    // while expand_memory returned only 1 source.
-    @Test("CK-CO-8: source-count invariant — DIST header src== tunnel count == expand sources count")
+    // while recollect returned only 1 source.
+    @Test("CK-CO-8: source-count invariant — DIST header src== tunnel count == recollect sources count")
     func sourceCountMatchesTunnelsAndExpand() async throws {
         let (kit, handle, _, _) = try await openEstateWithVectorStore()
 
@@ -232,10 +232,13 @@ struct ConsolidateTests {
         let out = try await runConsolidate(kit: kit, handle: handle)
         #expect(out.factoidsProduced == 1)
 
-        // Resolve the factoid drawer.
+        // Resolve the factoid drawer. Since Drawer no longer carries wing/room,
+        // resolve display names via the estate's node tree to find the _distilled room.
         let allDrawers = try await kit.allDrawers(in: handle)
+        let estate = try await kit.estate(for: handle)
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: allDrawers.map(\.parentNodeId))
         let factoidDrawer = try #require(
-            allDrawers.first { $0.room == "_distilled" && $0.lineageID.uuidString == sourceID },
+            allDrawers.first { nodeNames[$0.parentNodeId]?.room == "_distilled" && $0.lineageID.uuidString == sourceID },
             "one factoid in _distilled whose lineageID == sourceID")
 
         // 1. DIST header src= must be 1 (one source memory, not sentence count).
@@ -253,17 +256,42 @@ struct ConsolidateTests {
         #expect(sourceTunnels.count == 1,
             "_distilled_from tunnel count must equal sourceIDs.count (1)")
 
-        // 3. expand_memory sources.count must be 1, and sourceCount (from header) must agree.
-        let expandOut = try await ExpandMemory().run(
-            input: ExpandMemory.Input(factoidDrawerID: factoidDrawer.id),
+        // 3. recollect sources.count must be 1, and sourceCount (from header) must agree.
+        let expandOut = try await Recollect().run(
+            input: Recollect.Input(factoidDrawerID: factoidDrawer.id),
             estate: handle, kit: kit)
         #expect(expandOut.sourceCount == 1,
-            "ExpandMemory.Output.sourceCount must equal the DIST header src= value (1)")
+            "Recollect.Output.sourceCount must equal the DIST header src= value (1)")
         #expect(expandOut.sources.count == 1,
-            "expand_memory must return exactly 1 source for an intra-item factoid")
+            "recollect must return exactly 1 source for an intra-item factoid")
         #expect(expandOut.sourceCount == expandOut.sources.count,
             "sourceCount (DIST header) must equal sources.count (actual tunnels returned)")
         #expect(expandOut.sources[0].id == sourceID,
             "the single expanded source must be the original captured item")
+    }
+
+    // CK-CO-9: clusterID and includeHeld are accepted no-ops — passing non-nil /
+    // non-default values must not cause errors and must not change sweep behavior.
+    // Mirrors Rust CK-CON-3 (cluster_id/include_held no-ops must not cause errors).
+    @Test("CK-CO-9: clusterID and includeHeld are accepted without error, results are unchanged")
+    func clusterIDAndIncludeHeldAreNoOps() async throws {
+        let (kit, handle, _, _) = try await openEstateWithVectorStore()
+
+        try await captureItems(count: 1, body: recurringBody, kit: kit, handle: handle)
+
+        // Run with both no-op parameters set to non-default values. Sweep must
+        // produce the same factoid count as with default Input.
+        let outWithParams = try await runConsolidate(
+            input: Consolidate.Input(clusterID: "some-cluster", includeHeld: true),
+            kit: kit, handle: handle)
+        #expect(outWithParams.factoidsProduced == 1,
+            "clusterID/includeHeld must not suppress eligible items (they are no-ops)")
+
+        // Idempotency: a second run with the same no-op params produces 0 (item already distilled).
+        let outSecond = try await runConsolidate(
+            input: Consolidate.Input(clusterID: "some-cluster", includeHeld: true),
+            kit: kit, handle: handle)
+        #expect(outSecond.factoidsProduced == 0,
+            "second run with no-op params must still respect idempotency (already distilled)")
     }
 }

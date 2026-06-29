@@ -1,28 +1,20 @@
 // RecallHygieneTests.swift
 //
-// TDD coverage for recall-hygiene fix (fix/recall-hygiene-charters-ghosts):
+// TDD coverage for hint-drawer recall behaviour and ghost-ID guard:
 //
-// Bug A — Charter pollution:
-//   Wing `_charter` drawers (room == "_charter", embeddingModelID == "none") are
-//   wing metadata seeded at provision time. They must NOT surface as content hits
-//   in scored recall (locusOnly, unionBest, or any lane). They remain reachable
-//   via estate-map / enumerate but are excluded from the recall candidate set.
-//
-// Bug B — Ghost IDs:
-//   Every hit returned by recall must have a non-nil `drawer` field that resolves
-//   to a live, hydratable content drawer. Nil-drawer hits (ghost IDs — IDs in the
-//   recall candidate pool that have no backing row in the drawers table) must be
-//   dropped before the result is returned.
+// Hint drawers (AI_Charter_Hint room) are normal drawers — seeded at provision
+// time, embedded, and recalled like any other drawer. No special-casing in the
+// recall pipeline. The former "charter exclusion" is removed.
 //
 // Tests:
-//   H1  locusOnly excludes charter drawers — all returned hits are non-charter rooms
-//   H2  unionBest excludes charter drawers — same, via the full multi-lane pipeline
-//   H3  locusOnly hit count == content drawer count (not charter + content)
-//   H4  unionBest hit count == content drawer count (not charter + content)
+//   H1  locusOnly includes hint drawers — all returned hits include hint rooms
+//   H2  unionBest includes hint drawers — same, via the full multi-lane pipeline
+//   H3  locusOnly hit count == total drawer count (content + hint drawers)
+//   H4  unionBest hit count == total drawer count (content + hint drawers)
 //   H5  all recalled hits have non-nil drawer (ghost guard — locusOnly)
 //   H6  all recalled hits have non-nil drawer (ghost guard — unionBest)
-//   H7  charter drawers are still reachable via allDrawers (not deleted, just excluded)
-//   H8  recall returns correct content after fix (content drawers still rank)
+//   H7  hint drawers are in recall AND in allDrawers (present everywhere, normal)
+//   H8  recall returns correct content drawers after fix (content drawers still rank)
 
 import Testing
 import Foundation
@@ -33,10 +25,10 @@ import PersistenceKitInMemory
 import VectorKit
 @testable import GeniusLocusKit
 
-/// Number of default wings seeded by provision(). Charter drawers == one per wing.
+/// Number of default wings seeded by provision(). Hint drawers == one per wing.
 private let defaultWingCount = LocusKit.defaultWings.count
 
-@Suite("Recall hygiene — charter exclusion and ghost-ID guard")
+@Suite("Recall hygiene — hint-drawer inclusion and ghost-ID guard")
 struct RecallHygieneTests {
 
     // MARK: - Estate factory
@@ -44,11 +36,9 @@ struct RecallHygieneTests {
     /// Provision a GLK estate (InMemory) with `contentCount` user-memory drawers.
     /// Returns the kit, handle, and the captured user drawers.
     ///
-    /// After provision, the estate has `defaultWingCount` charter drawers in
-    /// room `_charter` plus `contentCount` content drawers in room "hygiene-test".
-    /// Charter drawers have `embeddingModelID == "none"` (excluded from BM25/vector).
-    /// Content drawers have `embeddingModelID == "test-model-v1"` (eligible for
-    /// BM25/vector if a corpus is wired).
+    /// After provision, the estate has `defaultWingCount` hint drawers in
+    /// room `AI_Charter_Hint` plus `contentCount` content drawers in room "hygiene-test".
+    /// Both hint drawers and content drawers are normal — embedded and recalled.
     private func provisionedEstate(
         contentCount: Int = 4
     ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle, content: [Drawer]) {
@@ -67,7 +57,7 @@ struct RecallHygieneTests {
         let handle = try await kit.provision(
             storage: storage, owner: owner, params: params)
 
-        // Capture N content drawers in a non-charter room.
+        // Capture N content drawers in a non-hint room.
         var content: [Drawer] = []
         for i in 0..<contentCount {
             let frame = CaptureFrame(
@@ -92,12 +82,12 @@ struct RecallHygieneTests {
             ordering: .byCaptureTimeDesc)
     }
 
-    // MARK: - H1: locusOnly excludes charter drawers
+    // MARK: - H1: locusOnly includes hint drawers
 
-    /// locusOnly recall on a provisioned estate must return ZERO hits in the
-    /// `_charter` room. Charter drawers are wing metadata, not recallable content.
+    /// locusOnly recall on a provisioned estate must include hits from the
+    /// `AI_Charter_Hint` room. Hint drawers are normal content — not filtered out.
     @Test
-    func locusOnlyExcludesCharterDrawers() async throws {
+    func locusOnlyIncludesHintDrawers() async throws {
         let (kit, handle, _) = try await provisionedEstate(contentCount: 4)
         let request = GLKRecallRequest(
             frame: fullFrame(),
@@ -108,19 +98,21 @@ struct RecallHygieneTests {
             queryText: nil)
         let result = try await kit.recall(handle, request)
 
-        let charterHits = result.hits.filter { hit in
-            hit.drawer?.room == LocusKit.charterRoom
+        let hintHits = result.hits.filter { hit in
+            hit.drawer?.addedBy == LocusKit.hintAddedBy
         }
-        #expect(charterHits.isEmpty,
-            "locusOnly recall must return zero charter hits; got \(charterHits.count)")
+        #expect(!hintHits.isEmpty,
+            "locusOnly recall must include hint drawer hits; got 0 (hint drawers are normal drawers)")
+        #expect(hintHits.count == defaultWingCount,
+            "locusOnly recall must return all \(defaultWingCount) hint drawers; got \(hintHits.count)")
     }
 
-    // MARK: - H2: unionBest excludes charter drawers
+    // MARK: - H2: unionBest includes hint drawers
 
-    /// unionBest recall (the full multi-lane pipeline) must return ZERO hits in
-    /// the `_charter` room, regardless of locus/BM25/vector lane contributions.
+    /// unionBest recall (the full multi-lane pipeline) must include hits from the
+    /// `AI_Charter_Hint` room.
     @Test
-    func unionBestExcludesCharterDrawers() async throws {
+    func unionBestIncludesHintDrawers() async throws {
         let (kit, handle, _) = try await provisionedEstate(contentCount: 4)
         let request = GLKRecallRequest(
             frame: fullFrame(),
@@ -131,20 +123,20 @@ struct RecallHygieneTests {
             queryText: "user memory")
         let result = try await kit.recall(handle, request)
 
-        let charterHits = result.hits.filter { hit in
-            hit.drawer?.room == LocusKit.charterRoom
+        let hintHits = result.hits.filter { hit in
+            hit.drawer?.addedBy == LocusKit.hintAddedBy
         }
-        #expect(charterHits.isEmpty,
-            "unionBest recall must return zero charter hits; got \(charterHits.count)")
+        #expect(!hintHits.isEmpty,
+            "unionBest recall must include hint drawer hits; got 0 (hint drawers are normal drawers)")
     }
 
-    // MARK: - H3: locusOnly hit count == content drawer count
+    // MARK: - H3: locusOnly hit count == total drawer count
 
-    /// After excluding charter drawers, locusOnly must return exactly as many hits
-    /// as there are content drawers (not content + charter).
+    /// locusOnly must return content drawers + hint drawers (not just content).
     @Test
-    func locusOnlyHitCountEqualsContentDrawerCount() async throws {
+    func locusOnlyHitCountEqualsTotalDrawerCount() async throws {
         let contentCount = 4
+        let totalCount = contentCount + defaultWingCount
         let (kit, handle, _) = try await provisionedEstate(contentCount: contentCount)
         let request = GLKRecallRequest(
             frame: fullFrame(limit: 100),
@@ -155,16 +147,16 @@ struct RecallHygieneTests {
             queryText: nil)
         let result = try await kit.recall(handle, request)
 
-        #expect(result.hits.count == contentCount,
-            "locusOnly must return \(contentCount) content hits, not \(result.hits.count) (charter drawers must be excluded)")
+        #expect(result.hits.count == totalCount,
+            "locusOnly must return \(totalCount) hits (content + hint drawers); got \(result.hits.count)")
     }
 
-    // MARK: - H4: unionBest hit count == content drawer count
+    // MARK: - H4: unionBest hit count >= content drawer count
 
-    /// After excluding charter drawers, unionBest must return exactly as many hits
-    /// as there are content drawers when querying with text that matches only content.
+    /// unionBest must return at least the content drawers — hint drawers may or may
+    /// not surface depending on query relevance, but the total is >= contentCount.
     @Test
-    func unionBestHitCountEqualsContentDrawerCount() async throws {
+    func unionBestHitCountIncludesContentDrawers() async throws {
         let contentCount = 4
         let (kit, handle, _) = try await provisionedEstate(contentCount: contentCount)
         let request = GLKRecallRequest(
@@ -176,8 +168,8 @@ struct RecallHygieneTests {
             queryText: "user memory unique content")
         let result = try await kit.recall(handle, request)
 
-        #expect(result.hits.count == contentCount,
-            "unionBest must return \(contentCount) content hits, not \(result.hits.count) (charter drawers must be excluded)")
+        #expect(result.hits.count >= contentCount,
+            "unionBest must return at least \(contentCount) content hits; got \(result.hits.count)")
     }
 
     // MARK: - H5: ghost guard — locusOnly all hits have non-nil drawer
@@ -221,32 +213,45 @@ struct RecallHygieneTests {
             "unionBest must return zero nil-drawer ghost hits; got \(ghostHits.count)")
     }
 
-    // MARK: - H7: charter drawers still exist in the estate
+    // MARK: - H7: hint drawers are in recall AND in allDrawers
 
-    /// Excluding charters from recall must not delete them. They remain accessible
-    /// via `estate.allDrawers()` (the estate-map path, not the recall path).
+    /// Hint drawers are normal — they are present in both recall and allDrawers.
+    /// They are not deleted, not excluded, not treated specially.
     @Test
-    func charterDrawersStillExistInEstate() async throws {
+    func hintDrawersArePresentInRecallAndAllDrawers() async throws {
         let contentCount = 4
         let (kit, handle, _) = try await provisionedEstate(contentCount: contentCount)
         let estate = try await kit.estate(for: handle)
         let allDrawers = try await estate.allDrawers()
 
-        let charterDrawers = allDrawers.filter { $0.room == LocusKit.charterRoom }
-        let contentDrawers = allDrawers.filter { $0.room != LocusKit.charterRoom }
+        let hintDrawers = allDrawers.filter { $0.addedBy == LocusKit.hintAddedBy }
+        let contentDrawers = allDrawers.filter { $0.addedBy != LocusKit.hintAddedBy }
 
-        // Charter drawers must still be in the estate (just not in recall).
-        #expect(charterDrawers.count == defaultWingCount,
-            "estate must still have \(defaultWingCount) charter drawers; got \(charterDrawers.count)")
+        // Hint drawers must be in allDrawers.
+        #expect(hintDrawers.count == defaultWingCount,
+            "estate must have \(defaultWingCount) hint drawers; got \(hintDrawers.count)")
         // Content drawers must all be present.
         #expect(contentDrawers.count == contentCount,
             "estate must have \(contentCount) content drawers; got \(contentDrawers.count)")
+
+        // Hint drawers must also appear in recall (not filtered out).
+        let request = GLKRecallRequest(
+            frame: fullFrame(limit: 1_000),
+            mode: .locusOnly,
+            scoring: .raw,
+            limit: 1_000,
+            fallback: .allowDegraded,
+            queryText: nil)
+        let result = try await kit.recall(handle, request)
+        let hintInRecall = result.hits.filter { $0.drawer?.addedBy == LocusKit.hintAddedBy }
+        #expect(hintInRecall.count == defaultWingCount,
+            "hint drawers must appear in recall (they are normal drawers); got \(hintInRecall.count)")
     }
 
     // MARK: - H8: recall returns correct content drawers after fix
 
-    /// After charter exclusion, the returned hits must be exactly the captured
-    /// content drawers — no more, no less, all correctly hydrated.
+    /// After the charter-exclusion removal, recall returns both content drawers and
+    /// hint drawers. The content drawer IDs must be a subset of the returned hits.
     @Test
     func recallReturnsCorrectContentDrawers() async throws {
         let (kit, handle, contentDrawers) = try await provisionedEstate(contentCount: 3)
@@ -262,7 +267,8 @@ struct RecallHygieneTests {
         let result = try await kit.recall(handle, request)
 
         let returnedIDs = Set(result.hits.compactMap { $0.drawer?.id })
-        #expect(returnedIDs == contentIDs,
-            "locusOnly must return exactly the content drawer IDs, not the charter set")
+        // All content drawer IDs must be in the returned set.
+        #expect(contentIDs.isSubset(of: returnedIDs),
+            "locusOnly must include all content drawer IDs; missing: \(contentIDs.subtracting(returnedIDs))")
     }
 }

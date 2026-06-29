@@ -10,12 +10,19 @@
 //! CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
 //! self-report telemetry to `recall`. The `report!` macro calls are
 //! placed at the operation boundary, after the result is assembled,
-//! so mathematical behaviour is unchanged. When monitoring is
-//! disabled (the default), the macro expands to a single
-//! `AtomicBool::load + branch` — zero allocation, no clock.
+//! so mathematical behaviour is unchanged. `recall` unconditionally
+//! reads SystemTime::now() for start_ts and end_ts, and builds
+//! model_tag before the `report!` calls; the disabled-monitoring
+//! path does not short-circuit these steps.
+//!
+//! The keyword lane uses `InvertedIndexStore` (SQLite-backed) rather than
+//! the former in-memory `BM25Index`. `default_keyword_tokens` is the
+//! canonical tokenizer, matching the vocabulary used at ingest time.
 
-use crate::bm25_index::BM25Index;
 use crate::bundle_store::BundleStore;
+use crate::engine::inverted_index::Algorithm;
+use crate::engine::inverted_index_store::InvertedIndexStore;
+use crate::tokenizer::default_keyword_tokens;
 use crate::chunk::ScoredChunk;
 use crate::engine::fusion::fuse;
 use crate::engine::sparse_types::LaneTag;
@@ -56,6 +63,11 @@ impl Default for HybridRecallConfiguration {
 /// vector hits and `LaneTag::Sparse` carries BM25 hits. The ranking
 /// behaviour is identical to the previous inline implementation.
 ///
+/// The keyword lane now uses `InvertedIndexStore` (SQLite-backed) instead
+/// of the former in-memory `BM25Index`. `default_keyword_tokens` tokenizes
+/// the query with the same vocabulary used at ingest, producing identical
+/// topK scores — same term frequencies, same BM25 parameters, same path.
+///
 /// Telemetry: emits `corpuskit.recall.latency_ms`,
 /// `corpuskit.recall.vector_result_count`,
 /// `corpuskit.recall.keyword_result_count`, and
@@ -67,7 +79,7 @@ impl Default for HybridRecallConfiguration {
 ///
 /// Mirrors Swift's `HybridRecall.recall` telemetry exactly.
 // Eight parameters: probe/query/model_id/limit/config plus the three
-// substrate handles (vector_store, bm25, bundle_store) are each a
+// substrate handles (vector_store, inverted_index, bundle_store) are each a
 // distinct input recall needs; bundling them into a struct would
 // obscure the call site and diverge the signature from the Swift
 // CorpusKit `recall`. Parity over the lint.
@@ -78,7 +90,7 @@ pub fn recall(
     model_id: &str,
     limit: usize,
     vector_store: &VectorStore,
-    bm25: &BM25Index,
+    inverted_index: &InvertedIndexStore,
     bundle_store: &BundleStore,
     config: HybridRecallConfiguration,
 ) -> CorpusKitResult<Vec<ScoredChunk>> {
@@ -98,10 +110,31 @@ pub fn recall(
     let vector_results = vector_store
         .find_nearest(probe, model_id, candidate_k)
         .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-    // Pre-tokenise using the index's own tokenizer vocabulary so top_k receives
-    // compatible tokens. Mirrors Swift HybridRecall using CorpusDefaultTokenizer.
-    let query_tokens = bm25.tokenize_query(query);
-    let keyword_results = bm25.top_k(candidate_k, &query_tokens);
+
+    // Tokenise using the same vocabulary as the indexed chunks.
+    // `default_keyword_tokens` is the canonical tokenizer shared by
+    // InvertedIndexStore.index calls at ingest time — same FNV-1a fold,
+    // same vocabulary parameters.
+    let query_tokens = default_keyword_tokens(query);
+    // InvertedIndexStore.top_k builds (or returns cached) the BM25 InvertedIndex
+    // from the persisted term-freq table and runs WAND/BMW. Returns SparseHit
+    // (item_id: String, impact: f32) sorted by score descending.
+    let sparse_hits = inverted_index.top_k(
+        &query_tokens,
+        candidate_k,
+        Default::default(),  // BM25Parameters::default() — standard k1=1.2, b=0.75
+        Algorithm::BlockMaxWand,
+    );
+
+    // Map SparseHit (item_id: String, impact: f32) → (Uuid, f32) for the
+    // keyword-lane builder. Hits whose item_id is not a valid UUID are dropped
+    // (should not occur since InvertedIndexStore only receives chunk UUID strings).
+    let keyword_results: Vec<(Uuid, f32)> = sparse_hits
+        .iter()
+        .filter_map(|hit| {
+            Uuid::parse_str(&hit.item_id).ok().map(|u| (u, hit.impact))
+        })
+        .collect();
 
     // Capture raw counts before the vecs are consumed by the fusion loop.
     // These are emitted as telemetry metrics at the operation boundary below.
@@ -114,8 +147,9 @@ pub fn recall(
     // Hamming distance ascending — index 0 = rank 1.
     // Raw score = Hamming distance (u32 cast to f32); lower = closer.
     //
-    // Keyword lane (Sparse): top_k returns (id: Uuid, score: f32)
-    // sorted by BM25 score descending — index 0 = rank 1.
+    // Keyword lane (Sparse): InvertedIndexStore.top_k returns SparseHit
+    // (item_id: String, impact: f32); these are mapped to (Uuid, f32)
+    // above — sorted by BM25 score descending, index 0 = rank 1.
     // Raw score = BM25 score f32.
     //
     // Both ranked lists are built as Vec<(String, usize)> using the
@@ -127,17 +161,27 @@ pub fn recall(
     for (idx, hit) in vector_results.iter().enumerate() {
         // Skip items whose item_id is not a valid UUID — they cannot be
         // hydrated by bundle_store and are not in the corpus.
-        if Uuid::parse_str(&hit.item_id).is_err() {
-            continue;
-        }
-        vector_ranked.push((hit.item_id.clone(), idx + 1));
+        // P3-secfix: parse through Uuid and re-emit .to_string() so the key
+        // is always the Rust canonical lowercase-hyphenated form (e.g.
+        // "a1b2c3d4-..."). Without this, a vector hit stored with an uppercase
+        // UUID string (common from Apple-side exports) uses a different map key
+        // than a keyword hit for the same memory and the two contributions never
+        // fuse. Intra-port canonical form: Rust = Uuid::to_string() (lowercase).
+        let parsed = match Uuid::parse_str(&hit.item_id) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let canonical_id = parsed.to_string();
+        vector_ranked.push((canonical_id.clone(), idx + 1));
         // Hamming distance as f32; lower = closer to probe.
-        vector_score_map.insert(hit.item_id.clone(), hit.distance as f32);
+        vector_score_map.insert(canonical_id, hit.distance as f32);
     }
 
     let mut keyword_ranked: Vec<(String, usize)> = Vec::new();
     let mut keyword_score_map: HashMap<String, f32> = HashMap::new();
     for (idx, (id, score)) in keyword_results.iter().enumerate() {
+        // id is Uuid-typed; .to_string() is always lowercase-hyphenated in Rust
+        // — the same canonical form used for vector hits above.
         let item_id = id.to_string();
         keyword_ranked.push((item_id.clone(), idx + 1));
         keyword_score_map.insert(item_id, *score);
@@ -175,7 +219,7 @@ pub fn recall(
         .iter()
         .filter_map(|h| Uuid::parse_str(&h.item_id).ok())
         .collect();
-    let chunks = bundle_store.get_many(&uuids)?;
+    let chunks = bundle_store.get_many(&uuids, None)?;
     let by_id: HashMap<Uuid, _> = chunks.into_iter().map(|c| (c.id, c)).collect();
 
     // Build the output list in fused-score order.

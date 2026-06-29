@@ -51,6 +51,15 @@ public struct ImportReport: Sendable, Equatable {
     /// would re-import as a fresh active drawer.
     public var drawersSkippedTombstoned: Int
 
+    /// Re-imports where a DisciplineViolation fired AFTER the supersession
+    /// cascade had already committed the successor drawer row but before the
+    /// predecessor belief-state flip completed. The estate contains an
+    /// orphaned successor alongside the un-flipped predecessor; unlike plain
+    /// `itemsSkipped`, the write was partially applied. Never silent (zero-loss
+    /// invariant C-13): callers must surface this count so a reconciliation
+    /// pass can detect the gap.
+    public var drawersSkippedPartialWrite: Int
+
     public init(
         drawersWritten: Int = 0,
         drawersUpdated: Int = 0,
@@ -60,7 +69,8 @@ public struct ImportReport: Sendable, Equatable {
         fdcUnclassified: Int = 0,
         fieldsDropped: [String: Int] = [:],
         drawersSkippedUnchanged: Int = 0,
-        drawersSkippedTombstoned: Int = 0
+        drawersSkippedTombstoned: Int = 0,
+        drawersSkippedPartialWrite: Int = 0
     ) {
         self.drawersWritten = drawersWritten
         self.drawersUpdated = drawersUpdated
@@ -71,6 +81,7 @@ public struct ImportReport: Sendable, Equatable {
         self.fieldsDropped = fieldsDropped
         self.drawersSkippedUnchanged = drawersSkippedUnchanged
         self.drawersSkippedTombstoned = drawersSkippedTombstoned
+        self.drawersSkippedPartialWrite = drawersSkippedPartialWrite
     }
 }
 
@@ -98,7 +109,7 @@ public struct ExportReport: Sendable, Equatable {
         notesExported: Int = 0,
         excludedSecretTier: Int = 0,
         excludedPrivateTier: Int = 0,
-        scope: VaultExportScope = .believed
+        scope: VaultExportScope = .exportable
     ) {
         self.notesExported = notesExported
         self.excludedSecretTier = excludedSecretTier
@@ -116,6 +127,9 @@ public struct ExportReport: Sendable, Equatable {
 /// MOOT. Synchronous-per-call is sufficient for V1; the long-run enqueue,
 /// drift detection, and watched-source scheduler are A2 (Stream va), not
 /// here.
+/// Callback fired periodically during import/export to report progress.
+public typealias VaultProgress = @Sendable (Int, Int) -> Void
+
 public struct VaultBridge: Sendable {
 
     private let kit: GeniusLocusKit
@@ -156,10 +170,10 @@ public struct VaultBridge: Sendable {
     /// - Parameters:
     ///   - handle: the estate to project.
     ///   - vaultURL: the vault root directory to write under.
-    ///   - scope: which drawers to include. Defaults to `.believed`,
-    ///     which includes all currently-believed drawers regardless of
-    ///     confirmation state — fixing the confirmed-drop bug from the
-    ///     previous `.unconfirmed`-only filter.
+    ///   - scope: which drawers to include. Defaults to `.exportable`
+    ///     (CAND-032) — only drawers explicitly marked exportable, so a default
+    ///     disk export never writes non-exportable/private rows. Broader scopes
+    ///     (`.believed`, `.believedIncludingPrivate`) are explicit opt-ins.
     ///   - now: the operation instant, supplied by the caller (determinism
     ///     rule — the bridge never reads the wall clock) and stamped on the
     ///     audit receipt.
@@ -169,11 +183,12 @@ public struct VaultBridge: Sendable {
     public func export(
         estate handle: EstateHandle,
         to vaultURL: URL,
-        scope: VaultExportScope = .believed,
-        now: Date
+        scope: VaultExportScope = .exportable,
+        now: Date,
+        progress: VaultProgress? = nil
     ) async throws -> ExportReport {
         let projection = try await mapping.export(kit: kit, handle: handle, scope: scope)
-        try adapter.fromIR(projection.notes, to: vaultURL)
+        try adapter.fromIR(projection.notes, to: vaultURL, progress: progress)
         let report = ExportReport(
             notesExported: projection.notes.count,
             excludedSecretTier: projection.excludedSecretTier,
@@ -207,13 +222,21 @@ public struct VaultBridge: Sendable {
     ///     audit receipt.
     /// - Returns: an `ImportReport` with written/updated/tunnel/skipped
     ///   and FDC-classified counts.
+    /// - Parameter mode: encode SPEED for the import's background encoding —
+    ///   `.foreground` (default) drains hard, `.background` yields for very large
+    ///   imports. SPEED only; the WRITE strategy (one bulk `captureBatch`
+    ///   transaction vs per-item streaming) is chosen automatically by source
+    ///   size (`ImportPolicy.streamThreshold`) — the same gate-agnostic policy
+    ///   PalaceBridge uses.
     public func importVault(
         at vaultURL: URL,
         into handle: EstateHandle,
-        now: Date
+        now: Date,
+        progress: VaultProgress? = nil,
+        mode: EncodeSpeed = .foreground
     ) async throws -> ImportReport {
         let notes = try adapter.toIR(vaultURL: vaultURL)
-        return try await importNotes(notes, into: handle, source: vaultURL.path, now: now)
+        return try await importNotes(notes, into: handle, source: vaultURL.path, now: now, mode: mode)
     }
 
     /// Import a filtered subset of a Markdown vault into an estate.
@@ -238,12 +261,18 @@ public struct VaultBridge: Sendable {
     ///   - now: the operation instant, supplied by the caller (determinism
     ///     rule — the bridge never reads the wall clock) and stamped on the
     ///     audit receipt.
+    ///   - mode: encode SPEED (`.foreground` default / `.background`). The write
+    ///     strategy is size-gated automatically (`ImportPolicy`) — a small
+    ///     reconcile candidate set writes in one bulk transaction, a huge one
+    ///     streams per-item.
     /// - Returns: an `ImportReport` reflecting only the candidate set.
     public func importVault(
         at vaultURL: URL,
         includingPaths candidatePaths: Set<String>,
         into handle: EstateHandle,
-        now: Date
+        now: Date,
+        progress: VaultProgress? = nil,
+        mode: EncodeSpeed = .foreground
     ) async throws -> ImportReport {
         let allNotes = try adapter.toIR(vaultURL: vaultURL)
         // Restrict to the candidate set. A note's vault-relative path is
@@ -253,7 +282,7 @@ public struct VaultBridge: Sendable {
         let filteredNotes = allNotes.filter { note in
             candidatePaths.contains(note.stableSourceKey + ".md")
         }
-        return try await importNotes(filteredNotes, into: handle, source: vaultURL.path, now: now)
+        return try await importNotes(filteredNotes, into: handle, source: vaultURL.path, now: now, mode: mode)
     }
 
     /// Import one MemPalace palace directly into an estate — all three
@@ -271,33 +300,50 @@ public struct VaultBridge: Sendable {
     ///   - adapter: the MemPalace adapter; default reads the standard
     ///     collection names. Parameterized so tests can point at fixture
     ///     palaces with non-default collections.
+    ///   - mode: encode SPEED (`.foreground` default / `.background`). The write
+    ///     strategy (one bulk `captureBatch` transaction vs per-item streaming)
+    ///     is chosen automatically by source size (`ImportPolicy`) — not by the
+    ///     caller.
     /// - Returns: an `ImportReport`, same semantics as `importVault`.
     public func importMemPalace(
         at palaceRoot: URL,
         into handle: EstateHandle,
         now: Date,
-        adapter: MemPalaceChromaAdapter = MemPalaceChromaAdapter()
+        adapter: MemPalaceChromaAdapter = MemPalaceChromaAdapter(),
+        progress: VaultProgress? = nil,
+        mode: EncodeSpeed = .foreground
     ) async throws -> ImportReport {
         let notes = try adapter.toIR(vaultURL: palaceRoot)
-        return try await importNotes(notes, into: handle, source: palaceRoot.path, now: now)
+        return try await importNotes(notes, into: handle, source: palaceRoot.path, now: now, mode: mode)
     }
 
     /// The shared import core: capture canonical notes into an estate via
     /// the capture seam. `importVault` and `importMemPalace` differ only
     /// in which adapter produced the notes; everything from the existing-
     /// state snapshot to the audit receipt is identical and lives here.
+    ///
+    /// When `batch` is `true`, all capture frames are collected upfront
+    /// and written in one SQLite transaction via `captureBatch`, then
+    /// post-capture work (KG facts, tunnels) is applied per-note. When
+    /// `false`, the original per-note loop runs unchanged.
     private func importNotes(
         _ notes: [NoteIR],
         into handle: EstateHandle,
         source: String,
-        now: Date
+        now: Date,
+        progress: VaultProgress? = nil,
+        mode: EncodeSpeed = .foreground
     ) async throws -> ImportReport {
+        // Declare the encode SPEED for this import's background drain before any
+        // encode work is enqueued — the same gate-agnostic policy PalaceBridge
+        // uses (T1/T7). SPEED only; the write strategy is size-gated below.
+        await kit.setEncodeSpeed(mode, for: handle)
         // Snapshot existing state once so written-vs-updated and tunnel
         // de-duplication need no per-note probe.
         // existingContentByLineage: the verbatim content of every active
         // drawer keyed by lineageID — used by the content-idempotent check
         // (FINDING-1a) to skip re-imports where nothing changed.
-        let (existingLineageIDs, existingWings, existingContentByLineage) =
+        let (existingLineageIDs, existingWings, existingContentByLineage, existingStableSourceKeyByLineage) =
             try await existingDrawerState(handle: handle)
         // The current tier of every believed drawer across ALL sensitivity
         // levels, so the import sensitivity floor can never be lowered by a
@@ -312,45 +358,103 @@ public struct VaultBridge: Sendable {
         )
 
         var report = ImportReport()
-        for note in notes {
-            let outcome = try await mapping.importNote(
-                note,
-                kit: kit,
-                handle: handle,
-                existingLineageIDs: existingLineageIDs,
-                existingSensitivityByLineage: existingSensitivityByLineage,
-                tombstonedLineageIDs: tombstonedLineageIDs,
-                existingContentByLineage: existingContentByLineage,
-                existingTunnelSignatures: &existingTunnelSignatures,
-                now: now
-            )
-            switch outcome {
-            case let .written(tunnels, classified):
-                report.drawersWritten += 1
-                report.tunnelsCreated += tunnels
-                if classified { report.fdcClassified += 1 } else { report.fdcUnclassified += 1 }
-                recordDroppedFields(of: note, in: &report)
-            case let .updated(tunnels, classified):
-                report.drawersUpdated += 1
-                report.tunnelsCreated += tunnels
-                if classified { report.fdcClassified += 1 } else { report.fdcUnclassified += 1 }
-                recordDroppedFields(of: note, in: &report)
-            case .skipped:
-                report.itemsSkipped += 1
-            case .skippedUnchanged:
-                // Content-idempotent no-op: lineage active, content unchanged.
-                // No substrate write occurs; the count is surfaced for observability.
-                report.drawersSkippedUnchanged += 1
-            case .skippedTombstoned:
-                // Tombstone respected: lineage was erased, not resurrected.
-                // Surfaced in the report so callers know which notes were blocked.
-                report.drawersSkippedTombstoned += 1
+
+        // Size gate (automatic — NOT user-controlled), single-sourced in
+        // ImportPolicy so every source gate uses the same boundary: a source at
+        // or below the threshold is written in one bulk `captureBatch`
+        // transaction; a larger one streams per-item so no single transaction
+        // holds the write lock across hundreds of thousands of notes.
+        let useBulk = ImportPolicy.useBulk(itemCount: notes.count)
+        if useBulk {
+            // Bulk path: collect qualified (note, frame, isUpdate, classified)
+            // tuples, submit all frames in one transaction, then apply post-capture
+            // work (KG facts, tunnels) per-note using the returned drawer IDs.
+            // Guard-skipped notes update report counters inside buildNoteFrame.
+            var qualified: [(note: NoteIR, frame: CaptureFrame, isUpdate: Bool, classified: Bool)] = []
+            for note in notes {
+                if let (frame, isUpdate, classified) = mapping.buildNoteFrame(
+                    for: note,
+                    existingLineageIDs: existingLineageIDs,
+                    existingSensitivityByLineage: existingSensitivityByLineage,
+                    tombstonedLineageIDs: tombstonedLineageIDs,
+                    existingContentByLineage: existingContentByLineage,
+                    existingStableSourceKeyByLineage: existingStableSourceKeyByLineage,
+                    report: &report
+                ) {
+                    qualified.append((note, frame, isUpdate, classified))
+                }
+            }
+            if !qualified.isEmpty {
+                let frames = qualified.map(\.frame)
+                let drawers = try await kit.captureBatch(handle, frames)
+                for (item, drawer) in zip(qualified, drawers) {
+                    let tunnels = try await mapping.applyNotePostCapture(
+                        note: item.note,
+                        frame: item.frame,
+                        drawer: drawer,
+                        kit: kit,
+                        handle: handle,
+                        existingTunnelSignatures: &existingTunnelSignatures,
+                        now: now
+                    )
+                    if item.isUpdate {
+                        report.drawersUpdated += 1
+                    } else {
+                        report.drawersWritten += 1
+                    }
+                    report.tunnelsCreated += tunnels
+                    if item.classified { report.fdcClassified += 1 } else { report.fdcUnclassified += 1 }
+                    recordDroppedFields(of: item.note, in: &report)
+                }
+            }
+        } else {
+            // Per-item path: unchanged from before batch support was added.
+            for note in notes {
+                let outcome = try await mapping.importNote(
+                    note,
+                    kit: kit,
+                    handle: handle,
+                    existingLineageIDs: existingLineageIDs,
+                    existingSensitivityByLineage: existingSensitivityByLineage,
+                    tombstonedLineageIDs: tombstonedLineageIDs,
+                    existingContentByLineage: existingContentByLineage,
+                    existingStableSourceKeyByLineage: existingStableSourceKeyByLineage,
+                    existingTunnelSignatures: &existingTunnelSignatures,
+                    now: now
+                )
+                switch outcome {
+                case let .written(tunnels, classified):
+                    report.drawersWritten += 1
+                    report.tunnelsCreated += tunnels
+                    if classified { report.fdcClassified += 1 } else { report.fdcUnclassified += 1 }
+                    recordDroppedFields(of: note, in: &report)
+                case let .updated(tunnels, classified):
+                    report.drawersUpdated += 1
+                    report.tunnelsCreated += tunnels
+                    if classified { report.fdcClassified += 1 } else { report.fdcUnclassified += 1 }
+                    recordDroppedFields(of: note, in: &report)
+                case .skipped:
+                    report.itemsSkipped += 1
+                case .skippedUnchanged:
+                    // Content-idempotent no-op: lineage active, content unchanged.
+                    // No substrate write occurs; the count is surfaced for observability.
+                    report.drawersSkippedUnchanged += 1
+                case .skippedTombstoned:
+                    // Tombstone respected: lineage was erased, not resurrected.
+                    // Surfaced in the report so callers know which notes were blocked.
+                    report.drawersSkippedTombstoned += 1
+                case .skippedWithPartialWrite:
+                    // Partial write: successor row committed, predecessor not flipped.
+                    // The estate has an orphaned successor; count surfaced for
+                    // reconciliation — never absorbed into itemsSkipped.
+                    report.drawersSkippedPartialWrite += 1
+                }
             }
         }
 
         try await writeImportReceipt(report, source: source, handle: handle, now: now)
         Self.log.info(
-            "imported vault: \(report.drawersWritten, privacy: .public) written, \(report.drawersUpdated, privacy: .public) updated, \(report.itemsSkipped, privacy: .public) skipped, \(report.drawersSkippedUnchanged, privacy: .public) unchanged, \(report.drawersSkippedTombstoned, privacy: .public) tombstoned"
+            "imported vault: \(report.drawersWritten, privacy: .public) written, \(report.drawersUpdated, privacy: .public) updated, \(report.itemsSkipped, privacy: .public) skipped, \(report.drawersSkippedUnchanged, privacy: .public) unchanged, \(report.drawersSkippedTombstoned, privacy: .public) tombstoned, \(report.drawersSkippedPartialWrite, privacy: .public) partial-write (DisciplineViolation after cascade)"
         )
         return report
     }
@@ -413,6 +517,7 @@ public struct VaultBridge: Sendable {
         "drawersUpdated":\(report.drawersUpdated),\
         "itemsSkipped":\(report.itemsSkipped),\
         "tunnelsCreated":\(report.tunnelsCreated),\
+        "drawersSkippedPartialWrite":\(report.drawersSkippedPartialWrite),\
         "occurredAt":"\(OccurredAt(date: now).iso8601)"}
         """
         try await writeReceipt(entry, handle: handle, now: now)
@@ -504,7 +609,7 @@ public struct VaultBridge: Sendable {
     /// content blank.
     private func existingDrawerState(
         handle: EstateHandle
-    ) async throws -> (lineageIDs: Set<UUID>, wings: Set<String>, contentByLineage: [UUID: String]) {
+    ) async throws -> (lineageIDs: Set<UUID>, wings: Set<String>, contentByLineage: [UUID: String], stableSourceKeyByLineage: [UUID: String]) {
         // limit: 10_000_000 means "all drawers" — the same full-scan intent
         // as the sibling existingSensitivityByLineage call below. Without an
         // explicit limit the estate scan caps at 256, silently truncating
@@ -522,12 +627,35 @@ public struct VaultBridge: Sendable {
                 limit: 10_000_000
             )
         )
+        // Resolve display names (wing, room) from the node tree in one batch
+        // (ADR-017: Drawer no longer stores wing/room).
+        let estate = try await kit.estate(for: handle)
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawers.map(\.parentNodeId))
+
         var lineageIDs: Set<UUID> = []
         var wings: Set<String> = []
         var contentByLineage: [UUID: String] = [:]
+        // stableSourceKeyByLineage: the vault path ("<wing>/<room>/<slug>") that
+        // the export would assign to each drawer. Used by the lineage-hijack guard
+        // (path-identity discriminator) to distinguish a legitimate round-trip edit
+        // (same file, same path) from a hostile note at a different path claiming
+        // the victim's moot_id. Computed from the CURRENT estate content and
+        // node-tree names — the same inputs the export uses — so this key exactly
+        // matches the stableSourceKey a note carries when it returns from an export.
+        // First-seen wins (matches the contentByLineage policy above).
+        var stableSourceKeyByLineage: [UUID: String] = [:]
         for drawer in drawers {
             lineageIDs.insert(drawer.lineageID)
-            wings.insert(drawer.wing)
+            if let names = nodeNames[drawer.parentNodeId] {
+                wings.insert(names.wing)
+                // Compute the vault path the export would use for this drawer so
+                // the hijack guard can compare against the incoming note's path.
+                if stableSourceKeyByLineage[drawer.lineageID] == nil {
+                    let slug = DrawerMapping.slug(from: drawer.content, id: drawer.lineageID)
+                    stableSourceKeyByLineage[drawer.lineageID] = "\(names.wing)/\(names.room)/\(slug)"
+                }
+            }
             // Store the first-seen content for each lineageID. When multiple
             // rows share a lineage (supersession race), any content match
             // prevents an unnecessary supersession — conservative is correct.
@@ -535,7 +663,7 @@ public struct VaultBridge: Sendable {
                 contentByLineage[drawer.lineageID] = drawer.content
             }
         }
-        return (lineageIDs, wings, contentByLineage)
+        return (lineageIDs, wings, contentByLineage, stableSourceKeyByLineage)
     }
 
     /// The set of lineage IDs the import path must not resurrect — the union

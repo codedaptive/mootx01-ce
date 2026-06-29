@@ -34,23 +34,25 @@ public enum ManifestKey: String, Sendable, CaseIterable {
 
     /// The estate's Ed25519 (Curve25519 signing) public key, base64 of
     /// the raw 32-byte representation. Generated on first open (see
-    /// `Estate.open`) and used as the estate's federation identity:
-    /// grants are signed by the matching private key so a paired estate
-    /// can verify provenance. Per DECISION_SYNCKIT_DESIGN_2026-05-19 §8.
+    /// `Estate.open`) and used as the estate's federation identity for
+    /// grant signing. Per DECISION_SYNCKIT_DESIGN_2026-05-19 §8 and
+    /// ADR-007. Safe to store here — public keys have no confidentiality
+    /// requirement.
     case ed25519PublicKey            = "ed25519_public_key"
 
-    /// The estate's Ed25519 private key. Base64 of the raw 32-byte
-    /// representation.
+    /// Reserved seam retained for backward read-compatibility with estates
+    /// opened before the Keychain migration (secfix/ed25519-keychain, ADR-007).
+    /// On Apple, the private signing key lives in the Keychain
+    /// (kSecClassGenericPassword, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+    /// account = estate UUID) and is loaded by `Estate.open` into memory for
+    /// the lifetime of the Estate instance. The manifest MUST NOT carry raw
+    /// private-key bytes: manifest.value is ordinary, unencrypted metadata
+    /// readable by anyone with database or backup access.
     ///
-    /// At-rest protection note: at the LocusKit layer this stores the
-    /// raw private-key bytes — there is no Keychain/Secure Enclave in a
-    /// cross-platform, zero-dependency kit. Hardware wrapping (Secure
-    /// Enclave / TPM) is a follow-on; at-rest confidentiality of the
-    /// manifest is the storage-encryption tier's responsibility per the
-    /// encryption-modes architecture and the ENC-01 `keys`-registry
-    /// scope note (LocusKitSchema). The "Wrapped" name marks the seam
-    /// where that hardware wrapping lands; today the wrap is the
-    /// identity transform.
+    /// This key is never written by current code. The field is kept here so
+    /// `DrawerStore.readManifest()` can decode it if it happens to be present
+    /// in an old database — `ManifestValues.ed25519PrivateKeyWrapped` will
+    /// carry the value but it is never used by any kit path for signing.
     case ed25519PrivateKeyWrapped    = "ed25519_private_key_wrapped"
 
     /// The 18 required keys that every conforming estate must populate.
@@ -111,8 +113,14 @@ public struct ManifestValues: Sendable {
     /// before the identity keypair was generated.
     public let ed25519PublicKey: Data?
 
-    /// The estate's Ed25519 private key as raw 32-byte data. See
-    /// `ManifestKey.ed25519PrivateKeyWrapped` for the at-rest note.
+    /// Raw bytes of the deprecated plaintext private key field, decoded from
+    /// the manifest if present in an old database opened before the Keychain
+    /// migration (secfix/ed25519-keychain, ADR-007).
+    ///
+    /// This field is never populated by current code and is never used for
+    /// signing. The private key now lives in the Keychain and is accessed via
+    /// `Estate.retrievePrivateSigningKeyData()`. This field is preserved in
+    /// `DrawerStore.readManifest()` for backward read-compatibility only.
     public let ed25519PrivateKeyWrapped: Data?
 
     /// Memberwise initializer. The two Ed25519 fields default to nil so

@@ -17,8 +17,9 @@
 
 use persistence_kit::{
     AuditEvent, Column, ColumnDeclaration, ColumnType, GeneratedColumn,
-    GeneratedExpression, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection,
-    SchemaDeclaration, Storage, StorageError, StoragePredicate, TableDeclaration, TypedValue,
+    GeneratedExpression, IndexDeclaration, IsolationLevel, Migration, OrderClause, OrderDirection,
+    SchemaDeclaration, SchemaOperation, Storage, StorageError, StoragePredicate, TableDeclaration,
+    TypedValue,
 };
 use std::collections::BTreeMap;
 use substrate_types::hlc::HLC;
@@ -120,6 +121,7 @@ fn append_only_schema() -> SchemaDeclaration {
 /// the test) on the first mismatch, tagging the backend name.
 pub fn run_all(backend: &str, factory: &Factory) {
     schema_fixtures(backend, factory);
+    fresh_open_add_column_idempotent_fixtures(backend, factory);
     row_fixtures(backend, factory);
     predicate_fixtures(backend, factory);
     blob_fixtures(backend, factory);
@@ -326,6 +328,47 @@ fn schema_fixtures(backend: &str, factory: &Factory) {
         storage.current_schema_version().unwrap(),
         1,
         "{backend}: schema version after open"
+    );
+    storage.close().unwrap();
+}
+
+/// Opening a FRESH store directly at a schema whose latest table already declares
+/// the column an addColumn migration adds must succeed on every backend. The
+/// emitter must treat addColumn idempotently (ADD COLUMN IF NOT EXISTS semantics),
+/// mirroring CREATE TABLE IF NOT EXISTS. On SQLite the migration ops are not
+/// replayed (tables are created at the latest schema), so the column is present
+/// from the create; on InMemory the ops ARE replayed, so the addColumn must skip
+/// the already-present column. Mirrors Swift `freshOpenAddColumnIdempotentFixtures`.
+fn fresh_open_add_column_idempotent_fixtures(backend: &str, factory: &Factory) {
+    let storage = factory();
+    let schema_v2 = SchemaDeclaration::new(
+        "ConformanceFreshAddColumn",
+        2,
+        vec![TableDeclaration::new(
+            "fresh_items",
+            // Latest schema already carries the column the migration adds.
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::text("name"),
+                ColumnDeclaration::text("note").nullable(),
+            ],
+            vec!["id".to_string()],
+        )],
+    )
+    .with_migrations(vec![Migration {
+        from_version: 1,
+        to_version: 2,
+        operations: vec![SchemaOperation::AddColumn {
+            table: "fresh_items".to_string(),
+            column: ColumnDeclaration::text("note").nullable(),
+        }],
+    }]);
+    // Direct open on a brand-new store — must succeed, not throw "duplicate column".
+    storage.open(&schema_v2).expect("fresh open with addColumn migration must succeed");
+    assert_eq!(
+        storage.current_schema_version_for("ConformanceFreshAddColumn").unwrap(),
+        2,
+        "{backend}: fresh open with addColumn migration reaches version 2"
     );
     storage.close().unwrap();
 }

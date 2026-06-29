@@ -14,6 +14,10 @@ import Foundation
 // ─────────────────────────────────────────────────────────────────
 import SubstrateTypes
 import LocusKit
+import PersistenceKit
+import PersistenceKitInMemory
+import PersistenceKitSQLite
+import QueueKit
 
 /// The standing-signals API on `GeniusLocusKit`.
 ///
@@ -132,26 +136,88 @@ public extension GeniusLocusKit {
 
     /// Lazy-mint the per-estate scheduler. The GLK actor isolates
     /// access to `schedulers`, so first-call concurrency is safe.
+    ///
+    /// T5 (ADR-021 Decision 7): selects the queue backend based on the
+    /// estate's storage configuration:
+    ///   - SQLite estate → the shared encrypted `queue.sqlite` sibling,
+    ///     derived via `EstateConfiguration.queueSibling("queue.sqlite")`.
+    ///     Signal jobs survive process restarts; the scheduler picks up
+    ///     pending signals on re-open without data loss.
+    ///   - InMemory estate → transient in-memory backend (estate is
+    ///     ephemeral, so durability is irrelevant).
+    ///
+    /// A `DrainLease` keyed `"signals"` is held for SQLite estates so
+    /// a future multi-process deployment can safely share the queue.sqlite
+    /// without two processes racing to claim signal jobs. InMemory estates
+    /// are always single-process — no lease needed.
     internal func ensureScheduler(for handle: EstateHandle) async throws -> StandingSignalScheduler {
         if let existing = schedulers[handle] { return existing }
         // The node id used by the scheduler's HLC generator is
         // derived from the estate handle's UUID so two estates on
         // one device produce distinguishable HLC streams. Stable per
-        // handle so a scheduler reopened from the same handle would
-        // resume the same HLC family (relevant when persistence
-        // lands in a later sub-mission).
-        let nodeID = Int32(
-            bitPattern: UInt32(truncatingIfNeeded:
-                handle.estateUUID.uuid.0 &<< 24 |
-                handle.estateUUID.uuid.1 &<< 16 |
-                handle.estateUUID.uuid.2 &<< 8 |
-                handle.estateUUID.uuid.3))
+        // handle so a scheduler opened from the same handle resumes
+        // the same HLC family across restarts.
+        // Assemble the first four UUID bytes big-endian into a UInt32, then
+        // bit-cast to Int32. Each byte is widened to UInt32 BEFORE shifting —
+        // shifting a UInt8 by 24/16/8 would mask the shift amount to the operand
+        // width (24 & 7 == 0) and collapse to a single-byte value. The Rust
+        // mirror does the byte-identical `u32::from_be_bytes([b0,b1,b2,b3]) as i32`.
+        let b = handle.estateUUID.uuid
+        let nodeID = Int32(bitPattern:
+            (UInt32(b.0) << 24) | (UInt32(b.1) << 16) | (UInt32(b.2) << 8) | UInt32(b.3))
         let hlc = HLCGenerator(nodeID: nodeID)
         let dispatcher = SchedulerDispatcher(kit: self)
-        let scheduler = try await StandingSignalScheduler(
+
+        // T5: select backend based on the estate's durability.
+        let queue: QueueKit
+        var signalDrainLease: DrainLease? = nil
+        let cfg = storages[handle]?.configuration
+
+        if case .sqlite = cfg?.backend {
+            // Persistent estate: share the estate's `queue.sqlite` sibling
+            // (same encrypted SQLite the encode stream uses). Signal jobs
+            // become crash-durable — pending emissions survive a restart.
+            // `queueSibling` is deterministic: same estate UUID → same path
+            // and encryption key, so every process that re-opens this estate
+            // mounts the same queue.sqlite.
+            let siblingCfg = try cfg!.queueSibling(filename: "queue.sqlite")
+            let qs = try SQLiteStorage(configuration: siblingCfg)
+            try await PersistenceKitBackend.openSchema(on: qs)
+            let backend = PersistenceKitBackend(storage: qs)
+            queue = QueueKit(backend: backend)
+            queue.estateTag = "signals"
+
+            // Stream-keyed drain lease (T2): prevents two processes from
+            // racing to claim signal jobs on the same queue.sqlite.
+            // Instance token = PID + handle's ObjectIdentifier so PID-reuse
+            // after a crash does not impersonate the previous holder.
+            let estateDir = siblingCfg.backend.sqliteURL!.deletingLastPathComponent()
+            signalDrainLease = DrainLease(
+                directory: estateDir,
+                stream: "signals",
+                instanceToken: "\(ObjectIdentifier(self))"
+            )
+        } else {
+            // InMemory (ephemeral) estate: transient queue, no crash recovery,
+            // no cross-process lease. Use the estate's own UUID as the store ID
+            // so diagnostics correlate cleanly; avoids UUID() nondeterminism.
+            let storeID = cfg?.estateID ?? handle.estateUUID
+            let qs = InMemoryStorage(configuration: EstateConfiguration(
+                estateID: storeID,
+                backend: .inMemory))
+            try await PersistenceKitBackend.openSchema(on: qs)
+            let backend = PersistenceKitBackend(storage: qs)
+            queue = QueueKit(backend: backend)
+            queue.estateTag = "signals_inmemory"
+            // InMemory estates are always single-process — no lease needed.
+        }
+
+        let scheduler = StandingSignalScheduler(
             handle: handle,
             hlcGenerator: hlc,
-            dispatcher: dispatcher)
+            dispatcher: dispatcher,
+            queue: queue,
+            drainLease: signalDrainLease)
         schedulers[handle] = scheduler
         return scheduler
     }
@@ -181,5 +247,18 @@ internal struct SchedulerDispatcher: SignalDispatcher {
 
     func dispatchAssociate(handle: EstateHandle, frame: AssociateFrame) async throws {
         try await kit.associate(handle, frame)
+    }
+}
+
+// MARK: - BackendConfiguration helper (SignalAPI-local)
+
+private extension BackendConfiguration {
+    /// Extract the SQLite file URL from a `.sqlite` backend.
+    /// Returns nil for `.inMemory` and `.postgres` backends.
+    /// Mirrors the same helper in CorpusIngestQueue.swift; private
+    /// here to keep the extension scoped to this file.
+    var sqliteURL: URL? {
+        if case let .sqlite(url, _) = self { return url }
+        return nil
     }
 }

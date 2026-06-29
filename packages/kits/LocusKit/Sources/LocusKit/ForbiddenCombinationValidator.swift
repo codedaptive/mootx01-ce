@@ -31,10 +31,11 @@ import SubstrateLib
 /// enum names are documentation.
 ///
 /// Storage can represent the combination; the verb layer must not
-/// produce it. This validator is called at every adjective-bitmap
-/// write path before any transaction opens, so a violation leaves
-/// the database exactly as it was — the row never reaches INSERT
-/// and the audit table never receives a row.
+/// produce it. Current write paths route through `AuditGate`/SubstrateLib;
+/// this validator has no live call sites. When wired in, it should be
+/// called before any write so a violation leaves the database as it
+/// was — the row never reaches INSERT and the audit table never
+/// receives a row.
 ///
 /// The validator does not import the `AdjectiveSensitivity` or
 /// `AdjectiveExportability` enums. The bit constants below are
@@ -42,7 +43,8 @@ import SubstrateLib
 /// changes to the enum cases (renaming `public_` to a non-keyword
 /// alias, adding intermediate tiers between `restricted` and
 /// `secret`) cannot silently shift this check. The numeric encoding
-/// at bits 4–11 is the contract; the enum names are documentation.
+/// at bits 6–11 (sensitivity) and 12–17 (exportability) is the
+/// contract; the enum names are documentation.
 ///
 /// Additional forbidden combinations may be added in future spec
 /// versions. When added, extend `isForbidden` with another guarded

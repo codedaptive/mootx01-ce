@@ -1,10 +1,12 @@
 // LaunchAgentTests.swift
 //
-// Covers the moot-mgr LaunchAgent contract: the new MootPaths helpers, the
-// pure plist generator (LaunchAgent.makePlist + xmlEscape), and the
-// filesystem behaviour of Installer.placeMgrBinary. The launchctl-invoking
-// install/uninstall entry points are integration-verified manually (they
-// mutate the user's launchd domain) and are not exercised here.
+// Covers both the moot-mgr console LaunchAgent contract and the resident
+// daemon plist/environment/path behavior: MootPaths helpers, the pure plist
+// generator (LaunchAgent.makePlist + xmlEscape), daemon environment variables,
+// daemon path resolution, and the filesystem behaviour of
+// Installer.placeMgrBinary. The launchctl-invoking install/uninstall entry
+// points are integration-verified manually (they mutate the user's launchd
+// domain) and are not exercised here.
 
 import XCTest
 @testable import MootInstallerCore

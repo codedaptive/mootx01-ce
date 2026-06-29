@@ -63,6 +63,23 @@ public protocol EmbeddingProvider: Sendable {
     ///   `EmbeddingProvider` trait carries the identical opt-out rule.
     func embedFloat(_ text: String) async throws -> [Float]
 
+    /// Generate the binary engram AND the dense float vector for `text` from a
+    /// SINGLE inference pass.
+    ///
+    /// `embed(_:)` already computes the pooled float vector on its way to the
+    /// SimHash projection, and `embedFloat(_:)` computes that same vector — so a
+    /// caller that needs both (the Corpus ingest float lane) would otherwise run
+    /// the provider's inference twice per chunk. Providers that compute-then-
+    /// project SHOULD override this to run the inference ONCE and return both
+    /// outputs; the default implementation below preserves the historical two-
+    /// pass behaviour for providers that have not been migrated.
+    ///
+    /// - Returns: `(engram, floats)`. `floats` is `[]` when the provider opts
+    ///   out of the float lane (binary-only providers) or for empty/unresolved
+    ///   input — identical to the `embedFloat(_:)` opt-out contract. The Rust
+    ///   `EmbeddingProvider` trait carries the identical `embed_pair` rule.
+    func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+
     /// Generate engrams for a batch of texts.
     ///
     /// The default implementation (below) calls `embed` sequentially;
@@ -88,6 +105,17 @@ public extension EmbeddingProvider {
     func embedFloat(_ text: String) async throws -> [Float] {
         throw VectorKitError.embeddingFailed(
             "embedFloat is not supported by this provider (modelID=\(modelID)); the float lane is opt-in")
+    }
+
+    /// Default `embedPair`: two inference passes (`embed` then `embedFloat`),
+    /// preserving the historical behaviour for providers that have not been
+    /// migrated to single-pass. The float-lane opt-out (a throwing `embedFloat`)
+    /// is swallowed to `[]`, matching the ingest call site's `try?` contract, so
+    /// this default is behaviour-identical to the pre-migration two-call code.
+    func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        let engram = try await embed(text)
+        let floats = (try? await embedFloat(text)) ?? []
+        return (engram, floats)
     }
 
     /// Default sequential implementation of `embedBatch`. Providers

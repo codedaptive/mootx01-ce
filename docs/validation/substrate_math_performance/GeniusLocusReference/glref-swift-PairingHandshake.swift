@@ -14,7 +14,8 @@
 //      determinism guarantees both estates produce the same
 //      family without further coordination.
 //   3. Family commit: each estate writes the shared family
-//      to its manifest under H_shared_<case>_<peer_uuid>.
+//      to its manifest under H_shared_<case>_<peer_uuid_short>
+//      (first 8 chars of peer UUID).
 //   4. Initial sync: each estate exchanges its scope-shareable
 //      audit log with the other, applying G-Set union.
 //   5. Handshake audit event: each estate appends an audit

@@ -121,6 +121,53 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
         }
     }
 
+    // MARK: - writeBatch (transactional bulk enqueue — T4 perf parity)
+
+    /// Enqueue a batch of jobs in ONE transaction instead of N autocommits.
+    ///
+    /// The default `QueueBackend.writeBatch` loops `write` (one autocommit per
+    /// job on SQLite). On the encrypted SQLite backend this is N write transactions
+    /// — the same bottleneck the FilesystemBackend's per-job fsync was on the
+    /// maildir. Wrapping all inserts in a single `.readCommitted` transaction
+    /// recovers the bulk-enqueue throughput: one begin/commit round-trip regardless
+    /// of batch size.
+    ///
+    /// Isolation is `.readCommitted` (not `.serializable`): these are bare inserts
+    /// into `new` rows and do not interact with the drain's claim predicate (which
+    /// flips `new` → `cur`). A claim racing a bulk enqueue partitions cleanly: the
+    /// claim's `.serializable` UPDATE only sees rows that were `new` when the
+    /// claim began; new rows committed by the enqueue after the claim's snapshot
+    /// land in the next drain pass. No phantom-read issue. Mirrors spec §10 §10b:
+    /// `write()` is a bare insert; `writeBatch` is a transactional multi-insert
+    /// with the same isolation guarantees as N sequential `write()` calls, only
+    /// cheaper. Rust twin: `PersistenceKitBackend::write_batch`.
+    public func writeBatch(_ jobs: [Job]) async throws -> Int {
+        guard !jobs.isEmpty else { return 0 }
+        let count: Int = try await storage.transaction(isolation: .readCommitted) { txn -> Int in
+            var inserted = 0
+            for job in jobs {
+                let extJSON = try WireFormat.encoder.encode(job.extensions)
+                let values: [String: TypedValue] = [
+                    "id": .text(job.id.rawValue),
+                    "stream_id": .text(job.streamID.rawValue),
+                    "physical_time": .int(job.submittedAt.physicalTime),
+                    "logical_count": .int(Int64(job.submittedAt.logicalCount)),
+                    "node_id": .int(Int64(job.submittedAt.nodeID)),
+                    "priority": .int(Int64(job.priority)),
+                    "status": .text("new"),
+                    "payload": .blob(job.payload),
+                    "extensions": .text(
+                        String(data: extJSON, encoding: .utf8) ?? "{}"),
+                ]
+                _ = try await txn.rowStore.insert(
+                    table: queueKitTableName, values: values)
+                inserted += 1
+            }
+            return inserted
+        }
+        return count
+    }
+
     // MARK: - pendingCount (telemetry depth probe)
 
     public func pendingCount() async throws -> Int {
@@ -131,15 +178,43 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
             where: .eq(Self.col("status"), .text("new")))
     }
 
-    // MARK: - drainAvailable (spec §10 / .serializable guarded claim)
+    // MARK: - Stream-scoped drain (ADR-021 Decision 7 / T1)
 
-    public func drainAvailable() async throws -> [(job: Job, sessionID: SessionID)] {
-        return try await storage.transaction(
+    /// Claim and return only the pending jobs that belong to `stream`.
+    ///
+    /// Uses the same serializable bulk-update pattern as `drainAvailable()`,
+    /// but adds `AND stream_id = ?` to the claim predicate. The
+    /// `idx_queuekit_stream (stream_id, status)` index makes the predicate
+    /// cheap. Only this stream's "new" rows are flipped to "cur" under the
+    /// batch session; other streams' rows are untouched. Rust twin:
+    /// `PersistenceKitBackend::drain_available_for_stream`.
+    public func drainAvailable(stream: StreamID) async throws -> [(job: Job, sessionID: SessionID)] {
+        let session = SessionID.mint()
+        let claimed = try await storage.transaction(
             isolation: .serializable
         ) { txn -> [(Job, SessionID)] in
+            // 1. Atomically claim every "new" job for this stream into "cur".
+            let claimedCount = try await txn.rowStore.update(
+                table: queueKitTableName,
+                values: [
+                    "status": .text("cur"),
+                    "session_id": .text(session.rawValue),
+                ],
+                where: .and([
+                    .eq(Self.col("status"), .text("new")),
+                    .eq(Self.col("stream_id"), .text(stream.rawValue)),
+                ]))
+            guard claimedCount > 0 else { return [] }
+
+            // 2. Read back EXACTLY the rows this call claimed (by session), in
+            //    HLC order. Same serializable transaction, so the read sees the
+            //    update's own writes.
             let rows = try await txn.rowStore.query(
                 table: queueKitTableName,
-                where: .eq(Self.col("status"), .text("new")),
+                where: .and([
+                    .eq(Self.col("status"), .text("cur")),
+                    .eq(Self.col("session_id"), .text(session.rawValue)),
+                ]),
                 orderBy: [
                     OrderClause(column: Self.col("physical_time")),
                     OrderClause(column: Self.col("logical_count")),
@@ -147,28 +222,130 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
                 ],
                 limit: nil, offset: nil)
 
-            var claimed: [(Job, SessionID)] = []
+            var out: [(Job, SessionID)] = []
+            out.reserveCapacity(rows.count)
             for row in rows {
-                guard case .text(let rowID) = row["id"] else { continue }
-                let session = SessionID.mint()
-                let updated = try await txn.rowStore.update(
-                    table: queueKitTableName,
-                    values: [
-                        "status": .text("cur"),
-                        "session_id": .text(session.rawValue),
-                    ],
-                    where: .and([
-                        .eq(Self.col("status"), .text("new")),
-                        .eq(Self.col("id"), .text(rowID)),
-                    ]))
-                if updated == 1 {
-                    if let job = Self.decodeRow(row) {
-                        claimed.append((job, session))
-                    }
+                if let job = Self.decodeRow(row) {
+                    out.append((job, session))
                 }
             }
-            claimed.sort { $0.0.submittedAt < $1.0.submittedAt }
-            return claimed
+            return out
+        }
+        return claimed.sorted { $0.0.submittedAt < $1.0.submittedAt }
+    }
+
+    /// Count pending jobs (status = "new") belonging to `stream` only.
+    ///
+    /// Uses `idx_queuekit_stream (stream_id, status)` — no cursor advance.
+    /// Rust twin: `PersistenceKitBackend::pending_count_for_stream`.
+    public func pendingCount(stream: StreamID) async throws -> Int {
+        try await storage.rowStore.count(
+            table: queueKitTableName,
+            where: .and([
+                .eq(Self.col("status"), .text("new")),
+                .eq(Self.col("stream_id"), .text(stream.rawValue)),
+            ]))
+    }
+
+    // MARK: - drainAvailable (spec §10 / .serializable guarded claim)
+
+    public func drainAvailable() async throws -> [(job: Job, sessionID: SessionID)] {
+        // SINGLE-PASS CLAIM. One guarded bulk UPDATE flips every available
+        // ("new") job to "cur" under this call's unique batch session, then we
+        // read the claimed rows back BY THAT SESSION. This replaces the prior N
+        // single-row guarded updates — each an O(N) predicate scan — which made a
+        // bulk claim O(N²) in queue depth and the dominant cost of a 40k import.
+        // The bulk update is one O(N) pass; the session-tagged read-back is
+        // another, so a whole batch claims in O(N).
+        //
+        // Reading back by the call's UNIQUE session (not by status="cur") keeps
+        // the claim robust under any isolation model: a concurrent drainer's rows
+        // carry a different session, so the two partition the "new" frontier and
+        // never double-count a job. spec §10 invariant 3 (the claim is still a
+        // status-guarded atomic new→cur transition).
+        let session = SessionID.mint()
+        let claimed = try await storage.transaction(
+            isolation: .serializable
+        ) { txn -> [(Job, SessionID)] in
+            // 1. Atomically claim EVERY "new" job into "cur" under this session.
+            let claimedCount = try await txn.rowStore.update(
+                table: queueKitTableName,
+                values: [
+                    "status": .text("cur"),
+                    "session_id": .text(session.rawValue),
+                ],
+                where: .eq(Self.col("status"), .text("new")))
+            guard claimedCount > 0 else { return [] }
+
+            // 2. Read back EXACTLY the rows this call claimed (by session), in HLC
+            //    order. Same serializable transaction, so the read sees the
+            //    update's own writes.
+            let rows = try await txn.rowStore.query(
+                table: queueKitTableName,
+                where: .and([
+                    .eq(Self.col("status"), .text("cur")),
+                    .eq(Self.col("session_id"), .text(session.rawValue)),
+                ]),
+                orderBy: [
+                    OrderClause(column: Self.col("physical_time")),
+                    OrderClause(column: Self.col("logical_count")),
+                    OrderClause(column: Self.col("node_id")),
+                ],
+                limit: nil, offset: nil)
+
+            var out: [(Job, SessionID)] = []
+            out.reserveCapacity(rows.count)
+            for row in rows {
+                if let job = Self.decodeRow(row) {
+                    out.append((job, session))
+                }
+            }
+            return out
+        }
+        // HLC ascending — the query already orders; kept explicit so the final
+        // contract is port-identical with the Rust drain_available.
+        return claimed.sorted { $0.0.submittedAt < $1.0.submittedAt }
+    }
+
+    // MARK: - completeSession (single-pass batch completion)
+
+    /// Complete EVERY in-flight ("cur") job claimed under `session` in one pass,
+    /// flipping them to terminal `status`. Returns the number completed.
+    ///
+    /// The single-pass twin of the session-batched `drainAvailable` claim: a
+    /// drain worker that claimed a whole batch under one session retires the
+    /// whole batch with ONE guarded bulk update instead of N per-job `complete`
+    /// calls (each an O(N) predicate scan → O(N²) per batch — the second half of
+    /// the bulk-import wall, alongside the claim). Artifacts are empty: the batch
+    /// fast path carries none; a job that needs artifacts uses per-job `complete`.
+    ///
+    /// Inherent (not on `QueueBackend`): only the PersistenceKit backend drives
+    /// the encode drain, and the concrete handle is held there. The guard is
+    /// status="cur", so any job already completed individually (e.g. an
+    /// undecodable job replied "blocked" before this call) is untouched. Mirrors
+    /// the Rust `PersistenceKitBackend::complete_session`.
+    @discardableResult
+    public func completeSession(
+        _ session: SessionID,
+        status: ObservationStatus
+    ) async throws -> Int {
+        guard status.isTerminal else {
+            throw QueueError.invalidTerminalStatus(status)
+        }
+        let artifactsJSON = try WireFormat.encoder.encode([ArtifactRef]())
+        let artifactsText = String(data: artifactsJSON, encoding: .utf8) ?? "[]"
+        return try await storage.transaction(isolation: .serializable) { txn -> Int in
+            try await txn.rowStore.update(
+                table: queueKitTableName,
+                values: [
+                    "status": .text("done"),
+                    "signal_status": .text(status.rawValue),
+                    "artifacts": .text(artifactsText),
+                ],
+                where: .and([
+                    .eq(Self.col("session_id"), .text(session.rawValue)),
+                    .eq(Self.col("status"), .text("cur")),
+                ]))
         }
     }
 
@@ -252,6 +429,42 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
         }
         if affected == 0 {
             throw QueueError.jobNotFound(jobID)
+        }
+    }
+
+    // MARK: - reclaimInFlight (crash-recovery primitive)
+
+    /// Reset every stale in-flight ("cur") job for `stream` back to "new", clearing
+    /// the session_id so the next `drainAvailable(stream:)` re-claims and re-drives
+    /// them. Returns the count reclaimed.
+    ///
+    /// SAFETY: this must only be called when the caller has JUST acquired the stream's
+    /// `DrainLease` via `tryAcquire`. A freshly-acquired lease means the prior holder
+    /// is dead (crashed or cleanly exited), so every "cur" row for this stream is an
+    /// orphan — no live drainer is processing it. The lease-TTL gate is the guarantee:
+    /// `tryAcquire` succeeds only when the prior lease is absent OR stale (heartbeat
+    /// older than TTL = 15 s), so another drainer cannot hold a fresh lease at the same
+    /// time. This rules out yanking a "cur" job out from under a live drainer.
+    ///
+    /// Idempotent + crash-safe: reclaimed jobs land in "new", are re-drained, and
+    /// re-ingested. Ingest is content-addressed, so re-processing a reclaimed job is
+    /// harmless. Mirrors `FilesystemBackend.reclaimInFlight()` but stream-scoped (the
+    /// shared queue carries multiple streams — only reset this stream's "cur" rows,
+    /// never another stream's). Rust twin:
+    /// `PersistenceKitBackend::reclaim_in_flight_for_stream`.
+    @discardableResult
+    public func reclaimInFlight(stream: StreamID) async throws -> Int {
+        try await storage.transaction(isolation: .serializable) { txn -> Int in
+            try await txn.rowStore.update(
+                table: queueKitTableName,
+                values: [
+                    "status": .text("new"),
+                    "session_id": .null,
+                ],
+                where: .and([
+                    .eq(Self.col("status"), .text("cur")),
+                    .eq(Self.col("stream_id"), .text(stream.rawValue)),
+                ]))
         }
     }
 

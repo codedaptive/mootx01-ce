@@ -77,9 +77,9 @@ struct GroundedSynthesisTests {
             #expect(out.drawerCount == 3)
             #expect(!out.context.summary.isEmpty,
                     "summary should be populated for a non-empty recall")
-            // The dominant room is "lab" — the summary names it.
-            #expect(out.context.summary.contains("lab"),
-                    "summary should name the dominant room")
+            // The summary names the dominant parentNodeId (a UUID).
+            #expect(out.context.summary.contains("dominant node"),
+                    "summary should reference the dominant node")
             // "carbon" appears in two drawers → a dominant pattern.
             #expect(out.context.patterns.contains("carbon"),
                     "repeated token should surface as a pattern")

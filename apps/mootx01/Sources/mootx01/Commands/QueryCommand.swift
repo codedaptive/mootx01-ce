@@ -11,13 +11,14 @@
 //      This preserves the single-writer guarantee — we never open a second
 //      writer (serve subprocess) while the resident daemon holds the DB.
 //
-//   2. stdio subprocess — when no daemon is running, or `--db` pins a specific
-//      estate that the running daemon doesn't serve. Spawns a short-lived
+//   2. stdio subprocess — when no daemon is running, or `--db` is given (the
+//      named estate is always served via subprocess regardless of what the
+//      daemon serves). Spawns a short-lived
 //      `mootx01 serve`, performs the MCP handshake (initialize → initialized →
 //      tools/call), reads the response, then terminates the subprocess.
 //
 // Tool name mapping: the user passes the ARIA verb without the `moot_` prefix
-// (e.g. `drawer_recall`) and this command prepends it.
+// (e.g. `memory_search`) and this command prepends it.
 //
 // Arguments are passed as `--key value` pairs and decoded as JSON where
 // possible (numbers, booleans) or left as strings.
@@ -164,7 +165,17 @@ struct QueryCommand: AsyncParsableCommand {
         ])
         let initializedNotif = jsonrpc(id: nil, method: "initialized", params: [:] as [String: Any])
 
-        let binaryPath = CommandLine.arguments.first ?? "mootx01"
+        // Resolve the absolute binary path from the bundle rather than argv[0].
+        // CommandLine.arguments.first returns whatever the parent passed as argv[0],
+        // which can be a relative path or a bare name controlled by the caller.
+        // Bundle.main.executableURL gives the absolute, standardized path of the
+        // running binary — immune to argv[0] manipulation (planned hardening).
+        guard let execURL = Bundle.main.executableURL?.standardizedFileURL,
+              execURL.path.hasPrefix("/") else {
+            fputs("mootx01 query: cannot resolve absolute executable path for subprocess\n", stderr)
+            throw ExitCode.failure
+        }
+        let binaryPath = execURL.path
         var serveArgs = ["serve"]
         if let dbName = db {
             serveArgs.append(contentsOf: ["--db", dbName])
@@ -176,10 +187,17 @@ struct QueryCommand: AsyncParsableCommand {
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        // INHERIT the parent's stderr rather than piping it. A captured-but-never-
+        // drained stderr pipe deadlocks any tool that writes more than the OS pipe
+        // buffer (~64KB) to stderr: the child blocks in fputs() once the buffer
+        // fills while the parent blocks in readDataToEndOfFile() on stdout, so
+        // neither side progresses. `moot_palace_import` emits a progress line every
+        // 10 records (~4,800 lines for a 48K-drawer palace), which overflows the
+        // buffer and hangs the import. Inheriting forwards the child's live
+        // progress straight to the user's terminal and removes the pipe entirely.
+        process.standardError = FileHandle.standardError
 
         try process.run()
 

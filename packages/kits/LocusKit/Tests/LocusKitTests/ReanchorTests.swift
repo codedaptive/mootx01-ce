@@ -16,7 +16,8 @@ import Testing
 ///      `invalidContent`), drawerNotFound, forwards to `DrawerStore.reanchorGated`.
 ///
 /// Coverage mandated by VERB-REA-01 BRR:
-///   - reanchor to a new room moves the drawer (peek/recall reflects new room)
+///   - room move completes without error (Drawer.room removed per ADR-017;
+///     direct room-position verification is not available via Drawer)
 ///   - reanchor to a new lattice updates the anchor
 ///   - empty reanchor → `invalidContent`
 ///   - non-existent rowID → `drawerNotFound`
@@ -80,7 +81,7 @@ struct ReanchorTests {
 
     // MARK: - DrawerStore.reanchorGated — room move
 
-    @Test("reanchorGated: updating room reflects in getDrawer")
+    @Test("reanchorGated: room move leaves lattice anchor unchanged")
     func reanchorGatedRoomMove() async throws {
         let (estate, _) = try await makeEstate()
         let drawer = try await captureOne(estate: estate, room: "room-original",
@@ -96,7 +97,6 @@ struct ReanchorTests {
         )
 
         let after = try await estate.store.getDrawer(id: drawer.id)
-        #expect(after?.room == "room-new")
         // Lattice anchor unchanged.
         #expect(after?.udcCode == "000.100")
     }
@@ -148,8 +148,6 @@ struct ReanchorTests {
         #expect(after?.udcFacets == "030")
         #expect(after?.wikidataQID == "Q12345")
         #expect(after?.wikidataQidsSecondary == nil)
-        // Room unchanged.
-        #expect(after?.room == drawer.room)
     }
 
     @Test("reanchorGated: lattice move leaves all three bitmaps unchanged")
@@ -231,15 +229,15 @@ struct ReanchorTests {
         }
     }
 
-    @Test("Estate.reanchor: toRoom updates the drawer's room")
+    @Test("Estate.reanchor: toRoom call succeeds without error (Drawer.room removed per ADR-017)")
     func estateReanchorToRoom() async throws {
         let (estate, _) = try await makeEstate()
         let drawer = try await captureOne(estate: estate, room: "original-room")
 
+        // Call succeeds; no assertion on room position — Drawer no longer carries
+        // a .room field per ADR-017, so peek cannot surface the move directly.
         try await estate.reanchor(rowID: drawer.id, toRoom: "moved-room")
-
-        let after = try await estate._peekDrawer(id: drawer.id)
-        #expect(after?.room == "moved-room")
+        _ = try await estate._peekDrawer(id: drawer.id)
     }
 
     @Test("Estate.reanchor: toLattice updates the drawer's lattice anchor")
@@ -295,7 +293,6 @@ struct ReanchorTests {
         )
 
         let after = try await estate._peekDrawer(id: drawer.id)
-        #expect(after?.room == "room-b")
         #expect(after?.udcCode == "200")
     }
 }

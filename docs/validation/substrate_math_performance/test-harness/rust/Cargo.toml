@@ -37,14 +37,14 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # see `rust-toolchain.toml` in this directory.
 substrate-kit = { path = "../../../../../packages/libs/SubstrateLib/rust", package = "substrate-lib" }
 substrate-types = { path = "../../../../../packages/libs/SubstrateTypes/rust" }
-substrate-kernel = { path = "../../../../../packages/libs/SubstrateKernel/rust", features = ["simd-nightly"] }
+substrate-kernel = { path = "../../../../../packages/libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../../../packages/libs/SubstrateML/rust" }
 
 [features]
-default = ["simd-nightly"]
+default = []
 # Passthrough: the harness re-exports substrate-kernel's simd-nightly
-# feature so kernel_registry::available() can cfg-gate on it. Disable
-# with `--no-default-features` to test the stable-fallback path.
+# feature so kernel_registry::available() can cfg-gate on it. Enable
+# with `--features simd-nightly`; the default stable path is scalar-only.
 simd-nightly = ["substrate-kernel/simd-nightly"]
 
 [dev-dependencies]

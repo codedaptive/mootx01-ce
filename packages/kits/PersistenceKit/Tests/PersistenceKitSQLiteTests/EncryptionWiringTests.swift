@@ -1,8 +1,7 @@
 // EncryptionWiringTests.swift
 //
 // Mission ENC-01 — integration tests for the SQLiteBackend crypto seam.
-// Verifies the two end-to-end behaviors the mission requires of the
-// insertRow/queryRows wiring:
+// Verifies three end-to-end behaviors of the insertRow/queryRows wiring:
 //   - Mode 1 (plaintext) is a pure no-op: content is stored and read
 //     unchanged and no keyID is written (the "null-key" case).
 //   - Mode 2 (row encryption) round-trips: a row inserted under an
@@ -10,6 +9,9 @@
 //     column carries the estate key identifier, and a reader opened in
 //     plaintext mode against the same file sees ciphertext, not plaintext
 //     — proof the content is encrypted at rest.
+//   - Mode 3 (FullDatabase / whole-file encryption) round-trips: the entire
+//     SQLite file is encrypted with a 256-bit key; opening with the correct
+//     key reads back the original rows; opening without the key fails.
 
 import Testing
 import Foundation

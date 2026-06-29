@@ -54,7 +54,7 @@ struct FormalContextFromRowAttributeViewTests {
     @Test("round-trip: two rows sharing one attribute form one concept")
     func roundTripTwoRowsSharedAttribute() {
         let id0 = UUID(), id1 = UUID(), id2 = UUID()
-        // Views sorted by (tier, rowID.uuidString) — use predictable field/value.
+        // Input order is arbitrary; use predictable field/value pairs.
         let views = [
             makeView(id0, attrs: [(field: 0, value: 1), (field: 1, value: 2)]),
             makeView(id1, attrs: [(field: 0, value: 1), (field: 2, value: 3)]),

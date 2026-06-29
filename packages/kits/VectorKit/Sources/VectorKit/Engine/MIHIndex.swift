@@ -14,7 +14,10 @@
 // Conformance gate (§3.3 of the arch spec, "BLOCKER"):
 //   MIHIndexTests.swift asserts MIHIndex.search == BruteForceIndex.search
 //   on all §1.10 canonical vectors AND on randomised fuzz inputs across
-//   seeds, n, k, and m ∈ {4,8,16,32}. BruteForceIndex is always right.
+//   seeds, n, k, and m ∈ {4,8,16,32}. BruteForceIndex is the oracle.
+//   Both indexes support vectors that share an itemID but differ in
+//   vectorIndex or modelID (the VectorStore UNIQUE constraint is
+//   (item_id, vector_index, model_id)) — each is retained independently.
 //
 // Key invariants (retrieval algorithms reference §1.8):
 //   1. Band order 0,1,...,m−1. Fixed.
@@ -78,17 +81,25 @@ public enum MIHBandCount: UInt32, Sendable, CaseIterable {
 
 // MARK: - Internal structures (not public — DenseIndex seam is the surface)
 
-/// One band's hash table. Maps substring bit-value → sorted list of itemIDs.
+/// One band's hash table. Maps substring bit-value → sorted list of full
+/// VectorRecordKeys.
+///
+/// Keyed by VectorRecordKey (not just itemID) so that two distinct vectors
+/// that share the same itemID but differ in vectorIndex or modelID are both
+/// retained as separate posting-list entries (secfix/punt-vector: MIH itemID
+/// collision fix). The VectorStore schema uniqueness constraint is
+/// (item_id, vector_index, model_id); the posting list respects that same
+/// triple by carrying the full key.
 ///
 /// The ids in each posting list are kept sorted ascending (§1.2 invariant):
 /// candidate enumeration is then deterministic regardless of Swift Dictionary
 /// iteration order.
 private struct SubstringTable: Sendable {
-    /// key: substring bit-value as UInt64, value: itemIDs sorted ascending.
-    var map: [UInt64: [String]] = [:]
+    /// key: substring bit-value as UInt64, value: VectorRecordKeys sorted ascending.
+    var map: [UInt64: [VectorRecordKey]] = [:]
 
     /// Insert `id` into the posting list for `key`, maintaining sort order.
-    mutating func insert(key: UInt64, id: String) {
+    mutating func insert(key: UInt64, id: VectorRecordKey) {
         if map[key] == nil { map[key] = [] }
         let idx = lowerBound(in: map[key]!, for: id)
         map[key]!.insert(id, at: idx)
@@ -97,7 +108,7 @@ private struct SubstringTable: Sendable {
     /// Remove `id` from the posting list for `key`.
     /// Drops the entry entirely if the posting list becomes empty
     /// (consistent across Swift and Rust: §1.5 note).
-    mutating func remove(key: UInt64, id: String) {
+    mutating func remove(key: UInt64, id: VectorRecordKey) {
         guard var list = map[key] else { return }
         if let i = list.firstIndex(of: id) { list.remove(at: i) }
         if list.isEmpty { map.removeValue(forKey: key) }
@@ -106,8 +117,8 @@ private struct SubstringTable: Sendable {
 }
 
 /// Binary search lower-bound: index at which `target` should be inserted
-/// to keep `arr` sorted ascending.
-private func lowerBound(in arr: [String], for target: String) -> Int {
+/// to keep `arr` sorted ascending (VectorRecordKey.Comparable order).
+private func lowerBound(in arr: [VectorRecordKey], for target: VectorRecordKey) -> Int {
     var lo = 0, hi = arr.count
     while lo < hi {
         let mid = lo + (hi - lo) / 2
@@ -118,19 +129,23 @@ private func lowerBound(in arr: [String], for target: String) -> Int {
 
 // MARK: - Bounded max-heap
 
-/// Retains the best k (dist, itemID) pairs by (dist ASC, itemID ASC).
+/// Retains the best k (dist, key) pairs by (dist ASC, key ASC).
 ///
-/// Internally a binary max-heap ordered by (dist DESC, itemID DESC), so
+/// Internally a binary max-heap ordered by (dist DESC, key DESC), so
 /// the root is always the WORST retained element — the one evicted when a
 /// strictly better candidate arrives.
 ///
 /// §1.8 rule 4: among codes tied at the boundary distance, those with
-/// smaller itemIDs are kept. This means:
-///   - eviction key: (dist DESC, itemID DESC) — evict largest dist,
-///     then among ties evict the largest itemID.
+/// smaller keys are kept. "key" here is the full VectorRecordKey, which
+/// orders by (itemID, vectorIndex, modelID, modelVersion) per §0.3.
+/// This means two vectors sharing the same itemID but differing in
+/// vectorIndex or modelID are each retained independently — no collapse.
+///
+/// Eviction key: (dist DESC, key DESC) — evict largest dist, then among
+/// ties evict the largest VectorRecordKey.
 private struct BoundedMaxHeap {
     let capacity: Int
-    private(set) var elements: [(dist: Int, itemID: String)] = []
+    private(set) var elements: [(dist: Int, key: VectorRecordKey)] = []
 
     init(capacity: Int) {
         self.capacity = capacity
@@ -142,15 +157,15 @@ private struct BoundedMaxHeap {
     /// Distance of the worst element (root). Only valid when size > 0.
     var worstDist: Int { elements[0].dist }
 
-    /// Offer `(dist, itemID)` to the heap.
+    /// Offer `(dist, key)` to the heap.
     ///
     /// If not full: always insert.
-    /// If full: insert only if `(dist, itemID)` is strictly better than
+    /// If full: insert only if `(dist, key)` is strictly better than
     /// the current worst. "Better" = lexicographically smaller by
-    /// (dist, itemID) — smaller dist, or equal dist and smaller itemID.
-    mutating func offer(dist: Int, itemID: String) {
+    /// (dist, key) — smaller dist, or equal dist and smaller VectorRecordKey.
+    mutating func offer(dist: Int, key: VectorRecordKey) {
         if elements.count < capacity {
-            elements.append((dist, itemID))
+            elements.append((dist, key))
             siftUp(from: elements.count - 1)
         } else {
             // Only replace if strictly better than the worst.
@@ -158,33 +173,33 @@ private struct BoundedMaxHeap {
             let betterThanWorst: Bool
             if dist < w.dist {
                 betterThanWorst = true
-            } else if dist == w.dist && itemID < w.itemID {
+            } else if dist == w.dist && key < w.key {
                 betterThanWorst = true
             } else {
                 betterThanWorst = false
             }
             if !betterThanWorst { return }
-            elements[0] = (dist, itemID)
+            elements[0] = (dist, key)
             siftDown(from: 0)
         }
     }
 
-    /// Return results sorted (dist ASC, itemID ASC) — the oracle final order.
-    func sortedAscending() -> [(dist: Int, itemID: String)] {
+    /// Return results sorted (dist ASC, key ASC) — the oracle final order.
+    func sortedAscending() -> [(dist: Int, key: VectorRecordKey)] {
         elements.sorted {
             if $0.dist != $1.dist { return $0.dist < $1.dist }
-            return $0.itemID < $1.itemID
+            return $0.key < $1.key
         }
     }
 
-    // MARK: - Max-heap maintenance (ordered by (dist DESC, itemID DESC))
+    // MARK: - Max-heap maintenance (ordered by (dist DESC, key DESC))
 
     /// Returns true if element at index i is "worse" (higher priority in
-    /// the max-heap = larger (dist, itemID)) than the element at j.
+    /// the max-heap = larger (dist, key)) than the element at j.
     private func isWorse(_ i: Int, _ j: Int) -> Bool {
         let a = elements[i], b = elements[j]
         if a.dist != b.dist { return a.dist > b.dist }
-        return a.itemID > b.itemID
+        return a.key > b.key
     }
 
     private mutating func siftUp(from start: Int) {
@@ -262,16 +277,18 @@ public actor MIHIndex: DenseIndex {
     /// m substring hash tables, one per band. Index t = band t.
     private var tables: [SubstringTable]
 
-    /// Full 256-bit codes by itemID, for exact full-distance re-check.
+    /// Full 256-bit codes keyed by VectorRecordKey, for exact full-distance
+    /// re-check.
     ///
-    /// MIH uses this for the candidate verification step (I-7: every
-    /// distance through EngramLib). The key is itemID; the MIH internal
-    /// "id" for the binary lane IS the itemID.
-    private var codes: [String: Engram] = [:]
-
-    /// VectorRecordKey by itemID — needed to construct DenseHit results
-    /// and to apply MetadataFilter per-key.
-    private var keysByItemID: [String: VectorRecordKey] = [:]
+    /// MIH uses this for the candidate verification step (I-7: every distance
+    /// through EngramLib). The key is the full VectorRecordKey — NOT just
+    /// itemID. Using the full key means two distinct vectors that share the
+    /// same itemID but differ in vectorIndex or modelID each get their own
+    /// entry. This is required because the VectorStore schema's UNIQUE
+    /// constraint is (item_id, vector_index, model_id), and a search must
+    /// return all live vectors, not just the first one per itemID.
+    /// (secfix/punt-vector: MIH itemID collision fix)
+    private var codes: [VectorRecordKey: Engram] = [:]
 
     // MARK: - Init
 
@@ -296,10 +313,12 @@ public actor MIHIndex: DenseIndex {
     ///
     /// Clears all existing state, then inserts every live
     /// (non-tombstoned) record. O(n·m) substring insertions.
+    /// Each record is keyed by its full VectorRecordKey so that distinct
+    /// vectors sharing the same itemID (different vectorIndex or modelID)
+    /// are all retained independently.
     public func build(from array: ResidentVectorArray) async {
-        codes        = [:]
-        keysByItemID = [:]
-        tables       = Array(repeating: SubstringTable(), count: Int(m))
+        codes  = [:]
+        tables = Array(repeating: SubstringTable(), count: Int(m))
 
         for slot in 0..<Int(array.count) {
             guard !array.isTombstoned(slot) else { continue }
@@ -307,9 +326,8 @@ public actor MIHIndex: DenseIndex {
             let k = array.keys[slot]
             do {
                 let engram = try VectorPayload(kind: .binary, dim: 256, bytes: bytes).asEngram()
-                insertIntoTables(id: k.itemID, engram: engram)
-                codes[k.itemID]        = engram
-                keysByItemID[k.itemID] = k
+                insertIntoTables(id: k, engram: engram)
+                codes[k] = engram
             } catch {
                 log.error("MIHIndex.build: skipping corrupted slot \(slot): \(error)")
             }
@@ -366,9 +384,13 @@ public actor MIHIndex: DenseIndex {
 
     /// Add one binary vector record to the MIH index.
     ///
-    /// Upsert semantics: if a record with the same itemID already
-    /// exists, it is replaced. Posting lists maintain sorted-ascending
-    /// order after the operation (§1.2 invariant preserved).
+    /// Upsert semantics: if a record with the same full VectorRecordKey already
+    /// exists, it is replaced. Posting lists maintain sorted-ascending order
+    /// after the operation (§1.2 invariant preserved).
+    ///
+    /// Two records that share the same itemID but differ in vectorIndex or
+    /// modelID are treated as DISTINCT entries (the VectorStore UNIQUE
+    /// constraint is (item_id, vector_index, model_id)).
     ///
     /// - Throws: `VectorKitError.invalidPayload` for non-binary or
     ///   wrong-size payloads.
@@ -382,28 +404,29 @@ public actor MIHIndex: DenseIndex {
                 "MIHIndex.add: binary vector must be 32 bytes, got \(vector.bytes.count)")
         }
         let engram = try vector.asEngram()
-        let id = key.itemID
-        // Upsert: remove existing entry for this id (if any).
-        if let existing = codes[id] {
-            removeFromTables(id: id, engram: existing)
+        // Upsert: remove existing entry for this exact key (if any).
+        // The lookup is by FULL VectorRecordKey so only this specific
+        // (itemID, vectorIndex, modelID, modelVersion) tuple is replaced —
+        // sibling vectors sharing the same itemID are unaffected.
+        if let existing = codes[key] {
+            removeFromTables(id: key, engram: existing)
         }
-        insertIntoTables(id: id, engram: engram)
-        codes[id]        = engram
-        keysByItemID[id] = key
+        insertIntoTables(id: key, engram: engram)
+        codes[key] = engram
     }
 
     // MARK: - DenseIndex — remove
 
     /// Remove the record identified by `key` from the index.
     ///
-    /// No-op if `key` is absent. After removal the id is excluded
-    /// from all future searches.
+    /// No-op if `key` is absent. After removal the record is excluded from
+    /// all future searches. Only the exact (itemID, vectorIndex, modelID,
+    /// modelVersion) match is removed; sibling vectors sharing the same
+    /// itemID but differing in vectorIndex or modelID are unaffected.
     public func remove(key: VectorRecordKey) async throws {
-        let id = key.itemID
-        guard let engram = codes[id] else { return }
-        removeFromTables(id: id, engram: engram)
-        codes.removeValue(forKey: id)
-        keysByItemID.removeValue(forKey: id)
+        guard let engram = codes[key] else { return }
+        removeFromTables(id: key, engram: engram)
+        codes.removeValue(forKey: key)
     }
 
     // MARK: - Progressive-radius k-NN (§1.4) with enumeration-budget guard
@@ -435,9 +458,12 @@ public actor MIHIndex: DenseIndex {
         // The `n` term means we never enumerate past the cost of a full scan.
         let budget = fixedMaskBudget ?? max(n, 1 << 20)
 
-        // seen: ids that have been full-distance-checked. Prevents
-        // processing the same id more than once across bands/radii.
-        var seen = Set<String>()
+        // seen: full VectorRecordKeys that have been full-distance-checked.
+        // Prevents processing the same record more than once across bands/radii.
+        // Using the full key (not just itemID) means two records that share an
+        // itemID but differ in vectorIndex or modelID are each tracked and
+        // distance-checked independently.
+        var seen = Set<VectorRecordKey>()
         seen.reserveCapacity(min(n, 256))
 
         var heap = BoundedMaxHeap(capacity: k)
@@ -529,12 +555,11 @@ public actor MIHIndex: DenseIndex {
             r += 1
         }
 
-        // Build DenseHit array from the sorted heap output ((dist ASC, itemID ASC)).
-        return heap.sortedAscending().map { (dist, itemID) in
-            let k = keysByItemID[itemID] ??
-                VectorRecordKey(itemID: itemID, vectorIndex: 0,
-                                modelID: "unknown", modelVersion: "0")
-            return DenseHit(key: k, hammingDistance: dist)
+        // Build DenseHit array from the sorted heap output
+        // ((dist ASC, key ASC) where key is the full VectorRecordKey).
+        // The key is stored directly in the heap element — no secondary lookup.
+        return heap.sortedAscending().map { (dist, key) in
+            DenseHit(key: key, hammingDistance: dist)
         }
     }
 
@@ -553,17 +578,15 @@ public actor MIHIndex: DenseIndex {
         filter: MetadataFilter?
     ) -> [DenseHit] {
         var heap = BoundedMaxHeap(capacity: k)
-        for (itemID, codeEngram) in codes {
-            if let f = filter, let key = keysByItemID[itemID], !f.accepts(key) { continue }
+        for (recordKey, codeEngram) in codes {
+            if let f = filter, !f.accepts(recordKey) { continue }
             let dist = EngramLib.distance(probe, codeEngram)
-            heap.offer(dist: dist, itemID: itemID)
+            heap.offer(dist: dist, key: recordKey)
         }
-        // Sort ascending (dist ASC, itemID ASC) — oracle order (§0.3).
-        return heap.sortedAscending().map { (dist, itemID) in
-            let k = keysByItemID[itemID] ??
-                VectorRecordKey(itemID: itemID, vectorIndex: 0,
-                                modelID: "unknown", modelVersion: "0")
-            return DenseHit(key: k, hammingDistance: dist)
+        // Sort ascending (dist ASC, key ASC) — oracle order (§0.3 extended
+        // to full VectorRecordKey for same-itemID disambiguation).
+        return heap.sortedAscending().map { (dist, key) in
+            DenseHit(key: key, hammingDistance: dist)
         }
     }
 
@@ -583,7 +606,7 @@ public actor MIHIndex: DenseIndex {
         rho:       Int,
         probe:     Engram,
         filter:    MetadataFilter?,
-        seen:      inout Set<String>,
+        seen:      inout Set<VectorRecordKey>,
         heap:      inout BoundedMaxHeap,
         maskCount: inout Int
     ) {
@@ -592,14 +615,17 @@ public actor MIHIndex: DenseIndex {
             let lookupKey = querySub ^ flipMask
             guard let posting = table.map[lookupKey] else { return }
             // posting is sorted ascending (§1.2 invariant) — deterministic order.
-            for id in posting {
-                guard seen.insert(id).inserted else { continue }
-                // Per-id metadata filter.
-                if let f = filter, let k = keysByItemID[id], !f.accepts(k) { continue }
+            for recordKey in posting {
+                // Deduplicate by FULL VectorRecordKey so two records sharing the
+                // same itemID (but differing in vectorIndex or modelID) are each
+                // checked independently — neither is suppressed as "already seen."
+                guard seen.insert(recordKey).inserted else { continue }
+                // Per-record metadata filter.
+                if let f = filter, !f.accepts(recordKey) { continue }
                 // I-7: ALL Hamming distances through EngramLib (SubstrateKernel).
-                guard let codeEngram = codes[id] else { continue }
+                guard let codeEngram = codes[recordKey] else { continue }
                 let dist = EngramLib.distance(probe, codeEngram)
-                heap.offer(dist: dist, itemID: id)
+                heap.offer(dist: dist, key: recordKey)
             }
         }
     }
@@ -648,14 +674,14 @@ public actor MIHIndex: DenseIndex {
 
     // MARK: - Table helpers
 
-    private func insertIntoTables(id: String, engram: Engram) {
+    private func insertIntoTables(id: VectorRecordKey, engram: Engram) {
         for t in 0..<Int(m) {
             let sub = extractBand(from: engram, bandIndex: UInt32(t))
             tables[t].insert(key: sub, id: id)
         }
     }
 
-    private func removeFromTables(id: String, engram: Engram) {
+    private func removeFromTables(id: VectorRecordKey, engram: Engram) {
         for t in 0..<Int(m) {
             let sub = extractBand(from: engram, bandIndex: UInt32(t))
             tables[t].remove(key: sub, id: id)

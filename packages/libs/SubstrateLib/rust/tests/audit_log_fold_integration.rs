@@ -3,10 +3,10 @@
 // Integration tests for AuditLogFold (the fold lives in substrate-ml
 // after the 2026-05-29 four-package split). These exercise the fold
 // against real audit-event streams produced by the verb orchestrator
-// `Substrate`, which lives in substrate-lib (verbs). The test was
-// relocated here from glref-rust-audit_log_fold.rs's inline #[cfg(test)]
-// module because substrate-ml cannot depend on substrate-lib (that
-// would invert the layering); substrate-lib can drive both legs.
+// `Substrate`, which lives in substrate-lib (verbs). The fold itself
+// is in packages/libs/SubstrateML/rust/src/audit_log_fold.rs; this
+// integration test lives in substrate-lib to avoid inverting the
+// substrate-ml → substrate-lib layering dependency.
 
 use substrate_ml::audit_log_fold::AuditLogFold;
 use substrate_types::fingerprint256::Fingerprint256;

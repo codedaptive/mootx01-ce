@@ -22,9 +22,13 @@ fn make_backend() -> (FilesystemBackend, std::path::PathBuf) {
 }
 
 fn make_job(tag: &str) -> Job {
+    make_job_stream("encode", tag)
+}
+
+fn make_job_stream(stream: &str, tag: &str) -> Job {
     Job {
         id: JobId(uuid::Uuid::new_v4().to_string()),
-        stream_id: StreamId("encode".to_string()),
+        stream_id: StreamId(stream.to_string()),
         submitted_at: HLC { physical_time: 1, logical_count: 0, node_id: 1 },
         priority: 50,
         payload: tag.as_bytes().to_vec(),
@@ -114,6 +118,53 @@ fn await_drain_blocks_while_in_flight() {
             assert_eq!(in_flight, 1);
         }
         other => panic!("expected DrainTimeout, got {other:?}"),
+    }
+}
+
+// Bug A regression (the encode-stall fix). On a SHARED queue carrying more
+// than one stream, `await_drain_for_stream(target)` must release once the
+// TARGET stream is clear and must NOT block on other streams' pending jobs
+// (e.g. `dreaming` enqueued on recall) that a stream-scoped drainer never
+// processes. The GLOBAL `await_drain` WOULD block on them — that was the
+// post-T4/T6 encode-stall where every capture's encode barrier hung on
+// pending dreaming jobs.
+#[test]
+fn await_drain_for_stream_ignores_other_streams() {
+    let (backend, _dir) = make_backend();
+    // One encode job + two dreaming jobs on the same (shared) queue.
+    backend.write(&make_job_stream("encode", "e")).unwrap();
+    backend.write(&make_job_stream("dreaming", "d1")).unwrap();
+    backend.write(&make_job_stream("dreaming", "d2")).unwrap();
+
+    // Drain + complete ONLY the encode stream.
+    let batch = backend
+        .drain_available_for_stream(&StreamId("encode".to_string()))
+        .unwrap();
+    assert_eq!(batch.len(), 1, "only the encode job is claimed");
+    for (job, _) in &batch {
+        backend.complete(&job.id, ObservationStatus::Done, vec![]).unwrap();
+    }
+
+    // The encode stream is clear; dreaming still has 2 pending. The
+    // stream-scoped barrier must release promptly anyway.
+    let start = Instant::now();
+    backend
+        .await_drain_for_stream(
+            &StreamId("encode".to_string()),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .expect("encode barrier must release despite pending dreaming jobs");
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "stream-scoped barrier must not wait out the timeout"
+    );
+
+    // Sanity: the GLOBAL barrier WOULD time out — proving the bug the
+    // stream-scoped barrier fixes (dreaming jobs still pending).
+    match backend.await_drain(Duration::from_millis(10), Duration::from_millis(120)) {
+        Err(QueueError::DrainTimeout { pending, .. }) => assert_eq!(pending, 2),
+        other => panic!("global await_drain should time out on dreaming; got {other:?}"),
     }
 }
 

@@ -5,8 +5,9 @@
 // through the GLK substrate and destroys their backing stores. These are the
 // most privileged operations the resident host performs. EVERY admin verb is
 // reached ONLY through the gated control surface (`HttpReadApi::apply_control`),
-// which both the UDS channel (0600, owner-only) and the token+Origin HTTP
-// control path dispatch through. There is NO admin path on the unauthenticated
+// which both the local gated IPC control channel (UDS on Unix, owner-ACL named
+// pipe on Windows) and the token+Origin HTTP control path dispatch through.
+// There is NO admin path on the unauthenticated
 // read surface — the GET routes serve metadata only and never touch the engine.
 //
 // Everything here is metadata only (names, kinds, enums, counts, ISO-8601

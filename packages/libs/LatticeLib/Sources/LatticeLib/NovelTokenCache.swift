@@ -11,8 +11,10 @@
 // Submission is fire-and-forget: no retry obligation, never on the hot
 // path of a wordClass call's return value (it does not change the
 // returned WordClass). The submitter closure is injected so tests can
-// assert the drain without a network call; the default is a no-op
-// until the pool endpoint is wired (cookbook §2.2).
+// assert the drain without a network call; the bare-init default is a
+// no-op (explicit fallback for tests and isolated construction). The
+// production shared cache in `WordClassTagger` is wired to
+// `NovelPoolSubmitter.makeDefault()` (cookbook §2.2).
 //
 // Snapshot-date purge: on ingesting a newer WordClassTable, a device
 // purges accumulation predating the new table's snapshot_date

@@ -1,6 +1,6 @@
 // InstallCommand.swift
 //
-// Wire mootx01 into one or more MCP clients and grant ARIA tool permissions.
+// Wire mootx01 into one or more MCP clients. ARIA tool permissions are opt-in.
 // Mirrors the install surface of popular MCP server CLIs (e.g. @modelcontextprotocol).
 
 import ArgumentParser
@@ -10,7 +10,7 @@ import MootInstallerCore
 struct InstallCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "install",
-        abstract: "Wire mootx01 into MCP clients and grant tool permissions."
+        abstract: "Wire mootx01 into MCP clients."
     )
 
     @Option(name: .long, help: "Comma-separated client ids to install (e.g. claude,cursor). Default: interactive picker.")
@@ -25,7 +25,10 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Skip prompts; auto-detect and install all present clients.")
     var yes: Bool = false
 
-    @Flag(name: .long, help: "Skip writing to settings.json (do not grant tool permissions).")
+    @Flag(name: .long, help: "Opt in to writing ARIA MCP tools to settings.json permissions.allow. This auto-approves high-impact tools; use only if you trust all prompts/documents processed by Claude Code.")
+    var grantPermissions: Bool = false
+
+    @Flag(name: .long, help: "Do not write to settings.json. This is the default; retained for script compatibility.")
     var noPermissions: Bool = false
 
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
@@ -113,8 +116,10 @@ struct InstallCommand: AsyncParsableCommand {
             }
         }
 
-        // Write tool permissions into Claude Code settings.json.
-        if !noPermissions {
+        // Write tool permissions into Claude Code settings.json only when the
+        // user explicitly opted in with --grant-permissions. Permissions are not
+        // granted silently; the user must acknowledge the high-impact surface.
+        if grantPermissions && !noPermissions {
             let settingsURL = local
                 ? MootPaths.localClaudeSettingsURL(workingDirectory: cwd)
                 : MootPaths.globalClaudeSettingsURL(homeDirectory: home)
@@ -154,7 +159,8 @@ struct InstallCommand: AsyncParsableCommand {
                     let outcome = try DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
-                        homeDirectory: home
+                        homeDirectory: home,
+                        binaryPath: binaryPath
                     )
                     switch outcome {
                     case .server:
@@ -307,9 +313,9 @@ struct InstallCommand: AsyncParsableCommand {
         #endif
 
         // If ~/.local/bin is not on PATH, the symlink won't resolve as a
-        // bare `mootx01` command — print the same kind of note codegraph
-        // does. (MCP clients use the absolute config path regardless, so
-        // this only affects running `mootx01` by name in a shell.)
+        // bare `mootx01` command — print a PATH advisory. (MCP clients use
+        // the absolute config path regardless, so this only affects running
+        // `mootx01` by name in a shell.)
         let localBinDir = MootPaths.localBinDirURL(homeDirectory: home).path
         let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
         let onPath = pathEnv.split(separator: ":").contains { String($0) == localBinDir }

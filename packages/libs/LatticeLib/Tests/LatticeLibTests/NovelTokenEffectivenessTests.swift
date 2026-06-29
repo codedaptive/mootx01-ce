@@ -5,25 +5,24 @@
 //
 // The loop has two edges:
 //
-//   WRITE EDGE: tag/submit content with a novel token → accumulate to threshold
-//               → drain → pool JSON file on disk → PoolReducer.reduce seeds
-//               writable artifact + merges token → artifact updated.
+//   WRITE EDGE: write a PoolSubmission JSON directly to the pool directory
+//               (bypassing NovelTokenCache threshold) → PoolReducer.reduce
+//               seeds writable artifact + merges token → artifact updated.
 //
-//   READ EDGE:  on the NEXT process load, WordClassTableCache is populated via
-//               WordClassTable.loadWithPrecedence() → writable artifact loaded
-//               → previously-novel token is now table-resident → wordClass fast
-//               path returns its class directly.
+//   READ EDGE:  load the writable artifact into a fresh WordClassTable
+//               (simulating a new-process load via loadWithPrecedence) →
+//               previously-novel token is now table-resident → wordClass
+//               fast path returns its class directly.
 //
-// These tests cover the CROSS-RELOAD read edge: the READ EDGE is exercised by
-// loading the writable artifact directly into a fresh WordClassTable (simulating
-// a new-process load) and asserting membership there. Live in-session swap is a
-// separate, shipped path (WordClassTable.swap), covered by LiveTableSwapTests;
-// the cross-reload read tested here is its own still-valid path, not a
-// substitute for it.
+// These tests cover the CROSS-RELOAD read edge by loading the writable
+// artifact into a fresh WordClassTable and asserting membership. Live
+// in-session swap is a separate, shipped path (WordClassTable.swap),
+// covered by LiveTableSwapTests; the cross-reload read tested here is its
+// own still-valid path, not a substitute for it.
 //
 // Force-test contract (mission spec):
 //   - begin from bundled table → novel token absent.
-//   - accumulate to threshold → pool file on disk.
+//   - write PoolSubmission JSON directly → pool file on disk.
 //   - run reduce → seeds-if-absent + merges + writes writable artifact.
 //   - reload tagger (fresh WordClassTable from writable path) → token NOW classified.
 //   - writable artifact seeded when absent (no tableReadFailed).

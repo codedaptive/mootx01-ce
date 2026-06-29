@@ -205,20 +205,35 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
     /// - Note: Pass `now` at the call site; this method never calls
     ///   Date() (determinism invariant).
     public func train(terms: [String], window: Int = riWindow) {
+        let n = terms.count
+        guard n > 0 else { return }
+        // Precompute each position's index vector ONCE. The previous form called
+        // `riIndexVector(terms[j])` for every (i, j) pair, recomputing each
+        // position's (deterministic) index vector ~2·window times. Same values,
+        // computed once — bit-identical.
+        let idxVecs = terms.map { riIndexVector(term: $0) }
         for (i, target) in terms.enumerated() {
             // Context: every term within ±window positions, excluding self.
             let lo = max(0, i - window)
-            let hi = min(terms.count - 1, i + window)
+            let hi = min(n - 1, i + window)
+            // No neighbours (the window collapses to {i}) → leave vocab untouched,
+            // exactly as the per-neighbour form did. A neighbourless term stays OOV.
+            if hi <= lo { continue }
+            // Bind the target's context vector ONCE per position, accumulate every
+            // neighbour into the local copy (neighbours in ascending j order — the
+            // same order as before), then write back once. The previous form
+            // re-looked-up `vocab[target]` (a String hash + dictionary probe + CoW
+            // uniqueness check) for EVERY dimension of EVERY neighbour — 2048 dict
+            // lookups per neighbour pair. Accumulation order is unchanged, so the
+            // stored context vector is bit-identical.
+            var cv = vocab[target] ?? [Float](repeating: 0, count: riDimension)
             for j in lo...hi where j != i {
-                let neighbourIndex = riIndexVector(term: terms[j])
-                // Accumulate into the target term's context vector.
-                if vocab[target] == nil {
-                    vocab[target] = [Float](repeating: 0, count: riDimension)
-                }
+                let neighbourIndex = idxVecs[j]
                 for d in 0..<riDimension {
-                    vocab[target]![d] += neighbourIndex[d]
+                    cv[d] += neighbourIndex[d]
                 }
             }
+            vocab[target] = cv
         }
     }
 
@@ -276,6 +291,25 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
             )
         }
         return result
+    }
+
+    /// Produce the engram AND the normalised context vector from a SINGLE
+    /// context-vector computation.
+    ///
+    /// `embed` projects the context vector and `embedFloat` returns it, so a
+    /// caller that needs both would otherwise run `contextVector(for:)` twice.
+    /// This override computes it ONCE and returns both outputs.
+    ///
+    /// Byte-identical to calling `embed` then `embedFloat` separately:
+    /// the engram is `FloatSimHash.project` of the vector (or `.zero` when the
+    /// vector is empty), and `floats` reproduces `embedFloat`'s result with its
+    /// vocab-miss throw collapsed to `[]` (the `embedPair` opt-out contract).
+    /// When the vocab is empty the context vector is `[]`, so the engram is
+    /// `.zero` and floats are `[]` — identical to the separate calls.
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        let v = await contextVector(for: text)
+        guard !v.isEmpty else { return (.zero, []) }
+        return (FloatSimHash.project(vector: v, seed: projectionSeed), v)
     }
 
     // MARK: Private helpers
@@ -397,4 +431,51 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try RandomIndexingProvider(deserializing: basis)
     }
+
+    // MARK: Maintained counts (incremental-counts change set, P3)
+
+    /// 4-byte magic identifying an RI COUNTS blob ("RICT"). RI is unique among
+    /// the trainable providers: its accumulated state — the per-term context
+    /// vectors — IS its basis (there is no separate factorization step). The
+    /// counts blob therefore carries the same `vocab` payload as the basis blob,
+    /// but under a distinct magic so a counts row can never be misread as a basis
+    /// row, keeping the two stores' contracts uniform across all four providers.
+    static let countsMagic: [UInt8] = Array("RICT".utf8)
+
+    /// Fold one chunk's text into the accumulated context vectors. RI's
+    /// accumulation consumes a term sequence, so the text is tokenized with the
+    /// canonical `defaultKeywordTokens` and folded at the canonical `riWindow` —
+    /// the same per-document step `trainOnCorpus` runs (RI has no finalize).
+    public func addToCounts(text: String) {
+        train(terms: defaultKeywordTokens(text), window: riWindow)
+    }
+
+    /// Serialize the maintained context vectors to a versioned counts blob.
+    /// Same `vocab` payload as `serializeBasis()`, under the RICT counts magic.
+    public func serializeCounts() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(RandomIndexingProvider.countsMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU64(projectionSeed)
+        w.writeStringFloatVectorMap(vocab)
+        return w.data
+    }
+
+    /// Restore the accumulated context vectors in place from a counts blob, so
+    /// incremental maintenance resumes after a restart. Throws
+    /// `CorpusKitError.decodingFailure` on a bad blob — never crashes.
+    public func restoreCounts(from data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(RandomIndexingProvider.countsMagic)
+        try r.expectVersion(basisFormatVersion)
+        _ = try r.readString()  // modelID — header for validation; row is keyed by it
+        _ = try r.readString()  // modelVersion
+        _ = try r.readU64()     // projectionSeed
+        self.vocab = try r.readStringFloatVectorMap()
+    }
+
+    /// Maintained vocabulary size for the growth trigger.
+    public var countsVocabularySize: Int { vocab.count }
 }

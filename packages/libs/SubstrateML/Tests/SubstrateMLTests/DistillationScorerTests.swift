@@ -3,8 +3,8 @@
 // Tests for DistillationScorer: structural (recurrence) threshold, SNR gate, PMI graph,
 // connected components, dominant component selection, and confidence scoring.
 //
-// Wave-1 isolation note: ExtractedFeature depends on DistillationFeatureType
-// (TypedDecayWeighting.swift, Ds2). These tests compile at wave merge.
+// ExtractedFeature and DistillationFeatureType (TypedDecayWeighting.swift)
+// are in this module.
 
 import Testing
 @testable import SubstrateML

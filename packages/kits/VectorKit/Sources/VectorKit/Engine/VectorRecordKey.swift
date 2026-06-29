@@ -8,11 +8,9 @@
 // ColBERT token vectors where each token is a separate row. Single-
 // vector items use vector_index=0; ColBERT items use 0..N-1.
 //
-// The key maps exactly to the new UNIQUE(item_id, vector_index, model_id)
-// constraint on the `vectors` table (schema migration §4.1). The
-// physical column may still be named `drawer_id` on a v1 store; callers
-// read it as item_id in code. The rename migration (v1→v2) brings the
-// column name into alignment with this field name.
+// The key maps to the UNIQUE(item_id, vector_index, model_id) constraint
+// on the `vectors` table. The active schema (version 3) declares `item_id`
+// directly; v1/v2 stores are not present in production.
 //
 // Additive-only rule: if a downstream lane needs a new field on this
 // type, it files an FT-1 update to Lane F. No lane adds fields locally.

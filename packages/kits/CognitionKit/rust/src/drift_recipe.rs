@@ -96,10 +96,10 @@ pub fn run_drift(
         // Split on event_time (the memory's event clock, ING-01), not
         // filed_at (the ingest clock). For back-dated corpora these differ.
         if d.event_time < split_at {
-            *before.entry(d.room.clone()).or_insert(0.0) += 1.0;
+            *before.entry(d.parent_node_id.clone()).or_insert(0.0) += 1.0;
             bc += 1;
         } else {
-            *after.entry(d.room.clone()).or_insert(0.0) += 1.0;
+            *after.entry(d.parent_node_id.clone()).or_insert(0.0) += 1.0;
             ac += 1;
         }
     }

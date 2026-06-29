@@ -23,11 +23,10 @@ import SubstrateLib
 /// is not a fold/ordering axis). Capture now emits a sealed genesis
 /// event, so a freshly-captured drawer's trail holds the capture event.
 ///
-/// These exercise the typed audit surface that sits on top of the
-/// `bitmap_audit` table. `auditTrail` is a straight projection of that
-/// table; `bitmapState` runs the spec § 6.8 XOR-fold reconstruction
-/// against historical mutations so a row's bitmap state at any past
-/// timestamp can be recovered.
+/// These exercise the typed audit surface. `auditTrail` returns
+/// sealed `AuditEvent` rows from `audit_log`; `bitmapState` delegates
+/// to `AuditLogFold.projectStateAt` (the substrate primitive) to
+/// reconstruct bitmap state at any past HLC.
 @Suite("Estate audit and history API — spec § 7.8.7")
 struct AuditAPITests {
 
@@ -125,7 +124,7 @@ struct AuditAPITests {
         guard let capHLC = before.first?.hlc else { return }
         try await estate.withdraw(rowID: drawer.id, reason: "after genesis")
         let state = try await estate.bitmapState(rowID: drawer.id, asOf: capHLC)
-        // State bits are the low nibble. Active = 0.
+        // State occupies the low 6 bits (mask 0x3F). Active = 0.
         #expect(state.adjectiveBitmap & 0x3F == 0)
     }
 

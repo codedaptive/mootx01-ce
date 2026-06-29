@@ -218,9 +218,9 @@ pub fn check_forbidden_combinations(
 
     // S-3: Accepted MUST NOT transition to Tombstoned — enforced
     // by the transition table; no field-level invariant to check.
-    // (Closed in F14: glref-rust-verbs.rs::can_transition no longer
-    // permits (Accepted, "expunge") → Tombstoned, and the standalone
-    // expunge() verb checks for Accepted at the top.)
+    // (Closed in F14: the transition table no longer permits
+    // (Accepted, "expunge") → Tombstoned, and the standalone
+    // expunge() verb in verbs.rs checks for Accepted at the top.)
 
     // S-4 (cookbook § 9.5.4): Accepted ⇒ sensitivity ≤ Elevated.
     // Adjective bits 6-11 encode sensitivity (6-bit per §2.3);

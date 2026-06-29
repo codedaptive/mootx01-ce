@@ -30,7 +30,8 @@ public struct PrecedenceOutput: Sendable, Equatable {
 /// Layer discipline (SPEC § 5, B-1/B-2): pure sequencing — GLK dormant read
 /// (`glkEventLagPairs`) + SubstrateML `TemporalCausalityFold.fold` (input
 /// shaping, I-17) + NeuronKit `precedence`. Read-only (B-6, I-6). No write
-/// verb, now passed in, deterministic.
+/// verb. The `now` parameter is accepted for signature parity but is not read
+/// by this recipe.
 ///
 /// Rust peer: `run_precedence` in `precedence_recipe.rs`. Accepts pre-fetched
 /// `[TemporalAuditEntry]` because the Rust `EstateCoordinator` audit log is

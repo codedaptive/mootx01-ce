@@ -13,12 +13,9 @@
 // Inputs and expected values MUST NOT be changed to make tests pass.
 // If a value doesn't match, fix the algorithm, not the vector.
 //
-// Note on sub-function confidence values:
-//   DeltaFeatureExtractor sub-function confidence uses `decay_lambda` as the
-//   confidence signal in Rust (not C in CONVERGENT, not 1.0 in STATIC).
-//   This is a known Rust-side implementation choice documented here for
-//   traceability. The pipeline-level conformance (DistillationPipeline::run)
-//   is what must match between Swift and Rust.
+// Sub-function confidence values match Swift semantics: 1.0 for STATIC,
+// C (convergence_score) for CONVERGENT, decay_lambda for MONOTONE, 0.0 for
+// OSCILLATING and DIVERGENT.
 
 use substrate_ml::delta_feature_extractor::{DeltaFeatureExtractor, DeltaType};
 use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
@@ -36,9 +33,8 @@ const T3: f64 = 3.0;
 
 // Fixture: input_cat_convergent
 // sequence = [("A",t0),("B",t1),("B",t2)], λ=0.5
-// k=2, M=3, C=2/3≈0.6667 ≥ 0.5 → CONVERGENT
-// terminal_value="B", convergence_score=2/3
-// confidence = C × λ = 0.3333 (Rust-specific; Swift returns C directly)
+// k=2, M=3, C=2/3≈0.6667 ≥ λ → CONVERGENT
+// terminal_value="B", convergence_score=2/3, confidence=C=2/3
 #[test]
 fn categorical_convergent() {
     let sequence: Vec<(String, f64)> = vec![
@@ -52,16 +48,15 @@ fn categorical_convergent() {
     assert!((result.convergence_score - (2.0_f32 / 3.0)).abs() < 1e-5,
         "expected convergence_score ≈ 0.6667, got {}", result.convergence_score);
     assert!(result.slope.is_none());
-    // Rust confidence = C × λ = (2/3) × 0.5
-    let expected_conf = (2.0_f32 / 3.0) * 0.5;
+    // confidence = C (convergence_score), matching Swift semantics
+    let expected_conf = 2.0_f32 / 3.0;
     assert!((result.confidence - expected_conf).abs() < 1e-5,
         "expected confidence ≈ {}, got {}", expected_conf, result.confidence);
 }
 
 // Fixture: input_cat_static
 // sequence = [("X",t0),("X",t1),("X",t2)], λ=0.5
-// All identical → STATIC, convergence_score=1.0
-// Rust confidence = decay_lambda (0.5); Swift returns 1.0
+// All identical → STATIC, convergence_score=1.0, confidence=1.0
 #[test]
 fn categorical_static() {
     let sequence: Vec<(String, f64)> = vec![
@@ -75,6 +70,8 @@ fn categorical_static() {
     assert!((result.convergence_score - 1.0).abs() < 1e-5,
         "expected convergence_score=1.0, got {}", result.convergence_score);
     assert!(result.slope.is_none());
+    assert!((result.confidence - 1.0).abs() < 1e-5,
+        "expected confidence=1.0, got {}", result.confidence);
 }
 
 // Fixture: input_cat_oscillating

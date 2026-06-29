@@ -58,9 +58,23 @@ public struct HTTPRequest: Sendable {
     /// the `?stream=1` query flag). The `?stream=1` flag is a consumer
     /// convenience (moot-mgr's dashboard sets it); a consumer that doesn't use it
     /// simply relies on the Accept header.
+    ///
+    /// CSRF NOTE: SSE connections opened by a browser with `?stream=1` are GET
+    /// requests, so the browser's CORS preflight does NOT run for same-origin
+    /// policies — a malicious page on a different origin can open an SSE connection
+    /// if the loopback address is reachable from the browser. Consumers that
+    /// expose sensitive data over SSE MUST validate the `Origin` header
+    /// (`request.origin`) and reject connections from unexpected origins before
+    /// upgrading to an event stream. The transport does not enforce this (per
+    /// ADR-LOOPBACKHTTP-001 condition 3 — auth/origin decisions belong to the
+    /// consumer layer above this library).
     public var wantsEventStream: Bool {
         if let accept = headers["accept"], accept.contains("text/event-stream") { return true }
-        return query.contains("stream=1")
+        // Use exact parameter matching rather than substring containment.
+        // `query.contains("stream=1")` would match "stream=10", "mystream=1",
+        // or "x=stream=1", incorrectly triggering SSE mode for unrelated requests.
+        let params = query.split(separator: "&", omittingEmptySubsequences: true)
+        return params.contains(where: { $0 == "stream=1" })
     }
 
     /// Read and parse one request from socket `fd`.
@@ -183,7 +197,9 @@ public struct HTTPResponse: Sendable {
     /// Serialize this response and write it to socket `fd`. `Content-Length` is
     /// computed from the body and overrides any caller-supplied value. Headers
     /// are emitted in a deterministic order (Content-Type, Content-Length, then
-    /// the remainder sorted) followed by `Connection: close`.
+    /// the remainder sorted alphabetically), then `Connection: close` is always
+    /// appended last. A caller-supplied `Connection` header is emitted in the
+    /// sorted section and does not suppress the trailing `Connection: close`.
     public func send(fd: Int32) {
         var hdrs = headers
         hdrs["Content-Length"] = String(body.count)

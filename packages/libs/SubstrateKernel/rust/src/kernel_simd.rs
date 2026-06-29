@@ -16,10 +16,10 @@
 // the substrate uses, per cookbook § 4.4 and § 17.5.
 //
 // SimdKernel is the Rust mirror of the Swift `SimdKernel` struct.
-// Phase 2.α-1 added `or_reduce_*`. Phase 2.β-1 (this update)
-// adds `hamming_distance_256`, `hamming_distance_batch`, and
-// `hamming_top_k`. `simhash_block_batch` still inherits the
-// scalar default until Phase 2.γ lands its decision record.
+// Phase 2.α-1 added `or_reduce_*`. Phase 2.β-1 added
+// `hamming_distance_256`, `hamming_distance_batch`, and
+// `hamming_top_k`. Phase 2.γ-1 added `simhash_block_batch` via
+// vertical SIMD over hyperplanes (see lines 297-315).
 //
 // This module is compiled only when the `simd-nightly` Cargo
 // feature is enabled (and a nightly toolchain is in use).
@@ -185,8 +185,8 @@ impl SubstrateKernel for SimdKernel {
         }
     }
 
-    /// Top-K Hamming-NN with branchless-on-update ladder
-    /// maintenance per cookbook section 11.2. Rust mirror of the
+    /// Top-K Hamming-NN with sorted-ladder maintenance per cookbook
+    /// section 11.2. Rust mirror of the
     /// Swift `SimdKernel.hammingTopK` at
     /// `glref-swift-PortableKernel-SIMD.swift` lines 113-211
     /// (Phase 2.delta-1).

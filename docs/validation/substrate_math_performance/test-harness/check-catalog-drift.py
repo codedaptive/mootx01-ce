@@ -28,8 +28,9 @@ Documents checked:
        (docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md)
 
 Exit status:
-  0 — all CRCs in all three documents match vector files
+  0 — all CRCs match vector files; §18.2 completeness gaps are warnings only
   1 — at least one CRC drift or required-document completeness gap
+      (§18.2 gaps alone do not trigger exit 1)
   2 — invocation / environment error
 """
 

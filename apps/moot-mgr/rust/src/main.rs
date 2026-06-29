@@ -3,8 +3,8 @@
 //! Parses the CLI command and dispatches. One-shot store commands
 //! (monitoring/retention/status) open the manager, run the command, print the
 //! result, and exit. `serve` brings up the resident multi-plane host (loopback
-//! HTTP read-API + gated UDS control channel) and runs the retention loop on the
-//! configured cadence until the process is signalled.
+//! HTTP read-API + gated local IPC control channel — UDS on Unix, named pipe on
+//! Windows) and runs the retention loop on the configured cadence until signalled.
 //!
 //! Per the no-FFI law this binary is a COMPLETE Rust vertical — it never calls
 //! Swift, Swift never calls it. The macOS GUI is not ported; the host serves the

@@ -1,7 +1,7 @@
 // matrix_c.rs
 //
 // Correlation matrix C per cookbook § 6.2. Mirror of
-// glref-swift-MatrixC.swift.
+// Sources/SubstrateTypes/MatrixC.swift.
 
 use crate::matrix_f::MatrixF;
 

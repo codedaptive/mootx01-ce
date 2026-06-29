@@ -18,7 +18,7 @@ import Foundation
 /// Conformance compares EDGE OUTPUT, not call shape. This mirrors the
 /// NeuronKit policy-store precedent where Swift and Rust surface identical
 /// value-level results despite different async shapes.
-public protocol NodeTopologyProvider: Sendable {
+public protocol GLKNodeTopologyProvider: Sendable {
 
     /// Return the parent node id of `nodeID`, or `nil` if `nodeID` is a root
     /// (has no parent). The tree is strict — each node has at most one parent.

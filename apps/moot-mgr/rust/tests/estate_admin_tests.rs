@@ -128,9 +128,9 @@ fn resolve_cache_config_default_is_enabled() {
 
 #[test]
 fn provisioned_estate_registers_corpus() {
-    // DEBT-2 structural proof: the admin path provisions WITH a corpus (the
-    // coordinator registers it), unlike the ARIA_MCP `open` path which leaves
-    // the semantic lanes dark.
+    // Structural proof: the admin path provisions WITH a corpus (the coordinator
+    // registers it). The current ARIA registry also wires semantic lanes after
+    // coord.open, but EstateAdmin::provision remains the correct admin-plane path.
     let mut admin = EstateAdmin::new(scratch_estates_dir());
     let result = admin
         .provision(&req("CorpusScratch", "GLK", "InMemory", "corpus-tests"), NOW)

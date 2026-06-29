@@ -6,11 +6,9 @@
 // the content-ID and the gate decisions are byte/branch identical
 // across ports.
 //
-// Parity note: the Rust `AuditEvent` (verbs.rs) has no `event_id`
-// field yet, where the Swift one does. `admit` therefore returns
-// `(content_id, AuditEvent)`; adding `event_id: u128` to the Rust
-// AuditEvent to fold the ID into the struct is the parity close, owed
-// separately so as not to churn every AuditEvent constructor here.
+// Parity: the Rust `AuditEvent` (substrate-types) now carries
+// `event_id: u128`. `admit` assigns `event_id: cid` and returns
+// `Result<AuditEvent, GateViolation>`, matching the Swift leg.
 
 use std::collections::HashSet;
 use substrate_kernel::bit_field;

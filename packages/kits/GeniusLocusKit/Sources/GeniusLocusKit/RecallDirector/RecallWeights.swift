@@ -65,7 +65,8 @@ public struct RecallWeights: Sendable {
 /// frontier-K value (how many candidates to retrieve before applying limit).
 public struct RecallPlan: Sendable {
     /// The mode the director resolved to (may differ from request.mode
-    /// when fallback applies in a future version).
+    /// when fallback applies — e.g. `corpusOnly` with no corpus registered
+    /// and `allowDegraded` resolves to `effectiveMode: .locusOnly`).
     public let effectiveMode: GLKRecallMode
     /// Candidate retrieval count before scoring.
     ///

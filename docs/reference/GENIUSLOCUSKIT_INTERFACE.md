@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-19
-version: 1.9.2
+date: 2026-06-28
+version: 1.15.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -118,33 +118,40 @@ public actor GeniusLocusKit {
 
     // Unified nine-verb surface (VerbSurface.swift) — SPEC B-2/B-3:
     public func capture(_ handle: EstateHandle, _ frame: CaptureFrame) async throws -> Drawer
+    // captureBatch: delegates to Estate.captureBatch — all frames in ONE
+    // storage.transaction() via DrawerStore.insertFreshBatch (fresh) or per-item
+    // addDrawerCovered (supersession). Avoids nested-transaction conflict that
+    // arises when per-item capture() is called inside a rowStore.beginTransaction()
+    // block on a SQLite backend. BM25/vector lanes remain dark until callers invoke
+    // moot_reindex / moot_dream.
+    @discardableResult
+    public func captureBatch(_ handle: EstateHandle, _ frames: [CaptureFrame]) async throws -> [Drawer]
     // Dual-Path Intake — mode-aware capture (EncodeIntake.swift). Stores the
     // drawer row (same as the verb above) then encodes it into the estate's
-    // Corpus per `mode`: .regular enqueues an EncodeJob for the background drain
-    // worker; .impatient ingests inline before returning. The write mode is a
-    // verb execution option, NOT a CaptureFrame field. A no-op encode when
-    // no Corpus is registered (.locusOnly).
+    // Corpus per `mode`: .regular enqueues the drawer onto the Corpus's OWN
+    // ingest queue (Corpus.enqueueIngest); .impatient ingests inline before
+    // returning. The write mode is a verb execution option, NOT a CaptureFrame
+    // field. A no-op encode when no Corpus is registered (.locusOnly).
+    //
+    // LAYERING: the encode queue + drain + worker pool live in CorpusKit (a
+    // Corpus self-drains — see CORPUSKIT_INTERFACE). GeniusLocusKit is the
+    // orchestrator: at provision it mounts the Corpus ingest queue and sets the
+    // Corpus `onEncoded` callback to roll up the touched LocusKit rooms; it
+    // never owns the queue or performs the encode. EncodeJob (the former
+    // GLK-owned payload) was deleted — the payload is CorpusKit-internal now.
     @discardableResult
     public func capture(_ handle: EstateHandle, _ frame: CaptureFrame, mode: WriteMode) async throws -> Drawer
-    // Dual-Path Intake — encode queue lifecycle + await-empty (EncodeIntake.swift):
-    //   mountEncodeQueue  — mount the estate's ONE dedicated encode queue
-    //                       and start its NEAR-REALTIME background drain worker.
-    //                       Called at provision for .glk/.corpusOnly; idempotent;
-    //                       dropped in close. Swift: an on-actor whole-batch poll
-    //                       worker (~15 ms floor; drains the entire claimable
-    //                       batch each pass, so it never starves under burst).
-    //                       Rust: an observer-watch-driven background thread
-    //                       (superseding the prior 5 s governor-tick drain). Both
-    //                       make regular-mode captures BM25/vector recallable in
-    //                       near-realtime, regardless of burst load or arrival
-    //                       order.
-    //   awaitEncodeDrain  — block until the estate's encode queue has fully
-    //                       drained (every EncodeJob ingested + replied). Returns
-    //                       promptly when empty; no-op when no queue is mounted.
-    //                       The authoritative "encoding finished" barrier for
-    //                       bulk callers; throws QueueError.drainTimeout past the
-    //                       timeout (the queue does not wedge under burst).
-    public func mountEncodeQueue(for handle: EstateHandle) async throws
+    // Dual-Path Intake — await-empty barrier (EncodeIntake.swift):
+    //   awaitEncodeDrain  — block until the estate's Corpus ingest queue has
+    //                       fully drained (every enqueued drawer ingested +
+    //                       replied). Thin delegator to Corpus.awaitIngestDrain.
+    //                       Returns promptly when empty; no-op when no Corpus is
+    //                       registered. The authoritative "encoding finished"
+    //                       barrier for bulk callers; throws QueueError.drainTimeout
+    //                       past the timeout (the queue does not wedge under burst).
+    //   (mountEncodeQueue was removed: the queue is mounted on the Corpus at
+    //    provision via Corpus.mountIngestQueue, not on GLK. The Corpus runs a
+    //    foreground ~15 ms poll drain worker on both ports.)
     public func awaitEncodeDrain(for handle: EstateHandle, timeout: Duration = .seconds(30)) async throws
     public func recall(_ handle: EstateHandle, _ frame: RecallFrame) async throws -> [Drawer]
     public func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws
@@ -348,35 +355,49 @@ public struct EstateHandle: Sendable, Hashable {
 **Rust:** `pub struct EstateHandle { estate_uuid, zoom_window_low,
 zoom_window_high, estate_name }` with `pub fn new(...)`.
 
-#### `WriteMode`, `EncodeJob` (Dual-Path Intake)
+#### `WriteMode` (Dual-Path Intake)
 
-The write-mode execution option and the encode-queue payload.
+The write-mode execution option on the mode-aware capture verb.
 
 ```swift
 // EncodeIntake.swift — the write verb's execution mode.
 public enum WriteMode: String, Sendable, Codable, CaseIterable {
-    case regular     // enqueue an EncodeJob; the drain worker encodes async
+    case regular     // enqueue onto the Corpus ingest queue; the drain encodes async
     case impatient   // encode inline before the write returns
-}
-
-// EncodeJob.swift — the encode-queue payload, encoded into QueueKit Job.payload.
-// sourceID at ingest = drawerID so BM25/vector hits hydrate to the Drawer.
-public struct EncodeJob: Sendable, Codable, Hashable {
-    public let drawerID: String
-    public let estateUUID: UUID
-    public let text: String
-    public let embeddingModelID: String
-    public let capturedAtISO8601: String       // capture instant, ISO8601 (.withFractionalSeconds)
-    public var capturedAt: Date { get }         // decoded back for Corpus.ingest(now:)
-    public init(drawerID: String, estateUUID: UUID, text: String,
-                embeddingModelID: String, capturedAt: Date)
-    public func toJob(streamID: StreamID, submittedAt: HLC, priority: Int = 50) throws -> Job
-    public static func from(job: Job) throws -> EncodeJob
 }
 ```
 
-**Rust:** the `WriteMode` and `EncodeJob` intake types are present in the
-Rust port (`rust/src/intake.rs`); see the additional-types concordance below.
+**Rust:** the `WriteMode` intake type is present in the Rust port
+(`rust/src/intake.rs`); see the additional-types concordance below.
+
+> **Note — `EncodeJob` was removed.** The encode-queue payload formerly lived on
+> GeniusLocusKit (`EncodeJob`, in `EncodeIntake.swift` / `intake.rs`). The encode
+> pipeline relocated into CorpusKit: the queue, drain worker pool, retry, and the
+> payload are now CorpusKit-internal (`IngestJob`, not part of any public
+> surface). GeniusLocusKit's intake is pure orchestration —
+> `capture(_:_:mode:)`, `awaitEncodeDrain`, and `reindexMissing` delegate to the
+> estate's `Corpus.enqueueIngest` / `Corpus.awaitIngestDrain`. See
+> `CORPUSKIT_INTERFACE.md`.
+>
+> **Drain monitoring.** `drainStatuses(_ handle:) async throws -> [DrainStatus]`
+> (Rust `EstateCoordinator::drain_statuses(&self, handle) -> Vec<DrainStatus>`)
+> reports every long-running background drain the estate runs, for AI/operator
+> monitoring (the `moot_drain_status` tool). Read-only: it OBSERVES each drain's
+> frontiers (via `Corpus.ingestQueueDepth`), never claiming or draining. The
+> return is a LIST so additional drains surface without a reshape; today the only
+> entry is `corpus_encode` (pending + in-flight counts, draining/idle, and the
+> live encoded-chunk count as detail). A bare estate with no Corpus returns an
+> empty list. `DrainStatus` is `Sendable`/`Equatable` (Swift) /
+> `Clone+Debug+PartialEq` (Rust) with an `isDraining`/`is_draining` accessor.
+>
+> **Encode speed.** `setEncodeSpeed(_ speed: EncodeSpeed, for handle:) async`
+> (Rust `EstateCoordinator::set_encode_speed(&self, handle, speed)`) sets the
+> estate corpus drain's embedding QoS — `EncodeSpeed.foreground` (embed across
+> all cores) or `.background` (cap to ~`cores / 4`). No-op when no Corpus is
+> registered. `EncodeSpeed` is re-exported from GeniusLocusKit (Swift: a GLK
+> enum mapping to CorpusKit's; Rust: `pub use corpus_kit::corpus::EncodeSpeed`)
+> so PalaceBridge / AriaMcpKit name it without a direct CorpusKit dependency.
+> The import `mode` arg maps onto this; write strategy is size-gated separately.
 
 #### Verb frames: `CaptureFrame`, `RecallFrame`, `LearnFrame`, `MutationKind`, `WithdrawFrame`, `MutateFrame`, `ExpungeFrame`, `ReanchorFrame`, `ProposeFrame`, `AssociateFrame`
 
@@ -1100,9 +1121,9 @@ appear in the HKDF info string).
 
 ---
 
-## Swift/Rust Concordance — `.nodeTreeNative` recall mode + `NodeTopologyProvider` seam
+## Swift/Rust Concordance — `.nodeTreeNative` recall mode + `GLKNodeTopologyProvider` seam
 
-The `NodeTopologyProvider` protocol/trait, `registerNodeTopology`, the fifth
+The `GLKNodeTopologyProvider` protocol/trait, `registerNodeTopology`, the fifth
 `GLKRecallMode` case, and the read-once-freeze seam in `recallTunnels` are
 present in both ports.
 
@@ -1114,13 +1135,13 @@ NeuronKit policy-store precedent. Conformance is proved by edge-output equality
 against a canonical fixed-edge test double — the call-shape difference does not
 affect result correctness.
 
-### `NodeTopologyProvider` protocol / trait
+### `GLKNodeTopologyProvider` protocol / trait
 
 The Swift protocol is async; the Rust trait is synchronous.
 
 | Swift | Rust | Notes |
 |---|---|---|
-| `public protocol NodeTopologyProvider: Sendable` | `pub trait NodeTopologyProvider: Send + Sync` | Swift async, Rust sync |
+| `public protocol GLKNodeTopologyProvider: Sendable` | `pub trait NodeTopologyProvider: Send + Sync` | Swift async, Rust sync; GLK prefix resolves LocusKit naming collision |
 | `func parentID(of nodeID: String) async -> String?` | `fn parent_id(&self, node_id: &str) -> Option<String>` | Non-recall use only — NOT called inside any deterministic recall path |
 | `func childIDs(of nodeID: String) async -> [String]` | `fn child_ids(&self, node_id: &str) -> Vec<String>` | Non-recall use only — NOT called inside any deterministic recall path |
 | `func treeEdges(scope: [String]?) async -> [(parent: String, child: String)]` | `fn tree_edges(&self, scope: Option<&[String]>) -> Vec<(String, String)>` | Called EXACTLY ONCE per `recallTunnels` call, result frozen |
@@ -1151,7 +1172,7 @@ Induced scope `{root, A, C}` → edges `{root→A, A→C}` only (B∉scope).
 
 ```swift
 // Swift (GeniusLocusKit actor extension)
-func registerNodeTopology(_ provider: any NodeTopologyProvider, for handle: EstateHandle)
+func registerNodeTopology(_ provider: any GLKNodeTopologyProvider, for handle: EstateHandle)
 ```
 
 ```rust
@@ -1161,7 +1182,7 @@ pub fn register_node_topology(
     handle: &EstateHandle,
     provider: Arc<dyn NodeTopologyProvider>,
 )
-// Stored in coordinator.node_topology_providers: HashMap<EstateHandle, Arc<dyn NodeTopologyProvider>>.
+// Stored in coordinator.node_topology_providers: HashMap<EstateHandle, Arc<dyn NodeTopologyProvider>> (Rust retains the unprefixed trait name).
 // Dropped on close. recall_tunnels reads tree_edges(None) EXACTLY ONCE and
 // unions the frozen containment edges with stored tunnel edges.
 ```
@@ -1172,6 +1193,31 @@ The `node_topology_providers` map is a field parallel to
 `close()`. `recall_tunnels` performs the read-once-freeze and union identical
 to the Swift `recallTunnels(_:wing:)`. Synthetic containment tunnel `filed_at` uses
 `i64::MIN` (Rust parity of Swift `Date.distantPast`).
+
+### `SubstrateNodeTopologyProvider` — auto-registered default adapter
+
+| Swift | Rust |
+|---|---|
+| `public final class SubstrateNodeTopologyProvider: GLKNodeTopologyProvider, @unchecked Sendable` | `pub struct SubstrateNodeTopologyProvider` (implements `NodeTopologyProvider`) |
+
+The substrate-native adapter (ADR-017 §10) bridges LocusKit's `NodeStore`
+(UUID ids, async throws / `Result`) to `GLKNodeTopologyProvider` (String ids,
+infallible). It constructs a separate read-only `NodeStore` from the estate's
+`Storage` instance — the same database, different handle. All operations are
+read-only; the adapter never writes to the nodes table.
+
+**Auto-registration:** `EstateCoordinator.open` (Swift) and `Coordinator::open`
+(Rust) automatically create and register a `SubstrateNodeTopologyProvider` for
+every opened estate. Host callers of `.nodeTreeNative` recall mode get
+substrate-native topology without supplying a provider.
+
+**String↔UUID boundary:** incoming String ids are parsed to UUID; outgoing
+UUIDs are formatted via `.uuidString` / `.to_string()`. Invalid strings return
+`nil` / `None` / empty (the protocol is non-throwing).
+
+**Tree walk:** BFS from root, collecting all active parent→child pairs. The
+tree is fixed-depth (max depth 2: estate→wing→room per I-NT-2), so the walk
+is bounded.
 
 ### `registerGraphCache` / `registerPreferenceStore` — recall-scoring seam
 
@@ -1220,7 +1266,7 @@ training) are absent in BOTH ports — a separate future mission.
 drawer retrieval. Tree-edge injection happens separately in `recallTunnels`
 (the structural-lens path), not in the scored recall path. This preserves
 B-1 layer discipline — CognitionKit recipes call `recallTunnels` and receive
-the enriched edge set without importing `NodeTopologyProvider`.
+the enriched edge set without importing `GLKNodeTopologyProvider`.
 
 ### Read-once-freeze in `recallTunnels`
 
@@ -1228,6 +1274,14 @@ the enriched edge set without importing `NodeTopologyProvider`.
 EXACTLY ONCE at the top of the method. The result is frozen into a local constant
 before the estate tunnel read begins. No provider method is called again during
 this `recallTunnels` call or by any consumer of the returned array.
+
+**G5 — Wing-scoped topology privacy (secfix/c-glk-remaining):** After freezing the
+full edge forest, the method resolves child node IDs via `estate.resolveNodeNames` and
+retains only edges whose child maps to the queried `wing`. Root→wing structural nodes
+are excluded (they resolve to the estate root, not the queried wing); only room-level
+containment edges for the requested wing are emitted. This prevents foreign-wing node
+IDs from appearing in another wing's tunnel stream. `resolveNodeNames` is a separate
+NodeStore read — G1 (treeEdges called exactly once) remains satisfied.
 
 When no provider is registered, the method returns only stored tunnels —
 identical to pre-`.nodeTreeNative` behaviour. The no-provider path is the
@@ -1251,7 +1305,7 @@ Tree edges are surfaced as `Tunnel` values with:
 
 | Port | Test file | Coverage |
 |---|---|---|
-| Swift | `NodeTopologyProviderTests.swift` | no-provider unchanged, registered provider adds containment edges, read-once enforcement, mode decode, recall delegation, scope-induced subset, call-count exactly one |
+| Swift | `NodeTopologyProviderTests.swift` | auto-registered substrate adapter produces containment edges, registered provider adds containment edges, read-once enforcement, mode decode, recall delegation, scope-induced subset, call-count exactly one; `SubstrateNodeTopologyProviderTests` — parent/child/treeEdges/scope/invalid-UUID |
 | Rust (trait) | `tests/node_topology_parity.rs` | parent_id, child_ids, full forest, induced scope, root/leaf behavior, empty scope |
 | Rust (coordinator) | `src/coordinator.rs` (unit tests) | no-provider unchanged, containment edges added, call-count exactly one per recall, close drops provider, unregistered estate unchanged, synthetic tunnel field values |
 | Rust (existing) | `tests/recall_scored_parity.rs` | Asserts `GLKRecallMode::NodeTreeNative.raw_value() == "nodeTreeNative"` (5th raw value) |
@@ -1781,8 +1835,7 @@ section above.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
-| Encode-queue job | `EncodeJob` (`Intake/EncodeJob.swift`) | `EncodeJob` (`rust/src/intake.rs`) | public struct / pub struct | identical 6-field struct (captureFrame/capture_frame, mode, now, estateID/estate_id, drawerID/drawer_id, corpusBundleID/corpus_bundle_id) | `EncodeIntakeTests.swift` / `intake_tests` | Confirmed |
-| Write execution mode | `WriteMode` (`Intake/EncodeIntake.swift`) | `WriteMode` (`rust/src/intake.rs`) | public enum / pub enum | identical 2-case enum (regular/Regular, direct/Direct) | `EncodeIntakeTests.swift` / `intake_tests` | Confirmed |
+| Write execution mode | `WriteMode` (`Intake/EncodeIntake.swift`) | `WriteMode` (`rust/src/intake.rs`) | public enum / pub enum | identical 2-case enum (regular/Regular, impatient/Impatient) | `EncodeIntakeTests.swift` / `encode_intake_parity` | Confirmed |
 | Expunge sweep result | `ExpungeIntegritySweepResult` (`Verbs/VerbSurface.swift`) | `ExpungeIntegritySweepResult` (`rust/src/coordinator.rs`) | public struct / pub struct | identical 3-field struct (expungedCount/expunged_count, orphanCorpusEntriesRemoved/orphan_corpus_entries_removed, durationMs/duration_ms) | `VerbSurfaceTests.swift` / `coordinator_tests` | Confirmed |
 | Recall origin tag | `RecallOrigin` (`RecallDirector/GLKRecallRequest.swift`) | `RecallOrigin` (`rust/src/recall.rs`) | public enum / pub enum | identical 2-case enum (local/Local, crossEstate/CrossEstate) | `RecallDirectorTests.swift` / `recall_tests` | Confirmed |
 | Recall fusion steering | `RecallShape` (`RecallDirector/RecallShape.swift`) | `RecallShape` (`rust/src/recall.rs`) | public struct / pub struct | signed `laneWeights`/`lane_weights` (retrieval keys `locus`/`bm25`/`hamming`/`dense`/`dense:<modelID>` + matrix/graph/preference keys `fieldFit`/`coOccurrence`/`temporal`/`graph`/`preference`, missing ⇒ 1.0) + `antiSimilarLanes`/`anti_similar_lanes` (FARTHEST dense lanes) + optional clamped `frontierK`/`frontier_k`; `weight(for:)`/`weight()`, `isAntiSimilar(_:)`/`is_anti_similar()`, and `effectiveFrontierK`/`effective_frontier_k` accessors; `[64,256]` frontier envelope | `RecallShapeSignedWeightTests.swift` + `RecallShapeAntiSimilarTests.swift` + `RecallShapeMatrixSteerTests.swift` / `recall_shape_signed_weight_parity` + `recall_shape_anti_similar_parity` + `recall_shape_matrix_steer_parity` | Confirmed |
@@ -1790,12 +1843,86 @@ section above.
 | Serial-lane noop dispatcher | — | `NoopDispatcher` (`rust/src/brain/scheduler/serial_lane.rs`) | — / test-only | Rust test stub gated `#[cfg(any(test, feature = "test-seams"))]` — compiled OUT of the production binary (not a shipped public symbol). Integration tests reach it via the `test-seams` feature. No Swift equivalent | scheduler/standing-signals/rag-wiring/coordinator-dispatcher parity tests | Confirmed (test-only) |
 | Grant-store error | — | `GrantStoreError` (`rust/src/grants/grant_store.rs`) | — / pub enum | Rust-only error enum for the grants persistence layer; Swift errors bubble as `GeniusLocusKitError` (no distinct grant-store type) | grant tests | Confirmed (Rust-only) |
 | Sync-engine entry | — | `SyncEngineEntry` (`rust/src/coordinator.rs`) | — / pub struct | Rust-only coordinator state record for the sync engine; no Swift parallel (sync lifecycle managed via actor state) | coordinator tests | Confirmed (Rust-only) |
+| Distillation brain signal | `DistillationSignal` (`Brain/Signals/DistillationSignal.swift:30`, `public enum`) | `DistillationSignal` (`rust/src/brain/signals/distillation.rs:18`, `pub struct`) | public / pub | Swift uses a caseless `public enum` as a namespace; Rust uses a zero-size `pub struct` — same idiom for a type that is only a factory for `SignalSpec`. Both expose `spec(distillationCycle:)`/`spec(distillation_cycle)` (production wiring) and `defaultSpec()`/`default_spec()` (no-op diagnostic variant). Signal name `"distillation-sweep"`, hourly cadence (3 600 s). Wired in DG5. NT-DOC-1. | `DistillationSignalTests.swift` ↔ `distillation_signal_tests.rs` | Confirmed |
+| Training brain signal | `TrainingSignal` (`Brain/Signals/TrainingSignal.swift:42`, `public enum`) | `TrainingSignal` (`rust/src/brain/signals/training.rs:24`, `pub struct`) | public / pub | Same Swift-enum/Rust-struct namespace idiom as `DistillationSignal`. Both expose `spec(trainingCycle:)`/`spec(training_cycle)` and `defaultSpec()`/`default_spec()`. Signal name `"training-daemon"`, hourly cadence (3 600 s). Wired per ADR-018 F1. NT-DOC-1. | `StandingSignalsTests.swift` ↔ `distillation_signal_tests.rs` (covers both brain signals) | Confirmed |
 
 ---
 
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.15.0 -- 2026-06-28
+Security fixes (secfix/c-glk-remaining): two API behaviour clarifications.
+
+**G5 — Wing-scoped topology privacy in `recallTunnels`**
+`recallTunnels(_ handle:, wing:)` now filters the frozen edge forest through
+`estate.resolveNodeNames`, retaining only edges whose child resolves to the queried
+wing. Foreign-wing node IDs no longer appear in a wing's tunnel output. The G1
+read-once invariant (treeEdges called exactly once) is unaffected. See
+`Read-once-freeze in recallTunnels` section above.
+
+**G6 — `reindexMissing` / `collect_reindex_jobs` fan-out cap**
+New public constant: `GeniusLocusKit.reindexMaxJobs: Int` (Swift) /
+`EstateCoordinator::REINDEX_MAX_JOBS: usize` (Rust) — value 10 000. A single
+`reindexMissing` call enqueues at most this many ingest jobs; estates with more
+unindexed drawers are handled by repeated calls (each call advances the backfill
+frontier). The `enqueueChunk` constant (1 024) remains the per-fsync unit.
+
+### 1.14.0 -- 2026-06-25
+Additive (T1 — encode mode): new `setEncodeSpeed(_:for:)` accessor (Rust
+`EstateCoordinator::set_encode_speed`) + re-export of `EncodeSpeed` from
+GeniusLocusKit. Forwards the import `mode` (foreground/background) onto the
+estate's corpus drain QoS; no-op when no Corpus is registered. No verb/contract
+change. (Swift defines a GLK `EncodeSpeed` enum mapping to CorpusKit's because
+Swift forbids an imported enum's cases in a default argument; Rust re-exports
+CorpusKit's directly.)
+
+### 1.13.0 -- 2026-06-25
+Additive (T6 — drain status): new public `DrainStatus` type + accessor
+`drainStatuses(_:)` (Swift) / `EstateCoordinator::drain_statuses` (Rust). The
+accessor assembles a read-only, list-shaped report of every long-running
+background drain the estate runs (today only `corpus_encode`), reading each
+drain's frontiers via `Corpus.ingestQueueDepth` without claiming or draining. It
+validates the handle up front (a stale handle surfaces `EstateNotOpen`, distinct
+from an empty list = "no drains"). Backs the `moot_drain_status` MCP tool. No
+change to the verb surface or byte-identity.
+
+### 1.12.0 -- 2026-06-23
+Encode-pipeline relocation: the encode queue + drain + worker pool + payload
+moved out of GeniusLocusKit into CorpusKit (a Corpus self-drains). Removed the
+public `mountEncodeQueue(for:)` and the `EncodeJob` type from the GLK surface
+(EncodeJob.swift deleted; the payload is now CorpusKit-internal `IngestJob`).
+`capture(_:_:mode:)`, `awaitEncodeDrain(for:)`, and `reindexMissing` are now thin
+orchestration delegators to the estate's `Corpus.enqueueIngest` /
+`Corpus.awaitIngestDrain`; at provision GLK mounts the Corpus ingest queue and
+wires the Corpus `onEncoded` callback to roll up the touched LocusKit rooms.
+Updated the intake docstrings, the `WriteMode` section (EncodeJob section
+removed), and the type concordance (EncodeJob row dropped).
+
+### 1.11.0 -- 2026-06-22
+GLK_BATCH1: `GeniusLocusKit.captureBatch(_:_:)` added to § 2 Tier-1 consumed
+contract. Delegates to `Estate.captureBatch` (LocusKit 1.9.0) which opens ONE
+`storage.transaction()` via `DrawerStore.insertFreshBatch` for fresh drawers and
+falls back to per-item `addDrawerCovered` for supersession cascade. Fixes the
+nested-transaction conflict (`StorageError.transactionConflict`) that occurred
+when the previous implementation called `rowStore.beginTransaction()` then invoked
+`capture()` per-row on a SQLite backend. BM25/vector lanes remain dark until
+`moot_reindex` / `moot_dream` is invoked after batch import.
+
+### 1.10.0 -- 2026-06-21
+NT-DOC-1: Added 2 concordance rows to `## Swift/Rust Concordance — additional
+public types`. `DistillationSignal` (Swift `public enum` namespace / Rust
+`pub struct` unit struct; signal name `"distillation-sweep"`, hourly cadence,
+DG5) and `TrainingSignal` (same Swift-enum/Rust-struct idiom; signal name
+`"training-daemon"`, hourly cadence, ADR-018 F1). Both factories expose
+`spec(…)` (production) and `defaultSpec()`/`default_spec()` (no-op diagnostic).
+
+### 1.9.4 -- 2026-06-21
+NT-G1: Added `SubstrateNodeTopologyProvider` section documenting the auto-registered
+substrate-native adapter (ADR-017 §10). Updated Swift test coverage table: test #1
+changed from "no-provider unchanged" to "auto-registered substrate adapter produces
+containment edges"; added `SubstrateNodeTopologyProviderTests` coverage.
 
 ### 1.9.2 -- 2026-06-19
 Behavioral change on `capture(_:_:mode:)` (Swift) / `capture_with_mode` (Rust):

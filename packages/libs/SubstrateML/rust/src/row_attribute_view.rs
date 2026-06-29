@@ -203,9 +203,9 @@ impl RowAttributeView {
             });
         }
 
-        // Deterministic output order: (tier, row_id formatted as hex string).
-        // row_id is a u128 representing a UUID; format as "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        // (32 lowercase hex digits) to match Swift's UUID.uuidString sort collation.
+        // Deterministic output order: (tier, row_id formatted as hyphenated UUID string).
+        // row_id is a u128 representing a UUID; formatted as "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        // for lexicographic ordering consistent with Swift's UUID.uuidString sort collation.
         views.sort_by(|a, b| {
             let t = a.tier.cmp(&b.tier);
             if t != std::cmp::Ordering::Equal {

@@ -26,7 +26,7 @@ import VectorKit
 /// supply a `distillationCycle` closure that runs the per-item
 /// distillation sweep and returns the count of factoids produced.
 ///
-/// Signal 9 (TrainingSignal) was wired per ADR-017 F1. Production
+/// Signal 9 (TrainingSignal) was wired per ADR-018 F1. Production
 /// callers supply a `trainingCycle` closure that invokes
 /// `TrainingDaemon.runOnce` against the estate's audit log, matrix
 /// tier, and calibration registry. The daemon's own threshold gate
@@ -65,9 +65,12 @@ public extension GeniusLocusKit {
     ///   - dreamingCycle: the daemon cycle closure forwarded to
     ///     `DreamingSignal.spec(daemonCycle:)`. The caller constructs a
     ///     `DreamingDaemon` (NeuronKit) with production adapters and wraps
-    ///     `daemon.triggerDreamingCycle(now:).proposalsEmitted` here.
-    ///     Defaults to a no-op that returns zero proposals — correct for
-    ///     test registration where no live daemon is available.
+    ///     `daemon.triggerDreamingCycle(now:).proposalsEmitted.count` here.
+    ///     The daemon writes proposals via `EstateDreamingSink`; the closure
+    ///     returns only the count so the scheduler records activity without
+    ///     re-dispatching already-persisted frames (single-write invariant).
+    ///     Defaults to a no-op that returns zero — correct for test
+    ///     registration where no live daemon is available.
     ///   - distillationCycle: async closure forwarded to
     ///     `DistillationSignal.spec(distillationCycle:)`. The caller wraps
     ///     the per-item distillation sweep (`kit.distillItemsSweep`) with
@@ -94,7 +97,7 @@ public extension GeniusLocusKit {
     func registerDefaultStandingSignals(
         in handle: EstateHandle,
         vectorStore: VectorStore,
-        dreamingCycle: @escaping @Sendable (Date) async throws -> [ProposeFrame] = { _ in [] },
+        dreamingCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         distillationCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         trainingCycle: @escaping @Sendable (Date) async throws -> String = { _ in "" },
         modelID: String = "minilm-v6",
@@ -121,7 +124,7 @@ public extension GeniusLocusKit {
             // no-op (returns 0) is appropriate for tests without a live sweep engine.
             DistillationSignal.spec(distillationCycle: distillationCycle),
             // TrainingSignal wired with the injected trainingCycle closure per
-            // ADR-017 F1. The caller wraps TrainingDaemon.runOnce against the
+            // ADR-018 F1. The caller wraps TrainingDaemon.runOnce against the
             // estate's audit log, matrix tier, and calibration registry. The
             // daemon's threshold gate (DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21)
             // decides whether to actually enrich on each hourly fire; the signal

@@ -12,7 +12,8 @@ public typealias LineageID = UUID
 public typealias RoomID = String
 
 /// Wing identifier — top-level namespace within the estate.
-/// Free-form String; wings emerge from the data via `SELECT DISTINCT wing`.
+/// Free-form String; wing and room names are resolved through the node tree
+/// via `DrawerStore.resolveNodeNames`.
 public typealias WingID = String
 
 /// Wikidata Q-ID string (e.g. "Q11165").
@@ -24,20 +25,21 @@ public typealias WikidataQID = String
 public typealias ProvenanceChannel = Channel
 
 /// Feature-flag filter argument — alias for `DrawerFeatureFlags`
-/// (bits 8–15 of `Drawer.operationalBitmap`). A filter matches when
+/// (bits 12–23 of `Drawer.operationalBitmap`). A filter matches when
 /// any of the specified flags are set.
 public typealias FeatureFlag = DrawerFeatureFlags
 
 // Note on `Sensitivity`: the spec uses the bare name `Sensitivity` in
 // the Filter case shapes (e.g. `Filter.sensitivityAtMost(Sensitivity)`).
-// `Provenance.swift` already declares a `public enum Sensitivity` at
-// a different bit width (2 bits, normal/elevated/restricted/secret with
-// rawValue 0…3). Declaring a typealias here for `AdjectiveSensitivity`
-// would shadow the provenance enum and break the
-// `Drawer.sensitivity` accessor (which returns provenance Sensitivity).
-// We therefore use the fully-qualified `AdjectiveSensitivity` type in
-// the adjective-axis filter cases below and rely on the type system
-// to make the choice unambiguous at call sites.
+// `Provenance.swift` declares a `public enum Sensitivity` for provenance
+// sensitivity (scale-gapped rawValues: normal=0, elevated=16,
+// restricted=32, secret=48; stored in the provenance bitmap's 6-bit
+// sensitivity field). The adjective-axis `AdjectiveSensitivity` is a
+// separate type. Declaring a typealias here would shadow the provenance
+// enum and break the `Drawer.sensitivity` accessor (which returns
+// provenance Sensitivity). We therefore use the fully-qualified
+// `AdjectiveSensitivity` type in the adjective-axis filter cases below
+// and rely on the type system to make the choice unambiguous at call sites.
 
 // MARK: - StateCluster
 
@@ -48,7 +50,7 @@ public enum StateCluster: Sendable {
     case knowNow
     /// State in {superseded, decayed, withdrawn, expired} — the "knew past" cluster.
     case knewPast
-    /// State in {rejected, accepted, tombstoned} — the terminal cluster.
+    /// State in {rejected, tombstoned} — the terminal cluster.
     case terminal
 }
 
@@ -127,7 +129,7 @@ public indirect enum Filter: Sendable {
 
     // MARK: Operational queries
 
-    /// Rows captured via this channel (operational bitmap bits 0–3).
+    /// Rows captured via this channel (operational bitmap bits 0–5).
     case captureChannel(CaptureChannel)
     /// Rows with this content kind.
     case contentKind(ContentKind)

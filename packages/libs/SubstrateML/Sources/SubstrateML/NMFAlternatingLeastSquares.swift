@@ -1,7 +1,7 @@
 // NMFAlternatingLeastSquares.swift
 //
-// Non-negative matrix factorization via alternating least squares
-// per cookbook § 6.9 and § 8.9.
+// Non-negative matrix factorization via Lee-Seung multiplicative
+// update rules per cookbook § 6.9 and § 8.9.
 //
 //   V ≈ W × H,  V ∈ R+^{m×n},  W ∈ R+^{m×k},  H ∈ R+^{k×n}
 //

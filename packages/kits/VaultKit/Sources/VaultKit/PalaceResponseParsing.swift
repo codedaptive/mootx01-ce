@@ -107,8 +107,9 @@ public enum PalaceResponseParsing {
     /// id key that tool returns. The four-noun generalization of
     /// ``parseAddDrawerID(textBlocks:)``: each MemPalace write tool echoes the
     /// assigned (or pre-existing) row id under a tool-specific key —
-    /// `add_drawer` → `drawer_id`, `create_tunnel` → `tunnel_id`, `kg_add` →
-    /// `triple_id`, `diary_write` → `entry_id` (verified live, v3.3.3). The
+    /// `add_drawer` → `drawer_id`, `create_tunnel` → `id` (bare key),
+    /// `kg_add` → `triple_id`, `diary_write` → `entry_id` (verified live,
+    /// v3.3.3). The
     /// `already_exists` shape carries the same key, so a duplicate still yields
     /// its id. Returns nil when no block carries a non-empty value for `idKey`
     /// (a write that produced no row).

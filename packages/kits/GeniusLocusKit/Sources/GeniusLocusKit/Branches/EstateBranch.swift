@@ -103,12 +103,20 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         // the parent IDs are not accessible after derivation without
         // re-querying the parent. compareToParent compares current branch
         // IDs against snapshotIDs to detect "new in branch" rows.
+        //
+        // Resolve parentNodeId → (wing, room) display names once for
+        // the whole batch. Drawer no longer carries wing/room stored
+        // properties (node-tree migration); room is recovered from the
+        // node tree via resolveNodeNames.
+        let parentNodeIds = Array(Set(snapshotRows.map(\.parentNodeId)))
+        let nodeNames = try await parentEstate.resolveNodeNames(parentNodeIds: parentNodeIds)
         var ids = Set<DrawerID>()
         for row in snapshotRows {
+            let roomName = nodeNames[row.parentNodeId]?.room ?? ""
             let frame = CaptureFrame(
                 content: row.content,
                 channel: row.captureChannel,
-                room: row.room,
+                room: roomName,
                 latticeAnchor: LatticeAnchor(
                     udcCode: row.udcCode,
                     udcFacets: row.udcFacets,

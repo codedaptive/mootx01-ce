@@ -11,8 +11,9 @@
 //      validate() call over the whole committed vector file, not per-op with
 //      batch sizes — the per-op StressTest sweep is a separate follow-on.
 //
-// Subsystems 3 (cross-language compare), 5 (source<->cookbook audit), 6 (source
-// CRC drift) land in sibling modules / the Swift app.
+// Subsystem 5 (source↔cookbook audit) runs via `mod cookbook_audit` and the
+// `--audit` flag. Subsystem 6 (source CRC drift) runs via `drift_check()` above.
+// Subsystem 3 (cross-language compare) still lives outside this crate.
 //
 // Output: `--json` emits a machine report to stdout; default is a human table.
 // Exit nonzero if any primitive is non-conformant or any backend disagrees.

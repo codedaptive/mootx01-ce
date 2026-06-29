@@ -441,11 +441,12 @@ struct ReplicationConformanceTests {
 
     // MARK: - §9.2 Idempotence
 
-    /// §9.2 — Idempotence: second flush with no change writes zero rows.
+    /// §9.2 — Idempotence: second flush with identical source produces no new rows.
     ///
-    /// The second flush must be a no-op at the data level — all rows already
-    /// exist in the destination and the upsert on primaryKey conflict is a
-    /// no-change update. Audit events are idempotent on (eventID, hlc).
+    /// The second flush runs the upsert (ON CONFLICT DO UPDATE) for each row that
+    /// already exists in the destination; the destination row count does not increase.
+    /// `rowsWritten` reports 1 (the upsert runs) even though no new row is created.
+    /// Audit events are idempotent on (eventID, hlc).
     @Test func idempotenceSecondFlushWritesNoNewRows() async throws {
         let source = try await makeInMemory()
         _ = try await source.rowStore.upsert(
@@ -475,8 +476,8 @@ struct ReplicationConformanceTests {
             into: sqlite,
             schema: SyntheticSchema.declaration
         )
-        // The primitive still "writes" 1 row (upsert contact), but the destination
-        // row count remains 1 — no duplicate was created.
+        // The upsert (ON CONFLICT DO UPDATE) runs and reports rowsWritten == 1,
+        // but the destination row count remains 1 — no duplicate was created.
         #expect(secondCursor.rowsWritten == 1)
 
         let destCount = try await sqlite.rowStore.count(table: "items", where: nil)
@@ -488,11 +489,13 @@ struct ReplicationConformanceTests {
 
     // MARK: - §9.3 Atomicity
 
-    /// §9.3 — Atomicity: a mid-flush failure leaves the destination unchanged.
+    /// §9.3 — Atomicity: a schema-gate failure throws before writing any rows.
     ///
     /// We simulate a failure by replicating into a backend whose schema is
     /// different (schemaMismatch gate), which throws before writing any rows.
-    /// The destination must remain at its prior consistent state (empty).
+    /// Note: the postcondition checks `destination` (a separate, never-written
+    /// storage) rather than `destMismatch` (the actual flush target). Both are
+    /// trivially empty; the test exercises the schema-gate throw path.
     @Test func atomicityMidFlushFailureLeavesDestinationUnchanged() async throws {
         let source = try await makeInMemory()
         _ = try await source.rowStore.upsert(
@@ -531,7 +534,8 @@ struct ReplicationConformanceTests {
             }
         }
 
-        // The destination must be empty — no rows were written.
+        // `destination` (a separate storage, never passed to the failed flush) must
+        // be empty — trivially true; the schema-gate threw before any write to `destMismatch`.
         let destItems = try await destination.rowStore.count(table: "items", where: nil)
         #expect(destItems == 0, "Destination must be empty after schema-gate failure")
     }

@@ -2,8 +2,7 @@
 //
 // The public Step 1 entry point: LatticeLib.wordClass(_:) classifies a
 // single token as .noun, .verb, or .other (cookbook §2.1, canonical
-// §3 Step 1). Implemented as an extension on the existing EideticLib
-// enum so EideticLib.swift stays untouched (mission Tier 3 invariant).
+// §3 Step 1). Implemented as an extension on the `LatticeLib` enum.
 //
 // Two tiers, per the encoder contract:
 //   1. Fast path — static-table membership (constant time, no tagger).
@@ -88,12 +87,16 @@ public extension LatticeLib {
         return tagNovelToken(lowered)
     }
 
-    /// Whether the platform tagger may run, given the running OS
+    /// Whether the platform `NLTagger` may run, given the running OS
     /// version and the table's pinned `min_os_version` (cookbook
     /// §1.3, §2.2). The static table is seeded from a specific
     /// NLTagger version; a build/runtime on an OS below that version
-    /// must use the table only and return `.other` for novel tokens
-    /// rather than invoke an older, differently-behaving tagger.
+    /// must not invoke an older, differently-behaving tagger.
+    ///
+    /// This gate applies only to the explicit `.nlTagger` choice in
+    /// the tagger-choice overload. The default `wordClass(_:)` path
+    /// always falls through to the deterministic HMM for novel tokens
+    /// and does not consult this flag.
     ///
     /// Pure and total over its inputs so the gate is unit-testable
     /// without an actual old OS. A `minOSVersion` that does not parse
@@ -120,17 +123,35 @@ public extension LatticeLib {
     /// fallback path (cookbook §2.2). Stamped with the bundled table
     /// version, the platform string, and the tagger version.
     ///
-    /// Wired with the real local-file submitter (NovelPoolSubmitter.makeDefault)
-    /// so drained batches are written as JSON files to the configured pool
-    /// directory (LATTICE_POOL_DIR env var, or the platform Application Support
-    /// default). The no-op submitter may only be used in tests or in an
-    /// embedded-host where the pool directory is explicitly unwanted.
-    internal static let sharedNovelCache = NovelTokenCache(
-        tableVersion: WordClassTableCache.table?.tableVersion ?? "",
-        platform: currentPlatform,
-        taggerVersion: currentTaggerVersion,
-        submitter: NovelPoolSubmitter.makeDefault()
-    )
+    /// Pool submission is opt-in: the real file-writing submitter
+    /// (`NovelPoolSubmitter.makeDefault`) is used ONLY when the
+    /// `LATTICE_POOL_DIR` environment variable is set to a non-empty
+    /// path. Without that opt-in the submitter is a no-op so novel
+    /// tokens are never written in plaintext to the Application Support
+    /// directory by default. Callers that want the real pool behaviour
+    /// must set `LATTICE_POOL_DIR` before `sharedNovelCache` is first
+    /// accessed (typically at process start), or supply their own
+    /// submitter via `NovelTokenCache.init`.
+    internal static let sharedNovelCache: NovelTokenCache = {
+        // Gate the real submitter on LATTICE_POOL_DIR being explicitly set.
+        // Failing open (writing plaintext tokens to the default Application
+        // Support path) leaks user text to disk in deployments that never
+        // configured a pool endpoint. The no-op is the safe default; the
+        // real submitter is the opt-in.
+        let envDir = ProcessInfo.processInfo.environment["LATTICE_POOL_DIR"]
+        let submitter: NovelTokenCache.Submitter
+        if let dir = envDir, !dir.isEmpty {
+            submitter = NovelPoolSubmitter.makeDefault()
+        } else {
+            submitter = { _ in }
+        }
+        return NovelTokenCache(
+            tableVersion: WordClassTableCache.table?.tableVersion ?? "",
+            platform: currentPlatform,
+            taggerVersion: currentTaggerVersion,
+            submitter: submitter
+        )
+    }()
 
     /// The platform string for the pool wire format (cookbook §2.3):
     /// `"apple"` where `NaturalLanguage` is available, else `"other"`.

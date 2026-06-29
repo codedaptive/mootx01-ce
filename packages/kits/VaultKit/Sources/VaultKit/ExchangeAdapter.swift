@@ -134,11 +134,14 @@ public struct ExchangeAdapter: VaultAdapter {
     /// `NoteIR` doc contract.
     ///
     /// - Throws: `DecodingError` on malformed JSON or a missing required
-    ///   field (`name`, `id`, `content`).
+    ///   field (`name`, `id`, `content`), or `VaultKitError.adapterError`
+    ///   when an entry's `pathComponents` contains traversal sequences (`..`),
+    ///   embedded separators (`/`, `\`), absolute-path markers, or empty strings.
     public func decode(_ data: Data) throws -> ExchangeExport {
         let payload = try JSONDecoder().decode(ExportPayload.self, from: data)
-        let notes = payload.entries.map { entry in
-            let pathComponents = entry.pathComponents ?? []
+        let notes = try payload.entries.map { entry in
+            let pathComponents = try Self.validatedPathComponents(
+                entry.pathComponents ?? [], entryID: entry.id)
             return NoteIR(
                 stableSourceKey: entry.id,
                 body: [Block(kind: "markdown", text: entry.content)],
@@ -154,6 +157,32 @@ public struct ExchangeAdapter: VaultAdapter {
         // VaultAdapter contract, so repeated decodes are stable.
         .sorted { $0.stableSourceKey < $1.stableSourceKey }
         return ExchangeExport(name: payload.name, notes: notes)
+    }
+
+    /// Validate the `pathComponents` array from a decoded export entry.
+    ///
+    /// Path components are semantic labels, not filesystem paths. Embedded
+    /// separators, traversal sequences, absolute-path markers, and empty
+    /// strings are invalid because they may be reinterpreted as filesystem
+    /// escape paths when a downstream adapter (e.g. `ObsidianAdapter.fromIR`)
+    /// projects them into a vault directory tree.
+    ///
+    /// - Throws: `VaultKitError.adapterError` on the first forbidden component.
+    private static func validatedPathComponents(
+        _ components: [String], entryID: String
+    ) throws -> [String] {
+        for component in components {
+            guard !component.isEmpty,
+                  component != ".",
+                  component != "..",
+                  !component.contains("/"),
+                  !component.contains("\\"),
+                  !component.hasPrefix("~") else {
+                throw VaultKitError.adapterError(
+                    "unsafe pathComponents entry \(String(reflecting: component)) in export entry \(entryID)")
+            }
+        }
+        return components
     }
 
     // MARK: - Write side (VK-EXPORT-01)
@@ -258,6 +287,15 @@ public struct ExchangeAdapter: VaultAdapter {
     /// transform of exactly the notes handed in: tier filtering and audit
     /// receipts happen upstream in `VaultBridge.export` (VK-TIER-01) —
     /// the adapter never re-implements tier logic.
+    ///
+    /// ## Symlink guard (CAND-014)
+    ///
+    /// The destination file is checked for a pre-existing symlink before the
+    /// write. A symlink planted at the output path (e.g. `estate.json → /etc/passwd`)
+    /// would cause a naive `Data.write(to:options:.atomic)` to follow the link
+    /// and overwrite the target outside the intended directory. The guard uses
+    /// `lstat`-equivalent semantics (`resourceValues(forKeys:)` with
+    /// `.isSymbolicLinkKey`) so the check never follows the link itself.
     public func fromIR(_ notes: [NoteIR], to vaultURL: URL) throws {
         let name = vaultURL.deletingPathExtension().lastPathComponent
         let export = ExchangeExport(name: name, notes: notes)
@@ -266,6 +304,16 @@ public struct ExchangeAdapter: VaultAdapter {
             at: vaultURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        // CAND-014: Refuse to write if a symlink already exists at the
+        // destination. This mirrors ObsidianAdapter.ensureWritableFileTarget(_:under:).
+        // The check is lstat-based (does not follow the link) so an attacker
+        // cannot redirect the write by planting a symlink at the export path.
+        if let values = try? vaultURL.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           values.isSymbolicLink == true {
+            throw VaultKitError.adapterError(
+                "exchange-adapter export target is a pre-existing symlink: \(vaultURL.path)"
+            )
+        }
         try data.write(to: vaultURL, options: .atomic)
     }
 }

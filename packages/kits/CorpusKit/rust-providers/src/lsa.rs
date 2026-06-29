@@ -68,6 +68,12 @@ pub const LSA_DEFAULT_RANK: usize = 64;
 /// constant `LsaProvider.basisMagic`.
 pub const LSA_BASIS_MAGIC: &[u8; 4] = b"LSB1";
 
+/// 4-byte magic identifying an LSA COUNTS blob ("LSAC"). The counts blob holds
+/// only the lightweight trigger anchors (vocabulary + document count), not the
+/// SVD basis — the heavy TF matrix is re-tokenized at refactor. Mirrors the
+/// Swift constant `LsaProvider.countsMagic`.
+pub const LSA_COUNTS_MAGIC: &[u8; 4] = b"LSAC";
+
 // MARK: - LsaProvider
 
 /// LSA distributional-semantics embedding provider.
@@ -284,15 +290,44 @@ impl LsaProvider {
 
     // MARK: Basis serialization (mission 6a-i)
 
-    /// Serialize the finalized LSA basis to a versioned, little-endian blob.
+    /// Serialize the maintained trigger anchors (vocabulary + document count) to
+    /// a versioned blob. Byte-identical to the Swift `LsaProvider.serializeCounts`
+    /// (UTF-8-byte-sorted vocab map, fixed field order). The SVD basis and the
+    /// per-document TF rows are NOT persisted here — the TF matrix is re-tokenized
+    /// at refactor (re-tokenize-at-refactor decision).
     ///
-    /// Emits configuration (`rank`, `svd_sweeps`, `projection_seed`), the
-    /// term-document support (vocab + document count), `idf_weights`, and the
-    /// raw SVD factors U/σ/Vᵀ plus `effective_rank`. The factors are
-    /// PORT-NEUTRAL: each port reconstructs its own internal representation
-    /// (Swift keeps the full SVDResult; Rust derives `doc_vecs` from U·σ).
-    /// Byte layout mirrors Swift's `serializeBasis()` exactly — the same
-    /// trained state yields a byte-identical blob on both ports.
+    /// Blob layout (after MAGIC + version):
+    ///   model_id (string) | model_version (string) | projection_seed (u64)
+    ///   | document_count (u32) | vocab (String→u32 map, byte-sorted keys)
+    pub fn serialize_counts(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(LSA_COUNTS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u64(self.projection_seed);
+        w.write_u32(self.counts.document_count() as u32);
+        w.write_string_u32_map(&self.counts.vocab);
+        w.into_bytes()
+    }
+
+    /// Restore the maintained vocabulary + document count from a counts blob into
+    /// this provider, so incremental maintenance resumes across a restart. Does
+    /// not touch the SVD basis. Returns `Err(BasisCodecError)` on a truncated,
+    /// unknown-version, or magic-mismatched blob — never panics.
+    pub fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(LSA_COUNTS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let _model_id = r.read_string()?;
+        let _model_version = r.read_string()?;
+        let _projection_seed = r.read_u64()?;
+        let document_count = r.read_u32()? as usize;
+        let vocab = r.read_string_u32_map()?;
+        self.counts = TermDocumentCounts::from_restored(vocab, document_count);
+        Ok(())
+    }
+
     pub fn serialize_basis(&self) -> Vec<u8> {
         let mut w = BasisWriter::new();
         w.write_magic(LSA_BASIS_MAGIC);
@@ -497,6 +532,25 @@ impl EmbeddingProvider for LsaProvider {
         // not OOV — the corpus layer maps this to UnavailableProviderOptOut).
         Ok(LsaProvider::embed_float(self, text).unwrap_or_default())
     }
+
+    /// Single-pass override: compute the LSA fold-in vector ONCE (via the
+    /// inherent `embed_float`) and return both the projected Engram and the float
+    /// vector, deduping the double pass that `embed` + `embed_float` would
+    /// otherwise run. The inherent `embed_float` is deterministic, so the outputs
+    /// are byte-identical to calling the two trait methods separately: a non-empty
+    /// vector v projects to the same Engram and is returned as the float lane; a
+    /// `None`/empty result (no basis, empty/non-tokenisable input, all-OOV, or a
+    /// degenerate all-zero fold-in) yields `(Engram::ZERO, vec![])` — matching
+    /// `embed`'s `ZERO` and `embed_float`'s `vec![]` (its all-OOV `EmbedFloatVocabMiss`
+    /// is swallowed to `vec![]` by the default `embed_pair`'s `unwrap_or_default`).
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        match LsaProvider::embed_float(self, text) {
+            Some(v) if !v.is_empty() => {
+                Ok((float_simhash::project(&v, self.projection_seed), v))
+            }
+            _ => Ok((Engram::ZERO, Vec::new())),
+        }
+    }
 }
 
 // MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
@@ -548,6 +602,32 @@ impl TrainableEmbeddingBasis for LsaProvider {
             .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
         Ok(Box::new(provider))
     }
+
+    /// Fold one chunk into the maintained vocab + document-count anchor. LSA's
+    /// heavy TF/DF inputs are re-derived by re-tokenizing at refactor, so the
+    /// anchor is accumulated through `add_document_for_counts_anchor` — O(vocab)
+    /// state, not the O(corpus) a full `train` per chunk would retain.
+    fn add_to_counts(&mut self, text: &str) {
+        self.counts.add_document_for_counts_anchor(text);
+    }
+
+    /// Serialize the maintained counts (6a-i counts codec), surfaced through the
+    /// seam.
+    fn serialize_counts(&self) -> Vec<u8> {
+        LsaProvider::serialize_counts(self)
+    }
+
+    /// Restore maintained counts; a codec error maps to
+    /// `CorpusKitError::DecodingFailure`.
+    fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError> {
+        LsaProvider::restore_counts(self, bytes)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))
+    }
+
+    /// Maintained vocabulary size for the growth trigger.
+    fn counts_vocabulary_size(&self) -> usize {
+        self.counts.vocabulary_size()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +663,33 @@ mod tests {
         assert!(p.is_finalized());
         assert!(p.effective_rank() <= 3);
         assert!(p.effective_rank() >= 1);
+    }
+
+    // ── Counts codec (incremental-counts change set), mirrors the Swift suite ──
+
+    #[test]
+    fn counts_round_trip_preserves_anchors() {
+        let original = trained_provider();
+        let blob = original.serialize_counts();
+        let mut restored = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+        restored.restore_counts(&blob).expect("restore counts");
+        assert_eq!(restored.vocabulary_size(), original.vocabulary_size());
+        assert_eq!(restored.document_count(), original.document_count());
+    }
+
+    #[test]
+    fn counts_blob_header_versioned() {
+        let bytes = trained_provider().serialize_counts();
+        assert!(bytes.len() >= 5);
+        assert_eq!(&bytes[0..4], LSA_COUNTS_MAGIC);
+        assert_eq!(bytes[4], BASIS_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn counts_truncated_blob_errors() {
+        let blob = trained_provider().serialize_counts();
+        let mut fresh = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+        assert!(fresh.restore_counts(&blob[..blob.len() / 2]).is_err());
     }
 
     #[test]

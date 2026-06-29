@@ -66,8 +66,7 @@ fn temporal_drawer(id: &str, content: &str, event_time: i64) -> Drawer {
     let mut d = Drawer::new(
         tid(id),
         content,
-        "temporal-wing",
-        "temporal-room",
+        "test-parent",
         "bilby",
         EPOCH_NOW,
         "minilm-v6",

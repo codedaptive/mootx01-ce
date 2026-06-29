@@ -3,7 +3,7 @@
 //! Routing order:
 //!   0. teachme pre-check — intercepts `teachme:true` before any runner fires
 //!   1. Federation tool (moot_federated_search)
-//!   2. Interface tools (Tier 1–5, 19 tools)
+//!   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
 //!   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
 //!   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 //!   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
@@ -42,7 +42,7 @@ use crate::vault_tools::VaultJobLedger;
 /// Routing order (mirrors Swift `ToolDispatcher.dispatch(_:_:)`):
 ///   0. teachme interception — returns guide before any runner fires
 ///   1. Federation tool (moot_federated_search)
-///   2. Interface tools (Tier 1–5, 19 tools)
+///   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
 ///   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
 ///   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 ///   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
@@ -130,6 +130,14 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     //    can record surfaced ids and dereference verbs can note usage.
     //    Also passes build_serial so moot_estate_ping can include it.
     if crate::interface_tools::is_interface_tool(name) {
+        // moot_palace_import opens arbitrary local SQLite files — same security
+        // posture as vault import/export. Refuse when vault is disabled so a
+        // hard-coded caller gets a clear message rather than an opaque dispatch.
+        if name == "moot_palace_import" && !vault_on {
+            return Ok(error_result(
+                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
+            ));
+        }
         let result = crate::interface_tools::dispatch(name, args, registry, ledger, build_serial)?;
         return Ok(inject_hint(name, args, result));
     }
@@ -204,40 +212,40 @@ fn run_federated_search(
     use locus_kit::filter::{HydrationLevel, RecallFrame};
     use uuid::Uuid;
 
-    // Resolve the requester estate from requesterEstateID. This is a required
-    // argument; a missing or malformed UUID returns isError:true (not a thrown
-    // JSONRPCError) so the caller sees a refusal, not a transport fault.
-    let raw_requester_id = match args.get("requesterEstateID") {
-        Some(JsonValue::String(s)) => s.as_str(),
-        None => return error_result("federated_search: missing required argument: requesterEstateID"),
-        Some(_) => return error_result(
-            "federated_search: requesterEstateID must be a UUID string"
-        ),
-    };
-    let requester_uuid = match Uuid::parse_str(raw_requester_id) {
-        Ok(u) => u,
-        Err(_) => return error_result(&format!(
-            "federated_search: malformed requesterEstateID (not a UUID): {raw_requester_id}"
-        )),
-    };
-
-    // Find the requester OpenEstate by matching the handle's estate_uuid
-    // (the store-manifest UUID, a [u8;16]). The grant system uses this UUID
-    // for grantee_estate_id, so federated_recall checks against it. Using the
-    // handle UUID here keeps MCP surface and grant surface in sync.
-    // Extract handle and coord before iterating all estates to avoid
-    // double-borrow of the extras map.
-    let (requester_handle, requester_handle_uuid, coord_arc) = {
-        let oe = match registry.extras.values()
-            .find(|oe| Uuid::from_bytes(oe.handle.estate_uuid) == requester_uuid)
-        {
-            Some(oe) => oe,
-            None => return error_result(&format!(
-                "federated_search: unknown requesterEstateID: {raw_requester_id}"
+    // Resolve the requester estate. Item 2 hardening (secfix/batch2-aria):
+    // requesterEstateID is now optional. When omitted the requester is always
+    // the default (authenticated caller) estate. When supplied it must match
+    // the default estate's UUID exactly — supplying a different UUID is refused
+    // to prevent cross-estate identity spoofing.
+    // Mirrors Swift ToolDispatcher.resolveRequester(_:).
+    let default_requester_uuid = Uuid::from_bytes(registry.default.handle.estate_uuid);
+    if let Some(supplied) = args.get("requesterEstateID") {
+        let raw_requester_id = match supplied {
+            JsonValue::String(s) => s.as_str(),
+            _ => return error_result(
+                "federated_search: requesterEstateID must be a UUID string when supplied; \
+                 omit it to use the default caller estate"
+            ),
+        };
+        let supplied_uuid = match Uuid::parse_str(raw_requester_id) {
+            Ok(u) => u,
+            Err(_) => return error_result(&format!(
+                "federated_search: malformed requesterEstateID (not a UUID): {raw_requester_id}"
             )),
         };
-        (oe.handle, Uuid::from_bytes(oe.handle.estate_uuid), oe.coord.clone())
-    };
+        if supplied_uuid != default_requester_uuid {
+            return error_result(
+                "federated_search: requesterEstateID does not match the authenticated \
+                 caller estate; omit requesterEstateID to use the default estate"
+            );
+        }
+    }
+    // Bind the requester to the default estate (the authenticated caller).
+    let (requester_handle, requester_handle_uuid, coord_arc) = (
+        registry.default.handle,
+        default_requester_uuid,
+        registry.default.coord.clone(),
+    );
 
     // Decode the recall frame. Absent `hydrationLevel` defaults to Full so
     // content blobs are present in the assembled response text — federated search
@@ -253,6 +261,16 @@ fn run_federated_search(
         Err(error) => return error_result(&format!("federated_search: {}", error.message)),
     };
     let mut frame = RecallFrame::new(filter_chain);
+    // Route limit through clamp_limit so negative and over-ceiling values are
+    // rejected/clamped at the MCP boundary on this federated surface.
+    // Parity: Swift runFederatedSearch uses Self.clampLimit with the same ceiling.
+    match optional_integer(args, "limit") {
+        Ok(raw) => match clamp_limit(raw, "limit", 20, LIMIT_HARD_CEILING) {
+            Ok(limit) => frame.limit = Some(limit),
+            Err(e) => return error_result(&format!("federated_search: {}", e.message)),
+        },
+        Err(e) => return error_result(&format!("federated_search: {}", e.message)),
+    }
     frame.hydration_level = match args.get("hydrationLevel") {
         None => HydrationLevel::Full,
         Some(v) => match v.as_str() {
@@ -305,9 +323,22 @@ fn run_federated_search(
                     fr.grant.id,
                     fr.drawers.len(),
                 );
+                // Resolve room display names from node tree for federated drawers.
+                let fed_node_ids: Vec<String> = fr.drawers.iter()
+                    .take(50)
+                    .map(|d| d.parent_node_id.clone())
+                    .collect();
+                let fed_node_names = coord.resolve_drawer_node_names(
+                    &source_handle,
+                    &fed_node_ids,
+                );
                 let lines: Vec<String> = fr.drawers.iter().take(50).map(|d| {
                     let preview: String = d.content.chars().take(80).collect();
-                    format!("{}  [{}]  {}", d.id, d.room, preview)
+                    let room = fed_node_names
+                        .get(&d.parent_node_id)
+                        .map(|(_, r)| r.as_str())
+                        .unwrap_or("");
+                    format!("{}  [{}]  {}", d.id, room, preview)
                 }).collect();
                 let section = std::iter::once(header).chain(lines).collect::<Vec<_>>().join("\n");
                 sections.push(section);
@@ -386,7 +417,7 @@ pub fn error_result(text: &str) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Shared argument helpers used by recipe, lens, and lexicon modules
+// Shared argument helpers used by recipe and lens modules
 // ---------------------------------------------------------------------------
 
 /// Extract a required string argument or return `invalidParams`.
@@ -449,6 +480,38 @@ pub fn optional_integer(
                 format!("{key} must be an integer; omit it to use the default"),
             )
         }),
+    }
+}
+
+/// Hard ceiling for all caller-supplied `limit`/`count`/`k` arguments at the
+/// MCP tool boundary. Parity: mirrors `limitHardCeiling` in Swift `ToolDispatch.swift`.
+pub const LIMIT_HARD_CEILING: usize = 500;
+
+/// Clamp a caller-supplied `limit`/`count`/`k` to the safe MCP boundary range
+/// `[1, ceiling]`. This is the single clamping funnel for all such arguments
+/// across the ARIA_MCP tool surface (interface tools, recipe tools, lens tools).
+///
+/// - `None` (absent arg)  → returns `default_value`.
+/// - raw ≤ 0             → returns `Err(invalidParams)`; negative/zero values
+///                         crash downstream range and iterator operations.
+/// - raw > `ceiling`     → silently clamped to `ceiling`; prevents DoS via
+///                         unbounded substrate scans.
+/// - Otherwise           → converted to `usize` and returned.
+///
+/// Parity: mirrors `clampLimit` in Swift `ToolDispatch.swift`.
+pub fn clamp_limit(
+    raw: Option<i64>,
+    name: &str,
+    default_value: usize,
+    ceiling: usize,
+) -> Result<usize, JSONRPCError> {
+    match raw {
+        None => Ok(default_value),
+        Some(v) if v <= 0 => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("{name} must be 1 or greater; received {v}"),
+        )),
+        Some(v) => Ok((v as usize).min(ceiling)),
     }
 }
 

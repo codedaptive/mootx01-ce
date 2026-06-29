@@ -195,6 +195,45 @@ struct EstateAdminLifecycleTests {
         }
     }
 
+    /// Verifies the destruction contract (secfix/ws2-coredelete §Cluster F):
+    /// after a confirmed destroy on a SQLite-backed estate, the .sqlite file
+    /// must be gone from disk. The file still existing after destroy would mean
+    /// verbatim captured content is recoverable via filesystem tools.
+    @Test("destroy on a SQLite estate deletes the backing file from disk")
+    func destroySQLiteDeletesFile() async throws {
+        try await withIntellectusLock {
+            let dir = makeScratchEstatesDir()
+            let admin = EstateAdmin(estatesDirectory: dir)
+            let r = try await admin.provision(
+                req(name: "Doomed SQLite", kind: "LocusOnly", backend: "SQLite"))
+            let uuid = try #require(r.estateUUID)
+
+            // Confirm the file exists before destroy.
+            let beforeFiles = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            #expect(
+                beforeFiles.contains { $0.hasSuffix(".sqlite") },
+                "SQLite file must exist after provision"
+            )
+
+            // Destroy with the correct confirm name.
+            let result = try await admin.destroy(
+                EstateLifecycleRequest(estateUUID: uuid, confirmName: "Doomed SQLite"))
+            #expect(result.ok)
+
+            // The estate is no longer hosted.
+            let payload = await admin.payload()
+            #expect(payload.hosted.isEmpty)
+
+            // The SQLite file (and any WAL/SHM sidecars) must be gone.
+            let afterFiles = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            let sqliteRemains = afterFiles.contains { $0.hasSuffix(".sqlite") || $0.hasSuffix(".sqlite-wal") || $0.hasSuffix(".sqlite-shm") }
+            #expect(
+                !sqliteRemains,
+                "SQLite file must be deleted after destroy; found: \(afterFiles)"
+            )
+        }
+    }
+
     @Test("destroy refuses when the confirm name does not match")
     func destroyRefusesMismatch() async throws {
         try await withIntellectusLock {

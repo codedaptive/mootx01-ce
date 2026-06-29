@@ -10,7 +10,7 @@
 //   NeuronKit.distillCluster  — thin lens wrapper that supplies the
 //                               EideticLib feature extraction seam
 //   DistilledRecall recipe    — DistilledHeader.parse() for result post-processing
-//   ExpandMemory recipe       — DistilledHeader.parse() for factoid validation
+//   Recollect recipe          — DistilledHeader.parse() for factoid validation
 //
 // Prerequisite types (DeltaType, DeltaFeatureExtractor, DistillationFeatureType,
 // TypedDecayWeighting, ExtractedFeature, DistillationSNR, FeatureGraph,
@@ -77,7 +77,7 @@ public struct DistillationOutput: Sendable {
 /// Parser for the DIST header on "_distilled" drawers.
 ///
 /// Co-located with the pipeline because the code that writes the format owns the
-/// parser. Consumed by CognitionKit recipes (DistilledRecall, ExpandMemory) and
+/// parser. Consumed by CognitionKit recipes (DistilledRecall, Recollect) and
 /// AriaMcpKit injection-depth post-processing.
 public struct DistilledHeader: Sendable, Equatable {
     /// Factoid prose: everything after "] " in the DIST content string.
@@ -160,7 +160,7 @@ public struct DistilledHeader: Sendable, Equatable {
 ///
 /// Stage 1: Build feature incidence matrix from extractFeatures.
 /// Stage 2: Apply typed decay weighting (if timestamps), compute SNR gate,
-///          apply majority threshold.
+///          apply structural recurrence threshold (df ≥ 2/M).
 /// Stage 2.5: DeltaFeatureExtractor pass on failing features; rescue
 ///             CONVERGENT/MONOTONE sequences.
 /// Stage 3: Build PMI coherence graph, select dominant component (F*).

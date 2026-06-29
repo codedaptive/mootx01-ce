@@ -1,8 +1,8 @@
 ---
 title: SubstrateKernel Interface
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-20
 description: Public API surface for SubstrateKernel in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -251,10 +251,30 @@ public enum GrantHKDF {
 }
 ```
 
-**Rust** (`src/hkdf.rs`, module free function):
+**Rust** (`src/hkdf.rs`, module free functions):
 
 ```rust
 pub fn derive_key(ikm: &[u8], salt: &str, info: &[u8], output_byte_count: usize) -> Vec<u8>;
+
+/// RFC 2104 HMAC-SHA256 over the in-repo SHA-256. Building block for
+/// KeyedCommitment (SubstrateLib ADR-017 §17).
+pub fn hmac(key: &[u8], data: &[u8]) -> [u8; 32];
+```
+
+`hmac` computes RFC 2104 HMAC-SHA256 using the in-repo SHA-256
+primitive. It is the building block for the keyed-commitment API
+in SubstrateLib (ADR-017 §17). The function was promoted from
+package-internal to public to support this use.
+
+**Swift** (additional on `GrantHKDF`):
+
+```swift
+public enum GrantHKDF {
+    // ... deriveKey as above ...
+
+    /// RFC 2104 HMAC-SHA256 over the in-repo SHA-256.
+    public static func hmac(key: [UInt8], data: [UInt8]) -> [UInt8]
+}
 ```
 
 ### `HammingNN`
@@ -411,6 +431,11 @@ differences; the two ports remain behaviorally equivalent.
   op, and its BNNSGraph matmul path crashes on macOS 26.5.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-20
+Added `GrantHKDF.hmac` (RFC 2104 HMAC-SHA256) to the public API surface.
+Promoted from package-internal to support the keyed-commitment API in
+SubstrateLib (ADR-017 §17).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

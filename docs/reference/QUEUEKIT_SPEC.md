@@ -1,8 +1,8 @@
 ---
 title: QueueKit Specification
-version: 1.0.0
+version: 1.4.1
 status: active
-date: 2026-06-14
+date: 2026-06-25
 description: "Behavioral specification for QueueKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -11,6 +11,8 @@ relates_to:
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
+  - docs/reference/NEURONKIT_SPEC.md
+  - docs/decisions/ADR-021-recall-driven-dreaming-queue.md
 purpose: |
   QueueKit is a general-purpose fill-and-drain serial job queue. A
   sender submits a Job without knowing who processes it or when; a
@@ -35,10 +37,10 @@ device, another machine, a server — claims it, runs it, and records a
 terminal observation. The protocol is the contract; the backend
 decides where the bits live.
 
-A caller interacts through one facade type (`QueueKit`) and four
+A caller interacts through one Interface type (`QueueKit`) and four
 permanent operations — `send`, `drain`, `watch`, `reply` — plus two
 inspection reads, `inFlight()` and `completed(streamID:)`. Behind the
-facade sits one of three interchangeable backends: a Filesystem
+Interface sits one of three interchangeable backends: a Filesystem
 backend (POSIX maildir with atomic `rename(2)` transitions), a
 PersistenceKit-backed backend (jobs as rows in a `Storage` table), and
 an InMemory backend (the PersistenceKit backend mounted on
@@ -95,7 +97,9 @@ SubstrateLib (HLC, HLCGenerator)      PersistenceKit (Storage, RowStore, Observe
         └───────────────┬──────────────────────────┘
                      QueueKit
                         ▲
-            GeniusLocusKit  (Brain / StandingSignalScheduler)
+        ┌───────────────┴────────────────┐
+ GeniusLocusKit                       CorpusKit
+ (Brain / StandingSignalScheduler)    (per-corpus ingest queue)
 ```
 
 **Depends on:** SubstrateLib (for `HLC` and `HLCGenerator`) and
@@ -103,14 +107,44 @@ PersistenceKit (for the `Storage` surface the PersistenceKit and
 InMemory backends use). It depends on nothing else; in particular it
 does **not** import ConvergenceKit (§ 8).
 
-**Consumed by:** GeniusLocusKit only. The Brain's
-`StandingSignalScheduler` owns a single `QueueKit` instance backed by
-the PersistenceKit backend over in-memory storage, and uses it as the
-serial emission lane for one estate (it imports `QueueKit`, `Job`,
-`JobID`, `StreamID`, `WireFormat`, and `PersistenceKitBackend`). Per
-the composition rule, NeuronKit and CognitionKit never import QueueKit
-directly; the queue is reached only through GeniusLocusKit's Brain
-layer.
+**Consumed by:** GeniusLocusKit and CorpusKit.
+
+- **GeniusLocusKit** — the Brain's `StandingSignalScheduler` owns a single
+  `QueueKit` instance backed by the PersistenceKit backend over in-memory
+  storage, and uses it as the serial emission lane for one estate's standing
+  signals (it imports `QueueKit`, `Job`, `JobID`, `StreamID`, `WireFormat`,
+  and `PersistenceKitBackend`).
+- **CorpusKit** — a `Corpus` owns a per-corpus `QueueKit` instance (same
+  transient in-memory PersistenceKit backend) as its **ingest queue**: a
+  Corpus enqueues capture work and drains it on its own bounded worker pool
+  (the encode pipeline — see `CORPUSKIT_SPEC.md`). This relocated from
+  GeniusLocusKit: the encode queue formerly lived in GLK's `EncodeIntake`;
+  CorpusKit is a standalone database substrate and now owns its own ingest
+  queue + drain + worker pool, talking to QueueKit directly. GLK only
+  orchestrates (it enqueues into the Corpus and coordinates the room rollup).
+- **One per-estate queue, many streams** (ADR-021 Decision 7). mootx01's
+  consumers share **one queue per estate**, discriminated by `stream_id`
+  (`encode`, `dreaming`, `signals`), rather than standing up a separate queue
+  instance per consumer. Each consumer uses a **stream-scoped drain** (the
+  additive `drainAvailable(stream:)` / complete / `pendingCount(stream:)`
+  capability, ADR-021 Decision 7, landing in its Phase 1) so it claims only its
+  own stream. Recall verbs enqueue the co-recalled drawer
+  set under `stream="dreaming"`; the governor (resident) or a forked
+  `mootx01 dream` process (stdio) drains that stream and hands the items to
+  NeuronKit's dreaming decide. NeuronKit never imports QueueKit — GLK owns the
+  queue, preserving the composition rule.
+- **Backend by estate storage class (mootx01 selection, not a QueueKit rule).**
+  QueueKit offers all backends (RAM, maildir, SQL, Postgres); mootx01 *selects*
+  the one matching the estate so its private, cipher-encrypted control plane is
+  confidential and tamper-resistant: an **encrypted SQLite queue DB** beside
+  the estate for SQLite estates (separate writer ⇒ no contention with the
+  estate's content writer; encrypted; integrity), **Postgres** for Postgres
+  estates, **InMemory** for ephemeral. mootx01 does **not** select the maildir
+  (a plaintext, injectable POSIX dir is wrong for private estate data) — the
+  maildir remains available for other SDK consumers.
+
+Per the composition rule, NeuronKit and CognitionKit never import QueueKit
+directly; queue behavior is reached only through the kit that owns it.
 
 ## § 4 — Invariants
 
@@ -131,6 +165,19 @@ rests on POSIX `rename(2)` atomicity (exactly one caller gets return
 value `0` for a given source path); on the PersistenceKit backend it
 rests on a `.serializable` transaction whose claim update is guarded
 by a `status = "new"` predicate.
+
+The PersistenceKit claim is **single-pass**: one `drainAvailable()` mints
+one batch session id, issues ONE guarded bulk update
+(`status = "new" → "cur"`, stamping that session on every claimed row),
+then reads the claimed rows back by that unique session in HLC order.
+This is O(N) in queue depth — the prior per-row claim (one guarded update
+per job, each a full predicate scan) was O(N²) and the dominant cost of a
+bulk import. No-double-claim still holds: a concurrent drainer mints a
+different session, so the two partition the `new` frontier (each row is
+flipped to `cur` exactly once, by exactly one session); reading back by
+session, not by `status = "cur"`, makes the partition robust under any
+isolation model. The batch sharing one session is the basis for the
+single-pass completion below.
 
 **I-4 (causal ordering):** claimed jobs are returned in HLC
 (`submittedAt`) order — `(physicalTime, logicalCount, nodeID)`
@@ -158,7 +205,7 @@ modification time as a crash-cleanup heuristic only, not for
 ordering.)
 
 **I-9 (backend opacity):** the three backends are observably
-indistinguishable through the public facade. Adding a fourth backend
+indistinguishable through the public Interface. Adding a fourth backend
 is additive — it conforms to `QueueBackend` without changing the
 public API or existing conformances.
 
@@ -216,6 +263,22 @@ in `cur/` — recovery is deterministic. On the PersistenceKit backend
 the single `.serializable` update sets `status`, `signal_status`, and
 `artifacts` together. `reply()` on a job that is not in-flight throws
 `jobNotFound`.
+
+**B-4a (single-pass batch completion):** the PersistenceKit backend offers
+`completeSession(_:status:)` (Rust `complete_session`) — the completion twin
+of the single-pass claim (I-3). It flips EVERY still-`cur` job stamped with a
+given batch session to a terminal `status` in ONE guarded bulk update
+(`session_id = X AND status = "cur"`), so a drain worker that claimed a whole
+batch under one session retires it in O(N), not the O(N²) of N per-job
+`reply()` calls. The guard `status = "cur"` leaves jobs already completed
+individually (e.g. an undecodable job replied `.blocked` before the batch call)
+untouched; artifacts are empty (the batch fast path carries none — a job that
+needs artifacts uses per-job `reply()`). Non-terminal status is rejected with
+`invalidTerminalStatus` (I-7), as in B-4. It is a PersistenceKit-backend
+optimization, not a `QueueBackend` requirement: only that backend drives the
+encode drain. The `QueueKit` Interface exposes it as `reply(session:status:)`,
+returning the count completed (0 when the mounted backend lacks the fast path,
+so the caller falls back to per-job `reply()`).
 
 **B-5 (inspection reads):** `inFlight()` returns the jobs currently in
 `cur` state; `completed(streamID:)` returns the jobs in `done` state,
@@ -308,6 +371,53 @@ PersistenceKit backend is behaviour-conformant, not byte-identical,
 since it stores rows rather than files.)
 
 ## Changelog
+
+### 1.4.1 -- 2026-06-25
+Corrected the § 3 dreaming-queue note to ADR-021 Decision 7 (the design moved
+from a separate dreaming maildir to one per-estate queue with streams). mootx01
+shares **one queue per estate**, streamed by `stream_id` (`encode`/`dreaming`/
+`signals`), each consumer using a **stream-scoped drain** (additive
+`drainAvailable(stream:)` capability, lands in ADR-021 Phase 1; the
+`(stream_id, status)` index already anticipates it). mootx01 selects the
+backend by estate storage class — encrypted SQLite queue DB / Postgres /
+InMemory, **never the maildir** for a private estate (plaintext + injectable);
+the maildir stays a valid backend for other SDK consumers. Doc only; no
+protocol/byte-identity change.
+
+### 1.4.0 -- 2026-06-25
+Additive (ADR-021 Phase 0 — doc only). Documented a second GeniusLocusKit-owned
+consumer in § 3: the **dreaming queue** (recall-driven dreaming v2). Recall
+verbs enqueue the co-recalled drawer set; the resident governor or a forked
+`mootx01 dream` process drains it and feeds NeuronKit's dreaming decide.
+[Superseded by 1.4.1 — the separate-maildir framing was corrected to the
+one-per-estate-queue / encrypted-backend model.] See NEURONKIT_SPEC § 12.
+
+### 1.3.0 -- 2026-06-25
+Additive (T6 — drain status): exposed a public `pendingCount` depth probe on the
+Interface (passthrough to the existing `QueueBackend.pendingCount`). Read-only; no
+new invariant, no protocol/trait change, no effect on byte-identity. Companion to
+the public `inFlight` probe so a status reader can observe both frontiers without
+claiming or draining.
+
+### 1.2.0 -- 2026-06-23
+Single-pass claim and batch completion (O(N²)→O(N) bulk import). The
+PersistenceKit backend's `drainAvailable()` now claims in one guarded bulk
+update under a per-call batch session and reads the claim back by that session,
+instead of one guarded update per job (I-3 amended; no-double-claim preserved).
+Added `completeSession(_:status:)` / `complete_session` — a single-pass batch
+completion that retires every `cur` job of a session in one update (B-4a),
+exposed on the `QueueKit` Interface as `reply(session:status:)`. Both replace the
+per-job O(N) predicate scans that made a 40k import O(N²) and pinned one core.
+PersistenceKit-backend optimization only; the `QueueBackend` contract,
+Filesystem backend, and byte-identity (C-7) are unchanged.
+
+### 1.1.0 -- 2026-06-23
+CorpusKit added as a second consumer. The encode/ingest queue relocated from
+GeniusLocusKit's `EncodeIntake` into CorpusKit: a `Corpus` now owns a
+per-corpus `QueueKit` ingest queue + drain worker pool (the encode pipeline).
+Updated the "Consumed by" section and the consumer topology to list both
+GeniusLocusKit (standing-signal scheduler) and CorpusKit (ingest queue). No
+change to QueueKit's own contract, invariants, or API.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

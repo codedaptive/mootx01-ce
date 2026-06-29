@@ -257,4 +257,50 @@ struct SQLiteBasicTests {
         #expect(v2Version == 2)
         await storage.close()
     }
+
+    /// Opening a FRESH database directly at a schema whose latest table already
+    /// declares the added column must not fail. The open path creates every
+    /// table at the latest schema first, then replays migrations from version 0
+    /// — so the v1→v2 addColumn targets a column that already exists. The
+    /// emitter must treat addColumn idempotently (ADD COLUMN IF NOT EXISTS
+    /// semantics), mirroring CREATE TABLE IF NOT EXISTS. Regression for the
+    /// "duplicate column name" failure on fresh DBs.
+    @Test func freshOpenWithAddColumnMigrationIsIdempotent() async throws {
+        let storage = try makeStorage()
+        let schemaV2 = SchemaDeclaration(
+            kitID: "TestKit",
+            version: 2,
+            tables: [
+                TableDeclaration(
+                    name: "drawers",
+                    columns: [
+                        .uuid("row_id"),
+                        .bitmap("adjective"),
+                        .bitmap("operational"),
+                        .bitmap("provenance"),
+                        .text("verbatim"),
+                        .timestamp("captured_at"),
+                        // Latest schema already carries the column the migration adds.
+                        .text("notes", nullable: true)
+                    ],
+                    primaryKey: ["row_id"]
+                )
+            ],
+            migrations: [
+                Migration(
+                    fromVersion: 1,
+                    toVersion: 2,
+                    operations: [
+                        .addColumn(table: "drawers", column: .text("notes", nullable: true))
+                    ]
+                )
+            ]
+        )
+        // Direct open on a brand-new file — the addColumn migration replays
+        // against a table that already has `notes`. Must succeed, not throw.
+        try await storage.open(schema: schemaV2)
+        let version = try await storage.currentSchemaVersion()
+        #expect(version == 2)
+        await storage.close()
+    }
 }

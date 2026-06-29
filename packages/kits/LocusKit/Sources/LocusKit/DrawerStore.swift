@@ -296,8 +296,7 @@ public actor DrawerStore {
         // unconditional overhead added.
         let startTs = Date().timeIntervalSince1970
 
-        try Self.validateNonEmpty(d.wing, label: "wing")
-        try Self.validateNonEmpty(d.room, label: "room")
+        try Self.validateNonEmpty(d.parentNodeId, label: "parentNodeId")
         try Self.validateNonEmpty(d.content, label: "content")
         try Self.validateNonEmpty(d.addedBy, label: "addedBy")
         try Self.validateNonEmpty(d.embeddingModelID, label: "embeddingModelID")
@@ -333,16 +332,19 @@ public actor DrawerStore {
     /// transaction's write lock so the audit row's prior_value is
     /// exactly what the flip overwrites. State nibble (bits 0-3) is
     /// cleared and ORed to State.superseded.rawValue; upper axes preserved.
+    /// Supersession cascade as one atomic transaction.
+    ///
+    /// Inserts the successor drawer + its genesis audit event and the
+    /// `supersedes` tunnel in a **single** `storage.transaction(isolation:
+    /// .serializable)` so both writes succeed or both roll back.  If the
+    /// tunnel insert fails no orphaned successor row is left in the database.
+    ///
+    /// The predecessor's state flip (`active → superseded`) is a separate
+    /// operation via `mutateState` and opens its own transaction.  It is NOT
+    /// part of the successor+tunnel transaction because the gate automaton
+    /// (`AuditGate`) must validate the state transition independently, and
+    /// nesting two transactions is not supported in PersistenceKit v1.0.
     private func addDrawerWithCascade(_ d: Drawer, priorID: String) async throws {
-        // Insert the successor and read the predecessor's location, then
-        // file the supersedes tunnel — these are the row writes that
-        // stay direct. The predecessor's state flip is NOT done here:
-        // it is a state transition (active --supersede--> superseded),
-        // so it goes through mutateState below, which validates it and
-        // appends the sealed audit event. The earlier code smuggled the
-        // state through a manual adjective-bitmap write + bitmap_audit
-        // row, bypassing the automaton (F8 anti-pattern, same as the
-        // withdraw bug); the write gate now forbids that.
         // Read the predecessor's location for the tunnel before the
         // write transaction (a plain read; the row exists).
         let priorRows = try await storage.rowStore.query(
@@ -352,20 +354,39 @@ public actor DrawerStore {
         guard let priorRow = priorRows.first else {
             throw LocusKitError.drawerNotFound(id: priorID)
         }
-        let priorWing = Self.string(priorRow["wing"])
-        let priorRoom = Self.string(priorRow["room"])
+        // Resolve wing/room names from the node tree for the tunnel.
+        let priorParentNodeId = Self.string(priorRow["parent_node_id"])
+        let nodeNames = try await resolveNodeNames(parentNodeIds: [d.parentNodeId, priorParentNodeId])
+        let sourceNames = nodeNames[d.parentNodeId] ?? (wing: "", room: "")
+        let priorNames = nodeNames[priorParentNodeId] ?? (wing: "", room: "")
         let tunnel = Tunnel(
             id: "supersedes:\(d.id):\(priorID)",
-            sourceWing: d.wing, sourceRoom: d.room, sourceDrawerId: d.id,
-            targetWing: priorWing, targetRoom: priorRoom, targetDrawerId: priorID,
+            sourceWing: sourceNames.wing, sourceRoom: sourceNames.room, sourceDrawerId: d.id,
+            targetWing: priorNames.wing, targetRoom: priorNames.room, targetDrawerId: priorID,
             label: "supersedes", kind: .supersedes,
             addedBy: d.addedBy, filedAt: d.filedAt
         )
-        // Emit the successor's gated capture (genesis) event + insert its
-        // projection row, then file the supersedes tunnel.
-        try await gatedCapture(d, now: d.filedAt)
-        _ = try await storage.rowStore.insert(
-            table: "tunnels", values: Self.tunnelValues(tunnel))
+        // Pre-compute the capture body (reads actor-isolated HLC / vocabulary
+        // before the @Sendable closure).  PersistenceKit v1.0 has no nested
+        // transaction support ("No nested transactions. No savepoints in v1.0"
+        // — Transaction.swift), so we cannot call gatedCapture (which opens
+        // its own transaction) inside an outer transaction.  Instead we obtain
+        // the work closure here, then execute it together with the tunnel INSERT
+        // in a single outer serializable transaction.  If the tunnel INSERT
+        // fails, the entire transaction rolls back — no orphaned successor
+        // drawer is left in the database (planned security hardening — B1,
+        // finding #3).
+        let captureBody = try gatedCaptureBody(d, now: d.filedAt)
+        let tunnelValues = Self.tunnelValues(tunnel)
+        try await storage.transaction(isolation: .serializable) { txn in
+            // 1. Insert the successor drawer projection row + genesis audit event.
+            try await captureBody(txn)
+            // 2. File the supersedes tunnel in the same transaction so both
+            //    writes land atomically.  If the tunnel insert throws, the
+            //    transaction rolls back and the successor row is also removed.
+            _ = try await txn.rowStore.insert(
+                table: "tunnels", values: tunnelValues)
+        }
 
         // Validated state flip of the predecessor through the gate.
         try await mutateState(
@@ -382,7 +403,7 @@ public actor DrawerStore {
     /// lineageID, excluding the row being inserted. Uses the
     /// generated state-cluster column so the filter is an indexed
     /// equality range rather than an inline bit expression.
-    private func findActivePredecessor(
+    internal func findActivePredecessor(
         lineageID: UUID, excludingID: String
     ) async throws -> String? {
         let rows = try await storage.rowStore.query(
@@ -435,13 +456,48 @@ public actor DrawerStore {
         return rows.first.map { Self.string($0["id"]) }
     }
 
+    /// Return the ids of every drawer sharing the same lineage chain as
+    /// the drawer identified by `drawerId`.
+    ///
+    /// The lineage chain is all rows whose `lineageID` column matches the
+    /// target drawer's `lineageID`. No state filter is applied — active,
+    /// superseded, and tombstoned rows are all returned. The target
+    /// drawer's own id is included in the result.
+    ///
+    /// Returns an empty array when `drawerId` does not exist (no row to
+    /// read `lineageID` from). Throws on storage errors.
+    public func lineageChain(for drawerId: String) async throws -> [String] {
+        // Step 1: look up the drawer's lineageID.
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+            orderBy: [], limit: 1, offset: nil,
+            columns: ["lineageID"]
+        )
+        guard let row = rows.first,
+              case .text(let rawLineage) = row["lineageID"],
+              !rawLineage.isEmpty else {
+            return []
+        }
+        // Step 2: query all drawers sharing this lineageID.
+        let chain = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "lineageID"), .text(rawLineage)),
+            orderBy: [], limit: nil, offset: nil,
+            columns: ["id"]
+        )
+        return chain.map { Self.string($0["id"]) }
+    }
+
     /// Look up a drawer by id. Returns nil on miss.
     public func getDrawer(id: String) async throws -> Drawer? {
         let rows = try await storage.rowStore.query(
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "id"), .text(id))
         )
-        return try rows.first.map(Self.drawerFromRow)
+        guard let row = rows.first else { return nil }
+        let drawers = try decodeDrawerRows([row])
+        return drawers.first
     }
 
     /// Batch by-id load. Returns the drawers whose ids appear in `ids`,
@@ -473,7 +529,7 @@ public actor DrawerStore {
     /// `.structured`. `drawerFromRow` decodes an absent `content` to "" via
     /// `string(_:)`, so a structured drawer carries an empty body by design.
     private static let structuredDrawerColumns: [String] = [
-        "id", "wing", "room", "sourceFile", "chunkIndex", "addedBy",
+        "id", "parent_node_id", "sourceFile", "chunkIndex", "addedBy",
         "filedAt", "eventTime", "embeddingModelID", "tombstonedAt",
         "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
@@ -518,7 +574,7 @@ public actor DrawerStore {
                 where: .in(Column(table: "drawers", name: "id"), values),
                 orderBy: [], limit: nil, offset: nil, columns: columns
             )
-            result.append(contentsOf: try rows.map(Self.drawerFromRow))
+            result.append(contentsOf: try decodeDrawerRows(rows))
             index = end
         }
         return result
@@ -526,29 +582,32 @@ public actor DrawerStore {
 
     /// All non-tombstoned drawers in a wing, ordered by filedAt.
     ///
+    /// Resolves via the node tree: finds the wing node by lookup_name,
+    /// then finds all room nodes under it, then queries drawers by
+    /// parent_node_id IN (room node IDs).
+    ///
     /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
     /// `locuskit.drawer.query_result_count` (tag: query="wing") when
     /// monitoring is enabled.
     public func drawersIn(wing: String) async throws -> [Drawer] {
         let startTs = Date().timeIntervalSince1970
-        // Use querySkipCorrupt so rows with corrupt timestamp columns (e.g.
-        // a poison filedAt from a bad Vault import or millisecond-vs-seconds
-        // confusion) are skipped rather than bricking the entire wing scan.
+        let roomNodeIds = try await roomNodeIdsInWing(wingName: wing)
+        guard !roomNodeIds.isEmpty else {
+            emitDrawerQuery(
+                start: startTs, now: Date().timeIntervalSince1970,
+                resultCount: 0, estateTag: estateUuid.uuidString, queryLabel: "wing")
+            return []
+        }
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
-                .eq(Column(table: "drawers", name: "wing"), .text(wing)),
+                .in(Column(table: "drawers", name: "parent_node_id"), roomNodeIds.map { TypedValue.text($0) }),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil, columns: nil
         )
-        // decodeDrawerRowsSkipCorrupt handles any remaining drawerFromRow failures
-        // (e.g. corrupt lineageID UUID) that survived the storage-level skip.
-        let result = try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "drawersIn(wing:)")
-        // Emit query metrics at the operation boundary.
-        // query="wing" labels this as a per-wing query path for per-path
-        // latency dashboards. Off-path: single Atomic<Bool> load.
+        let result = try decodeDrawerRowsResilient(rows, scan: "drawersIn(wing:)")
         emitDrawerQuery(
             start: startTs, now: Date().timeIntervalSince1970,
             resultCount: result.count,
@@ -560,23 +619,31 @@ public actor DrawerStore {
 
     /// All non-tombstoned drawers in a wing/room pair, ordered by filedAt.
     ///
+    /// Resolves via the node tree: finds the room node by lookup_name
+    /// under the wing node, then queries drawers by parent_node_id.
+    ///
     /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
     /// `locuskit.drawer.query_result_count` (tag: query="wing_room") when
     /// monitoring is enabled.
     public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
         let startTs = Date().timeIntervalSince1970
+        let roomNodeId = try await roomNodeId(wingName: wing, roomName: room)
+        guard let roomNodeId else {
+            emitDrawerQuery(
+                start: startTs, now: Date().timeIntervalSince1970,
+                resultCount: 0, estateTag: estateUuid.uuidString, queryLabel: "wing_room")
+            return []
+        }
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
-                .eq(Column(table: "drawers", name: "wing"), .text(wing)),
-                .eq(Column(table: "drawers", name: "room"), .text(room)),
+                .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomNodeId)),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil, columns: nil
         )
-        let result = try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "drawersIn(wing:room:)")
-        // query="wing_room" labels this as the per-wing/room path.
+        let result = try decodeDrawerRowsResilient(rows, scan: "drawersIn(wing:room:)")
         emitDrawerQuery(
             start: startTs, now: Date().timeIntervalSince1970,
             resultCount: result.count,
@@ -601,7 +668,7 @@ public actor DrawerStore {
             ],
             limit: nil, offset: nil, columns: nil
         )
-        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "drawersBySource(file:)")
+        return try decodeDrawerRowsResilient(rows, scan: "drawersBySource(file:)")
     }
 
     /// Full-corpus scan ordered by filedAt, including tombstoned rows.
@@ -630,10 +697,30 @@ public actor DrawerStore {
     ///     filedAt order; fetching the whole estate and discarding the tail
     ///     is O(N_estate), this is O(min(N_estate, limit)).
     ///
+    ///   - `direction` controls the `ORDER BY` direction for both sort keys.
+    ///     Defaults to `.ascending` (oldest-first, preserving existing behaviour
+    ///     for all callers that do not pass this parameter). The recall path
+    ///     passes `.descending` so the bounded 256-row candidate window retains
+    ///     the NEWEST drawers; without this, estates with >256 drawers silently
+    ///     exclude every drawer filed after the 256th-oldest (P4-secfix).
+    ///
+    ///     **Deterministic total order:** the query uses `(filedAt, id)` as a
+    ///     compound sort key, both in `direction`. `id` is the declared TEXT
+    ///     primary key of the drawers table — present in SQLite, PostgreSQL,
+    ///     and InMemory backends — so the order is portable and deterministic.
+    ///     Rows with the same `filedAt` are broken by `id`, so the DESC result
+    ///     is the exact byte-for-byte reverse of the ASC result for any fixed
+    ///     dataset. This matches the Rust port's `(filed_at, id)` ordering
+    ///     (c-recall-portable fix; replaces SQLite-only rowid tie-break).
+    ///
     /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
     /// `locuskit.drawer.query_result_count` (tag: query="all") when
     /// monitoring is enabled.
-    public func allDrawers(hydrationLevel: HydrationLevel, limit: Int?) async throws -> [Drawer] {
+    public func allDrawers(
+        hydrationLevel: HydrationLevel,
+        limit: Int?,
+        direction: OrderDirection = .ascending
+    ) async throws -> [Drawer] {
         let startTs = Date().timeIntervalSince1970
         // No-blob projection for the structured/bitmap tiers; full read for `.full`.
         // Mirrors the same column set used by `getDrawers(ids:hydrationLevel:)`.
@@ -648,13 +735,25 @@ public actor DrawerStore {
         // a poison filedAt like "+58432-..." from a Vault import where a
         // millisecond epoch was stored where seconds were expected) are skipped
         // at the storage cursor level and do not abort the entire corpus scan.
+        //
+        // Compound sort key: (filedAt, id) in `direction`. The id secondary
+        // term breaks ties within the same filedAt so the result is a
+        // deterministic total order — DESC is exactly reverse(ASC). `id` is
+        // the declared TEXT primary key of the drawers table, present in all
+        // three backends (SQLite, PostgreSQL, InMemory). This replaces the
+        // previous SQLite-only `rowid` pseudo-column, which is undefined in
+        // PostgreSQL and caused an undefined-column error on Postgres estates
+        // (c-recall-portable fix). Mirrors Rust's (filed_at, id) ordering.
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: nil,
-            orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: direction),
+                OrderClause(column: Column(table: "drawers", name: "id"), direction: direction),
+            ],
             limit: limit.map { $0 }, offset: nil, columns: columns
         )
-        let result = try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "allDrawers(hydrationLevel:limit:)")
+        let result = try decodeDrawerRowsResilient(rows, scan: "allDrawers(hydrationLevel:limit:direction:)")
         // query="all" labels this as the full-corpus path.
         // This is the most expensive drawer read and the one most worth
         // monitoring for latency regression in large estates.
@@ -743,8 +842,28 @@ public actor DrawerStore {
     /// capture may set — is decomposed from the drawer's bitmaps into a
     /// FieldWrite. This makes the audit log self-sufficient from birth
     /// (cold-rebuild and federation both need the creation event).
-    private func gatedCapture(_ d: Drawer, now: Date) async throws {
+    /// Build the `@Sendable` closure that performs the row INSERT and audit-gate
+    /// work for a drawer capture, reading all actor-isolated state (HLC stamp,
+    /// vocabulary, estate UUID) eagerly before the closure is constructed so
+    /// the result is safe to call inside a `storage.transaction` block.
+    ///
+    /// This separation exists because `PersistenceKit` v1.0 does not support
+    /// nested transactions (see `Transaction.swift`: "No nested transactions.
+    /// No savepoints in v1.0"). Callers that need a drawer INSERT to share a
+    /// transaction with another storage write (e.g. `addDrawerWithCascade`
+    /// bundling the successor INSERT and the supersedes tunnel INSERT into one
+    /// atomic commit) call this method to obtain the work body, then execute
+    /// it inside a single outer `storage.transaction(isolation: .serializable)`.
+    ///
+    /// `gatedCapture` is the single-drawer path (no cascade); it simply wraps
+    /// the result of this method in its own transaction.
+    private func gatedCaptureBody(
+        _ d: Drawer, now: Date
+    ) throws -> @Sendable (any StorageTransaction) async throws -> Void {
         let rowUuid = try Self.requireUuid(d.id, label: "id")
+        // All actor-isolated reads happen here, before the @Sendable closure
+        // is formed.  HLC.send() both reads and mutates the actor-isolated
+        // hybrid logical clock, so it must be called outside the closure.
         let estate = estateUuid
         let vocab = vocabulary
         let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
@@ -764,13 +883,15 @@ public actor DrawerStore {
             writes(for: .operational, from: d.operationalBitmap) +
             writes(for: .provenance, from: d.provenance)
         let anchor = SubstrateTypes.LatticeAnchor.udc(d.udcCode)
-
         let nowTs = now.timeIntervalSince1970
         let estateTag = estate.uuidString
-        try await storage.transaction(isolation: .serializable) { txn in
+
+        // The returned closure captures only Sendable values.  `Drawer` is
+        // Sendable; all computed values above (UUID, Vocabulary, [FieldWrite],
+        // LatticeAnchor, HLCTimestamp, Double, String) are Sendable.
+        return { txn in
             _ = try await txn.rowStore.insert(
                 table: "drawers", values: Self.drawerValues(d))
-
             let result = AuditGate.admit(
                 estateUuid: estate, rowId: rowUuid, nounType: .drawer, verb: .capture,
                 prior: nil, priorLatticeAnchor: nil, writes: allWrites,
@@ -782,6 +903,73 @@ public actor DrawerStore {
             case .failure(let v):
                 emitGateReject(now: nowTs, estateTag: estateTag, reason: "\(v)")
                 throw LocusKitError.invalidContent("capture rejected by gate: \(v)")
+            }
+        }
+    }
+
+    /// File a new drawer through the write gate inside a single serializable
+    /// transaction.  For the non-cascade path (no active predecessor).
+    private func gatedCapture(_ d: Drawer, now: Date) async throws {
+        let body = try gatedCaptureBody(d, now: now)
+        try await storage.transaction(isolation: .serializable, body)
+    }
+
+    /// Insert a batch of pre-validated fresh drawers in a single transaction.
+    ///
+    /// Each drawer MUST be a fresh insert with no active predecessor for its
+    /// lineage. The caller (Estate.captureBatch) is responsible for pre-checking
+    /// that `findActivePredecessor` returns nil for each drawer before passing
+    /// it here. Drawers with active predecessors must go through the per-item
+    /// `addDrawer` path so supersession cascades correctly.
+    ///
+    /// All INSERTs and audit events share ONE `storage.transaction()` — the
+    /// entire batch lands as a single SQLite commit, eliminating per-row fsyncs
+    /// and reducing a 40K-drawer import from ~34 min to ~30 sec.
+    ///
+    /// HLC stamps are computed BEFORE entering the transaction closure to respect
+    /// Swift 6's actor-isolation rules (the HLC is actor-state; @Sendable closures
+    /// cannot access actor-isolated properties directly).
+    internal func insertFreshBatch(_ drawers: [Drawer], now: Date) async throws {
+        guard !drawers.isEmpty else { return }
+        let estateID = estateUuid
+        let vocab = vocabulary
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+
+        // Pre-compute HLC stamps and row UUIDs outside the @Sendable transaction
+        // closure (both access actor-isolated state: hlc and UUID parsing).
+        let stamps = drawers.map { _ in hlc.send(now: nowMillis) }
+        let rowUuids = try drawers.map { d in try Self.requireUuid(d.id, label: "id") }
+
+        // All INSERTs + audit events in one transaction — single fsync under WAL.
+        try await storage.transaction(isolation: .serializable) { txn in
+            for (d, (stamp, rowUuid)) in zip(drawers, zip(stamps, rowUuids)) {
+                _ = try await txn.rowStore.insert(
+                    table: "drawers", values: Self.drawerValues(d))
+
+                // Assemble FieldWrites for all three bitmap columns.
+                func writes(for column: FieldSlot.Column, from value: Int64) -> [FieldWrite] {
+                    Self.declaredSlots(for: column).map { slot in
+                        FieldWrite(slot: slot,
+                                   value: BitField.extractField(value, shift: slot.shift, width: slot.width))
+                    }
+                }
+                let allWrites =
+                    writes(for: .adjective, from: d.adjectiveBitmap) +
+                    writes(for: .operational, from: d.operationalBitmap) +
+                    writes(for: .provenance, from: d.provenance)
+                let anchor = SubstrateTypes.LatticeAnchor.udc(d.udcCode)
+
+                let result = AuditGate.admit(
+                    estateUuid: estateID, rowId: rowUuid, nounType: .drawer, verb: .capture,
+                    prior: nil, priorLatticeAnchor: nil, writes: allWrites,
+                    afterLatticeAnchor: anchor, vocabulary: vocab, hlc: stamp, actor: d.addedBy)
+                switch result {
+                case .success(let e):
+                    try await txn.auditLog.append(e)
+                case .failure(let v):
+                    throw LocusKitError.invalidContent(
+                        "batch capture gate rejected for drawer \(d.id): \(v)")
+                }
             }
         }
     }
@@ -880,45 +1068,38 @@ public actor DrawerStore {
         }
     }
 
-    /// Expunge a row: tombstone the state, set the
-    /// `dreaming_recalc_required` worklist marker (adjective bit 26)
-    /// synchronously, zero the content blob, and stamp `tombstonedAt`,
-    /// all in one transaction. Implements the cookbook §10.5 expunge
-    /// verb's storage-layer postconditions (atomic content erasure +
-    /// state transition + flag set); the cross-kit RAG vector delete
-    /// is GLK's orchestration responsibility — see §B-2a.
-    /// Aggregates are deliberately untouched, per §9.5.1 and §10.5
-    /// (they are already de-identified statistical roll-ups).
+    /// Lineage-wide expunge: tombstone the target drawer AND every
+    /// version sharing its lineageID. For each version: set state to
+    /// Tombstoned with dreaming_recalc_required (bit 26), zero the
+    /// content blob, stamp tombstonedAt, and record the drawer id in
+    /// the erasure ledger (ADR-017 §17). Already-tombstoned siblings
+    /// have their content re-zeroed and erasure ledger entry ensured
+    /// but are not re-gated.
     ///
-    /// Routes through `AuditGate.admit` with two FieldWrites in a
-    /// single call: the state slot (adjective bits 0-5, target = 33
-    /// = tombstoned) and the flags slot (adjective bits 24-26, with
-    /// bit 26 set and bits 24-25 preserved from prior). RowVerb is
-    /// `.tombstone`. The gate's verb-state-consistency check refuses
-    /// any prior state from which `.tombstone` does not legally
-    /// transition to `.tombstoned`; in particular `accepted →
-    /// tombstoned` is intentionally absent from
-    /// `RowStateAutomaton.transitions` (cookbook §9.5 S-3: audit-grade
-    /// rows survive intact), so expunging an accepted row throws
-    /// `LocusKitError.invalidContent`.
+    /// Routes the target drawer through `AuditGate.admit` (the primary
+    /// audit event). Lineage siblings are scrubbed and gated
+    /// individually. The gate's verb-state-consistency check refuses
+    /// `accepted → tombstoned` (S-3: audit-grade rows survive intact).
     ///
-    /// When `sealAudit` is `true` (default), the audit event is
-    /// appended atomically inside the same transaction as the row
-    /// mutation — this is the behaviour for direct callers that own
-    /// the full expunge. When `sealAudit` is `false`, the audit event
-    /// is NOT appended (the caller must call `sealExpungeAudit(_:now:)`
-    /// after completing its own orchestration steps). The gate-produced
-    /// event is returned in both cases so the caller has it ready for
-    /// the deferred seal. Returns nil only when `sealAudit` is true
-    /// (the event was sealed inside the transaction and no further
-    /// action is required from the caller).
+    /// When `sealAudit` is `true` (default), the audit event for the
+    /// target drawer is appended atomically inside the transaction.
+    /// When `false`, the event is returned for deferred sealing by
+    /// the GLK orchestration path (§B-2a). Returns nil when
+    /// `sealAudit` is true.
+    ///
+    /// Optionally accepts `commitmentKey` / `commitmentKeyVersion` to
+    /// compute a keyed commitment (HMAC-SHA256) over the target
+    /// drawer's content before scrubbing. When nil, the commitment
+    /// step is skipped (key infrastructure not yet provisioned).
     @discardableResult
     public func expungeGated(
         drawerId: String,
         changedBy: String,
         reason: String? = nil,
         now: Date = Date(),
-        sealAudit: Bool = true
+        sealAudit: Bool = true,
+        commitmentKey: [UInt8]? = nil,
+        commitmentKeyVersion: Int = 0
     ) async throws -> AuditEvent? {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
@@ -928,6 +1109,18 @@ public actor DrawerStore {
         let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
         let estate = estateUuid
         let vocab = vocabulary
+
+        // Resolve the full lineage chain before entering the
+        // transaction. All members — active, superseded, tombstoned —
+        // are in scope for content scrub.
+        let lineageIds = try await lineageChain(for: drawerId)
+
+        // Pre-stamp HLC values for each sibling outside the Sendable
+        // closure (actor-isolated hlc.send cannot be called inside).
+        // Use a plain [HLC] array indexed in sync with siblingIds.
+        let siblingIds = lineageIds.filter { $0 != drawerId }
+        let siblingStamps: [HLC] = siblingIds.map { _ in hlc.send(now: nowMillis) }
+
         // ──────────────────────────────────────────────────────────────
         // Quis custodiet ipsos custodes? Who watches the watchmen's
         // bitmaps? The SwiftSyntax Guardian does — tools/guardian.
@@ -949,12 +1142,8 @@ public actor DrawerStore {
         let flagsSlot = FieldSlot(column: .adjective, shift: 24, width: 3,
                                   label: "flags")
 
-        // When sealAudit is false the gate-produced event is returned to
-        // the caller (GLK VerbSurface) so it can be sealed after its own
-        // orchestration steps. The transaction returns the event in both
-        // cases; we thread it back via the generic-return overload so the
-        // mutable-capture concurrency constraint is satisfied.
         let capturedEvent: AuditEvent = try await storage.transaction(isolation: .serializable) { txn in
+            // ── Step 1: gate and scrub the target drawer ──
             let rows = try await txn.rowStore.query(
                 table: "drawers",
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
@@ -999,24 +1188,18 @@ public actor DrawerStore {
             case .failure(let v):
                 throw LocusKitError.invalidContent("expunge rejected by gate: \(v)")
             }
-            // Thread the caller-supplied reason into the event so it is
-            // persisted in the audit table's `reason` column.
             let event = gateEvent.withReason(reason)
 
+            // Keyed commitment params are reserved for a future
+            // attestation table (NT-F2 wave 2). The KeyedCommitment
+            // type is landed; the persistence surface is not. Params
+            // accepted here so callers can provision keys ahead of
+            // the storage wave without a signature change.
+            _ = commitmentKey
+            _ = commitmentKeyVersion
+
             // Materialized projection: write the merged adjective
-            // snapshot, zero the content blob, stamp tombstonedAt — all
-            // in the same transaction as the gated event append. Per
-            // cookbook §10.5: "Content blob zeroized in the same
-            // transaction as the state transition (atomic; verbatim
-            // sacred only up to expunge)."
-            //
-            // TypedValue.timestamp is the canonical door for all
-            // timestamp column writes (PersistenceKit serialises it as
-            // ISO-8601 with fractional seconds, matching every other
-            // date column in the schema and the read-back path in
-            // drawerValues(_:) at line 2489). Using a bare
-            // ISO8601DateFormatter() here would be a bespoke side-door
-            // and a one-door violation.
+            // snapshot, zero the content blob, stamp tombstonedAt.
             _ = try await txn.rowStore.update(
                 table: "drawers",
                 values: [
@@ -1026,19 +1209,118 @@ public actor DrawerStore {
                 ],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
+
+            // Record head drawer in the erasure ledger (ADR-017 §17).
+            try await ErasureLedgerOps.recordErasure(
+                rowStore: txn.rowStore,
+                drawerId: drawerId,
+                erasedHlc: stamp
+            )
+
+            // ── Step 2: scrub every lineage sibling ──
+            // Siblings are predecessors (superseded versions) and any
+            // other members of the lineage chain. Already-tombstoned
+            // siblings have content re-zeroed as a defense-in-depth
+            // measure but are not re-gated.
+            for (idx, siblingId) in siblingIds.enumerated() {
+                let sibRows = try await txn.rowStore.query(
+                    table: "drawers",
+                    where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
+                )
+                guard let sibRow = sibRows.first else { continue }
+
+                let sibBitmap = Self.int64(sibRow["adjectiveBitmap"])
+                let sibState = BitField.extractField(sibBitmap, shift: 0, width: 6)
+
+                if sibState == Int64(State.tombstoned.rawValue) {
+                    // Already tombstoned — just ensure content is empty.
+                    _ = try await txn.rowStore.update(
+                        table: "drawers",
+                        values: ["content": .text("")],
+                        where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
+                    )
+                } else {
+                    // Gate the sibling through the state machine.
+                    let sibUuid = try Self.requireUuid(siblingId, label: "siblingId")
+                    let sibOperational = Self.int64(sibRow["operationalBitmap"])
+                    let sibProvenance = Self.int64(sibRow["provenance"])
+                    let sibPrior = BitmapFields(
+                        adjective: UInt64(bitPattern: sibBitmap),
+                        operational: UInt64(bitPattern: sibOperational),
+                        provenance: UInt64(bitPattern: sibProvenance)
+                    )
+                    let sibAnchor = SubstrateTypes.LatticeAnchor.udc(
+                        Self.string(sibRow["udcCode"]))
+                    let sibFlagsValue = BitField.extractField(sibBitmap, shift: 24, width: 3)
+                    let sibNewFlags = (sibFlagsValue & 0b011) | 0b100
+
+                    let sibStamp = siblingStamps[idx]
+                    let sibResult = AuditGate.admit(
+                        estateUuid: estate,
+                        rowId: sibUuid,
+                        nounType: .drawer,
+                        verb: .tombstone,
+                        prior: sibPrior,
+                        priorLatticeAnchor: sibAnchor,
+                        writes: [
+                            FieldWrite(slot: stateSlot, value: Int64(State.tombstoned.rawValue)),
+                            FieldWrite(slot: flagsSlot, value: sibNewFlags),
+                        ],
+                        afterLatticeAnchor: sibAnchor,
+                        vocabulary: vocab,
+                        hlc: sibStamp,
+                        actor: changedBy
+                    )
+                    if case .success(let sibEvent) = sibResult {
+                        // Gate accepted: update state bitmap, zero content, stamp.
+                        let sibEventWithReason = sibEvent.withReason(
+                            "lineage expunge cascade from \(drawerId)")
+                        _ = try await txn.rowStore.update(
+                            table: "drawers",
+                            values: [
+                                "adjectiveBitmap": .bitmap(sibEventWithReason.afterBitmaps.adjective),
+                                "content": .text(""),
+                                "tombstonedAt": .timestamp(now),
+                            ],
+                            where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
+                        )
+                        if sealAudit {
+                            try await txn.auditLog.append(sibEventWithReason)
+                        }
+                    } else {
+                        // Gate rejected the state transition (e.g., accepted →
+                        // tombstoned is S-3 forbidden). Content scrub is unconditional
+                        // and independent of the state machine: even when the state
+                        // cannot transition, the verbatim content MUST be zeroed.
+                        // Leaving content intact when the gate fails is a destruction-
+                        // contract violation (secfix/ws2-coredelete).
+                        _ = try await txn.rowStore.update(
+                            table: "drawers",
+                            values: ["content": .text("")],
+                            where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
+                        )
+                    }
+                }
+
+                // Record sibling in the erasure ledger. duplicateKey is
+                // expected if the sibling was previously expunged.
+                do {
+                    try await ErasureLedgerOps.recordErasure(
+                        rowStore: txn.rowStore,
+                        drawerId: siblingId,
+                        erasedHlc: stamp
+                    )
+                } catch StorageError.duplicateKey {
+                    // Already in the ledger from a prior expunge.
+                }
+            }
+
             if sealAudit {
-                // Default path: seal atomically in the same transaction
-                // as the row mutation. Direct callers (not via GLK) use
-                // this path and get the same atomic guarantee as before.
                 try await txn.auditLog.append(event)
             }
             return event
         }
 
-        // When sealAudit is true the event was appended inside the
-        // transaction; return nil so callers know no deferred action is
-        // needed. When sealAudit is false, return the captured event so
-        // the caller can pass it to sealExpungeAudit(_:).
         return sealAudit ? nil : capturedEvent
     }
 
@@ -1148,7 +1430,7 @@ public actor DrawerStore {
             orderBy: [OrderClause(column: Column(table: "drawers", name: "tombstonedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
-        let tombstoned = try rows.map(Self.drawerFromRow)
+        let tombstoned = try decodeDrawerRows(rows)
 
         // Filter to only those with no tombstone or expungeOrphan audit event.
         var orphans: [Drawer] = []
@@ -1367,15 +1649,23 @@ public actor DrawerStore {
                 updateValues["wikidataQID"] = newLattice.wikidataQID.map { .text($0) } ?? .null
                 updateValues["wikidataQidsSecondary"] = newLattice.wikidataQidsSecondary.map { .text($0) } ?? .null
             }
-            if let newRoom = toRoom {
-                updateValues["room"] = .text(newRoom)
-            }
-            // Cross-wing moves: update the wing column when toWing is supplied.
-            // Wings emerge from SELECT DISTINCT wing on the drawers table (no wings
-            // table), so writing a new wing name here is sufficient to move the drawer
-            // into the target wing.
-            if let newWing = toWing {
-                updateValues["wing"] = .text(newWing)
+            // ADR-017: reanchor resolves target wing/room names to a node
+            // ID via NodeStore create-on-demand, then updates parent_node_id.
+            if toRoom != nil || toWing != nil {
+                let currentParentId = Self.string(row["parent_node_id"])
+                let currentNames = try await self.resolveNodeNames(parentNodeIds: [currentParentId])
+                let current = currentNames[currentParentId] ?? (wing: "", room: "")
+                let resolvedWing = toWing ?? current.wing
+                let resolvedRoom = toRoom ?? current.room
+                // Create-on-demand via NodeStore over the same storage.
+                let nodeStore = NodeStore(storage: self.storage)
+                if let root = try await nodeStore.rootNode() {
+                    let wingNode = try await nodeStore.createNode(
+                        displayName: resolvedWing, parentId: root.id, now: now)
+                    let roomNode = try await nodeStore.createNode(
+                        displayName: resolvedRoom, parentId: wingNode.id, now: now)
+                    updateValues["parent_node_id"] = .text(roomNode.id.uuidString)
+                }
             }
 
             if !updateValues.isEmpty {
@@ -1544,6 +1834,30 @@ public actor DrawerStore {
         try Self.validateNonEmpty(t.targetRoom, label: "targetRoom")
         try Self.validateNonEmpty(t.label, label: "label")
         try Self.validateNonEmpty(t.addedBy, label: "addedBy")
+
+        // One parent per child (ADR-017 §11): a drawer may have at
+        // most one active .parent tunnel. Kit-level constraint
+        // (not a DB-level partial unique index, which PersistenceKit's
+        // schema declaration does not expose).
+        if t.kind == .parent, let childId = t.sourceDrawerId {
+            let existing = try await storage.rowStore.query(
+                table: "tunnels",
+                where: .and([
+                    .eq(Column(table: "tunnels", name: "kind_id"),
+                         .int(Int64(TunnelKind.parent.rawValue))),
+                    .eq(Column(table: "tunnels", name: "sourceDrawerId"),
+                         .text(childId)),
+                    .isNull(Column(table: "tunnels", name: "tombstonedAt"))
+                ]),
+                orderBy: [],
+                limit: 1, offset: nil
+            )
+            if !existing.isEmpty {
+                throw LocusKitError.invalidContent(
+                    "Drawer \(childId) already has a parent tunnel")
+            }
+        }
+
         _ = try await storage.rowStore.insert(
             table: "tunnels", values: Self.tunnelValues(t))
         // Emit tunnel-add metric at the operation boundary.
@@ -1621,6 +1935,195 @@ public actor DrawerStore {
             offset: nil
         )
         return try rows.map(Self.tunnelFromRow)
+    }
+
+    // MARK: - Tunnel retirement (T13 / ADR-021 Phase 7)
+
+    /// All non-tombstoned, non-retired tunnels estate-wide, ordered by filedAt.
+    ///
+    /// This is the active-edge view used by the dreaming pipeline and any
+    /// consumer that needs live links only. Retired tunnels (bit 13 of
+    /// `operationalBitmap` set) are excluded so that OMEGA retirement removes
+    /// a tunnel from the dreaming suppression set — allowing a later co-recall
+    /// to re-propose it. Unreachable-by-default is the correct visibility rule
+    /// for retired edges; full history (including retired tunnels) is still
+    /// reachable via `allTunnels()`.
+    ///
+    /// Mirrors Rust `DrawerStore::all_active_tunnels`.
+    public func allActiveTunnels() async throws -> [Tunnel] {
+        // Load all non-tombstoned tunnels and filter in-memory: PersistenceKit's
+        // predicate DSL does not expose bit-mask comparisons, so the client-side
+        // filter is the correct approach (consistent with recall_trace bitmap
+        // filtering elsewhere in this file).
+        let all = try await allTunnels()
+        return all.filter { !$0.isRetired }
+    }
+
+    /// Flip bit 13 of `operationalBitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Retrieves the current tunnel, sets the retirement bit, and persists
+    /// the updated bitmap. Throws `notFound` if no non-tombstoned tunnel with
+    /// `tunnelId` exists.
+    ///
+    /// Audit: the caller (NeuronKit via the GLK seam) is responsible for
+    /// writing a diary entry that records the retirement decision and its
+    /// OMEGA cycle context. This method performs only the bitmap update.
+    ///
+    /// Reversible: call `unretireTunnel(id:changedBy:now:)` to clear bit 13
+    /// and bring the tunnel back into active reads.
+    ///
+    /// - Parameters:
+    ///   - tunnelId:  id of the tunnel to retire.
+    ///   - changedBy: agent name performing the retirement (for future audit fields).
+    ///   - now:       deterministic clock supplied by the caller.
+    /// - Throws: `LocusKitError.notFound` if the tunnel does not exist.
+    ///
+    /// Mirrors Rust `DrawerStore::retire_tunnel`.
+    public func retireTunnel(id tunnelId: String, changedBy: String, now: Date) async throws {
+        guard let existing = try await getTunnel(id: tunnelId) else {
+            throw LocusKitError.tunnelNotFound(id: tunnelId)
+        }
+        let retired = existing.withRetired()
+        _ = try await storage.rowStore.update(
+            table: "tunnels",
+            values: ["operationalBitmap": .bitmap(retired.operationalBitmap)],
+            where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
+        )
+    }
+
+    /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Reverses a prior `retireTunnel` call. The tunnel re-enters active reads
+    /// (`allActiveTunnels`) and the dreaming suppression set once persisted.
+    ///
+    /// Throws `notFound` if no non-tombstoned tunnel with `tunnelId` exists.
+    ///
+    /// Mirrors Rust `DrawerStore::unretire_tunnel`.
+    public func unretireTunnel(id tunnelId: String, changedBy: String, now: Date) async throws {
+        guard let existing = try await getTunnel(id: tunnelId) else {
+            throw LocusKitError.tunnelNotFound(id: tunnelId)
+        }
+        let active = existing.withUnretired()
+        _ = try await storage.rowStore.update(
+            table: "tunnels",
+            values: ["operationalBitmap": .bitmap(active.operationalBitmap)],
+            where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
+        )
+    }
+
+    // MARK: - Outline helpers (ADR-017 §11, NT-L5)
+
+    /// Children of a parent drawer in the outline graph, sorted by
+    /// `orderKey` ascending. Returns only active (non-tombstoned)
+    /// `.parent` tunnels where `targetDrawerId == parentDrawerId`.
+    /// Each returned tunnel's `sourceDrawerId` is a child.
+    public func outlineChildren(of parentDrawerId: String) async throws -> [Tunnel] {
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "kind_id"),
+                     .int(Int64(TunnelKind.parent.rawValue))),
+                .eq(Column(table: "tunnels", name: "targetDrawerId"),
+                     .text(parentDrawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt"))
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "order_key"),
+                direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Walk parent edges from `drawerId` to the outline root.
+    /// Returns the ancestor chain ordered root-first (deepest
+    /// ancestor at index 0, `drawerId` is NOT included).
+    /// Each step is a single point lookup on (sourceDrawerId,
+    /// kind_id=parent) — not a recursive subtree scan.
+    /// Terminates when no parent tunnel exists (the root).
+    /// Guards against cycles with a depth ceiling of 256.
+    public func outlineAncestors(of drawerId: String) async throws -> [String] {
+        var ancestors: [String] = []
+        var current = drawerId
+        let maxDepth = 256
+        while ancestors.count < maxDepth {
+            let rows = try await storage.rowStore.query(
+                table: "tunnels",
+                where: .and([
+                    .eq(Column(table: "tunnels", name: "kind_id"),
+                         .int(Int64(TunnelKind.parent.rawValue))),
+                    .eq(Column(table: "tunnels", name: "sourceDrawerId"),
+                         .text(current)),
+                    .isNull(Column(table: "tunnels", name: "tombstonedAt"))
+                ]),
+                orderBy: [],
+                limit: 1, offset: nil
+            )
+            guard let row = rows.first else { break }
+            let tunnel = try Self.tunnelFromRow(row)
+            guard let parentId = tunnel.targetDrawerId else { break }
+            ancestors.append(parentId)
+            current = parentId
+        }
+        ancestors.reverse()
+        return ancestors
+    }
+
+    /// Move a child drawer under a new parent in the outline graph.
+    /// Tombstones the existing `.parent` tunnel from `childId` (if
+    /// any) and creates a new one pointing at `newParentId` with
+    /// the given `orderKey`. Pass `nil` for `newParentId` to make
+    /// the child an outline root.
+    public func reparentDrawer(
+        _ childId: String,
+        newParentId: String?,
+        orderKey: Double,
+        wing: String,
+        room: String,
+        addedBy: String,
+        now: Date
+    ) async throws {
+        // Tombstone the existing parent tunnel for this child.
+        let existing = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "kind_id"),
+                     .int(Int64(TunnelKind.parent.rawValue))),
+                .eq(Column(table: "tunnels", name: "sourceDrawerId"),
+                     .text(childId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt"))
+            ]),
+            orderBy: [],
+            limit: 1, offset: nil
+        )
+        if let row = existing.first {
+            let oldTunnel = try Self.tunnelFromRow(row)
+            _ = try await storage.rowStore.update(
+                table: "tunnels",
+                values: ["tombstonedAt": .timestamp(now)],
+                where: .eq(Column(table: "tunnels", name: "id"),
+                           .text(oldTunnel.id))
+            )
+        }
+
+        // Create the new parent tunnel if newParentId is provided.
+        if let parentId = newParentId {
+            let tunnel = Tunnel(
+                id: UUID().uuidString,
+                sourceWing: wing,
+                sourceRoom: room,
+                sourceDrawerId: childId,
+                targetWing: wing,
+                targetRoom: room,
+                targetDrawerId: parentId,
+                label: "parent",
+                kind: .parent,
+                addedBy: addedBy,
+                filedAt: now,
+                orderKey: orderKey
+            )
+            try await addTunnel(tunnel)
+        }
     }
 
     // MARK: - KGFact CRUD
@@ -2199,9 +2702,10 @@ public actor DrawerStore {
 
     /// Mark a trace row's `used` flag (bit 0 of operationalBitmap).
     /// The reward path calls this when it has processed the row.
-    /// Uses `storage.transaction` for atomic read-modify-write: reads
-    /// the current bitmap, ORs bit 0 in, then writes it back. A no-op
-    /// if the row is already marked used.
+    /// Performs a sequential read-modify-write: fetches the current row,
+    /// ORs bit 0 into the operationalBitmap, then writes it back. There
+    /// is no wrapping transaction — the fetch and update are separate
+    /// storage calls. A no-op if the row is already marked used.
     ///
     /// - Parameters:
     ///   - id: the RecallTraceItem id to mark
@@ -2328,58 +2832,101 @@ public actor DrawerStore {
 
     // MARK: - Summary surface
 
-    /// Wing-level taxonomy: one WingSummary per wing over
-    /// non-tombstoned drawers. Computed in Swift from the drawer rows
-    /// rather than SQL GROUP BY, because PersistenceKit's query surface
-    /// returns rows, not aggregates; the wing/room cardinalities are
-    /// small (taxonomy, not corpus) so the in-memory fold is cheap.
+    /// Wing-level taxonomy: one WingSummary per active wing node.
+    /// Counts non-tombstoned drawers per wing by querying room nodes
+    /// under each wing node and counting drawers by parent_node_id.
     public func listWings() async throws -> [WingSummary] {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .isNull(Column(table: "drawers", name: "tombstonedAt"))
+        // Get all active wing nodes (depth=1).
+        let wingRows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .eq(Column(table: "nodes", name: "depth"), .int(1)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
         )
-        var drawerCounts: [String: Int] = [:]
-        var rooms: [String: Set<String>] = [:]
-        for row in rows {
-            let wing = Self.string(row["wing"])
-            let room = Self.string(row["room"])
-            drawerCounts[wing, default: 0] += 1
-            rooms[wing, default: []].insert(room)
-        }
-        return drawerCounts.keys.sorted().map { wing in
-            WingSummary(
-                name: wing,
-                drawerCount: drawerCounts[wing] ?? 0,
-                roomCount: rooms[wing]?.count ?? 0
+        var result: [WingSummary] = []
+        for wingRow in wingRows {
+            let wingId = Self.string(wingRow["id"])
+            let wingName = Self.string(wingRow["display_name"])
+            // Room nodes under this wing.
+            let roomRows = try await storage.rowStore.query(
+                table: "nodes",
+                where: .and([
+                    .eq(Column(table: "nodes", name: "parent_id"), .text(wingId)),
+                    .eq(Column(table: "nodes", name: "depth"), .int(2)),
+                    .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+                ])
             )
+            let roomIds = roomRows.map { Self.string($0["id"]) }
+            var drawerCount = 0
+            if !roomIds.isEmpty {
+                let drawerRows = try await storage.rowStore.query(
+                    table: "drawers",
+                    where: .and([
+                        .in(Column(table: "drawers", name: "parent_node_id"), roomIds.map { TypedValue.text($0) }),
+                        .isNull(Column(table: "drawers", name: "tombstonedAt"))
+                    ])
+                )
+                drawerCount = drawerRows.count
+            }
+            result.append(WingSummary(
+                name: wingName,
+                drawerCount: drawerCount,
+                roomCount: roomIds.count
+            ))
         }
+        return result.sorted { $0.name < $1.name }
     }
 
     /// Room-level taxonomy. When wing is nil, every wing's rooms;
     /// otherwise restricted to that wing. Non-tombstoned only.
     public func listRooms(in wing: String?) async throws -> [RoomSummary] {
-        let predicate: StoragePredicate
-        if let wing = wing {
-            predicate = .and([
-                .eq(Column(table: "drawers", name: "wing"), .text(wing)),
-                .isNull(Column(table: "drawers", name: "tombstonedAt"))
+        // Get wing nodes to filter by (or all wings).
+        let wingPredicate: StoragePredicate
+        if let wing {
+            let wingLookup = Node.normalizeLookupName(wing)
+            wingPredicate = .and([
+                .eq(Column(table: "nodes", name: "lookup_name"), .text(wingLookup)),
+                .eq(Column(table: "nodes", name: "depth"), .int(1)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
             ])
         } else {
-            predicate = .isNull(Column(table: "drawers", name: "tombstonedAt"))
+            wingPredicate = .and([
+                .eq(Column(table: "nodes", name: "depth"), .int(1)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
         }
-        let rows = try await storage.rowStore.query(table: "drawers", where: predicate)
-        var counts: [String: Int] = [:]   // key "wing\u{0}room"
-        for row in rows {
-            let w = Self.string(row["wing"])
-            let r = Self.string(row["room"])
-            counts["\(w)\u{0}\(r)", default: 0] += 1
+        let wingRows = try await storage.rowStore.query(table: "nodes", where: wingPredicate)
+        var result: [RoomSummary] = []
+        for wingRow in wingRows {
+            let wingId = Self.string(wingRow["id"])
+            let wingName = Self.string(wingRow["display_name"])
+            let roomRows = try await storage.rowStore.query(
+                table: "nodes",
+                where: .and([
+                    .eq(Column(table: "nodes", name: "parent_id"), .text(wingId)),
+                    .eq(Column(table: "nodes", name: "depth"), .int(2)),
+                    .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+                ])
+            )
+            for roomRow in roomRows {
+                let roomId = Self.string(roomRow["id"])
+                let roomName = Self.string(roomRow["display_name"])
+                let drawerRows = try await storage.rowStore.query(
+                    table: "drawers",
+                    where: .and([
+                        .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomId)),
+                        .isNull(Column(table: "drawers", name: "tombstonedAt"))
+                    ])
+                )
+                result.append(RoomSummary(
+                    wing: wingName,
+                    name: roomName,
+                    drawerCount: drawerRows.count
+                ))
+            }
         }
-        return counts.keys.sorted().map { key in
-            let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
-            let w = String(parts[0])
-            let r = parts.count > 1 ? String(parts[1]) : ""
-            return RoomSummary(wing: w, name: r, drawerCount: counts[key] ?? 0)
-        }
+        return result.sorted { "\($0.wing)\u{0}\($0.name)" < "\($1.wing)\u{0}\($1.name)" }
     }
 
     /// Wing-level projection, named distinctly from listWings because
@@ -2483,14 +3030,139 @@ public actor DrawerStore {
         )
     }
 
+    // MARK: - Node-tree lookup helpers
+
+    /// Find the wing node by lookup_name, then return IDs of all active
+    /// room nodes (depth=2) under it. Uses NFC + casefold normalization
+    /// matching Node.normalizeLookupName (ADR-017 §8).
+    private func roomNodeIdsInWing(wingName: String) async throws -> [String] {
+        let wingLookup = Node.normalizeLookupName(wingName)
+        let wingRows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .eq(Column(table: "nodes", name: "lookup_name"), .text(wingLookup)),
+                .eq(Column(table: "nodes", name: "depth"), .int(1)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
+        )
+        guard let wingRow = wingRows.first else { return [] }
+        let wingId = Self.string(wingRow["id"])
+        let roomRows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .eq(Column(table: "nodes", name: "parent_id"), .text(wingId)),
+                .eq(Column(table: "nodes", name: "depth"), .int(2)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
+        )
+        return roomRows.map { Self.string($0["id"]) }
+    }
+
+    /// Find a specific room node by wing name + room name. Returns the
+    /// room node ID, or nil if the wing/room pair doesn't exist.
+    private func roomNodeId(wingName: String, roomName: String) async throws -> String? {
+        let wingLookup = Node.normalizeLookupName(wingName)
+        let wingRows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .eq(Column(table: "nodes", name: "lookup_name"), .text(wingLookup)),
+                .eq(Column(table: "nodes", name: "depth"), .int(1)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
+        )
+        guard let wingRow = wingRows.first else { return nil }
+        let wingId = Self.string(wingRow["id"])
+        let roomLookup = Node.normalizeLookupName(roomName)
+        let roomRows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .eq(Column(table: "nodes", name: "parent_id"), .text(wingId)),
+                .eq(Column(table: "nodes", name: "lookup_name"), .text(roomLookup)),
+                .eq(Column(table: "nodes", name: "depth"), .int(2)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
+        )
+        return roomRows.first.map { Self.string($0["id"]) }
+    }
+
+    // MARK: - Node-name resolution
+
+    /// Build a lookup: room node ID → (wing display name, room display name).
+    /// Two queries: one for the room nodes, one for their parent wing nodes.
+    /// Used by all drawer fetch paths to populate the computed wing/room
+    /// bridge properties from the node tree (ADR-017 §3).
+    /// Resolve parentNodeId UUIDs to display names (wing, room) from
+    /// the node tree. Higher kits call this to obtain display names
+    /// after ADR-017 removed them from the Drawer struct.
+    public func resolveNodeNames(
+        parentNodeIds: [String]
+    ) async throws -> [String: (wing: String, room: String)] {
+        guard !parentNodeIds.isEmpty else { return [:] }
+        let unique = Array(Set(parentNodeIds))
+        // Query with .uuid() values to match the nodes table's id column type.
+        // NodeStore stores id as .uuid(UUID); querying with .text() fails in
+        // InMemoryStorage because the predicate evaluator does strict type matching.
+        let uuidValues = unique.compactMap { str -> TypedValue? in
+            guard let uuid = UUID(uuidString: str) else { return nil }
+            return .uuid(uuid)
+        }
+        guard !uuidValues.isEmpty else { return [:] }
+        let roomRows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .in(Column(table: "nodes", name: "id"), uuidValues)
+        )
+        var roomMap: [String: (displayName: String, parentId: String)] = [:]
+        var wingIds = Set<String>()
+        for row in roomRows {
+            let id = Self.string(row["id"])
+            let displayName = Self.string(row["display_name"])
+            let parentId = Self.string(row["parent_id"])
+            roomMap[id] = (displayName, parentId)
+            wingIds.insert(parentId)
+        }
+        var wingNames: [String: String] = [:]
+        if !wingIds.isEmpty {
+            let wingUuids = wingIds.compactMap { UUID(uuidString: $0) }.map { TypedValue.uuid($0) }
+            let wingRows = try await storage.rowStore.query(
+                table: "nodes",
+                where: .in(Column(table: "nodes", name: "id"), wingUuids)
+            )
+            for row in wingRows {
+                wingNames[Self.string(row["id"])] = Self.string(row["display_name"])
+            }
+        }
+        var result: [String: (wing: String, room: String)] = [:]
+        for (roomId, info) in roomMap {
+            result[roomId] = (
+                wing: wingNames[info.parentId] ?? "",
+                room: info.displayName
+            )
+        }
+        return result
+    }
+
+    /// Decode drawer rows from storage.
+    private func decodeDrawerRows(
+        _ rows: [StorageRow]
+    ) throws -> [Drawer] {
+        try rows.map { try Self.drawerFromRow($0) }
+    }
+
+    /// Decode drawer rows with skip-corrupt resilience.
+    private func decodeDrawerRowsResilient(
+        _ rows: [StorageRow],
+        scan: String
+    ) throws -> [Drawer] {
+        try Self.decodeDrawerRowsSkipCorrupt(rows, scan: scan)
+    }
+
     // MARK: - Row encode helpers
 
     private static func drawerValues(_ d: Drawer) -> [String: TypedValue] {
         [
             "id": .text(d.id),
             "content": .text(d.content),
-            "wing": .text(d.wing),
-            "room": .text(d.room),
+            "parent_node_id": .text(d.parentNodeId),
             "sourceFile": d.sourceFile.map { TypedValue.text($0) } ?? .null,
             "chunkIndex": d.chunkIndex.map { TypedValue.int(Int64($0)) } ?? .null,
             "addedBy": .text(d.addedBy),
@@ -2530,7 +3202,8 @@ public actor DrawerStore {
             "kind_id": .int(Int64(t.kind.rawValue)),
             "adjectiveBitmap": .bitmap(t.adjectiveBitmap),
             "operationalBitmap": .bitmap(t.operationalBitmap),
-            "provenanceBitmap": .bitmap(t.provenanceBitmap)
+            "provenanceBitmap": .bitmap(t.provenanceBitmap),
+            "order_key": t.orderKey.map { TypedValue.float($0) } ?? .null
         ]
     }
 
@@ -2666,7 +3339,10 @@ public actor DrawerStore {
 
     // MARK: - Row decode helpers
 
-    private static func drawerFromRow(_ row: StorageRow) throws -> Drawer {
+    /// Decode a single storage row into a Drawer.
+    private static func drawerFromRow(
+        _ row: StorageRow
+    ) throws -> Drawer {
         // lineageID — empty-string is the intentional "unset" sentinel and
         // becomes a fresh per-row UUID so unset rows never collapse onto one
         // lineage. A non-empty string that is not a valid UUID is unambiguous
@@ -2688,11 +3364,11 @@ public actor DrawerStore {
             )
         }
         let filedAt = try date(table: "drawers", column: "filedAt", row["filedAt"])
+        let parentNodeId = string(row["parent_node_id"])
         return Drawer(
             id: string(row["id"]),
             content: string(row["content"]),
-            wing: string(row["wing"]),
-            room: string(row["room"]),
+            parentNodeId: parentNodeId,
             sourceFile: optString(row["sourceFile"]),
             chunkIndex: optInt(row["chunkIndex"]),
             addedBy: string(row["addedBy"]),
@@ -2781,7 +3457,8 @@ public actor DrawerStore {
             addedBy: string(row["addedBy"]),
             filedAt: try date(table: "tunnels", column: "filedAt", row["filedAt"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
-            removedByBatch: optString(row["removedByBatch"])
+            removedByBatch: optString(row["removedByBatch"]),
+            orderKey: optDouble(row["order_key"])
         )
     }
 

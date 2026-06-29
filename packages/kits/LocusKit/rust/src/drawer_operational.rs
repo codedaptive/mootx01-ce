@@ -344,7 +344,7 @@ mod tests {
     use super::*;
 
     fn sample() -> Drawer {
-        Drawer::new("d1", "hello", "w", "r", "alice", 1_700_000_000, "test-v1")
+        Drawer::new("d1", "hello", "test-parent", "alice", 1_700_000_000, "test-v1")
     }
 
     #[test]
@@ -411,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    // The accessor reads a 6-bit field from bits 0-5, not a low nibble.
     fn capture_channel_accessor_reads_low_nibble() {
         let mut d = sample();
         d.operational_bitmap = CaptureChannel::Ocr.raw_value();

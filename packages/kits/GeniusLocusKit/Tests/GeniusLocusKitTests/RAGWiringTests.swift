@@ -4,7 +4,8 @@
 //
 // Suite 1 — ExternalCorpus.hybridRecall: verifies that hybrid recall
 // routes through CorpusKit's Corpus actor and returns ScoredChunk
-// results with both vectorScore and keywordScore sub-scores.
+// results with a non-zero fused score (sub-scores may be nil when only
+// one dimension matched).
 //
 // Suite 2 — VectorSimilaritySignal real proximity: verifies that the
 // wired signal emits real AssociateFrames for row pairs whose embeddings

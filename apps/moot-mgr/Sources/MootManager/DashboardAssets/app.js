@@ -535,7 +535,7 @@
         return;
       }
 
-      const evMap = {};
+      const evMap = Object.create(null);
       eventEstates.forEach((e) => { evMap[e.id] = e; });
 
       if (adminHosted.length > 0) {
@@ -1268,7 +1268,7 @@
 
   // Canvas2D brain renderer state
   let brainCanvas = null, brainCtx = null;
-  let brainNodes = [], brainEdges = [], brainNodeMap = {};
+  let brainNodes = [], brainEdges = [], brainNodeMap = Object.create(null);
   let brainAnimId = null, brainT = 0;
   let brainW = 0, brainH = 0;       // current logical canvas dimensions (updated on resize)
   let brainResizeObs = null;         // ResizeObserver — disconnected in stopBrainAnimation
@@ -1280,9 +1280,9 @@
   let brainKeyHandler = null;
   // Selection state — set by selectBrainNode(); drives neighbor highlighting.
   let brainSelectedNode = null;
-  let brainHop1 = {};    // id → true for 1-hop neighbors of selected node
-  let brainHop2 = {};    // id → true for 2-hop neighbors of selected node
-  let brainAdjacency = {};  // id → [neighbor ids] — built once from brainEdges
+  let brainHop1 = Object.create(null);    // id → true for 1-hop neighbors of selected node
+  let brainHop2 = Object.create(null);    // id → true for 2-hop neighbors of selected node
+  let brainAdjacency = Object.create(null);  // id → [neighbor ids] — built once from brainEdges
   // L4 strata (3D) state — toggled by #topoDimToggle. 2D is the default; all
   // 2D behavior is unchanged when off (brainProject is the identity then).
   let brain3D = false;
@@ -1299,7 +1299,7 @@
   // L3 lobe labels — community rank (lobe index) → FDC label string. Built by
   // buildRealBrainNodes from the proxy's enriched communities []{id,label,size};
   // empty on the synthetic path (synthetic lobes carry no real community).
-  let brainLobeLabels = {};
+  let brainLobeLabels = Object.create(null);
   // Content picker (community filter) state. Keys are CONTENT identities —
   // the community's FDC label, or the '(unlabeled)' / 'fragments' buckets —
   // because Louvain ids renumber on every governor cycle while labels are
@@ -1309,7 +1309,7 @@
   // Picker rows for the current real-data build: [{key, label, size, cIdx}].
   let topoCommRows = [];
   // Lobe rank → content key, for hull/label fading.
-  let brainLobeKey = {};
+  let brainLobeKey = Object.create(null);
   // The full real dataset, retained so the content picker can re-render a
   // SUBSET: filtering hides deselected communities entirely and re-lays-out
   // the selected ones to fill the canvas (solo "Business" → its nodes get
@@ -1317,13 +1317,13 @@
   let topoRealData = null;
   // Content key per community id for the CURRENT snapshot (rebuilt each
   // load); used to filter raw nodes before layout.
-  let topoCommKeyById = {};
+  let topoCommKeyById = Object.create(null);
   // Stable palette: content key → palette index, assigned ONCE from the
   // full dataset's size ranking so hues do not reshuffle on every filter
   // toggle or snapshot refresh.
-  let topoCommPaletteByKey = {};
+  let topoCommPaletteByKey = Object.create(null);
   // community index → [nodes] pools — L5 estate-hash pulse fallback target.
-  let brainCommPools = {};
+  let brainCommPools = Object.create(null);
   // Effective "now" for recency brightness + the L5 alive(t) filter. Wall clock
   // normally; frozen to the playhead timestamp while playback is active.
   let brainNowMs = 0;
@@ -1465,7 +1465,7 @@
     var MAX_LOBES = 14;     // distinct lobe centers the canvas can hold legibly
     var MIN_LOBE_SIZE = 4;  // fragments below this scatter to the periphery
 
-    var byId = {};
+    var byId = Object.create(null);
     rawNodes.forEach(function (n) {
       var k = (n.communityId === undefined || n.communityId === null) ? 0 : n.communityId;
       (byId[k] = byId[k] || []).push(n);
@@ -1525,7 +1525,7 @@
     // brainLobeLabels keys are the lobe rank (the node `community` index used
     // on the lobe path), values are the proxy's enriched label strings.
     // Null/empty labels are skipped — drawLobeLabels draws nothing for them.
-    brainLobeLabels = {};
+    brainLobeLabels = Object.create(null);
     lobeIds.forEach(function (cid, rank) {
       var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
       if (meta && meta.label) brainLobeLabels[rank] = meta.label;
@@ -1542,8 +1542,8 @@
     }
 
     // Picker rows: one per labeled lobe (size desc), then the two buckets.
-    brainLobeKey = {};
-    var rowByKey = {};
+    brainLobeKey = Object.create(null);
+    var rowByKey = Object.create(null);
     function addRow(key, size, cIdx, isBucket) {
       if (!rowByKey[key]) {
         rowByKey[key] = { key: key, size: 0, cIdx: cIdx, bucket: !!isBucket };
@@ -1571,7 +1571,7 @@
     // Periphery fragments: each fragment gets one random anchor across the
     // canvas with its members placed tightly around it, so a tunnel-linked
     // pair stays a visible pair. Color cycles the palette per fragment.
-    var lobeSet = {};
+    var lobeSet = Object.create(null);
     lobeIds.forEach(function (cid) { lobeSet[cid] = true; });
     ranked.forEach(function (cid, rank) {
       if (lobeSet[cid]) return;
@@ -1604,7 +1604,7 @@
   // inter-community kgFact bridges (corpus callosum).
   function synthBrainEdges(nodes) {
     var edges = [];
-    var byComm = {};
+    var byComm = Object.create(null);
     nodes.forEach(function (n) { (byComm[n.community] = byComm[n.community] || []).push(n.id); });
 
     // Target average degree ~5 per node (2 × edges / nodes = 5 → multiplier 2.5).
@@ -1703,8 +1703,8 @@
 
     // Pre-build O(1) node lookup used by edge rendering, plus per-community
     // pools used by the L5 estate-hash pulse fallback.
-    brainNodeMap = {};
-    brainCommPools = {};
+    brainNodeMap = Object.create(null);
+    brainCommPools = Object.create(null);
     brainNodes.forEach(function (n) {
       brainNodeMap[n.id] = n;
       (brainCommPools[n.community] = brainCommPools[n.community] || []).push(n);
@@ -1714,7 +1714,7 @@
     brainUpdateDrawOrder();
 
     // Pre-build undirected adjacency map for O(1) hop-1/hop-2 neighbor lookups.
-    brainAdjacency = {};
+    brainAdjacency = Object.create(null);
     brainEdges.forEach(function (e) {
       (brainAdjacency[e.src] = brainAdjacency[e.src] || []).push(e.tgt);
       (brainAdjacency[e.tgt] = brainAdjacency[e.tgt] || []).push(e.src);
@@ -1864,8 +1864,8 @@
   // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from brainAdjacency.
   function selectBrainNode(node) {
     brainSelectedNode = node;
-    brainHop1 = {};
-    brainHop2 = {};
+    brainHop1 = Object.create(null);
+    brainHop2 = Object.create(null);
     if (!node) return;
     var adj = brainAdjacency[node.id] || [];
     adj.forEach(function (id) { brainHop1[id] = true; });
@@ -1888,7 +1888,7 @@
     brainOrbitDown = null; brainOrbitMove = null; brainOrbitUp = null;
     brainClickHandler = null; brainKeyHandler = null;
     brainZoomedNode = null; brainZoomScale = 1; brainZoomTS = 1;
-    brainSelectedNode = null; brainHop1 = {}; brainHop2 = {}; brainAdjacency = {};
+    brainSelectedNode = null; brainHop1 = Object.create(null); brainHop2 = Object.create(null); brainAdjacency = Object.create(null);
     brainCanvas = null; brainCtx = null;
   }
 
@@ -2083,7 +2083,7 @@
   // including them would paint phantom hulls over empty space. Synthetic
   // nodes carry no lobe flag and keep their hulls.
   function drawCommHulls(ctx) {
-    var byComm = {};
+    var byComm = Object.create(null);
     brainNodes.forEach(function (n) {
       if (n.lobe === false) return;
       (byComm[n.community] = byComm[n.community] || []).push(n);
@@ -2298,7 +2298,7 @@
     if (!ranks.length) return;
 
     // Group lobe members by community rank (projected coords already cached).
-    var groups = {};
+    var groups = Object.create(null);
     brainNodes.forEach(function (n) {
       if (!n.lobe || brainLobeLabels[n.community] === undefined) return;
       (groups[n.community] = groups[n.community] || []).push(n);
@@ -2375,7 +2375,7 @@
       return key === undefined || topoCommFilter.has(key);
     };
     var rawNodes = d.rawNodes.filter(keep);
-    var present = {};
+    var present = Object.create(null);
     rawNodes.forEach(function (n) { present[n.id] = true; });
 
     brainNodes = buildRealBrainNodes(rawNodes, d.communities, d.W, d.H, layoutAsSubset);
@@ -2534,8 +2534,8 @@
       topoRealData = { rawNodes: g.nodes, rawEdges: g.edges || [],
                        communities: g.communities || [], W: W, H: H,
                        container: container };
-      topoCommKeyById = {};
-      const sizeById = {};
+      topoCommKeyById = Object.create(null);
+      const sizeById = Object.create(null);
       g.nodes.forEach(function (n) {
         if (n.communityId >= 0) sizeById[n.communityId] = (sizeById[n.communityId] || 0) + 1;
       });
@@ -2548,7 +2548,7 @@
       topoRealData = null;
       brainNodes = synthBrainNodes(events, W, H);
       brainEdges = synthBrainEdges(brainNodes);
-      brainLobeLabels = {};  // synthetic lobes carry no real community labels
+      brainLobeLabels = Object.create(null);  // synthetic lobes carry no real community labels
       topoCommRows = [];     // no content picker on synthetic data
     }
     renderCommPicker();
@@ -2625,7 +2625,7 @@
       if (!(g.analytics || []).length) {
         legend.appendChild(el("div", "lrow", "no signals yet"));
       } else {
-        const bySignal = {};
+        const bySignal = Object.create(null);
         g.analytics.forEach((a) => { bySignal[a.signal] = a.value; });
         Object.keys(bySignal).sort().forEach((sig) => {
           const row = el("div", "lrow");
@@ -2663,7 +2663,7 @@
     legend.style.display = "none";
     clear(legend);
 
-    const byEstate = {};
+    const byEstate = Object.create(null);
     g.analytics.forEach((a) => {
       if (!byEstate[a.estate]) byEstate[a.estate] = [];
       byEstate[a.estate].push(a);

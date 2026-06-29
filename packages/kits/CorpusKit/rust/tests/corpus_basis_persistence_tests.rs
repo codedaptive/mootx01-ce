@@ -272,3 +272,256 @@ fn cross_port_persist_reopen_embed() {
         "reopened embedding must equal the α canonical 'car engine' bit patterns"
     );
 }
+
+// ── §7 maintained counts wiring (incremental-counts change set, P3) ──
+
+use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
+
+const RI_MODEL_ID: &str = "random-indexing-v1";
+const RI_MODEL_VERSION: &str = "1.0.0";
+
+#[test]
+fn ingest_persists_counts_with_growing_anchor() {
+    let _g = global_lock();
+    let path = scratch_path();
+    let corpus = fresh_ri_corpus(storage_at(&path));
+    let counts = CorpusProviderCountsStore::new(storage_at(&path));
+
+    // No counts row before any ingest.
+    assert!(counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .is_none());
+
+    corpus.ingest(RI_DOCS[0], "doc-0", NOW_MILLIS).expect("ingest 0");
+    let a0 = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("ingest must persist a counts row");
+    assert_eq!(a0.document_count, 1);
+    assert!(a0.vocab_size > 0);
+
+    // A second ingest with new vocabulary grows both anchors.
+    corpus.ingest(RI_DOCS[3], "doc-3", NOW_MILLIS).expect("ingest 3");
+    let a1 = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+    assert_eq!(a1.document_count, 2);
+    assert!(
+        a1.vocab_size > a0.vocab_size,
+        "new-vocabulary doc must grow the vocab anchor"
+    );
+}
+
+#[test]
+fn reopen_restores_counts_anchor() {
+    let _g = global_lock();
+    let path = scratch_path();
+    {
+        let corpus = fresh_ri_corpus(storage_at(&path));
+        for (i, doc) in RI_DOCS.iter().enumerate() {
+            corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+        }
+    }
+    let counts = CorpusProviderCountsStore::new(storage_at(&path));
+    let before = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+    assert_eq!(before.document_count, RI_DOCS.len());
+
+    // Reopen and ingest ONE more document. A reset accumulator would read 1;
+    // a restored one continues from the persisted anchor.
+    let reopened = fresh_ri_corpus(storage_at(&path));
+    reopened
+        .ingest("airplane wing flight sky", "doc-new", NOW_MILLIS)
+        .expect("ingest new");
+    let after = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+    assert_eq!(
+        after.document_count,
+        RI_DOCS.len() + 1,
+        "reopened accumulator must continue from the restored doc count, not reset"
+    );
+}
+
+#[test]
+fn reopened_corpus_retrains_on_reindex() {
+    let _g = global_lock();
+    let path = scratch_path();
+    {
+        let corpus = fresh_ri_corpus(storage_at(&path));
+        for (i, doc) in RI_DOCS.iter().enumerate() {
+            corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+        }
+        corpus.reindex(NOW_MILLIS).expect("reindex");
+    }
+    let store = BasisStore::new(storage_at(&path));
+    assert_eq!(
+        store
+            .load(RI_MODEL_ID, RI_MODEL_VERSION)
+            .expect("load")
+            .expect("basis row")
+            .trained_chunk_count,
+        RI_DOCS.len()
+    );
+
+    // Reopen, add a doc, reindex. Before the frozen-after-restart fix the reopened
+    // corpus dropped its empty-basis factory and reindex could only re-embed —
+    // the basis stayed trained on 5 chunks. With the factory retained, reindex
+    // retrains from scratch on the full 6-chunk corpus.
+    let reopened = fresh_ri_corpus(storage_at(&path));
+    reopened
+        .ingest("airplane wing flight sky", "doc-new", NOW_MILLIS)
+        .expect("ingest new");
+    reopened.reindex(NOW_MILLIS).expect("reindex");
+
+    assert_eq!(
+        store
+            .load(RI_MODEL_ID, RI_MODEL_VERSION)
+            .expect("load")
+            .expect("basis row")
+            .trained_chunk_count,
+        RI_DOCS.len() + 1,
+        "reopened corpus must retrain on the full corpus (incl. the new doc)"
+    );
+}
+
+#[test]
+fn reingest_does_not_inflate_counts() {
+    let _g = global_lock();
+    let path = scratch_path();
+    let corpus = fresh_ri_corpus(storage_at(&path));
+    let counts = CorpusProviderCountsStore::new(storage_at(&path));
+
+    for (i, doc) in RI_DOCS.iter().enumerate() {
+        corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+    }
+    let chunk_count0 = corpus.count().expect("count");
+    let a0 = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+    assert_eq!(a0.document_count, RI_DOCS.len());
+
+    // Re-ingest the IDENTICAL sources: same text + source_id → same
+    // content-addressed chunk ids → idempotent no-op in the bundle store. The
+    // maintained counts must NOT advance — the fold runs only over newly-inserted
+    // chunks, of which there are none on the second pass.
+    for (i, doc) in RI_DOCS.iter().enumerate() {
+        corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("re-ingest");
+    }
+    let chunk_count1 = corpus.count().expect("count");
+    let a1 = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+
+    assert_eq!(chunk_count1, chunk_count0, "re-ingest must not add chunks (idempotent)");
+    assert_eq!(
+        a1.document_count, a0.document_count,
+        "re-ingest must not inflate the maintained document count"
+    );
+    assert_eq!(
+        a1.vocab_size, a0.vocab_size,
+        "re-ingest must not inflate the maintained vocabulary anchor"
+    );
+}
+
+#[test]
+fn reingest_batch_does_not_inflate_counts() {
+    let _g = global_lock();
+    let path = scratch_path();
+    let corpus = fresh_ri_corpus(storage_at(&path));
+    let counts = CorpusProviderCountsStore::new(storage_at(&path));
+
+    let batch: Vec<(String, String, i64)> = RI_DOCS
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.to_string(), format!("doc-{i}"), NOW_MILLIS))
+        .collect();
+    corpus.ingest_batch(&batch).expect("ingest_batch");
+    let chunk0 = corpus.count().expect("count");
+    let a0 = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+    assert_eq!(a0.document_count, RI_DOCS.len());
+
+    // Re-import the IDENTICAL batch via the drain path: every chunk is an
+    // idempotent no-op, so the maintained counts must not advance.
+    corpus.ingest_batch(&batch).expect("re-ingest_batch");
+    let a1 = counts
+        .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
+        .expect("growth_anchor")
+        .expect("counts row");
+
+    assert_eq!(corpus.count().expect("count"), chunk0, "batch re-import must not add chunks");
+    assert_eq!(
+        a1.document_count, a0.document_count,
+        "batch re-import must not inflate the maintained document count"
+    );
+    assert_eq!(
+        a1.vocab_size, a0.vocab_size,
+        "batch re-import must not inflate the maintained vocabulary anchor"
+    );
+}
+
+// T4 (ADR-021 Decision 7): a file-backed (SQLite) estate persists the Corpus
+// ingest queue to a per-estate SQLite file BESIDE the estate — not a plaintext
+// maildir. The sibling filename is `<estate-stem>.queue.sqlite` so two estates
+// in the same directory never share a queue (cross-estate isolation). Proven by:
+//   1. `<estate-stem>.queue.sqlite` appears as a regular FILE beside the estate db.
+//   2. No `corpus_ingest_queue/` maildir is created (old FilesystemBackend path is gone).
+//   3. The enqueued document is searchable via the per-estate queue path.
+// Mirrors Swift's ingestQueueIsDurableForSQLiteEstate (T4 rewrite).
+#[test]
+fn ingest_queue_is_durable_for_sqlite_estate() {
+    let path = scratch_path();
+    let corpus = Arc::new(
+        Corpus::open(storage_at(&path), EmbeddingModelConfig::Deterministic)
+            .expect("Corpus::open must succeed"),
+    );
+    corpus
+        .enqueue_ingest("durable queue content survives restart", "doc-queue", NOW_MILLIS)
+        .expect("enqueue_ingest");
+    corpus.await_ingest_drain().expect("await_ingest_drain");
+
+    // T4: derive the per-estate sibling path the same way EstateConfiguration does:
+    // <dir>/<estate-stem>.queue.sqlite — guarantees cross-estate isolation.
+    let estate_path = std::path::Path::new(&path);
+    let stem = estate_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sibling_filename = format!("{}.queue.sqlite", stem);
+    let queue_sibling = estate_path
+        .parent()
+        .map(|p| p.join(&sibling_filename))
+        .unwrap_or_else(|| std::path::PathBuf::from(&sibling_filename));
+
+    assert!(
+        queue_sibling.is_file(),
+        "{} must exist as a regular file beside the estate db (T4 per-estate isolation)",
+        sibling_filename
+    );
+
+    // T4: the old plaintext maildir must NOT exist.
+    let mut old_maildir = std::path::PathBuf::from(&path);
+    old_maildir.pop();
+    old_maildir.push("corpus_ingest_queue");
+    assert!(
+        !old_maildir.exists(),
+        "corpus_ingest_queue/ maildir must NOT exist (old FilesystemBackend path is gone in T4)"
+    );
+
+    // The enqueued document is searchable via the per-estate queue path.
+    let results = corpus.recall("durable queue", 5, NOW_MILLIS).expect("recall");
+    assert!(!results.is_empty());
+
+    let _ = std::fs::remove_file(&queue_sibling);
+    let _ = std::fs::remove_file(&path);
+}

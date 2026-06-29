@@ -14,8 +14,10 @@
 // Step 1). Flush is fire-and-forget: no retry, never on the hot encode path.
 //
 // The `submitter` closure is injected so tests can assert the drain without a
-// network call; the default is a no-op until the pool endpoint is wired
-// (cookbook §2.2). This exactly mirrors the Swift default `submitter: { _ in }`.
+// network call. `new_noop` is the explicit test/embedded fallback; the process-
+// wide cache is wired to `default_submitter()` via `init_shared_cache`. This
+// mirrors the Swift pattern where the bare-init default is a no-op but the
+// production shared cache is wired to `NovelPoolSubmitter.makeDefault()`.
 //
 // Process-wide singleton: `SHARED_NOVEL_CACHE` is initialized once via
 // `OnceLock`, mirroring Swift's `LatticeLib.sharedNovelCache` static `let`.
@@ -42,10 +44,10 @@ pub const POOL_SUBMIT_THRESHOLD: usize = 50;
 
 // ─── HMM/Viterbi tagger version ──────────────────────────────────────────────
 
-/// The non-Apple HMM/Viterbi model version stamped on pool submissions.
-/// Mirrors `WordClassTagger.currentTaggerVersion` `#else` branch in Swift
-/// (value: `"hmm-viterbi-3"`). Bump both here and in Swift when the
-/// `HMMTagger` model tables change.
+/// The HMM/Viterbi model version stamped on pool submissions. Mirrors
+/// `WordClassTagger.currentTaggerVersion` in Swift (value: `"hmm-viterbi-3"`).
+/// HMM is the default novel-token path on all platforms; bump both here and
+/// in Swift when the `HMMTagger` model tables change.
 pub const HMM_VITERBI_VERSION: &str = "hmm-viterbi-3";
 
 // ─── Wire-format types ────────────────────────────────────────────────────────
@@ -206,11 +208,13 @@ impl NovelTokenCache {
 /// (cookbook §2.2). Stamped with the bundled table version, the platform
 /// string, and the tagger version.
 ///
-/// Wired with the real local-file submitter (`novel_pool_submitter::default_submitter`)
-/// so drained batches are written as JSON files to the configured pool directory
-/// (`LATTICE_POOL_DIR` env var, or the platform XDG default). The no-op submitter
-/// may only be used in tests or in an embedded-host where the pool directory is
-/// explicitly unwanted.
+/// Pool submission is opt-in: the real file-writing submitter
+/// (`novel_pool_submitter::default_submitter`) is used ONLY when the
+/// `LATTICE_POOL_DIR` environment variable is set to a non-empty path.
+/// Without that opt-in the submitter is a no-op so novel tokens are never
+/// written in plaintext to the XDG data directory by default. Callers that
+/// want the real pool behaviour must set `LATTICE_POOL_DIR` before
+/// `init_shared_cache` is called (typically at process start).
 ///
 /// Mirrors `LatticeLib.sharedNovelCache` (Swift static `let`) in
 /// `WordClassTagger.swift`. On non-Apple platforms (the only Rust target):
@@ -219,7 +223,14 @@ impl NovelTokenCache {
 ///   Swift `currentTaggerVersion` `#else` branch (`WordClassTagger.swift`)
 pub static SHARED_NOVEL_CACHE: OnceLock<NovelTokenCache> = OnceLock::new();
 
-/// Initialize the process-wide cache with the real local-file submitter.
+/// Initialize the process-wide cache.
+///
+/// Pool submission is opt-in: the real local-file submitter is used only when
+/// `LATTICE_POOL_DIR` is set and non-empty; otherwise the no-op submitter is
+/// used. Failing open (writing plaintext tokens to the XDG default directory)
+/// leaks user text to disk in deployments that never configured a pool endpoint.
+/// The no-op is the safe default; the real submitter is the opt-in.
+///
 /// Must be called once before `word_class` is invoked on novel tokens.
 /// The runtime (`fdc_runtime.rs`) calls this when loading the bundled
 /// artifacts so the table version is available.
@@ -228,13 +239,24 @@ pub static SHARED_NOVEL_CACHE: OnceLock<NovelTokenCache> = OnceLock::new();
 /// (OnceLock contract). Mirrors Swift's `sharedNovelCache` static let which
 /// reads `WordClassTableCache.table?.tableVersion ?? ""` at initialization.
 pub(crate) fn init_shared_cache(table_version: &str) {
+    use std::env;
     use crate::novel_pool_submitter::default_submitter;
     SHARED_NOVEL_CACHE.get_or_init(|| {
+        // Gate the real submitter on LATTICE_POOL_DIR being explicitly set.
+        let submitter: Submitter = if env::var("LATTICE_POOL_DIR")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            default_submitter()
+        } else {
+            Box::new(|_: PoolSubmission| {}) // no-op: pool not configured
+        };
         NovelTokenCache::new(
             table_version,
             "other",             // mirrors Swift currentPlatform #else branch
             HMM_VITERBI_VERSION, // mirrors Swift currentTaggerVersion #else branch
-            default_submitter(), // real local-file submitter; no-op only in tests
+            submitter,
         )
     });
 }

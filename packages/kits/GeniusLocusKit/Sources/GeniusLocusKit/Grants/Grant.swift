@@ -307,12 +307,20 @@ public struct DecayPolicy: Sendable, Codable, Equatable {
     /// rounded to the nearest integer (`.toNearestOrAwayFromZero`, matching the
     /// Rust `round()` so both ports agree on the discrete value), then floored
     /// at `floor`.
+    ///
+    /// The result is additionally capped at `baseLevel` so a persisted `floor`
+    /// that exceeds the original grant level (e.g., a corrupt row or a tampered
+    /// policy) cannot raise effective access above what was granted. Decay is
+    /// strictly attenuating — `effectiveLevel` never returns more than `baseLevel`.
     func effectiveLevel(baseLevel: Int, now: Date) -> Int {
         let elapsed = max(0.0, now.timeIntervalSince(startedAt))
         let halfLife = Double(max(1, halfLifeSeconds))
         let surviving = Double(baseLevel) * pow(0.5, elapsed / halfLife)
         let rounded = Int(surviving.rounded(.toNearestOrAwayFromZero))
-        return max(floor, rounded)
+        // Cap at baseLevel: time-aging is strictly attenuating — floor must not
+        // raise access above the original grant's content level even if the
+        // persisted decay_floor column contains a value that exceeds contentLevel.
+        return min(baseLevel, max(floor, rounded))
     }
 }
 
@@ -389,4 +397,12 @@ public enum GrantError: Error, Sendable, Equatable {
     /// `UnifiedAuditVerb.keyDecayed`, which is the audit event, not an
     /// error: this case is a different symbol in a different type.
     case keyDecayed
+    /// A mode-3 (decay-derived) grant was issued with degenerate custody
+    /// parameters: `threshold` must be > 0, `totalShares` must be ≥
+    /// `threshold`, and `totalShares` must not exceed `maxDecayShares`
+    /// (255). A zero threshold or a totalShares < threshold causes
+    /// LagrangeDecayKey.reconstruct to interpolate an empty point set,
+    /// producing DecayFieldElement.zero — a constant anyone can precompute
+    /// (planned security hardening — B1, finding #2).
+    case invalidCustodyParameters
 }

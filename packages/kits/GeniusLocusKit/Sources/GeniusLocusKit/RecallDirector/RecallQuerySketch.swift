@@ -4,10 +4,12 @@ import LocusKit
 /// A compiled query sketch derived from a `GLKRecallRequest`.
 ///
 /// The sketch extracts `queryText` from the request and — when a `Corpus`
-/// instance is available for the estate — pre-tokenises it into `queryTokens`
-/// for the BM25 lane and pre-embeds it into `queryEngram` for the vector lane.
-/// Doing both once per recall avoids redundant tokenisation and embedding when
-/// multiple lanes share the same query.
+/// instance is available for the estate — pre-embeds it into `queryEngram`
+/// for the vector lane. `queryTokens` are derived from `queryText` and
+/// compiled into the sketch, but the current recall lanes call
+/// `Corpus.bm25TopKBySource(query:queryText, ...)` directly; `queryTokens`
+/// are not consumed by `RecallDirector` (an earlier design passed tokens into
+/// the BM25 call; that path was replaced by passing `queryText`).
 ///
 /// `queryTokens` uses the same keyword-split vocabulary as `BM25Index.topK` —
 /// ASCII-lowercased whitespace+punctuation splits, min length 2. This matches

@@ -13,8 +13,10 @@
 //! - **Private tier** (`Restricted`) is excluded by default; only the
 //!   explicit `BelievedIncludingPrivate` scope includes it
 //!   (`includes_private_tier()`). The owner-key ceremony that authorizes
-//!   selecting that scope is v1.0-gold access-surface work; this scope is
-//!   the enforcement hook it will gate.
+//!   selecting that scope is the planned 1.1 vault authorization gate
+//!   (ADR-015): a human-presence consent check, not encryption. Vault
+//!   ships open through the 1.0.x-beta line by design; this scope is the
+//!   enforcement hook that gate will attach to.
 //! - **Normal tier** (`Normal` + `Elevated`) exports freely.
 //!
 //! `DrawerMapping::export` recalls with an explicit
@@ -35,10 +37,11 @@ pub enum VaultExportScope {
     ///   `[CurrentlyBelieve, Any([UserConfirmed, Unconfirmed, AutomatedConfirmedOnly]),
     ///     Any([Trustworthy, RequiresConfirmation])]`
     ///
-    /// This is the default scope. It produces the same result as the old
-    /// `Unconfirmed`-only export for unconfirmed drawers, and additionally
-    /// includes confirmed drawers — fixing the confirmed-drop bug.
-    #[default]
+    /// Produces the same result as the old `Unconfirmed`-only export for
+    /// unconfirmed drawers, and additionally includes confirmed drawers —
+    /// fixing the confirmed-drop bug. An explicit opt-in (no longer the
+    /// default): use this to export ALL currently-believed normal-tier content,
+    /// not just the exportable-marked subset.
     Believed,
 
     /// `Believed` selection plus Private-tier (`Restricted`) drawers — the
@@ -53,8 +56,14 @@ pub enum VaultExportScope {
     /// Currently-believed drawers that are marked exportable (exportability
     /// == public_), with any confirmation state.
     ///
+    /// This is the DEFAULT scope (CAND-032): a default disk export writes ONLY
+    /// content explicitly marked exportable, never non-exportable/private rows.
+    /// Broader scopes (`Believed`, `BelievedIncludingPrivate`) are explicit
+    /// opt-ins.
+    ///
     /// Filter chain:
     ///   `[Exportable, CurrentlyBelieve, Any([UserConfirmed, Unconfirmed, AutomatedConfirmedOnly])]`
+    #[default]
     Exportable,
 
     /// Currently-believed drawers that are user-confirmed.
@@ -186,8 +195,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_believed() {
-        assert_eq!(VaultExportScope::default(), VaultExportScope::Believed);
+    fn default_is_exportable() {
+        // CAND-032: default export scope is the exportable-marked subset, so a
+        // default disk export never writes non-exportable/private rows.
+        assert_eq!(VaultExportScope::default(), VaultExportScope::Exportable);
     }
 
     #[test]

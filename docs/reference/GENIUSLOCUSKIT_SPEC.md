@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.7.2
+version: 1.11.0
 status: active
-date: 2026-06-19
-description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.7.2: one-door FDC classification seam."
+date: 2026-06-28
+description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.11.0: G5 wing-scoped topology privacy + G6 reindexMissing fan-out cap."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -1681,6 +1681,53 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.11.0 -- 2026-06-28
+Security fixes (secfix/c-glk-remaining): two correctness and safety invariants added.
+
+**G5 — Wing-scoped topology privacy (`recallTunnels`)**
+`recallTunnels(_ handle:, wing:)` previously called `provider.treeEdges(scope: nil)` and
+stamped ALL returned edges with the queried wing's label, leaking foreign-wing node IDs into
+every wing's tunnel stream. The fix resolves child node IDs against `estate.resolveNodeNames`
+and retains only edges whose child maps to the queried wing. Root→wing structural nodes are
+excluded (they resolve to the estate root, not the queried wing); only room-level containment
+edges are emitted. The G1 read-once invariant is preserved — `treeEdges` is still called
+EXACTLY ONCE; `resolveNodeNames` is a separate NodeStore read.
+New test: `nodeTreeNative_g5_wingScoped_foreignEdgesExcluded` (Swift) verifies disjoint
+containment sets across two real wings.
+
+**G6 — `reindexMissing` unbounded fan-out cap**
+`reindexMissing` now caps total enqueued jobs at `GeniusLocusKit.reindexMaxJobs` (10 000,
+`EstateCoordinator::REINDEX_MAX_JOBS` in Rust). Large estates (200k+ drawers) previously
+could flood the encode queue in a single call, starving live captures. Callers repeat the
+call to continue backfill; the cap is a per-call ceiling, not a total lifetime ceiling. The
+existing `enqueueChunk` constant (1 024) remains the per-fsync unit and is unaffected.
+New tests: constant value assertion + cap enforcement test (both ports).
+
+### 1.10.0 -- 2026-06-25
+Additive (T1 — encode mode): `setEncodeSpeed(_:for:)` forwards an import's
+declared encode SPEED (foreground/background) onto the estate corpus drain. Pure
+orchestration — no new verb, no mutation of stored state, no byte-identity
+change; the speed governs only the drain's embed concurrency (size-gated write
+strategy is unaffected).
+
+### 1.9.0 -- 2026-06-25
+Additive (T6 — drain status): new public `drainStatuses(_:)` accessor + the
+`DrainStatus` value type. Read-only aggregation of the estate's long-running
+background drains (today only the corpus encode drain), assembled by observing
+each drain's frontiers via `Corpus.ingestQueueDepth`. Validates the handle
+(`EstateNotOpen` on a stale handle). No new verb, no mutation, no change to
+byte-identity; backs the `moot_drain_status` MCP tool.
+
+### 1.8.0 -- 2026-06-22
+GLK_BATCH1: `captureBatch(_:_:)` now delegates to `Estate.captureBatch` (LocusKit
+B-1a) instead of opening `rowStore.beginTransaction()` then calling per-item
+`capture()`. SQLiteBackend tracks open transactions via `inTransaction`; the old
+pattern threw `StorageError.transactionConflict` on any SQLite estate. The new
+path opens ONE `storage.transaction()` for all fresh-lineage drawers via
+`DrawerStore.insertFreshBatch`, falls back to per-item `addDrawerCovered` for
+supersession frames, and runs post-insert coverage identical to single-item
+`capture`. BM25/vector lanes remain dark until `moot_reindex` / `moot_dream`.
 
 ### 1.7.2 -- 2026-06-19
 One-door FDC classification seam (fix/fdc-capture-seam): `capture(_:_:mode:)` /

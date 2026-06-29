@@ -14,11 +14,9 @@
 // and commutative (inherited from OR-reduction), so the final
 // summary is independent of roll-up order.
 //
-// Storage discipline: the substrate keeps the most recent
-// (hour windows, day windows) hot in the bit-sliced tensor and
-// progressively older windows in the SQLite tail. The dreaming
-// daemon (§ 15 rule 6) advances windows hourly, daily, weekly,
-// monthly, quarterly, and yearly on schedule.
+// This file provides pure `compress`, `rollup`, and `cascadeRollup`
+// helpers; storage and daemon scheduling are the caller's responsibility
+// (see dreaming daemon § 15 rule 6 for the scheduling contract).
 //
 // Used by:
 //   § 8.14   Temporal compression definition (this file)

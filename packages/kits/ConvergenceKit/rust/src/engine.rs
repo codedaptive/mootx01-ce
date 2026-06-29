@@ -22,7 +22,8 @@ use persistence_kit::Storage;
 // and it is driven through exclusive `&mut` access, not shared `&`.
 pub trait SyncEngine: Send {
     /// Enable sync against the given manifest and storage. Must
-    /// be called once before push/pull/subscribe.
+    /// be called before push/pull. Subscribe may be called without
+    /// prior enablement in some implementations.
     fn enable(&mut self, manifest: SyncManifest, storage: Arc<dyn Storage>) -> SyncResult<()>;
 
     /// Tear down subscriptions, stop observing, release resources.

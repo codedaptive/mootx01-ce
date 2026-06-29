@@ -1,11 +1,11 @@
 // RowBitmapsTests.swift
 //
 // Per-type suite for RowBitmaps + BitVector216 (cookbook §2.3 row
-// bitmap layout, made an explicit value type in Phase 5). RowBitmaps
-// is a Swift-side layout type with no dedicated Rust module; this suite
-// asserts the contract from source: layout constants, 6-bit field
-// access, (field,bit) predicate, fieldValues enumeration, and the dense
-// BitVector216 view.
+// bitmap layout, made an explicit value type in Phase 5). The Rust
+// mirror is packages/libs/SubstrateTypes/rust/src/row_bitmaps.rs.
+// This suite asserts the contract from source: layout constants,
+// 6-bit field access, (field,bit) predicate, fieldValues enumeration,
+// and the dense BitVector216 view.
 
 import Testing
 @testable import SubstrateTypes

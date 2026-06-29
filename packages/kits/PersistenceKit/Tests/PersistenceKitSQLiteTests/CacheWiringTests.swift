@@ -119,7 +119,8 @@ struct CacheWiringTests {
     }
 
     /// Cache-enabled backend serves subsequent reads from the hot tier — second
-    /// query returns the same row even after the backing store has no record.
+    /// query returns the same row from the hot tier (backing store still has the row;
+    /// this test verifies the hot-tier hit path, not post-deletion behaviour).
     @Test func enabledCacheServesHotTierOnRepeatedRead() async throws {
         let schema = makeSchema()
         let id = UUID()

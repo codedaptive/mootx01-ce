@@ -8,8 +8,8 @@
 //! Online path: GitHub latest tag → semver compare → download + SHA-256
 //! verify → atomic place. Network failure reports clearly; there is no
 //! local-build fallback on the Rust platforms (dev builds use --from).
-//! Service restart is wired when the service backends land; until then the
-//! command prints what to do.
+//! Service restart is wired for Linux (systemd) and Windows (Task Scheduler).
+//! Other platforms print a manual restart note.
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -107,8 +107,8 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
 }
 
 /// Restart the registered services after placing a new binary. Linux:
-/// systemd restart of both units (mgr best-effort). Elsewhere: manual note
-/// until the platform backend lands.
+/// systemd restart of both units (mgr best-effort). Windows: Task Scheduler
+/// restart of both tasks (mgr best-effort). Other platforms: manual note.
 fn restart_services() {
     #[cfg(target_os = "linux")]
     {

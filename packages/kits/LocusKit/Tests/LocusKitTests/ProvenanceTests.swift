@@ -19,10 +19,9 @@ import Testing
 import SubstrateLib
 
 /// Provenance bitmap coverage — schema shape, axis encoding,
-/// default zero, mutation + atomic audit, Confidence ordering, and
-/// idempotent ALTER migration. Each test stands up a fresh
-/// temp-directory database so the suite can run in parallel without
-/// cross-contamination.
+/// default zero, mutation + atomic audit, and Confidence ordering.
+/// Each test stands up a fresh temp-directory database so the suite
+/// can run in parallel without cross-contamination.
 @Suite("ProvenanceTests")
 struct ProvenanceTests {
 
@@ -51,8 +50,7 @@ struct ProvenanceTests {
         Drawer(
             id: TestStorage.tid(id),
             content: "content-\(id)",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_700_000_000),
             embeddingModelID: "minilm-v6",
@@ -105,23 +103,6 @@ struct ProvenanceTests {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, name, -1, Self.SQLITE_TRANSIENT_TEST)
         return sqlite3_step(stmt) == SQLITE_ROW
-    }
-
-    private func auditRowCount(at url: URL) throws -> Int {
-        var handle: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let opened = handle else {
-            if let h = handle { sqlite3_close_v2(h) }
-            return -1
-        }
-        defer { sqlite3_close_v2(opened) }
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(opened, "SELECT COUNT(*) FROM provenance_audit", -1, &stmt, nil) == SQLITE_OK else {
-            return -1
-        }
-        defer { sqlite3_finalize(stmt) }
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return -1 }
-        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     // MARK: - 4b. Bit layout round-trip test
@@ -205,7 +186,8 @@ struct ProvenanceTests {
         #expect(loaded?.sourceType == .user)
         #expect(loaded?.confirmation == .userConfirmed)
 
-        // Exactly one audit event, carrying the new provenance snapshot.
+        // Two audit events: genesis capture + this mutation; the mutation
+        // event carries the new provenance snapshot.
         let events = try await store.auditEventsForRow(UUID(uuidString: "11111111-1111-4111-8111-111111111111")!)
         #expect(events.count == 2)
         #expect(events.last?.afterBitmaps.provenance == newValue)

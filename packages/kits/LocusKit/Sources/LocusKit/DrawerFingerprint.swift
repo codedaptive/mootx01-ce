@@ -2,10 +2,10 @@
 //
 // Derives a drawer's 256-bit structural fingerprint, the estate's
 // coordinate system for structural similarity (cookbook section 3).
-// This is the LocusKit glue over SubstrateLib's SimHash machinery, and
-// it is what un-defers LOCI_V035_18: fingerprint pruning (spec section
-// 7.9.4 step 1) was carved out "until fingerprints exist," and this is
-// where they begin to exist.
+// This is the LocusKit glue over SubstrateLib's SimHash machinery.
+// Fingerprint pruning (spec section 7.9.4 step 1) is now live and uses
+// `ContainerFingerprint` aggregates built from these per-drawer
+// fingerprints via `EstateVerbs.liveRows` and `BitmapEvaluator`.
 //
 // A fingerprint is four 64-bit SimHash blocks, each a projection of one
 // facet of the row through a hyperplane family:

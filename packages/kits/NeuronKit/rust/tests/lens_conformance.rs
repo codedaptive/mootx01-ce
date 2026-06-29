@@ -522,6 +522,8 @@ struct ScenarioProfileCase {
 #[serde(rename_all = "camelCase")]
 struct ContextSynthRow {
     content: String,
+    #[serde(rename = "parentNodeId")]
+    parent_node_id: String,
     wing: String,
     room: String,
     // State in bits 0-5 of adjectiveBitmap (LocusKit State enum raws).
@@ -1153,6 +1155,7 @@ fn lenses_reproduce_shared_vectors() {
             .rows
             .iter()
             .map(|r| DrawerRowMeta {
+                parent_node_id: r.parent_node_id.clone(),
                 wing: r.wing.clone(),
                 room: r.room.clone(),
                 // State occupies bits 0-5 of adjectiveBitmap (LocusKit State enum).

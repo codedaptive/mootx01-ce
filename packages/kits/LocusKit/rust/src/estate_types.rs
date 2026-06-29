@@ -109,9 +109,10 @@ impl LatticeAnchor {
 /// map exactly to the Swift `EstateError` enum.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EstateError {
-    /// The backing SQLite store could not be opened or created. The
-    /// associated message is the underlying diagnostic so callers can
-    /// log the substrate failure without re-wrapping `LocusKitError`.
+    /// A store operation failed — covers initialization, write, and
+    /// query failures across all backends (SQLite, InMemory, Postgres).
+    /// The associated message is the underlying diagnostic so callers
+    /// can log it without re-wrapping `LocusKitError`.
     SubstrateUnavailable(String),
 
     /// A manifest key does not match the expected value. Per spec § 8.1:

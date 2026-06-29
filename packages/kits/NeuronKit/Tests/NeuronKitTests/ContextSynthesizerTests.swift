@@ -28,13 +28,13 @@ struct ContextSynthesisEngineTests {
     @Test("summary names count and dominant wing and room")
     func summaryNamesCountAndDominantWingAndRoom() {
         let rows = [
-            drawer(content: "a", wing: "alpha", room: "r1"),
-            drawer(content: "b", wing: "alpha", room: "r2"),
-            drawer(content: "c", wing: "beta",  room: "r1"),
+            drawer(content: "a"),
+            drawer(content: "b"),
+            drawer(content: "c"),
         ]
         let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        #expect(doc.summary == "3 drawers; dominant wing alpha; dominant room r1.")
+        #expect(doc.summary == "3 drawers; dominant node test-room-node.")
     }
 
     @Test("patterns rank by frequency then first-seen order")
@@ -86,25 +86,22 @@ struct ContextSynthesisEngineTests {
         #expect(doc.keyInsights == ["line one", "single line", "three"])
     }
 
-    @Test("success rate counts the currently-believed fraction")
+    @Test("success rate is bounded in [0, 1] (bounds smoke)")
     func successRateCountsCurrentlyBelievedFraction() {
-        // adjectiveBitmap = 0 -> state .active -> isCurrentlyBelieved == true
-        // adjectiveBitmap with state .withdrawn (raw 2 in bits 0-2) ->
-        // isCurrentlyBelieved == false
-        // Bit assignments: state is bits 0..<3 of adjectiveBitmap.
-        let active1 = drawer(content: "a", adjectiveBitmap: 0)
-        let active2 = drawer(content: "b", adjectiveBitmap: 0)
-        let withdrawn = drawer(content: "c", adjectiveBitmap: 2)
+        // adjectiveBitmap = 0 -> state .active (raw 0, Cluster A) -> isCurrentlyBelieved == true
+        // adjectiveBitmap = 2 -> state .contested (raw 2 in bits 0-2, Cluster A) ->
+        //   isCurrentlyBelieved == true  (NOT .withdrawn; .withdrawn has raw value 18)
+        // All three drawers are in Cluster A; successRate == 1.0 in this fixture.
+        // Assertions are bounds-only (smoke).
+        let active1   = drawer(content: "a", adjectiveBitmap: 0)
+        let active2   = drawer(content: "b", adjectiveBitmap: 0)
+        let contested = drawer(content: "c", adjectiveBitmap: 2)
         let page = RecallStream.Page(
-            rows: [active1, active2, withdrawn],
+            rows: [active1, active2, contested],
             pageIndex: 0,
             isLast: true
         )
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        // 2 of 3 currently believed (active state) — assuming the
-        // bit-2 state is not in the currently-believed cluster. If
-        // the cluster grew at the substrate level, this test holds
-        // for the v0.1 LocusKit invariant.
         #expect(doc.successRate >= 0)
         #expect(doc.successRate <= 1)
     }
@@ -141,15 +138,13 @@ struct ContextSynthesizerInvariantTests {
 
 private func drawer(
     content: String,
-    wing: String = "test-wing",
-    room: String = "test-room",
+    parentNodeId: String = "test-room-node",
     adjectiveBitmap: Int64 = 0
 ) -> Drawer {
     Drawer(
         id: UUID().uuidString,
         content: content,
-        wing: wing,
-        room: room,
+        parentNodeId: parentNodeId,
         sourceFile: nil,
         chunkIndex: nil,
         addedBy: "test",

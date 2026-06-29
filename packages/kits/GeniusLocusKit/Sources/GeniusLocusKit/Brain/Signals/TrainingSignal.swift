@@ -46,7 +46,7 @@ public enum TrainingSignal {
     public static let defaultCadenceSeconds: TimeInterval = 3_600
 
     /// Stable name surfaced in `SignalReport.name` and in
-    /// `GeniusLocusKit.defaultStandingSignalNames` (signal 9, ADR-017 F1).
+    /// `GeniusLocusKit.defaultStandingSignalNames` (signal 9, ADR-018 F1).
     public static let signalName = "training-daemon"
 
     /// Build a signal spec that invokes the training daemon on each fire.

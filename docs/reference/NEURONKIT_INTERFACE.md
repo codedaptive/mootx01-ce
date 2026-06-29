@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.1.0
+version: 1.4.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-19
+date: 2026-06-25
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -36,7 +36,7 @@ and Rust legs.
 **Swift:** `packages/kits/NeuronKit/`
 
 - `Sources/NeuronKit/NeuronKit.swift` — the `NeuronKit` namespace,
-  `inferLatticeAnchor`, the `dreamingDaemon` facade, `LinguisticPipelineMode`
+  `inferLatticeAnchor`, the `dreamingDaemon` Interface, `LinguisticPipelineMode`
 - `Sources/NeuronKit/LatticeAnchorInference.swift` — `LatticeAnchorInference`,
   `AnchorConfidence`, `EnrichmentStatus`
 - `Sources/NeuronKit/HybridRecall.swift` — `hybridRecall`,
@@ -568,8 +568,20 @@ public struct DreamingPolicy: Sendable, Equatable, Codable {
 public protocol DreamingPolicyStore: Sendable {
     func loadPolicy() async throws -> DreamingPolicy?
     func savePolicy(_ policy: DreamingPolicy) async throws
+    func loadBandit() async throws -> SolverBandit?                  // default: nil
+    func saveBandit(_ bandit: SolverBandit) async throws            // default: no-op
+    func loadDaemonState() async throws -> DreamingDaemonState?     // default: nil   (F6)
+    func saveDaemonState(_ state: DreamingDaemonState) async throws // default: no-op (F6)
 }
 public actor InMemoryDreamingPolicyStore: DreamingPolicyStore { public init(_ initial: DreamingPolicy? = nil) }
+// Manifest-backed store (F6 / ADR-020): persists policy, bandit, and daemon cycle
+// state to the estate manifest through kit.estate(for:) -> Estate.meta/setMeta.
+public struct EstateManifestDreamingPolicyStore: DreamingPolicyStore {
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+}
+// Daemon cycle state carried across restarts (F6): lastTickAt, proposedKeys,
+// lastReindexVocab, consolidated, cycleCount. Codable.
+public struct DreamingDaemonState: Sendable, Equatable, Codable { /* … */ }
 
 public enum DreamingTriggerMode: String, Sendable, Codable, CaseIterable, Equatable {
     case timer, event, hybrid                 // only .timer is live (SPEC § 9)
@@ -640,8 +652,18 @@ public struct MaintenancePolicy: Sendable, Equatable, Codable {
 public protocol MaintenancePolicyStore: Sendable {
     func loadPolicy() async throws -> MaintenancePolicy?
     func savePolicy(_ policy: MaintenancePolicy) async throws
+    func loadDaemonState() async throws -> MaintenanceDaemonState?     // default: nil   (F6)
+    func saveDaemonState(_ state: MaintenanceDaemonState) async throws // default: no-op (F6)
 }
 public actor InMemoryMaintenancePolicyStore: MaintenancePolicyStore { public init(_ initial: MaintenancePolicy? = nil) }
+// Manifest-backed store (F6 / ADR-020): persists policy + daemon cycle state to
+// the estate manifest through kit.estate(for:) -> Estate.meta/setMeta.
+public struct EstateManifestMaintenancePolicyStore: MaintenancePolicyStore {
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+}
+// Daemon cycle state carried across restarts (F6): lastTickAt, lastAuditCheckAt,
+// proposedKeys, cycleCount. Codable.
+public struct MaintenanceDaemonState: Sendable, Equatable, Codable { /* … */ }
 
 public protocol MaintenanceSubstrateReader: Sendable {
     func activeDrawers() async throws -> [Drawer]
@@ -715,9 +737,17 @@ public func mmrRank(candidates: [Drawer], query: Engram, lambda: Float, k: Int,
                     fingerprint: (Drawer) -> Engram) -> [Drawer]
 ```
 
-**Rust:** (pure rerank + paging only — no estate, no `mmrRank`)
+**Rust:** (GLK entry point + rerank + paging — no `mmrRank`)
 
 ```rust
+// GLK entry point — routes through EstateCoordinator::recall (B-1), applies
+// RRF+MMR rerank, emits 3 telemetry metrics, returns paged results.
+pub fn hybrid_recall(
+    coordinator: &EstateCoordinator, handle: &EstateHandle,
+    frame: RecallFrame, tuning: &RecallFrameTuning, now: i64,
+) -> Result<Vec<RecallPage>, VerbDispatchError>;
+
+// Pure rerank + paging engine (no estate dependency).
 pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRow>;
 pub fn page_recall(rows: &[DrawerRow], page_size: i32) -> Vec<RecallPage>;
 pub fn shingles(s: &str) -> std::collections::BTreeSet<String>;     // 3-char lowercase
@@ -1160,7 +1190,7 @@ shape deltas.
 | Dreaming cycle report | `DreamingCycleReport` `Dreaming/DreamingDaemon.swift:108` | `DreamingCycleReport` `dreaming_cycle.rs:79` | `public` / `pub` | identical | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
 | Dreaming daemon | `DreamingDaemon` (actor) `Dreaming/DreamingDaemon.swift:143` | `DreamingDaemon` (struct) `dreaming_cycle.rs:236` | `public` / `pub` | Swift actor / Rust struct (sync seam, no async runtime — sanctioned) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
 | Estate dreaming reader | `EstateDreamingReader` `Dreaming/EstateDreamingReader.swift:31` | `EstateDreamingReader` `estate_dreaming_reader.rs:35` | `public` / `pub` | Swift binds GLK verbs / Rust generic over `DrawerStore` (no estate dep, sanctioned) | `EstateDreamingReaderTests.swift` ; `estate_dreaming_reader.rs` tests | Confirmed |
-| Estate dreaming sink | `EstateDreamingSink` `Dreaming/EstateDreamingSink.swift:45` | `EstateDreamingSink<S>` `estate_dreaming_sink.rs:55` | `public` / `pub` | Swift binds GLK verbs / Rust generic over `DrawerStore` (sanctioned) | `EstateDreamingSinkTests.swift` ; `estate_dreaming_sink.rs` tests | Confirmed |
+| Estate dreaming sink | `EstateDreamingSink` `Dreaming/EstateDreamingSink.swift:45` | `EstateDreamingSink<'a>` `estate_dreaming_sink.rs:64` | `public` / `pub` | Swift binds GLK verbs / Rust binds GLK coordinator (B-1 parity) | `EstateDreamingSinkTests.swift` ; `estate_dreaming_sink.rs` tests | Confirmed |
 | Dreaming decision core | `DreamingDecision` (enum, nested `Observation`/`EmittedCandidate`/`Outcome`) `Dreaming/DreamingDecision.swift:29` | `dreaming_decision.rs` free fns + flat `Observation`/`EmittedCandidate`/`Outcome` | `public` / `pub` | Swift nests the decision sub-shapes under `DreamingDecision`; Rust declares them flat (`Observation` `:43`, `EmittedCandidate` `:53`, `Outcome` `:64`) — Swift nested X.Y / Rust flat XY | `DreamingDaemonTests.swift` ; `dreaming_decision.rs` tests | Confirmed |
 | Dreaming-decision observation | `DreamingDecision.Observation` (nested) | `Observation` `dreaming_decision.rs:43` | `public` / `pub` | Swift nested / Rust flat | `dreaming_decision.rs` tests | Confirmed |
 | Dreaming-decision emitted candidate | `DreamingDecision.EmittedCandidate` (nested) | `EmittedCandidate` `dreaming_decision.rs:53` | `public` / `pub` | Swift nested / Rust flat | `dreaming_decision.rs` tests | Confirmed |
@@ -1459,6 +1489,36 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-06-25
+Rust dreaming-daemon parity (closes the 1.3.0 port differences). The Rust
+`DreamingDaemon` now holds the Thompson-Sampling `SolverBandit` and observes
+reward + re-selects the trigger mode each cycle (NEURONKIT_SPEC § 3.4), matching
+the Swift Brain algorithm; `DreamingPolicyStore` gains `load_bandit`/`save_bandit`
+(default impls) and the manifest store persists the bandit under
+`neuronkit.dreaming.bandit`. The Rust `MaintenanceDaemon` now owns the audit-check
+cadence (`last_audit_check_epoch_secs` ≡ Swift `lastAuditCheckAt`, gated by
+`audit_check_interval_ms`), so `MaintenanceDaemonState` matches the Swift shape.
+Both ports are now structurally equal: same daemon algorithms, same persisted
+state. (Supersedes the 1.3.0 note about Rust holding no bandit.)
+
+### 1.3.0 -- 2026-06-25
+F6 / ADR-020 — manifest-backed daemon persistence. `DreamingPolicyStore` and
+`MaintenancePolicyStore` gain `loadDaemonState`/`saveDaemonState` seams (default
+no-op) plus the `DreamingDaemonState` / `MaintenanceDaemonState` codable carriers;
+new `EstateManifestDreamingPolicyStore` / `EstateManifestMaintenancePolicyStore`
+persist policy, bandit (dreaming), and daemon cycle state to the estate manifest
+via `Estate.meta/setMeta` (Rust: through `DrawerStore::get_meta/set_meta`). The
+production `AutonomicGovernor` wires the manifest-backed stores; daemons load state
+on start and save after each cycle, so a restart resumes the prior run's
+idempotency/cycle memory. Both ports. (Rust dreaming store is policy+state only —
+the Rust dreaming daemon holds no bandit, a pre-existing port difference.)
+
+### 1.2.0 -- 2026-06-22
+Rust parity: added `hybrid_recall()` GLK entry point (§4.1, B-1 compliant)
+with 3 telemetry metrics. Updated `EstateDreamingSink` parity row — now
+`EstateDreamingSink<'a>` binding GLK coordinator (was generic over DrawerStore).
+PAR-R5.
 
 ### 1.1.0 -- 2026-06-19
 Added distillation lens surface: `NeuronKit.hmmFeatureExtractor` (production

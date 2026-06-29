@@ -34,6 +34,29 @@ final class SQLiteConnection: @unchecked Sendable {
         let parent = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
+        // CAND-052: Symlink refusal — reject a pre-planted symlink at the DB path.
+        //
+        // A symlink at the database location can redirect SQLite writes to an
+        // arbitrary file (e.g. /etc/passwd or another estate's SQLite). Refuse
+        // before opening. `resourceValues(forKeys:)` uses `lstat` semantics
+        // when asked for `isSymbolicLink` — it does NOT follow the symlink,
+        // so it correctly identifies the symlink itself rather than its target.
+        // Non-existent paths return `.resourceNotFound` or a missing key; both
+        // are safe to ignore (new-file creation path).
+        //
+        // Apple Data Protection (applied below after open) covers the DB file
+        // and its WAL sidecars at rest under the Secure Enclave key. This guard
+        // addresses the symlink-redirection attack surface (CAND-052), which is
+        // orthogonal to at-rest encryption.
+        if let attrs = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           attrs.isSymbolicLink == true {
+            throw StorageError.backendError(
+                underlying: "sqlite open: refusing to open \(url.lastPathComponent) " +
+                            "— path is a symbolic link. Pre-planted symlinks are a " +
+                            "security risk (CAND-052)."
+            )
+        }
+
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         let rc = sqlite3_open_v2(url.path, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
@@ -55,9 +78,9 @@ final class SQLiteConnection: @unchecked Sendable {
 
         // Apple Data Protection: the OS stores the estate encrypted at rest
         // under a Secure Enclave-derived key (the device passcode is the root
-        // secret). This is the Apple-native at-rest encryption — the Rust port
-        // uses SQLCipher; each port uses its platform's mechanism and the files
-        // are never shared. We bypass Core Data per PERSISTENCEKIT_SPEC
+        // secret). This layers Apple-native Data Protection on top of the
+        // SQLCipher whole-file key applied above (when keyHex is set); the
+        // Rust port uses SQLCipher only. We bypass Core Data per PERSISTENCEKIT_SPEC
         // invariant I-2, so we set directly the protection class Core Data would
         // otherwise request via NSPersistentStoreFileProtectionKey.
         Self.applyDataProtection(to: url)
@@ -186,7 +209,13 @@ final class SQLiteStatement {
                 if rc != SQLITE_OK { throw StorageError.backendError(underlying: "bind json") }
             }
         case .hlc(let hlc):
-            sqlite3_bind_int64(stmt, index, sqlite3_int64(hlc.packed))
+            // Int64(bitPattern:) preserves the bit pattern when the
+            // node byte sets the top bit (e.g. nodeID -1 → 0xFF <<
+            // 56). The bare Int64() traps with "Not enough bits".
+            // The read side already uses UInt64(bitPattern:) (line
+            // 792 of SQLiteStorage.swift) — this keeps write/read
+            // symmetric.
+            sqlite3_bind_int64(stmt, index, Int64(bitPattern: hlc.packed))
         case .fingerprint(let fp):
             // Store as 32-byte blob, big-endian for stability.
             var data = Data(capacity: 32)
@@ -349,9 +378,113 @@ enum ISO8601 {
     /// Parse an ISO-8601 string, accepting both fractional-second and
     /// whole-second forms. Returns `nil` only when neither form succeeds,
     /// which means the string is not a valid ISO-8601 timestamp at all.
+    ///
+    /// Hot-path note: `NSISO8601DateFormatter` (`ISO8601DateFormatter`) is FAR
+    /// TOO SLOW to use in this situation. Its `date(from:)` is ICU-backed
+    /// (`udat`/calendar machinery) and costs microseconds per call even with
+    /// the formatter instance cached. The Merkle rollup re-decodes every drawer
+    /// in a room on each insert, so this parse runs O(N²) times during a large
+    /// import — a stack sample showed it consuming ≈80% of total CPU and
+    /// producing a visibly decelerating import. `fastParseCanonicalUTC` handles
+    /// the exact shape this kit writes
+    /// (`YYYY-MM-DDTHH:MM:SS[.fff…]Z`, UTC) without touching ICU; anything it
+    /// does not confidently recognize (numeric offsets, malformed input)
+    /// falls back to the formatters, which preserves the previous behavior
+    /// exactly — including returning `nil` for genuinely corrupt values. The
+    /// fast path is verified against the formatters in `ISO8601ParseTests`.
     static func date(from string: String) -> Date? {
-        formatterWithFraction.date(from: string)
+        if let fast = fastParseCanonicalUTC(string) {
+            return fast
+        }
+        return formatterWithFraction.date(from: string)
             ?? formatterWithoutFraction.date(from: string)
+    }
+
+    /// Fast, allocation-free parse of the canonical UTC RFC-3339 shape this
+    /// kit emits: `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.fff…Z`.
+    /// Returns `nil` for ANY deviation (offsets, lowercase markers, invalid
+    /// calendar dates, trailing garbage) so the caller falls back to the
+    /// reference formatters. For the shapes this kit writes (≤ millisecond
+    /// fractions) the result is identical to `ISO8601DateFormatter`. Fractional
+    /// seconds are retained at FULL sub-second precision — the "super fine"
+    /// date — so for finer-than-millisecond fractions (only possible from
+    /// externally-authored timestamps) the fast path is deliberately more
+    /// precise than `ISO8601DateFormatter`, which caps at milliseconds. That is
+    /// the correct, non-lossy behavior; it never loses precision the formatter
+    /// would have kept.
+    private static func fastParseCanonicalUTC(_ string: String) -> Date? {
+        let u = Array(string.utf8)
+        // Shortest accepted form "YYYY-MM-DDTHH:MM:SSZ" is 20 bytes.
+        guard u.count >= 20 else { return nil }
+
+        // ASCII digit at index i → its value, else nil.
+        func digit(_ i: Int) -> Int? {
+            let c = u[i]
+            return (c >= 48 && c <= 57) ? Int(c - 48) : nil
+        }
+        // Fixed-width unsigned integer from `len` digits starting at `start`.
+        func uint(_ start: Int, _ len: Int) -> Int? {
+            var v = 0
+            for i in start..<(start + len) {
+                guard let d = digit(i) else { return nil }
+                v = v * 10 + d
+            }
+            return v
+        }
+
+        // Structural separators: '-' '-' 'T' ':' ':' (uppercase T only — the
+        // canonical form; lowercase/space falls back to the formatter).
+        guard u[4] == 45, u[7] == 45, u[10] == 84, u[13] == 58, u[16] == 58 else { return nil }
+        guard let year = uint(0, 4), let month = uint(5, 2), let day = uint(8, 2),
+              let hour = uint(11, 2), let minute = uint(14, 2), let second = uint(17, 2)
+        else { return nil }
+
+        // Range + calendar-validity checks (reject what the formatter rejects).
+        guard month >= 1, month <= 12, hour <= 23, minute <= 59, second <= 60 else { return nil }
+        guard day >= 1, day <= daysInMonth(month, year: year) else { return nil }
+
+        // Optional fractional seconds: '.' followed by ≥1 digit.
+        var idx = 19
+        var fractional = 0.0
+        if idx < u.count, u[idx] == 46 {
+            idx += 1
+            var scale = 0.1
+            var sawDigit = false
+            while idx < u.count, let d = digit(idx) {
+                fractional += Double(d) * scale
+                scale /= 10
+                idx += 1
+                sawDigit = true
+            }
+            guard sawDigit else { return nil }
+        }
+
+        // Canonical fast path is UTC 'Z' only; offsets fall back.
+        guard idx == u.count - 1, u[idx] == 90 else { return nil }
+
+        // Days since 1970-01-01 (Howard Hinnant's days_from_civil — proleptic
+        // Gregorian, matches Unix-epoch day counting and the formatter output).
+        let y = month <= 2 ? year - 1 : year
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146097 + doe - 719468
+
+        let seconds = Double(days * 86400 + hour * 3600 + minute * 60 + second) + fractional
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    /// Days in `month` (1–12) for `year`, proleptic-Gregorian leap rule.
+    private static func daysInMonth(_ month: Int, year: Int) -> Int {
+        switch month {
+        case 1, 3, 5, 7, 8, 10, 12: return 31
+        case 4, 6, 9, 11: return 30
+        case 2:
+            let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+            return leap ? 29 : 28
+        default: return 0
+        }
     }
 }
 

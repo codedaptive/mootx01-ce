@@ -284,7 +284,7 @@ struct ServerTests {
         #expect(searchObject["isError"] == .bool(false))
     }
 
-    // MARK: - tools/call: stubbed verb surfaces as result-isError
+    // MARK: - tools/call: live verb with nonexistent ID surfaces as result-isError
 
     @Test func testEraseMemoryForNonexistentIDReturnsIsError() async throws {
         let dispatcher = try await makeDispatcher()

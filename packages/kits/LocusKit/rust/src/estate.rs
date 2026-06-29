@@ -21,6 +21,9 @@
 use crate::drawer_store::DrawerStore;
 use crate::estate_types::{EstateError, OwnerCredentials};
 use crate::manifest::{ManifestKey, ManifestValues};
+use crate::node_store::NodeStore;
+use ed25519_dalek::SigningKey;
+use rand_core::OsRng;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -57,6 +60,12 @@ pub struct Estate {
     /// the `pub(crate)` visibility here — `estate_verbs.rs` and
     /// `estate_audit.rs` reach the store, external callers do not.
     pub(crate) store: Arc<dyn DrawerStore>,
+
+    /// The estate's containment tree store (ADR-017). Wings and rooms
+    /// are nodes; the capture verb resolves wing/room display names to
+    /// node IDs through this store's create-on-demand resolution (§7).
+    /// Wrapped in Arc so Estate remains Clone.
+    pub(crate) node_store: Option<Arc<NodeStore>>,
 
     /// Parsed UUID form of the manifest's `estate_uuid` row. Cached at
     /// init time because the value never changes for the lifetime of
@@ -262,11 +271,51 @@ impl Estate {
             .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))
     }
 
+    /// Read a per-estate metadata value by key, or `None` on miss.
+    ///
+    /// The public, lowest-level key-value surface over the estate manifest
+    /// table (spec §5.9) — the "future verb surface" the manifest accessor
+    /// anticipated. The substrate OWNS this durable storage; upper layers
+    /// (e.g. NeuronKit's dreaming/maintenance daemons) persist their own
+    /// state here THROUGH the estate's public interface rather than reaching
+    /// around the substrate to a host-owned store (Interface Rules: features
+    /// owned at the lowest level; data flows through public interfaces).
+    ///
+    /// Consumers MUST namespace their keys (e.g. `"neuronkit.dreaming.policy"`)
+    /// to avoid collision with the typed v1 manifest keys in `ManifestKey`.
+    /// The value round-trips verbatim and survives restarts (the manifest
+    /// table is durable). Mirrors Swift `Estate.meta(key:)`.
+    pub fn meta(&self, key: &str) -> Result<Option<String>, EstateError> {
+        self.store
+            .get_meta(key)
+            .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))
+    }
+
+    /// Write a per-estate metadata value (upsert on `key`).
+    ///
+    /// See `meta` for the ownership rationale and the key-namespacing
+    /// requirement. The write is durable and visible to a subsequent `meta`
+    /// read (including across a restart). Mirrors Swift `Estate.setMeta(key:value:)`.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), EstateError> {
+        self.store
+            .set_meta(key, value)
+            .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))
+    }
+
     /// The estate's stable UUID, parsed from the manifest at open time.
     /// Identical across all opens of the same backing store, because
     /// estate identity is a property of the substrate, not the handle.
     pub fn estate_uuid(&self) -> Uuid {
         self.estate_uuid
+    }
+
+    /// Public accessor for the estate's node store (ADR-017).
+    /// Consumers outside LocusKit (e.g. GeniusLocusKit, VaultKit) need
+    /// to resolve drawer `parent_node_id` values to display names via
+    /// `NodeStore::get_node`. Returns `None` for legacy estates opened
+    /// without a node tree.
+    pub fn node_store(&self) -> Option<&Arc<NodeStore>> {
+        self.node_store.as_ref()
     }
 
     // -----------------------------------------------------------------
@@ -287,6 +336,26 @@ impl Estate {
                 found: manifest.estate_uuid.clone(),
                 expected: "<valid UUID string>".to_string(),
             })?;
+        // Establish the estate's Ed25519 federation identity on first
+        // open. The keypair is the signing identity for federation grants
+        // (DECISION_SYNCKIT_DESIGN_2026-05-19 §8); minting it once and
+        // persisting the public half to the manifest makes the public key
+        // stable across every subsequent open. Key generation is
+        // intrinsically random — like the estate UUID minted at create —
+        // so it is exempt from the deterministic-engine rule. The private
+        // signing key is intentionally not persisted here: the manifest is
+        // a normal key/value table and row encryption does not protect
+        // manifest.value, so storing raw key bytes here would expose the
+        // estate identity to database/backup readers. Mirrors Swift Estate.open.
+        if manifest.ed25519_public_key.is_none() {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let signing_key = SigningKey::generate(&mut OsRng);
+            let pub_b64 = b64.encode(signing_key.verifying_key().as_bytes());
+            store
+                .set_meta(ManifestKey::Ed25519PublicKey.as_str(), &pub_b64)
+                .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+        }
         // Backfill the per-container OR aggregate from the active drawer set
         // so it covers every active row and is therefore sound to prune
         // against (spec § 11.5). One full scan at open. Mirrors Swift
@@ -298,8 +367,19 @@ impl Estate {
         store
             .rebuild_container_fingerprints(manifest.last_modified)
             .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+        // ADR-017 NT-L2: construct NodeStore from the same storage that
+        // backs the DrawerStore. The `storage()` trait method returns the
+        // underlying Storage so NodeStore shares the same connection.
+        let node_store = store.storage().map(|s| Arc::new(NodeStore::new(s, None)));
+        // ADR-017: seed root node. create_root is idempotent — returns
+        // existing root if already seeded.
+        if let Some(ref ns) = node_store {
+            ns.create_root("Estate", manifest.last_modified)
+                .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+        }
         Ok(Estate {
             store,
+            node_store,
             estate_uuid: uuid,
             #[cfg(any(test, feature = "test-seams"))]
             test_force_internal_read_error: std::sync::Arc::new(
@@ -414,6 +494,8 @@ mod tests {
                     tiny_model_id: None,
                     tiny_model_training_corpus_size: None,
                     operational_bitmap_layouts: None,
+                    ed25519_public_key: None,
+                    ed25519_private_key_wrapped: None,
                 },
                 overrides: Mutex::new(Default::default()),
                 fail_read: false,
@@ -433,6 +515,12 @@ mod tests {
             }
             if let Some(v) = lock.get(ManifestKey::EstateName.as_str()) {
                 m.estate_name = v.clone();
+            }
+            if let Some(v) = lock.get(ManifestKey::Ed25519PublicKey.as_str()) {
+                m.ed25519_public_key = Some(v.clone());
+            }
+            if let Some(v) = lock.get(ManifestKey::Ed25519PrivateKeyWrapped.as_str()) {
+                m.ed25519_private_key_wrapped = Some(v.clone());
             }
             Ok(m)
         }
@@ -1035,6 +1123,56 @@ mod tests {
         assert!(estate.close().is_ok());
     }
 
+    /// First open mints an Ed25519 identity and persists only the public
+    /// half to the manifest. The private signing key must not be written
+    /// to manifest.value because that table is not secret storage.
+    #[test]
+    fn open_mints_ed25519_public_key_on_first_open_without_persisting_private_key() {
+        let store = Arc::new(FakeStore::new(
+            "v1.0",
+            "55555555-5555-5555-5555-555555555555",
+        ));
+        let estate = Estate::open(store.clone(), OwnerCredentials::new("alice")).unwrap();
+        let m = estate.manifest().unwrap();
+        assert!(m.ed25519_public_key.is_some(), "public key should be minted");
+        assert!(
+            m.ed25519_private_key_wrapped.is_none(),
+            "private key must not be persisted in the manifest"
+        );
+        // The public key is base64 of a 32-byte Ed25519 verifying key.
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let pub_bytes = b64
+            .decode(m.ed25519_public_key.as_ref().unwrap())
+            .expect("public key should be valid base64");
+        assert_eq!(pub_bytes.len(), 32, "Ed25519 public key is 32 bytes");
+    }
+
+    /// Re-opening an estate that already has a public identity does NOT regenerate it.
+    #[test]
+    fn open_preserves_existing_ed25519_public_key() {
+        let store = Arc::new(FakeStore::new(
+            "v1.0",
+            "66666666-6666-6666-6666-666666666666",
+        ));
+        let estate1 = Estate::open(store.clone(), OwnerCredentials::new("alice")).unwrap();
+        let m1 = estate1.manifest().unwrap();
+        let pub1 = m1.ed25519_public_key.clone().unwrap();
+
+        // Second open: public key should be identical.
+        let estate2 = Estate::open(store.clone(), OwnerCredentials::new("alice")).unwrap();
+        let m2 = estate2.manifest().unwrap();
+        assert_eq!(
+            m2.ed25519_public_key.as_ref().unwrap(),
+            &pub1,
+            "public key stable across re-opens"
+        );
+        assert!(
+            m2.ed25519_private_key_wrapped.is_none(),
+            "private key remains absent across re-opens"
+        );
+    }
+
     /// Manifest accessor re-reads through the store each call so
     /// post-create overrides surface.
     #[test]
@@ -1082,6 +1220,8 @@ mod tests {
             tiny_model_id: None,
             tiny_model_training_corpus_size: None,
             operational_bitmap_layouts: None,
+            ed25519_public_key: None,
+            ed25519_private_key_wrapped: None,
         }
     }
 }

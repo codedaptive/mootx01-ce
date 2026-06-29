@@ -1,4 +1,4 @@
-// glref-rust-fnv.rs
+// fnv.rs
 //
 // Fowler–Noll–Vo 1a string hash, in the two widths the substrate
 // uses and the 16-bit fold the cookbook calls out. Substrate-

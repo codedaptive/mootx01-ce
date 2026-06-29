@@ -17,7 +17,7 @@
 //   that other Apple host apps (examples, future CE app) can consume without
 //   replicating the intent logic.
 //
-// Platforms: macOS 26 / iOS 26 (Apple Silicon), matching the kit stack.
+// Platforms: macOS 26 / iOS 26, matching the kit stack.
 
 import PackageDescription
 
@@ -57,9 +57,9 @@ let package = Package(
                 "MootIntentKit",
                 .product(name: "AriaMCP", package: "AriaMcpKit"),
                 // GeniusLocusKit and friends are pulled in here so the test
-                // target can build a real MootBridge conformance and exercise
-                // the tool-call composition functions against a live in-memory
-                // estate.
+                // target can build a TestBridge (MootBridge-equivalent)
+                // conformance and exercise the tool-call composition functions
+                // against a live in-memory estate.
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),

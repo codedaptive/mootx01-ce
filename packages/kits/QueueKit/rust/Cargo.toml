@@ -5,7 +5,8 @@ edition = "2021"
 description = "QueueKit Rust parallel — FilesystemBackend per QUEUEKIT_SPEC"
 
 [dependencies]
-substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+substrate-types  = { path = "../../../libs/SubstrateTypes/rust" }
+intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid       = { version = "1", features = ["v4"] }
@@ -23,7 +24,14 @@ path     = "../../PersistenceKit/rust"
 optional = true
 
 [features]
-default     = ["filesystem"]
+# `watch` is included by default: on Linux RecommendedWatcher uses inotify
+# (evented, sub-ms latency); on macOS it uses kqueue/FSEvents; on Windows it
+# uses ReadDirectoryChangesW. If evented watcher setup fails at runtime
+# (inotify watch-limit exhausted, unsupported filesystem, etc.) the
+# FilesystemBackend::watch() falls back to 200 ms polling automatically.
+# Build with --no-default-features --features filesystem to get the poll-only
+# build (useful when the notify transitive dep is unwanted, e.g. embedded targets).
+default     = ["filesystem", "watch"]
 filesystem  = []
 # Enables the real PersistenceKitBackend and pulls in persistence-kit.
 persistencekit  = ["dep:persistence-kit"]
@@ -51,11 +59,19 @@ name = "parity"
 path = "tests/parity.rs"
 required-features = ["persistencekit"]
 
-# Parity tests for the default-build (no `watch` feature) polling implementation
-# of FilesystemBackend::watch(). Confirms watch() works out of the box (no
-# external dependency) and delivers jobs near-realtime via 200 ms polling.
-# These tests are explicitly NOT run with --features watch (they target the
-# polling path; the event-driven path requires a separate CI step).
+# Contract tests for the polling fallback path. These run when the `watch`
+# feature is disabled (--no-default-features --features filesystem). They
+# verify that poll-based delivery satisfies the same watch() contract as the
+# evented path, and that the fallback is always reachable at runtime.
 [[test]]
 name = "watch_polling"
 path = "tests/watch_polling.rs"
+
+# Contract tests for the evented (notify-backed) watch path and the poll
+# fallback callable from within the evented build. Enabled by default since
+# `watch` is now a default feature. Tests that delivery occurs promptly via
+# OS events and that the poll_watch_loop fallback is correct.
+[[test]]
+name = "watch_evented"
+path = "tests/watch_evented.rs"
+required-features = ["watch"]

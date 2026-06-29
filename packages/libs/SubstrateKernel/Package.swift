@@ -9,10 +9,11 @@
 // What lives here (Tier 1 of HARNESS_REFERENCE §2.1):
 //   SimHash family
 //   Fingerprint256 distance / OR / AND / XOR / prototype ops
-//   HammingNN top-K (branchless ladder, cookbook §17.6)
+//   HammingNN top-K (bounded max-heap, cookbook §17.6)
 //   The combinators layer: zip4 / reduce4 / map4 / popcount over
 //     Fingerprint256
-//   SimdKernel (Swift NEON via `import simd`)
+//   PortableKernel backends: SIMD (`import simd`), NEON (direct ARM
+//     intrinsics), and Metal (GPU compute)
 //   BitField (bitmap field extraction / masked-equals)
 //   SHA-256 content-ID and seal computation (the I-27 integrity
 //                                            triangle's binding leg)

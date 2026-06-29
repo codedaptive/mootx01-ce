@@ -24,7 +24,9 @@ public enum LexRank {
     /// original order). Returns `text` unchanged when it has `<= n` sentences.
     public static func reduce(_ text: String, sentences n: Int = defaultSentences) -> String {
         let sents = segment(text)
-        guard sents.count > n else { return text }
+        // Guard against negative n: .prefix(n) traps on negative values.
+        // A negative sentence count is nonsensical, so return text unchanged.
+        guard n >= 0, sents.count > n else { return text }
 
         // Per-sentence stemmed term-frequency vectors.
         let vecs = sents.map { termFrequencies($0) }

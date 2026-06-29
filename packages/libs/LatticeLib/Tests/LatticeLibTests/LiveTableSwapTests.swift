@@ -18,10 +18,9 @@ import Foundation
 struct LiveTableSwapTests {
 
     /// A token that is NOT in the bundled table and is NOT classified noun/verb
-    /// by the deterministic HMM/Apple tagger — so `wordClass` returns `.other`
-    /// for it until the table learns it. It carries a digit, so the HMM's
-    /// observation is `NonAlpha` (→ `.other`) and Apple's NLTagger does not tag a
-    /// digit-bearing token as a noun. After the swap inserts it into the table's
+    /// by the deterministic HMM tagger — so `wordClass` returns `.other` for it
+    /// until the table learns it. It carries a digit, so the HMM's observation
+    /// is `NonAlpha` (→ `.other`). After the swap inserts it into the table's
     /// noun set, the constant-time fast path resolves it to `.noun`.
     private static let novelToken = "qx7zglyph"
 

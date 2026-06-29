@@ -33,11 +33,13 @@ When new durable knowledge appears:
 
 ## After Bulk Ingest
 
-1. Import with `moot_vault_import`.
-2. Poll with `moot_vault_job`.
-3. Verify with `moot_estate_map`.
-4. Run `moot_dream`.
-5. Search or synthesize only after the estate has been indexed and dreamt.
+1. Import with `moot_vault_import` or `moot_palace_import`.
+2. Poll with `moot_vault_job` (vault imports) or check estate status (palace imports).
+3. Run `moot_reindex` to populate BM25 and vector indexes. Semantic recall is dark until this completes.
+4. Verify with `moot_estate_map`.
+5. Run `moot_dream`.
+6. Optionally run `moot_consolidate` to populate the distilled factoid tier.
+7. Search or synthesize only after the estate has been indexed and dreamt.
 
 ## End
 

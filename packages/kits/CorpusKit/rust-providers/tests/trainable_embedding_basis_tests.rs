@@ -9,8 +9,9 @@
 //!
 //! Also exercises `EmbeddingModelConfig::reconstruct`: the trainable cases
 //! round-trip a basis blob to embeddings identical to the trained provider's,
-//! and the non-trainable cases (Deterministic / named / FDC) return
-//! `CorpusKitError::NotTrainable` rather than panicking.
+//! and the non-trainable cases (Deterministic / FDC) return
+//! `CorpusKitError::NotTrainable` rather than panicking. Named-model cases
+//! (MiniLM/MPNet/EmbeddingGemma) are not exercised in this file.
 //!
 //! Fixtures are embedded with `include_bytes!` (hermetic, no I/O at test time);
 //! base64 is decoded by the shared inline decoder in `basis_fixture` (C-1: no
@@ -219,4 +220,95 @@ fn is_trainable_flags() {
         provider: Box::new(corpus_kit_providers::FDCProvider::default_provider()),
     };
     assert!(!fdc.is_trainable());
+}
+
+// ── §4 Maintained-counts seam (incremental-counts change set, P3) ──
+//
+// Drives the counts seam THROUGH the trait: `add_to_counts` per chunk grows the
+// maintained vocabulary anchor, and `serialize_counts` → `restore_counts` resumes
+// that anchor in a fresh provider. Each conformer routes the uniform methods to
+// its own accumulation (RI/PPMI fold term sequences; LSA/NMF fold documents via
+// the lightweight anchor). The Swift twin
+// (`TrainableEmbeddingBasisTests.swift`, "counts seam") asserts the same shape.
+
+const COUNTS_CORPUS: &[&str] = &[
+    "car engine drive road vehicle",
+    "vehicle road transport car fuel",
+    "engine fuel combustion power car",
+    "dog bark run fetch animal",
+    "animal run cat dog pet",
+];
+
+/// Fold the corpus through `add_to_counts`, then assert the anchor survives a
+/// `serialize_counts` → `restore_counts` round trip on a fresh provider.
+fn assert_counts_seam_round_trips<P>(mut trained: P, mut fresh: P)
+where
+    P: TrainableEmbeddingBasis,
+{
+    for chunk in COUNTS_CORPUS {
+        trained.add_to_counts(chunk);
+    }
+    let vocab = trained.counts_vocabulary_size();
+    assert!(vocab > 0, "add_to_counts must grow the maintained vocabulary");
+
+    let blob = trained.serialize_counts();
+    fresh
+        .restore_counts(&blob)
+        .expect("restore_counts must accept a well-formed counts blob");
+    assert_eq!(
+        fresh.counts_vocabulary_size(),
+        vocab,
+        "restored maintained vocabulary size must match the source"
+    );
+
+    // A truncated blob is rejected, never a panic.
+    assert!(
+        fresh.restore_counts(&blob[..blob.len() / 2]).is_err(),
+        "truncated counts blob must error"
+    );
+}
+
+#[test]
+fn ri_counts_seam_round_trips() {
+    assert_counts_seam_round_trips(
+        RandomIndexingProvider::new(),
+        RandomIndexingProvider::new(),
+    );
+}
+
+#[test]
+fn ppmi_counts_seam_round_trips() {
+    assert_counts_seam_round_trips(PpmiProvider::new(), PpmiProvider::new());
+}
+
+#[test]
+fn lsa_counts_seam_round_trips() {
+    assert_counts_seam_round_trips(
+        LsaProvider::new(3, 30, LSA_PROJECTION_SEED),
+        LsaProvider::new(3, 30, LSA_PROJECTION_SEED),
+    );
+}
+
+#[test]
+fn nmf_counts_seam_round_trips() {
+    assert_counts_seam_round_trips(
+        NmfProvider::new(3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED),
+        NmfProvider::new(3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED),
+    );
+}
+
+/// The lightweight LSA/NMF anchor grows vocab + document count WITHOUT retaining
+/// the per-document TF rows (it bounds maintained state to O(vocab)). Document
+/// count must equal the number of non-empty chunks folded.
+#[test]
+fn lsa_nmf_anchor_tracks_document_count() {
+    let mut lsa = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+    for chunk in COUNTS_CORPUS {
+        lsa.add_to_counts(chunk);
+    }
+    assert_eq!(
+        lsa.document_count(),
+        COUNTS_CORPUS.len(),
+        "anchor must bump document_count once per non-empty chunk"
+    );
 }

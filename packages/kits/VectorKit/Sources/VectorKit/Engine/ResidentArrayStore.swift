@@ -87,12 +87,10 @@ let kVecMagic: [UInt8] = [0x56, 0x45, 0x43, 0x31]
 /// On-disk format version. Little-endian UInt16.
 ///
 /// Version 0x0002: adds a `live_count` field (LE UInt32) immediately
-/// after `count` and before `tombstone_words`. It records the number
-/// of non-tombstoned slots so VectorStore stale detection can compare
-/// the sidecar's live count against the table row count without walking
-/// the tombstone bitmap. The field is informational — on load the live
-/// count is recomputed from the bitmap (`ResidentVectorArray.liveCount`)
-/// so a stale or hand-written value cannot corrupt search results. This
+/// after `count` and before `tombstone_words`. The field is written on
+/// save but not used on load — on load the live count is recomputed
+/// from the tombstone bitmap (`ResidentVectorArray.liveCount`) so a
+/// stale or hand-written value cannot corrupt search results. This
 /// matches the Rust sidecar format byte-for-byte (arch spec §4.3). No
 /// installed sidecars exist at version 0x0001; the old bytes are rejected
 /// by `parseSidecar`.
@@ -637,6 +635,11 @@ public actor ResidentArrayStore {
         offset = 4
 
         // --- Version ---
+        // readLE16 subscripts data[offset] and data[offset+1] without its own
+        // bounds check, so we guard that 2 bytes remain before calling it.
+        guard data.count >= offset + 2 else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: truncated at version field")
+        }
         let version = data.readLE16(at: offset)
         offset += 2
         guard version == kVecVersion else {
@@ -655,9 +658,16 @@ public actor ResidentArrayStore {
         }
 
         // --- Stride ---
+        // readLE32 subscripts four bytes without its own bounds check.
+        guard data.count >= offset + 4 else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: truncated at stride field")
+        }
         let stride = data.readLE32(at: offset); offset += 4
 
         // --- Count ---
+        guard data.count >= offset + 4 else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: truncated at count field")
+        }
         let count = data.readLE32(at: offset); offset += 4
 
         // --- Live count (format 0x0002) ---
@@ -666,22 +676,48 @@ public actor ResidentArrayStore {
         // so a stale header value can never affect search results. The field
         // exists only to make stale detection an O(1) header read on the
         // happy path; it is cross-checked against the bitmap in tests.
+        guard data.count >= offset + 4 else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: truncated at live_count field")
+        }
         _ = data.readLE32(at: offset); offset += 4
 
         // --- Tombstones ---
+        guard data.count >= offset + 4 else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: truncated at tombstone_words field")
+        }
         let tombstoneWords = data.readLE32(at: offset); offset += 4
-        guard offset + Int(tombstoneWords) * 8 <= data.count else {
+        // Guard against overflow when computing tombstone block byte size:
+        // tombstoneWords is UInt32 so the max product is ~34 GB — safe in
+        // Int64 but not necessarily in Int on a 32-bit host.  Use a checked
+        // multiply so a malformed sidecar can't cause overflow.
+        let tombstoneBlockBytes: Int
+        let (tsBytes, tsOverflow) = Int(tombstoneWords).multipliedReportingOverflow(by: 8)
+        guard !tsOverflow else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: tombstone block size overflows")
+        }
+        tombstoneBlockBytes = tsBytes
+        guard offset + tombstoneBlockBytes <= data.count else {
             throw VectorKitError.decodingFailure("ResidentArrayStore: truncated in tombstone block")
         }
         var tombstones = [UInt64]()
         tombstones.reserveCapacity(Int(tombstoneWords))
         for _ in 0..<Int(tombstoneWords) {
+            // Each 8-byte readLE64 is safe: the tombstoneBlockBytes guard above
+            // ensures the entire tombstone block is within data.
             let word = data.readLE64(at: offset); offset += 8
             tombstones.append(word)
         }
 
         // --- Vectors block ---
-        let vectorsBytes = Int(count) * Int(stride)
+        // Guard against overflow in count * stride before checking bounds.
+        // Both count and stride are UInt32; their product as Int can overflow
+        // on 32-bit platforms or with pathological values.
+        let vectorsBytes: Int
+        let (vb, vbOverflow) = Int(count).multipliedReportingOverflow(by: Int(stride))
+        guard !vbOverflow else {
+            throw VectorKitError.decodingFailure("ResidentArrayStore: vectors block size overflows")
+        }
+        vectorsBytes = vb
         guard offset + vectorsBytes <= data.count else {
             throw VectorKitError.decodingFailure("ResidentArrayStore: truncated in vectors block")
         }

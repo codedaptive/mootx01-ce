@@ -29,7 +29,7 @@
 //!     FormalAttribute { namespace:"locus", key:"sensitivity", value:{caseName} }
 //!     FormalAttribute { namespace:"locus", key:"kind",        value:{caseName} }
 //!     FormalAttribute { namespace:"locus", key:"channel",     value:{caseName} }
-//!     FormalAttribute { namespace:"locus", key:"room",        value:{roomString} }
+//!     FormalAttribute { namespace:"locus", key:"room",        value:{parentNodeId} }
 //!     FormalAttribute { namespace:"locus", key:"udc",         value:{udcCode} }   // only when non-empty
 //!     FormalAttribute { namespace:"locus", key:"qid",         value:{wikidataQid} } // only when non-nil/non-empty
 //!   The caseName is the lowercase camelCase Swift name, NOT the Rust
@@ -85,6 +85,19 @@ pub struct FormalConceptsOutput {
 }
 
 // MARK: - Recipe entry point
+
+/// Maximum number of mined concepts fed to the O(N²) cover-delta step.
+/// Pre-staged for when `cover_deltas` is ported to the Rust output (the
+/// Swift port enforces this cap — CK-6 planned hardening).
+#[allow(dead_code)]
+const COVER_DELTA_CONCEPT_CAP: usize = 100;
+
+/// Maximum number of mined concepts fed to `concept_implications`. The
+/// implication engine iterates over all supplied concepts; the cap bounds
+/// the enumeration. Pre-staged for when `implications` is ported to the
+/// Rust output (the Swift port enforces this cap — CK-5 planned hardening).
+#[allow(dead_code)]
+const IMPLICATION_CONCEPT_CAP: usize = 100;
 
 /// Run the FormalConcepts recipe: recall drawers via `frame`, build a
 /// `FormalContext`, and mine bounded formal concepts.
@@ -184,7 +197,7 @@ fn formal_attributes_for_drawer(drawer: &Drawer) -> Vec<FormalAttribute> {
             "channel",
             capture_channel_value(drawer.capture_channel()),
         ),
-        FormalAttribute::new("locus", "room", &drawer.room),
+        FormalAttribute::new("locus", "room", &drawer.parent_node_id),
     ];
     // Spine — about-ness: the lattice anchors locating the drawer in
     // knowledge space. Omit-on-absent is load-bearing: an unanchored drawer
@@ -254,6 +267,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use locus_kit::drawer::Drawer;
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
     use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
@@ -278,7 +292,7 @@ mod tests {
         room: &str,
         kind: ContentKind,
         channel: CaptureChannel,
-    ) {
+    ) -> Drawer {
         let mut frame = CaptureFrame::new(
             "content",
             channel,
@@ -288,7 +302,7 @@ mod tests {
             "test-v1",
         );
         frame.kind = kind;
-        coord.capture(h, frame, NOW).unwrap();
+        coord.capture(h, frame, NOW).unwrap()
     }
 
     fn unconfirmed() -> RecallFrame {
@@ -441,7 +455,9 @@ mod tests {
 
     /// Capture with explicit filing facets, sensitivity, and lattice anchor;
     /// returns the minted drawer id. Trust stays at the capture-time default
-    /// `Verbatim` (the in-memory estate does not yet wire `CorrectTrust`).
+    /// `Verbatim`; the non-default trust case in this test suite is exercised
+    /// by building a `Drawer` directly rather than via the live `CorrectTrust`
+    /// mutation path.
     fn capture_rich(
         coord: &EstateCoordinator,
         h: &EstateHandle,
@@ -450,11 +466,11 @@ mod tests {
         channel: CaptureChannel,
         sensitivity: AdjectiveSensitivity,
         anchor: LatticeAnchor,
-    ) -> String {
+    ) -> Drawer {
         let mut frame = CaptureFrame::new("content", channel, room, anchor, "test", "test-v1");
         frame.kind = kind;
         frame.sensitivity = sensitivity;
-        coord.capture(h, frame, NOW).unwrap().id
+        coord.capture(h, frame, NOW).unwrap()
     }
 
     fn unconfirmed_at_most(ceiling: AdjectiveSensitivity) -> RecallFrame {
@@ -472,7 +488,7 @@ mod tests {
     #[test]
     fn discovery_groups_by_trust_and_lattice() {
         let (coord, h) = coord_with_estate();
-        let id1 = capture_rich(
+        let d1 = capture_rich(
             &coord,
             &h,
             "study",
@@ -481,7 +497,8 @@ mod tests {
             AdjectiveSensitivity::Normal,
             LatticeAnchor::new("530", None, Some("Q11397".into()), None),
         );
-        let id2 = capture_rich(
+        let id1 = d1.id.clone();
+        let d2 = capture_rich(
             &coord,
             &h,
             "work",
@@ -490,6 +507,7 @@ mod tests {
             AdjectiveSensitivity::Normal,
             LatticeAnchor::new("530", None, Some("Q11397".into()), None),
         );
+        let id2 = d2.id.clone();
         let out = run_formal_concepts(
             &coord,
             &h,
@@ -513,9 +531,15 @@ mod tests {
         assert!(concept.intent.iter().any(|s| s == "locus.udc=530"));
         assert!(concept.intent.iter().any(|s| s == "locus.qid=Q11397"));
         // Grouping is by the spine, not filing: facets the two disagree on
+        // (different parentNodeIds, different kinds, different channels)
         // cannot appear in the shared intent.
-        assert!(!concept.intent.iter().any(|s| s == "locus.room=study"));
-        assert!(!concept.intent.iter().any(|s| s == "locus.room=work"));
+        assert!(
+            !concept
+                .intent
+                .iter()
+                .any(|s| s.starts_with("locus.room=")),
+            "room facet must not appear in shared intent when rooms differ"
+        );
         assert!(!concept.intent.iter().any(|s| s == "locus.kind=prose"));
         assert!(!concept.intent.iter().any(|s| s == "locus.kind=code"));
     }
@@ -527,7 +551,7 @@ mod tests {
     #[test]
     fn absent_anchors_omit_udc_qid_and_trust_maps_canonically() {
         // Unanchored: empty udc, no qid, default (verbatim) trust.
-        let unanchored = Drawer::new("d1", "x", "w", "void", "t", NOW, "v1");
+        let unanchored = Drawer::new("d1", "x", "w", "t", NOW, "v1");
         let bare = formal_attributes_for_drawer(&unanchored);
         assert!(
             !bare.iter().any(|a| a.key == "udc"),
@@ -542,7 +566,7 @@ mod tests {
             .any(|a| a.key == "trust" && a.value == "verbatim"));
 
         // Anchored + non-default trust (canonical = raw 3 at adjective bits 18–23).
-        let mut anchored = Drawer::new("d2", "y", "w", "lab", "t", NOW, "v1");
+        let mut anchored = Drawer::new("d2", "y", "w", "t", NOW, "v1");
         anchored.adjective_bitmap = Trust::Canonical.raw_value() << 18;
         anchored.udc_code = "530".to_string();
         anchored.wikidata_qid = Some("Q11397".to_string());
@@ -614,7 +638,7 @@ mod tests {
     #[test]
     fn filing_facets_retained() {
         let (coord, h) = coord_with_estate();
-        capture_rich(
+        let study_d = capture_rich(
             &coord,
             &h,
             "study",
@@ -623,6 +647,7 @@ mod tests {
             AdjectiveSensitivity::Normal,
             LatticeAnchor::udc("600"),
         );
+        let expected_room = format!("locus.room={}", study_d.parent_node_id);
         let out = run_formal_concepts(
             &coord,
             &h,
@@ -634,6 +659,6 @@ mod tests {
         let all: Vec<&String> = out.concepts.iter().flat_map(|c| c.intent.iter()).collect();
         assert!(all.iter().any(|s| *s == "locus.kind=code"));
         assert!(all.iter().any(|s| *s == "locus.channel=voiced"));
-        assert!(all.iter().any(|s| *s == "locus.room=study"));
+        assert!(all.iter().any(|s| **s == expected_room));
     }
 }

@@ -1,5 +1,7 @@
 // QueueKit Rust parallel.
 //
+// QueueKit<B>: QUEUEKIT_SPEC §3 — facade with drain telemetry via
+//   IntellectusLib. QueueLatencyWindow: rolling drain-latency percentiles.
 // FilesystemBackend: QUEUEKIT_SPEC §5,6,8,9 — byte-identical to Swift.
 // PersistenceKitBackend: QUEUEKIT_SPEC §10 — behaviour-conformant,
 //   gated on "persistencekit" feature (pulls in persistence-kit crate).
@@ -10,6 +12,8 @@ pub mod error;
 pub mod job;
 pub mod backend;
 pub mod filesystem;
+pub mod facade;
+pub mod drain_lease;
 
 #[cfg(feature = "persistencekit")]
 pub mod persistencekit;
@@ -23,6 +27,9 @@ pub use job::{
 };
 pub use backend::QueueBackend;
 pub use filesystem::FilesystemBackend;
+pub use facade::QueueKit;
+pub use facade::QueueLatencyWindow;
+pub use drain_lease::{DrainLease, DRAIN_LEASE_TTL_SECS, DRAIN_LEASE_HEARTBEAT_SECS, wall_now_secs};
 
 #[cfg(feature = "persistencekit")]
 pub use persistencekit::{

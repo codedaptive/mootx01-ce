@@ -70,10 +70,17 @@ AI assistants should check the current repository scripts and release notes befo
 
 ## Expected Commands
 
-Normal product install, if the repository still publishes this route:
+Normal source install from the checked-out repository:
 
-    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
+    # macOS 26+
+    swift build -c release --package-path apps/aria-mcp-server
+
+    # PC/Linux
+    cd apps/aria-mcp-server/rust && cargo build --release
+
     mootx01 install
+
+Do not pipe a mutable remote installer into a shell. Use prebuilt binaries only when they are pinned to a release artifact and authenticated before any installer code runs.
 
 Status check:
 
@@ -177,13 +184,11 @@ Use the current code and docs for exact platform support.
 
 Use the repository's current uninstall route.
 
-Typical shapes may include:
+Typical shape:
 
     mootx01 uninstall
 
-or:
-
-    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh -s -- --uninstall
+Do not run a remote installer script to uninstall unless it is pinned to an authenticated release artifact and verified before execution.
 
 Before uninstalling, tell the user whether the command removes only binaries, configs, and services, or whether it also removes local estate data.
 

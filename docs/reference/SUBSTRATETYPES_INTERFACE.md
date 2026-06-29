@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Interface
-version: 1.1.0
+version: 1.2.0
 status: active
-date: 2026-06-17
+date: 2026-06-20
 description: Public API surface for SubstrateTypes in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -14,7 +14,7 @@ relates_to:
   - SUBSTRATEML_INTERFACE.md      (sibling: cold-path algorithms)
   - SUBSTRATELIB_INTERFACE.md     (umbrella: orchestration)
 purpose: |
-  Public API surface of SubstrateTypes in both ports. Twenty-four
+  Public API surface of SubstrateTypes in both ports. Twenty-nine
   Swift files publish the top-level types and eight algebra-
   primitive namespaces; the Rust mirror exposes the same shapes with
   Rust-idiomatic names. The companion SPEC carries the behavioral
@@ -27,7 +27,7 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateTypes/`
 
-- `Sources/SubstrateTypes/` — 24 files, one per type family.
+- `Sources/SubstrateTypes/` — 29 files, one per type family.
 - `Tests/SubstrateTypesTests/` — unit + conformance tests.
 - `Package.swift` — manifest. No dependencies on other substrate
   packages.
@@ -40,7 +40,9 @@ purpose: |
   `row_state.rs`, `lattice_anchor.rs`, `noun_type.rs`, `matrix_*.rs`,
   `hyperplane.rs`, `block_mask.rs`, `simhash.rs`, `hamming.rs`,
   `or_reduce.rs`, `bitwise.rs`, `fnv.rs`, `count_vector.rs`,
-  `bit_tensor.rs`, `time_range.rs`, `recall_types.rs`).
+  `bit_tensor.rs`, `time_range.rs`, `recall_types.rs`,
+  `content_hash.rs`, `merkle_root.rs`, `snapshot_id.rs`,
+  `as_of_coordinate.rs`, `merkle_domain.rs`).
 - `tests/` — conformance tests, shared vectors.
 - `Cargo.toml` — declares only `serde`, `serde_json`, `uuid`,
   standard library.
@@ -780,6 +782,165 @@ negative_mask: Vec<u64>, bit_length: usize }` with `sign`;
 `HyperplaneFamily { block_index, input_bit_length, planes }` with
 `generate`/`canonical_hash`.
 
+### `ContentHash`
+
+Typed 32-byte SHA-256 leaf digest. SPEC § 5.8. ADR-017 §16.
+
+**Swift:**
+
+```swift
+public struct ContentHash: Hashable, Sendable, Codable, CustomStringConvertible {
+    public init(bytes: [UInt8])            // exactly 32 bytes
+    public var bytes: [UInt8] { get }
+    public static let tombstone: ContentHash   // SHA-256([0x02])
+    public var hexString: String { get }
+    public var description: String { get }     // == hexString
+}
+
+public enum ContentHashError: Error, Sendable {
+    case invalidHexLength(Int)
+    case invalidHexCharacter
+}
+```
+
+**Rust:**
+
+```rust
+pub struct ContentHash { /* [u8; 32] */ }
+impl ContentHash {
+    pub const fn new(bytes: [u8; 32]) -> Self;
+    pub const fn bytes(&self) -> &[u8; 32];
+    pub const TOMBSTONE: ContentHash;           // SHA-256([0x02])
+    pub fn hex_string(&self) -> String;
+    pub fn from_hex(hex: &str) -> Result<Self, ContentHashError>;
+}
+
+pub enum ContentHashError { InvalidHexLength(usize), InvalidHexCharacter }
+```
+
+### `MerkleRoot`
+
+Typed 32-byte subtree root hash. SPEC § 5.9. ADR-017 §16.
+
+**Swift:**
+
+```swift
+public struct MerkleRoot: Hashable, Sendable, Codable, CustomStringConvertible {
+    public init(bytes: [UInt8])            // exactly 32 bytes
+    public var bytes: [UInt8] { get }
+    public static let empty: MerkleRoot    // SHA-256([0x01])
+    public var hexString: String { get }
+    public var description: String { get }
+}
+
+public enum MerkleRootError: Error, Sendable {
+    case invalidHexLength(Int)
+    case invalidHexCharacter
+}
+```
+
+**Rust:**
+
+```rust
+pub struct MerkleRoot { /* [u8; 32] */ }
+impl MerkleRoot {
+    pub const fn new(bytes: [u8; 32]) -> Self;
+    pub const fn bytes(&self) -> &[u8; 32];
+    pub const EMPTY: MerkleRoot;                // SHA-256([0x01])
+    pub fn hex_string(&self) -> String;
+    pub fn from_hex(hex: &str) -> Result<Self, MerkleRootError>;
+}
+
+pub enum MerkleRootError { InvalidHexLength(usize), InvalidHexCharacter }
+```
+
+### `SnapshotId`
+
+Typed UUID wrapper for snapshot identifiers. SPEC § 5.10. ADR-017 §15.
+
+**Swift:**
+
+```swift
+public struct SnapshotId: Hashable, Sendable, Codable, CustomStringConvertible {
+    public let uuid: UUID
+    public init(_ uuid: UUID)
+    public init()                              // random
+    public init?(uuidString: String)
+    public var uuidString: String { get }
+    public var description: String { get }     // == uuidString
+}
+
+public enum SnapshotIdError: Error, Sendable {
+    case invalidUUID(String)
+}
+```
+
+**Rust:**
+
+```rust
+pub struct SnapshotId { /* [u8; 16] */ }
+impl SnapshotId {
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self;
+    pub const fn bytes(&self) -> &[u8; 16];
+    pub fn from_uuid_string(s: &str) -> Result<Self, SnapshotIdError>;
+    pub fn uuid_string(&self) -> String;
+}
+
+pub enum SnapshotIdError { InvalidUUID(String) }
+```
+
+### `AsOfCoordinate`
+
+Temporal query coordinate. SPEC § 5.11. ADR-017 §15–§17.
+
+**Swift:**
+
+```swift
+public enum AsOfCoordinate: Hashable, Sendable, Codable {
+    case present
+    case asOf(HLC)
+}
+```
+
+**Rust:**
+
+```rust
+pub enum AsOfCoordinate {
+    Present,
+    AsOf(HLC),
+}
+```
+
+Serialized as `{"kind":"present"}` or `{"kind":"asOf","hlc":{...}}` in
+both ports.
+
+### `MerkleDomain`
+
+Frozen domain-separation tag constants. SPEC § 5.12. ADR-017 §16.
+
+**Swift:**
+
+```swift
+public enum MerkleDomain {
+    public static let leaf: UInt8       // 0x00
+    public static let interior: UInt8   // 0x01
+    public static let tombstone: UInt8  // 0x02
+    public static let commitment: UInt8 // 0x03
+}
+```
+
+**Rust:**
+
+```rust
+pub struct MerkleDomain;
+impl MerkleDomain {
+    pub const LEAF: u8;       // 0x00
+    pub const INTERIOR: u8;   // 0x01
+    pub const TOMBSTONE: u8;  // 0x02
+    pub const COMMITMENT: u8; // 0x03
+}
+```
+
 ## § 3 — Public functions (algebra primitives)
 
 ### `Hamming`
@@ -943,6 +1104,11 @@ The package raises only these errors:
 | `HLCError.invalidWireLength(Int)` | `HLC.init(wireBytes:)` / Rust `from_wire_bytes` | wire byte buffer was not the required 16-byte length |
 | `RowStateError.illegalTransition(RowState, RowVerb)` | `RowStateAutomaton.validate` (in SubstrateLib; the enum lives here) | the (prior state, verb) pair is absent from the transition table |
 | `RowStateError.violatesInvariant(String)` | `RowStateAutomaton.validate` (in SubstrateLib) | resulting bitmap violates a schema invariant (e.g. I-22) |
+| `ContentHashError.invalidHexLength(Int)` | `ContentHash(from:)` / Rust `from_hex` | hex string is not 64 characters |
+| `ContentHashError.invalidHexCharacter` | `ContentHash(from:)` / Rust `from_hex` | non-hex character in input |
+| `MerkleRootError.invalidHexLength(Int)` | `MerkleRoot(from:)` / Rust `from_hex` | hex string is not 64 characters |
+| `MerkleRootError.invalidHexCharacter` | `MerkleRoot(from:)` / Rust `from_hex` | non-hex character in input |
+| `SnapshotIdError.invalidUUID(String)` | `SnapshotId(from:)` / Rust `from_uuid_string` | input is not a valid UUID string |
 
 ## § 5 — Conformance test entry points
 
@@ -1075,8 +1241,19 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Bitwise fingerprint algebra | `BitwiseArithmetic` namespace (`BitwiseArithmetic.swift:21`) | `bitwise::intersect`/`difference`/`prototype` free fns (`bitwise.rs:29`,`:42`,`:59`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical AND/XOR/weighted-majority | `BitwiseArithmeticTests.swift`; `bitwise.rs` tests (6) | Confirmed |
 | OR-reduce | `ORReduce` namespace (`ORReduce.swift:22`) | `or_reduce::reduce`/`reduce_blocks` free fns (`or_reduce.rs:29`,`:43`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical bitwise OR fold | `ORReduceTests.swift`; `or_reduce.rs` tests (4) | Confirmed |
 | FNV-1a hash | `FNV` namespace (`FNV.swift:18`) | `fnv::hash64`/`hash32`/`hash16` free fns (`fnv.rs:18`,`:31`,`:45`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical FNV-1a output | `FNVTests.swift`; `fnv.rs` tests (6) | Confirmed |
+| Content hash | `ContentHash` (`ContentHash.swift`) | `ContentHash` (`content_hash.rs`) | both public | identical — 32-byte SHA-256 leaf digest; `tombstone`/`TOMBSTONE` sentinel byte-identical; hex display + Codable/serde | `ContentHashTests.swift`; `content_hash.rs` tests (7) | Confirmed |
+| Content hash error | `ContentHashError` (`ContentHash.swift`) | `ContentHashError` (`content_hash.rs`) | both public | identical — `invalidHexLength`/`invalidHexCharacter` ↔ `InvalidHexLength`/`InvalidHexCharacter` | `ContentHashTests.swift`; `content_hash.rs` tests | Confirmed |
+| Merkle root | `MerkleRoot` (`MerkleRoot.swift`) | `MerkleRoot` (`merkle_root.rs`) | both public | identical — 32-byte subtree root hash; `empty`/`EMPTY` sentinel byte-identical; hex display + Codable/serde | `MerkleRootTests.swift`; `merkle_root.rs` tests (6) | Confirmed |
+| Merkle root error | `MerkleRootError` (`MerkleRoot.swift`) | `MerkleRootError` (`merkle_root.rs`) | both public | identical — `invalidHexLength`/`invalidHexCharacter` ↔ `InvalidHexLength`/`InvalidHexCharacter` | `MerkleRootTests.swift`; `merkle_root.rs` tests | Confirmed |
+| Snapshot id | `SnapshotId` (`SnapshotId.swift`) | `SnapshotId` (`snapshot_id.rs`) | both public | idiom — Swift wraps `UUID` with random init; Rust wraps `[u8;16]` with `from_bytes`; UUID string round-trip identical | `SnapshotIdTests.swift`; `snapshot_id.rs` tests (5) | Confirmed |
+| Snapshot id error | `SnapshotIdError` (`SnapshotId.swift`) | `SnapshotIdError` (`snapshot_id.rs`) | both public | identical — `invalidUUID(String)` ↔ `InvalidUUID(String)` | `SnapshotIdTests.swift`; `snapshot_id.rs` tests | Confirmed |
+| Temporal coordinate | `AsOfCoordinate` (`AsOfCoordinate.swift`) | `AsOfCoordinate` (`as_of_coordinate.rs`) | both public | identical — `.present`/`.asOf(HLC)` ↔ `Present`/`AsOf(HLC)`; JSON `{"kind":"present"}` / `{"kind":"asOf","hlc":{...}}` identical | `AsOfCoordinateTests.swift`; `as_of_coordinate.rs` tests (6) | Confirmed |
+| Domain tags | `MerkleDomain` (`MerkleDomain.swift`) | `MerkleDomain` (`merkle_domain.rs`) | both public | identical — `leaf`/`interior`/`tombstone`/`commitment` = 0x00/0x01/0x02/0x03; conformance-frozen | `MerkleDomainTests.swift`; `merkle_domain.rs` tests (2) | Confirmed |
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-20
+Added five new types for ADR-017 content-integrity and snapshots: ContentHash, MerkleRoot, SnapshotId, AsOfCoordinate, MerkleDomain (§2). Updated §1 file count from 24 to 29. Added ContentHashError, MerkleRootError, SnapshotIdError to §4. Added nine concordance rows to §7. Updated Rust module list.
 
 ### 1.1.0 -- 2026-06-17
 Added `reason: String?` / `reason: Option<String>` field to `AuditEvent` in both ports (A-8: audit reason persistence). The field is nil/None when no caller reason is supplied and is persisted as nullable TEXT in the `_storagekit_audit` table's `reason` column. Added `withReason(_:) -> AuditEvent` copy helper (Swift). Updated concordance table row and init signature accordingly.

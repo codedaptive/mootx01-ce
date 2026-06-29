@@ -111,6 +111,14 @@ let package = Package(
                 // GLK_HYDRATE_01_BLAST_RADIUS.md §Symbol 2. Layering is upstream→downstream
                 // (PersistenceKit ← GeniusLocusKit); no inversion.
                 .product(name: "PersistenceKitReplication", package: "PersistenceKit"),
+                // PersistenceKitSQLite: `ensureScheduler` opens the shared encrypted
+                // `queue.sqlite` sibling via `SQLiteStorage(configuration:)` for
+                // persistent estates (T5, ADR-021 Decision 7). Same encrypted SQLite
+                // the encode stream uses — `queueSibling` derives the sibling config
+                // so signal jobs share the per-estate queue.sqlite without a separate
+                // file. Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28;
+                // layering is upstream→downstream (PersistenceKit ← GeniusLocusKit).
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 // IntellectusLib: per-estate rollup telemetry (GLK_ROLLUPS_001).

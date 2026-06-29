@@ -1,20 +1,25 @@
 // VerbsTests.swift
 //
-// Per-type coverage for the nine substrate verbs (cookbook § 10),
+// Per-type coverage for the substrate verb surface (cookbook § 10),
 // the Substrate composition reference in Verbs.swift. Mirrors the
-// behavior set asserted by the Rust `glref-rust-verbs.rs` test
-// module so the two legs pin the same verb semantics:
+// behavior set asserted by the Rust tests in
+// `packages/libs/SubstrateLib/rust/src/verbs.rs` so the two legs
+// pin the same verb semantics:
 //
 //   capture / propose / mutate / withdraw / expunge / recall, plus
 //   HLC advancement on audit emission and the forbidden-combination
 //   gate inside capture.
 //
-// PORT NOTE: the Rust port asserts deterministic RowId(u128) values
-// across identical call sequences. The Swift reference assigns
-// `UUID()` (random) per capture, so row-ID determinism is a Rust-only
-// port property, NOT a Swift behavior. The Swift-faithful assertion
-// here is row-ID uniqueness; the divergence is recorded in the
-// completion report Discoveries.
+// These six verbs are the subset exercised here. Cross-port audit
+// event ID parity (bit-identical content_id across Swift and Rust)
+// lives in AuditGateTests.
+//
+// PORT NOTE: Rust assigns deterministic RowId(u128) values across
+// identical call sequences. Swift assigns random UUID() per capture,
+// so row-ID determinism is Rust-only. However, audit event IDs are
+// now deterministic in BOTH ports: Swift's appendAudit computes the
+// same SHA-256 content_id as Rust's audit_gate::content_id, enabling
+// G-Set deduplication and federation convergence.
 
 import Foundation
 import Testing
@@ -311,6 +316,33 @@ struct VerbsTests {
 
     // MARK: - withdraw
 
+    // WS2-F5 regression: withdraw must update matrixF and matrixO.
+    // Previously withdraw mutated the adjective bitmap but skipped the
+    // matrix delta, leaving the state-field bucket counts stale.
+    @Test func testWithdrawUpdatesMatrix() {
+        var s = freshSubstrate()
+        guard case .success(let id) = s.capture(
+            nounType: .drawer, adjectiveBitmap: 0, operationalBitmap: 0,
+            provenanceBitmap: 0, latticeAnchor: anchor(), fingerprint: dummyFP,
+            actor: "test") else { Issue.record("expected capture success"); return }
+
+        // Record matrix state after capture.
+        let matrixFBefore = s.matrixF
+        let matrixOBefore = s.matrixO
+
+        // Withdraw the row.
+        guard case .success = s.withdraw(rowId: id, actor: "user")
+        else { Issue.record("expected withdraw success"); return }
+
+        // The matrix must have changed: withdraw moves the state field from
+        // active to withdrawn, which changes the bit-slice bucket counts.
+        // A no-op matrix update (the pre-fix bug) would leave them identical.
+        #expect(s.matrixF != matrixFBefore,
+                "WS2-F5: matrixF must be updated by withdraw")
+        #expect(s.matrixO != matrixOBefore,
+                "WS2-F5: matrixO must be updated by withdraw")
+    }
+
     @Test func testWithdrawActiveToWithdrawn() {
         var s = freshSubstrate()
         guard case .success(let id) = s.capture(
@@ -370,5 +402,50 @@ struct VerbsTests {
         // Swift assigns a fresh UUID per row; two captures never collide.
         #expect(id1 != id2)
         #expect(s.rows.count == 2)
+    }
+
+    // MARK: - deterministic event IDs (PAR-R2 parity)
+
+    @Test func testVerbAuditEventIdIsDeterministicNotRandom() {
+        // After PAR-R2, appendAudit computes a deterministic content-ID
+        // via AuditGate.contentID instead of random UUID(). Verify by
+        // capturing in one fresh substrate, then recomputing the expected
+        // contentID from the same estate/row/HLC fields and checking
+        // that the emitted event ID matches.
+        var s = freshSubstrate()
+        guard case .success = s.capture(
+            nounType: .drawer, adjectiveBitmap: 0, operationalBitmap: 0,
+            provenanceBitmap: 0, latticeAnchor: anchor(), fingerprint: dummyFP,
+            actor: "test") else { Issue.record("expected capture"); return }
+        let eid = s.auditEvents[0].eventID
+        // A random UUID would never equal a content-hash; verify the
+        // event ID matches AuditGate.contentID for the same wire fields.
+        let expected = AuditGate.contentID(
+            estateUuid: s.estateUuid, rowId: s.auditEvents[0].rowId,
+            hlc: s.auditEvents[0].hlc, verb: "capture",
+            after: (0, 0, 0), afterAnchor: anchor())
+        #expect(eid == expected,
+                "verb appendAudit must compute deterministic contentID")
+    }
+
+    @Test func testVerbEventIdSharedVector() {
+        // Verb-path idempotence: same (estate, row, HLC, verb, bitmaps,
+        // anchor) tuple must produce the same event ID on every call.
+        // Cross-port hex parity — verifying the Swift UUID equals the
+        // Rust u128 for the same wire fields — is asserted in
+        // AuditGateTests.testSharedContentIDVector.
+        let estate = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let row    = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let hlc    = HLC(physicalTime: 7, logicalCount: 0, nodeID: 0)
+        let anch   = LatticeAnchor(udcCode: 1, qidPointer: 0)
+        let eid = AuditGate.contentID(
+            estateUuid: estate, rowId: row, hlc: hlc, verb: "mutate",
+            after: (0, 2, 0), afterAnchor: anch)
+        #expect(eid != UUID(), "contentID must be deterministic, not random")
+        // Verify idempotence: same inputs → same result.
+        let eid2 = AuditGate.contentID(
+            estateUuid: estate, rowId: row, hlc: hlc, verb: "mutate",
+            after: (0, 2, 0), afterAnchor: anch)
+        #expect(eid == eid2, "contentID must be idempotent")
     }
 }

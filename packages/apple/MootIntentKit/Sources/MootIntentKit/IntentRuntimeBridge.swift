@@ -4,10 +4,10 @@ import Foundation
 //
 // The shared runtime that system-instantiated intents (Siri, Shortcuts, the
 // Action Button) use when the host app has not injected a caller directly.
-// When the system launches an intent without a prior app launch, the intent
-// must still reach the MOOT. IntentRuntimeBridge is the hook the host app
-// wires at launch so that system-instantiated calls land on the same estate
-// the app uses.
+// IntentRuntimeBridge is the hook the host app wires at launch. When no
+// caller has been registered, `bridge()` throws
+// `IntentRuntimeError.noBridgeRegistered` — the code intentionally fails
+// closed rather than providing a default in-memory fallback.
 //
 // Usage:
 //   1. At app launch: call IntentRuntimeBridge.shared.register(bridge) with
@@ -16,9 +16,9 @@ import Foundation
 //      IntentRuntimeBridge.shared.bridge() and get back whatever the host
 //      registered, or an error if nothing was registered yet.
 //
-// Design: this is a simple actor holding a weak-ish reference (stored as
-// existential). It does not own the bridge — the host (GatewayRuntime) owns
-// the real MootBridge. The registration is one-write: once a bridge is
+// Design: this is a simple actor holding a strong reference to the registered
+// caller (stored as existential). The actor retains the caller for the
+// lifetime of the process. The registration is one-write: once a bridge is
 // registered, a second call to register() is a no-op so a late call cannot
 // swap the estate out from under an in-flight intent.
 

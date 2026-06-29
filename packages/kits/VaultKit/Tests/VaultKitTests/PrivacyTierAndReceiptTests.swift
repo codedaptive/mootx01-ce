@@ -91,7 +91,9 @@ struct PrivacyTierAndReceiptTests {
         defer { try? FileManager.default.removeItem(at: vault) }
 
         let bridge = VaultBridge(kit: kit)
-        let report = try await bridge.export(estate: handle, to: vault, now: Self.fixedNow)
+        // CAND-032: the default scope is now `.exportable`; this test validates
+        // the believed-tier behavior, so it passes `.believed` explicitly.
+        let report = try await bridge.export(estate: handle, to: vault, scope: .believed, now: Self.fixedNow)
 
         #expect(report.notesExported == 2)
         #expect(report.excludedPrivateTier == 1)
@@ -189,7 +191,7 @@ struct PrivacyTierAndReceiptTests {
         defer { try? FileManager.default.removeItem(at: vault) }
 
         let bridge = VaultBridge(kit: kit)
-        _ = try await bridge.export(estate: handle, to: vault, now: Self.fixedNow)
+        _ = try await bridge.export(estate: handle, to: vault, scope: .believed, now: Self.fixedNow)
         #expect(allMarkdown(in: vault).contains("sensitivity: elevated"))
 
         // Re-import into a fresh estate; the tier must survive the trip.
@@ -249,10 +251,14 @@ struct PrivacyTierAndReceiptTests {
         let survivor = try #require(drawers.first { $0.lineageID == drawer.lineageID })
         #expect(survivor.adjectiveSensitivity == .restricted)
 
-        // And it still does not ride a default bulk export.
+        // And under the `.believed` scope it is admitted by the scope but
+        // excluded by the ADR-007 tier partition — a COUNTED exclusion, never
+        // silent. (Under the default `.exportable` scope it is filtered earlier
+        // by exportability; `.believed` is what exercises the private-tier
+        // partition counter here.)
         let exportVault = makeTempVault()
         defer { try? FileManager.default.removeItem(at: exportVault) }
-        let report = try await bridge.export(estate: handle, to: exportVault, now: Self.fixedNow)
+        let report = try await bridge.export(estate: handle, to: exportVault, scope: .believed, now: Self.fixedNow)
         #expect(report.excludedPrivateTier == 1)
         #expect(!allMarkdown(in: exportVault).contains("a restricted secret kept private"))
     }
@@ -307,7 +313,7 @@ struct PrivacyTierAndReceiptTests {
         defer { try? FileManager.default.removeItem(at: vault) }
 
         let bridge = VaultBridge(kit: kit)
-        _ = try await bridge.export(estate: handle, to: vault, now: Self.fixedNow)
+        _ = try await bridge.export(estate: handle, to: vault, scope: .believed, now: Self.fixedNow)
 
         let receipts = try await kit.readDiaryEntries(
             in: handle, agentName: VaultBridge.receiptAgentName)
@@ -355,6 +361,58 @@ struct PrivacyTierAndReceiptTests {
         #expect(receipt.eventClass == .migration)
     }
 
+    // MARK: - CAND-050: KG fact tier filtering on export
+
+    @Test("CAND-050: KG facts anchored to a secret drawer do not appear in export output")
+    func cand050KGFactsExcludedWithSecretAnchor() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Capture a normal drawer and a secret drawer.
+        let normalDrawer = try await kit.capture(handle, CaptureFrame(
+            content: "normal drawer content",
+            channel: .typed,
+            room: "cand050",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "test-v1",
+            sensitivity: .normal
+        ))
+        let secretDrawer = try await kit.capture(handle, CaptureFrame(
+            content: "secret drawer content",
+            channel: .typed,
+            room: "cand050",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "test-v1",
+            sensitivity: .secret
+        ))
+
+        // Anchor KG facts to each drawer — one to the normal, one to the secret.
+        _ = try await kit.captureKGFact(handle,
+            subject: "tag:normal-tag", predicate: "tagged", object: "true",
+            sourceDrawerID: normalDrawer.id, now: Self.fixedNow)
+        _ = try await kit.captureKGFact(handle,
+            subject: "tag:secret-tag", predicate: "tagged", object: "true",
+            sourceDrawerID: secretDrawer.id, now: Self.fixedNow)
+
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let bridge = VaultBridge(kit: kit)
+        let report = try await bridge.export(estate: handle, to: vault, scope: .believed, now: Self.fixedNow)
+
+        // Normal drawer exports (1); secret drawer excluded (1).
+        #expect(report.notesExported == 1)
+        #expect(report.excludedSecretTier == 1)
+
+        // The tag KG fact anchored to the normal drawer should appear in export
+        // (as frontmatter `tags:`). The tag fact anchored to the secret drawer
+        // must not appear in any exported markdown — CAND-050 enforces this.
+        let exported = allMarkdown(in: vault)
+        #expect(exported.contains("normal-tag"), "normal drawer's tag must appear in export")
+        #expect(!exported.contains("secret-tag"),
+            "CAND-050 regression: secret-anchored KG fact must not appear in export")
+    }
+
     @Test("each run writes its own receipt — two exports, two receipts")
     func receiptsAccumulatePerRun() async throws {
         let (kit, handle) = try await openEstate()
@@ -363,7 +421,7 @@ struct PrivacyTierAndReceiptTests {
         for _ in 0..<2 {
             let vault = makeTempVault()
             defer { try? FileManager.default.removeItem(at: vault) }
-            _ = try await bridge.export(estate: handle, to: vault, now: Self.fixedNow)
+            _ = try await bridge.export(estate: handle, to: vault, scope: .believed, now: Self.fixedNow)
         }
         let receipts = try await kit.readDiaryEntries(
             in: handle, agentName: VaultBridge.receiptAgentName)

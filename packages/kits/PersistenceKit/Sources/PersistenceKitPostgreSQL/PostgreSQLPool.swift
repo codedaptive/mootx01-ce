@@ -7,6 +7,7 @@ import Foundation
 import PersistenceKit
 @preconcurrency import PostgresNIO
 import NIOPosix
+import NIOSSL
 
 actor PostgreSQLPool {
     private let connectionString: String
@@ -138,15 +139,61 @@ actor PostgreSQLPool {
         let user = url.user ?? "postgres"
         let password = url.password
         let database = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let tls = try parseTLSMode(host: host)
         return PostgresConnection.Configuration(
             host: host,
             port: port,
             username: user,
             password: password,
             database: database.isEmpty ? "postgres" : database,
-            tls: .disable
+            tls: tls
         )
     }
+
+    /// Resolve the TLS mode for a PostgreSQL connection from the
+    /// `ARIA_MCP_POSTGRES_TLS` environment variable (SECFIX-WS2-PK F3 — CAND-029).
+    ///
+    /// | Value      | Behaviour                                                      |
+    /// |---|---|
+    /// | `disable`  | No TLS. Safe only for loopback / Unix-socket connections.      |
+    /// | `require`  | TLS mandatory; refuse if the server does not offer it.         |
+    /// | `prefer`   | TLS if offered; fall back to plaintext (default).              |
+    /// | *(absent)* | Defaults to `prefer`.                                          |
+    /// | *(unknown)*| Defaults to `prefer` (unknown ≠ `disable`; safe default).     |
+    ///
+    /// Loopback check: when the resolved host is `127.0.0.1`, `::1`, or
+    /// `localhost` and the env var is absent, we still default to `prefer`
+    /// (not `disable`). Callers that want plaintext on loopback must set
+    /// `ARIA_MCP_POSTGRES_TLS=disable` explicitly.
+    private func parseTLSMode(host: String) throws -> PostgresConnection.Configuration.TLS {
+        let raw = ProcessInfo.processInfo.environment["ARIA_MCP_POSTGRES_TLS"]?
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        switch raw {
+        case "disable":
+            return .disable
+        case "require":
+            let context = try makeTLSContext()
+            return .require(context)
+        default:
+            // "prefer" or absent or unrecognised → safe default (prefer).
+            let context = try makeTLSContext()
+            return .prefer(context)
+        }
+    }
+
+    /// Build a default TLS context for outgoing PostgreSQL connections.
+    ///
+    /// Uses `TLSConfiguration.makeClientConfiguration()` — verifies the
+    /// server certificate against the platform trust store (Security.framework
+    /// on macOS/iOS, OpenSSL on Linux). For environments with custom CAs, the
+    /// caller can extend this by adding trust roots to the `TLSConfiguration`
+    /// before constructing the context.
+    private func makeTLSContext() throws -> NIOSSLContext {
+        let tlsConfig = TLSConfiguration.makeClientConfiguration()
+        return try NIOSSLContext(configuration: tlsConfig)
+    }
 }
+
 
 import Logging

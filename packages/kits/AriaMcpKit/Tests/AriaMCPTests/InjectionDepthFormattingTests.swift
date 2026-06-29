@@ -127,4 +127,49 @@ struct InjectionDepthFormattingTests {
             #expect(result == "Some prose.")
         }
     }
+
+    // MARK: - Preview cap (secfix-p1-ariamcp)
+
+    @Test func factoidOnlyLongProseIsCappedAt300Chars() throws {
+        // A prose string longer than 300 chars must be truncated to exactly 300.
+        let longProse = String(repeating: "A", count: 500)
+        let header = try #require(makeHeader(conf: 0.85, prose: longProse))
+        let result = ToolDispatcher.injectionDepthFormatted(header: header, drawerID: "cap-001")
+        #expect(result.count == 300)
+        #expect(!result.contains("[distilled"))
+    }
+
+    @Test func factoidOnlyShortProseIsNotTruncated() throws {
+        // Prose shorter than 300 chars must be returned verbatim.
+        let shortProse = "The boiling point of water is 100 °C at 1 atm."
+        let header = try #require(makeHeader(conf: 0.85, prose: shortProse))
+        let result = ToolDispatcher.injectionDepthFormatted(header: header, drawerID: "cap-002")
+        #expect(result == shortProse)
+    }
+
+    @Test func factoidWithMetaLongProseIsCapped() throws {
+        let longProse = String(repeating: "B", count: 600)
+        let header = try #require(makeHeader(conf: 0.55, src: 3, prose: longProse))
+        let result = ToolDispatcher.injectionDepthFormatted(header: header, drawerID: "cap-003")
+        let lines = result.components(separatedBy: "\n")
+        // First line = capped prose (300 Bs)
+        #expect(lines[0].count == 300)
+        // Second line = meta annotation
+        #expect(lines[1].contains("[distilled from 3 memories, conf=0.55]"))
+    }
+
+    @Test func factoidWithProvenanceLongProseIsCapped() throws {
+        let longProse = String(repeating: "C", count: 400)
+        let drawerID = "cap-004"
+        let header = try #require(makeHeader(conf: 0.25, prose: longProse))
+        let result = ToolDispatcher.injectionDepthFormatted(header: header, drawerID: drawerID)
+        let lines = result.components(separatedBy: "\n")
+        #expect(lines[0].count == 300)
+        #expect(lines[1].contains("[distilled, conf=0.25, sources: \(drawerID)]"))
+    }
+
+    @Test func distilledProseCappedAtConstant() throws {
+        // Verify that the constant value itself is 300 (not accidentally changed).
+        #expect(ToolDispatcher.distilledProseCap == 300)
+    }
 }

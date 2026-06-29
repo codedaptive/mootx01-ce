@@ -32,9 +32,9 @@ extension NeuronKit {
     /// One candidate handed to the reduction signals: the dense recall signal
     /// (`score`) plus the hydrated content and the lattice anchor. Built from a
     /// GLK `RecallHit` by `from(hit:coarseRank:)`. The `coarseRank` is the
-    /// candidate's 0-based position in the coarse-grab pool — the deterministic
-    /// tie-break basis so equal-precision near-duplicates keep the coarse lane's
-    /// order (and the reduce is bit-reproducible).
+    /// candidate's 0-based position in the coarse-grab pool — the last-resort
+    /// tie-break after content lexicographic order (equal-precision candidates
+    /// are ordered by content string first, coarse rank second).
     /// Not `Equatable`: the embedded `RecallScoreVector` is `Sendable` but not
     /// `Equatable`, and candidates are compared by `id` where identity is needed.
     public struct ReductionCandidate: Sendable {
@@ -42,7 +42,7 @@ extension NeuronKit {
         public let id: String
         /// The drawer's content (empty when the hit was not hydrated).
         public let content: String
-        /// The drawer's room (echoed for serialization parity).
+        /// The drawer's parentNodeId (echoed for serialization parity).
         public let room: String
         /// The dense per-lane recall signal carried from GLK (Step 2): integer
         /// Hamming distance, per-lane bm25/vector/coOccurrence, final fused score.
@@ -57,8 +57,10 @@ extension NeuronKit {
         /// The candidate's event time (when the recorded thing happened/was
         /// authored), or `nil` when the hit carried no structured drawer. Read
         /// BODY-FREE: `eventTime` is a structured column preserved at the
-        /// `.bitmapOnly` hydration the precise pool loads at, so the temporal
-        /// signal can prefer the more-recent record without reading any body.
+        /// `.bitmapOnly` hydration the precise pool loads at. Note: the
+        /// per-candidate `.temporalState` scorer uses `isCurrentlyBelieved`,
+        /// not `eventTime` — event-time recency is a relative (pool-wide)
+        /// comparison and is not used as a per-candidate signal term.
         public let eventTime: Date?
         /// Whether the candidate is in a currently-believed state (drawer state
         /// Cluster A: active/pending/contested/accepted) versus a superseded or
@@ -109,7 +111,7 @@ extension NeuronKit {
             ReductionCandidate(
                 id: hit.id,
                 content: hit.drawer?.content ?? "",
-                room: hit.drawer?.room ?? "",
+                room: hit.drawer?.parentNodeId ?? "",
                 score: hit.score,
                 udcCode: hit.drawer?.udcCode ?? "",
                 udcFacets: hit.drawer?.udcFacets,
@@ -234,8 +236,8 @@ extension NeuronKit {
     // MARK: - Per-candidate scorers
 
     /// Score `candidate` under `signal` against `query`, in [0, 1]. For the
-    /// set-level `mmr` signal this returns 0 (it is applied by the composition
-    /// fold, not per-candidate); call `score` only for per-candidate signals.
+    /// set-level `mmr` and `assembly` signals this returns 0.5 (the neutral
+    /// coarse-order-preserving value; the composition fold handles both).
     ///
     /// - Parameters:
     ///   - signal: which signal component to evaluate.

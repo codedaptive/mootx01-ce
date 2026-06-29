@@ -8,6 +8,9 @@
 ///
 /// Hint injection applies only to successful (isError == false) results;
 /// error results are never annotated by the caller in `dispatch`.
+///
+/// Eleven trigger conditions mirror Rust `coaching_engine.rs` exactly.
+/// The first matching trigger wins; the rest are skipped.
 enum CoachingEngine {
 
     /// Return a coaching hint for the completed call, or nil if none applies.
@@ -21,131 +24,82 @@ enum CoachingEngine {
         args: [String: JSONValue],
         resultText: String
     ) -> String? {
-        switch name {
-        case "moot_memory_search":
-            return memorySearchHint(args: args, resultText: resultText)
-        case "moot_file_memory":
-            return fileMemoryHint(args: args, resultText: resultText)
-        case "moot_erase_memory":
-            return eraseMemoryHint(args: args)
-        case "moot_confirm_migration":
-            return confirmMigrationHint(resultText: resultText)
-        case "moot_link_memories":
-            return linkMemoriesHint(resultText: resultText)
-        case "moot_lens_keystones", "moot_lens_constellation":
-            // These lenses operate on the tunnel graph (drawer-to-drawer edges),
-            // not on memory count. "0 result" here means no tunnel edges exist
-            // — not 0 memories. The generic lensHint message is wrong for this
-            // case, so we provide a tunnel-specific message instead.
-            return tunnelGraphLensHint(name: name, resultText: resultText)
-        default:
-            // Any other lens tool with a thin result.
-            if LensTools.isLensTool(name) {
-                return lensHint(resultText: resultText)
+        // Trigger 1: long query — moot_memory_search with query > 200 chars
+        if name == "moot_memory_search" {
+            if let query = args["query"]?.stringValue, query.count > 200 {
+                return "queries over 200 characters may reduce recall precision; try a shorter, more specific phrase"
             }
-            return nil
         }
-    }
 
-    // MARK: - Per-tool hint logic
+        // Trigger 2: no results — moot_memory_search returned 0 hits
+        if name == "moot_memory_search", resultText.contains("found 0 memory") {
+            return "no memories matched — try moot_estate_status to check estate contents, or broaden the query"
+        }
 
-    /// Coaching hints for `moot_memory_search`.
-    ///
-    /// Three triggers: query too long, no query provided, zero results returned.
-    private static func memorySearchHint(
-        args: [String: JSONValue],
-        resultText: String
-    ) -> String? {
-        // No query argument — caller may not understand semantic retrieval.
-        guard let query = args["query"]?.stringValue else {
-            return "Use `query` for semantic retrieval. To browse estate structure, use `moot_estate_map` instead."
+        // Trigger 3: filed memory — suggest confirming it
+        if name == "moot_file_memory", resultText.contains("filed memory") {
+            return "memory filed — call moot_confirm_memory with this ID to mark it as user-verified"
         }
-        // Query too long — long queries dilute the semantic embedding signal.
-        if query.count > 200 {
-            return "Queries work best as keywords or a short question under 50 words. Long queries dilute the semantic signal."
+
+        // Trigger 4: empty estate — moot_estate_status shows drawers: 0
+        if name == "moot_estate_status", resultText.contains("drawers: 0") {
+            return "estate is empty — start with moot_file_memory to store your first memory"
         }
-        // Zero results — help caller broaden or verify the location exists.
-        // Gate on the full prefix "found 0 memory" so a result like "found 20 memory(s)"
-        // (which contains the substring "0 memory") does not spuriously fire this hint.
-        if resultText.contains("found 0 memory") {
-            return "No results. Try broader terms, or check `moot_estate_map` to confirm the location exists."
+
+        // Trigger 5: empty journal — moot_read_journal returned 0 entries
+        if name == "moot_read_journal", resultText.contains("0 entry(s)") {
+            return "no journal entries found — use moot_write_journal to record session notes"
         }
+
+        // Trigger 6: no outgoing connections — moot_connection_search returned 0
+        if name == "moot_connection_search", resultText.contains(": 0") {
+            return "no outgoing connections found — use moot_link_memories to create typed relationships between memories"
+        }
+
+        // Trigger 7: empty fact store — moot_fact_search with no query returned 0
+        if name == "moot_fact_search",
+           resultText.hasPrefix("facts: 0"),
+           args["query"] == nil {
+            return "no facts in this estate — use moot_file_fact to store subject-predicate-object knowledge"
+        }
+
+        // Trigger 8: many facts — moot_fact_timeline with >= 20 entries
+        if name == "moot_fact_timeline",
+           let count = parseTimelineCount(resultText),
+           count >= 20 {
+            return "large fact timeline — consider using moot_retire_fact to remove outdated facts and keep the knowledge graph current"
+        }
+
+        // Trigger 9: connection map empty — moot_connection_map returned 0
+        if name == "moot_connection_map", resultText.contains(": 0") {
+            return "no incoming connections found — use moot_link_memories to build the association graph"
+        }
+
+        // Trigger 10: tunnel-graph lens 0 results — keystones/constellation
+        // operate on drawer-to-drawer edges; "0 result" means no tunnel edges
+        // exist, not 0 memories.
+        if (name == "moot_lens_keystones" || name == "moot_lens_constellation"),
+           resultText.contains("0 result") {
+            return "no tunnel connections found in this wing — these lenses require linked memories; use moot_link_memories to connect memories and then re-run this lens"
+        }
+
+        // Trigger 11: generic lens tool 0 results — any other moot_lens_* tool.
+        if name.hasPrefix("moot_lens_"), resultText.contains("0 result") {
+            return "lens results are thin — try scope: active for a broader search"
+        }
+
         return nil
     }
 
-    /// Coaching hints for `moot_file_memory`.
-    ///
-    /// Two triggers: content over 4000 chars, result says content already exists.
-    private static func fileMemoryHint(
-        args: [String: JSONValue],
-        resultText: String
-    ) -> String? {
-        if let content = args["content"]?.stringValue, content.count > 4000 {
-            return "Consider splitting into smaller memories — content under 500 words recalls more precisely."
-        }
-        if resultText.contains("already exists") {
-            return "This content is already filed. Use `moot_update_memory` with the existing id to revise it."
-        }
-        return nil
-    }
+    // MARK: - Helpers
 
-    /// Coaching hint for `moot_erase_memory`.
-    ///
-    /// Fires when `confirmed` is absent or false — reminds the caller that erase is
-    /// irreversible and `moot_withdraw_memory` is the recoverable alternative.
-    private static func eraseMemoryHint(args: [String: JSONValue]) -> String? {
-        let confirmed = args["confirmed"]?.boolValue ?? false
-        if !confirmed {
-            return "Erase is irreversible. Pass `confirmed: true` to proceed, or use `moot_withdraw_memory` for recoverable removal."
-        }
-        return nil
-    }
-
-    /// Coaching hint for `moot_confirm_migration`.
-    ///
-    /// Fires when the result indicates a branch was disqualified.
-    private static func confirmMigrationHint(resultText: String) -> String? {
-        if resultText.contains("disqualified") {
-            return "This branch was disqualified by `moot_run_migration`. Promote only branches from the rankings list."
-        }
-        return nil
-    }
-
-    /// Coaching hint for `moot_link_memories`.
-    ///
-    /// Fires when the result text contains "isError" — one or both IDs were
-    /// not found and the result carries an error payload.
-    private static func linkMemoriesHint(resultText: String) -> String? {
-        if resultText.contains("isError") {
-            return "One or both memory IDs not found. Use `moot_memory_search` to locate the correct IDs first."
-        }
-        return nil
-    }
-
-    /// Coaching hint for any lens tool when the result is thin.
-    ///
-    /// Fires when the result text contains "0 result" — the lens matched no
-    /// memories and broader scope may help.
-    private static func lensHint(resultText: String) -> String? {
-        if resultText.contains("0 result") {
-            return "Only 0 memories matched this scope — lens results may be thin. Try `scope: active` for a fuller picture."
-        }
-        return nil
-    }
-
-    /// Coaching hint for tunnel-graph lenses (keystones, constellation).
-    ///
-    /// These lenses operate on the drawer-to-drawer tunnel graph, NOT on
-    /// memory count. "0 result" means no tunnel edges exist in this wing —
-    /// the wing may have memories but lacks connections between them.
-    ///
-    /// The generic lensHint message is wrong here because:
-    ///   1. It claims "Only 0 memories" — the wing may have many memories.
-    ///   2. It suggests `scope: active` — scope does not affect tunnel topology.
-    private static func tunnelGraphLensHint(name: String, resultText: String) -> String? {
-        if resultText.contains("0 result") {
-            return "No tunnel connections found in this wing. \(name.contains("keystones") ? "Keystones" : "Constellation") requires linked memories — use `moot_link_memories` to connect memories and then re-run this lens."
-        }
-        return nil
+    /// Parse the fact count from a fact-timeline result header.
+    /// Matches "fact timeline: N" or "fact timeline for ...: N".
+    private static func parseTimelineCount(_ text: String) -> Int? {
+        guard let firstLine = text.split(separator: "\n").first else { return nil }
+        guard let colonIndex = firstLine.lastIndex(of: ":") else { return nil }
+        let afterColon = firstLine[firstLine.index(after: colonIndex)...]
+            .trimmingCharacters(in: .whitespaces)
+        return Int(afterColon)
     }
 }

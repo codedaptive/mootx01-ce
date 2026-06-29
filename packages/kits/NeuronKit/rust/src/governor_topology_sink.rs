@@ -38,6 +38,9 @@ pub trait GovernorTopologySink: Send + Sync {
     ///   seconds. Matches the `generatedTs` field embedded in `payload`.
     /// - `payload`: UTF-8 JSON snapshot bytes (the same wire shape moot-mgr
     ///   decodes as `GraphNodePayload` / `GraphEdgePayload`).
+    /// - `fingerprint`: the stable topology-inputs fingerprint (F5). The
+    ///   implementation persists it beside the snapshot so a restarting governor
+    ///   can skip the full topology read when inputs are unchanged.
     ///
     /// Returns `Ok(())` on success. Errors are logged by the governor; they
     /// do not propagate to the tick loop.
@@ -46,7 +49,19 @@ pub trait GovernorTopologySink: Send + Sync {
         estate_id: &str,
         now_epoch_secs: f64,
         payload: &str,
+        fingerprint: &str,
     ) -> Result<(), String>;
+
+    /// Load the persisted topology fingerprint for `estate_id`, if any (F5).
+    ///
+    /// The governor calls this once on its first topology duty so it can compare
+    /// the persisted fingerprint against freshly-computed inputs and skip the
+    /// full drawer/tunnel/fact read when they match. Returns `None` when no
+    /// snapshot/fingerprint has been persisted yet. A read failure should map to
+    /// `None` (the governor then recomputes once, as if nothing was persisted).
+    ///
+    /// Mirrors Swift's `topologyFingerprintLoader` closure.
+    fn load_topology_fingerprint(&self, estate_id: &str) -> Option<String>;
 
     /// Return `true` when monitoring is enabled (the topology duty should fire).
     ///

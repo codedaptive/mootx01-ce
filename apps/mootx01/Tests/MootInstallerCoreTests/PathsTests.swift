@@ -1,8 +1,9 @@
 // PathsTests.swift
 //
-// Pure path-math tests for MootInstallerCore.MootPaths. No
-// filesystem touching; the tests inject environment and home so
-// they run identically under any user.
+// Tests for MootInstallerCore.MootPaths. Most tests are pure path math
+// (environment and home injected, no filesystem access). Daemon-port
+// tests write a temporary daemon.port file to exercise
+// MootPaths.resolvedResidentPort(dataDir:) end to end.
 
 import XCTest
 @testable import MootInstallerCore

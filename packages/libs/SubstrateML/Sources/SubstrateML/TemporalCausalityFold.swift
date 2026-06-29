@@ -120,8 +120,8 @@ public struct TemporalAuditEntry: Sendable {
 /// matches the Rust port and is required for Swift/Rust lockstep
 /// conformance.
 public struct FoldResult: Sendable {
-    /// Aggregated per-key deltas in stable emission order (source
-    /// HLC ascending). Caller adds each delta to the T matrix.
+    /// Aggregated per-key deltas in first-seen insertion order.
+    /// Caller adds each delta to the T matrix.
     public let deltas: [(TemporalCausalityKey, Int64)]
     /// HLC of the last new entry processed, or `startWatermark`
     /// when no new entries were found. Mirrors Rust `new_watermark`.
@@ -182,10 +182,9 @@ public enum TemporalCausalityFold {
     /// Map a minute delta to the smallest lag bucket >= deltaMinutes.
     ///
     /// Out-of-window inputs are rejected upstream by the buffer eviction
-    /// inside `fold`; this function therefore operates on values in
-    /// [1, windowMinutes]. The largest bucket (128) is returned for any
-    /// value > 128 (which cannot happen after eviction when windowMinutes
-    /// == 256, but is defensive against custom windowMinutes values).
+    /// inside `fold`. The largest bucket (128) is returned for any
+    /// value > 128 — this is the normal path when windowMinutes > 128
+    /// and the delta falls between 128 and windowMinutes.
     ///
     /// This is the canonical implementation; GeniusLocusKit's
     /// `MatrixTier.lagBucket(forMinutes:)` delegates to this so a single

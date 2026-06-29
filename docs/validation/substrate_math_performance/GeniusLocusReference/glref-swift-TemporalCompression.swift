@@ -16,9 +16,10 @@
 //
 // Storage discipline: the substrate keeps the most recent
 // (hour windows, day windows) hot in the bit-sliced tensor and
-// progressively older windows in the SQLite tail. The dreaming
-// daemon (§ 15 rule 6) advances windows hourly, daily, weekly,
-// monthly, quarterly, and yearly on schedule.
+// progressively older windows in the SQLite tail. This file
+// implements the pure compression and rollup helpers; the dreaming
+// daemon temporal-compression branch in ReferenceRuleExecutor is
+// a no-op in the current reference implementation.
 //
 // Used by:
 //   § 8.14   Temporal compression definition (this file)

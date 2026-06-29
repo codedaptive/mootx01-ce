@@ -1,50 +1,49 @@
 // EncodeIntake.swift
 //
-// Dual-Path Intake P3 / P4 / P6 — the capture→encode wiring.
+// Dual-Path Intake — the capture→encode ORCHESTRATION.
 //
 // THE LOAD-BEARING CHANGE: before this wiring, a `moot_file_memory` write
 // produced a LocusKit drawer row ONLY — never chunked, never BM25-indexed,
 // never embedded — so the semantic (BM25 + vector) recall lanes were DARK for
-// normally-captured content. This file connects capture to `Corpus.ingest`, the
-// one call that lights those lanes, via two paths:
+// normally-captured content. This file connects capture to the estate's Corpus,
+// which lights those lanes, via two paths:
 //
-//   • REGULAR (P3 + P4): capture returns immediately; an EncodeJob is enqueued
-//     onto the estate's dedicated encode queue; a background drain worker (P4)
-//     ingests it into the Corpus and replies terminal. After the queue drains,
-//     the drawer is BM25/vector searchable.
+//   • REGULAR (P3 + P4): capture returns immediately; the drawer is enqueued
+//     onto the Corpus's OWN ingest queue (`Corpus.enqueueIngest`); the Corpus's
+//     drain worker pool ingests it. After the queue drains, the drawer is
+//     BM25/vector searchable.
 //
 //   • IMPATIENT (P6): capture ingests the drawer into the Corpus INLINE before
-//     returning, skipping the queue — the drawer is searchable the instant the
-//     write returns, at the cost of a slower write.
+//     returning, skipping the queue — searchable the instant the write returns.
+//
+// LAYERING: the encode QUEUE + DRAIN + WORKER POOL live in CorpusKit (a Corpus
+// queues, drains, and encodes itself — see CorpusKit's CorpusIngestQueue.swift).
+// GeniusLocusKit is ONLY the orchestrator: it enqueues work into the Corpus, and
+// — through the Corpus's `onEncoded` callback wired at provision — rolls up the
+// touched LocusKit rooms for the encoded drawers. GLK never performs the encode.
 //
 // D-A: the write mode is an EXECUTION OPTION on the write verb (a GLK param),
 //      not a field on CaptureFrame — mirroring how `scoring` is an option on the
 //      recall verb. CaptureFrame's schema is untouched.
-// D-B: ONE QueueKit per estate (dedicated, not the Brain scheduler's queue),
-//      mounted at provision alongside the corpus/vector registration.
 //
-// G4: the worker ingests with `sourceID = drawer.id` so BM25/vector hits hydrate
-//     back to the real Drawer row (RecallDirector hydration by drawer id).
+// G4: the drawer is ingested with `sourceID = drawer.id` so BM25/vector hits
+//     hydrate back to the real Drawer row (RecallDirector hydration by drawer id).
 
-import Foundation
 import CorpusKit
 import EideticLib
+import Foundation
 import LocusKit
 import OSLog
-import PersistenceKit
-import PersistenceKitInMemory
-import QueueKit
-import SubstrateML
-import SubstrateTypes
 
 /// The execution mode for a write verb (D-A).
 ///
 /// `regular` is the default: the write returns as soon as the drawer row lands,
-/// and semantic encoding happens asynchronously on the encode drain worker.
+/// and semantic encoding happens asynchronously on the Corpus's drain worker.
 /// `impatient` trades write latency for immediate searchability: the drawer is
 /// ingested into the Corpus inline before the write returns.
 public enum WriteMode: String, Sendable, Codable, CaseIterable {
-    /// Enqueue the encode job; the drain worker encodes it asynchronously.
+    /// Enqueue the drawer onto the Corpus ingest queue; the drain worker encodes
+    /// it asynchronously.
     case regular
     /// Encode inline before the write returns; the drawer is immediately
     /// semantically searchable.
@@ -65,8 +64,8 @@ public extension GeniusLocusKit {
     /// This is the mode-aware capture verb. It dispatches the same
     /// `Estate.capture` as the legacy `capture(_:_:)`, then:
     ///
-    ///   • `.regular` — enqueues an `EncodeJob` onto the estate's encode queue
-    ///     (P3). The background drain worker (P4) ingests it. The write returns
+    ///   • `.regular` — enqueues the drawer onto the Corpus's own ingest queue
+    ///     (P3). The Corpus drain worker (P4) ingests it. The write returns
     ///     before encoding completes; callers that need to know encoding
     ///     finished use `awaitEncodeDrain(for:)`.
     ///   • `.impatient` — ingests the drawer into the Corpus inline (P6) before
@@ -126,7 +125,7 @@ public extension GeniusLocusKit {
         let drawer = try await capture(handle, classifiedFrame)
 
         // 2. Encode per mode — only when a Corpus is registered for the estate.
-        guard corpusKits[handle] != nil else {
+        guard let corpus = corpusKits[handle] else {
             // No semantic lane to feed (e.g. .locusOnly). The drawer row is
             // stored; nothing to ingest. Both modes degrade to row-only.
             return drawer
@@ -140,80 +139,108 @@ public extension GeniusLocusKit {
             // inside the engine). The drawer row is already durably stored, so
             // an ingest failure surfaces to the caller without losing content.
             try await ingestDrawerIntoCorpus(handle: handle, drawer: drawer)
+            // NT-L3: Impatient skips the encode queue, so it also rolls up the
+            // drawer's room inline (one capture → one room, O(room) once) rather
+            // than via the Corpus drain worker's onEncoded callback.
+            let estate = try estate(for: handle)
+            try await estate.rollupRoomsForDrawers([drawer.id])
         case .regular:
-            // P3: enqueue an EncodeJob; the drain worker (P4) ingests it.
-            try await enqueueEncodeJob(handle: handle, drawer: drawer)
+            // P3: enqueue the drawer onto the Corpus's own ingest queue; the
+            // Corpus drain worker (P4) ingests it and fires onEncoded → room
+            // rollup. Hint drawers (AI_Charter_Hint room) are normal drawers
+            // and flow through the normal encode path. Empty content is
+            // skipped inside enqueueIngest.
+            try await corpus.enqueueIngest(
+                drawer.content,
+                sourceID: drawer.id,
+                now: drawer.filedAt
+            )
         }
         return drawer
     }
 
-    // MARK: - mountEncodeQueue — D-B (called at provision)
+    // MARK: - captureBatch — GLK_BATCH1
 
-    /// Mount the estate's dedicated encode queue and start its drain worker.
+    /// File a batch of drawers into the estate addressed by `handle` inside a
+    /// single SQLite transaction.
     ///
-    /// D-B: ONE QueueKit per estate, distinct from the Brain scheduler's queue.
-    /// Backed by a transient in-memory PersistenceKitBackend (the same substrate
-    /// the scheduler uses) so it needs no estate file directory and works for
-    /// in-memory estates. Idempotent: re-mounting an already-mounted estate is a
-    /// no-op (the existing queue and worker are kept).
+    /// ## Performance contract
     ///
-    /// Called from `provision` for `.glk`/`.corpusOnly` estates (those with a
-    /// Corpus to feed). `.locusOnly` estates do not mount an encode queue.
+    /// All frames are FDC-classified upfront (one pass). Then a single
+    /// `BEGIN IMMEDIATE` is opened on the estate's row store, every drawer row
+    /// is inserted without per-row fsync, and the transaction is committed once.
+    /// For a ~40 K-drawer palace import this reduces wall-clock time from
+    /// ~34 min (per-item autocommit) to ~30 sec.
     ///
-    /// - Parameter handle: The estate to mount the encode queue for. Must be open.
-    /// - Throws: A storage/schema error if the queue backend cannot be opened.
-    func mountEncodeQueue(for handle: EstateHandle) async throws {
-        guard encodeQueues[handle] == nil else { return }  // idempotent
-        // Transient in-memory queue substrate — mirrors StandingSignalScheduler.
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: handle.estateUUID,
-            backend: .inMemory))
-        try await PersistenceKitBackend.openSchema(on: storage)
-        let backend = PersistenceKitBackend(storage: storage)
-        let queue = QueueKit(backend: backend)
-        queue.estateTag = handle.estateUUID.uuidString
-        encodeQueues[handle] = queue
-        encodeHLCs[handle] = HLCGenerator(nodeID: 1)
+    /// ## Encode queue
+    ///
+    /// `captureBatch` intentionally skips the encode queue. The caller (VaultKit
+    /// import) is a bulk-import path; semantic indexing of the imported corpus
+    /// is expected to run via a subsequent `moot_reindex` + `moot_dream` cycle.
+    ///
+    /// ## Atomicity
+    ///
+    /// If any single insert fails, the transaction is rolled back and no drawers
+    /// are persisted. The error is re-thrown to the caller.
+    ///
+    /// - Parameters:
+    ///   - handle: The estate to capture into. Must be open.
+    ///   - frames: The capture frames to insert.
+    /// - Returns: The stored drawers in insertion order.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` for a stale handle;
+    ///   `VerbError.underlyingEstateFailure` on any LocusKit failure;
+    ///   `StorageError.transactionConflict` if a transaction is already open.
+    @discardableResult
+    func captureBatch(
+        _ handle: EstateHandle,
+        _ frames: [CaptureFrame]
+    ) async throws -> [Drawer] {
+        // Quiesce gate: reject captureBatch on quiesced or draining estates
+        // before touching the transaction. This mirrors the Rust coordinator's
+        // estate_for_verb check that precedes begin_transaction (planned
+        // security hardening — B1). Without this guard a batch on a quiesced
+        // estate would silently proceed to the LocusKit insertFreshBatch
+        // transaction, bypassing the estate lifecycle fence.
+        try requireMounted(handle, verb: "captureBatch")
+        guard !frames.isEmpty else { return [] }
 
-        // P4: spawn the background drain worker (near-realtime, load-robust). It
-        // runs on the actor, draining the whole available batch each pass and
-        // ingesting into the Corpus, so awaitEncodeDrain can observe completion.
-        // Cancelled in dropEncodeQueue/close(). See runEncodeDrainLoop for why a
-        // poll worker (not watch) is the correct claimer on the actor.
-        let worker = Task { [weak self] in
-            guard let self else { return }
-            await self.runEncodeDrainLoop(for: handle)
+        // Batch capture must preserve the same lattice anchoring guarantee as
+        // the normal capture path: classifiable sentinel frames are anchored
+        // before storage so latticeSubtree grants never authorize them under
+        // the wrong UDC scope. Explicit non-sentinel anchors are preserved.
+        let classifiedFrames = frames.map { frame -> CaptureFrame in
+            guard frame.latticeAnchor.udcCode == Self.unclassifiedSentinel,
+                  !frame.content.isEmpty else {
+                return frame
+            }
+            let anchor = EideticLib.lookup(frame.content)
+            guard !anchor.code.isEmpty else {
+                // UNRESOLVED: content could not be classified. Leave sentinel.
+                return frame
+            }
+            var classified = frame
+            classified.latticeAnchor = LatticeAnchor(
+                udcCode: anchor.code,
+                wikidataQID: anchor.wikidataQID
+            )
+            return classified
         }
-        encodeDrainWorkers[handle] = worker
-        Self.intakeLog.debug(
-            "mounted encode queue for estate \(handle.estateUUID, privacy: .public)")
-    }
-
-    /// Tear down the estate's encode queue and drain worker.
-    ///
-    /// Cancels the background worker and drops the queue/HLC/worker registry
-    /// entries. Called from `close` so a torn-down estate leaves no orphan
-    /// worker task. Idempotent.
-    ///
-    /// - Parameter handle: The estate whose encode queue to drop.
-    func dropEncodeQueue(for handle: EstateHandle) {
-        encodeDrainWorkers[handle]?.cancel()
-        encodeDrainWorkers[handle] = nil
-        encodeQueues[handle] = nil
-        encodeHLCs[handle] = nil
+        let estateObj = try estate(for: handle)
+        return try await estateObj.captureBatch(classifiedFrames)
     }
 
     // MARK: - awaitEncodeDrain (P5 consumer)
 
-    /// Block until the estate's encode queue has fully drained — every enqueued
-    /// `EncodeJob` has been ingested and replied — then return.
+    /// Block until the estate's Corpus ingest queue has fully drained — every
+    /// enqueued drawer has been ingested and replied — then return.
     ///
-    /// Delegates to `QueueKit.awaitDrain()` (P5). Returns promptly when the queue
-    /// is already empty and does not hang on an empty queue. This is the signal a
-    /// bulk caller (importer, gauntlet) or an acceptance test uses to know that a
-    /// batch of regular writes has become semantically searchable.
+    /// Delegates to `Corpus.awaitIngestDrain()` (the encode pipeline lives in
+    /// CorpusKit). Returns promptly when the queue is already empty and does not
+    /// hang on an empty queue. This is the signal a bulk caller (importer,
+    /// gauntlet) or an acceptance test uses to know that a batch of regular
+    /// writes has become semantically searchable.
     ///
-    /// Returns immediately if no encode queue is mounted for the estate (e.g. a
+    /// Returns immediately if no Corpus is registered for the estate (e.g. a
     /// `.locusOnly` estate, or an estate provisioned before the intake wiring) —
     /// there is nothing to drain.
     ///
@@ -225,45 +252,64 @@ public extension GeniusLocusKit {
         for handle: EstateHandle,
         timeout: Duration = .seconds(30)
     ) async throws {
-        guard let queue = encodeQueues[handle] else { return }
-        // The watch-driven background worker is the SOLE drainer of this queue
-        // (running two concurrent claimers over one queue can wedge a job
-        // claimed-but-unreplied if a claim transaction commits the new→cur move
-        // but its consumer never sees the row). This barrier therefore only
-        // OBSERVES the frontiers — it does not claim. It returns once both are
-        // clear (every enqueued job ingested and replied by the worker), and the
-        // worker's drain-until-empty-per-wake guarantees no committed job is left
-        // behind, so a pure frontier wait converges.
-        try await queue.awaitDrain(timeout: timeout)
+        try await corpusKits[handle]?.awaitIngestDrain(timeout: timeout)
     }
 
     // MARK: - reindexMissing (backfill for pre-wiring drawers)
 
-    /// Enqueue encode jobs for every active drawer in the estate that is NOT
-    /// already present in the Corpus BundleStore.
+    /// Hard cap on the total number of drawers `reindexMissing` will enqueue
+    /// in a single call (secfix/c-glk-remaining Part 6).
+    ///
+    /// Without this cap, a sufficiently large estate (e.g. a 200k-drawer palace
+    /// import) causes `reindexMissing` to enqueue all missing drawers atomically,
+    /// flooding the encode queue and starving live captures of encode capacity
+    /// for minutes. 10,000 drawers ≈ 10 MiB of typical content — enough to make
+    /// a meaningful dent in a backfill while keeping the queue drain bounded.
+    ///
+    /// Rust parity: `REINDEX_MAX_JOBS` in GeniusLocusKit/rust/src/intake.rs.
+    ///
+    /// Callers that need to reindex more than 10,000 drawers call `reindexMissing`
+    /// multiple times; each call skips already-indexed drawers (idempotent), so
+    /// repeated calls converge to full coverage without a single unbounded burst.
+    ///
+    /// `static` because Swift extension properties must be static or computed;
+    /// `internal` (not `private`) so the security-hardening tests can assert the
+    /// constant's value without a separate public accessor.
+    /// Access as `GeniusLocusKit.reindexMaxJobs` or `Self.reindexMaxJobs`.
+    static let reindexMaxJobs = 10_000
+
+    /// Enqueue ingest jobs for every active drawer in the estate that is NOT
+    /// already present in the Corpus BundleStore, up to `reindexMaxJobs` total.
     ///
     /// Use this after deploying the dual-path intake fix to backfill the existing
     /// drawers that were captured before the encode pipeline was wired. Each
-    /// missing drawer is enqueued as a `.regular` EncodeJob — the background drain
-    /// worker ingests them into the Corpus (BM25 + vector) asynchronously, so this
-    /// call returns quickly regardless of estate size.
+    /// missing drawer is enqueued onto the Corpus ingest queue — the Corpus
+    /// drain worker ingests them (BM25 + vector) asynchronously, so this call
+    /// returns quickly regardless of estate size.
     ///
     /// **Idempotent:** drawers already in the BundleStore (identified by
     /// `Corpus.indexedSourceIDs()`) are skipped. Calling this multiple times is
     /// safe — already-indexed drawers are never double-enqueued.
+    ///
+    /// **Cap:** at most `reindexMaxJobs` (10,000) drawers are enqueued per call.
+    /// When truncation occurs, a structured warning is logged with the total
+    /// missing count so the caller knows to repeat the call. The cap prevents
+    /// a single large backfill from starving live captures of encode capacity
+    /// (secfix/c-glk-remaining Part 6 — local DoS hardening).
     ///
     /// **No Corpus, no-op:** if no Corpus is registered for the estate (e.g. a
     /// `.locusOnly` estate), the call returns 0 immediately.
     ///
     /// - Parameters:
     ///   - handle: The estate to reindex. Must be open.
-    ///   - now: The operation instant used as the capture timestamp for enqueued
-    ///     jobs. Pass the current date; the caller never reads the clock inside an
-    ///     engine (determinism rule).
-    /// - Returns: The number of drawers enqueued for re-encoding.
+    ///   - now: The operation instant used for the deferred Merkle rollup; the
+    ///     per-drawer enqueue uses each drawer's `filedAt` as the capture
+    ///     timestamp. Pass the current date; the caller never reads the clock
+    ///     inside an engine (determinism rule).
+    /// - Returns: The number of drawers enqueued for re-encoding (≤ reindexMaxJobs).
     /// - Throws: An estate-not-open error if the handle is stale; a corpus query
     ///   error if the indexed-source-IDs query fails; an estate recall error.
-    public func reindexMissing(
+    func reindexMissing(
         handle: EstateHandle,
         now: Date
     ) async throws -> Int {
@@ -276,79 +322,86 @@ public extension GeniusLocusKit {
 
         // Recall all active (non-tombstoned) drawers from the estate.
         // .full hydration is required because we need the drawer content to
-        // enqueue the EncodeJob payload. (.structured returns content = "")
+        // enqueue the ingest payload. (.structured returns content = "")
         let estate = try estate(for: handle)
         let allDrawers = try await estate.allDrawers()
         let activeDrawers = allDrawers.filter { $0.tombstonedAt == nil }
 
-        var enqueued = 0
+        // Collect the active, not-yet-indexed, non-empty drawers.
+        // The drawer's filedAt is the capture instant so vector filing timestamps
+        // are deterministic (not now). Hint drawers (AI_Charter_Hint room) are
+        // normal drawers — they encode like any other.
+        var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
         for drawer in activeDrawers {
-            // Skip drawers with empty content — nothing to encode (matches the
-            // guard in enqueueEncodeJob).
-            guard !drawer.content.isEmpty else { continue }
-            // Skip structural drawers that carry the "none" embedding sentinel.
-            // Charter drawers (_charter room, embeddingModelID = "none") are
-            // spatial metadata, not semantic content — encoding them would waste
-            // slots and pollute BM25 rankings with role-description text. The
-            // "none" sentinel is the canonical signal that a drawer was
-            // intentionally captured without a semantic lane (ADR-016 §2,
-            // DefaultWings.swift charterEmbeddingModelID).
-            guard drawer.embeddingModelID != "none" else { continue }
-            // Skip drawers already in the BundleStore — idempotence.
-            guard !indexedIDs.contains(drawer.id) else { continue }
-            // Enqueue using the existing P3 path. The drain worker picks it up
-            // near-realtime. The draw's filedAt is used as the capture instant
-            // so vector filing timestamps are deterministic (not now).
-            try await enqueueEncodeJob(handle: handle, drawer: drawer)
-            enqueued += 1
+            guard !drawer.content.isEmpty else { continue }          // nothing to encode
+            guard !indexedIDs.contains(drawer.id) else { continue }  // already indexed (idempotent)
+            uncappedBatch.append((text: drawer.content, sourceID: drawer.id, now: drawer.filedAt))
+        }
+
+        // Cap the batch to reindexMaxJobs to prevent a single large estate from
+        // flooding the encode queue and starving live captures (Part 6 DoS fix).
+        // Log a warning when truncation occurs so the caller knows to repeat.
+        let totalMissing = uncappedBatch.count
+        let batch: [(text: String, sourceID: String, now: Date)]
+        if totalMissing > Self.reindexMaxJobs {
+            batch = Array(uncappedBatch.prefix(Self.reindexMaxJobs))
+            Self.intakeLog.warning(
+                "reindexMissing: truncated to reindexMaxJobs=\(Self.reindexMaxJobs, privacy: .public); \(totalMissing, privacy: .public) unindexed drawers remain — call again to continue backfill for estate \(handle.estateUUID, privacy: .public)")
+        } else {
+            batch = uncappedBatch
+        }
+
+        // Batch-enqueue in chunks so the filesystem backend fsyncs new/ ONCE per
+        // chunk instead of per job (the per-job fsync was the last full-core
+        // bottleneck of a bulk import), while the chunk bounds the single fsync
+        // window against concurrent live captures.
+        // NOTE: enqueueChunk (1024) is the per-batch fsync unit, NOT the total
+        // ceiling — that ceiling is reindexMaxJobs applied above.
+        let enqueueChunk = 1024
+        var enqueued = 0
+        var offset = 0
+        while offset < batch.count {
+            let end = min(offset + enqueueChunk, batch.count)
+            try await corpus.enqueueIngestBatch(Array(batch[offset..<end]))
+            enqueued += end - offset
+            offset = end
         }
         Self.intakeLog.info(
             "reindexMissing: enqueued \(enqueued, privacy: .public) drawers for estate \(handle.estateUUID, privacy: .public) (\(activeDrawers.count, privacy: .public) active, \(indexedIDs.count, privacy: .public) already indexed)")
+
+        // NT_R1: deferred Merkle rollup. Batch-capture paths (e.g. moot_palace_import)
+        // skip per-drawer rollupMerkleRoots to avoid O(N²) work. The full-tree pass
+        // here is O(N) and runs once regardless of whether this reindex triggered any
+        // new encode jobs — it is safe to call on an already-current tree (idempotent).
+        try await estate.rollupAllMerkleRoots(now: now)
+
         return enqueued
     }
 
     // MARK: - Internals
 
-    /// Enqueue an `EncodeJob` for a captured drawer (P3).
+    /// Wire the estate's Corpus `onEncoded` callback to roll up the touched
+    /// LocusKit rooms for each drained batch.
     ///
-    /// Mounts the encode queue on demand if it is absent (an estate opened via
-    /// the legacy `open` path rather than `provision` still gets a queue on its
-    /// first regular write). Skips drawers with empty content — there is nothing
-    /// to encode.
-    private func enqueueEncodeJob(
-        handle: EstateHandle,
-        drawer: Drawer
-    ) async throws {
-        guard !drawer.content.isEmpty else { return }
-        // Structural drawers with the "none" embedding sentinel are never
-        // encoded — they are spatial metadata (charter drawers, etc.), not
-        // semantic content. ADR-016 §2 / DefaultWings.swift charterEmbeddingModelID.
-        guard drawer.embeddingModelID != "none" else { return }
-        if encodeQueues[handle] == nil {
-            try await mountEncodeQueue(for: handle)
+    /// CorpusKit owns the encode pipeline and fires this callback with the
+    /// encoded drawer ids after its drain worker ingests a batch. GLK's only
+    /// role is to coordinate the LocusKit-side deferred room rollup — off the
+    /// encode path, coalesced per batch. GLK never performs the encode itself.
+    /// Best-effort: a rollup failure is non-fatal — the drawer rows are durable
+    /// and the next reindex full-tree pass reconciles the Merkle tree.
+    ///
+    /// Called from `wireSubstores` at provision (for `.glk`/`.corpusOnly`
+    /// estates). The closure captures the GLK actor weakly so a torn-down estate
+    /// leaves no retain cycle through the Corpus.
+    internal func wireCorpusRoomRollup(_ corpus: Corpus, for handle: EstateHandle) async {
+        await corpus.setOnEncoded { [weak self] drawerIDs in
+            guard let self else { return }
+            guard let estate = try? await self.estate(for: handle) else { return }
+            try? await estate.rollupRoomsForDrawers(drawerIDs)
         }
-        guard let queue = encodeQueues[handle] else { return }
-
-        let job = EncodeJob(
-            drawerID: drawer.id,
-            estateUUID: handle.estateUUID,
-            text: drawer.content,
-            embeddingModelID: drawer.embeddingModelID,
-            capturedAt: drawer.filedAt
-        )
-        // Stamp the queue submission on the estate's per-estate HLC. The HLC
-        // physical clock is milliseconds since the Unix epoch, derived from the
-        // drawer's capture instant (deterministic — no Date() in the engine).
-        var hlc = encodeHLCs[handle] ?? HLCGenerator(nodeID: 1)
-        let physMillis = Int64((drawer.filedAt.timeIntervalSince1970 * 1000).rounded())
-        let submittedAt = hlc.send(now: physMillis)
-        encodeHLCs[handle] = hlc
-        let streamID = Self.encodeStreamID(for: handle)
-        let queueJob = try job.toJob(streamID: streamID, submittedAt: submittedAt)
-        try await queue.send(queueJob)
     }
 
-    /// Ingest a single drawer into the estate's Corpus (P4/P6 shared call),
+    /// Ingest a single drawer into the estate's Corpus (the P6 inline path),
     /// `sourceID = drawer.id` (G4) so BM25/vector hits hydrate to this drawer.
     /// `now = drawer.filedAt` for deterministic vector filing timestamps. A
     /// no-op when no Corpus is registered.
@@ -363,145 +416,6 @@ public extension GeniusLocusKit {
             sourceID: drawer.id,
             now: drawer.filedAt
         )
-    }
-
-    /// The background drain loop for an estate's encode queue (P4).
-    ///
-    /// NEAR-REALTIME, LOAD-ROBUST poll worker. Each pass drains the WHOLE
-    /// currently-available batch (`drainEncodeQueueOnce`) and ingests it, then
-    /// sleeps a short interval before polling again. Because each pass drains the
-    /// entire claimable batch — not one job — a burst of N captures is processed
-    /// in a single pass, so the worker never starves under burst; the latency
-    /// floor is the ~15 ms idle interval, not a per-job cadence.
-    ///
-    /// Why a poll and not `QueueKit.watch` here: the drain runs on the
-    /// `GeniusLocusKit` actor, serialised with the capture path that writes the
-    /// queue. A watch worker would claim rows off-actor, concurrently with the
-    /// on-actor enqueue writes, contending on the in-memory backend's
-    /// serializable claim transaction — which can strand a row claimed-but-
-    /// unseen under burst. Keeping the sole claimer on the actor makes the lane
-    /// load-robust by construction. (The Rust port, whose coordinator is not an
-    /// actor, uses the observer-driven `watch` worker for the same near-realtime
-    /// effect.)
-    ///
-    /// Cancelled in `dropEncodeQueue`/`close`. Ingest failures are logged and the
-    /// job is still replied `.blocked` (via `ingestAndReply`) so it does not
-    /// wedge the queue; the drawer row remains durably stored regardless.
-    private func runEncodeDrainLoop(for handle: EstateHandle) async {
-        while !Task.isCancelled {
-            do {
-                try await drainEncodeQueueOnce(for: handle)
-            } catch {
-                Self.intakeLog.error(
-                    "encode drain loop error for estate \(handle.estateUUID, privacy: .public): \(error, privacy: .public)")
-            }
-            // Idle poll cadence. Short so newly-enqueued jobs encode promptly
-            // (near-realtime floor); long enough that an idle estate does not
-            // spin a core.
-            try? await Task.sleep(for: .milliseconds(15))
-        }
-    }
-
-    /// Drain the encode queue once: ingest every currently-available job, then
-    /// reply terminal for each (P4).
-    ///
-    /// Internal (not private) so tests can drive the drain deterministically
-    /// without waiting on the background loop's poll cadence. Returns the number
-    /// of jobs processed.
-    ///
-    /// - Parameter handle: The estate whose encode queue to drain.
-    /// - Returns: The number of encode jobs ingested in this pass.
-    /// - Throws: A queue error from `drain`/`reply`. Ingest errors are caught
-    ///   per-job (logged, replied `.blocked`) and do not abort the pass.
-    @discardableResult
-    func drainEncodeQueueOnce(for handle: EstateHandle) async throws -> Int {
-        guard let queue = encodeQueues[handle] else { return 0 }
-        let batch = try await queue.drain()
-        var processed = 0
-        for (job, _) in batch {
-            await ingestAndReply(job: job, on: queue, handle: handle)
-            processed += 1
-        }
-        return processed
-    }
-
-    /// The bounded at-least-once retry budget for a single encode job's ingest.
-    ///
-    /// AT-LEAST-ONCE DELIVERY: a job is ACKed (replied terminal) only AFTER its
-    /// ingest succeeds. A transient ingest failure does NOT silently drop the
-    /// job — it is retried in place, up to this many attempts, before the job is
-    /// finally replied `.blocked`. Corpus ingest is idempotent (chunk IDs are
-    /// content-addressed — re-ingesting the same drawer overwrites the same
-    /// postings, never duplicates), so an in-place retry is safe and does not
-    /// violate QueueKit B-7 (which forbids the QUEUE from auto-requeuing a
-    /// half-applied job; here the CONSUMER retries an idempotent op, the spec-
-    /// sanctioned pattern). 8 attempts comfortably outlasts any realistic
-    /// transient hiccup while bounding a permanently-failing job's cost.
-    private static let encodeIngestMaxAttempts = 8
-
-    /// Ingest one drained encode job into the estate's Corpus and reply terminal
-    /// (the shared per-job body of both the watch-driven worker and the
-    /// `drainEncodeQueueOnce` pump).
-    ///
-    /// G4: `sourceID = drawer.id`; `now = capture instant`. AT-LEAST-ONCE: the
-    /// job is replied `.done` only AFTER ingest succeeds; a transient ingest
-    /// failure is retried in place (up to `encodeIngestMaxAttempts`) so no
-    /// successfully-captured drawer is silently lost. A permanently-failing
-    /// ingest, or a job that cannot be decoded at all, is finally replied
-    /// `.blocked` after the budget is spent (the drawer row is already durably
-    /// stored, so the queue never wedges and `awaitEncodeDrain` can still
-    /// release).
-    private func ingestAndReply(
-        job: Job,
-        on queue: QueueKit,
-        handle: EstateHandle
-    ) async {
-        // A decode failure is PERMANENT — retrying re-parses the same bytes to
-        // the same error. Reply `.blocked` immediately (no retry budget spent).
-        guard let encodeJob = try? EncodeJob.from(job: job) else {
-            Self.intakeLog.error(
-                "encode job decode failed in estate \(handle.estateUUID, privacy: .public); replying blocked")
-            try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
-            return
-        }
-        // Nothing to ingest (empty text, or a .locusOnly estate with no Corpus):
-        // the job is complete the moment it is acknowledged.
-        guard let corpus = corpusKits[handle], !encodeJob.text.isEmpty else {
-            try? await queue.reply(to: job.id, status: .done, artifacts: [])
-            return
-        }
-        // AT-LEAST-ONCE: retry the (idempotent) ingest until it lands or the
-        // bounded budget is spent. ACK `.done` only after a successful ingest.
-        var lastError: (any Error)?
-        for attempt in 1...Self.encodeIngestMaxAttempts {
-            do {
-                // Test seam: a non-nil hook can simulate a transient ingest
-                // failure (nil in production — zero overhead).
-                try encodeIngestFailureHook?(encodeJob.drawerID)
-                try await corpus.ingest(
-                    encodeJob.text,
-                    sourceID: encodeJob.drawerID,
-                    now: encodeJob.capturedAt
-                )
-                try await queue.reply(to: job.id, status: .done, artifacts: [])
-                return
-            } catch {
-                lastError = error
-                Self.intakeLog.error(
-                    "encode ingest attempt \(attempt, privacy: .public)/\(Self.encodeIngestMaxAttempts, privacy: .public) failed for drawer \(encodeJob.drawerID, privacy: .public) in estate \(handle.estateUUID, privacy: .public): \(error, privacy: .public)")
-            }
-        }
-        // Budget spent — the ingest is permanently failing. Reply `.blocked` so
-        // the queue does not wedge; the drawer row remains durably stored.
-        Self.intakeLog.error(
-            "encode ingest gave up after \(Self.encodeIngestMaxAttempts, privacy: .public) attempts for drawer \(encodeJob.drawerID, privacy: .public) in estate \(handle.estateUUID, privacy: .public); last error: \(String(describing: lastError), privacy: .public)")
-        try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
-    }
-
-    /// The estate-scoped encode stream id. Distinct from the Brain scheduler's
-    /// `glk_scheduler_<uuid>` stream so encode jobs never mix with signal jobs.
-    static func encodeStreamID(for handle: EstateHandle) -> StreamID {
-        StreamID(rawValue: "glk_encode_\(handle.estateUUID.uuidString.lowercased())")
     }
 
     /// The canonical unclassified-content sentinel UDC code. A drawer that

@@ -73,7 +73,8 @@ struct StatusCommand: AsyncParsableCommand {
     // MARK: - Helpers
 
     private func processIsRunning(pid: Int32) -> Bool {
-        // kill(pid, 0) returns 0 if the process exists, -1 otherwise.
+        // kill(pid, 0) returns 0 if the process exists and the caller may signal
+        // it, or -1 (ESRCH: no such process; EPERM: exists but not signallable).
         return kill(pid, 0) == 0
     }
 

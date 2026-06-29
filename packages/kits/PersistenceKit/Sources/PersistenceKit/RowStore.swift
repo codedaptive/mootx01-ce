@@ -3,6 +3,7 @@
 // Typed row I/O protocol.
 
 import Foundation
+import SubstrateTypes
 
 public typealias RowKey = UUID
 
@@ -100,6 +101,31 @@ public protocol RowStore: Sendable {
         offset: Int?,
         columns: [String]?
     ) async throws -> [StorageRow]
+
+    // MARK: - Transaction boundary (GLK_BATCH1)
+
+    /// Open a write transaction on the backing store.
+    ///
+    /// Declared as a protocol requirement (not just a protocol-extension
+    /// default) so that dynamic dispatch through `any RowStore` existentials
+    /// reaches the concrete type's override. SQLiteRowStore overrides with
+    /// `BEGIN IMMEDIATE`. CachingRowStore overrides with explicit delegation
+    /// to its backing store. All other conformers inherit the no-op default
+    /// provided in the protocol extension.
+    func beginTransaction() async throws
+
+    /// Commit the current transaction.
+    ///
+    /// Protocol requirement for the same dynamic-dispatch reason as
+    /// `beginTransaction`.
+    func commitTransaction() async throws
+
+    /// Roll back the current transaction, discarding all changes since
+    /// the last `beginTransaction` call.
+    ///
+    /// Protocol requirement for the same dynamic-dispatch reason as
+    /// `beginTransaction`.
+    func rollbackTransaction() async throws
 }
 
 public extension RowStore {
@@ -147,4 +173,95 @@ public extension RowStore {
             return ([], 1)
         }
     }
+
+    // MARK: - As-of temporal query (ADR-017 §15)
+
+    /// Temporal query: returns rows visible at the given `AsOfCoordinate`.
+    ///
+    /// - `.present` or `nil`: delegates to the standard `query(...)` — the
+    ///   current live state.
+    /// - `.asOf(hlc)`: returns rows whose HLC validity range includes the
+    ///   given HLC. **Currently gated off** — returns
+    ///   `StorageError.featureGated` until NT-L4 (lineage-wide expunge)
+    ///   and NT-P3 (erasure overlay) have both merged.
+    ///
+    /// The filter logic (when ungated): a row with `created_hlc` and optional
+    /// `tombstoned_hlc` is visible at HLC T when
+    /// `created_hlc <= T AND (tombstoned_hlc IS NULL OR tombstoned_hlc > T)`.
+    ///
+    /// Default implementation handles the gate. Backends override once the
+    /// gate is lifted to push the temporal filter into the engine.
+    func query(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        asOf: AsOfCoordinate?
+    ) async throws -> [StorageRow] {
+        switch asOf {
+        case nil, .present:
+            return try await query(
+                table: table, where: predicate,
+                orderBy: orderBy, limit: limit, offset: offset)
+        case .asOf:
+            throw StorageError.featureGated(feature: "asOfQuery")
+        }
+    }
+
+    /// Temporal projected query: as-of variant of the column-projecting
+    /// query. Same gating behavior as `query(..., asOf:)`.
+    func query(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?,
+        asOf: AsOfCoordinate?
+    ) async throws -> [StorageRow] {
+        switch asOf {
+        case nil, .present:
+            return try await query(
+                table: table, where: predicate,
+                orderBy: orderBy, limit: limit, offset: offset,
+                columns: columns)
+        case .asOf:
+            throw StorageError.featureGated(feature: "asOfQuery")
+        }
+    }
+
+    /// Temporal skip-corrupt query: as-of variant of `querySkipCorrupt`.
+    /// Same gating behavior as `query(..., asOf:)`.
+    func querySkipCorrupt(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?,
+        asOf: AsOfCoordinate?
+    ) async throws -> (rows: [StorageRow], skipped: Int) {
+        switch asOf {
+        case nil, .present:
+            return try await querySkipCorrupt(
+                table: table, where: predicate,
+                orderBy: orderBy, limit: limit, offset: offset,
+                columns: columns)
+        case .asOf:
+            throw StorageError.featureGated(feature: "asOfQuery")
+        }
+    }
+
+    // MARK: - Transaction boundary defaults (GLK_BATCH1)
+
+    /// No-op default for `beginTransaction`. Correct for any backend that has
+    /// no serializable multi-statement transaction concept (in-memory, hashing).
+    func beginTransaction() async throws {}
+
+    /// No-op default for `commitTransaction`.
+    func commitTransaction() async throws {}
+
+    /// No-op default for `rollbackTransaction`.
+    func rollbackTransaction() async throws {}
 }

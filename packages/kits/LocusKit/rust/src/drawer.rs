@@ -5,11 +5,10 @@
 //! normalization — because the verbatim-first pillar of MemPalace
 //! requires that retrieval surface exactly what was filed.
 //!
-//! Wing and room are metadata-only strings. They participate in taxonomy
-//! queries (`list_wings`, `list_rooms`) by `SELECT DISTINCT` at query
-//! time; there is no `wings` or `rooms` table. This matches MemPalace's
-//! runtime behavior — wings emerge from the data rather than being
-//! declared up front.
+//! Every drawer belongs to a room node in the estate's containment tree
+//! (ADR-017). The `parent_node_id` field is the UUID of the room node.
+//! Display names (wing, room) are resolved via `DrawerStore::resolve_node_names`
+//! when needed — they are not stored on the Drawer struct.
 //!
 //! `embedding_model_id` is present from day one even though no
 //! embeddings are generated in this mission. The modelID-tagging rule
@@ -77,12 +76,10 @@ pub struct Drawer {
     /// The content as filed. Verbatim, no transformation.
     pub content: String,
 
-    /// Top-level taxonomy bucket. Free-form string.
-    pub wing: String,
-
-    /// Sub-taxonomy bucket inside a wing. Free-form string, scoped
-    /// under `wing` only by convention.
-    pub room: String,
+    /// UUID of the room node that contains this drawer (ADR-017 §3).
+    /// Foreign key to nodes.id; the referenced node has depth=2
+    /// (room level) in the estate containment tree.
+    pub parent_node_id: String,
 
     /// Optional path of the file this drawer was ingested from.
     pub source_file: Option<String>,
@@ -115,18 +112,19 @@ pub struct Drawer {
     /// produce) the vector for this drawer.
     pub embedding_model_id: String,
 
-    /// When this drawer was tombstoned, if it has been. Reserved for
-    /// the Rev 2.0 soft-delete workflow; always None at Rev 1.0.
+    /// When this drawer was tombstoned, if it has been. Written by
+    /// expunge/tombstone paths; `None` while the drawer is active.
     pub tombstoned_at: Option<i64>,
 
     /// Batch identifier used for receipt-based rollback of a tombstone.
     /// Reserved for the Rev 2.0 soft-delete workflow.
     pub removed_by_batch: Option<String>,
 
-    /// Provenance bitmap encoding source_type, confirmation, confidence,
-    /// channel, and sensitivity per Q1_DECISION_PROVENANCE_BITMAP.md.
-    /// See `provenance.rs` for the five axis enums and the accessor
-    /// methods below for type-safe decoding.
+    /// Provenance bitmap encoding source type, channel, provenance capture
+    /// channel, confirmation, confidence, sensitivity, and enrichment
+    /// status per Q1_DECISION_PROVENANCE_BITMAP.md. See `provenance.rs`
+    /// for the axis enums and the accessor methods below for type-safe
+    /// decoding.
     pub provenance: i64,
 
     /// Adjective bitmap encoding state, sensitivity, exportability, and
@@ -134,9 +132,10 @@ pub struct Drawer {
     pub adjective_bitmap: i64,
 
     /// Operational bitmap encoding capture channel, content kind,
-    /// feature flags, and the state-extension flag per spec § 5.6. See
-    /// `drawer_operational.rs` for the two enums, the feature-flag
-    /// bitset constants, and the accessor methods.
+    /// feature flags, the lineage-clustering bit, and the
+    /// state-extension flag per spec § 5.6. See `drawer_operational.rs`
+    /// for the enums, the feature-flag bitset constants, and the accessor
+    /// methods.
     pub operational_bitmap: i64,
 
     /// UDC (Universal Decimal Classification) code locating this
@@ -171,8 +170,7 @@ impl Drawer {
     pub fn new(
         id: impl Into<String>,
         content: impl Into<String>,
-        wing: impl Into<String>,
-        room: impl Into<String>,
+        parent_node_id: impl Into<String>,
         added_by: impl Into<String>,
         filed_at: i64,
         embedding_model_id: impl Into<String>,
@@ -181,8 +179,7 @@ impl Drawer {
             id: id.into(),
             lineage_id: Uuid::new_v4(),
             content: content.into(),
-            wing: wing.into(),
-            room: room.into(),
+            parent_node_id: parent_node_id.into(),
             source_file: None,
             chunk_index: None,
             added_by: added_by.into(),
@@ -312,8 +309,7 @@ mod tests {
         Drawer::new(
             "d1",
             "hello",
-            "study",
-            "notes",
+            "test-parent",
             "alice",
             1_700_000_000,
             "test-v1",

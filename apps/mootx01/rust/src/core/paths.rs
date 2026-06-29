@@ -5,9 +5,9 @@
 //! | Data dir | ${XDG_DATA_HOME:-~/.local/share}/mootx01 | %LOCALAPPDATA%\MOOTx01  |
 //!
 //! macOS appears only for dev runs of the Rust binary (Swift owns Apple
-//! targets in production); it uses the spec's open-source data dir
-//! `~/Library/Application Support/ai.mootx01.ce` so a dev run sees the same
-//! estate layout the Swift binary manages.
+//! targets in production); it uses `~/Library/Application Support/ai.mootx01.ce`
+//! as the data dir. Note: Swift `MootPaths` uses `com.mootx01.ce`, so Rust dev
+//! runs on macOS read a separate data directory from the Swift binary.
 //!
 //! `MOOTX01_DATA_DIR` overrides the data dir root on every platform.
 //!

@@ -7,18 +7,18 @@ import Foundation
 // tool, a removed required argument, a new required argument the pump does not
 // send — the pump HALTS with a precise diff rather than writing garbage.
 //
-// The manifest is the small, authoritative subset the pump actually drives:
-// `add_drawer` (write), `get_drawer` (verify), `list_drawers`/`search` if the
-// pump enumerates. We assert NAME presence and REQUIRED-ARG presence, the two
+// The manifest is the authoritative subset the pump actually drives across all
+// four nouns: drawer, tunnel, KG fact, and diary entry write/verify tools.
+// We assert NAME presence and REQUIRED-ARG presence, the two
 // shape facts a faithful write depends on. We do NOT assert the full schema
 // (optional args may be added freely; that is forward-compatible), only that
 // every tool+required-arg the pump relies on still exists and that no NEW
 // required arg appeared that the pump does not supply.
 
 /// One tool the pump depends on, with the argument facts a faithful call
-/// requires: the tool must exist, every `requiredArgs` entry must still be
-/// required-or-accepted, and `suppliedArgs` is the set the pump actually
-/// sends (so a newly-required arg outside this set is a breaking drift).
+/// requires: the tool must exist, every `requiredArgs` entry must still
+/// appear in the live required set, and `suppliedArgs` is the set the pump
+/// actually sends (so a newly-required arg outside this set is a breaking drift).
 public struct PalaceExpectedTool: Sendable, Equatable {
     /// The MCP tool name (e.g. `mempalace_add_drawer`).
     public let name: String

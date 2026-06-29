@@ -14,9 +14,10 @@
 // file adds the mirror types so the public CognitionKit surface is
 // type-identical across ports. `RecipeError` (the 6-case guard enum) is
 // unchanged. The `Recipe.run()` protocol signature remains `async throws`
-// for backward compatibility with the protocol abstraction; the concrete run
-// bodies may throw `RecipeRunError` where a substrate arm is possible, and
-// callers who need the typed distinction can catch against this enum.
+// for backward compatibility with the protocol abstraction. `RecipeRunError`
+// and `SubstrateError` are defined and tested here for parity with the Rust
+// port; no Swift recipe body in this directory currently throws or constructs
+// them, but callers may catch against these types when that changes.
 //
 // Description strings mirror the Rust `Display` implementations in `error.rs`
 // byte-for-byte, satisfying COGNITIONKIT_SPEC § 6.

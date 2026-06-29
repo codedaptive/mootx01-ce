@@ -7,8 +7,8 @@ import GeniusLocusKit
 /// `DreamingSubstrateReader` is the read seam the daemon uses during a
 /// cycle. This adapter satisfies it by delegating to the three substrate
 /// reads GLK exposes through `recentRecallTraces(in:since:now:)`,
-/// `allDrawers(in:)`, and `allTunnels(in:)` — all B-1-compliant calls
-/// through the public GeniusLocusKit verb surface.
+/// `drainDreamingItems(for:)`, and `allTunnels(in:)` — all B-1-compliant
+/// calls through the public GeniusLocusKit verb surface.
 ///
 /// ── Why this lives in NeuronKit, not GeniusLocusKit ──────────────────
 /// `DreamingSubstrateReader` is declared here in NeuronKit. A conforming
@@ -18,16 +18,16 @@ import GeniusLocusKit
 /// that can see both the protocol and the GLK estate surface, making it
 /// the natural home for this adapter.
 ///
-/// ── Co-occurrence algorithm (v1) ─────────────────────────────────────
-/// v1 derives co-occurrence candidates from the drawer graph: drawers
-/// that share a room are latent co-occurrence pairs. For each room with
-/// ≥ 2 drawers, the adapter emits one `CoOccurrenceObservation` per
-/// pair. `attempts` is set to the room's drawer count as a proxy for
-/// how much evidence the room accumulates. `evidenceTargets` are the
-/// two drawer IDs so the daemon can look them up in its reward map.
-///
-/// The full NMF-based builder is a follow-on mission; v1 intentionally
-/// uses only the structure the estate already exposes.
+/// ── Co-occurrence algorithm (v2, drain-fed) ──────────────────────────
+/// v2 derives co-recall pairs from the estate's dreaming queue rather
+/// than the drawer graph. Each drained window is the drawer-ID set from
+/// one recall event that co-recalled ≥ 2 drawers (a `DreamingItem`
+/// payload written by the recall verb when it enqueues the dreaming job).
+/// The daemon enumerates unordered pairs within each window and bumps
+/// `coRecallCounts` once per pair per window (not per cycle) so counts
+/// accumulate across drain events. `drainDreamingWindow()` delegates to
+/// `GeniusLocusKit.drainDreamingItems(for:)`, which drains the queue and
+/// replies Done to consumed jobs before returning.
 public struct EstateDreamingReader: DreamingSubstrateReader {
 
     private let handle: EstateHandle
@@ -51,16 +51,15 @@ public struct EstateDreamingReader: DreamingSubstrateReader {
         try await kit.recentRecallTraces(in: handle, since: since, now: now)
     }
 
-    /// Latent co-occurrence candidates derived from the drawer graph (v1).
+    /// Drained dreaming-queue windows for the estate.
     ///
-    /// Groups all non-tombstoned drawers by (wing, room). For every room
-    /// with ≥ 2 drawers, emits one `CoOccurrenceObservation` per pair.
-    /// Pairs are enumerated in stable lexicographic order of drawer IDs
-    /// so the daemon's EWC++ consolidation is deterministic across cycles
-    /// over the same estate state.
-    public func coOccurrenceObservations() async throws -> [CoOccurrenceObservation] {
-        let drawers = try await kit.allDrawers(in: handle)
-        return Self.buildObservations(from: drawers)
+    /// Each inner array is the set of drawer IDs from one `DreamingItem`
+    /// (one recall event that co-recalled ≥ 2 drawers). Returns an empty
+    /// array when the dreaming queue has not been mounted for this estate
+    /// yet (no recall has fired since open). Delegates to
+    /// `GeniusLocusKit.drainDreamingItems(for:)`.
+    public func drainDreamingWindow() async throws -> [[String]] {
+        try await kit.drainDreamingItems(for: handle)
     }
 
     /// Existing tunnels for duplicate suppression.
@@ -69,54 +68,14 @@ public struct EstateDreamingReader: DreamingSubstrateReader {
         try await kit.allTunnels(in: handle)
     }
 
-    // MARK: - Co-occurrence builder (package-internal for testing)
-
-    /// Build co-occurrence observations from a drawer snapshot.
+    /// All non-retired dreamed tunnels (T13 / ADR-021 Phase 7).
     ///
-    /// Exposed as `internal` so tests can exercise the algorithm
-    /// deterministically without needing a live estate.
-    static func buildObservations(from drawers: [Drawer]) -> [CoOccurrenceObservation] {
-        // Group non-tombstoned drawers by their (wing, room) location.
-        var byRoom: [RoomKey: [String]] = [:]
-        for drawer in drawers where drawer.tombstonedAt == nil {
-            let key = RoomKey(wing: drawer.wing, room: drawer.room)
-            byRoom[key, default: []].append(drawer.id)
-        }
-
-        var observations: [CoOccurrenceObservation] = []
-        for (_, ids) in byRoom {
-            guard ids.count >= 2 else { continue }
-            // Sort for determinism, then enumerate all pairs.
-            let sorted = ids.sorted()
-            let roomCount = sorted.count
-            for i in 0..<sorted.count {
-                for j in (i + 1)..<sorted.count {
-                    observations.append(
-                        CoOccurrenceObservation(
-                            endpointA: sorted[i],
-                            endpointB: sorted[j],
-                            // roomCount is a proxy for evidence density in this room.
-                            attempts: roomCount,
-                            evidenceTargets: [sorted[i], sorted[j]]
-                        )
-                    )
-                }
-            }
-        }
-        // Stable output order: sort by (endpointA, endpointB) so cycles over
-        // unchanged state always present candidates in the same sequence.
-        return observations.sorted {
-            $0.endpointA == $1.endpointA
-                ? $0.endpointB < $1.endpointB
-                : $0.endpointA < $1.endpointA
-        }
+    /// Fetches the active-tunnel set from GLK and filters to those with
+    /// `isDreamed == true`. Declared tunnels (`isDreamed == false`) are never
+    /// returned so OMEGA can never retire them (§ 12.8 guard). Delegates to
+    /// `GeniusLocusKit.allActiveTunnels(in:)`.
+    public func dreamedActiveTunnels() async throws -> [Tunnel] {
+        let active = try await kit.allActiveTunnels(in: handle)
+        return active.filter { $0.isDreamed }
     }
-}
-
-// MARK: - Private helpers
-
-/// Hashable (wing, room) pair used as the grouping key.
-private struct RoomKey: Hashable {
-    let wing: String
-    let room: String
 }

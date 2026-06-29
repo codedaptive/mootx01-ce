@@ -61,12 +61,21 @@ struct InferLatticeAnchorTests {
         #expect(inference.enrichmentStatusBits == EnrichmentStatus.none.rawValue)
     }
 
-    @Test("chemistry term produces qidCompleted status")
-    func chemistryTermProducesQidCompletedStatus() {
-        // EideticLib resolves chemistry to an FDC code, and the input's
-        // dominant concept supplies the Q-ID; code and Q-ID both
-        // populated means status = qidCompleted.
-        let inference = NeuronKit.inferLatticeAnchor("chemistry")
+    @Test("realistic multi-token content produces qidCompleted status")
+    func realisticContentProducesQidCompletedStatus() {
+        // Production NEVER feeds the encoder a bare single noun — the FDC
+        // anchor is computed over real captured content (drawer.content /
+        // frame.content), which is always multi-token. A single token (e.g.
+        // "chemistry") maps to one very common Q-ID present in ~111 code
+        // signatures, so every candidate ties at the same Raw score and the
+        // tie-count guard (maximumTiedWinnersForClassification) correctly
+        // returns UNRESOLVED — a confidently-wrong specific code is worse than
+        // the honest "000" sentinel. Multi-token content carries several Q-IDs
+        // whose overlap DISCRIMINATES one code, so a winner emerges and the
+        // anchor resolves with a Q-ID → status = qidCompleted. This input
+        // resolves to FDC code "547" (organic chemistry) on both ports.
+        let inference = NeuronKit.inferLatticeAnchor(
+            "organic chemistry of carbon compounds and reactions")
         #expect(!inference.code.isEmpty)
         #expect(inference.wikidataQID != nil)
         #expect(inference.enrichmentStatusBits == EnrichmentStatus.qidCompleted.rawValue)

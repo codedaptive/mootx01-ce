@@ -41,9 +41,10 @@ struct CapabilityGateTests {
     @Test("first missing is reported in declaration order")
     func firstMissingIsReportedInDeclarationOrder() {
         // With two missing, the FIRST in allCases order is reported so the
-        // failure is deterministic. allCases order:
-        // hybridRecall, synthesize, deriveBranch, promoteBranch,
-        // benchmark, runTournament. deriveBranch precedes benchmark.
+        // failure is deterministic. The test only requires that deriveBranch
+        // precedes benchmark in allCases order — the full allCases list also
+        // includes associationRuleMining, formalConceptAnalysis, and
+        // exploratoryRecall.
         let available: Set<NeuronKitCapability> = [.hybridRecall, .synthesize]
         #expect(throws: RecipeError.missingCapability(.deriveBranch)) {
             try verifyCapabilities(required: [.benchmark, .deriveBranch],

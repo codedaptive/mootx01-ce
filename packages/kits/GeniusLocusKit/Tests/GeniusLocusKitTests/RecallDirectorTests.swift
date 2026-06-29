@@ -683,13 +683,12 @@ struct RecallDirectorDenseSignalTests {
         )
     }
 
-    /// EQUIVALENCE: ranking is unchanged. The hit ids, their order, and the fused
-    /// `final` scores must be exactly what the pre-change path produced.
-    ///
-    /// Pre-change behaviour is captured as a golden snapshot here: the fusion +
-    /// MMR + ranking path consumes the same `final` it always did, so these
-    /// values are the invariant. Any drift means the additive change leaked into
-    /// ranking — which is forbidden.
+    /// DETERMINISM: ranking must be stable across two identical recalls.
+    /// The test performs two current-state recalls and asserts they return
+    /// the same hit ids, order, and `final` scores. There is no hardcoded
+    /// golden snapshot — the only available oracle is determinism relative
+    /// to a second recall with the same request (the discarded-signal path
+    /// no longer exists to A/B against, as noted at the call site below).
     @Test
     func rankingIsByteIdenticalAcrossUnionBestHybridCorpus() async throws {
         // open/capture/recall cross telemetry emit sites, so hold the process-wide
@@ -1435,13 +1434,14 @@ struct RecallDirectorSafetyTests {
 
     // MARK: - 19. denseFirstPoolBodyFreeStructuredTopKHydrated
 
-    /// Dense-first equivalence + late hydration (steps 3+4): a `.structured`
+    /// Body-free pool load + late hydration (steps 3+4): a `.structured`
     /// unionBest recall over a multi-drawer estate must return the SAME hit ids
     /// (set) as the `.full` recall — the pool is loaded body-free, but the
-    /// returned set is late-hydrated, so the ids/selection are unchanged — and
-    /// the returned top-k must carry content (transitional safety: never less
-    /// hydrated than today). This proves the deferral changed WHEN bodies load,
-    /// not WHAT is returned.
+    /// returned set is late-hydrated so content is present on the top-k hits.
+    /// This proves the deferral changed WHEN bodies load, not WHAT is returned.
+    /// Note: the dense float lane is dark in this test (no corpus is registered);
+    /// the "dense-first" label in the function name refers to pool hydration
+    /// ordering, not to the dense signal lane contributing hits.
     @Test
     func denseFirstPoolBodyFreeStructuredTopKHydrated() async throws {
         let kit = GeniusLocusKit()
@@ -2258,10 +2258,10 @@ struct RecallByIDHydrationEquivalenceTests {
     }
 
     /// Hybrid recall over a multi-drawer estate must hydrate every BM25/vector
-    /// frontier hit with the CORRECT drawer body (joined by id), and must never
-    /// surface the distractor row that was never in the frontier. This is the
-    /// core correctness claim of the by-id hydration swap: the frontier-scoped
-    /// load returns exactly the rows the old whole-estate scan would have joined.
+    /// frontier hit with the CORRECT drawer body (joined by id). The distractor
+    /// row may surface via the locus lane but must not carry BM25 or vector
+    /// sources — by-id hydration must not mark off-frontier distractors as
+    /// corpus/vector frontier hits.
     @Test
     func hybridByIDHydrationMatchesCanonicalDrawers() async throws {
         let (kit, handle, seeded, distractor) = try await openMultiDrawerEstate()

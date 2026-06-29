@@ -30,9 +30,10 @@
 //   - MTLLibrary (compiled from the embedded shader source)
 //   - MTLComputePipelineState (compiled from the kernel function)
 //
-// These are cached in the kernel instance. Each
-// hammingDistanceBatch call reuses them; only the per-call
-// command-buffer / encoder / buffers are allocated fresh.
+// These are cached in the kernel instance alongside a
+// `MetalBufferPool`. Calls with N ≤ maxN reuse preallocated
+// anchor/candidate/mask/count/distance buffers from the pool;
+// only command-buffer and encoder work is allocated fresh per call.
 //
 // Apple-only. The harness skips this kernel on non-Apple
 // platforms via the kernel registry's #if predicates.
@@ -357,9 +358,9 @@ public struct MetalKernel: SubstrateKernel {
         return out
     }
 
-    /// Top-K via Metal batched distance + CPU sort. For typical
-    /// K (10-100) the CPU pass over the result buffer is faster
-    /// than a GPU reduction per the shader file's note.
+    /// Top-K via Metal batched distance computation + CPU heap-of-K
+    /// selection. For typical K (10–100) CPU heap selection over the
+    /// result buffer is faster than a GPU reduction.
     public func hammingTopK(probe: Fingerprint256,
                             candidates: [Fingerprint256],
                             k: Int) -> [(index: Int, distance: Int)] {

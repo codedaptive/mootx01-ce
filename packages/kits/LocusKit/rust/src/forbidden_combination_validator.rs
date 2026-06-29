@@ -17,17 +17,18 @@
 //! / 12–17; raws 48 / 32).
 //!
 //! Storage can represent the combination; the verb layer must not
-//! produce it. This validator is called at every adjective-bitmap write
-//! path before any transaction opens, so a violation leaves the
-//! database exactly as it was — the row never reaches INSERT and the
-//! audit table never receives a row.
+//! produce it. The validator has no live direct call sites — the
+//! `AuditGate` / SubstrateLib's `validate_with_fields` enforces this
+//! check on every adjective-bitmap write path. This module exposes
+//! `validate` as a standalone utility for callers that need the check
+//! outside the gate (e.g. targeted unit tests).
 //!
 //! The validator deliberately does not import `AdjectiveSensitivity` or
 //! `AdjectiveExportability`. The bit constants below are hand-derived
 //! from those enums' shipped raw values so future renames or added
 //! intermediate tiers cannot silently shift this check. The numeric
-//! encoding at bits 4–11 is the contract; the enum names are
-//! documentation.
+//! encoding at bits 6–11 (sensitivity) and 12–17 (exportability) is
+//! the contract; the enum names are documentation.
 
 use crate::error::LocusKitError;
 // ─────────────────────────────────────────────────────────────────
@@ -81,8 +82,8 @@ pub fn validate(bitmap: i64) -> Result<(), LocusKitError> {
 
 // MARK: - Private checks
 
-/// True when `bitmap` encodes both `secret` in bits 4–7 and
-/// `exportable` in bits 8–11. Other bits are not inspected.
+/// True when `bitmap` encodes both `secret` in bits 6–11 and
+/// `exportable` in bits 12–17. Other bits are not inspected.
 fn is_secret_and_exportable(bitmap: i64) -> bool {
     // F18 atomic centralization: extract each field and compare to the
     // cookbook-spec'd raw value. Sensitivity=secret is raw 48 at bits 6-11;

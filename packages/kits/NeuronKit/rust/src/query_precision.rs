@@ -98,17 +98,28 @@ pub fn word_tokens(s: &str) -> Vec<String> {
 
 /// The query's DISTINCTIVE tokens, case-folded: a token is distinctive when it
 /// carries a digit (a number) or is a proper noun (its ORIGINAL casing has an
-/// uppercase letter). Returned case-folded to match the candidate's folded
-/// token set. Mirrors Swift `distinctiveTokens`.
+/// uppercase letter AND it is not in the STOPWORDS list). Returned case-folded
+/// to match the candidate's folded token set. Mirrors Swift `distinctiveTokens`.
+///
+/// Stopwords are excluded BEFORE the uppercase check so sentence-initial
+/// function words ("What", "Who", "The") are not incorrectly classified as
+/// distinctive proper nouns. A stopword that contains a digit is still treated
+/// as distinctive (e.g. a hypothetical stopword with a numeral).
 pub fn distinctive_tokens(s: &str) -> BTreeSet<String> {
     // Split the ORIGINAL string (casing preserved) so proper-noun detection
     // can see the uppercase letters.
     let mut out = BTreeSet::new();
     for token in s.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()) {
+        let lower = token.to_lowercase();
         let has_digit = token.chars().any(|c| c.is_numeric());
         let has_upper = token.chars().any(|c| c.is_uppercase());
-        if has_digit || has_upper {
-            out.insert(token.to_lowercase());
+        // Exclude stopwords from the uppercase-proper-noun test: sentence-initial
+        // words like "What" / "Who" / "The" are NOT distinctive. A token that
+        // contains a digit bypasses the stopword check (numeric tokens are always
+        // distinctive regardless of the stopword list).
+        let is_stopword = STOPWORDS.contains(&lower.as_str());
+        if has_digit || (has_upper && !is_stopword) {
+            out.insert(lower);
         }
     }
     out
@@ -191,6 +202,69 @@ mod tests {
         assert!(!has_distinctive_tokens("the quick brown fox"));
         assert!(!has_distinctive_tokens("what is the indemnity"));
         assert!(!has_distinctive_tokens(""));
+    }
+
+    // Regression guard: sentence-initial stopwords ("What", "Who", "The") must NOT
+    // be treated as distinctive proper nouns. Before this fix, any token with an
+    // uppercase letter was distinctive regardless of whether it was a stopword.
+    // The gate in moot_recall_precise would suppress all results for sentence queries
+    // because no candidate contains "what", "the", or "who" as a literal token.
+    #[test]
+    fn sentence_initial_stopwords_are_not_distinctive() {
+        // "What" — sentence-initial stopword with uppercase. Must NOT be distinctive.
+        assert!(
+            !has_distinctive_tokens("What is the indemnity"),
+            "'What' is a stopword: sentence-initial uppercase must not be classified as distinctive"
+        );
+        assert!(
+            !has_distinctive_tokens("Who signed the treaty"),
+            "'Who' is a stopword: must not be classified as distinctive"
+        );
+        assert!(
+            !has_distinctive_tokens("The reserve value of the fund"),
+            "'The' is a stopword: sentence-initial uppercase must not be classified as distinctive"
+        );
+        // The proper noun survives even when query begins with a stopword.
+        assert!(
+            has_distinctive_tokens("What happened at Versailles"),
+            "'Versailles' is a non-stopword proper noun — still distinctive"
+        );
+        // A number in a sentence with leading stopword is still distinctive.
+        assert!(
+            has_distinctive_tokens("What is the 46 million marks indemnity"),
+            "numeric token '46' is always distinctive"
+        );
+    }
+
+    // Regression guard for the moot_recall_precise gate: a sentence-form query
+    // that begins with "What" must yield candidate hits, not 0 results. Before the
+    // fix, distinctive_tokens("What is the indemnity") returned {"what"}, causing
+    // containment_satisfied to suppress all candidates.
+    #[test]
+    fn sentence_query_does_not_suppress_candidates() {
+        // "What is the indemnity" — after fix: no distinctive tokens, gate passes.
+        let q = "What is the indemnity";
+        assert!(
+            containment_satisfied(q, &["the indemnity was 46 million marks", "indemnity clause"]),
+            "sentence query with no distinctive tokens must not suppress candidates"
+        );
+        // A proper noun IS distinctive and still applies the gate correctly.
+        let q2 = "What is the Versailles indemnity";
+        assert!(
+            containment_satisfied(
+                q2,
+                &["the Versailles indemnity was imposed in 1919", "the Berlin clause"]
+            ),
+            "Versailles is distinctive; a candidate containing it satisfies the gate"
+        );
+        // Proper noun in query but NO candidate contains it → gate fires.
+        assert!(
+            !containment_satisfied(
+                "What is the Versailles indemnity",
+                &["the Berlin clause", "no proper noun here"]
+            ),
+            "Versailles distinctive token absent from all candidates → gate fires"
+        );
     }
 
     #[test]

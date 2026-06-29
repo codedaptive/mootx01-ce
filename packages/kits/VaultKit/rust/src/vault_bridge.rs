@@ -20,12 +20,13 @@ use crate::drawer_mapping::{ms_to_iso8601, DrawerMapping, ImportOutcome};
 use crate::error::VaultKitError;
 use crate::vault_adapter::VaultAdapter;
 use crate::vault_export_scope::VaultExportScope;
-use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
+use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, EncodeSpeed};
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
     diary_entry::DiaryEntry,
     diary_operational::{DiaryActorClass, DiaryEventClass, DiarySeverity},
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
+    frames::CaptureFrame,
     tunnel_operational::TunnelKind,
 };
 use std::collections::HashSet;
@@ -77,6 +78,15 @@ pub struct ImportReport {
     /// estate. The tombstone is respected; the note is NOT resurrected.
     /// Fixes FINDING-1b. Mirrors Swift `ImportReport.drawersSkippedTombstoned`.
     pub drawers_skipped_tombstoned: usize,
+
+    /// Re-imports where a DisciplineViolation fired AFTER the supersession
+    /// cascade had already committed the successor drawer row but before the
+    /// predecessor belief-state flip completed. The estate contains an orphaned
+    /// successor alongside the un-flipped predecessor; unlike `items_skipped`,
+    /// the write was partially applied. Never silent (zero-loss invariant C-13):
+    /// surfaced so a reconciliation pass can detect the gap. Mirrors Swift
+    /// `ImportReport.drawersSkippedPartialWrite`.
+    pub drawers_skipped_partial_write: usize,
 }
 
 /// Counts returned by an export run, including the per-tier exclusion counts
@@ -159,9 +169,14 @@ impl<'a> VaultBridge<'a> {
         vault_path: &Path,
         now: i64,
         scope: VaultExportScope,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
     ) -> Result<ExportReport, VaultKitError> {
         let projection = self.mapping.export(self.coordinator, handle, now, scope)?;
-        self.adapter.from_ir(&projection.notes, vault_path)?;
+        // Forward the progress callback to the adapter, which fires it every
+        // 100 notes and at the final note. Mirrors Swift `VaultBridge.export`,
+        // which passes `progress` into `adapter.fromIR(_:to:progress:)`.
+        self.adapter
+            .from_ir_with_progress(&projection.notes, vault_path, progress)?;
         let report = ExportReport {
             notes_exported: projection.notes.len(),
             excluded_secret_tier: projection.excluded_secret_tier,
@@ -194,14 +209,20 @@ impl<'a> VaultBridge<'a> {
     ///
     /// `now` is milliseconds-since-epoch, supplied by the caller and stamped
     /// on the audit receipt.
+    /// `mode`: encode SPEED (`EncodeSpeed::Foreground` default / `Background`).
+    /// SPEED only; the write strategy (bulk transaction vs per-item stream) is
+    /// chosen automatically by source size (`import_policy`) — the same
+    /// gate-agnostic policy PalaceBridge uses.
     pub fn import_vault(
         &mut self,
         vault_path: &Path,
         handle: &EstateHandle,
         now: i64,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
         let notes = self.adapter.to_ir(vault_path)?;
-        self.import_notes(&notes, handle, &vault_path.display().to_string(), now)
+        self.import_notes(&notes, handle, &vault_path.display().to_string(), now, progress, mode)
     }
 
     /// Import a filtered subset of a Markdown vault into an estate.
@@ -222,12 +243,16 @@ impl<'a> VaultBridge<'a> {
     /// manifest keys. Paths not present on disk are silently ignored.
     ///
     /// Mirrors Swift `VaultBridge.importVault(at:includingPaths:into:now:)`.
+    /// `mode`: encode SPEED; the write strategy is size-gated automatically (`import_policy`).
+    /// Defaults to `false` for reconcile operations (typically small candidate sets).
     pub fn import_vault_filtered(
         &mut self,
         vault_path: &Path,
         candidate_paths: &std::collections::HashSet<String>,
         handle: &EstateHandle,
         now: i64,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
         let all_notes = self.adapter.to_ir(vault_path)?;
         // Restrict to the candidate set. A note's vault-relative path is
@@ -241,7 +266,7 @@ impl<'a> VaultBridge<'a> {
                 candidate_paths.contains(&note_path)
             })
             .collect();
-        self.import_notes(&filtered, handle, &vault_path.display().to_string(), now)
+        self.import_notes(&filtered, handle, &vault_path.display().to_string(), now, progress, mode)
     }
 
     /// Import one MemPalace palace directly into an estate — all three
@@ -256,22 +281,31 @@ impl<'a> VaultBridge<'a> {
     /// `now` is milliseconds-since-epoch, supplied by the caller and
     /// stamped on the audit receipt. `adapter` is parameterized so tests
     /// can point at fixture palaces with non-default collections.
+    /// `mode`: encode SPEED; the write strategy is size-gated automatically (`import_policy`).
+    /// Cutting import time for large palaces from O(N×commit) to O(1×commit).
+    /// Run `moot_reindex` + `moot_dream` afterward to rebuild dense lanes.
     pub fn import_mem_palace(
         &mut self,
         palace_root: &Path,
         handle: &EstateHandle,
         now: i64,
         adapter: &crate::mem_palace_chroma_adapter::MemPalaceChromaAdapter,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
         let notes = adapter.to_ir(palace_root)?;
-        self.import_notes(&notes, handle, &palace_root.display().to_string(), now)
+        self.import_notes(&notes, handle, &palace_root.display().to_string(), now, progress, mode)
     }
 
     /// The shared import core: capture canonical notes into an estate via
     /// the capture seam. `import_vault` and `import_mem_palace` differ only
     /// in which adapter produced the notes; everything from the existing-
     /// state snapshot to the audit receipt is identical and lives here.
-    /// Mirrors Swift `VaultBridge.importNotes(_:into:source:now:)`.
+    /// The write strategy is size-gated automatically (`import_policy`): at or
+    /// below the threshold all frames are collected upfront and submitted in one
+    /// `capture_batch` transaction (post-capture KG/tunnel work runs per-note
+    /// afterward); above it the original per-note loop streams. `mode` sets the
+    /// encode SPEED only. Mirrors Swift `VaultBridge.importNotes(_:into:source:now:mode:)`.
     ///
     /// `&mut self` is required because `import_note` calls `capture_with_mode`
     /// (dual-path intake fix) which needs `&mut EstateCoordinator`.
@@ -281,13 +315,25 @@ impl<'a> VaultBridge<'a> {
         handle: &EstateHandle,
         source: &str,
         now: i64,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
+        // The import path does not emit per-note progress in either port: Swift
+        // `VaultBridge.importNotes` accepts `progress` but never fires it, and the
+        // public importers forward it here only to keep the signatures aligned.
+        // Only the export path reports progress (via the adapter). Discarded
+        // explicitly to preserve the Swift-parity signature without firing.
+        let _ = progress;
+        // Declare the encode SPEED for this import's background drain before any
+        // encode work is enqueued — the same gate-agnostic policy PalaceBridge
+        // uses (T1/T7). SPEED only; the write strategy is size-gated below.
+        self.coordinator.set_encode_speed(handle, mode);
         // Snapshot existing state once so written-vs-updated and tunnel
         // de-duplication need no per-note probe.
         // existing_content_by_lineage: verbatim content of every active drawer
         // keyed by lineage_id — used by the content-idempotent check (FINDING-1a)
         // to skip re-imports where nothing changed.
-        let (existing_lineage_ids, existing_wings, existing_content_by_lineage) =
+        let (existing_lineage_ids, existing_wings, existing_content_by_lineage, existing_stable_source_key_by_lineage) =
             self.existing_drawer_state(handle, now)?;
         // The current tier of every believed drawer across ALL sensitivity
         // levels, so the import sensitivity floor can never be lowered by a
@@ -299,51 +345,103 @@ impl<'a> VaultBridge<'a> {
         let mut existing_tunnel_sigs = self.existing_tunnel_signatures(handle, &existing_wings)?;
 
         let mut report = ImportReport::default();
-        for note in notes {
-            let outcome = self.mapping.import_note(
-                note,
-                self.coordinator,
-                handle,
-                &existing_lineage_ids,
-                &existing_sensitivity,
-                &tombstoned_lineage_ids,
-                &existing_content_by_lineage,
-                &mut existing_tunnel_sigs,
-                now,
-            )?;
-            match outcome {
-                ImportOutcome::Written { tunnels_created, fdc_classified } => {
-                    report.drawers_written += 1;
-                    report.tunnels_created += tunnels_created;
-                    if fdc_classified {
-                        report.fdc_classified += 1;
-                    } else {
-                        report.fdc_unclassified += 1;
-                    }
+
+        // Size gate (automatic — NOT user-controlled), single-sourced in
+        // import_policy so every source gate uses the same boundary: a source at
+        // or below the threshold is written in one bulk capture_batch transaction;
+        // a larger one streams per-item.
+        let use_bulk = crate::import_policy::use_bulk(notes.len());
+        if use_bulk {
+            // Bulk path: collect qualified (note, frame, is_update, classified)
+            // tuples, submit all frames in one transaction via capture_batch,
+            // then apply post-capture work (KG facts, tunnels) per-note.
+            // Guard-skipped notes update report counters inside build_note_frame.
+            let mut qualified: Vec<(&crate::note_ir::NoteIR, CaptureFrame, bool, bool)> = Vec::new();
+            for note in notes {
+                if let Some((frame, is_update, classified)) = self.mapping.build_note_frame(
+                    note,
+                    &existing_lineage_ids,
+                    &existing_sensitivity,
+                    &tombstoned_lineage_ids,
+                    &existing_content_by_lineage,
+                    &existing_stable_source_key_by_lineage,
+                    &mut report.items_skipped,
+                    &mut report.drawers_skipped_unchanged,
+                    &mut report.drawers_skipped_tombstoned,
+                ) {
+                    qualified.push((note, frame, is_update, classified));
+                }
+            }
+            if !qualified.is_empty() {
+                let frames: Vec<CaptureFrame> = qualified.iter().map(|(_, f, _, _)| f.clone()).collect();
+                let drawers = self.coordinator
+                    .capture_batch(handle, frames, now / 1000)
+                    .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                for ((note, frame, is_update, classified), drawer) in qualified.iter().zip(drawers.iter()) {
+                    let tunnels = self.mapping.apply_note_post_capture(
+                        note,
+                        frame,
+                        drawer,
+                        self.coordinator,
+                        handle,
+                        &mut existing_tunnel_sigs,
+                        now,
+                    )?;
+                    if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
+                    report.tunnels_created += tunnels;
+                    if *classified { report.fdc_classified += 1; } else { report.fdc_unclassified += 1; }
                     Self::record_dropped_fields(note, &mut report);
                 }
-                ImportOutcome::Updated { tunnels_created, fdc_classified } => {
-                    report.drawers_updated += 1;
-                    report.tunnels_created += tunnels_created;
-                    if fdc_classified {
-                        report.fdc_classified += 1;
-                    } else {
-                        report.fdc_unclassified += 1;
+            }
+        } else {
+            // Per-item path: unchanged from before batch support was added.
+            for note in notes {
+                let outcome = self.mapping.import_note(
+                    note,
+                    self.coordinator,
+                    handle,
+                    &existing_lineage_ids,
+                    &existing_sensitivity,
+                    &tombstoned_lineage_ids,
+                    &existing_content_by_lineage,
+                    &existing_stable_source_key_by_lineage,
+                    &mut existing_tunnel_sigs,
+                    now,
+                )?;
+                match outcome {
+                    ImportOutcome::Written { tunnels_created, fdc_classified } => {
+                        report.drawers_written += 1;
+                        report.tunnels_created += tunnels_created;
+                        if fdc_classified { report.fdc_classified += 1; } else { report.fdc_unclassified += 1; }
+                        Self::record_dropped_fields(note, &mut report);
                     }
-                    Self::record_dropped_fields(note, &mut report);
-                }
-                ImportOutcome::Skipped { .. } => {
-                    report.items_skipped += 1;
-                }
-                ImportOutcome::SkippedUnchanged => {
-                    // Content-idempotent no-op: lineage active, content unchanged.
-                    // No substrate write occurs; the count is surfaced for observability.
-                    report.drawers_skipped_unchanged += 1;
-                }
-                ImportOutcome::SkippedTombstoned => {
-                    // Tombstone respected: lineage was erased, not resurrected.
-                    // Surfaced in the report so callers know which notes were blocked.
-                    report.drawers_skipped_tombstoned += 1;
+                    ImportOutcome::Updated { tunnels_created, fdc_classified } => {
+                        report.drawers_updated += 1;
+                        report.tunnels_created += tunnels_created;
+                        if fdc_classified { report.fdc_classified += 1; } else { report.fdc_unclassified += 1; }
+                        Self::record_dropped_fields(note, &mut report);
+                    }
+                    ImportOutcome::Skipped { .. } => {
+                        report.items_skipped += 1;
+                    }
+                    ImportOutcome::SkippedUnchanged => {
+                        // Content-idempotent no-op: lineage active, content unchanged.
+                        // No substrate write occurs; the count is surfaced for observability.
+                        report.drawers_skipped_unchanged += 1;
+                    }
+                    ImportOutcome::SkippedTombstoned => {
+                        // Tombstone respected: lineage was erased, not resurrected.
+                        // Surfaced in the report so callers know which notes were blocked.
+                        report.drawers_skipped_tombstoned += 1;
+                    }
+                    ImportOutcome::SkippedWithPartialWrite { .. } => {
+                        // Partial write: the supersession cascade committed the
+                        // successor row before the predecessor belief-state flip
+                        // failed (DisciplineViolation). The estate has an orphaned
+                        // successor; the count is surfaced for reconciliation —
+                        // never absorbed into items_skipped (zero-loss C-13).
+                        report.drawers_skipped_partial_write += 1;
+                    }
                 }
             }
         }
@@ -446,7 +544,7 @@ impl<'a> VaultBridge<'a> {
         &self,
         handle: &EstateHandle,
         now: i64,
-    ) -> Result<(HashSet<Uuid>, HashSet<String>, std::collections::HashMap<Uuid, String>), VaultKitError> {
+    ) -> Result<(HashSet<Uuid>, HashSet<String>, std::collections::HashMap<Uuid, String>, std::collections::HashMap<Uuid, String>), VaultKitError> {
         // limit 10_000_000 = "all drawers" — the same full-scan intent as the
         // sibling existing_sensitivity_by_lineage below. Without an explicit
         // limit the recall scan caps at the candidate floor (256), silently
@@ -465,23 +563,51 @@ impl<'a> VaultBridge<'a> {
             as_of: None,
             trace_limit: None,
         };
-        let drawers = self
+        let drawers: Vec<locus_kit::drawer::Drawer> = self
             .coordinator
             .recall(handle, frame, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+
+        // Resolve wing display names from the node tree (ADR-017: Drawer no
+        // longer stores wing/room strings directly).
+        let node_names = crate::drawer_mapping::resolve_drawer_node_names(
+            self.coordinator, handle, &drawers,
+        );
+
         let mut lineage_ids: HashSet<Uuid> = HashSet::new();
         let mut wings: HashSet<String> = HashSet::new();
         let mut content_by_lineage: std::collections::HashMap<Uuid, String> =
             std::collections::HashMap::new();
+        // stable_source_key_by_lineage: the vault path ("<wing>/<room>/<slug>")
+        // the export would assign to each drawer. Used by the lineage-hijack guard
+        // (path-identity discriminator) to distinguish a legitimate round-trip edit
+        // (same file, same path) from a hostile note at a different path claiming
+        // the victim's moot_id. Computed from current estate content and node-tree
+        // names — same inputs the export uses — so this key exactly matches the
+        // stable_source_key a note carries when it returns from an export.
+        // First-seen wins (matches the content_by_lineage policy above).
+        let mut stable_source_key_by_lineage: std::collections::HashMap<Uuid, String> =
+            std::collections::HashMap::new();
         for d in drawers {
             lineage_ids.insert(d.lineage_id);
-            wings.insert(d.wing.clone());
+            // Wing and room resolved from the node tree via parent_node_id.
+            if let Some((wing, room)) = node_names.get(&d.parent_node_id) {
+                wings.insert(wing.clone());
+                // Compute the vault path the export would use for this drawer so
+                // the hijack guard can compare against the incoming note's path.
+                stable_source_key_by_lineage
+                    .entry(d.lineage_id)
+                    .or_insert_with(|| {
+                        let slug = DrawerMapping::slug(&d.content, &d.lineage_id.to_string());
+                        format!("{}/{}/{}", wing, room, slug)
+                    });
+            }
             // Store the first-seen content for each lineage_id. When multiple
             // rows share a lineage (supersession race), any content match
             // prevents an unnecessary supersession — conservative is correct.
             content_by_lineage.entry(d.lineage_id).or_insert(d.content);
         }
-        Ok((lineage_ids, wings, content_by_lineage))
+        Ok((lineage_ids, wings, content_by_lineage, stable_source_key_by_lineage))
     }
 
     /// The set of lineage IDs the import path must not resurrect — the union

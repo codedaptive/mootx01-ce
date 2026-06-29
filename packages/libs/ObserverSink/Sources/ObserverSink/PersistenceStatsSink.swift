@@ -31,10 +31,10 @@
 //   show Task overhead is measurable in practice.
 //
 // Drop policy:
-//   If the store's monitoring flag read throws, the sample is discarded
-//   (logged at .debug level). Store errors on insert are logged at
-//   .error level but do not propagate — the sink must never crash the
-//   substrate.
+//   If the store's monitoring flag read (or any insert) throws, the
+//   error is logged at .error level but does not propagate — the sink
+//   must never crash the substrate. If the flag is off, the sample is
+//   discarded and logged at .debug level (silent to operators by default).
 
 import Foundation
 import OSLog
@@ -57,11 +57,11 @@ import PersistenceKit
 ///
 /// ## On/off signal
 ///
-/// The sink reads the monitoring flag row from the store on each
-/// `receive(_:)` call. If the flag is `"0"`, the sample is discarded
-/// without any I/O. The manager sets the flag to `"1"` when it is
-/// ready to receive data. This is the flag-row signal mechanism
-/// (confirmed by Bob, 2026-06-06, MANAGER_1.0_PLAN.md §5 item 3).
+/// Each `receive(_:)` call dispatches an async Task that reads the
+/// monitoring flag row first. If the flag is `"0"`, no sample row is
+/// written (the flag read itself is store I/O). The manager sets the
+/// flag to `"1"` when it is ready to receive data. This is the flag-row
+/// signal mechanism (confirmed by Bob, 2026-06-06, MANAGER_1.0_PLAN.md §5 item 3).
 ///
 /// ## Buffering
 ///
@@ -108,12 +108,12 @@ public struct PersistenceStatsSink: StatsSink {
 
     /// Deliver one sample to the store.
     ///
-    /// Checks the store's monitoring flag row first. Discards silently if
-    /// the flag is `"0"` (monitoring off). If `"1"`, dispatches an async
-    /// Task to serialise the sample into the appropriate table.
-    ///
-    /// This method is synchronous and returns immediately. Store I/O happens
-    /// in the dispatched Task. Errors from Task I/O are logged (never thrown).
+    /// Immediately dispatches an unstructured `Task`, then returns. Inside
+    /// the Task, the store's monitoring flag row is read first; if the flag
+    /// is `"0"` (monitoring off), the sample is discarded and no row is
+    /// written. If the flag is `"1"`, the sample is serialised into the
+    /// appropriate table. Store I/O errors are logged at `.error` level
+    /// (never thrown).
     ///
     /// Called only when `Intellectus.isEnabled` is `true` (the protocol
     /// guarantees no call when monitoring is disabled at the IntellectusLib

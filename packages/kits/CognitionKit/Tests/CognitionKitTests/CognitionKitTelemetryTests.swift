@@ -9,7 +9,8 @@
 //    per run invocation; step_count tag equals recalled drawer count.
 // §3 MigrationBenchmark emissions: start + complete pair per run
 //    invocation; step_count tag equals plan count.
-// §4 Conformance: recipe outputs are identical with monitoring ON and OFF.
+// §4 Conformance: selected observable fields (drawer count, winner plan name,
+//    ranking count) are identical with monitoring ON and OFF.
 //
 // ISOLATION STRATEGY
 // These tests install a capturing sink and flip the global Intellectus

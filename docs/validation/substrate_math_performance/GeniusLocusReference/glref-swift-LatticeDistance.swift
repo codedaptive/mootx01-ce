@@ -11,8 +11,9 @@
 //     = alpha_udc * udc_tree_distance(a.udc, b.udc)
 //     + alpha_qid * wikidata_graph_distance(a.qid, b.qid)
 //
-// Both component distances are normalized to [0, 1]; the weighted
-// sum is therefore in [0, 1] when alpha_udc + alpha_qid = 1.
+// The qid component is normalized to [0, 1) by exponential scaling;
+// the UDC component divides by max(len(a), len(b)) and can exceed 1.0
+// for disjoint strings. The weighted sum is not strictly bounded to [0, 1].
 //
 // UDC tree distance uses longest common prefix (in characters):
 //   d_udc(a, b) = (len(a) - len(lcp))
@@ -181,11 +182,10 @@ public enum LatticeDistance {
 //
 //   reflexive:    distance(a, a) = 0 always (lcp = len(a)).
 //   symmetric:    distance(a, b) = distance(b, a) for UDC by
-//                 construction; symmetric for Wikidata when the
-//                 adjacency is symmetric (subclass_of is not, but
-//                 BFS treats edges as undirected for the distance
-//                 metric per the cookbook).
-//   bounded:      with alpha_udc + alpha_qid = 1, distance ∈ [0, 1].
+//                 construction; Wikidata symmetry depends on the
+//                 neighbor provider — BFS follows edges as supplied
+//                 without reversing them.
+//   bounded:      not strictly bounded; see note above.
 //   null-qid:     when either anchor has qid = 0, qid_distance = 1
 //                 (no info ⇒ maximally far on that axis).
 //

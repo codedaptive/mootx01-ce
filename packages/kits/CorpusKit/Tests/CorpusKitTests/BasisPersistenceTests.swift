@@ -319,4 +319,165 @@ struct BasisPersistenceTests {
                     "reopened embedding must equal the α canonical 'car engine' bit patterns")
         }
     }
+
+    // MARK: - §7 maintained counts wiring (incremental-counts change set, P3)
+
+    private static let riModelID = "random-indexing-v1"
+    private static let riModelVersion = "1.0.0"
+
+    @Test("ingest persists maintained counts with a growing vocab/doc anchor")
+    func ingestPersistsCounts() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try storage(at: scratchURL())
+            let corpus = try await freshRICorpus(storage)
+            let counts = CorpusProviderCountsStore(storage: storage)
+
+            // No counts row before any ingest.
+            #expect(try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion) == nil)
+
+            try await corpus.ingest(riDocs[0], sourceID: "doc-0", now: now)
+            let a0 = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(a0 != nil, "ingest must persist a counts row")
+            #expect(a0?.documentCount == 1)
+            let vocab0 = a0?.vocabSize ?? 0
+            #expect(vocab0 > 0)
+
+            // A second ingest (new vocabulary) grows both anchors.
+            try await corpus.ingest(riDocs[3], sourceID: "doc-3", now: now.addingTimeInterval(60))
+            let a1 = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(a1?.documentCount == 2)
+            #expect((a1?.vocabSize ?? 0) > vocab0, "new-vocabulary doc must grow the vocab anchor")
+        }
+    }
+
+    @Test("reopen restores the maintained counts anchor (not reset to zero)")
+    func reopenRestoresCounts() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = scratchURL()
+            // Ingest the full corpus, capturing the persisted doc count.
+            do {
+                let corpus = try await freshRICorpus(try storage(at: url))
+                for (i, doc) in riDocs.enumerated() {
+                    try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
+                }
+            }
+            let counts = CorpusProviderCountsStore(storage: try storage(at: url))
+            let before = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(before?.documentCount == riDocs.count)
+
+            // Reopen and ingest ONE more document. If the accumulator were reset on
+            // open instead of restored, the doc count would read 1; restored, it
+            // continues from the persisted anchor.
+            let reopened = try await freshRICorpus(try storage(at: url))
+            try await reopened.ingest("airplane wing flight sky", sourceID: "doc-new",
+                                      now: now.addingTimeInterval(120))
+            let after = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(after?.documentCount == riDocs.count + 1,
+                    "reopened accumulator must continue from the restored doc count, not reset")
+        }
+    }
+
+    @Test("reopened trainable corpus retrains on reindex (frozen-after-restart fix)")
+    func reopenedCorpusRetrains() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = scratchURL()
+            // First session: ingest + reindex → basis trained on the 5-doc corpus.
+            do {
+                let corpus = try await freshRICorpus(try storage(at: url))
+                for (i, doc) in riDocs.enumerated() {
+                    try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
+                }
+                try await corpus.reindex(now: now)
+            }
+            let store = BasisStore(storage: try storage(at: url))
+            #expect(try await store.load(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)?.trainedChunkCount
+                == riDocs.count)
+
+            // Reopen, add a new document, reindex. Before the frozen-after-restart
+            // fix a reopened corpus dropped its empty-basis factory, so reindex
+            // could only re-embed under the loaded basis — the basis would stay
+            // trained on 5 chunks forever. With the factory retained, reindex
+            // retrains from scratch on the full 6-chunk corpus.
+            let reopened = try await freshRICorpus(try storage(at: url))
+            try await reopened.ingest("airplane wing flight sky", sourceID: "doc-new",
+                                      now: now.addingTimeInterval(120))
+            try await reopened.reindex(now: now.addingTimeInterval(180))
+
+            let after = try await store.load(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(after?.trainedChunkCount == riDocs.count + 1,
+                    "reopened corpus must retrain on the full corpus (incl. the new doc)")
+        }
+    }
+
+    @Test("re-ingesting the same source does not inflate maintained counts")
+    func reingestDoesNotInflateCounts() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try storage(at: scratchURL())
+            let corpus = try await freshRICorpus(storage)
+            let counts = CorpusProviderCountsStore(storage: storage)
+
+            for (i, doc) in riDocs.enumerated() {
+                try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
+            }
+            let chunkCount0 = try await corpus.count()
+            let a0 = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(a0?.documentCount == riDocs.count)
+
+            // Re-ingest the IDENTICAL sources (same text + sourceID → same
+            // content-addressed chunk ids → idempotent no-op in the bundle store).
+            // The maintained counts must NOT advance: the fold runs only over
+            // newly-inserted chunks, of which there are none on the second pass.
+            for (i, doc) in riDocs.enumerated() {
+                try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now.addingTimeInterval(60))
+            }
+            let chunkCount1 = try await corpus.count()
+            let a1 = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+
+            #expect(chunkCount1 == chunkCount0, "re-ingest must not add chunks (idempotent)")
+            #expect(a1?.documentCount == a0?.documentCount,
+                    "re-ingest must not inflate the maintained document count")
+            #expect(a1?.vocabSize == a0?.vocabSize,
+                    "re-ingest must not inflate the maintained vocabulary anchor")
+        }
+    }
+
+    @Test("re-ingesting the same BATCH does not inflate maintained counts")
+    func reingestBatchDoesNotInflateCounts() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try storage(at: scratchURL())
+            let corpus = try await freshRICorpus(storage)
+            let counts = CorpusProviderCountsStore(storage: storage)
+
+            let batch = riDocs.enumerated().map {
+                (text: $0.element, sourceID: "doc-\($0.offset)", now: now)
+            }
+            try await corpus.ingestBatch(batch)
+            let chunkCount0 = try await corpus.count()
+            let a0 = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+            #expect(a0?.documentCount == riDocs.count)
+
+            // Re-import the IDENTICAL batch via the batch (drain) path: every chunk
+            // is an idempotent no-op, so the maintained counts must not advance.
+            try await corpus.ingestBatch(batch)
+            let a1 = try await counts.growthAnchor(
+                modelID: Self.riModelID, modelVersion: Self.riModelVersion)
+
+            #expect(try await corpus.count() == chunkCount0,
+                    "batch re-import must not add chunks (idempotent)")
+            #expect(a1?.documentCount == a0?.documentCount,
+                    "batch re-import must not inflate the maintained document count")
+            #expect(a1?.vocabSize == a0?.vocabSize,
+                    "batch re-import must not inflate the maintained vocabulary anchor")
+        }
+    }
 }

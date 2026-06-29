@@ -27,7 +27,7 @@ fn sqlite_conformance() {
 // ─────────────────────────────────────────────────────────────────────
 // Audit-log reason round-trip tests for the SQLite backend.
 // These tests verify that the nullable `reason` column persists and
-// reads back through appendAuditEvent → decodeAuditRow with fidelity.
+// reads back through audit_log().append(…) → decode_audit(…) with fidelity.
 // ─────────────────────────────────────────────────────────────────────
 
 use persistence_kit::{AuditEvent, Storage as _};
@@ -51,7 +51,7 @@ fn make_sqlite_audit_storage() -> SqliteStorage {
 
 #[test]
 fn sqlite_audit_reason_some_round_trips() {
-    // A supplied reason must survive the INSERT → decodeAuditRow path unchanged.
+    // A supplied reason must survive the INSERT → decode_audit path unchanged.
     let storage = make_sqlite_audit_storage();
     let log = storage.audit_log();
     let event = AuditEvent {
@@ -230,4 +230,103 @@ fn sqlite_introspection_captured_at_matches_input() {
     let now = 1_700_000_000_i64;
     let stats = storage.stats(now).unwrap();
     assert_eq!(stats.captured_at_secs, now);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Part 1 regression test: schema merge on `migrate`.
+//
+// When a second `migrate()` call adds a new table (e.g. GeniusLocusKitMatrix
+// adding `matrix_snapshot` to an open estate storage), the original schema's
+// column-type metadata must remain intact. Before the fix, `apply_schema`
+// replaced `inner.schema` unconditionally, erasing the first schema's
+// type hints; after the fix, `inner.schema` accumulates all tables via merge.
+//
+// The test simulates the exact GLK pattern: open with a "drawer" schema
+// containing a timestamp column, then migrate in a second "matrix" schema
+// with a separate table. After migration, a drawer round-trip must decode
+// the timestamp column as `TypedValue::Timestamp` (not `TypedValue::Text`).
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn migrate_preserves_primary_schema_timestamp_columns() {
+    use persistence_kit::{
+        ColumnDeclaration, RowStore as _, SchemaDeclaration, Storage as _,
+        StorageError, TableDeclaration, TypedValue,
+    };
+    use std::collections::BTreeMap;
+
+    // Open a fresh SQLite file.
+    let path = std::env::temp_dir()
+        .join(format!("pk_schema_merge_{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage = SqliteStorage::new(config).expect("open sqlite storage");
+
+    // Primary schema: a table with a timestamp column (`filed_at`).
+    // This represents the LocusKit drawer schema opened at estate provision.
+    let primary_schema = SchemaDeclaration::new(
+        "LocusKit",
+        1,
+        vec![TableDeclaration::new(
+            "drawers",
+            vec![
+                ColumnDeclaration::uuid("row_id"),
+                ColumnDeclaration::timestamp("filed_at"),
+                ColumnDeclaration::text("content"),
+            ],
+            vec!["row_id".to_string()],
+        )],
+    );
+    storage.open(&primary_schema).expect("open primary schema");
+
+    // Insert a row with a Timestamp value so we can read it back.
+    let now_secs: i64 = 1_700_000_000;
+    let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+    row.insert("row_id".into(), TypedValue::Uuid(Uuid::new_v4()));
+    row.insert("filed_at".into(), TypedValue::Timestamp(now_secs));
+    row.insert("content".into(), TypedValue::Text("hello".into()));
+    let handle = storage.row_store().insert("drawers", row).expect("insert drawer row");
+
+    // Secondary schema: a different table (the matrix snapshot table) with no
+    // timestamp columns. This simulates the GeniusLocusKitMatrix `migrate` call
+    // that previously replaced `inner.schema` and erased the drawer type hints.
+    let secondary_schema = SchemaDeclaration::new(
+        "GeniusLocusKitMatrix",
+        1,
+        vec![TableDeclaration::new(
+            "matrix_snapshot",
+            vec![
+                ColumnDeclaration::text("estate_id"),
+                ColumnDeclaration::int("schema_version"),
+                ColumnDeclaration::blob("snapshot"),
+            ],
+            vec!["estate_id".to_string()],
+        )],
+    );
+    storage.migrate(&secondary_schema).expect("migrate secondary schema");
+
+    // After migration: the drawer row must still decode `filed_at` as Timestamp.
+    // Before the merge fix, `inner.schema` was the matrix schema only, so
+    // `table_column_type("drawers", "filed_at")` returned None and the value
+    // decoded as TypedValue::Text (the raw SQLite ISO8601 string).
+    let rows = storage
+        .row_store()
+        .query("drawers", None, &[], Some(10), None)
+        .expect("query after migrate");
+    assert_eq!(rows.len(), 1, "expected one drawer row after migrate");
+    let filed_at = rows[0].values.get("filed_at").expect("filed_at must be present");
+    assert!(
+        matches!(filed_at, TypedValue::Timestamp(_)),
+        "filed_at must decode as Timestamp after migrate, got {:?}",
+        filed_at
+    );
+    // Sanity-check the round-trip value.
+    if let TypedValue::Timestamp(ts) = filed_at {
+        assert_eq!(*ts, now_secs, "Timestamp round-trip must be exact");
+    }
 }

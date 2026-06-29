@@ -93,15 +93,10 @@ impl EmbeddingProvider for FloatSimHashEmbeddingProvider {
         Ok(float_simhash::project(&floats, self.projection_seed))
     }
 
-    /// Return the pooled dense float vector — the float lane source.
-    ///
-    /// This is exactly the vector `embed` feeds into
-    /// `float_simhash::project`; the inference closure is the model pass
-    /// MiniLM/mpnet/EmbeddingGemma run. Returning it directly is the
-    /// "retain, don't recompute" path: the float lane and the binary
-    /// SimHash lane are two reads of one inference output. Empty input
-    /// returns `vec![]` per the trait contract (no dense direction for the
-    /// empty string).
+    /// Return the dense float vector from the inference closure — the float
+    /// lane source. This provider does not override `embed_pair`, so callers
+    /// requesting both binary and float outputs run the inference closure
+    /// once in `embed` and again here. Empty input returns `vec![]`.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         if text.is_empty() {
             return Ok(Vec::new());

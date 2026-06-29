@@ -52,10 +52,8 @@
 //!   behaviour change.
 //! - Audit-row id assignment: SQLite assigns the rowid to omitted
 //!   `id` columns. The InMemory persistence-kit backend keys rows by an
-//!   internal UUID and does not surface a public auto-id, so this
-//!   store carries an `AtomicI64` counter and writes the assigned
-//!   value into the audit row's `id` column. Audit ids are dense and
-//!   monotone within a process and ordered by insertion.
+//!   internal UUID and does not surface a public auto-id. Audit ids
+//!   are dense and monotone within a process and ordered by insertion.
 
 use crate::adjectives::State;
 use crate::diary_entry::DiaryEntry;
@@ -79,6 +77,8 @@ use substrate_types::RowState;
 // ─────────────────────────────────────────────────────────────────
 use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
+use crate::node::Node;
+use crate::node_store::T_NODES;
 use crate::drawer_store::DrawerStore;
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
@@ -129,8 +129,7 @@ const T_RECALL_TRACE: &str = "recall_trace";
 /// `content` column to `""` via `string_value_of(None)`.
 const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "id",
-    "wing",
-    "room",
+    "parent_node_id",
     "sourceFile",
     "chunkIndex",
     "addedBy",
@@ -172,8 +171,6 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
 /// so that the backend is always named at the construction site.
 pub struct DrawerStoreCore {
     storage: Arc<dyn Storage>,
-    /// Monotonic audit-id counter. SQLite would assign these as the
-    /// integer primary key (rowid); the InMemory backend has no such
     /// The HLC clock this store stamps audit events with. Per the clock
     /// decision (DECISION_CLOCK_TRIANGLE_TIME_MODEL): the top entity
     /// *makes* the clock, holders *receive* it. `new(.., None)` = top
@@ -389,7 +386,8 @@ impl DrawerStoreCore {
         Ok(())
     }
 
-    /// Find an active predecessor (state cluster < 3) sharing the
+    /// Find an active predecessor (Cluster-A state; raw < 16 per
+    /// `RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`) sharing the
     /// drawer's `lineage_id`, excluding the row being inserted.
     /// Mirrors Swift `findActivePredecessor`. Used by the supersession
     /// cascade.
@@ -424,16 +422,33 @@ impl DrawerStoreCore {
         Ok(rows.first().map(|r| string_value_of(r.get("id"))))
     }
 
-    /// Supersession cascade. Mirrors Swift `addDrawerWithCascade`.
+    /// Supersession cascade. Mirrors Swift `DrawerStore.addDrawerWithCascade`.
     ///
-    /// In the Swift port this whole sequence runs inside
-    /// `storage.transaction(isolation: .serializable)`. The Rust
-    /// persistence-kit has no transaction surface yet (its `storage.rs`
-    /// doc defers that to the SQLite backend); the InMemory backend's
-    /// internal `Mutex` serialises operations, which gives the same
-    /// effective atomicity against this single backend. When
-    /// persistence-kit grows transactions, wrap this block; behaviour
-    /// stays the same.
+    /// ## Atomicity (Swift vs Rust)
+    ///
+    /// In the Swift port the successor drawer INSERT + genesis audit event and
+    /// the supersedes tunnel INSERT share a single
+    /// `storage.transaction(isolation: .serializable)` so both land atomically
+    /// or both roll back.  The predecessor state flip (`mutate_state`) is a
+    /// separate operation that runs AFTER the transaction.
+    ///
+    /// The Rust PersistenceKit has no transaction surface yet (`storage.rs`
+    /// defers that to the SQLite backend).  To preserve failure atomicity
+    /// between the successor INSERT and the tunnel INSERT this port:
+    ///
+    /// 1. Inserts the successor drawer + genesis audit event (`gated_capture`).
+    /// 2. Builds and inserts the tunnel.
+    /// 3. If the tunnel insert fails, performs a **compensating delete** of the
+    ///    just-inserted drawer row so no orphaned successor is left visible to
+    ///    queries.  The genesis audit event cannot be compensated (append-only),
+    ///    but the drawer row — which is the entity queries search — is removed.
+    /// 4. Flips the predecessor state via `mutate_state` only AFTER the tunnel
+    ///    insert succeeds (mirrors Swift order).  This means a tunnel-insert
+    ///    failure does not leave the predecessor stuck in `Superseded` without
+    ///    an active successor.
+    ///
+    /// When PersistenceKit grows a transaction surface, replace steps 1–3 with
+    /// a single transaction block; behaviour stays the same.
     fn add_drawer_with_cascade(
         &self,
         new_drawer: &Drawer,
@@ -441,12 +456,9 @@ impl DrawerStoreCore {
     ) -> Result<(), LocusKitError> {
         let row_store = self.storage.row_store();
 
-        // Successor's gated capture (genesis) event + projection row.
-        self.gated_capture(new_drawer, new_drawer.filed_at)?;
-
-        // Read the predecessor's prior adjective + location so the
-        // audit row's prior_value is exactly what the flip overwrites
-        // and the supersedes tunnel carries the predecessor's place.
+        // Read the predecessor's location before any writes so the tunnel
+        // carries the predecessor's place and the state-flip audit row
+        // records the exact prior adjective value.
         let prior_rows = row_store
             .query(
                 T_DRAWERS,
@@ -465,20 +477,74 @@ impl DrawerStoreCore {
                 id: prior_id.to_string(),
             })?;
         let prior_adjective = i64_value_of(prior_row.get("adjectiveBitmap"));
-        let prior_wing = string_value_of(prior_row.get("wing"));
-        let prior_room = string_value_of(prior_row.get("room"));
-
         let _ = prior_adjective;
 
-        // Flip the predecessor active → superseded via the validated
-        // state path. Earlier this smuggled the state through a manual
-        // adjective-bitmap write + bitmap_audit row, bypassing the
-        // transition automaton (F8 anti-pattern, same as withdraw). The
-        // write gate now forbids moving state through a field edit, so
-        // the supersede transition MUST go through mutate_state, which
-        // validates active --supersede--> superseded and appends the
-        // sealed audit event. changed_by is the triggering successor's
-        // author (its insertion caused the flip).
+        // ADR-017 §3: resolve wing/room display names from node tree for
+        // the supersedes tunnel. Both the new drawer and the predecessor
+        // carry parent_node_id; resolve to display names via node tree.
+        let prior_parent_node_id = string_value_of(prior_row.get("parent_node_id"));
+        let node_names = self.resolve_node_names(
+            &[new_drawer.parent_node_id.clone(), prior_parent_node_id.clone()],
+        )?;
+        let source_names = node_names
+            .get(&new_drawer.parent_node_id)
+            .cloned()
+            .unwrap_or_default();
+        let prior_names = node_names
+            .get(&prior_parent_node_id)
+            .cloned()
+            .unwrap_or_default();
+
+        // Step 1: Successor's gated capture (genesis) event + projection row.
+        self.gated_capture(new_drawer, new_drawer.filed_at)?;
+
+        // Step 2: Directional supersedes tunnel: new → prior.
+        // This insert and the gated_capture above are logically atomic:
+        // if the tunnel insert fails, we compensate by deleting the drawer
+        // row (step 3 below) so no orphaned successor is visible to queries.
+        let mut tunnel = Tunnel::new(
+            format!("supersedes:{}:{}", new_drawer.id, prior_id),
+            source_names.0.clone(),
+            source_names.1.clone(),
+            prior_names.0.clone(),
+            prior_names.1.clone(),
+            "supersedes".to_string(),
+            new_drawer.added_by.clone(),
+            new_drawer.filed_at,
+        );
+        tunnel.kind = TunnelKind::Supersedes;
+        tunnel.source_drawer_id = Some(new_drawer.id.clone());
+        tunnel.target_drawer_id = Some(prior_id.to_string());
+        if let Err(tunnel_err) = row_store
+            .insert(T_TUNNELS, tunnel_values(&tunnel))
+            .map_err(map_storage_err)
+        {
+            // Step 3: Compensating delete — remove the successor drawer row
+            // so no orphaned successor is left in the database.  The genesis
+            // audit event cannot be compensated (the audit_log is append-only)
+            // but the drawer row — which is what lineage and recall queries
+            // search — is removed.  When PersistenceKit gains transaction
+            // support, replace this compensation with a proper rollback.
+            let _ = row_store.delete(
+                T_DRAWERS,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(new_drawer.id.clone()),
+                ),
+            );
+            return Err(tunnel_err);
+        }
+
+        // Step 4: Flip the predecessor active → superseded via the validated
+        // state path — only AFTER the tunnel insert succeeds (mirrors Swift
+        // ordering: state flip is not part of the successor+tunnel transaction
+        // but follows it).  Earlier code smuggled the state through a manual
+        // adjective-bitmap write + bitmap_audit row, bypassing the transition
+        // automaton (F8 anti-pattern, same as withdraw).  The write gate now
+        // forbids moving state through a field edit, so the supersede
+        // transition MUST go through mutate_state, which validates
+        // active --supersede--> superseded and appends the sealed audit event.
+        // changed_by is the triggering successor's author.
         self.mutate_state(
             prior_id,
             State::Superseded,
@@ -490,24 +556,6 @@ impl DrawerStoreCore {
             )),
             new_drawer.filed_at,
         )?;
-
-        // Directional supersedes tunnel: new → prior.
-        let mut tunnel = Tunnel::new(
-            format!("supersedes:{}:{}", new_drawer.id, prior_id),
-            new_drawer.wing.clone(),
-            new_drawer.room.clone(),
-            prior_wing,
-            prior_room,
-            "supersedes".to_string(),
-            new_drawer.added_by.clone(),
-            new_drawer.filed_at,
-        );
-        tunnel.kind = TunnelKind::Supersedes;
-        tunnel.source_drawer_id = Some(new_drawer.id.clone());
-        tunnel.target_drawer_id = Some(prior_id.to_string());
-        row_store
-            .insert(T_TUNNELS, tunnel_values(&tunnel))
-            .map_err(map_storage_err)?;
 
         Ok(())
     }
@@ -739,6 +787,198 @@ impl DrawerStoreCore {
             .map_err(map_storage_err)?;
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Node-tree helpers (ADR-017 §3)
+    //
+    // Query the nodes table directly through the shared Storage to resolve
+    // wing/room names ↔ node IDs. Mirrors the Swift DrawerStore private
+    // helpers roomNodeIdsInWing, roomNodeId, resolveNodeNames.
+    // ------------------------------------------------------------------
+
+    /// All room node IDs under a wing identified by display name.
+    ///
+    /// Finds the active wing node (depth=1) by lookup_name, then returns
+    /// the IDs of all active room nodes (depth=2) under it.
+    fn room_node_ids_in_wing(&self, wing: &str) -> Result<Vec<String>, LocusKitError> {
+        let wing_lookup = Node::normalize_lookup_name(wing);
+        let row_store = self.storage.row_store();
+        let wing_rows = row_store
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "lookup_name"),
+                        TypedValue::Text(wing_lookup),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "depth"),
+                        TypedValue::Int(1),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let wing_id = match wing_rows.first() {
+            Some(row) => string_value_of(row.get("id")),
+            None => return Ok(Vec::new()),
+        };
+        let room_rows = row_store
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "parent_id"),
+                        TypedValue::Text(wing_id.clone()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "depth"),
+                        TypedValue::Int(2),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(room_rows.iter().map(|r| string_value_of(r.get("id"))).collect())
+    }
+
+    /// Find a specific room node by wing name + room name.
+    /// Returns the room node ID, or None if the pair doesn't exist.
+    fn room_node_id(&self, wing: &str, room: &str) -> Result<Option<String>, LocusKitError> {
+        let wing_lookup = Node::normalize_lookup_name(wing);
+        let row_store = self.storage.row_store();
+        let wing_rows = row_store
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "lookup_name"),
+                        TypedValue::Text(wing_lookup),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "depth"),
+                        TypedValue::Int(1),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let wing_id = match wing_rows.first() {
+            Some(row) => string_value_of(row.get("id")),
+            None => return Ok(None),
+        };
+        let room_lookup = Node::normalize_lookup_name(room);
+        let room_rows = row_store
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "parent_id"),
+                        TypedValue::Text(wing_id.clone()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "lookup_name"),
+                        TypedValue::Text(room_lookup),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "depth"),
+                        TypedValue::Int(2),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(room_rows.first().map(|r| string_value_of(r.get("id"))))
+    }
+
+    /// Resolve parent_node_id values to (wing_name, room_name) pairs.
+    ///
+    /// Fetches room nodes by their IDs, then fetches their parent wing
+    /// nodes to build the display-name lookup. Used by the supersession
+    /// cascade to populate tunnel wing/room fields from node tree.
+    fn resolve_node_names(
+        &self,
+        parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        if parent_node_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let unique: BTreeSet<_> = parent_node_ids.iter().cloned().collect();
+        let row_store = self.storage.row_store();
+        let room_predicates: Vec<StoragePredicate> = unique
+            .iter()
+            .map(|id| {
+                StoragePredicate::Eq(
+                    Column::new(T_NODES, "id"),
+                    TypedValue::Text(id.to_string()),
+                )
+            })
+            .collect();
+        let room_rows = row_store
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::any(room_predicates)),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let mut room_map: BTreeMap<String, (String, String)> = BTreeMap::new();
+        let mut wing_ids: BTreeSet<String> = BTreeSet::new();
+        for row in &room_rows {
+            let id = string_value_of(row.get("id"));
+            let display_name = string_value_of(row.get("display_name"));
+            let parent_id = string_value_of(row.get("parent_id"));
+            wing_ids.insert(parent_id.clone());
+            room_map.insert(id, (display_name, parent_id));
+        }
+        let mut wing_names: BTreeMap<String, String> = BTreeMap::new();
+        if !wing_ids.is_empty() {
+            let wing_predicates: Vec<StoragePredicate> = wing_ids
+                .iter()
+                .map(|id| {
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "id"),
+                        TypedValue::Text(id.to_string()),
+                    )
+                })
+                .collect();
+            let wing_rows = row_store
+                .query(
+                    T_NODES,
+                    Some(&StoragePredicate::any(wing_predicates)),
+                    &[],
+                    None,
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            for row in &wing_rows {
+                wing_names.insert(
+                    string_value_of(row.get("id")),
+                    string_value_of(row.get("display_name")),
+                );
+            }
+        }
+        let mut result: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for (room_id, (room_display, parent_id)) in &room_map {
+            let wing_name = wing_names.get(parent_id).cloned().unwrap_or_default();
+            result.insert(room_id.clone(), (wing_name, room_display.clone()));
+        }
+        Ok(result)
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +986,18 @@ impl DrawerStoreCore {
 // ---------------------------------------------------------------------------
 
 impl DrawerStore for DrawerStoreCore {
+    fn storage(&self) -> Option<Arc<dyn Storage>> {
+        Some(Arc::clone(&self.storage))
+    }
+
+    fn resolve_node_names(
+        &self,
+        parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        // Delegate to the private helper that queries the nodes table.
+        DrawerStoreCore::resolve_node_names(self, parent_node_ids)
+    }
+
     fn read_manifest(&self) -> Result<ManifestValues, LocusKitError> {
         let row_store = self.storage.row_store();
         let rows = row_store
@@ -826,6 +1078,8 @@ impl DrawerStore for DrawerStoreCore {
             tiny_model_id: get_opt(ManifestKey::TinyModelID),
             tiny_model_training_corpus_size: get_opt_int(ManifestKey::TinyModelTrainingCorpusSize),
             operational_bitmap_layouts: get_opt(ManifestKey::OperationalBitmapLayouts),
+            ed25519_public_key: get_opt(ManifestKey::Ed25519PublicKey),
+            ed25519_private_key_wrapped: get_opt(ManifestKey::Ed25519PrivateKeyWrapped),
         })
     }
 
@@ -863,8 +1117,7 @@ impl DrawerStore for DrawerStoreCore {
     // -----------------------------------------------------------------
 
     fn add_drawer(&self, drawer: &Drawer, _now: i64) -> Result<(), LocusKitError> {
-        validate_non_empty(&drawer.wing, "wing")?;
-        validate_non_empty(&drawer.room, "room")?;
+        validate_non_empty(&drawer.parent_node_id, "parent_node_id")?;
         validate_non_empty(&drawer.content, "content")?;
         validate_non_empty(&drawer.added_by, "addedBy")?;
         validate_non_empty(&drawer.embedding_model_id, "embeddingModelID")?;
@@ -905,10 +1158,18 @@ impl DrawerStore for DrawerStoreCore {
             // Construct a ContainerFingerprintStore view over the same
             // backing Storage and OR the drawer's bitmaps into the room-level
             // and wing-rollup rows. The schema re-open is idempotent.
+            //
+            // Drawer no longer carries wing/room display names (ADR-017);
+            // resolve them from parent_node_id via the node tree.
             let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+            let names = self.resolve_node_names(&[drawer.parent_node_id.clone()])?;
+            let (wing, room) = names
+                .get(&drawer.parent_node_id)
+                .cloned()
+                .unwrap_or_default();
             fp_store.or_in(
-                &drawer.wing,
-                &drawer.room,
+                &wing,
+                &room,
                 drawer.adjective_bitmap,
                 drawer.operational_bitmap,
                 drawer.provenance,
@@ -940,7 +1201,10 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        rows.first().map(drawer_from_row).transpose()
+        match rows.first().map(drawer_from_row).transpose()? {
+            Some(d) => Ok(Some(d)),
+            None => Ok(None),
+        }
     }
 
     fn living_successor_in_lineage(
@@ -982,22 +1246,31 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<Drawer>, LocusKitError> {
-        // Capture start instant before I/O for latency telemetry.
         let _tel_start = std::time::Instant::now();
 
-        // Use query_skip_corrupt so rows with corrupt timestamp columns (e.g.
-        // a poison filedAt from a bad Vault import) are skipped at the SQLite
-        // cursor level rather than bricking the entire wing scan.
+        // ADR-017 NT-L2: resolve wing name → room node IDs via node tree,
+        // then query drawers by parent_node_id IN (...).
+        let room_ids = self.room_node_ids_in_wing(wing)?;
+        if room_ids.is_empty() {
+            crate::telemetry::emit_drawer_query(&_tel_start, 0.0, 0, &self.estate_uuid, "wing");
+            return Ok(Vec::new());
+        }
+        let predicates: Vec<StoragePredicate> = room_ids
+            .iter()
+            .map(|id| {
+                StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "parent_node_id"),
+                    TypedValue::Text(id.clone()),
+                )
+            })
+            .collect();
         let (rows, _skipped) = self
             .storage
             .row_store()
             .query_skip_corrupt(
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
-                    StoragePredicate::Eq(
-                        Column::new(T_DRAWERS, "wing"),
-                        TypedValue::Text(wing.to_string()),
-                    ),
+                    StoragePredicate::any(predicates),
                     StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                 ])),
                 &[OrderClause::new(
@@ -1008,18 +1281,18 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        // decode_rows_skip_corrupt handles any remaining drawer_from_row failures
-        // (e.g. corrupt lineageID UUID) that survived the storage-level skip.
         let drawers = decode_rows_skip_corrupt(&rows, "drawers_in_wing")?;
 
-        // Emit query telemetry at the post-query operation boundary.
-        // now_secs=0.0 because drawers_in_wing has no caller-supplied timestamp.
-        // The start instant captures real wall time for the latency metric.
         crate::telemetry::emit_drawer_query(&_tel_start, 0.0, drawers.len(), &self.estate_uuid, "wing");
         Ok(drawers)
     }
 
     fn drawers_in_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        // ADR-017 NT-L2: resolve wing/room → room node ID via node tree.
+        let room_id = match self.room_node_id(wing, room)? {
+            Some(id) => id,
+            None => return Ok(Vec::new()),
+        };
         let (rows, _skipped) = self
             .storage
             .row_store()
@@ -1027,12 +1300,8 @@ impl DrawerStore for DrawerStoreCore {
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
                     StoragePredicate::Eq(
-                        Column::new(T_DRAWERS, "wing"),
-                        TypedValue::Text(wing.to_string()),
-                    ),
-                    StoragePredicate::Eq(
-                        Column::new(T_DRAWERS, "room"),
-                        TypedValue::Text(room.to_string()),
+                        Column::new(T_DRAWERS, "parent_node_id"),
+                        TypedValue::Text(room_id),
                     ),
                     StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                 ])),
@@ -1044,7 +1313,9 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        decode_rows_skip_corrupt(&rows, "drawers_in_wing_room")
+        let drawers = decode_rows_skip_corrupt(&rows, "drawers_in_wing_room")?;
+
+        Ok(drawers)
     }
 
     fn drawers_by_source(&self, source_file: &str) -> Result<Vec<Drawer>, LocusKitError> {
@@ -1071,7 +1342,9 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        decode_rows_skip_corrupt(&rows, "drawers_by_source")
+        let drawers = decode_rows_skip_corrupt(&rows, "drawers_by_source")?;
+
+        Ok(drawers)
     }
 
     fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
@@ -1082,22 +1355,32 @@ impl DrawerStore for DrawerStoreCore {
         // a poison filedAt like "+58432-..." from a bad Vault import or
         // millisecond-vs-seconds epoch confusion) are skipped at the SQLite
         // cursor level and do not abort the entire corpus scan.
+        //
+        // Compound sort key: (filedAt ASC, id ASC). The id secondary term
+        // breaks ties within the same filedAt so the result is a deterministic
+        // total order. id is the declared TEXT primary key of the drawers
+        // table — present in SQLite, PostgreSQL, and InMemory backends.
+        // Using id (not rowid) makes the tie-break portable to PostgreSQL where
+        // rowid is undefined (c-recall-portable fix). DESC variants use
+        // (filedAt DESC, id DESC), which is exactly reverse(ASC).
+        // Mirrors Swift's compound OrderClause in DrawerStore.allDrawers.
         let (rows, _skipped) = self
             .storage
             .row_store()
             .query_skip_corrupt(
                 T_DRAWERS,
                 None,
-                &[OrderClause::new(
-                    Column::new(T_DRAWERS, "filedAt"),
-                    OrderDirection::Ascending,
-                )],
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
                 None,
                 None,
             )
             .map_err(map_storage_err)?;
         // decode_rows_skip_corrupt handles any remaining drawer_from_row failures.
         let drawers = decode_rows_skip_corrupt(&rows, "all_drawers")?;
+
 
         // Emit query telemetry at the post-query operation boundary.
         crate::telemetry::emit_drawer_query(&_tel_start, 0.0, drawers.len(), &self.estate_uuid, "all");
@@ -1115,6 +1398,11 @@ impl DrawerStore for DrawerStoreCore {
         // `all_drawers_bounded_projected`, which uses `RowStore::query_projected`
         // to omit the content column. The behavioral contract (bounded scan,
         // filedAt order, correct result set) matches the Swift port.
+        //
+        // Compound sort key: (filedAt ASC, id ASC) for deterministic total
+        // order — ties in filedAt are broken by id (declared TEXT primary key,
+        // portable across SQLite + PostgreSQL + InMemory). DESC variant uses
+        // the same compound key with both directions flipped.
         let _tel_start = std::time::Instant::now();
 
         let (rows, _skipped) = self
@@ -1123,15 +1411,16 @@ impl DrawerStore for DrawerStoreCore {
             .query_skip_corrupt(
                 T_DRAWERS,
                 None,
-                &[OrderClause::new(
-                    Column::new(T_DRAWERS, "filedAt"),
-                    OrderDirection::Ascending,
-                )],
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
                 limit,
                 None,
             )
             .map_err(map_storage_err)?;
         let drawers = decode_rows_skip_corrupt(&rows, "all_drawers_bounded")?;
+
 
         crate::telemetry::emit_drawer_query(
             &_tel_start,
@@ -1160,6 +1449,10 @@ impl DrawerStore for DrawerStoreCore {
         // excluded) do not abort the scan. Skipped rows are logged at the
         // storage level; decode_rows_skip_corrupt handles any remaining
         // drawer_from_row failures.
+        //
+        // Compound sort key: (filedAt ASC, id ASC) — same deterministic total
+        // order as all_drawers_bounded (full path) and all_drawers. id is the
+        // declared TEXT primary key, portable across all backends.
         let (rows, _skipped) = self
             .storage
             .row_store()
@@ -1167,15 +1460,16 @@ impl DrawerStore for DrawerStoreCore {
                 T_DRAWERS,
                 DRAWER_STRUCTURED_COLUMNS,
                 None,
-                &[OrderClause::new(
-                    Column::new(T_DRAWERS, "filedAt"),
-                    OrderDirection::Ascending,
-                )],
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
                 limit,
                 None,
             )
             .map_err(map_storage_err)?;
         let drawers = decode_rows_skip_corrupt(&rows, "all_drawers_bounded_projected")?;
+
 
         crate::telemetry::emit_drawer_query(
             &_tel_start,
@@ -1183,6 +1477,91 @@ impl DrawerStore for DrawerStoreCore {
             drawers.len(),
             &self.estate_uuid,
             "all_bounded_structured",
+        );
+        Ok(drawers)
+    }
+
+    // -----------------------------------------------------------------
+    // P4-secfix: DESC-ordered bounded scan overrides.
+    //
+    // The trait defaults for all_drawers_bounded_desc and
+    // all_drawers_bounded_projected_desc call all_drawers() then reverse
+    // in memory — correct but O(N). These overrides push the ORDER BY
+    // Descending + LIMIT directly to the storage layer so only `limit`
+    // rows are materialised, matching the efficiency of the ASC path.
+    // -----------------------------------------------------------------
+
+    fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
+        // Newest-first bounded scan. Supplies (filedAt DESC, id DESC) to the
+        // storage layer so the most-recently-filed drawers are returned within
+        // the cap. The id secondary term (declared TEXT primary key) breaks
+        // ties within the same filedAt, making this the exact reverse of the
+        // (filedAt ASC, id ASC) total order from all_drawers / all_drawers_bounded.
+        // Using id (not rowid) is portable to PostgreSQL (c-recall-portable fix).
+        // Mirrors Swift's compound OrderClause.
+        let _tel_start = std::time::Instant::now();
+
+        let (rows, _skipped) = self
+            .storage
+            .row_store()
+            .query_skip_corrupt(
+                T_DRAWERS,
+                None,
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Descending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Descending),
+                ],
+                limit,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let drawers = decode_rows_skip_corrupt(&rows, "all_drawers_bounded_desc")?;
+
+        crate::telemetry::emit_drawer_query(
+            &_tel_start,
+            0.0,
+            drawers.len(),
+            &self.estate_uuid,
+            "all_bounded_desc",
+        );
+        Ok(drawers)
+    }
+
+    fn all_drawers_bounded_projected_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        // Newest-first no-blob bounded scan. Combines (filedAt DESC, id DESC)
+        // ordering with the structured projection (content column omitted) for
+        // the common recall path where content predicates are absent and
+        // hydration is Structured. The id tie-break (declared TEXT primary key)
+        // makes this the exact reverse of the ASC projected path, and is
+        // portable to PostgreSQL where rowid is undefined (c-recall-portable).
+        let _tel_start = std::time::Instant::now();
+
+        let (rows, _skipped) = self
+            .storage
+            .row_store()
+            .query_projected_skip_corrupt(
+                T_DRAWERS,
+                DRAWER_STRUCTURED_COLUMNS,
+                None,
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Descending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Descending),
+                ],
+                limit,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let drawers = decode_rows_skip_corrupt(&rows, "all_drawers_bounded_projected_desc")?;
+
+        crate::telemetry::emit_drawer_query(
+            &_tel_start,
+            0.0,
+            drawers.len(),
+            &self.estate_uuid,
+            "all_bounded_structured_desc",
         );
         Ok(drawers)
     }
@@ -1376,6 +1755,43 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    fn lineage_chain(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        let row_store = self.storage.row_store();
+        // Step 1: look up the drawer's lineageID.
+        let rows = row_store
+            .query_projected(
+                T_DRAWERS,
+                &["lineageID"],
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(drawer_id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let lineage_id = match rows.first().and_then(|r| r.get("lineageID")) {
+            Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
+            _ => return Ok(vec![]),
+        };
+        // Step 2: query all drawers sharing this lineageID.
+        let chain = row_store
+            .query_projected(
+                T_DRAWERS,
+                &["id"],
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "lineageID"),
+                    TypedValue::Text(lineage_id),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(chain.iter().map(|r| string_value_of(r.get("id"))).collect())
+    }
+
     fn expunge_gated(
         &self,
         drawer_id: &str,
@@ -1386,6 +1802,10 @@ impl DrawerStore for DrawerStoreCore {
     ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
+
+        // Resolve the full lineage chain. All members — active,
+        // superseded, tombstoned — are in scope for content scrub.
+        let lineage_ids = self.lineage_chain(drawer_id)?;
 
         // Read all three bitmaps so we can construct BitmapFields and
         // route through SubstrateLib's full validate.
@@ -1399,7 +1819,6 @@ impl DrawerStore for DrawerStoreCore {
             operational: prior_operational as u64,
             provenance: prior_provenance as u64,
         };
-        // Expunge does not touch the lattice anchor; before == after.
         let udc = self.read_drawer_udc(drawer_id)?;
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
 
@@ -1432,11 +1851,11 @@ impl DrawerStore for DrawerStoreCore {
             Some(anchor),
             &[
                 audit_gate::FieldWrite {
-                    slot: state_slot,
+                    slot: state_slot.clone(),
                     value: State::Tombstoned.raw_value(),
                 },
                 audit_gate::FieldWrite {
-                    slot: flags_slot,
+                    slot: flags_slot.clone(),
                     value: new_flags_value,
                 },
             ],
@@ -1448,10 +1867,7 @@ impl DrawerStore for DrawerStoreCore {
         .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {}", v)))?;
 
         // Materialized projection: write the merged adjective snapshot,
-        // zero the content blob, stamp tombstonedAt — all in the same
-        // logical operation. Per cookbook §10.5: "Content blob zeroized
-        // in the same transaction as the state transition (atomic;
-        // verbatim sacred only up to expunge)."
+        // zero the content blob, stamp tombstonedAt.
         let row_store = self.storage.row_store();
         let mut update_vals = BTreeMap::new();
         update_vals.insert(
@@ -1459,10 +1875,6 @@ impl DrawerStore for DrawerStoreCore {
             TypedValue::Bitmap(event.after_bitmaps.0),
         );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
-        // tombstonedAt is a Timestamp column (i64 epoch seconds);
-        // TypedValue::Timestamp carries seconds (PersistenceKit converts to
-        // TEXT ISO8601 via iso8601(secs)). Writing as TypedValue::Text would
-        // silently parse back to None.
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
         row_store
             .update(
@@ -1475,12 +1887,124 @@ impl DrawerStore for DrawerStoreCore {
             )
             .map_err(map_storage_err)?;
 
-        // When seal_audit is true (direct LocusKit callers), append the
-        // gate-produced event immediately — preserving the historical
-        // single-call atomic contract. When false (GLK orchestration path),
-        // the event is returned unsealed; the caller seals via
-        // seal_expunge_audit or seal_expunge_orphan_audit after step 2
-        // (cross-kit vector delete), satisfying §B-2a audit ordering.
+        // Record head drawer in the erasure ledger (ADR-017 §17).
+        // Direct row_store insert — mirrors Swift ErasureLedgerOps.
+        let mut ledger_vals = BTreeMap::new();
+        ledger_vals.insert(
+            "drawer_id".to_string(),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        ledger_vals.insert("erased_hlc".to_string(), TypedValue::Hlc(stamp));
+        let _ = row_store.insert("erasure_ledger", ledger_vals);
+        // Ignore duplicate-key if already in the ledger.
+
+        // ── Scrub every lineage sibling ──
+        for sibling_id in &lineage_ids {
+            if sibling_id == drawer_id {
+                continue;
+            }
+            let sib_bitmap = match self.read_drawer_bitmap(sibling_id, "adjectiveBitmap") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let sib_state = bit_field::extract_field(sib_bitmap, 0, 6);
+
+            if sib_state == State::Tombstoned.raw_value() {
+                // Already tombstoned — just ensure content is empty.
+                let mut vals = BTreeMap::new();
+                vals.insert("content".to_string(), TypedValue::Text(String::new()));
+                let _ = row_store.update(
+                    T_DRAWERS,
+                    vals,
+                    &StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(sibling_id.to_string()),
+                    ),
+                );
+            } else {
+                // Gate the sibling through the state machine.
+                let sib_uuid = require_uuid(sibling_id, "siblingId")?;
+                let sib_operational =
+                    self.read_drawer_bitmap(sibling_id, "operationalBitmap")?;
+                let sib_provenance = self.read_drawer_bitmap(sibling_id, "provenance")?;
+                let sib_prior = BitmapFields {
+                    adjective: sib_bitmap as u64,
+                    operational: sib_operational as u64,
+                    provenance: sib_provenance as u64,
+                };
+                let sib_udc = self.read_drawer_udc(sibling_id)?;
+                let sib_anchor = substrate_lib::verbs::LatticeAnchor::udc(&sib_udc);
+                let sib_flags_value = bit_field::extract_field(sib_bitmap, 24, 3);
+                let sib_new_flags = (sib_flags_value & 0b011) | 0b100;
+
+                let sib_stamp = self.hlc.lock().unwrap().send(now * 1000);
+                let sib_result = audit_gate::admit(
+                    self.estate_uuid.as_u128(),
+                    substrate_lib::verbs::RowId(sib_uuid.as_u128()),
+                    substrate_lib::verbs::NounType::Drawer,
+                    RowVerb::Tombstone,
+                    Some(sib_prior),
+                    Some(sib_anchor),
+                    &[
+                        audit_gate::FieldWrite {
+                            slot: state_slot.clone(),
+                            value: State::Tombstoned.raw_value(),
+                        },
+                        audit_gate::FieldWrite {
+                            slot: flags_slot.clone(),
+                            value: sib_new_flags,
+                        },
+                    ],
+                    sib_anchor,
+                    &self.vocabulary,
+                    sib_stamp,
+                    changed_by,
+                );
+
+                if let Ok(sib_event) = sib_result {
+                    let mut vals = BTreeMap::new();
+                    vals.insert(
+                        "adjectiveBitmap".to_string(),
+                        TypedValue::Bitmap(sib_event.after_bitmaps.0),
+                    );
+                    vals.insert("content".to_string(), TypedValue::Text(String::new()));
+                    vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
+                    let _ = row_store.update(
+                        T_DRAWERS,
+                        vals,
+                        &StoragePredicate::Eq(
+                            Column::new(T_DRAWERS, "id"),
+                            TypedValue::Text(sibling_id.to_string()),
+                        ),
+                    );
+                    if seal_audit {
+                        let sib_event = substrate_lib::verbs::AuditEvent {
+                            reason: Some(format!(
+                                "lineage expunge cascade from {}",
+                                drawer_id
+                            )),
+                            ..sib_event
+                        };
+                        let _ = self
+                            .storage
+                            .audit_log()
+                            .append(pk_audit_event_from(&sib_event));
+                    }
+                }
+                // If the gate rejects (e.g. accepted → tombstoned is
+                // S-3 forbidden), skip silently. Accepted rows survive.
+            }
+
+            // Record sibling in the erasure ledger.
+            let mut sib_ledger = BTreeMap::new();
+            sib_ledger.insert(
+                "drawer_id".to_string(),
+                TypedValue::Text(sibling_id.to_string()),
+            );
+            sib_ledger.insert("erased_hlc".to_string(), TypedValue::Hlc(stamp));
+            let _ = row_store.insert("erasure_ledger", sib_ledger);
+        }
+
         if seal_audit {
             self.storage
                 .audit_log()
@@ -1488,8 +2012,6 @@ impl DrawerStore for DrawerStoreCore {
                 .map_err(map_storage_err)?;
         }
 
-        // Thread the caller-supplied reason into the event so it is
-        // persisted in the audit table's `reason` column.
         let event = substrate_lib::verbs::AuditEvent {
             reason: reason.map(|s| s.to_string()),
             ..event
@@ -1607,6 +2129,29 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    /// Zero the `content` column for every row in the `drawers` table.
+    /// Used by `GLKCoordinator::destroy` to erase all drawer content blobs
+    /// from LocusKit's SQLite storage as part of the estate destruction
+    /// sequence (secfix/ws2-coredelete). Runs before `close()` so the
+    /// storage connection is still live.
+    ///
+    /// The operation is a bulk UPDATE with a `1=1` predicate — one SQL
+    /// statement regardless of row count. On the InMemory backend the
+    /// predicate resolves to `StoragePredicate::IsTrue`.
+    ///
+    /// Does NOT delete the manifest row or audit events — those remain as
+    /// a forensic record that the estate existed. The SQLite FILE is
+    /// deleted by the application layer (moot-mgr) after this call returns.
+    fn wipe_all_content(&self) -> Result<(), LocusKitError> {
+        let row_store = self.storage.row_store();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("content".to_string(), TypedValue::Text(String::new()));
+        row_store
+            .update(T_DRAWERS, values, &StoragePredicate::IsTrue)
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
     fn reanchor_gated(
         &self,
         drawer_id: &str,
@@ -1701,15 +2246,47 @@ impl DrawerStore for DrawerStoreCore {
                     .unwrap_or(TypedValue::Null),
             );
         }
-        if let Some(new_room) = to_room {
-            update_vals.insert("room".to_string(), TypedValue::Text(new_room.to_string()));
-        }
-        // Cross-wing move: update the wing column when to_wing is supplied.
-        // Wings emerge from SELECT DISTINCT wing on the drawers table (no wings
-        // table), so writing a new wing name here is sufficient to move the drawer
-        // into the target wing. Mirrors Swift DrawerStore.reanchorGated.
-        if let Some(new_wing) = to_wing {
-            update_vals.insert("wing".to_string(), TypedValue::Text(new_wing.to_string()));
+        // ADR-017: resolve wing/room names to parent_node_id via
+        // NodeStore create-on-demand, then update parent_node_id.
+        if to_room.is_some() || to_wing.is_some() {
+            let current_parent_id = {
+                let rows = self
+                    .storage
+                    .row_store()
+                    .query(
+                        T_DRAWERS,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_DRAWERS, "id"),
+                            TypedValue::Text(drawer_id.to_string()),
+                        )),
+                        &[],
+                        Some(1),
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                rows.first()
+                    .map(|r| string_value_of(r.get("parent_node_id")))
+                    .unwrap_or_default()
+            };
+            let current_names = self
+                .resolve_node_names(&[current_parent_id.clone()])?;
+            let current = current_names
+                .get(&current_parent_id)
+                .cloned()
+                .unwrap_or_default();
+            let resolved_wing = to_wing.unwrap_or(&current.0);
+            let resolved_room = to_room.unwrap_or(&current.1);
+            // Create-on-demand via NodeStore over the same storage.
+            let ns = crate::node_store::NodeStore::new(
+                Arc::clone(&self.storage), None);
+            if let Some(root) = ns.root_node()? {
+                let wing_node = ns.create_node(resolved_wing, root.id, now)?;
+                let room_node = ns.create_node(resolved_room, wing_node.id, now)?;
+                update_vals.insert(
+                    "parent_node_id".to_string(),
+                    TypedValue::Text(room_node.id.to_string()),
+                );
+            }
         }
         if !update_vals.is_empty() {
             row_store
@@ -1747,6 +2324,46 @@ impl DrawerStore for DrawerStoreCore {
         validate_non_empty(&tunnel.target_room, "targetRoom")?;
         validate_non_empty(&tunnel.label, "label")?;
         validate_non_empty(&tunnel.added_by, "addedBy")?;
+
+        // One parent per child (ADR-017 §11): a drawer may have at
+        // most one active Parent tunnel. Kit-level constraint
+        // (not a DB-level partial unique index, which PersistenceKit's
+        // schema declaration does not expose).
+        if tunnel.kind == TunnelKind::Parent {
+            if let Some(child_id) = &tunnel.source_drawer_id {
+                let existing = self
+                    .storage
+                    .row_store()
+                    .query(
+                        T_TUNNELS,
+                        Some(&StoragePredicate::all(vec![
+                            StoragePredicate::Eq(
+                                Column::new(T_TUNNELS, "kind_id"),
+                                TypedValue::Int(TunnelKind::Parent.raw_value()),
+                            ),
+                            StoragePredicate::Eq(
+                                Column::new(T_TUNNELS, "sourceDrawerId"),
+                                TypedValue::Text(child_id.clone()),
+                            ),
+                            StoragePredicate::IsNull(Column::new(
+                                T_TUNNELS,
+                                "tombstonedAt",
+                            )),
+                        ])),
+                        &[],
+                        Some(1),
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                if !existing.is_empty() {
+                    return Err(LocusKitError::InvalidContent(format!(
+                        "Drawer {} already has a parent tunnel",
+                        child_id
+                    )));
+                }
+            }
+        }
+
         self.storage
             .row_store()
             .insert(T_TUNNELS, tunnel_values(tunnel))
@@ -1868,6 +2485,212 @@ impl DrawerStore for DrawerStoreCore {
             )
             .map_err(map_storage_err)?;
         Ok(rows.iter().map(tunnel_from_row).collect())
+    }
+
+    // -----------------------------------------------------------------
+    // Tunnel retirement (T13 / ADR-021 Phase 7)
+    // -----------------------------------------------------------------
+
+    fn retire_tunnel(
+        &self,
+        tunnel_id: &str,
+        _changed_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Fetch the current tunnel to ensure it exists and get the current bitmap.
+        let existing = self.get_tunnel(tunnel_id)?
+            .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        let retired = existing.with_retired();
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("operationalBitmap".to_string(), TypedValue::Bitmap(retired.operational_bitmap));
+        self.storage
+            .row_store()
+            .update(
+                T_TUNNELS,
+                vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "id"),
+                    TypedValue::Text(tunnel_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    fn unretire_tunnel(
+        &self,
+        tunnel_id: &str,
+        _changed_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        let existing = self.get_tunnel(tunnel_id)?
+            .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        let active = existing.with_unretired();
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("operationalBitmap".to_string(), TypedValue::Bitmap(active.operational_bitmap));
+        self.storage
+            .row_store()
+            .update(
+                T_TUNNELS,
+                vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "id"),
+                    TypedValue::Text(tunnel_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Outline helpers (ADR-017 §11, NT-L5)
+    // -----------------------------------------------------------------
+
+    fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_TUNNELS,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_TUNNELS, "kind_id"),
+                        TypedValue::Int(TunnelKind::Parent.raw_value()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_TUNNELS, "targetDrawerId"),
+                        TypedValue::Text(parent_drawer_id.to_string()),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_TUNNELS, "tombstonedAt")),
+                ])),
+                &[OrderClause::new(
+                    Column::new(T_TUNNELS, "order_key"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(tunnel_from_row).collect())
+    }
+
+    fn outline_ancestors(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        let mut ancestors: Vec<String> = Vec::new();
+        let mut current = drawer_id.to_string();
+        let max_depth = 256;
+        while ancestors.len() < max_depth {
+            let rows = self
+                .storage
+                .row_store()
+                .query(
+                    T_TUNNELS,
+                    Some(&StoragePredicate::all(vec![
+                        StoragePredicate::Eq(
+                            Column::new(T_TUNNELS, "kind_id"),
+                            TypedValue::Int(TunnelKind::Parent.raw_value()),
+                        ),
+                        StoragePredicate::Eq(
+                            Column::new(T_TUNNELS, "sourceDrawerId"),
+                            TypedValue::Text(current.clone()),
+                        ),
+                        StoragePredicate::IsNull(Column::new(T_TUNNELS, "tombstonedAt")),
+                    ])),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            let row = match rows.first() {
+                Some(r) => r,
+                None => break,
+            };
+            let tunnel = tunnel_from_row(row);
+            match tunnel.target_drawer_id {
+                Some(parent_id) => {
+                    ancestors.push(parent_id.clone());
+                    current = parent_id;
+                }
+                None => break,
+            }
+        }
+        ancestors.reverse();
+        Ok(ancestors)
+    }
+
+    fn reparent_drawer(
+        &self,
+        child_id: &str,
+        new_parent_id: Option<&str>,
+        order_key: f64,
+        wing: &str,
+        room: &str,
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Tombstone the existing parent tunnel for this child.
+        let existing = self
+            .storage
+            .row_store()
+            .query(
+                T_TUNNELS,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_TUNNELS, "kind_id"),
+                        TypedValue::Int(TunnelKind::Parent.raw_value()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_TUNNELS, "sourceDrawerId"),
+                        TypedValue::Text(child_id.to_string()),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_TUNNELS, "tombstonedAt")),
+                ])),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        if let Some(row) = existing.first() {
+            let old_tunnel = tunnel_from_row(row);
+            self.storage
+                .row_store()
+                .update(
+                    T_TUNNELS,
+                    {
+                        let mut vals = std::collections::BTreeMap::new();
+                        vals.insert(
+                            "tombstonedAt".to_string(),
+                            TypedValue::Timestamp(now),
+                        );
+                        vals
+                    },
+                    &StoragePredicate::Eq(
+                        Column::new(T_TUNNELS, "id"),
+                        TypedValue::Text(old_tunnel.id),
+                    ),
+                )
+                .map_err(map_storage_err)?;
+        }
+
+        // Create the new parent tunnel if new_parent_id is provided.
+        if let Some(parent_id) = new_parent_id {
+            let mut tunnel = Tunnel::new(
+                uuid::Uuid::new_v4().to_string(),
+                wing.to_string(),
+                room.to_string(),
+                wing.to_string(),
+                room.to_string(),
+                "parent".to_string(),
+                added_by.to_string(),
+                now,
+            );
+            tunnel.kind = TunnelKind::Parent;
+            tunnel.source_drawer_id = Some(child_id.to_string());
+            tunnel.target_drawer_id = Some(parent_id.to_string());
+            tunnel.order_key = Some(order_key);
+            self.add_tunnel(&tunnel)?;
+        }
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -2564,28 +3387,17 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
-        // COUNT(*) on the drawers table excluding charter-room rows — bypasses
-        // all row-decode logic so corrupt rows (e.g. a poison timestamp) are
-        // still counted. Used by the vault-export fail-loud path: a non-zero
-        // count when recall returns 0 means the corpus is bricked, not empty.
+        // COUNT(*) on the drawers table — bypasses all row-decode logic so
+        // corrupt rows (e.g. a poison timestamp) are still counted. Used by the
+        // vault-export fail-loud path: a non-zero count when recall returns 0
+        // means the corpus is bricked, not empty.
         //
-        // Charter drawers (room == "_charter") are wing metadata seeded at
-        // provision time, not recallable user content. Recall already excludes
-        // them (RECALL-HYGIENE filter in estate_verbs.rs). Counting charter rows
-        // here would trigger the bricked-estate guard on estates that have ONLY
-        // charter rows (e.g. freshly seeded estates before any user content is
-        // captured), because the guard interprets "rows in storage, 0 from recall"
-        // as corruption rather than "all rows are metadata, not user content."
-        //
-        // Mirrors Swift `DrawerStore.countDrawerRows()` — the Swift port
-        // excludes the same charter-room rows in its equivalent query.
-        let predicate = StoragePredicate::Neq(
-            Column::new(T_DRAWERS, "room"),
-            TypedValue::Text(crate::default_wings::CHARTER_ROOM.to_string()),
-        );
+        // Hint drawers (AI_Charter_Hint room) are normal recallable drawers
+        // and are counted like any other drawer.
+        // Mirrors Swift `DrawerStore.countDrawerRows()` — count all rows.
         self.storage
             .row_store()
-            .count(T_DRAWERS, Some(&predicate))
+            .count(T_DRAWERS, None)
             .map_err(map_storage_err)
     }
 
@@ -2679,70 +3491,168 @@ impl DrawerStore for DrawerStoreCore {
     // -----------------------------------------------------------------
 
     fn list_wings(&self) -> Result<Vec<WingSummary>, LocusKitError> {
-        let rows = self
-            .storage
-            .row_store()
+        // ADR-017: enumerate wings from the node tree (depth=1, active).
+        let row_store = self.storage.row_store();
+        let wing_rows = row_store
             .query(
-                T_DRAWERS,
-                Some(&StoragePredicate::IsNull(Column::new(
-                    T_DRAWERS,
-                    "tombstonedAt",
-                ))),
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "depth"),
+                        TypedValue::Int(1),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
                 &[],
                 None,
                 None,
             )
             .map_err(map_storage_err)?;
-        let mut drawer_counts: BTreeMap<String, i64> = BTreeMap::new();
-        let mut rooms: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for row in &rows {
-            let wing = string_value_of(row.get("wing"));
-            let room = string_value_of(row.get("room"));
-            *drawer_counts.entry(wing.clone()).or_insert(0) += 1;
-            rooms.entry(wing).or_default().insert(room);
+        let mut result: Vec<WingSummary> = Vec::new();
+        for wing_row in &wing_rows {
+            let wing_id = string_value_of(wing_row.get("id"));
+            let wing_name = string_value_of(wing_row.get("display_name"));
+            let room_rows = row_store
+                .query(
+                    T_NODES,
+                    Some(&StoragePredicate::And(vec![
+                        StoragePredicate::Eq(
+                            Column::new(T_NODES, "parent_id"),
+                            TypedValue::Text(wing_id.clone()),
+                        ),
+                        StoragePredicate::Eq(
+                            Column::new(T_NODES, "depth"),
+                            TypedValue::Int(2),
+                        ),
+                        StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                    ])),
+                    &[],
+                    None,
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            let room_ids: Vec<String> =
+                room_rows.iter().map(|r| string_value_of(r.get("id"))).collect();
+            let drawer_count = if room_ids.is_empty() {
+                0
+            } else {
+                let predicates: Vec<StoragePredicate> = room_ids
+                    .iter()
+                    .map(|id| {
+                        StoragePredicate::Eq(
+                            Column::new(T_DRAWERS, "parent_node_id"),
+                            TypedValue::Text(id.clone()),
+                        )
+                    })
+                    .collect();
+                let drawer_rows = row_store
+                    .query(
+                        T_DRAWERS,
+                        Some(&StoragePredicate::all(vec![
+                            StoragePredicate::any(predicates),
+                            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+                        ])),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                drawer_rows.len() as i64
+            };
+            result.push(WingSummary {
+                name: wing_name,
+                drawer_count,
+                room_count: room_ids.len() as i64,
+            });
         }
-        // BTreeMap iterates keys in sorted order — matches the Swift
-        // `drawerCounts.keys.sorted()` shape.
-        Ok(drawer_counts
-            .iter()
-            .map(|(wing, count)| WingSummary {
-                name: wing.clone(),
-                drawer_count: *count,
-                room_count: rooms.get(wing).map(|s| s.len() as i64).unwrap_or(0),
-            })
-            .collect())
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(result)
     }
 
     fn list_rooms(&self, wing: Option<&str>) -> Result<Vec<RoomSummary>, LocusKitError> {
-        let predicate = match wing {
-            Some(w) => StoragePredicate::all(vec![
+        // ADR-017: enumerate rooms from the node tree. Wing nodes are
+        // depth=1, room nodes are depth=2 under them.
+        let row_store = self.storage.row_store();
+        let wing_predicate = match wing {
+            Some(w) => {
+                let wing_lookup = Node::normalize_lookup_name(w);
+                StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "lookup_name"),
+                        TypedValue::Text(wing_lookup),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "depth"),
+                        TypedValue::Int(1),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])
+            }
+            None => StoragePredicate::And(vec![
                 StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "wing"),
-                    TypedValue::Text(w.to_string()),
+                    Column::new(T_NODES, "depth"),
+                    TypedValue::Int(1),
                 ),
-                StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+                StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
             ]),
-            None => StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
         };
-        let rows = self
-            .storage
-            .row_store()
-            .query(T_DRAWERS, Some(&predicate), &[], None, None)
+        let wing_rows = row_store
+            .query(T_NODES, Some(&wing_predicate), &[], None, None)
             .map_err(map_storage_err)?;
-        let mut counts: BTreeMap<(String, String), i64> = BTreeMap::new();
-        for row in &rows {
-            let w = string_value_of(row.get("wing"));
-            let r = string_value_of(row.get("room"));
-            *counts.entry((w, r)).or_insert(0) += 1;
+        let mut result: Vec<RoomSummary> = Vec::new();
+        for wing_row in &wing_rows {
+            let wing_id = string_value_of(wing_row.get("id"));
+            let wing_name = string_value_of(wing_row.get("display_name"));
+            let room_rows = row_store
+                .query(
+                    T_NODES,
+                    Some(&StoragePredicate::And(vec![
+                        StoragePredicate::Eq(
+                            Column::new(T_NODES, "parent_id"),
+                            TypedValue::Text(wing_id.clone()),
+                        ),
+                        StoragePredicate::Eq(
+                            Column::new(T_NODES, "depth"),
+                            TypedValue::Int(2),
+                        ),
+                        StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                    ])),
+                    &[],
+                    None,
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            for room_row in &room_rows {
+                let room_id = string_value_of(room_row.get("id"));
+                let room_name = string_value_of(room_row.get("display_name"));
+                let drawer_rows = row_store
+                    .query(
+                        T_DRAWERS,
+                        Some(&StoragePredicate::all(vec![
+                            StoragePredicate::Eq(
+                                Column::new(T_DRAWERS, "parent_node_id"),
+                                TypedValue::Text(room_id),
+                            ),
+                            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+                        ])),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                result.push(RoomSummary {
+                    wing: wing_name.clone(),
+                    name: room_name,
+                    drawer_count: drawer_rows.len() as i64,
+                });
+            }
         }
-        Ok(counts
-            .into_iter()
-            .map(|((w, r), c)| RoomSummary {
-                wing: w,
-                name: r,
-                drawer_count: c,
-            })
-            .collect())
+        result.sort_by(|a, b| {
+            let key_a = format!("{}\0{}", a.wing, a.name);
+            let key_b = format!("{}\0{}", b.wing, b.name);
+            key_a.cmp(&key_b)
+        });
+        Ok(result)
     }
 
     // -----------------------------------------------------------------
@@ -3087,8 +3997,12 @@ impl DrawerStore for DrawerStoreCore {
             .into_iter()
             .filter(|d| d.tombstoned_at.is_none())
             .collect();
+        // ADR-017 §3: resolve parent_node_id → (wing, room) display names
+        // from the node tree so the fingerprint store can group by container.
+        let parent_ids: Vec<String> = active.iter().map(|d| d.parent_node_id.clone()).collect();
+        let node_names = self.resolve_node_names(&parent_ids)?;
         let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
-        fp_store.rebuild_all(&active, now)
+        fp_store.rebuild_all(&active, &node_names, now)
     }
 
     fn get_container_fingerprint(
@@ -3168,6 +4082,17 @@ impl InMemoryDrawerStore {
 }
 
 impl DrawerStore for InMemoryDrawerStore {
+    fn storage(&self) -> Option<Arc<dyn Storage>> {
+        self.inner.storage()
+    }
+
+    fn resolve_node_names(
+        &self,
+        parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        self.inner.resolve_node_names(parent_node_ids)
+    }
+
     fn read_manifest(&self) -> Result<crate::manifest::ManifestValues, LocusKitError> {
         self.inner.read_manifest()
     }
@@ -3221,6 +4146,28 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.all_drawers_bounded_projected(limit)
     }
+
+    // Forwarding overrides for the DESC bounded scan methods. Without these,
+    // Arc<dyn DrawerStore> callers hit the O(estate) trait default (load
+    // all_drawers, reverse, truncate) rather than DrawerStoreCore's efficient
+    // (filed_at DESC, id DESC, LIMIT) path. Forwarding here ensures the
+    // InMemoryDrawerStore wrapper routes correctly for in-process estates
+    // (c-recall-portable fix).
+
+    fn all_drawers_bounded_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.all_drawers_bounded_desc(limit)
+    }
+
+    fn all_drawers_bounded_projected_desc(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.all_drawers_bounded_projected_desc(limit)
+    }
+
     fn drawer_ids(&self) -> Result<Vec<crate::estate_types::RowID>, LocusKitError> {
         self.inner.drawer_ids()
     }
@@ -3268,6 +4215,9 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<(), LocusKitError> {
         self.inner
             .mutate_state(drawer_id, new_state, via, changed_by, reason, now)
+    }
+    fn lineage_chain(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.inner.lineage_chain(drawer_id)
     }
     fn expunge_gated(
         &self,
@@ -3328,6 +4278,31 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn all_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.all_tunnels()
+    }
+    // Retirement forwarding — T13 / ADR-021 Phase 7.
+    fn retire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
+        self.inner.retire_tunnel(tunnel_id, changed_by, now)
+    }
+    fn unretire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
+        self.inner.unretire_tunnel(tunnel_id, changed_by, now)
+    }
+    fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.inner.outline_children(parent_drawer_id)
+    }
+    fn outline_ancestors(&self, drawer_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.inner.outline_ancestors(drawer_id)
+    }
+    fn reparent_drawer(
+        &self,
+        child_id: &str,
+        new_parent_id: Option<&str>,
+        order_key: f64,
+        wing: &str,
+        room: &str,
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.reparent_drawer(child_id, new_parent_id, order_key, wing, room, added_by, now)
     }
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
         self.inner.add_kg_fact(fact)
@@ -3510,6 +4485,9 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<(), LocusKitError> {
         self.inner.seal_expunge_orphan_for_sweep(drawer_id, changed_by, now)
     }
+    fn wipe_all_content(&self) -> Result<(), LocusKitError> {
+        self.inner.wipe_all_content()
+    }
     fn list_wings(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
         self.inner.list_wings()
     }
@@ -3595,8 +4573,10 @@ fn drawer_values(d: &Drawer) -> BTreeMap<String, TypedValue> {
     let mut m = BTreeMap::new();
     m.insert("id".to_string(), TypedValue::Text(d.id.clone()));
     m.insert("content".to_string(), TypedValue::Text(d.content.clone()));
-    m.insert("wing".to_string(), TypedValue::Text(d.wing.clone()));
-    m.insert("room".to_string(), TypedValue::Text(d.room.clone()));
+    m.insert(
+        "parent_node_id".to_string(),
+        TypedValue::Text(d.parent_node_id.clone()),
+    );
     m.insert(
         "sourceFile".to_string(),
         d.source_file
@@ -3735,6 +4715,12 @@ fn tunnel_values(t: &Tunnel) -> BTreeMap<String, TypedValue> {
     m.insert(
         "provenanceBitmap".to_string(),
         TypedValue::Bitmap(t.provenance_bitmap),
+    );
+    m.insert(
+        "order_key".to_string(),
+        t.order_key
+            .map(TypedValue::Float)
+            .unwrap_or(TypedValue::Null),
     );
     m
 }
@@ -4043,8 +5029,7 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         id: string_value_of(row.get("id")),
         lineage_id,
         content: string_value_of(row.get("content")),
-        wing: string_value_of(row.get("wing")),
-        room: string_value_of(row.get("room")),
+        parent_node_id: string_value_of(row.get("parent_node_id")),
         source_file: opt_string_value_of(row.get("sourceFile")),
         chunk_index: opt_int_value_of(row.get("chunkIndex")),
         added_by: string_value_of(row.get("addedBy")),
@@ -4132,6 +5117,7 @@ fn tunnel_from_row(row: &StorageRow) -> Tunnel {
         filed_at: i64_value_of(row.get("filedAt")),
         tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
         removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
+        order_key: opt_float_value_of(row.get("order_key")),
     }
 }
 
@@ -4417,6 +5403,7 @@ fn string_value_of(v: Option<&TypedValue>) -> String {
     }
 }
 
+/// Parse a UUID string to `TypedValue::Uuid` for node-tree predicate
 fn opt_string_value_of(v: Option<&TypedValue>) -> Option<String> {
     match v {
         Some(TypedValue::Text(s)) => Some(s.clone()),
@@ -4682,7 +5669,44 @@ mod tests {
             Ok(_) => id.to_string(),
             Err(_) => tid(id),
         };
-        let mut d = Drawer::new(&resolved, content, wing, room, "alice", NOW, "test-v1");
+        // parent_node_id is a deterministic test value derived from
+        // wing+room so tests that group by parent_node_id remain stable.
+        let parent_id = tid(&format!("node-{}-{}", wing, room));
+        let mut d = Drawer::new(&resolved, content, &parent_id, "alice", NOW, "test-v1");
+        d.udc_code = "001".to_string();
+        d
+    }
+
+    /// Seed a node tree for tests: root → wing (depth=1) → room (depth=2).
+    /// Returns the room node ID string. The wing and room display names
+    /// are stored as-is; lookup_name is normalized. The returned room
+    /// node ID matches what sample_drawer produces for the same wing/room.
+    fn seed_node_tree(store: &InMemoryDrawerStore, wing: &str, room: &str) -> String {
+        use crate::node_store::NodeStore;
+        let storage = Arc::clone(store.storage());
+        let ns = NodeStore::new(storage, None);
+        let root = ns.create_root("Estate", NOW).unwrap();
+        let wing_node = ns.create_node(wing, root.id, NOW).unwrap();
+        let room_node = ns.create_node(room, wing_node.id, NOW).unwrap();
+        room_node.id.to_string()
+    }
+
+    /// Seed nodes and create a drawer whose parent_node_id points to the
+    /// room node. Replaces sample_drawer for tests that need node-tree
+    /// resolution (drawers_in_wing, drawers_in_wing_room, list_wings, etc.).
+    fn sample_drawer_with_nodes(
+        store: &InMemoryDrawerStore,
+        id: &str,
+        wing: &str,
+        room: &str,
+        content: &str,
+    ) -> Drawer {
+        let room_node_id = seed_node_tree(store, wing, room);
+        let resolved = match Uuid::parse_str(id) {
+            Ok(_) => id.to_string(),
+            Err(_) => tid(id),
+        };
+        let mut d = Drawer::new(&resolved, content, &room_node_id, "alice", NOW, "test-v1");
         d.udc_code = "001".to_string();
         d
     }
@@ -4936,19 +5960,20 @@ mod tests {
         store.add_drawer(&d, NOW).unwrap();
         let back = store.get_drawer(&tid("d1")).unwrap().unwrap();
         assert_eq!(back.content, "hello");
-        assert_eq!(back.wing, "w");
-        assert_eq!(back.room, "kitchen");
+        // ADR-017: wing/room are no longer stored in the drawers table;
+        // they default to empty on read-back (populated by node-tree
+        // JOIN at fetch time in production paths).
+        assert_eq!(back.parent_node_id, d.parent_node_id);
     }
 
     #[test]
-    fn add_drawer_rejects_empty_wing() {
+    fn add_drawer_rejects_empty_parent_node_id() {
         let store = open_store();
-        let mut d = sample_drawer("d1", "", "kitchen", "hello");
-        // Force the wing field empty by direct mutation.
-        d.wing = String::new();
+        let mut d = sample_drawer("d1", "w", "kitchen", "hello");
+        d.parent_node_id = String::new();
         let err = store.add_drawer(&d, NOW).unwrap_err();
         match err {
-            LocusKitError::InvalidContent(msg) => assert!(msg.contains("wing")),
+            LocusKitError::InvalidContent(msg) => assert!(msg.contains("parent_node_id")),
             other => panic!("expected InvalidContent, got {:?}", other),
         }
     }
@@ -4979,13 +6004,16 @@ mod tests {
     #[test]
     fn drawers_in_wing_excludes_tombstoned_and_orders_by_filed_at() {
         let store = open_store();
-        let mut d1 = sample_drawer("d1", "w", "k", "first");
+        let mut d1 = sample_drawer_with_nodes(&store, "d1", "w", "k", "first");
         d1.filed_at = NOW + 10;
-        let mut d2 = sample_drawer("d2", "w", "k", "second");
+        let mut d2 = sample_drawer_with_nodes(&store, "d2", "w", "k", "second");
         d2.filed_at = NOW + 20;
-        let mut d3 = sample_drawer("d3", "w", "k", "tombstoned");
+        // Same parent_node_id as d1/d2 (same wing+room nodes already exist).
+        d2.parent_node_id = d1.parent_node_id.clone();
+        let mut d3 = sample_drawer_with_nodes(&store, "d3", "w", "k", "tombstoned");
         d3.filed_at = NOW + 30;
         d3.tombstoned_at = Some(NOW + 31);
+        d3.parent_node_id = d1.parent_node_id.clone();
         store.add_drawer(&d1, NOW).unwrap();
         store.add_drawer(&d2, NOW).unwrap();
         store.add_drawer(&d3, NOW).unwrap();
@@ -4998,8 +6026,8 @@ mod tests {
     #[test]
     fn drawers_in_wing_room_filters_on_both() {
         let store = open_store();
-        let d1 = sample_drawer("d1", "w", "k", "kitchen-row");
-        let d2 = sample_drawer("d2", "w", "study", "study-row");
+        let d1 = sample_drawer_with_nodes(&store, "d1", "w", "k", "kitchen-row");
+        let d2 = sample_drawer_with_nodes(&store, "d2", "w", "study", "study-row");
         store.add_drawer(&d1, NOW).unwrap();
         store.add_drawer(&d2, NOW).unwrap();
         let kitchen = store.drawers_in_wing_room("w", "k").unwrap();
@@ -5066,7 +6094,7 @@ mod tests {
         store.add_drawer(&prior, NOW).unwrap();
         store.add_drawer(&next, NOW + 100).unwrap();
 
-        // Predecessor state nibble flipped to Superseded (raw 16).
+        // Predecessor 6-bit state field set to Superseded (raw 16).
         let p_back = store
             .get_drawer("11111111-1111-4111-8111-111111111111")
             .unwrap()
@@ -5103,6 +6131,73 @@ mod tests {
         assert_eq!(
             tunnel.target_drawer_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
+        );
+    }
+
+    /// B1 Finding #3 regression — atomic cascade ordering.
+    ///
+    /// Pre-fix: `mutate_state` (predecessor flip to Superseded) ran BEFORE the
+    /// `supersedes` tunnel insert. A tunnel insert failure would leave the
+    /// predecessor permanently Superseded with no active successor — a silent
+    /// lineage corruption. Post-fix ordering:
+    ///   1. `gated_capture` (new drawer + audit event)
+    ///   2. Tunnel insert
+    ///   3. Compensating delete of new drawer on tunnel failure
+    ///   4. `mutate_state` (predecessor flip) ONLY if tunnel insert succeeded
+    ///
+    /// This test verifies the post-fix happy path: all three invariants hold
+    /// simultaneously — new drawer present, tunnel filed, predecessor flipped.
+    /// If the ordering were wrong (flip before tunnel), a failed tunnel insert
+    /// in step 2 would leave the predecessor Superseded with the new drawer
+    /// absent — a state that cannot be verified by a success-path test but is
+    /// prevented structurally by the ordering change.
+    ///
+    /// (Full fault-injection test requires a FailingStorage fixture not yet
+    /// present in the test harness. The happy-path test regression-guards the
+    /// fix did not break the success path. See planned B3 fault-injection task.)
+    #[test]
+    fn cascade_ordering_drawer_tunnel_and_predecessor_flip_all_consistent() {
+        let store = open_store();
+        let lineage = Uuid::new_v4();
+        let mut prior = sample_drawer("aaaa1111-0000-4000-8000-000000000001", "w", "k", "v1");
+        prior.lineage_id = lineage;
+        prior.filed_at = NOW;
+        let mut next = sample_drawer("aaaa2222-0000-4000-8000-000000000002", "w", "k", "v2");
+        next.lineage_id = lineage;
+        next.filed_at = NOW + 50;
+
+        store.add_drawer(&prior, NOW).unwrap();
+        store.add_drawer(&next, NOW + 50).unwrap();
+
+        // Post-condition 1: new drawer is present.
+        let new_row = store
+            .get_drawer("aaaa2222-0000-4000-8000-000000000002")
+            .unwrap()
+            .expect("new drawer must be present");
+        assert_eq!(new_row.content, "v2");
+
+        // Post-condition 2: supersedes tunnel was filed (new → prior).
+        let tunnel_key = format!(
+            "supersedes:{}:{}",
+            "aaaa2222-0000-4000-8000-000000000002",
+            "aaaa1111-0000-4000-8000-000000000001"
+        );
+        let tunnel = store
+            .get_tunnel(&tunnel_key)
+            .unwrap()
+            .expect("supersedes tunnel must be filed");
+        assert_eq!(tunnel.kind, TunnelKind::Supersedes);
+
+        // Post-condition 3: predecessor state flipped to Superseded — ONLY AFTER
+        // the tunnel insert, so the lineage graph is always consistent.
+        let prior_row = store
+            .get_drawer("aaaa1111-0000-4000-8000-000000000001")
+            .unwrap()
+            .expect("predecessor must still be present");
+        assert_eq!(
+            prior_row.adjective_bitmap & 0x3F,
+            State::Superseded.raw_value(),
+            "predecessor must be Superseded after a successful cascade"
         );
     }
 
@@ -5713,6 +6808,164 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Tunnel retirement tests (T13 / ADR-021 Phase 7)
+    // -----------------------------------------------------------------
+
+    fn dreamed_tunnel(id: &str) -> Tunnel {
+        let mut t = Tunnel::new(
+            id.to_string(), "src".to_string(), "r1".to_string(),
+            "tgt".to_string(), "r2".to_string(), format!("edge-{}", id),
+            "bilby".to_string(), NOW,
+        );
+        // stamp dreamed provenance (bit 0 of provenance_bitmap)
+        t = t.with_dreamed_provenance();
+        t
+    }
+
+    fn declared_tunnel(id: &str) -> Tunnel {
+        Tunnel::new(
+            id.to_string(), "src".to_string(), "r1".to_string(),
+            "tgt".to_string(), "r2".to_string(), format!("edge-{}", id),
+            "bilby".to_string(), NOW,
+        )
+        // provenance_bitmap = 0 (is_dreamed = false)
+    }
+
+    #[test]
+    fn retire_tunnel_sets_bit_13_and_persists() {
+        let store = open_store();
+        let t = dreamed_tunnel("td-1");
+        store.add_tunnel(&t).unwrap();
+
+        store.retire_tunnel("td-1", "bilby", NOW).unwrap();
+
+        let fetched = store.get_tunnel("td-1").unwrap().expect("tunnel must exist");
+        assert!(fetched.is_retired(), "bit 13 must be set after retire_tunnel");
+        assert_eq!(fetched.operational_bitmap & Tunnel::IS_RETIRED_BIT, Tunnel::IS_RETIRED_BIT);
+    }
+
+    #[test]
+    fn unretire_tunnel_clears_bit_13() {
+        let store = open_store();
+        store.add_tunnel(&dreamed_tunnel("td-2")).unwrap();
+        store.retire_tunnel("td-2", "bilby", NOW).unwrap();
+
+        store.unretire_tunnel("td-2", "bilby", NOW).unwrap();
+
+        let fetched = store.get_tunnel("td-2").unwrap().expect("tunnel must exist");
+        assert!(!fetched.is_retired(), "bit 13 must be cleared after unretire_tunnel");
+    }
+
+    #[test]
+    fn retire_tunnel_returns_not_found_for_unknown_id() {
+        let store = open_store();
+        let result = store.retire_tunnel("no-such-tunnel", "bilby", NOW);
+        assert!(
+            matches!(result, Err(LocusKitError::TunnelNotFound { .. })),
+            "must return TunnelNotFound for unknown tunnel id"
+        );
+    }
+
+    #[test]
+    fn unretire_tunnel_returns_not_found_for_unknown_id() {
+        let store = open_store();
+        let result = store.unretire_tunnel("no-such-tunnel", "bilby", NOW);
+        assert!(
+            matches!(result, Err(LocusKitError::TunnelNotFound { .. })),
+            "must return TunnelNotFound for unknown tunnel id"
+        );
+    }
+
+    #[test]
+    fn all_active_tunnels_excludes_retired() {
+        let store = open_store();
+        store.add_tunnel(&dreamed_tunnel("td-retire")).unwrap();
+        store.add_tunnel(&declared_tunnel("td-active")).unwrap();
+
+        store.retire_tunnel("td-retire", "bilby", NOW).unwrap();
+
+        let active = store.all_active_tunnels().unwrap();
+        assert_eq!(active.len(), 1, "retired tunnel must be excluded from all_active_tunnels");
+        assert_eq!(active[0].id, "td-active");
+    }
+
+    #[test]
+    fn all_tunnels_includes_retired_tunnels() {
+        let store = open_store();
+        store.add_tunnel(&dreamed_tunnel("td-r1")).unwrap();
+        store.retire_tunnel("td-r1", "bilby", NOW).unwrap();
+
+        let all = store.all_tunnels().unwrap();
+        assert_eq!(all.len(), 1, "all_tunnels must include retired tunnels (full-history view)");
+        assert!(all[0].is_retired());
+    }
+
+    #[test]
+    fn all_active_tunnels_returns_all_when_none_retired() {
+        let store = open_store();
+        store.add_tunnel(&dreamed_tunnel("td-1")).unwrap();
+        store.add_tunnel(&declared_tunnel("td-2")).unwrap();
+
+        let active = store.all_active_tunnels().unwrap();
+        assert_eq!(active.len(), 2);
+    }
+
+    #[test]
+    fn retire_unretire_round_trip_preserves_other_bits() {
+        let store = open_store();
+        // Set direction=bidirectional (raw 1 in bits 0-2) and lifecycle=proposed (raw 1 in bits 3-5).
+        let mut t = declared_tunnel("td-bits");
+        t.operational_bitmap = 1 | (1 << 3); // direction=bidirectional, lifecycle=proposed
+        store.add_tunnel(&t).unwrap();
+
+        store.retire_tunnel("td-bits", "bilby", NOW).unwrap();
+        store.unretire_tunnel("td-bits", "bilby", NOW).unwrap();
+
+        let restored = store.get_tunnel("td-bits").unwrap().expect("must exist");
+        assert_eq!(
+            restored.operational_bitmap,
+            t.operational_bitmap,
+            "round-trip must leave operational_bitmap identical"
+        );
+    }
+
+    #[test]
+    fn retirement_does_not_disturb_other_operational_bits() {
+        let store = open_store();
+        let mut t = dreamed_tunnel("td-bits2");
+        // direction=bidirectional (1), lifecycle=proposed (1 << 3)
+        t.operational_bitmap = 1 | (1 << 3);
+        store.add_tunnel(&t).unwrap();
+
+        store.retire_tunnel("td-bits2", "bilby", NOW).unwrap();
+
+        let fetched = store.get_tunnel("td-bits2").unwrap().expect("must exist");
+        assert!(fetched.is_retired());
+        assert_eq!(
+            fetched.direction(),
+            crate::tunnel_operational::TunnelDirection::Bidirectional,
+            "direction bits must survive retirement"
+        );
+        assert_eq!(
+            fetched.lifecycle(),
+            crate::tunnel_operational::TunnelLifecycle::Proposed,
+            "lifecycle bits must survive retirement"
+        );
+    }
+
+    #[test]
+    fn declared_tunnel_has_is_dreamed_false() {
+        let t = declared_tunnel("td-declared");
+        assert!(!t.is_dreamed(), "declared tunnel must have is_dreamed = false");
+    }
+
+    #[test]
+    fn dreamed_tunnel_has_is_dreamed_true() {
+        let t = dreamed_tunnel("td-dreamed");
+        assert!(t.is_dreamed(), "dreamed tunnel must have is_dreamed = true");
+    }
+
+    // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------
 
@@ -5723,15 +6976,12 @@ mod tests {
     #[test]
     fn list_wings_and_list_rooms() {
         let store = open_store();
-        store
-            .add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW)
-            .unwrap();
-        store
-            .add_drawer(&sample_drawer("d2", "w1", "study", "b"), NOW)
-            .unwrap();
-        store
-            .add_drawer(&sample_drawer("d3", "w2", "lab", "c"), NOW)
-            .unwrap();
+        let d1 = sample_drawer_with_nodes(&store, "d1", "w1", "k", "a");
+        let d2 = sample_drawer_with_nodes(&store, "d2", "w1", "study", "b");
+        let d3 = sample_drawer_with_nodes(&store, "d3", "w2", "lab", "c");
+        store.add_drawer(&d1, NOW).unwrap();
+        store.add_drawer(&d2, NOW).unwrap();
+        store.add_drawer(&d3, NOW).unwrap();
         let wings = store.list_wings().unwrap();
         assert_eq!(wings.len(), 2);
         assert_eq!(wings[0].name, "w1");
@@ -5748,9 +6998,8 @@ mod tests {
     #[test]
     fn taxonomy_equals_list_wings_for_now() {
         let store = open_store();
-        store
-            .add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW)
-            .unwrap();
+        let d1 = sample_drawer_with_nodes(&store, "d1", "w1", "k", "a");
+        store.add_drawer(&d1, NOW).unwrap();
         assert_eq!(store.taxonomy().unwrap(), store.list_wings().unwrap());
     }
 

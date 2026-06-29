@@ -1,8 +1,9 @@
 // CorpusGrowthProbe.swift
 //
 // Seam for the dreaming daemon's auto-reindex step: a protocol the daemon
-// calls to (1) read the current corpus chunk count and (2) trigger a full
-// basis retrain when corpus growth crosses a threshold.
+// calls to (1) read the current vocabulary anchor via `vocabAnchor()` and
+// (2) trigger a full basis retrain via `reindex(now:)` when vocabulary
+// growth crosses the configured fraction/floor threshold.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
 // Distributional embedding bases (RI / PPMI / LSA / NMF) train on the
@@ -23,7 +24,7 @@
 //
 // ── B-1 compliance ───────────────────────────────────────────────────────
 // The production adapter (`EstateCorpusGrowthProbe`) calls GLK through
-// the two new Brain-layer methods `corpusChunkCount(handle:)` and
+// the two Brain-layer methods `corpusVocabAnchor(handle:)` and
 // `reindexCorpus(handle:now:)` — both B-1-compliant GLK surface calls.
 // The daemon never touches CorpusKit directly.
 
@@ -31,40 +32,50 @@ import Foundation
 import GeniusLocusKit
 import OSLog
 
-// MARK: - Auto-reindex threshold
+// MARK: - Auto-reindex threshold (vocabulary-growth trigger, P3 item 5)
 
-/// Corpus growth required to trigger an auto-reindex.
+/// Fractional vocabulary growth required to trigger an auto-reindex.
 ///
-/// When the live chunk count exceeds `lastReindexChunkCount` by at least
-/// this many chunks, the dreaming daemon calls `CorpusGrowthProbe.reindex`.
+/// The retrain trigger fires on VOCABULARY drift, not raw chunk count:
+/// distributional embeddings (RI / PPMI / LSA / NMF) freeze their vocabulary at
+/// training time, so what degrades dense recall is novel TERMS going OOV, not
+/// chunks per se. The maintained counts table (P3) makes the live vocabulary
+/// size a cheap, always-current read, so the gate measures the fraction by which
+/// the vocabulary has grown since the last retrain.
 ///
-/// Vocabulary coverage rationale: distributional embeddings (RI / PPMI /
-/// LSA / NMF) are trained on the full vocabulary at training time. Each
-/// new chunk may introduce novel terms; 25 chunks is a practical "enough
-/// vocabulary drift has accumulated" threshold that balances two costs:
-///   - Too low: frequent, expensive full-corpus retrains for tiny gains.
-///   - Too high: long windows of OOV terms degrading dense recall quality.
-/// 25 is the documented starting value; callers with denser or sparser
-/// ingestion patterns may override via the `threshold` parameter on
+/// When `(liveVocab − lastReindexVocab)` reaches `lastReindexVocab × this
+/// fraction` (or the absolute floor below, whichever is larger), the dreaming
+/// daemon calls `CorpusGrowthProbe.reindex`. 0.10 (10% vocabulary growth) is the
+/// documented starting value — proportional, so a large corpus tolerates more
+/// absolute drift before the expensive full retrain, while a small one retrains
+/// sooner. Callers may override via `DreamingDaemon.init`.
+public let autoReindexVocabGrowthFraction: Double = 0.10
+
+/// Absolute floor on new vocabulary terms before an auto-reindex, regardless of
+/// the fraction. Dominates at small vocabularies, where a 10% fraction would be
+/// a handful of terms and cause thrashing; also the effective cold-start gate.
+/// 25 new terms is the documented starting value; overridable via
 /// `DreamingDaemon.init`.
-public let autoReindexGrowthThreshold: Int = 25
+public let autoReindexVocabGrowthFloor: Int = 25
 
 // MARK: - Protocol
 
 /// Read-and-trigger seam for corpus auto-reindex (NEURONKIT_SPEC § 3.1
 /// auto-reindex extension).
 ///
-/// Injected into `DreamingDaemon`. The daemon calls `chunkCount()` at
-/// every cycle to measure growth since the last retrain, then calls
-/// `reindex(now:)` when growth crosses `autoReindexGrowthThreshold`.
+/// Injected into `DreamingDaemon`. The daemon calls `vocabAnchor()` at
+/// every cycle to measure vocabulary growth since the last retrain, then calls
+/// `reindex(now:)` when growth crosses the vocab-growth fraction/floor.
 /// `EstateCorpusGrowthProbe` is the production adapter; in-memory fakes
 /// satisfy this protocol in tests.
 public protocol CorpusGrowthProbe: Sendable {
 
-    /// Current chunk count for the probe's estate corpus. Returns 0 when
-    /// no Corpus is wired (e.g. a LocusOnly estate), so the growth delta
-    /// is always zero and the gate never fires for un-wired estates.
-    func chunkCount() async throws -> Int
+    /// Current maintained vocabulary anchor for the probe's estate corpus — the
+    /// maximum maintained vocabulary size across its trainable providers. Returns
+    /// 0 when no Corpus is wired (e.g. a LocusOnly estate) or no trainable
+    /// provider is present, so the growth delta is always zero and the gate never
+    /// fires for un-wired estates.
+    func vocabAnchor() async throws -> Int
 
     /// Trigger a full basis retrain on the probe's estate corpus.
     ///
@@ -99,9 +110,9 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
         self.kit = kit
     }
 
-    /// Current chunk count via `GeniusLocusKit.corpusChunkCount(handle:)`.
-    public func chunkCount() async throws -> Int {
-        try await kit.corpusChunkCount(handle: handle)
+    /// Current vocabulary anchor via `GeniusLocusKit.corpusVocabAnchor(handle:)`.
+    public func vocabAnchor() async throws -> Int {
+        try await kit.corpusVocabAnchor(handle: handle)
     }
 
     /// Full basis retrain via `GeniusLocusKit.reindexCorpus(handle:now:)`.

@@ -3,14 +3,12 @@
 // Sound logical implications over a `FormalContext` via bounded
 // Duquenne–Guigues canonical basis enumeration (Next-Closure).
 //
-// ALGORITHM: Next-Closure (Ganter 1999, "Two Basic Algorithms in Concept
-// Analysis", TH Darmstadt Preprint 831). Enumeration visits candidate
-// attribute sets in lectic order over the sorted attribute universe and
-// identifies pseudo-intents: sets A whose closure A'' strictly contains A.
-// Every pseudo-intent A yields one implication A → (A'' \ A) in the
-// canonical basis. The basis is minimal (Duquenne–Guigues): no proper
-// subset of it implies the same consequences, and every sound implication
-// over the context follows from the basis by Armstrong's rules.
+// ALGORITHM: Size-ordered enumeration. Candidates are enumerated by
+// premise size from 0 through min(n, maxPremiseSize), testing each
+// attribute subset for pseudo-intent status (closure strictly contains
+// the set). A size-0 special case handles global attributes (the empty
+// premise is a pseudo-intent when the empty-context closure is non-empty).
+// Every pseudo-intent A yields one implication A → (A'' \ A).
 //
 // SOUNDNESS CONTRACT:
 // Every emitted implication (premise → conclusion) holds universally across
@@ -62,9 +60,9 @@ import Foundation
 /// Every row in the context that satisfies the premise must satisfy the
 /// conclusion, without exception.
 public struct Implication: Hashable, Codable, Sendable {
-    /// The premise attribute set. Non-empty for all canonical-basis
-    /// implications (the empty premise would force every row to carry every
-    /// attribute, which only holds when all attributes are global).
+    /// The premise attribute set. May be empty when the context closure of
+    /// {} is non-empty (all attributes are globally present), in which case
+    /// {} is a valid pseudo-intent and the implication {} → A is emitted.
     public let premise: Set<FormalAttribute>
     /// The conclusion: `closure(premise) \ premise`. Always non-empty
     /// (sets with closure equal to themselves are concepts, not pseudo-intents,
@@ -127,10 +125,10 @@ public struct ConceptImplications: Sendable {
     /// Bounding:
     /// - `maxImplications`: hard cap on the number of emitted implications.
     ///   When reached, sets `isTruncated = true` and terminates early.
-    /// - `maxPremiseSize`: pseudo-intents with `|A| > maxPremiseSize` are
-    ///   skipped (not emitted, enumeration continues). This is a filter,
-    ///   not a terminator — `isTruncated` remains `false` unless the
-    ///   `maxImplications` cap is hit.
+    /// - `maxPremiseSize`: candidates larger than `maxPremiseSize` are
+    ///   never generated; the enumeration cap is `min(n, maxPremiseSize)`.
+    ///   `isTruncated` remains `false` for this limit; it is set only
+    ///   when `maxImplications` is reached.
     ///
     /// Empty context returns empty implications without truncation.
     ///

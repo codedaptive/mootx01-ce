@@ -34,8 +34,8 @@ pub fn run_theme_weather(
     let mut weighted: BTreeMap<String, f64> = BTreeMap::new();
     for d in &drawers {
         let elapsed = (now - d.filed_at).max(0) as f64;
-        *raw.entry(d.room.clone()).or_insert(0.0) += 1.0;
-        *weighted.entry(d.room.clone()).or_insert(0.0) +=
+        *raw.entry(d.parent_node_id.clone()).or_insert(0.0) += 1.0;
+        *weighted.entry(d.parent_node_id.clone()).or_insert(0.0) +=
             recency_weight(elapsed, half_life_seconds);
     }
 
@@ -51,6 +51,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use locus_kit::drawer::Drawer;
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -71,7 +72,12 @@ mod tests {
         (coord, h)
     }
 
-    fn capture_at(coord: &EstateCoordinator, h: &EstateHandle, room: &str, when: i64) {
+    fn capture_at(
+        coord: &EstateCoordinator,
+        h: &EstateHandle,
+        room: &str,
+        when: i64,
+    ) -> Drawer {
         let frame = CaptureFrame::new(
             "content",
             CaptureChannel::Typed,
@@ -80,7 +86,7 @@ mod tests {
             "alice",
             "test-v1",
         );
-        coord.capture(h, frame, when).unwrap();
+        coord.capture(h, frame, when).unwrap()
     }
 
     fn all() -> RecallFrame {
@@ -96,17 +102,25 @@ mod tests {
     #[test]
     fn ck_tw1_recent_room_is_rising() {
         let (coord, h) = coord_with_parent();
+        let mut rising_node = String::new();
         for _ in 0..3 {
-            capture_at(&coord, &h, "rising", NOW); // elapsed 0
+            let d = capture_at(&coord, &h, "rising", NOW); // elapsed 0
+            rising_node = d.parent_node_id;
         }
+        let mut fading_node = String::new();
         for _ in 0..3 {
-            capture_at(&coord, &h, "fading", 1_000); // elapsed 9000, heavily decayed
+            let d = capture_at(&coord, &h, "fading", 1_000); // elapsed 9000, heavily decayed
+            fading_node = d.parent_node_id;
         }
         let w = run_theme_weather(&coord, &h, all(), HALF_LIFE, NOW).expect("weather");
-        assert_eq!(w[0].category, "rising", "the recent room is hottest");
+        assert_eq!(w[0].category, rising_node, "the recent room is hottest");
         assert!(w[0].momentum > 0.0, "rising is heating");
         assert!(
-            w.iter().find(|m| m.category == "fading").unwrap().momentum < 0.0,
+            w.iter()
+                .find(|m| m.category == fading_node)
+                .unwrap()
+                .momentum
+                < 0.0,
             "fading is cooling"
         );
     }

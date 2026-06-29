@@ -203,8 +203,8 @@ struct FDCConformanceTests {
     ///
     /// `#filePath` resolves to this source file's absolute path at compile
     /// time. The fixture lives at rust/tests/fixtures/fdc_conformance.json
-    /// relative to the LatticeLib package root. We walk up four directories
-    /// from this test file (Tests/LatticeLibTests/ → Tests/ → package root)
+    /// relative to the LatticeLib package root. We walk up three directories
+    /// from this test file (LatticeLibTests/ → Tests/ → package root)
     /// then down to rust/tests/fixtures/.
     ///
     /// This avoids resource bundling (which would create a separate test

@@ -29,8 +29,9 @@ import MootGateway   // The MOOTx01 SDK product. Gives us MootBridge, GatewayRun
 // HOW MOOTx01 IS WIRED IN (the three touch points)
 // -------------------------------------------------
 //   1. At launch we point the process-wide GatewayRuntime at a durable SQLite
-//      estate (configure(databaseURL:)). This is the same estate the App
-//      Intents reach, so Siri/Shortcuts and our own UI share ONE MOOT.
+//      estate (configure(databaseURL:)). Calling bridge() registers the bridge
+//      with IntentRuntimeBridge; App Intents resolve through
+//      IntentRuntimeBridge.shared.bridge(), so Siri/Shortcuts and our UI share ONE MOOT.
 //   2. Our UI gets its bridge from GatewayRuntime.shared.bridge() — NOT a
 //      separate attach — so UI writes and intent writes land in the same MOOT.
 //   3. We seed sample data on first launch if the MOOT is empty.
@@ -93,11 +94,10 @@ struct MootTodoApp: App {
             let bridge = try await GatewayRuntime.shared.bridge()
             model.attach(bridge: bridge)
 
-            // STEP 4: First-launch sample data. We ask the MOOT whether it
-            // already knows about any todos. If a search comes back empty, this
-            // is a fresh estate, so we seed three sample todos — which flows
-            // through the exact same add() path a user tap would, mirroring each
-            // one into the MOOT. The app therefore has content out of the box.
+            // STEP 4: First-launch sample data. Searches for "TODO" with limit 1;
+            // if no matching row is found and todos are empty, seeds three sample
+            // todos. A MOOT with non-TODO content is not treated as fresh.
+            // Seed writes flow through the same add() path as user taps.
             await model.seedSampleDataIfEmpty()
         } catch {
             // If the MOOT fails to attach, the to-do list still works — the

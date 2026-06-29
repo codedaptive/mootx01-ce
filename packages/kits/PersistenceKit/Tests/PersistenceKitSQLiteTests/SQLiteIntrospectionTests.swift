@@ -110,8 +110,9 @@ struct SQLiteIntrospectionTests {
 
     @Test("walFrameCount is non-negative after open in WAL mode")
     func walFrameCountIsNonNegative() async throws {
-        // SQLiteStorage opens in WAL mode (PRAGMA journal_mode = WAL),
-        // so wal_checkpoint(PASSIVE) must succeed and return a non-negative frame count.
+        // SQLiteStorage opens in WAL mode (PRAGMA journal_mode = WAL).
+        // stats(now:) reads the WAL file size to derive walFrameCount; the value
+        // must be present (non-nil) and non-negative immediately after open.
         let storage = try makeStorage()
         try await storage.open(schema: Self.schema)
         defer { Task { await storage.close() } }

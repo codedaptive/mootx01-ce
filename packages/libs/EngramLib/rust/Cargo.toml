@@ -17,5 +17,9 @@ default = []
 simd-nightly = ["substrate-kernel/simd-nightly"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 substrate-kernel = { path = "../../SubstrateKernel/rust" }
 substrate-types = { path = "../../SubstrateTypes/rust" }
+
+[dev-dependencies]
+serde_json = "1"

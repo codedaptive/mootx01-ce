@@ -17,17 +17,11 @@
 //!
 //! ## Why a self-contained checkpoint queue (not the `queuekit` crate)
 //!
-//! The Swift pump uses the QueueKit package. The Rust `queuekit` crate enables
-//! serde_json's `preserve_order` feature; adding it to `vault-kit`'s graph
-//! would, through Cargo feature unification, turn `preserve_order` on for the
-//! WHOLE crate — which would break `CorpusDocument::canonical_json` and the
-//! `PalaceEnvelopePayload` canonical JSON, both of which require serde_json's
-//! default BTree-backed (key-sorted) `Value` for cross-language byte-equality.
-//! So the Rust port realizes the SAME maildir-style "queue is the checkpoint"
-//! semantics with a small dependency-free filesystem queue local to this
-//! module. The checkpoint guarantee (resume from disk, not from zero) is
-//! identical; only the implementation differs, as the two languages' ecosystem
-//! constraints require.
+//! The Swift pump uses the QueueKit package. The Rust port uses a small
+//! dependency-free filesystem queue local to this module, realizing the same
+//! maildir-style "queue is the checkpoint" semantics. The checkpoint guarantee
+//! (resume from disk, not from zero) is identical; only the implementation
+//! differs, as the two languages' ecosystem constraints differ.
 
 use crate::drawer_mapping::DrawerMapping;
 use crate::mcp_stdio_client::{McpClientError, McpStdioClient};
@@ -44,7 +38,8 @@ use std::path::{Path, PathBuf};
 pub struct PalacePumpItemResult {
     /// The note's `stable_source_key`.
     pub source_key: String,
-    /// The drawer id MemPalace assigned (or echoed); `None` only when the
+    /// The assigned noun id from MemPalace (drawer id, tunnel id, triple id,
+    /// or entry id depending on the noun written); `None` only when the
     /// write failed.
     pub drawer_id: Option<String>,
     /// True when a `get_drawer` fetch returned the content the pump wrote.
@@ -439,11 +434,40 @@ impl PalacePump {
     }
 
     /// Write one four-noun job's call and verify it by the noun's read tool.
+    ///
+    /// Security: the tool name is re-validated against the write-tool allowlist
+    /// before every invocation. A persisted payload whose `call.tool` names any
+    /// tool outside the four canonical write tools is rejected — never forwarded
+    /// to the MCP server — so a tampered queue job cannot invoke arbitrary
+    /// MemPalace tools during drain.
     fn process_item_job(
         &self,
         payload: &PalaceItemJobPayload,
         client: &mut McpStdioClient,
     ) -> Result<PalacePumpItemResult, PalacePumpError> {
+        // Allowlist check: only the four write tools are permitted. The name
+        // was embedded in the payload at enqueue time; validate before draining
+        // to guard against tampered queue files on disk.
+        const ALLOWED_WRITE_TOOLS: &[&str] = &[
+            palace_pump_mapping::ADD_DRAWER_TOOL,
+            palace_pump_mapping::CREATE_TUNNEL_TOOL,
+            palace_pump_mapping::KG_ADD_TOOL,
+            palace_pump_mapping::DIARY_WRITE_TOOL,
+        ];
+        if !ALLOWED_WRITE_TOOLS.contains(&payload.call.tool.as_str()) {
+            // Log to stderr and count as a failed item — not a hard error, to
+            // match the Swift pump's behaviour of continuing the drain.
+            eprintln!(
+                "vault-pump: refusing persisted tool '{}' for '{}' — not in write allowlist",
+                payload.call.tool, payload.source_id
+            );
+            return Ok(PalacePumpItemResult {
+                source_key: payload.source_id.clone(),
+                drawer_id: None,
+                verified: false,
+            });
+        }
+
         let args = serde_json::Value::Object(
             payload.call.arguments.clone().into_iter().collect(),
         );

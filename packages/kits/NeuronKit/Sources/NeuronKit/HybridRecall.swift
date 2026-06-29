@@ -84,11 +84,12 @@ public func hybridRecall(
     let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
     let stream = RecallStream(rows: reranked, pageSize: tuning.pageSize)
 
-    // Emit hybrid-recall telemetry at the operation boundary. The ts is
-    // caller-supplied epoch seconds per IntellectusLib's determinism contract.
-    // The `start` clock is read here (a factory-level side-effect), not inside
-    // the math engine. When monitoring is off (the default), the autoclosure is
-    // never evaluated — zero allocation, zero clock on the off-path.
+    // Emit hybrid-recall telemetry at the operation boundary. `start` is
+    // read from `Date().timeIntervalSince1970` here at the verb boundary
+    // (a factory-level side-effect), not inside the math engine, so the
+    // math stays deterministic. When monitoring is off (the default), the
+    // autoclosure is never evaluated — zero allocation, zero clock on the
+    // off-path.
     //
     // `neuronkit.recall.latency_ms`: wall time from verb call to rerank done.
     // `neuronkit.recall.candidate_count`: drawers returned by the estate verb.

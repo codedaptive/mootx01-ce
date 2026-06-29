@@ -30,6 +30,13 @@ pub struct ContextDocument {
 /// (active state, default wing/room)".
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DrawerRowMeta {
+    /// Parent node id — the node-tree anchor the summary names. The Swift engine
+    /// reads `LocusKit.Drawer.parentNodeId`; the Rust version accepts it as
+    /// parallel metadata. Drives `make_summary`'s "dominant node {id}".
+    pub parent_node_id: String,
+    /// Wing/room remain as vestigial metadata (the summary no longer reads them
+    /// after the node-tree migration; kept for parity with the Swift fixture,
+    /// which still carries them).
     pub wing: String,
     pub room: String,
     /// Whether the drawer is "currently believed" per the LocusKit
@@ -42,6 +49,7 @@ pub struct DrawerRowMeta {
 impl Default for DrawerRowMeta {
     fn default() -> Self {
         Self {
+            parent_node_id: "(no node)".to_string(),
             wing: "(no wing)".to_string(),
             room: "(no room)".to_string(),
             is_currently_believed: true,
@@ -86,22 +94,16 @@ fn meta_or_default(meta: &[DrawerRowMeta], idx: usize) -> DrawerRowMeta {
     meta.get(idx).cloned().unwrap_or_default()
 }
 
-/// One-line summary naming row count and dominant wing/room. Stable
-/// across runs.
+/// One-line summary naming row count and the dominant parent node. Stable
+/// across runs. Mirrors Swift `ContextSynthesisEngine.makeSummary`, which reads
+/// `Drawer.parentNodeId` (node-tree anchor) — not wing/room.
 pub fn make_summary(rows: &[DrawerRow], meta: &[DrawerRowMeta]) -> String {
     let count = rows.len();
-    let wings: Vec<String> = (0..rows.len())
-        .map(|i| meta_or_default(meta, i).wing)
+    let nodes: Vec<String> = (0..rows.len())
+        .map(|i| meta_or_default(meta, i).parent_node_id)
         .collect();
-    let rooms: Vec<String> = (0..rows.len())
-        .map(|i| meta_or_default(meta, i).room)
-        .collect();
-    let top_wing = most_frequent(&wings).unwrap_or_else(|| "(no wing)".to_string());
-    let top_room = most_frequent(&rooms).unwrap_or_else(|| "(no room)".to_string());
-    format!(
-        "{} drawers; dominant wing {}; dominant room {}.",
-        count, top_wing, top_room
-    )
+    let top_node = most_frequent(&nodes).unwrap_or_else(|| "(no node)".to_string());
+    format!("{} drawers; dominant node {}.", count, top_node)
 }
 
 /// Standard English stopwords excluded from pattern extraction. High-frequency
@@ -123,11 +125,17 @@ const STOPWORDS: &[&str] = &[
 /// True when `token` is a bare 4-digit year (1000–2999) or a pure numeric
 /// string — neither carries semantic meaning as a pattern. Mirrors Swift
 /// `ContextSynthesisEngine.isBareYearOrNumeric(_:)`.
+///
+/// Uses `char::is_numeric()` (Unicode numeric category: digits, superscripts,
+/// fractions, circled numerals, ...) to match Swift's `Character.isNumber`,
+/// which is the Unicode general category "Number". Using `is_ascii_digit()`
+/// (0-9 only) would silently pass through Unicode numeric tokens that Swift
+/// filters, causing cross-port divergence on non-ASCII input. (NK-3 planned hardening)
 fn is_bare_year_or_numeric(token: &str) -> bool {
-    if !token.chars().all(|c| c.is_ascii_digit()) {
+    if !token.chars().all(|c| c.is_numeric()) {
         return false;
     }
-    // All-digit strings of any length are pure numeric — exclude.
+    // All-numeric strings of any length are pure numeric — exclude.
     true
 }
 
@@ -267,9 +275,17 @@ mod tests {
 
     fn meta(wing: &str, room: &str, believed: bool) -> DrawerRowMeta {
         DrawerRowMeta {
+            parent_node_id: "(no node)".to_string(),
             wing: wing.to_string(),
             room: room.to_string(),
             is_currently_believed: believed,
+        }
+    }
+
+    fn meta_node(node: &str) -> DrawerRowMeta {
+        DrawerRowMeta {
+            parent_node_id: node.to_string(),
+            ..DrawerRowMeta::default()
         }
     }
 
@@ -290,12 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn summary_names_count_and_dominant_wing_and_room() {
+    fn summary_names_count_and_dominant_node() {
         let rows = vec![row("a"), row("b"), row("c")];
         let m = vec![
-            meta("alpha", "r1", true),
-            meta("alpha", "r2", true),
-            meta("beta", "r1", true),
+            meta_node("node-x"),
+            meta_node("node-x"),
+            meta_node("node-y"),
         ];
         let page = RecallPage {
             rows,
@@ -303,10 +319,7 @@ mod tests {
             is_last: true,
         };
         let doc = synthesize(&page, &m);
-        assert_eq!(
-            doc.summary,
-            "3 drawers; dominant wing alpha; dominant room r1."
-        );
+        assert_eq!(doc.summary, "3 drawers; dominant node node-x.");
     }
 
     #[test]

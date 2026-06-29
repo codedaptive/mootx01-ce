@@ -162,9 +162,9 @@ mod tests {
     /// and either the env-override path or the derived path fires.
     #[test]
     fn derive_returns_non_empty() {
-        // Remove the env var so we exercise the derived path.
-        // (If MOOTX01_BUILD_SERIAL happens to be set in the test environment,
-        // the override path fires — also fine; either is non-empty.)
+        // The env var is not removed before calling derive(). If MOOTX01_BUILD_SERIAL
+        // is already set in the test environment, the override path fires — also fine;
+        // either path returns a non-empty serial.
         let serial = derive();
         assert!(!serial.is_empty(), "derive() must return a non-empty serial");
     }

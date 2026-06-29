@@ -15,8 +15,10 @@ Use MOOTx01 as active memory, not passive notes.
 
 - Recall first for prior decisions, preferences, history, source material, and continuity.
 - Use `moot_recall_precise` for exact details and near-duplicates.
+- Use `moot_recall_shaped` for associative or conceptual recall modes.
+- Use `moot_recall_distilled` for compact factoid answers.
 - Use facts and lenses before expensive manual analysis.
 - Write back durable decisions, facts, links, corrections, and journals.
-- Run `moot_dream` after bulk import or major memory growth.
+- Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 - Disclose if MOOTx01 is unavailable.
 

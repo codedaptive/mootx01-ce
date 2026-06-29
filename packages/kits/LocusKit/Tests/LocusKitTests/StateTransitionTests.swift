@@ -60,8 +60,7 @@ struct StateTransitionTests {
         Drawer(
             id: id,
             content: "content-\(id)",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_700_000_000),
             embeddingModelID: "minilm-v6",
@@ -71,8 +70,8 @@ struct StateTransitionTests {
     }
 
     /// Count `bitmap_audit` rows scoped to a single drawer + adjective
-    /// column. Used to assert the audit-row delta of a single mutation
-    /// without depending on global row counts.
+    /// column. `bitmap_audit` is retired; this helper queries the old
+    /// table directly for backward-compatibility assertions only.
     private func adjectiveAuditCount(at url: URL, drawerId: String) throws -> Int {
         var handle: OpaquePointer?
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
@@ -95,9 +94,9 @@ struct StateTransitionTests {
     }
 
     /// Read the latest (changed_at DESC) bitmap_audit row's prior/new
-    /// pair for the adjective column of one drawer. Returns nil when
-    /// no row exists. Lets a single-mutation test assert the exact
-    /// bits flipped (bits 0–3) without column-index dance.
+    /// pair for the adjective column of one drawer. `bitmap_audit` is
+    /// retired; this helper is retained for any test that still reads
+    /// the old table. Returns nil when no row exists.
     private func latestAdjectiveAudit(
         at url: URL,
         drawerId: String
@@ -312,8 +311,8 @@ struct StateTransitionTests {
         #expect(fetched?.state == .withdrawn)
 
         // Two events now: the genesis capture, then the withdraw.
-        // The gate sealed both; afterBitmaps state nibble on the second
-        // is withdrawn (snapshot model, not bitmap_audit deltas).
+        // The gate sealed both; afterBitmaps 6-bit state field on the
+        // second is withdrawn (snapshot model, not bitmap_audit deltas).
         let count = try await auditEventCount(store, Self.idD1)
         #expect(count == 2)
         let events = try await store.auditEventsForRow(UUID(uuidString: Self.idD1)!)
@@ -344,7 +343,7 @@ struct StateTransitionTests {
 
         let fetched = try await store.getDrawer(id: Self.idD2)
         #expect(fetched?.state == .decayed)
-        // Upper nibbles unchanged.
+        // Upper bits (outside the 6-bit state field, mask ~0x3F) unchanged.
         let bitmap = fetched?.adjectiveBitmap ?? -1
         #expect(bitmap & ~Int64(0x3F) == upper)
         #expect(bitmap & 0x3F == Int64(State.decayed.rawValue))

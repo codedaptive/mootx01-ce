@@ -37,7 +37,7 @@
 
 import Foundation
 
-/// Canonical 5-byte key for a T-matrix cell. Field indices and
+/// Canonical key for a T-matrix cell, packed into a UInt64. Field indices and
 /// values fit in 6 bits each (the field-width floor I-15); lag
 /// bucket fits in 3 bits (8 buckets, 0..7).
 public struct CausalityKey: Hashable, Comparable, Sendable {

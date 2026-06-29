@@ -10,13 +10,11 @@
 //!   2. a `moot_file_memory` call accepts and routes the `impatient` arg (both
 //!      true and false / omitted) without error.
 //!
-//! NOTE ON SCOPE: these tests use `EstateRegistry::new_inmemory()` (the
-//! ephemeral default, row-only by design) to prove the `impatient` arg is
-//! advertised in the tool schema and correctly threaded through the dispatch
-//! layer to `capture_with_mode`. The in-memory estate registers no Corpus or
-//! VectorStore (row-only policy mirrors Swift AriaMCPMain.swift's explicit
-//! non-wiring for the in-memory backend), so both write modes degrade to
-//! row-only storage here — that is intentional, not a gap.
+//! NOTE ON SCOPE: these tests use `EstateRegistry::new_inmemory()` to prove
+//! the `impatient` arg is advertised in the tool schema and correctly threaded
+//! through the dispatch layer to `capture_with_mode`. The in-memory registry
+//! now wires semantic recall; sibling tests in this directory prove BM25/vector
+//! lanes are live for `new_inmemory()`. These tests cover arg routing only.
 //!
 //! The end-to-end proof that BM25 + vector recall lanes are live at the MCP
 //! dispatch surface for SQLite-backed estates is covered in the sibling file

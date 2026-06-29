@@ -35,10 +35,10 @@ public struct DriftOutput: Sendable, Equatable {
 /// `run_drift`.
 public enum Drift {
 
-    /// Measure room-distribution drift between drawers whose event time
-    /// is before `splitAt` and those at/after it. A window with no
-    /// drawers yields zero drift (nothing to compare). Read-only; a
-    /// recall failure propagates.
+    /// Measure parentNodeId-distribution drift between drawers whose
+    /// event time is before `splitAt` and those at/after it. A window
+    /// with no drawers yields zero drift (nothing to compare).
+    /// Read-only; a recall failure propagates.
     public static func run(
         kit: GeniusLocusKit,
         handle: EstateHandle,
@@ -55,9 +55,9 @@ public enum Drift {
             // differ; drifting on event time gives the semantically correct
             // "when did this happen" partition.
             if drawer.eventTime < splitAt {
-                before[drawer.room, default: 0] += 1
+                before[drawer.parentNodeId, default: 0] += 1
             } else {
-                after[drawer.room, default: 0] += 1
+                after[drawer.parentNodeId, default: 0] += 1
             }
         }
         let beforeCount = Int(before.values.reduce(0, +))

@@ -10,7 +10,7 @@ from .job import Job, ObservationStatus, ArtifactRef
 
 
 class QueueKit:
-    """Public facade. Four permanent methods: send/drain/watch/reply."""
+    """Public facade. Methods: send/drain/watch/reply/in_flight/completed."""
 
     def __init__(self, root: str | os.PathLike, node_id: int = 1):
         self.backend = FilesystemBackend(root, node_id=node_id)

@@ -208,4 +208,48 @@ struct ExploratoryRecallTests {
         // Seed excluded from ranked output.
         #expect(!out.results.contains(where: { $0.drawerID == Self.seedID }))
     }
+
+    // CK-4: steps clamped to maxWalkSteps — absurdly large step count degrades
+    // gracefully (completes with results) rather than running until OOM/timeout.
+    @Test("CK-4: oversized steps clamped to maxWalkSteps")
+    func ck4OversizedStepsClamped() async throws {
+        let (kit, handle) = try await openEstate()
+        try await addEdge(kit, handle, src: Self.seedID, tgt: Self.aID)
+        try await addEdge(kit, handle, src: Self.aID,    tgt: Self.seedID)
+
+        // Pass Int.max steps — would take O(Int.max) CPU without the CK-4 clamp.
+        // The test asserts the call completes (clamp engaged) and produces a result.
+        let input = ExploratoryRecall.Input(
+            wing: Self.wing,
+            seedDrawerID: Self.seedID,
+            steps: Int.max,
+            k: 0)
+        let recipe = ExploratoryRecall()
+        let out = try await recipe.run(input: input, estate: handle, kit: kit)
+        // A is reachable: the walk ran with clamped steps, not Int.max steps.
+        #expect(out.results.contains(where: { $0.drawerID == Self.aID }),
+                "A must be reachable with clamped steps")
+    }
+
+    // CK-4: restartProbability ≥ 1.0 clamped to 0.999 — prevents infinite
+    // teleport loops in the walk engine (every step would teleport home,
+    // leaving visitedCount == 1 (seed only) and no progress through the graph).
+    @Test("CK-4: restartProbability >= 1.0 clamped to 0.999")
+    func ck4RestartProbabilityAtOneClamped() async throws {
+        let (kit, handle) = try await openEstate()
+        try await addEdge(kit, handle, src: Self.seedID, tgt: Self.aID)
+        try await addEdge(kit, handle, src: Self.aID,    tgt: Self.seedID)
+
+        let input = ExploratoryRecall.Input(
+            wing: Self.wing,
+            seedDrawerID: Self.seedID,
+            steps: 1_000,
+            restartProbability: 1.0,   // always-teleport without the clamp
+            k: 0)
+        let recipe = ExploratoryRecall()
+        // Must complete without hanging; visitedCount > 0 confirms the engine ran.
+        let out = try await recipe.run(input: input, estate: handle, kit: kit)
+        #expect(out.visitedCount > 0,
+                "walk must complete with clamped restart probability")
+    }
 }

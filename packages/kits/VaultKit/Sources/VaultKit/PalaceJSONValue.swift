@@ -25,8 +25,10 @@ import Foundation
 // ``PalacePayloadEnvelope`` for the codec that uses it.
 
 /// A loosely-typed JSON value carrying one envelope field. `Codable` with
-/// canonical output; `Equatable` so round-trip vectors assert
-/// `decode(encode(x)) == x`.
+/// standard JSON encoding; `Equatable` so round-trip vectors assert
+/// `decode(encode(x)) == x`. Canonical key ordering and slash behavior are
+/// the responsibility of the codec that wraps this type (see
+/// `PalacePayloadEnvelope.canonicalFieldsJSON`).
 public enum PalaceJSONValue: Codable, Sendable, Equatable {
     case null
     case bool(Bool)

@@ -248,4 +248,23 @@ mod tests {
         let state = classify_lattice_code("100", &HashSet::new());
         assert_eq!(state, LatticeCodeState::Pending("100".to_string()));
     }
+
+    #[test]
+    fn lattice_code_state_wire_shape_conformance() {
+        // Locks the wire shape: internally-tagged enum with "state" discriminator
+        // and "code" content. This is the canonical cross-language format; both
+        // Swift (via explicit CodingKeys) and Rust (via serde attributes) must
+        // produce byte-identical JSON for the same variant+value.
+        let pending = LatticeCodeState::Pending("999.42".to_string());
+        let json = serde_json::to_string(&pending).expect("serialize");
+        assert_eq!(json, r#"{"state":"pending","code":"999.42"}"#);
+
+        let known = LatticeCodeState::Known("540".to_string());
+        let json = serde_json::to_string(&known).expect("serialize");
+        assert_eq!(json, r#"{"state":"known","code":"540"}"#);
+
+        let malformed = LatticeCodeState::Malformed("xyz".to_string());
+        let json = serde_json::to_string(&malformed).expect("serialize");
+        assert_eq!(json, r#"{"state":"malformed","code":"xyz"}"#);
+    }
 }

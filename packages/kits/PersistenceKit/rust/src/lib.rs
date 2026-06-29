@@ -26,16 +26,21 @@ pub mod cache_invalidator;
 pub mod caching_row_store;
 pub mod encryption;
 pub mod error;
+// gc_pin and snapshot_registry types accessed via module path (like replication).
+pub mod gc_pin;
 pub mod generated_column;
+pub mod hashing_row_store;
 pub mod inmemory;
 pub mod introspection;
 pub mod observer;
 pub mod postgres;
+pub mod postgres_tls;
 pub mod predicate;
 pub mod incremental_replication;
 pub mod replication;
 pub mod row_store;
 pub mod schema;
+pub mod snapshot_registry;
 pub mod sqlite;
 pub mod storage;
 // cp-persistencekit-report (2026-06-06): self-report telemetry via IntellectusLib.
@@ -48,7 +53,8 @@ pub use audit_log::*;
 pub use blob_store::*;
 pub use cache_config::*;
 pub use cache_invalidator::CacheInvalidator;
-pub use caching_row_store::CachingRowStore;
+pub use caching_row_store::{CachingRowStore, ParentChainProvider};
+pub use hashing_row_store::{HashingRowStore, HashOnWriteConfig, ContentHashProvider, HashParentChainProvider};
 pub use encryption::{
     ensure_install_key, AeadProvider, AesGcmAeadProvider, EncryptionMode, EstateEncryptionConfig,
     RowCrypto, INSTALL_KEY_FILE,

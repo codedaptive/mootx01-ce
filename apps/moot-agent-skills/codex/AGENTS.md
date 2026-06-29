@@ -35,11 +35,13 @@ Reach for MOOTx01 when the user asks about:
 2. Use `moot_read_journal` to resume continuity.
 3. Use `moot_memory_search` for broad recall.
 4. Use `moot_recall_precise` for exact paths, versions, names, numbers, dates, and near-duplicates.
-5. Use `moot_fact_search` for structured facts.
-6. Use `moot_list_lenses`, `moot_lens_*`, and `moot_synthesize` for analysis before loading many memories into context.
-7. Use `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal` to persist durable knowledge.
-8. Use correction tools instead of silently rewriting history.
-9. Run `moot_dream` after bulk import or major memory growth.
+5. Use `moot_recall_shaped` for associative, conceptual, or other fusion-steered recall.
+6. Use `moot_recall_distilled` for compact factoid answers from the distilled tier.
+7. Use `moot_fact_search` for structured facts.
+8. Use `moot_list_lenses`, `moot_lens_*`, and `moot_synthesize` for analysis before loading many memories into context.
+9. Use `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal` to persist durable knowledge.
+10. Use correction tools instead of silently rewriting history.
+11. Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
 If MOOTx01 is unavailable, say so plainly and answer only from current context.
 

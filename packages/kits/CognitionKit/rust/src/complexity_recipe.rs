@@ -6,8 +6,10 @@
 //! `neuron_kit::complexity`. Read-only (B-6, I-6).
 //!
 //! Paired with `Sources/CognitionKit/Complexity.swift`. Supported field
-//! names: "room", "wing", "addedBy", "embeddingModelID". Unknown fields
-//! are mapped to "_unknown" (B-8 total-over-edge-input posture).
+//! names: "room", "wing", "addedBy", "embeddingModelID". Both "room" and
+//! "wing" resolve to `parent_node_id` (display names are resolved from
+//! the node tree by the caller). Unknown fields are mapped to "_unknown"
+//! (B-8 total-over-edge-input posture).
 
 use std::collections::HashMap;
 
@@ -32,10 +34,16 @@ pub struct ComplexityOutput {
 /// Extract the `field` value from a recalled drawer. Supported fields:
 /// "room", "wing", "addedBy", "embeddingModelID". Unknown field → "_unknown"
 /// (B-8: total behaviour over edge inputs rather than panic).
+///
+/// Both "room" and "wing" resolve to `parent_node_id` — display names are
+/// resolved from the node tree by the caller. For within-estate entropy
+/// analysis, grouping by node ID is semantically correct.
 fn field_value<'a>(drawer: &'a Drawer, field: &str) -> &'a str {
     match field {
-        "room" => &drawer.room,
-        "wing" => &drawer.wing,
+        // Both room and wing are now resolved from the node tree via
+        // parent_node_id. The Drawer no longer carries denormalized
+        // display names.
+        "room" | "wing" => &drawer.parent_node_id,
         "addedBy" => &drawer.added_by,
         "embeddingModelID" => &drawer.embedding_model_id,
         _ => "_unknown",
@@ -183,8 +191,10 @@ mod tests {
 
         let out = run_complexity(&coord, &h, unconfirmed(), "room", Some("wing"), NOW).unwrap();
         assert!(out.result.entropy_b.is_some(), "entropy_b present for field_b");
-        // With only one estate owner, all drawers share the same wing, so
-        // joint distribution is well-defined.
+        // The implementation maps both "room" and "wing" to drawer.parent_node_id;
+        // the fixture captures drawers in different rooms, so the second field is
+        // not a shared estate owner/wing value. The test only asserts that mutual
+        // information is present.
         assert!(out.result.mutual_information.is_some());
     }
 

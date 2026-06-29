@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-17
-version: 1.0.2
+date: 2026-06-25
+version: 1.3.1
 description: Public API surface for QueueKit in both the Swift and Rust ports.
 spec_type: kit
 package: QueueKit
@@ -10,7 +10,7 @@ languages: [swift, rust, python]
 relates_to:
   - QUEUEKIT_SPEC.md  (the contract this interface implements)
 purpose: |
-  Public API surface of QueueKit: the QueueKit facade and its four
+  Public API surface of QueueKit: the QueueKit Interface and its four
   operations (send/drain/watch/reply) plus inFlight/completed, the
   QueueBackend protocol and its three conformances (Filesystem,
   PersistenceKit-backed, InMemory), the Job model and its supporting
@@ -26,7 +26,7 @@ purpose: |
 
 **Swift:** `packages/kits/QueueKit/`
 
-- `Sources/QueueKit/QueueKit.swift` — the `QueueKit` facade
+- `Sources/QueueKit/QueueKit.swift` — the `QueueKit` Interface
   (send/drain/watch/reply, inFlight/completed), maildir management,
   `staleTmpThreshold`
 - `Sources/QueueKit/QueueBackend.swift` — the `QueueBackend` protocol
@@ -68,7 +68,7 @@ ConvergenceKit (SPEC § 3, § 8).
 
 ## § 2 — Public types
 
-### `QueueKit` (facade)
+### `QueueKit` (Interface)
 
 The public entry point; mounts one backend and delegates to it
 (SPEC § 1, § 3).
@@ -97,7 +97,7 @@ public let staleTmpThreshold: TimeInterval   // 5 * 60
 ```
 
 **Rust:** the crate exposes the backends directly (`FilesystemBackend`,
-`PersistenceKitBackend`); there is no separate facade wrapper. Callers
+`PersistenceKitBackend`); there is no separate Interface wrapper. Callers
 hold a `Box<dyn QueueBackend>` and call the trait methods of § 3.
 
 ### `QueueBackend` (protocol)
@@ -145,9 +145,14 @@ pub struct Job {
 
 String-wrapping value types (SPEC § 4). `JobID.generate()` mints a
 UUID as 32 lowercase hex chars (no hyphens); `SessionID.mint()` is
-minted by the backend at claim time per claimed job; `StreamID` is
-URL-safe, ≤ 64 chars; `ToolName` names a tool for allowlist validation
-(SPEC § 9).
+minted by the backend at claim time. Session granularity is
+backend-specific: the **PersistenceKit** backend mints ONE session per
+`drainAvailable()` pass — every job claimed in that pass shares it as a
+claim-group handle, which `completeSession(_:status:)` retires in one
+update (SPEC I-3 / B-4a). The **Filesystem** backend mints one session
+per claimed file (its claim is a per-file `rename`, with no batch group),
+and offers no `completeSession`. `StreamID` is URL-safe, ≤ 64 chars;
+`ToolName` names a tool for allowlist validation (SPEC § 9).
 
 **Swift:**
 
@@ -352,6 +357,10 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
     public let storage: any Storage
     public init(storage: any Storage)
     public static func openSchema(on storage: any Storage) async throws
+    // Inherent (not on QueueBackend): single-pass batch completion — retire every
+    // cur job of one batch session in one update. SPEC B-4a. Interface: reply(session:).
+    @discardableResult
+    public func completeSession(_ session: SessionID, status: ObservationStatus) async throws -> Int
 }
 ```
 
@@ -361,11 +370,16 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
 pub struct FilesystemBackend { /* ... */ }
 impl FilesystemBackend { pub fn new(root: impl Into<PathBuf>, node_id: i32) -> Result<Self, QueueError>; }
 // feature = "persistencekit": pub struct PersistenceKitBackend; (behaviour-conformant)
+impl PersistenceKitBackend {
+    // Inherent single-pass batch completion (SPEC B-4a) — O(N), not N×O(N).
+    pub fn complete_session(&self, session: &SessionId, status: ObservationStatus)
+        -> Result<usize, QueueError>;
+}
 ```
 
 ## § 3 — Public functions
 
-### The four operations + inspection reads (`QueueKit` facade)
+### The four operations + inspection reads (`QueueKit` Interface)
 
 Behavioral contracts: SPEC § 5, B-1…B-5.
 
@@ -374,7 +388,8 @@ Behavioral contracts: SPEC § 5, B-1…B-5.
 ```swift
 extension QueueKit {
     public func send(_ job: Job) async throws                       // SPEC B-1
-    public func drain() async throws -> [(job: Job, sessionID: SessionID)]   // SPEC B-2
+    public func drain() async throws -> [(job: Job, sessionID: SessionID)]   // SPEC B-2 (all streams)
+    public func drain(stream: StreamID) async throws -> [(job: Job, sessionID: SessionID)]  // ADR-021 D7 — stream-scoped claim
     public func watch(handler: @escaping @Sendable (Job, SessionID) async throws -> Void) async throws  // SPEC B-3
     // watch() (FilesystemBackend + PersistenceKitBackend, both ports): drains
     // pre-existing jobs FIRST (before awaiting events), then on each wake drains
@@ -383,7 +398,11 @@ extension QueueKit {
     // may be dropped while a serializable claim contends with concurrent inserts;
     // a once-per-event drain would strand the rows whose wake was coalesced away.
     public func reply(to jobID: JobID, status: ObservationStatus, artifacts: [ArtifactRef]) async throws // SPEC B-4
+    @discardableResult
+    public func reply(session: SessionID, status: ObservationStatus) async throws -> Int  // SPEC B-4a (single-pass batch completion)
     public func inFlight() async throws -> [Job]                    // SPEC B-5
+    public func pendingCount() async throws -> Int                  // depth probe (new/ frontier, all streams)
+    public func pendingCount(stream: StreamID) async throws -> Int  // ADR-021 D7 — per-stream depth probe
     public func completed(streamID: StreamID? = nil) async throws -> [Job]   // SPEC B-5
     public func awaitDrain(pollInterval: Duration = .milliseconds(20),
                            timeout: Duration = .seconds(30)) async throws    // await-empty latch
@@ -392,6 +411,16 @@ extension QueueKit {
 
 `reply` rejects a non-terminal status with `invalidTerminalStatus`
 before any storage mutation (SPEC § 4, I-7).
+
+`reply(session:status:)` is the single-pass batch-completion twin of the
+single-pass claim (SPEC I-3 / B-4a): it retires every still-`cur` job stamped
+with one batch session in ONE update and returns the count completed — O(N)
+instead of the O(N²) of N per-job `reply()` calls. It delegates to the
+PersistenceKit backend's inherent `completeSession(_:status:)` (Rust
+`complete_session`); on a backend without that fast path it returns `0`, and
+the caller falls back to per-job `reply()`. It is the completion half of the
+bulk-import path (the claim half is `drainAvailable`, which tags a whole drained
+batch with one session). Non-terminal status is rejected as in `reply`.
 
 `awaitDrain(pollInterval:timeout:)` is an await-empty latch: it blocks
 until BOTH frontiers are clear — `pendingCount() == 0` (nothing waiting
@@ -413,8 +442,8 @@ equivalent. The await-empty contract is expressible over the existing
 
 ### `QueueBackend` protocol methods
 
-The contract the facade delegates to (SPEC § 4). Backend method names
-are `write`/`drainAvailable`/`watch`/`complete` (the facade renames the
+The contract the Interface delegates to (SPEC § 4). Backend method names
+are `write`/`drainAvailable`/`watch`/`complete` (the Interface renames the
 public verbs to send/drain/watch/reply).
 
 **Swift:**
@@ -702,6 +731,39 @@ These types are present in the Swift port only. They are legitimately one-langua
 *End of QueueKit Interface.*
 
 ## Changelog
+
+### 1.3.1 -- 2026-06-25
+Additive `DrainLease` (ADR-021 Decision 7, T2): a stream-keyed heartbeat-TTL
+drain lease (Swift `DrainLease` / Rust `drain_lease::DrainLease`) so multiple
+consumers sharing one per-estate queue each hold an independent
+per-(estate, stream) lease (`<dir>/<stream>.drain.lease`) — exactly one drainer
+per stream, while different streams hold leases concurrently. TTL 15 s,
+heartbeat 5 s; `now` injected for deterministic tests; atomic temp+rename write
+with write-then-re-read race resolution. Filesystem form (SQLite-first); the
+Postgres-estate DB-backed lease is deferred. Consumers rewire onto it in T4/T5.
+
+### 1.3.0 -- 2026-06-25
+Additive stream-scoped drain (ADR-021 Decision 7, T1). Interface gains
+`drain(stream:)` and `pendingCount(stream:)`; the `QueueBackend` protocol/trait
+gains `drainAvailable(stream:)`/`pendingCount(stream:)` (Rust:
+`drain_available_for_stream`/`pending_count_for_stream`) with defaults that
+delegate to the all-streams versions (single-stream back-compat). PK overrides
+use the `(stream_id, status)` index; Filesystem overrides decode each `new/`
+file in place and claim only matching-stream files (never touching other
+streams, so concurrent per-stream drainers don't collide). Lets many consumers
+share one per-estate queue. No byte-identity change.
+
+### 1.2.0 -- 2026-06-25
+Additive (T6 — drain status): `QueueKit.pendingCount() -> Int` (Swift) /
+`pending_count() -> usize` (Rust) — a public passthrough to the backend's
+`pendingCount`, mirroring the existing public `inFlight()` probe. Lets a status
+reader observe queue depth (`pendingCount() + inFlight().count` = total
+outstanding work) without claiming or draining. No change to the `QueueBackend`
+protocol/trait (which already carried `pendingCount`), the backends, or
+byte-identity.
+
+### 1.1.0 -- 2026-06-23
+Added the single-pass batch-completion surface (SPEC B-4a): `QueueKit.reply(session:status:) -> Int` on the Interface and the inherent `PersistenceKitBackend.completeSession(_:status:)` / `complete_session` it delegates to. Documented that `drainAvailable` now claims single-pass (one bulk update under one batch session; SPEC I-3) so a drained batch shares one session and can be completed in one update. PersistenceKit-backend optimization; no change to the `QueueBackend` protocol/trait, the Filesystem backend, or byte-identity.
 
 ### 1.0.2 -- 2026-06-17
 Rust `QueueBackend` brought to Swift parity on compile-enforcement: `pending_count` and `watch` are now required trait methods with NO default (a backend that forgets either fails to COMPILE, not at runtime). Replaced the stale "Default impl returns BackendUnavailable" trait-excerpt comment and listed `pending_count` in the excerpt. No behaviour change for either production backend (FilesystemBackend, PersistenceKitBackend already implement both); no signature change.

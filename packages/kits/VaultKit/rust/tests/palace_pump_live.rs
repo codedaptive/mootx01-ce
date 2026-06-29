@@ -97,12 +97,16 @@ fn live_pump_to_scratch_palace_verifies_every_item() {
     let (coord, handle) = open_estate();
     capture_small_estate(&coord, &handle);
 
-    // The env-prefixed launch command points MemPalace at the scratch palace.
-    let command = format!(
-        "MEMPALACE_PALACE_PATH={} mempalace-mcp",
-        palace.display()
-    );
-    let mut client = McpStdioClient::connect(&command).expect("connect to scratch mempalace");
+    // Spawn MemPalace with an explicit argv vector (no shell) — the palace path
+    // rides as an env var so no metacharacter in the path can escape into a
+    // shell argument position.
+    let palace_str = palace.to_string_lossy();
+    let mut client = McpStdioClient::connect(
+        "mempalace-mcp",
+        &["--palace", &palace_str],
+        &[("MEMPALACE_PALACE_PATH", &palace_str)],
+    )
+    .expect("connect to scratch mempalace");
     let mut queue = CheckpointQueue::mount(&queue_root).expect("mount checkpoint queue");
     let pump = PalacePump::new(Duration::from_millis(0));
 

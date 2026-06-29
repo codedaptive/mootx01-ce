@@ -744,9 +744,9 @@ struct EstateProvisionSQLiteTests {
 /// T14–T18: ADR-016 §1 + §2 — seven default wings are seeded at provision.
 ///
 /// Every provisioned estate (any kind) has seven wings, each carrying a
-/// `_charter` drawer that describes the wing's role. The default wing for
-/// `capture` is "Agentic Memory". Charter drawers carry the "none" embedding
-/// sentinel so they are excluded from the semantic recall pipeline.
+/// hint drawer (AI_Charter_Hint room) that describes the wing's role. The
+/// default wing for `capture` is "Agentic Memory". Hint drawers are normal
+/// drawers — embedded and recalled like any other drawer.
 @Suite("ADR-016 — Default Wing Seeding at Provision")
 struct ADR016DefaultWingSeedingTests {
 
@@ -763,19 +763,21 @@ struct ADR016DefaultWingSeedingTests {
 
         let estate = try await kit.estate(for: handle)
         let allDrawers = try await estate.allDrawers()
-        let wingNames = Set(allDrawers.map(\.wing))
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: allDrawers.map(\.parentNodeId))
+        let wingNames = Set(nodeNames.values.map(\.wing))
 
         let expectedWings = Set(LocusKit.defaultWings.map(\.name))
         #expect(wingNames == expectedWings,
             "provision must seed exactly the 7 default wing names; got \(wingNames)")
     }
 
-    // MARK: - T15: each wing has a _charter drawer
+    // MARK: - T15: each wing has a hint drawer in AI_Charter_Hint room
 
-    /// Each of the 7 default wings has exactly one charter drawer in the
-    /// reserved `_charter` room, confirming wings are created by charter filing.
+    /// Each of the 7 default wings has exactly one hint drawer in the
+    /// `AI_Charter_Hint` room, confirming wings are created by hint filing.
     @Test
-    func eachDefaultWingHasOneCharterDrawer() async throws {
+    func eachDefaultWingHasOneHintDrawer() async throws {
         let kit = GeniusLocusKit()
         let storage = makeStorage()
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
@@ -783,16 +785,19 @@ struct ADR016DefaultWingSeedingTests {
 
         let estate = try await kit.estate(for: handle)
         let allDrawers = try await estate.allDrawers()
-        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+        let hints = allDrawers.filter { $0.addedBy == LocusKit.hintAddedBy }
 
-        #expect(charters.count == LocusKit.defaultWings.count,
-            "must have one charter drawer per default wing; got \(charters.count)")
+        #expect(hints.count == LocusKit.defaultWings.count,
+            "must have one hint drawer per default wing; got \(hints.count)")
+
+        // Resolve display names so we can verify each wing has exactly one hint drawer.
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: hints.map(\.parentNodeId))
 
         // Every default wing name must appear exactly once.
         for wing in LocusKit.defaultWings {
-            let wingCharters = charters.filter { $0.wing == wing.name }
-            #expect(wingCharters.count == 1,
-                "wing '\(wing.name)' must have exactly 1 charter drawer; got \(wingCharters.count)")
+            let wingHints = hints.filter { nodeNames[$0.parentNodeId]?.wing == wing.name }
+            #expect(wingHints.count == 1,
+                "wing '\(wing.name)' must have exactly 1 hint drawer; got \(wingHints.count)")
         }
     }
 
@@ -818,17 +823,20 @@ struct ADR016DefaultWingSeedingTests {
             embeddingModelID: "test-v1"
         )
         let drawer = try await kit.capture(handle, frame)
-        #expect(drawer.wing == LocusKit.defaultWingName,
+        let estate = try await kit.estate(for: handle)
+        let names = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        let wingName = names[drawer.parentNodeId]?.wing ?? ""
+        #expect(wingName == LocusKit.defaultWingName,
             "capture without explicit wing must land in defaultWingName")
     }
 
-    // MARK: - T17: charter drawers carry the "none" embedding sentinel
+    // MARK: - T17: hint drawers do NOT carry the "none" embedding sentinel
 
-    /// Charter drawers are structural metadata, not semantic content — they
-    /// carry embeddingModelID = "none" so they are excluded from the encode
-    /// pipeline (reindexMissing, enqueueEncodeJob).
+    /// Hint drawers are normal content — they must NOT carry embeddingModelID == "none".
+    /// They carry a real model ID (or "estate-provision" as a non-"none" fallback if no
+    /// corpus is wired at provision time). The encode pipeline embeds them normally.
     @Test
-    func charterDrawersCarryNoneEmbeddingSentinel() async throws {
+    func hintDrawersDoNotCarryNoneEmbeddingSentinel() async throws {
         let kit = GeniusLocusKit()
         let storage = makeStorage()
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: glkParams())
@@ -836,11 +844,11 @@ struct ADR016DefaultWingSeedingTests {
 
         let estate = try await kit.estate(for: handle)
         let allDrawers = try await estate.allDrawers()
-        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+        let hints = allDrawers.filter { $0.addedBy == LocusKit.hintAddedBy }
 
-        for charter in charters {
-            #expect(charter.embeddingModelID == LocusKit.charterEmbeddingModelID,
-                "charter drawer for '\(charter.wing)' must have embeddingModelID == 'none'")
+        for hint in hints {
+            #expect(hint.embeddingModelID != "none",
+                "hint drawer '\(hint.id)' must NOT have embeddingModelID == 'none'; got '\(hint.embeddingModelID)'")
         }
     }
 
@@ -861,7 +869,9 @@ struct ADR016DefaultWingSeedingTests {
 
             let estate = try await kit.estate(for: handle)
             let allDrawers = try await estate.allDrawers()
-            let wingNames = Set(allDrawers.map(\.wing))
+            let nodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: allDrawers.map(\.parentNodeId))
+            let wingNames = Set(nodeNames.values.map(\.wing))
             let expectedWings = Set(LocusKit.defaultWings.map(\.name))
             #expect(wingNames == expectedWings,
                 "\(name) provision must seed all 7 default wings; got \(wingNames)")
@@ -880,7 +890,7 @@ struct ADR016DefaultWingSeedingTests {
 /// "estate map:" empty). The fix adds `seedDefaultWings` — a public, idempotent
 /// method on GeniusLocusKit — and calls it from ServeCommand after `wireGLKSubstores`.
 ///
-/// T19: Serve-style open + seedDefaultWings yields exactly 7 wings each with a _charter.
+/// T19: Serve-style open + seedDefaultWings yields exactly 7 wings each with a hint drawer.
 /// T20: Calling seedDefaultWings twice (idempotency) still yields exactly 7 wings.
 /// T21: seedDefaultWings on a provision-created estate is a no-op (still 7 wings, no duplicates).
 @Suite("ADR-016 — Serve-Path Wing Seeding (seedDefaultWings)")
@@ -889,7 +899,7 @@ struct ServePathWingSeedingTests {
     // MARK: - T19: bare open + seedDefaultWings produces 7 wings
 
     /// A serve-style open (Estate.create → kit.open) followed by seedDefaultWings
-    /// must produce exactly 7 wings, each with one `_charter` drawer.
+    /// must produce exactly 7 wings, each with one hint drawer (AI_Charter_Hint room).
     ///
     /// This is the exact flow that `mootx01 serve` executes after this fix:
     ///   1. LocusKit.Estate.create (raw create — no provision, no wing seeding)
@@ -915,30 +925,32 @@ struct ServePathWingSeedingTests {
         // The fix: seedDefaultWings seeds the 7 default wings idempotently.
         try await kit.seedDefaultWings(for: handle, now: now)
 
-        // After seeding: exactly 7 wings each with one _charter drawer.
+        // After seeding: exactly 7 wings each with one hint drawer (AI_Charter_Hint room).
         let estateAfter = try await kit.estate(for: handle)
         let allDrawers = try await estateAfter.allDrawers()
-        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+        let hints = allDrawers.filter { $0.addedBy == LocusKit.hintAddedBy }
 
-        let wingNames = Set(charters.map(\.wing))
+        // Resolve display names to verify wing assignment.
+        let nodeNames = try await estateAfter.resolveNodeNames(parentNodeIds: hints.map(\.parentNodeId))
+        let wingNames = Set(hints.compactMap { nodeNames[$0.parentNodeId]?.wing })
         let expectedWings = Set(LocusKit.defaultWings.map(\.name))
         #expect(wingNames == expectedWings,
             "seedDefaultWings must produce exactly the 7 default wing names; got \(wingNames)")
-        #expect(charters.count == LocusKit.defaultWings.count,
-            "must have exactly one charter drawer per wing; got \(charters.count)")
+        #expect(hints.count == LocusKit.defaultWings.count,
+            "must have exactly one hint drawer per wing; got \(hints.count)")
 
-        // Verify each wing has exactly one charter.
+        // Verify each wing has exactly one hint drawer.
         for wing in LocusKit.defaultWings {
-            let wingCharters = charters.filter { $0.wing == wing.name }
-            #expect(wingCharters.count == 1,
-                "wing '\(wing.name)' must have exactly 1 charter after seedDefaultWings; got \(wingCharters.count)")
+            let wingHints = hints.filter { nodeNames[$0.parentNodeId]?.wing == wing.name }
+            #expect(wingHints.count == 1,
+                "wing '\(wing.name)' must have exactly 1 hint drawer after seedDefaultWings; got \(wingHints.count)")
         }
     }
 
     // MARK: - T20: idempotency — calling seedDefaultWings twice does not duplicate charters
 
     /// Calling seedDefaultWings twice on the same estate must NOT produce duplicate
-    /// charter drawers. After two calls: still exactly 7 wings, one charter each.
+    /// hint drawers. After two calls: still exactly 7 wings, one hint drawer each.
     ///
     /// This is the serve restart scenario: process exits, restarts, opens the same
     /// estate, calls seedDefaultWings again — must be a no-op on the second call.
@@ -960,16 +972,18 @@ struct ServePathWingSeedingTests {
 
         let estate = try await kit.estate(for: handle)
         let allDrawers = try await estate.allDrawers()
-        let charters = allDrawers.filter { $0.room == LocusKit.charterRoom }
+        let hints = allDrawers.filter { $0.addedBy == LocusKit.hintAddedBy }
 
         // Still exactly 7 wings — no duplicates from the second call.
-        #expect(charters.count == LocusKit.defaultWings.count,
-            "seedDefaultWings called twice must not produce duplicate charters; got \(charters.count)")
+        #expect(hints.count == LocusKit.defaultWings.count,
+            "seedDefaultWings called twice must not produce duplicate hint drawers; got \(hints.count)")
 
+        // Resolve display names to verify per-wing hint drawer uniqueness.
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: hints.map(\.parentNodeId))
         for wing in LocusKit.defaultWings {
-            let wingCharters = charters.filter { $0.wing == wing.name }
-            #expect(wingCharters.count == 1,
-                "wing '\(wing.name)' must still have exactly 1 charter after second seedDefaultWings; got \(wingCharters.count)")
+            let wingHints = hints.filter { nodeNames[$0.parentNodeId]?.wing == wing.name }
+            #expect(wingHints.count == 1,
+                "wing '\(wing.name)' must still have exactly 1 hint drawer after second seedDefaultWings; got \(wingHints.count)")
         }
     }
 
@@ -992,19 +1006,19 @@ struct ServePathWingSeedingTests {
 
         let estateBefore = try await kit.estate(for: handle)
         let drawersBefore = try await estateBefore.allDrawers()
-        let chartersBefore = drawersBefore.filter { $0.room == LocusKit.charterRoom }
-        #expect(chartersBefore.count == LocusKit.defaultWings.count,
-            "provision must have seeded exactly 7 charters")
+        let hintsBefore = drawersBefore.filter { $0.addedBy == LocusKit.hintAddedBy }
+        #expect(hintsBefore.count == LocusKit.defaultWings.count,
+            "provision must have seeded exactly 7 hint drawers")
 
         // Calling seedDefaultWings on a fully-seeded estate must be a complete no-op.
         try await kit.seedDefaultWings(for: handle, now: now)
 
         let estateAfter = try await kit.estate(for: handle)
         let drawersAfter = try await estateAfter.allDrawers()
-        let chartersAfter = drawersAfter.filter { $0.room == LocusKit.charterRoom }
+        let hintsAfter = drawersAfter.filter { $0.addedBy == LocusKit.hintAddedBy }
 
-        // Charter count must be unchanged — no duplicates added.
-        #expect(chartersAfter.count == chartersBefore.count,
-            "seedDefaultWings on a provisioned estate must add 0 charters; before=\(chartersBefore.count), after=\(chartersAfter.count)")
+        // Hint drawer count must be unchanged — no duplicates added.
+        #expect(hintsAfter.count == hintsBefore.count,
+            "seedDefaultWings on a provisioned estate must add 0 hint drawers; before=\(hintsBefore.count), after=\(hintsAfter.count)")
     }
 }

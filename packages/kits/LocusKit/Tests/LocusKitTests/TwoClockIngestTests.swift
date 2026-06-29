@@ -75,9 +75,8 @@ struct TwoClockIngestTests {
     func eventTimeRoundTrips() async throws {
         let (store, url) = try await TestStorage.makeStore()
         defer { TestStorage.cleanup(url) }
-        let d = Drawer(content: "c", wing: "w", room: "r", addedBy: "a",
-                       filedAt: Date(), eventTime: historical,
-                       embeddingModelID: "m")
+        let d = Drawer(content: "c", parentNodeId: "test-parent", addedBy: "a",
+                       filedAt: Date(), eventTime: historical, embeddingModelID: "m")
         try await store.addDrawer(d)
         let back = try #require(try await store.getDrawer(id: d.id))
         #expect(back.eventTime == historical)
@@ -88,9 +87,8 @@ struct TwoClockIngestTests {
         let (store, url) = try await TestStorage.makeStore()
         defer { TestStorage.cleanup(url) }
         let filed = Date()
-        let d = Drawer(content: "c", wing: "w", room: "r", addedBy: "a",
-                       filedAt: filed, eventTime: historical,
-                       embeddingModelID: "m")
+        let d = Drawer(content: "c", parentNodeId: "test-parent", addedBy: "a",
+                       filedAt: filed, eventTime: historical, embeddingModelID: "m")
         try await store.addDrawer(d)
         let back = try #require(try await store.getDrawer(id: d.id))
         #expect(back.eventTime == historical)
@@ -105,7 +103,7 @@ struct TwoClockIngestTests {
     private func fpDrawer(filedAt: Date, eventTime: Date) -> Drawer {
         // Identical content / bitmaps / lineage / lattice across calls;
         // only the two clocks vary per test.
-        Drawer(content: "same", wing: "w", room: "r", addedBy: "a",
+        Drawer(content: "same", parentNodeId: "test-parent", addedBy: "a",
                filedAt: filedAt, eventTime: eventTime, embeddingModelID: "m",
                lineageID: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!,
                udcCode: "613.71", wikidataQID: "Q42")
@@ -142,8 +140,7 @@ struct TwoClockIngestTests {
             values: [
                 "id": .text(id),
                 "content": .text("legacy content"),
-                "wing": .text("w"),
-                "room": .text("r"),
+                "parent_node_id": .text("test-parent"),
                 "addedBy": .text("a"),
                 "filedAt": .timestamp(filedAt),
                 "embeddingModelID": .text("m")

@@ -102,4 +102,12 @@ public struct EstateDreamingSink: DreamingProposalSink {
     public func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int {
         try await kit.pruneRecallTraces(in: handle, olderThan: cutoff)
     }
+
+    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap` (T13 / ADR-021 Phase 7).
+    ///
+    /// Called by OMEGA through the GLK seam (B-1 compliance). Delegates to
+    /// `GeniusLocusKit.retireTunnel(in:id:changedBy:now:)`.
+    public func retireTunnel(id tunnelId: String, changedBy: String, now: Date) async throws {
+        try await kit.retireTunnel(in: handle, id: tunnelId, changedBy: changedBy, now: now)
+    }
 }

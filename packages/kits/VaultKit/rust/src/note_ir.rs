@@ -25,9 +25,8 @@ use serde::{Deserialize, Serialize};
 // (Swift synthesized `encodeIfPresent` omits nil keys). The four
 // full-fidelity fields decode with defaults when absent so JSON produced
 // before the VK_IR_01 extension still parses. Deterministic key ORDER is
-// the envelope's job: `CorpusDocument::canonical_json` serializes through
-// `serde_json::Value`, whose map is BTree-backed and therefore sorted —
-// matching Swift's `.sortedKeys`.
+// the envelope's job: `CorpusDocument::canonical_json` applies a recursive
+// `sort_keys` pass before serialization, matching Swift's `.sortedKeys`.
 
 /// One ordered fragment of a note's body.
 ///
@@ -216,9 +215,9 @@ fn default_kind() -> String {
 pub struct NoteIR {
     /// The stable identity of this note across re-imports. For the Obsidian
     /// adapter this is the vault-relative path without the `.md` extension.
-    /// `DrawerMapping` derives a deterministic `lineage_id` from this key
-    /// so a re-import supersedes the existing drawer rather than duplicating
-    /// it (idempotency).
+    /// `DrawerMapping` uses this as the FNV-1a lineage fallback; `moot_id`
+    /// frontmatter takes priority, and byte-identical active content skips
+    /// supersession without writing.
     #[serde(rename = "stableSourceKey")]
     pub stable_source_key: String,
 

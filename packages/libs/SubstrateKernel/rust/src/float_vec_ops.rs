@@ -111,14 +111,17 @@ pub fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
 
 /// Dot product of two equal-length float slices.
 ///
-/// Panics (debug) / returns a truncated result (release) if the
-/// slices have different lengths. Callers must ensure equal lengths.
+/// Panics in both debug and release builds if the slices have
+/// different lengths (`assert_eq!` is not debug-only). Callers must
+/// ensure equal lengths.
 ///
 /// Returns `sum(a[i] * b[i])` over all indices.
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(),
-                     "FloatVecOps::dot: dimension mismatch {} ≠ {}", a.len(), b.len());
+    // PAR-R2: release-build safety — mismatched dimensions must panic
+    // even in optimized builds (silent truncation via zip is worse).
+    assert_eq!(a.len(), b.len(),
+               "FloatVecOps::dot: dimension mismatch {} ≠ {}", a.len(), b.len());
     let mut sum: f32 = 0.0;
     // Scalar loop: element-wise product accumulated in order.
     for (&x, &y) in a.iter().zip(b.iter()) {
@@ -144,8 +147,9 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// Returns cosine similarity in `[-1.0, 1.0]`.
 #[inline]
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(),
-                     "FloatVecOps::cosine: dimension mismatch {} ≠ {}", a.len(), b.len());
+    // PAR-R2: release-build safety — mismatched dimensions must panic.
+    assert_eq!(a.len(), b.len(),
+               "FloatVecOps::cosine: dimension mismatch {} ≠ {}", a.len(), b.len());
     // Debug-only norm check: catch un-normalised inputs early.
     debug_assert!({
         let norm_a: f32 = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
@@ -309,5 +313,23 @@ mod tests {
         let d = dot(&a, &b);
         assert!(approx_eq(c, d, 1e-7),
                 "cosine and dot must agree for normalised inputs: cosine={c} dot={d}");
+    }
+
+    // PAR-R2: dimension mismatch must panic in release builds too.
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn dot_panics_on_dimension_mismatch() {
+        let a = vec![1.0f32, 2.0];
+        let b = vec![1.0f32, 2.0, 3.0];
+        dot(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn cosine_panics_on_dimension_mismatch() {
+        let a = l2_normalize(vec![1.0f32, 0.0]);
+        let b = l2_normalize(vec![1.0f32, 0.0, 0.0]);
+        cosine(&a, &b);
     }
 }

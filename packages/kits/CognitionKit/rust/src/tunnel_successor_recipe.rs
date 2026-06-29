@@ -102,7 +102,7 @@ mod tests {
         coord.estate_for(h).unwrap().add_tunnel(&t).unwrap();
     }
 
-    // CK-AN-1: from the anchor, the more-frequently-tunneled target is the
+    // CK-TS-1: from the anchor, the more-frequently-tunneled target is the
     // stronger prediction; an unrelated edge elsewhere is ignored.
     #[test]
     fn ck_ts1_frequent_successor_ranks_first() {
@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(out[1].id, "Y");
     }
 
-    // CK-AN-2: an anchor with no outgoing tunnels predicts nothing (guarded).
+    // CK-TS-2: an anchor with no outgoing tunnels predicts nothing (guarded).
     #[test]
     fn ck_ts2_no_successors_empty() {
         let (coord, h) = coord_with_parent();

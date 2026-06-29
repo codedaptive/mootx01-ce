@@ -33,7 +33,8 @@
 // Used by:
 //   § 13 cookbook    Cognition bundle definition (this file)
 //   § 10.6 paper     Export/import semantics
-//   § 15 cookbook    Dreaming daemon rule 13 (scheduled export)
+//   § 15 cookbook    Dreaming daemon rule 13 (scheduled export — not
+//                   yet wired in ReferenceRuleExecutor)
 //   § 12 cookbook    Federation (bundle is what audit-sharing exchanges)
 
 import Foundation

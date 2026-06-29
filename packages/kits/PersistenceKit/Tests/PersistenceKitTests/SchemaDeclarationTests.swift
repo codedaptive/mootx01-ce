@@ -1,12 +1,11 @@
 // SchemaDeclarationTests.swift
 //
-// Part 2 coverage gap: PersistenceKitCoreTypeTests built one SchemaDeclaration
-// and checked three fields. The ColumnDeclaration convenience constructors (the
-// `.uuid`/`.bitmap`/… factories every schema in the codebase is built from),
-// the struct defaults (TableDeclaration.appendOnly, IndexDeclaration.unique,
+// Schema and default-value coverage for PersistenceKit core types.
+// Pins the ColumnDeclaration convenience constructors (`.uuid`/`.bitmap`/… factories),
+// struct defaults (TableDeclaration.appendOnly, IndexDeclaration.unique,
 // SchemaDeclaration.indices/migrations), Migration, and EstateConfiguration's
-// default encryption mode had no peer suite. These tests pin the defaults that
-// callers silently depend on.
+// default encryption mode. SQLite encryption behavior (Mode 1/2/3) lives in
+// `EncryptionWiringTests.swift`.
 
 import Testing
 import Foundation

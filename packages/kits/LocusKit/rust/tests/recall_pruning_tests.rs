@@ -16,8 +16,8 @@
 //!    zero rows; surviving containers contribute all matching rows (mirrors
 //!    Swift `recallPrunesAndStaysEquivalent`).
 //! 3. **Result-identity** — pruning is an optimization, never a result change:
-//!    the pruned-path result set is identical to what a full per-row scan
-//!    returns on the same fixture.
+//!    the pruned-path result set matches the non-pruning recall result for the
+//!    same frame and fixture (both pass the same `BitmapEvaluator` filter).
 //! 4. **Bounded behavior** — `prefix(scan_bound)` is applied after collection
 //!    so the pruning path respects the same row cap as the non-pruning path.
 //!
@@ -282,8 +282,8 @@ fn pruned_container_contributes_zero_rows() {
 
 #[test]
 fn result_identity_pruned_vs_unpruned_scan_on_same_fixture() {
-    // Core invariant: the pruning path returns an identical row set to what
-    // a full per-row scan returns on the same fixture.
+    // Core invariant: the pruning path returns an identical row set to the
+    // non-pruning recall result for the same frame and fixture.
     //
     // We verify by:
     //   1. Running the pruned recall ([HasFeatureFlag(HAS_VOICE)]).

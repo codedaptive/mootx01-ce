@@ -17,8 +17,9 @@
 //
 // DETERMINISM (hard requirement, CLAUDE.md). Same inputs always
 // produce the same `[BradleyTerryScore]`, bit-for-bit, including CI
-// bounds. There is no wall-clock read, no randomness, no unseeded
-// iteration.
+// bounds. The BT math has no wall-clock read, no randomness, no
+// unseeded iteration. The telemetry section reads `Date()` for metric
+// timestamps only — those reads do not affect the returned scores.
 // The competitor set is materialised as a LEXICOGRAPHICALLY SORTED
 // array (`ids`); every subsequent loop iterates that array by integer
 // index, never a `Set` or `Dictionary` in hash order. Tally
@@ -85,7 +86,9 @@ private let bradleyTerryZ95 = 1.96
 /// - Parameter outcomes: win/loss records between named competitors.
 ///   `count` aggregates repeated identical outcomes;
 ///   `PairwiseOutcome(winner: a, loser: b, count: 5)` is exactly five
-///   single-count records. A non-positive `count` contributes nothing.
+///   single-count records. A non-positive `count` contributes no tally
+///   weight but its competitors are still added to the graph — a
+///   zero-count-only record can affect the connectivity gate.
 /// - Returns: scores sorted by descending `strength`, ties broken by
 ///   ascending `competitorID` (a deterministic, stable order). Empty
 ///   input returns `[]`.
@@ -240,10 +243,11 @@ public func bradleyTerry(outcomes: [PairwiseOutcome]) throws -> [BradleyTerrySco
         return lhs.competitorID < rhs.competitorID
     }
 
-    // Emit Bradley-Terry update activity. The ts is the caller-supplied
-    // site's epoch seconds; here we read Date() once at the function boundary
-    // (a factory-level side-effect permitted per the determinism contract —
-    // the BT math itself uses no clock). When monitoring is off, zero cost.
+    // Emit Bradley-Terry update activity. Date() is read internally at
+    // each report call — not caller-supplied and not once at the boundary
+    // (two metric reports, two Date() reads). Factory-level side-effect
+    // permitted per the determinism contract: the BT math itself uses no
+    // clock. When monitoring is off, zero cost.
     //
     // `neuronkit.tournament.bt_update`: one counter per completed fit.
     // `neuronkit.tournament.competitor_count`: n competitors ranked.

@@ -1,7 +1,7 @@
 // matrix_o.rs
 //
 // Co-occurrence matrix O per cookbook § 6.3. Mirror of
-// glref-swift-MatrixO.swift.
+// Sources/SubstrateTypes/MatrixO.swift.
 
 /// Canonical 4-byte key for an O-matrix cell. Field indices are
 /// 0..63 (6 bits, anticipating §11.x growth); values are 0..63

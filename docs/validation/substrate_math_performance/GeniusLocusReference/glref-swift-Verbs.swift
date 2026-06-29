@@ -4,16 +4,16 @@
 //   capture, reanchor, mutate, withdraw, expunge,
 //   recall, propose, associate, learn.
 //
-// The verbs are the substrate's public mutation API. Each verb:
+// The verbs are the substrate's public mutation API. This reference:
 //
-//   1. Validates preconditions (row-state automaton via § 9.9
-//      DrawerStateValidator; isLegalRowState forbidden-
-//      combination check per § 9.5 / I-22).
-//   2. Computes the new row state.
-//   3. Emits an audit event (§ 5) under the current HLC.
-//   4. Updates derived state (matrix tier § 6; fingerprint
-//      recompute via § 3.6).
-//   5. Returns Result<RowId, SubstrateError>.
+//   - Validates row-state preconditions (DrawerStateValidator, isLegalRowState)
+//   - Emits audit events under the current HLC
+//   - Updates F and O matrices on capture/mutate/expunge
+//   - Returns Result<RowId, SubstrateError>
+//
+// Note: MatrixT is not updated here; `reanchor` leaves fingerprint
+// recompute to the caller; `associate` discards endpoint/signal/weight
+// arguments before creating the association row.
 //
 // This file is the COMPOSITION REFERENCE. It assumes the prior
 // reference files are wired in as a package:
@@ -579,8 +579,11 @@ public struct Substrate {
         auditEvents.append(event)
     }
 
-    /// Per § 9.5 / I-22 forbidden-combination check. Returns nil
-    /// on success or the relevant error on failure.
+    /// Simplified forbidden-combination check (§ 9.5 / I-22 subset).
+    /// Checks two conditions: secret-cannot-be-public and
+    /// accepted-cannot-be-verbatim. Tombstone-completed enforcement
+    /// and other I-22 checks are deferred to the production layer.
+    /// Returns nil on success or the relevant error on failure.
     private func isLegalRowState(state: RowStateValue,
                                   adjective: Int64,
                                   operational: Int64) -> SubstrateError? {

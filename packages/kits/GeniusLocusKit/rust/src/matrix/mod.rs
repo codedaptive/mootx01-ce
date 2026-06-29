@@ -22,6 +22,7 @@ pub mod calibration;
 pub mod matrix;
 pub mod nmf;
 pub mod persistence;
+pub mod snapshot_store;
 
 pub use calibration::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
@@ -34,3 +35,4 @@ pub use nmf::{MatrixNMF, MatrixNMFFactorization};
 pub use persistence::{
     MatrixPersistenceBackend, MatrixPersistenceError, MatrixPersistenceMode, MatrixSnapshot,
 };
+pub use snapshot_store::MatrixSnapshotStore;

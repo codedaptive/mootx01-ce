@@ -7,15 +7,12 @@
 ///
 /// **Scope: reader files only.**
 /// The SINK files (`estate_dreaming_sink.rs`, `estate_maintenance_sink.rs`) are
-/// intentionally excluded from this scan. The sinks write Proposals and
-/// DiaryEntries via `DrawerStore::add_proposal` / `add_diary_entry` — write
-/// paths that have no GLK-level equivalent compatible with the sync Rust trait
-/// signatures (GLK's `propose` verb requires a `now` clock parameter that the
-/// infallible sink trait methods cannot supply). This architectural constraint
-/// is documented in each sink file's module comment. The B-1 violation in the
-/// sinks is a distinct scoping question tracked separately (TASK-MXE-2026-0070
-/// covers readers only; the sink write-path is pending a design decision on
-/// whether GLK should expose a sync write surface for autonomic proposals).
+/// intentionally excluded from this scan. `estate_dreaming_sink.rs` routes its
+/// writes through the GLK EstateCoordinator verb surface; `estate_maintenance_sink.rs`
+/// uses a direct `DrawerStore` path documented in its module comment as the
+/// current sync Rust adapter shape. Both have module-level comments explaining
+/// their write path. The scan covers only the reader layer; sink write-path
+/// compliance is evaluated separately per each sink's own module comment.
 ///
 /// **Exclusions within reader files:**
 /// - `#[cfg(test)]` blocks: test infrastructure may hold `Arc<dyn DrawerStore>`

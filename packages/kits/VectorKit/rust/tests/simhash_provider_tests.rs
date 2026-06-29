@@ -1,8 +1,9 @@
-//! Tests for `FloatSimHashEmbeddingProvider`. Mirror of the Swift
-//! provider tests in `CorpusKit/Tests/CorpusKitTests/ProvidersTests.swift`:
-//! deterministic output, distinct projection seeds across the three
-//! convenience constructors (MiniLM / mpnet / EmbeddingGemma),
-//! empty-input contract.
+//! Tests for `FloatSimHashEmbeddingProvider`. Mirrors the core
+//! `FloatSimHashEmbeddingProvider` behavior from the Swift suite:
+//! model identity, deterministic embed, distinct projection seeds, inference
+//! failure surfacing, and empty-input contract. Uses pinned local seeds and
+//! injected inference closures rather than the text-provider convenience
+//! constructors (which live in corpus-kit-providers).
 
 use engram_lib::Engram;
 use std::sync::atomic::{AtomicUsize, Ordering};

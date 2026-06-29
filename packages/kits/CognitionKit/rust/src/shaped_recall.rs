@@ -61,6 +61,7 @@ pub fn run(
     filter: Filter,
     limit: usize,
     now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
 ) -> Result<ShapedRecallOutput, RecipeRunError> {
     // Resolve the preset NAME to its signed-weight shape. `None` means
     // "balanced / unsteered" (the name "balanced", or an unknown name): the recall
@@ -111,7 +112,13 @@ pub fn run(
         .iter()
         .map(|hit| {
             let (room, content) = match &hit.drawer {
-                Some(d) => (d.room.clone(), d.content.clone()),
+                Some(d) => {
+                    let (_wing, room) = node_names
+                        .get(&d.parent_node_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    (room, d.content.clone())
+                }
                 None => (String::new(), String::new()),
             };
             PreciseMatch {
@@ -142,6 +149,11 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
+    /// Empty node-name map for tests — no display-name resolution needed.
+    fn empty_names() -> std::collections::HashMap<String, (String, String)> {
+        std::collections::HashMap::new()
+    }
+
     fn coord_with_rows(contents: &[&str]) -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
         let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
@@ -171,7 +183,7 @@ mod tests {
             "a dog ran in the park",
             "cats and dogs are pets",
         ]);
-        let out = run(&coord, &h, "cat", "precise", Filter::CurrentlyBelieve, 10, NOW)
+        let out = run(&coord, &h, "cat", "precise", Filter::CurrentlyBelieve, 10, NOW, &empty_names())
             .expect("run");
         assert_eq!(out.applied_preset, "precise");
         assert!(!out.matches.is_empty(), "the shaped recall surfaces rows");
@@ -193,6 +205,7 @@ mod tests {
             Filter::CurrentlyBelieve,
             10,
             NOW,
+            &empty_names(),
         )
         .expect("unknown-name run still succeeds");
         assert_eq!(out.applied_preset, "balanced");
@@ -202,7 +215,7 @@ mod tests {
     #[test]
     fn sr3_balanced_runs_unsteered() {
         let (coord, h) = coord_with_rows(&["one two three", "four five six"]);
-        let out = run(&coord, &h, "one", "balanced", Filter::CurrentlyBelieve, 5, NOW)
+        let out = run(&coord, &h, "one", "balanced", Filter::CurrentlyBelieve, 5, NOW, &empty_names())
             .expect("run");
         assert_eq!(out.applied_preset, "balanced");
     }
@@ -213,7 +226,7 @@ mod tests {
     fn sr4_every_preset_runs() {
         let (coord, h) = coord_with_rows(&["alpha", "beta", "gamma"]);
         for name in RecallShape::PRESET_NAMES {
-            let out = run(&coord, &h, "alpha", name, Filter::CurrentlyBelieve, 5, NOW)
+            let out = run(&coord, &h, "alpha", name, Filter::CurrentlyBelieve, 5, NOW, &empty_names())
                 .unwrap_or_else(|e| panic!("preset {name} failed: {e:?}"));
             let expected = if RecallShape::PRESET_NAMES.contains(&name) {
                 name

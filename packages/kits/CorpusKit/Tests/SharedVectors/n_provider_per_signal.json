@@ -47,14 +47,10 @@
       ]
     },
     {
-      "kind" : "hits",
+      "kind" : "dark_provider",
       "modelID" : "fdc-v1",
       "rankedItemIDs" : [
-        "doc-0",
-        "doc-2",
-        "doc-1",
-        "doc-3",
-        "doc-4"
+
       ]
     }
   ]

@@ -2,10 +2,11 @@
 //
 // Public entry point for CorpusKit: the Corpus actor.
 //
-// The actor composes BundleStore (chunk persistence), BM25Index
-// (keyword recall), VectorStore (vector kNN), and an EmbeddingProvider
-// (text → engram) behind a sealed surface. Callers see only documents
-// and queries — no VectorKit type is exposed on the public API.
+// The actor composes BundleStore (chunk persistence), InvertedIndexStore
+// (durable SQLite-backed BM25 keyword recall), VectorStore (vector kNN),
+// and an EmbeddingProvider (text → engram) behind a sealed surface.
+// Callers see only documents and queries — no VectorKit type is exposed
+// on the public API.
 //
 // EmbeddingModel is a CorpusKit-owned enum so the host can select an
 // embedding model without importing VectorKit or naming EmbeddingProvider.
@@ -25,6 +26,8 @@ import Foundation
 import IntellectusLib
 import OSLog
 import PersistenceKit
+import QueueKit
+import SubstrateLib
 import SubstrateML
 import SubstrateTypes
 import VectorKit
@@ -250,6 +253,46 @@ public enum EmbeddingModel: Sendable {
     /// in `CorpusKitProviders` for the encoding details.
     case fdc(provider: any EmbeddingProvider & Sendable)
 
+#if canImport(NaturalLanguage)
+    /// Apple NaturalLanguage sentence embedding provider (Swift-only).
+    ///
+    /// Uses `NLEmbedding.sentenceEmbedding(for:)` — the OS-bundled sentence
+    /// similarity model (macOS 12+/iOS 15+). No model asset download, no
+    /// CoreML dependency. Lower quality than `NLContextualEmbeddingProvider`
+    /// but immediately available on any macOS/iOS device.
+    ///
+    /// This is an ADDITIVE lane — it does not replace the deterministic or
+    /// distributional providers. It is ITEM-LOCAL: the vector is a pure
+    /// function of the input text computed once on write; no training step.
+    ///
+    /// When the OS has no sentence-embedding model for the configured language,
+    /// this lane opts out gracefully (`embedFloat` returns `[]` → the corpus
+    /// layer maps to `unavailableProviderOptOut`).
+    ///
+    /// Swift-only: `NaturalLanguage` is an Apple system framework (same
+    /// sanctioned divergence as the `.nlTagger` word-class path). Rust has no
+    /// counterpart. Recorded in ADR-019.
+    case nlEmbedding(provider: any EmbeddingProvider & Sendable)
+
+    /// Apple NaturalLanguage contextual (transformer) embedding provider (Swift-only).
+    ///
+    /// Uses `NLContextualEmbedding` — an on-device transformer model that
+    /// produces contextual per-token representations, mean-pooled to a sentence
+    /// embedding. Higher quality than `.nlEmbedding` at the cost of a
+    /// downloadable language asset that may not be present on first use.
+    ///
+    /// When the asset is unavailable, this lane opts out gracefully (`embedFloat`
+    /// returns `[]` → `unavailableProviderOptOut`). The provider NEVER blocks on
+    /// a download; asset prefetch is the host app's responsibility via
+    /// `NLContextualEmbedding.requestAssets(for:completionHandler:)`.
+    ///
+    /// This is an ADDITIVE lane — item-local, no training step, no basis.
+    ///
+    /// Swift-only: same sanctioned divergence as `.nlEmbedding`. Rust has no
+    /// counterpart. Recorded in ADR-019.
+    case nlContextualEmbedding(provider: any EmbeddingProvider & Sendable)
+#endif // canImport(NaturalLanguage)
+
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 
@@ -267,6 +310,15 @@ public enum EmbeddingModel: Sendable {
         switch self {
         case .randomIndexing(let p), .ppmi(let p), .lsa(let p), .nmf(let p), .fdc(let p):
             return p
+        // The Apple NL cases carry a provider (EmbeddingProvider & Sendable), but like FDC
+        // they are stateless — no TrainableEmbeddingBasis conformance. We return the carried
+        // provider here so callers that need the provider instance (e.g. direct inspection)
+        // can obtain it, mirroring the FDC pattern. `isTrainable` will still be false
+        // because neither NL provider conforms to TrainableEmbeddingBasis.
+#if canImport(NaturalLanguage)
+        case .nlEmbedding(let p), .nlContextualEmbedding(let p):
+            return p
+#endif
         case .deterministic, .miniLM, .mpNet, .embeddingGemma:
             return nil
         }
@@ -322,17 +374,28 @@ public enum EmbeddingModel: Sendable {
 
 /// Unified RAG entry point for CorpusKit.
 ///
-/// Corpus composes BundleStore, BM25Index, VectorStore, and one OR MORE
+/// Corpus composes BundleStore, InvertedIndexStore, VectorStore, and one OR MORE
 /// EmbeddingProviders internally. The public surface exposes only
 /// `ingest`, `recall`, `remove`, and `count`. No VectorKit type
 /// appears in any public signature — the sealed-vector principle is
 /// enforced here, not by the caller.
 ///
+/// ## BM25 persistence (cold-start fix)
+///
+/// `BM25Index` (the former in-memory-only index) is replaced by `InvertedIndexStore`
+/// — a SQLite-backed sidecar that persists term frequencies and document lengths so
+/// that keyword recall survives a process restart WITHOUT replaying all chunk bodies.
+/// On open, `InvertedIndexStore.open()` loads the compact term-freq rows into RAM;
+/// `chunkSourceMap` is warm-loaded via a body-free `(id, source_id)` projection from
+/// the chunks table. Neither load touches the `text` column, so cold-start cost is
+/// O(terms + docs) rather than O(N·body). `BM25Index` is preserved as a public
+/// CorpusKit primitive (other callers may use it) — `Corpus` simply no longer uses it.
+///
 /// Lifecycle: construct with a PersistenceKit Storage (the actor calls
 /// `storage.open(schema:)` for both BundleStore and VectorStore during
 /// `init`), then call `ingest` to add documents and `recall` to query.
-/// The BundleStore is append-only; `remove(sourceID:)` clears the
-/// recall index (BM25 + vectors) without deleting content rows.
+/// `remove(sourceID:)` clears the recall index (BM25 + vectors) without
+/// deleting content rows. `expunge(sourceID:)` additionally zeroes chunk text.
 ///
 /// ## N-provider capability (mission 6a-iii-core)
 ///
@@ -351,7 +414,88 @@ public enum EmbeddingModel: Sendable {
 /// the first held slot — so existing callers are unaffected. The per-signal
 /// fan-out for recall is exposed additively via `floatNearestPerSignal`, the
 /// 6b RRF-fusion seam (this mission builds the seam, NOT the fusion).
+/// The encode SPEED a corpus's ingest drain runs its embedding work at — the
+/// user/AI-declared QoS. This is the SPEED axis ONLY; the write strategy (bulk
+/// transaction vs stream) is chosen automatically by source size, never by this
+/// setting. Mirrors Rust `EncodeSpeed`.
+public enum EncodeSpeed: Sendable {
+    /// Push the cores: the embed fan-out uses all logical cores. Default — the
+    /// user is waiting for content to become searchable.
+    case foreground
+    /// Yield to the machine: the embed fan-out is capped to ~a quarter of cores,
+    /// for very large imports where draining hard would saturate the host.
+    case background
+}
+
 public actor Corpus {
+
+    /// `ingestBatch` transaction-window sizes. The corpus shares the estate's
+    /// primary SQLite connection (single-writer at the file level), so committing
+    /// every `commitChunkItems` items / `commitChunkRows` rows bounds how long a
+    /// transaction holds the write lock — long enough to amortise the
+    /// fsync/WAL-checkpoint cost ~chunk-fold, short enough not to starve
+    /// concurrent LocusKit captures / the governor. Items are coarser than rows
+    /// (~providers × lanes × sub-chunks per item), so the row window is larger.
+    /// Mirrored by the Rust twin's COMMIT_CHUNK_ITEMS / COMMIT_CHUNK_ROWS.
+    static let commitChunkItems = 512
+    static let commitChunkRows = 4096
+
+    /// The encode drain's SPEED (user/AI-declared via the import `mode`).
+    /// `.foreground` (default) embeds across all logical cores; `.background`
+    /// caps embed concurrency to ~a quarter of cores (see `embedConcurrencyCap`)
+    /// so a very large import leaves the machine headroom. SPEED axis only — the
+    /// write strategy is size-gated, not set here. Read when sizing the embed
+    /// fan-out in `ingest` / `ingestBatch`; set via `setEncodeSpeed`.
+    private var encodeSpeed: EncodeSpeed = .foreground
+
+    /// Max concurrent embed operations for the current `encodeSpeed` (T1 QoS
+    /// throttle). Foreground uses all logical cores (push hard); background uses
+    /// `cores / 4` (floor 1) so a large background import leaves ~75% of the
+    /// machine free for the resident daemon / the user. Uniform across platforms
+    /// via `activeProcessorCount`; identical formula to the Rust port
+    /// (`available_parallelism() / 4`). The `/ 4` divisor (x=4) is the one tuning
+    /// knob — change it here to adjust background headroom.
+    private var embedConcurrencyCap: Int {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        switch encodeSpeed {
+        case .foreground: return max(1, cores)
+        case .background: return max(1, cores / 4)
+        }
+    }
+
+    /// Run `work` over `inputs` with at most `cap` operations in flight, results
+    /// returned in input order. Bounds concurrency by processing `inputs` in
+    /// contiguous batches of `cap` with a barrier between batches — the embed QoS
+    /// throttle (T1). Identical shape to the Rust `thread::scope` chunked
+    /// fan-out, so both ports throttle the same way.
+    private func boundedConcurrentMap<Input: Sendable, Output: Sendable>(
+        _ inputs: [Input],
+        cap: Int,
+        _ work: @escaping @Sendable (Input) async throws -> Output
+    ) async throws -> [Output] {
+        precondition(cap >= 1)
+        var results = [Output?](repeating: nil, count: inputs.count)
+        var start = 0
+        while start < inputs.count {
+            let end = min(start + cap, inputs.count)
+            try await withThrowingTaskGroup(of: (Int, Output).self) { group in
+                for i in start..<end {
+                    let input = inputs[i]
+                    group.addTask { (i, try await work(input)) }
+                }
+                for try await (i, out) in group { results[i] = out }
+            }
+            start = end
+        }
+        return results.map { $0! }
+    }
+
+    /// Set the drain's encode SPEED. Called by the import path mapping the `mode`
+    /// arg of `moot_palace_import`; affects embed fan-outs sized after this call.
+    /// Mirrors Rust `Corpus::set_encode_speed`.
+    public func setEncodeSpeed(_ speed: EncodeSpeed) {
+        encodeSpeed = speed
+    }
 
     /// One held embedding provider plus its fresh-basis blob.
     ///
@@ -367,46 +511,84 @@ public actor Corpus {
         /// path and each training pass install a replacement. Never exposed on
         /// the public surface (sealed-vector principle).
         var provider: any EmbeddingProvider
-        /// The serialized basis of a FRESH (untrained) trainable provider,
-        /// captured ONLY when this slot was built from a fresh trainable
-        /// provider (RI/PPMI/LSA/NMF) with no persisted basis — NOT when the
-        /// provider was restored from a persisted basis on open.
+        /// The serialized EMPTY (untrained) basis of a trainable provider — the
+        /// from-scratch factory. Non-nil for EVERY trainable slot (RI/PPMI/LSA/
+        /// NMF), whether the slot was built fresh OR restored from a persisted
+        /// basis on open; nil only for non-trainable slots (deterministic / named
+        /// / FDC / NL).
         ///
         /// Each training pass (`reindex` and the first-ingest auto-train)
-        /// reconstructs a FRESH provider from this empty-basis blob, trains it
-        /// on the full corpus, and installs it as `provider`. This is the only
-        /// correct retrain semantics: `trainOnCorpus` is ADDITIVE (it
-        /// accumulates over calls), so retraining an already-trained provider
-        /// would double-count the first-ingest corpus. Reconstructing from the
-        /// empty blob guarantees every train starts from scratch, so reindex is
-        /// idempotent and produces the canonical from-scratch basis (the
-        /// cross-port conformance contract).
+        /// reconstructs a FRESH provider from this empty-basis blob, trains it on
+        /// the full corpus, and installs it as `provider`. This is the only
+        /// correct retrain semantics: `trainOnCorpus` is ADDITIVE (it accumulates
+        /// over calls), so retraining an already-trained provider would
+        /// double-count the corpus. Reconstructing from the empty blob guarantees
+        /// every train starts from scratch, so reindex is idempotent and produces
+        /// the canonical from-scratch basis (the cross-port conformance contract).
         ///
-        /// When the provider was restored from a persisted basis on open, this
-        /// is nil: a reopened corpus is already trained and serving; `reindex`
-        /// then re-embeds under the loaded basis without retraining. This
-        /// deliberately mirrors the Rust port, where the seam's
-        /// `reconstruct_basis` yields a non-trainable boxed provider, so a
-        /// reopened-from-blob corpus is not retrained-in-place on either port.
+        /// Keeping the factory for a reopened-from-basis slot (rather than nilling
+        /// it as the pre-P3 code did) is the frozen-after-restart fix: a restarted
+        /// corpus can now retrain on `reindex` and fold new content into the
+        /// basis, instead of being permanently stuck re-embedding under the basis
+        /// it loaded. The first-ingest auto-train path is unchanged — it still
+        /// gates on "no basis persisted yet", so a reopened corpus does not
+        /// auto-train on ingest; only explicit `reindex` retrains.
         let freshBasisBlob: Data?
+        /// The dedicated maintained-counts accumulator for a trainable slot (P3),
+        /// a fresh trainable provider held SEPARATELY from `provider`. The counts
+        /// table is grown by folding each written chunk into this accumulator
+        /// (`addToCounts`) and persisted at batch boundaries. It must NOT be the
+        /// serving `provider`: for LSA/NMF, growing the maintained vocabulary
+        /// would desync the serving provider's basis-aligned vocab from its
+        /// frozen SVD/NMF factors. nil for non-trainable slots. `var` because the
+        /// on-open path restores persisted counts into it.
+        var countsAccumulator: (any TrainableEmbeddingBasis)?
+        /// Documents (chunks) folded into `countsAccumulator` — the doc-count
+        /// growth anchor persisted alongside the counts blob. Tracked here (not
+        /// read off the provider) so it is uniform across RI/PPMI/LSA/NMF whose
+        /// providers track document count inconsistently. Restored from the
+        /// persisted anchor on open, incremented per folded chunk.
+        var countsDocumentCount: Int
     }
 
+    /// The estate's backing storage, retained so the ingest queue can choose a
+    /// durable on-disk maildir backend when the estate is file-backed (SQLite)
+    /// versus a transient in-memory queue when the estate is in-memory. See
+    /// `mountIngestQueue`. Internal (not private) so the `CorpusIngestQueue`
+    /// extension in its own file can read the backend kind.
+    let storage: any Storage
     private let bundleStore: BundleStore
-    private let bm25: BM25Index
+    /// SQLite-backed durable inverted index — replaces the former in-memory BM25Index
+    /// so BM25 keyword state persists across process restarts. Loaded into RAM on open
+    /// via `open()` (reads iix_termfreqs + iix_doclens rows; no chunk bodies touched).
+    private let invertedIndex: InvertedIndexStore
     private let vectorStore: VectorStore
     private let basisStore: BasisStore
+    /// Persisted, incrementally-maintained per-provider statistics (the counts
+    /// table). Holds each trainable provider's additive state so it is grown on
+    /// write and read at refactor instead of rebuilt from scratch (P3 wiring
+    /// lands the write/refactor uses; this store is the durable home).
+    private let countsStore: CorpusProviderCountsStore
+    /// Records which source IDs have been removed (recall-suppressed). This
+    /// store lets every chunk-replay path (reindex, first-ingest train, count)
+    /// EXCLUDE removed sources so they cannot resurface — the auto-reindex
+    /// resurrection fix. (BM25 is no longer rebuilt from chunks on open — it
+    /// loads from the durable InvertedIndexStore and `remove(sourceID:)` deletes
+    /// the removed source's rows from it directly.) Re-ingesting a source clears
+    /// its row (reactivation).
+    private let removedSourceStore: RemovedSourceStore
     /// The ordered per-provider slots, one per held `EmbeddingModel`, in
     /// construction order. `slots[0]` is the DEFAULT signal that the
     /// single-signal entry points delegate to. Never empty: every init builds
     /// at least one slot. For N=1 this holds exactly one slot.
     private var slots: [ProviderSlot]
     private var hlcGenerator: HLCGenerator
-    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join.
+    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` and `floatNearest` joins.
     ///
-    /// Populated on `init` (from persisted chunks) and on each `ingest` call.
-    /// Cleared per-source on `remove(sourceID:)`. The map is in-memory only;
-    /// it is rebuilt from BundleStore on every process restart alongside the
-    /// BM25 index, so the two stay in sync.
+    /// Populated on `init` via a compact `(id, source_id)` projection from the chunks
+    /// table (no body text loaded — O(N) row count only). Updated on each `ingest`
+    /// call. Cleared per-source on `remove(sourceID:)`. In-memory only; warm-loaded
+    /// on every open alongside `InvertedIndexStore.open()` so both stay in sync.
     private var chunkSourceMap: [UUID: String] = [:]
 
     /// Test-only: when non-nil, `floatNearest` returns `.storeError(this)` immediately,
@@ -414,6 +596,70 @@ public actor Corpus {
     /// Never set in production code; documented here so future agents do not mistake
     /// this property for production logic.
     var _forcedFloatError: Error? = nil
+
+    // MARK: - Ingest queue (the Corpus-owned encode pipeline)
+    //
+    // CorpusKit is a standalone database substrate: it owns the encode QUEUE,
+    // its DRAIN worker, and the bounded WORKER POOL that feeds `ingestBatch`,
+    // talking directly to QueueKit + PersistenceKit. A Corpus queues, drains,
+    // and encodes itself with no orchestrator. GeniusLocusKit only COORDINATES
+    // — it enqueues work and (via `onEncoded`) rolls up the touched LocusKit
+    // rooms — it never performs the encode itself. The state below is the
+    // per-corpus ingest pipeline; see CorpusIngestQueue.swift for the methods.
+
+    /// The Corpus-owned ingest queue. nil until `mountIngestQueue()` (mounted at
+    /// construction by an orchestrator, or lazily on the first `enqueueIngest`).
+    /// Backed by a transient in-memory PersistenceKit backend so it needs no
+    /// estate file directory and works for in-memory corpora — the same
+    /// substrate the standing-signal scheduler queue uses.
+    var ingestQueue: QueueKit?
+
+    /// The background drain worker that pulls every currently-available job off
+    /// `ingestQueue` each pass and ingests the whole batch via `ingestBatch`
+    /// (cross-document parallel compute, serial batched writes — the bounded
+    /// worker pool). Spawned in `mountIngestQueue`, cancelled in
+    /// `dropIngestQueue`. The poll loop runs at default priority; the heavy
+    /// embedding work it spawns is throttled to the concurrency declared by
+    /// `encodeSpeed` — all cores for foreground, ~a quarter for background (see
+    /// `embedConcurrencyCap`, applied in `ingest` / `ingestBatch`).
+    var ingestDrainWorker: Task<Void, Never>?
+
+    /// Single-drainer lease for a file-backed estate (T2/T4). Non-nil only when the
+    /// estate is durable (multiple processes can open it); `nil` for in-memory
+    /// estates, which are single-process and need no lease. The drain loop drains
+    /// a pass only while it holds this lease, so exactly one process drains the
+    /// shared `encode` stream at a time. Stream-keyed (`"encode"`) so the dreaming
+    /// drainer can hold its own lease concurrently (ADR-021 Decision 7). Released in
+    /// `dropIngestQueue`. Uses the QueueKit-provided `DrainLease` (T2).
+    var drainLease: DrainLease?
+
+    /// Per-corpus HLC for stamping ingest-queue submissions. Distinct from
+    /// `hlcGenerator` (which sequences chunks within the store): this one orders
+    /// only the queue, derived from each item's capture instant so submission
+    /// stamps are deterministic (no `Date()` in the engine).
+    var ingestHLC = HLCGenerator(nodeID: 1)
+
+    /// Invoked AFTER each drained batch finishes ingesting, with the sourceIDs
+    /// that were encoded (drawer ids in the GLK context). nil when the Corpus
+    /// runs standalone. The orchestrator (GeniusLocusKit) sets this to roll up
+    /// the touched LocusKit rooms for the encoded drawers — coordination only;
+    /// CorpusKit never reaches into LocusKit itself (layering: GLK orchestrates).
+    public var onEncoded: (@Sendable ([String]) async -> Void)?
+
+    /// The estate's single dense vector store (binary Engram + float32 lanes),
+    /// owned by this Corpus. The composition layer (GeniusLocusKit) borrows THIS
+    /// instance for its scored-recall vector lane instead of constructing a second
+    /// `VectorStore` over the same `vectors` table — one store, one resident array,
+    /// one on-disk sidecar. CorpusKit owns the dense vector lane; the orchestrator
+    /// reaches it through this accessor rather than reaching around the kit.
+    public var sharedVectorStore: VectorStore { vectorStore }
+
+    /// Test-only ingest failure hook. When non-nil, the per-job retry path
+    /// invokes it with the job's sourceID BEFORE ingesting; a throw simulates a
+    /// transient ingest failure so the at-least-once retry/`.blocked` semantics
+    /// are exercisable. nil in production (zero overhead). Set via
+    /// `_armIngestFailureHook(_:)`.
+    var _ingestFailureHook: (@Sendable (String) throws -> Void)?
 
     /// Construct a single-provider Corpus against a PersistenceKit Storage.
     ///
@@ -476,14 +722,26 @@ public actor Corpus {
         // regardless of the other schemas' version gates, exactly like the
         // BundleStore/VectorStore pair above.
         try await storage.migrate(to: BasisStore.schemaDeclaration)
+        // Additive maintained-counts table (P3): created via migrate like the
+        // BasisStore pair so it exists regardless of the other schemas' gates.
+        try await storage.migrate(to: CorpusProviderCountsStore.schemaDeclaration)
+        // Additive removed-sources table: created via migrate like the others.
+        try await storage.migrate(to: RemovedSourceStore.schemaDeclaration)
+        // Durable inverted-index sidecar tables (F1 cold-start fix). Additive
+        // via migrate so the tables are created alongside the others regardless
+        // of which schema was applied first.
+        try await storage.migrate(to: InvertedIndexStore.schemaDeclaration)
 
+        self.storage = storage
         self.bundleStore = BundleStore(storage: storage)
-        // CorpusDefaultTokenizer provides keyword tokenization for the
-        // BM25 index. It is private to CorpusKit to avoid a circular
-        // dependency (CorpusKitProviders depends on CorpusKit).
-        self.bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
-        self.vectorStore = VectorStore(storage: storage)
+        // InvertedIndexStore replaces the former in-memory BM25Index. Shares
+        // the same storage backend so iix_termfreqs/iix_doclens live in the
+        // same SQLite file as chunk rows — no extra file, no extra connection.
+        self.invertedIndex = InvertedIndexStore(storage: storage)
+        self.vectorStore = VectorStore(storage: storage, sidecarURL: VectorStore.defaultSidecarURL(for: storage))
         self.basisStore = BasisStore(storage: storage)
+        self.countsStore = CorpusProviderCountsStore(storage: storage)
+        self.removedSourceStore = RemovedSourceStore(storage: storage)
 
         // Build one slot per model, resolving each against any persisted basis.
         // The resolution per slot is exactly the single-provider resolve, so a
@@ -495,31 +753,65 @@ public actor Corpus {
             let resolved = try await Self.resolveProvider(
                 freshProvider: freshProvider,
                 isTrainable: model.isTrainable,
-                basisStore: basisStore
+                basisStore: basisStore,
+                countsStore: countsStore
             )
             built.append(ProviderSlot(
                 provider: resolved.provider,
-                freshBasisBlob: resolved.freshBasisBlob))
+                freshBasisBlob: resolved.freshBasisBlob,
+                countsAccumulator: resolved.countsAccumulator,
+                countsDocumentCount: resolved.countsDocumentCount))
         }
         self.slots = built
         // nodeID 1: Corpus is a standalone actor; HLC ordering is for
         // chunk sequencing within one store, not cross-replica ordering.
         self.hlcGenerator = HLCGenerator(nodeID: 1)
 
-        // Rebuild the BM25 index from persisted chunks so keyword recall
-        // survives a process restart. allChunks() returns all non-tombstoned
-        // rows (append-only table, no deletes) ordered by HLC ascending —
-        // the same ordering as ingest. The fresh BM25Index is empty at this
-        // point, so there is no risk of double-indexing.
-        let existing = try await bundleStore.allChunks()
-        if !existing.isEmpty {
-            await bm25.index(existing)
-            // Rebuild chunkSourceMap in lockstep with BM25 so bm25TopKBySource
-            // can resolve chunk UUIDs back to their source identifiers.
-            for chunk in existing {
-                chunkSourceMap[chunk.id] = chunk.sourceID
-            }
+        // Open the durable inverted index — loads iix_termfreqs and iix_doclens
+        // rows into RAM. No chunk bodies are read; this is O(terms + docs) not
+        // O(N·body). The fresh InvertedIndexStore starts empty; `open()` populates
+        // it from persisted rows so keyword recall is immediately available without
+        // replaying chunk text through BM25Index.
+        try await invertedIndex.open()
+
+        // Warm-load chunkSourceMap from a compact (id, source_id) projection of
+        // the chunks table — no body text, no removed-source filter needed here
+        // because the map is used for source-level aggregation (a removed source
+        // that appears in the map but not in the inverted index simply produces no
+        // BM25 hits, so its map entry is harmless). The projection avoids the O(N·body)
+        // scan that `activeChunks()` + body decode would incur.
+        let pairs = try await bundleStore.chunkSourcePairs()
+        for pair in pairs {
+            chunkSourceMap[pair.id] = pair.sourceID
         }
+
+        // WS2-F3: backfill corpus_metadata rows for any existing chunks.
+        // After a v2→v3 schema upgrade the corpus_metadata table is empty even
+        // though chunks exist; globalCorpusMerkleRoot() would return empty until
+        // the next insert triggered rollupCorpusMerkleRoot. This call is idempotent
+        // (upsert on conflict) and is the only correct place to run it: after
+        // migrate(to: BundleStore.schemaDeclaration) creates the table and after
+        // bundleStore is assigned, but before any recall path can observe the roots.
+        try await bundleStore.recomputeAllCorpusMerkleRoots()
+    }
+
+    /// Join the ingest drain worker and release the drain lease on actor teardown.
+    ///
+    /// Called by the Swift runtime when the last reference to this `Corpus` is
+    /// released. `dropIngestQueue()` cancels the background drain worker Task and
+    /// releases the `DrainLease` — so any in-progress drain loop exits cleanly and
+    /// the next process that opens the same estate can take the lease immediately
+    /// rather than waiting out the TTL (15 s). The `isolated` keyword (SE-0371,
+    /// Swift 6+) permits calling actor-isolated synchronous methods directly from
+    /// deinit without `await`: the runtime guarantees exclusive access at deinit.
+    ///
+    /// Idempotent: `dropIngestQueue()` is a no-op when the queue was never
+    /// mounted or was already dropped via an explicit teardown call (the normal
+    /// path for orchestrated estates).
+    ///
+    /// Rust twin: `impl Drop for Corpus { fn drop(&mut self) { self.drop_ingest_queue(); } }`
+    isolated deinit {
+        dropIngestQueue()
     }
 
     /// The default signal's serving provider — `slots[0].provider`.
@@ -533,19 +825,22 @@ public actor Corpus {
         slots.first!.provider
     }
 
-    /// Resolve the serving provider and the fresh-empty-basis blob on open.
+    /// Resolve the serving provider, the empty-basis factory, and the maintained-
+    /// counts accumulator on open.
     ///
-    /// Used by both inits. Three outcomes:
-    ///   - Not trainable: serve `freshProvider`, no fresh-basis blob.
-    ///   - Trainable, no persisted basis: serve `freshProvider` AND capture its
-    ///     EMPTY (untrained) serialized basis so first-ingest/`reindex` can
-    ///     reconstruct a fresh provider from it and train from scratch.
+    /// Used by both inits. Outcomes:
+    ///   - Not trainable: serve `freshProvider`; no factory, no accumulator.
+    ///   - Trainable, no persisted basis: serve `freshProvider` (untrained).
     ///   - Trainable, basis persisted: reconstruct the trained provider from the
-    ///     persisted blob (so the dense lane is trained-ready without retraining)
-    ///     and serve THAT, with no fresh-basis blob — a reopened-from-blob corpus
-    ///     is already trained; `reindex` then re-embeds under the loaded basis
-    ///     without retraining. This matches the Rust port, whose seam
-    ///     `reconstruct_basis` yields a non-trainable boxed provider.
+    ///     persisted blob and serve THAT (so the dense lane is trained-ready).
+    ///
+    /// For EVERY trainable slot — both cases — the empty-basis factory is captured
+    /// (`freshProvider.serializeBasis()` on the untrained provider) so `reindex`
+    /// can always rebuild a from-scratch trainable provider, INCLUDING after a
+    /// restart (the frozen-after-restart fix). The dedicated counts accumulator is
+    /// a SEPARATE fresh trainable provider, restored from the persisted counts
+    /// table if a row exists; it is held apart from the serving provider so
+    /// growing the maintained vocabulary never desyncs an LSA/NMF serving basis.
     ///
     /// Reconstruction routes through the carried provider's
     /// `TrainableEmbeddingBasis.reconstructBasis(from:)` witness — CorpusKit core
@@ -555,25 +850,49 @@ public actor Corpus {
     private static func resolveProvider(
         freshProvider: any EmbeddingProvider,
         isTrainable: Bool,
-        basisStore: BasisStore
-    ) async throws -> (provider: any EmbeddingProvider, freshBasisBlob: Data?) {
+        basisStore: BasisStore,
+        countsStore: CorpusProviderCountsStore
+    ) async throws -> (
+        provider: any EmbeddingProvider,
+        freshBasisBlob: Data?,
+        countsAccumulator: (any TrainableEmbeddingBasis)?,
+        countsDocumentCount: Int
+    ) {
         guard isTrainable, let trainable = freshProvider as? any TrainableEmbeddingBasis else {
-            return (freshProvider, nil)
+            return (freshProvider, nil, nil, 0)
         }
-        guard let persisted = try await basisStore.load(
+        // The empty-basis factory: the untrained fresh provider's serialized
+        // basis, captured for every trainable slot so reindex can always train
+        // from scratch (frozen-after-restart fix).
+        let factoryBlob = trainable.serializeBasis()
+
+        // The maintained-counts accumulator: a distinct fresh trainable provider,
+        // reconstructed from the empty factory, restored from the counts table if
+        // a row exists. Distinct from the serving provider (LSA/NMF desync rule).
+        guard let accumulator = try trainable.reconstructBasis(from: factoryBlob)
+            as? any TrainableEmbeddingBasis else {
+            throw CorpusKitError.notTrainable(
+                "reconstructed counts accumulator is not trainable — basis seam invariant violated")
+        }
+        var accumulatorDocCount = 0
+        if let counts = try await countsStore.load(
             modelID: freshProvider.modelID,
             modelVersion: freshProvider.modelVersion
-        ) else {
-            // Trainable provider, no basis yet: serve it untrained and capture
-            // its EMPTY serialized basis as the fresh-provider factory for
-            // first-ingest/reindex (which reconstruct fresh and train from
-            // scratch — trainOnCorpus is additive, so a fresh start is required).
-            return (freshProvider, trainable.serializeBasis())
+        ) {
+            try accumulator.restoreCounts(from: counts.counts)
+            accumulatorDocCount = counts.documentCount
         }
-        // Basis exists: reconstruct the trained provider for serving; no
-        // fresh-basis blob (already trained, reopened corpus is not retrained).
-        let restored = try trainable.reconstructBasis(from: persisted.basis)
-        return (restored, nil)
+
+        // Serving provider: the trained provider when a basis is persisted, else
+        // the untrained fresh provider.
+        if let persisted = try await basisStore.load(
+            modelID: freshProvider.modelID,
+            modelVersion: freshProvider.modelVersion
+        ) {
+            let restored = try trainable.reconstructBasis(from: persisted.basis)
+            return (restored, factoryBlob, accumulator, accumulatorDocCount)
+        }
+        return (freshProvider, factoryBlob, accumulator, accumulatorDocCount)
     }
 
     // MARK: - Test seams (internal — not part of the public surface)
@@ -595,11 +914,26 @@ public actor Corpus {
         try await storage.migrate(to: BundleStore.schemaDeclaration)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
         try await storage.migrate(to: BasisStore.schemaDeclaration)
+        // Additive maintained-counts table (P3): created via migrate like the
+        // BasisStore pair so it exists regardless of the other schemas' gates.
+        try await storage.migrate(to: CorpusProviderCountsStore.schemaDeclaration)
+        // Additive removed-sources table: created via migrate like the others.
+        try await storage.migrate(to: RemovedSourceStore.schemaDeclaration)
 
+        // InvertedIndexStore sidecar schema: ensure tables exist before open().
+        try await storage.migrate(to: InvertedIndexStore.schemaDeclaration)
+
+        self.storage = storage
         self.bundleStore = BundleStore(storage: storage)
-        self.bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
-        self.vectorStore = VectorStore(storage: storage)
+        // InvertedIndexStore replaces the former in-memory BM25Index for the
+        // test seam, matching the production init. Same durability guarantee:
+        // keyword state persists in SQLite and is loaded on open without
+        // replaying chunk bodies.
+        self.invertedIndex = InvertedIndexStore(storage: storage)
+        self.vectorStore = VectorStore(storage: storage, sidecarURL: VectorStore.defaultSidecarURL(for: storage))
         self.basisStore = BasisStore(storage: storage)
+        self.countsStore = CorpusProviderCountsStore(storage: storage)
+        self.removedSourceStore = RemovedSourceStore(storage: storage)
 
         // This seam receives a directly-built provider rather than an
         // EmbeddingModel. Trainability is probed via the type-erasure cast
@@ -611,20 +945,27 @@ public actor Corpus {
         let resolved = try await Self.resolveProvider(
             freshProvider: provider,
             isTrainable: provider is any TrainableEmbeddingBasis,
-            basisStore: basisStore
+            basisStore: basisStore,
+            countsStore: countsStore
         )
         self.slots = [ProviderSlot(
             provider: resolved.provider,
-            freshBasisBlob: resolved.freshBasisBlob)]
+            freshBasisBlob: resolved.freshBasisBlob,
+            countsAccumulator: resolved.countsAccumulator,
+            countsDocumentCount: resolved.countsDocumentCount)]
         self.hlcGenerator = HLCGenerator(nodeID: 1)
 
-        let existing = try await bundleStore.allChunks()
-        if !existing.isEmpty {
-            await bm25.index(existing)
-            for chunk in existing {
-                chunkSourceMap[chunk.id] = chunk.sourceID
-            }
+        // Load the durable inverted index from SQLite and warm-load
+        // chunkSourceMap via a compact (id, source_id) projection — no bodies.
+        try await invertedIndex.open()
+        let pairs = try await bundleStore.chunkSourcePairs()
+        for pair in pairs {
+            chunkSourceMap[pair.id] = pair.sourceID
         }
+
+        // WS2-F3: backfill corpus_metadata rows for any existing chunks (same
+        // as production init — idempotent upsert).
+        try await bundleStore.recomputeAllCorpusMerkleRoots()
     }
 
     /// Test-only: force `floatNearest` to return `.storeError(error)` on the next call.
@@ -660,22 +1001,49 @@ public actor Corpus {
         let chunks = Chunker.chunk(text: text, sourceID: sourceID, hlcGenerator: &hlcGenerator)
         guard !chunks.isEmpty else { return }
 
-        try await bundleStore.insert(chunks)
-        await bm25.index(chunks)
-        // Update chunkSourceMap so bm25TopKBySource can resolve these chunks.
+        // (Re-)ingesting a source reactivates it: clear any prior removed-row so
+        // it returns to the active set (its vectors + BM25 postings are restored
+        // by this ingest). No-op when the source was never removed.
+        try await removedSourceStore.clearRemoved(sourceID)
+
+        // `insert` is idempotent (dedups by chunk id); it returns only the
+        // chunks ACTUALLY inserted so derived per-chunk state does not
+        // double-count on re-ingest of the same source.
+        let insertedChunks = try await bundleStore.insert(chunks)
+        // Index every chunk into the durable InvertedIndexStore (SQLite-backed).
         // BM25 and the source map are provider-INDEPENDENT (one keyword index
         // per corpus), so they are maintained once, outside the per-provider
-        // fan-out below.
-        for chunk in chunks { chunkSourceMap[chunk.id] = chunk.sourceID }
+        // fan-out below. Re-indexing an existing chunk replaces its term
+        // frequencies atomically (InvertedIndexStore.index is idempotent).
+        for chunk in chunks {
+            try await invertedIndex.index(
+                itemID: chunk.id.uuidString,
+                tokens: CorpusDefaultTokenizer().keywordTokens(chunk.text),
+                now: now
+            )
+            chunkSourceMap[chunk.id] = chunk.sourceID
+        }
 
-        // Fan out the embedding work across every held provider slot. For N=1
-        // this loop runs once over the default slot — byte-identical to the
-        // pre-6a-iii single-provider ingest. Each slot embeds independently
-        // under its own modelID; the VectorStore/BasisStore keys keep the N
-        // providers' rows apart. `allChunks` is loaded lazily and shared across
-        // slots that take the first-ingest train path (the corpus snapshot is
-        // the same for every provider).
+        // Maintained-counts write path (P3): fold only the NEWLY-inserted chunks
+        // into each trainable slot's counts accumulator — folding a duplicate
+        // (idempotent no-op in the bundle store) would inflate the additive
+        // counts and the vocab-growth anchor on re-ingest. Independent of the
+        // embed fan-out (the accumulator is separate from the serving provider);
+        // persisted once at the end of this ingest (the single-doc batch boundary).
+        foldChunksIntoCounts(insertedChunks)
+
+        // Fan out the embedding work across every held provider slot in two
+        // phases. Phase 1 (serial) handles any first-ingest training and collects
+        // the fold-in slots. Phase 2 computes the fold-in slots' embeddings
+        // CONCURRENTLY (the CPU-bound cost), then writes each slot's batch
+        // serially. For N=1 this is byte-identical to the single-provider ingest.
+        // Each slot embeds independently under its own modelID; the
+        // VectorStore/BasisStore keys keep the N providers' rows apart.
+        // `allChunks` is loaded lazily and shared across slots that take the
+        // first-ingest train path (the corpus snapshot is the same for every
+        // provider).
         var cachedAllChunks: [Chunk]?
+        var foldInSlotIndices: [Int] = []
         for index in slots.indices {
             // First-ingest auto-train (mission 6a-ii-β): when this slot has a
             // fresh-basis blob (trainable provider) AND no basis has been
@@ -683,12 +1051,16 @@ public actor Corpus {
             // (which now includes the just-inserted chunks) and re-embed every
             // chunk under the trained basis. This is the ONLY implicit train
             // trigger. Subsequent ingests (once a basis exists) take the fold-in
-            // path below: `embedFloat` projects new chunks onto the FROZEN basis
+            // path: `embedFloat` projects new chunks onto the FROZEN basis
             // without retraining — LSA/NMF cannot incrementally refactor a basis,
             // so a per-ingest retrain would be both wrong and wasteful. Explicit
-            // `reindex(now:)` retrains on growth. A reopened-from-blob corpus has
-            // no fresh-basis blob, so it always takes the fold-in path here
-            // (already trained on open).
+            // `reindex(now:)` retrains on growth. The auto-train gate is the
+            // `!hasBasis` check below, NOT the presence of the factory blob: a
+            // reopened-from-basis corpus keeps its factory blob (the frozen-after-
+            // restart fix) but already has a persisted basis, so it falls through
+            // to the fold-in path here and does not auto-train on ingest. Training
+            // stays SERIAL — it mutates the slot's basis and re-embeds the whole
+            // corpus; only the fold-in compute (phase 2) is parallelised.
             if slots[index].freshBasisBlob != nil {
                 let slotProvider = slots[index].provider
                 let hasBasis = try await basisStore.load(
@@ -700,7 +1072,9 @@ public actor Corpus {
                     if let cached = cachedAllChunks {
                         allChunks = cached
                     } else {
-                        allChunks = try await bundleStore.allChunks()
+                        // Active chunks only — a removed source must not be
+                        // re-trained/re-embedded back into recall.
+                        allChunks = try await activeChunks()
                         cachedAllChunks = allChunks
                     }
                     try await trainAndPersistBasis(slotIndex: index, chunks: allChunks, now: now)
@@ -716,47 +1090,368 @@ public actor Corpus {
             // Fold-in path: a basis already exists (or the provider is not
             // trainable). Embed only the NEW chunks; for a trainable provider
             // `embedFloat` projects them onto the frozen basis (no retrain).
-            //
-            // Fan-out: embed each chunk and store the vector. The
-            // chunk.id.uuidString == vector.item_id join is maintained here;
-            // the caller never sees it (sealed-vector principle). The column
-            // was renamed drawer_id → item_id in Lane F (arch spec §4.1).
-            let provider = slots[index].provider
-            for chunk in chunks {
-                let engram = try await provider.embed(chunk.text)
-                try await vectorStore.addVector(
-                    itemID: chunk.id.uuidString,
-                    engram: engram,
-                    modelID: provider.modelID,
-                    modelVersion: provider.modelVersion,
-                    filedAt: now
-                )
+            foldInSlotIndices.append(index)
+        }
 
-                // Float lane (Lane D): RETAIN, don't recompute. The provider's
-                // float vector is the SAME pooled embedding `embed` already ran
-                // through `FloatSimHash.project` for the binary engram — one
-                // inference pass, two stored rows. The float row is a SECOND row
-                // per chunk under the same item_id, distinguished by
-                // `kind=float32` and `vector_index=1` (the binary engram is
-                // vector_index=0). It is written only when the provider supports
-                // `embedFloat`; the default provider opts out by throwing, so a
-                // non-float provider stores the binary lane only and the dense
-                // float lane stays dark for it. Cosine over this true embedding
-                // ranks an answer above a near-duplicate of the question, which
-                // the 256-bit SimHash projection cannot (it loses the magnitude
-                // signal).
-                if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
-                    try await vectorStore.addPayload(
-                        itemID: chunk.id.uuidString,
-                        vectorIndex: 1,
-                        payload: VectorPayload(floats: floats),
-                        modelID: provider.modelID,
-                        modelVersion: provider.modelVersion,
-                        filedAt: now
-                    )
+        // Phase 2: compute the fold-in slots CONCURRENTLY. Each provider slot is
+        // independent (distinct modelID, own rows), and `embedPair` is a pure
+        // function of the text that runs OFF the Corpus actor (the provider is a
+        // Sendable value, not actor-isolated state), so the slots' embedding
+        // compute — the dominant CPU cost — runs in parallel on the cooperative
+        // pool. The WRITES stay serial: VectorStore is an actor and we await its
+        // batched `addPayloads` one slot at a time (SQLite is single-writer).
+        // Determinism: each slot's rows are built in chunk order (binary v0 then
+        // float v1) and the writes are issued in slot order, so stored rows are
+        // byte-identical to the serial path. The chunk.id.uuidString ==
+        // vector.item_id join is maintained here (sealed-vector principle; column
+        // renamed drawer_id → item_id in Lane F, arch spec §4.1).
+        if !foldInSlotIndices.isEmpty {
+            // Snapshot the providers (Sendable values) and the per-call inputs on
+            // the actor before fanning out, so the child tasks touch no isolated
+            // state.
+            let foldInProviders: [(provider: any EmbeddingProvider, chunks: [Chunk], now: Date)] =
+                foldInSlotIndices.map { (provider: slots[$0].provider, chunks: chunks, now: now) }
+            // Embed each provider slot, throttled to embedConcurrencyCap (T1):
+            // foreground fans across all cores, background to ~a quarter. Results
+            // return in slot order, so the flattened write stays deterministic.
+            let perSlotRows: [[VectorPayloadInput]] =
+                try await boundedConcurrentMap(foldInProviders, cap: embedConcurrencyCap) { fp in
+                    var rows: [VectorPayloadInput] = []
+                    rows.reserveCapacity(fp.chunks.count * 2)
+                    for chunk in fp.chunks {
+                        // Single inference pass: embedPair computes the provider's
+                        // pooled vector ONCE and returns both the binary engram and
+                        // the dense float vector.
+                        let (engram, floats) = try await fp.provider.embedPair(chunk.text)
+                        // Binary engram row (vectorIndex 0) — always written.
+                        rows.append(VectorPayloadInput(
+                            itemID: chunk.id.uuidString,
+                            vectorIndex: 0,
+                            payload: VectorPayload(engram: engram),
+                            modelID: fp.provider.modelID,
+                            modelVersion: fp.provider.modelVersion,
+                            filedAt: fp.now
+                        ))
+                        // Float lane (Lane D): vectorIndex 1 (kind=float32), present
+                        // only when the provider's float lane is live and the chunk
+                        // resolved (`floats` non-empty).
+                        if !floats.isEmpty {
+                            rows.append(VectorPayloadInput(
+                                itemID: chunk.id.uuidString,
+                                vectorIndex: 1,
+                                payload: VectorPayload(floats: floats),
+                                modelID: fp.provider.modelID,
+                                modelVersion: fp.provider.modelVersion,
+                                filedAt: fp.now
+                            ))
+                        }
+                    }
+                    return rows
+                }
+            // One batched write for the whole document (all provider slots
+            // flattened). A single addPayloads call means a single resident-index
+            // rebuild for the document instead of one per slot; under the drain's
+            // deferred-index window the rebuild is deferred to burst end entirely.
+            let allRows = perSlotRows.flatMap { $0 }
+            if !allRows.isEmpty {
+                try await vectorStore.addPayloads(allRows)
+            }
+        }
+
+        // Batch boundary: persist the maintained counts + growth anchors once for
+        // this document (not per chunk).
+        try await persistMaintainedCounts(now: now)
+    }
+
+    /// Batch ingest for the drain worker pool: ingest many documents with the
+    /// embedding COMPUTE parallelized across documents (the CPU-bound cost) while
+    /// the chunk/BM25/bundle/vector WRITES stay serial (single-writer + actor
+    /// isolation). Output is identical to calling `ingest` once per item — same
+    /// chunks, same vectors, same content-addressed idempotency. This is the
+    /// cross-drawer parallelism the per-estate encode drain drives (the 1.0
+    /// separate-pump fix; the global cross-estate cap is the 1.1 central drain
+    /// master, DECISION_CENTRAL_DRAIN_MASTER_2026-06-23).
+    ///
+    /// First-ingest training cannot run concurrently (it mutates a slot's basis),
+    /// so when a trainable slot still lacks a persisted basis the batch trains it
+    /// ONCE on the full just-chunked corpus (Phase 1b) before the parallel embed —
+    /// not item-by-item, which would train on a single document and yield a
+    /// degenerate basis. Every subsequent batch (basis frozen) skips the bootstrap
+    /// and takes the parallel fold-in path directly.
+    public func ingestBatch(_ items: [(text: String, sourceID: String, now: Date)]) async throws {
+        guard !items.isEmpty else { return }
+
+        // Phase 1 (serial, actor-isolated): chunk + bundle + BM25 + source map.
+        // Chunking uses the actor's HLC generator and the stores are actor state,
+        // so this stays on-actor; it is cheap relative to the embeds.
+        var perItemChunks: [[Chunk]] = []
+        perItemChunks.reserveCapacity(items.count)
+        // Commit the storage writes PER ITEM-CHUNK, not per item: the prior
+        // per-item/per-chunk autocommits made a bulk drain I/O-bound on
+        // sqlite3_step → commit + WAL checkpoint, idling the cores regardless of
+        // embed parallelism. Chunked, NOT one transaction over the whole batch,
+        // because the corpus shares the estate's primary SQLite connection
+        // (single-writer at the file level); a transaction held across thousands
+        // of rows would starve concurrent LocusKit captures / the governor. The
+        // per-chunk commit still amortises the fsync/checkpoint ~chunk-fold.
+        // (Parity: the Rust twin splits storage and BM25 into two sequential
+        // windows because its InvertedIndexStore owns a private connection; here
+        // invertedIndex shares storage.rowStore, so one window per chunk covers
+        // bundle + BM25 + counts.)
+        let rowStore = storage.rowStore
+        var offset = 0
+        while offset < items.count {
+            let end = min(offset + Self.commitChunkItems, items.count)
+            try await rowStore.beginTransaction()
+            do {
+                for item in items[offset..<end] {
+                    let chunks = Chunker.chunk(
+                        text: item.text, sourceID: item.sourceID, hlcGenerator: &hlcGenerator)
+                    perItemChunks.append(chunks)
+                    guard !chunks.isEmpty else { continue }
+                    // (Re-)ingesting reactivates the source (clears any removed-row).
+                    try await removedSourceStore.clearRemoved(item.sourceID)
+                    // Idempotent insert returns only the newly-inserted chunks; fold
+                    // counts over those (a re-ingested duplicate must not inflate them).
+                    let insertedChunks = try await bundleStore.insert(chunks)
+                    // Index into the durable InvertedIndexStore; idempotent on re-ingest.
+                    for chunk in chunks {
+                        try await invertedIndex.index(
+                            itemID: chunk.id.uuidString,
+                            tokens: CorpusDefaultTokenizer().keywordTokens(chunk.text),
+                            now: item.now
+                        )
+                        chunkSourceMap[chunk.id] = chunk.sourceID
+                    }
+                    // Maintained-counts write path (P3): fold this item's NEWLY-inserted
+                    // chunks into each trainable slot's accumulator. Persisted ONCE at the
+                    // end of the batch (Phase 3), the batch boundary — never per chunk.
+                    foldChunksIntoCounts(insertedChunks)
+                }
+                try await rowStore.commitTransaction()
+            } catch {
+                try? await rowStore.rollbackTransaction()
+                throw error
+            }
+            offset = end
+        }
+
+        // Phase 1b — batch-aware first-basis bootstrap. When a trainable slot
+        // (RI/PPMI/LSA/NMF) still has no persisted basis, train it ONCE on the
+        // FULL corpus now in the bundle store — every chunk just inserted, not
+        // the first item alone. The prior per-item serial fallback trained on
+        // item 1's chunks (often a single document), producing a degenerate
+        // basis (e.g. a rank-1 LSA SVD that folds in to zero); training on the
+        // whole batch is the representative corpus these distributional models
+        // need. Training is serial (it mutates the slot's basis) and runs BEFORE
+        // the parallel embed below, which then folds every chunk onto the trained
+        // basis. A subsequent full-corpus reindex still retrains on the complete
+        // corpus once a bulk import has fully drained — this only fixes the
+        // first-batch quality so interim recall is not embedding onto a 1-doc basis.
+        var needsBootstrap = false
+        for slot in slots where slot.freshBasisBlob != nil {
+            if try await basisStore.load(
+                modelID: slot.provider.modelID,
+                modelVersion: slot.provider.modelVersion) == nil {
+                needsBootstrap = true
+                break
+            }
+        }
+        if needsBootstrap {
+            // Active chunks only — exclude removed sources from the first-basis train.
+            let allChunks = try await activeChunks()
+            if !allChunks.isEmpty {
+                for index in slots.indices where slots[index].freshBasisBlob != nil {
+                    let alreadyTrained = try await basisStore.load(
+                        modelID: slots[index].provider.modelID,
+                        modelVersion: slots[index].provider.modelVersion) != nil
+                    if !alreadyTrained {
+                        // Trains on the full chunk set and installs the trained
+                        // provider into the slot, so the embed phase folds in.
+                        try await trainAndPersistBasis(
+                            slotIndex: index, chunks: allChunks, now: items[0].now)
+                    }
                 }
             }
         }
+
+        // Snapshot the providers (Sendable values) so the compute tasks touch no
+        // actor-isolated state.
+        let providers: [(provider: any EmbeddingProvider, modelID: String, modelVersion: String)] =
+            slots.map { ($0.provider, $0.provider.modelID, $0.provider.modelVersion) }
+
+        // Phase 2 (parallel, OFF the Corpus actor): fan the embeds over
+        // `embedConcurrencyCap` tasks, each taking ONE CONTIGUOUS SLICE of
+        // ~count/cap items and embedding them serially. The prior model ran one
+        // task PER ITEM, which `boundedConcurrentMap` schedules in cap-sized
+        // barriered batches — for cheap per-item embeds the task-scheduling churn
+        // dominates and cores never fill (the Rust twin measured ~2.8 effective
+        // cores of 18 under the equivalent per-item thread::scope). Slicing pays
+        // the scheduling cost `cap` times total and keeps each task busy.
+        // `embedPair` is a pure provider call (Sendable). Deterministic: each
+        // item's rows are built in (provider, chunk, lane) order and scattered
+        // back by ORIGINAL item index, so the stored rows are identical to the
+        // per-item serial path regardless of task completion order. Mirrors the
+        // Rust slice-per-worker fan-out.
+        let embedInputs: [(idx: Int, chunks: [Chunk])] =
+            perItemChunks.enumerated().compactMap { $0.element.isEmpty ? nil : ($0.offset, $0.element) }
+        let provs = providers
+        let itemNows = items.map(\.now)
+        let cap = embedConcurrencyCap
+        // Slice the non-empty items into at most `cap` contiguous groups.
+        let sliceLen = max(1, (embedInputs.count + cap - 1) / cap)
+        var slices: [[(idx: Int, chunks: [Chunk])]] = []
+        var sliceStart = 0
+        while sliceStart < embedInputs.count {
+            let sliceEnd = min(sliceStart + sliceLen, embedInputs.count)
+            slices.append(Array(embedInputs[sliceStart..<sliceEnd]))
+            sliceStart = sliceEnd
+        }
+        // One task per slice (cap slices, cap concurrency → all run together).
+        let computedSlices: [[(Int, [VectorPayloadInput])]] =
+            try await boundedConcurrentMap(slices, cap: cap) { slice in
+                var out: [(Int, [VectorPayloadInput])] = []
+                out.reserveCapacity(slice.count)
+                for input in slice {
+                    var rows: [VectorPayloadInput] = []
+                    rows.reserveCapacity(input.chunks.count * provs.count * 2)
+                    let nowLocal = itemNows[input.idx]
+                    for p in provs {
+                        for chunk in input.chunks {
+                            let (engram, floats) = try await p.provider.embedPair(chunk.text)
+                            rows.append(VectorPayloadInput(
+                                itemID: chunk.id.uuidString, vectorIndex: 0,
+                                payload: VectorPayload(engram: engram),
+                                modelID: p.modelID, modelVersion: p.modelVersion, filedAt: nowLocal))
+                            if !floats.isEmpty {
+                                rows.append(VectorPayloadInput(
+                                    itemID: chunk.id.uuidString, vectorIndex: 1,
+                                    payload: VectorPayload(floats: floats),
+                                    modelID: p.modelID, modelVersion: p.modelVersion, filedAt: nowLocal))
+                            }
+                        }
+                    }
+                    out.append((input.idx, rows))
+                }
+                return out
+            }
+        // Scatter the computed rows back to per-item order; skipped (empty) items
+        // remain []. Determinism preserved: rows are keyed by original item index.
+        var acc = [[VectorPayloadInput]](repeating: [], count: perItemChunks.count)
+        for slice in computedSlices {
+            for (idx, rows) in slice { acc[idx] = rows }
+        }
+        let perItemRows = acc
+
+        // Phase 3 (serial, actor-isolated): ONE batched write for the whole drain
+        // batch (every item's rows flattened, preserving item-then-chunk order).
+        // A single addPayloads call collapses the per-item resident-index rebuilds
+        // into one; under the drain's deferred-index window even that one rebuild
+        // is deferred to burst end (publishResidentIndex), so a bulk import pays
+        // O(N) total index work instead of O(N²).
+        let allRows = perItemRows.flatMap { $0 }
+        // Commit vector upserts PER ROW-CHUNK (same shared-connection bound as
+        // Phase 1). addPayloads under the drain's deferred-index window appends to
+        // the resident array across calls; the index rebuild is published once at
+        // burst end, so chunking the durable writes is safe.
+        var rowOffset = 0
+        while rowOffset < allRows.count {
+            let rowEnd = min(rowOffset + Self.commitChunkRows, allRows.count)
+            try await rowStore.beginTransaction()
+            do {
+                try await vectorStore.addPayloads(Array(allRows[rowOffset..<rowEnd]))
+                try await rowStore.commitTransaction()
+            } catch {
+                try? await rowStore.rollbackTransaction()
+                throw error
+            }
+            rowOffset = rowEnd
+        }
+
+        // Batch boundary: persist the maintained counts + growth anchors once for
+        // the whole drained batch (a single counts-blob write; autocommits).
+        // `items[0].now` matches the first-basis bootstrap's training instant above.
+        try await persistMaintainedCounts(now: items[0].now)
+    }
+
+    // MARK: - Maintained counts (incremental-counts change set, P3)
+
+    /// Fold the written chunks into every trainable slot's maintained-counts
+    /// accumulator — the per-chunk "increment as we go" write path
+    /// (`addToCounts`). Cheap (O(chunk·vocab)); non-trainable slots are skipped.
+    /// Does NOT persist: persistence batches at the caller's boundary
+    /// (`persistMaintainedCounts`), because re-serializing the whole counts blob
+    /// per chunk would be O(N·vocab) over an import.
+    private func foldChunksIntoCounts(_ chunks: [Chunk]) {
+        guard !chunks.isEmpty else { return }
+        for index in slots.indices where slots[index].countsAccumulator != nil {
+            for chunk in chunks {
+                slots[index].countsAccumulator!.addToCounts(text: chunk.text)
+            }
+            slots[index].countsDocumentCount += chunks.count
+        }
+    }
+
+    /// All chunks EXCLUDING those of removed (recall-suppressed) sources.
+    ///
+    /// Every rebuild path — reindex, the BM25 rebuild on open, the first-ingest
+    /// basis train — reads this instead of `bundleStore.allChunks()` so a source
+    /// cleared by `remove(sourceID:)` cannot resurface. Re-ingesting a source
+    /// clears its removed-row so it returns to the active set. Not a hot path
+    /// (rebuild/reindex only).
+    private func activeChunks() async throws -> [Chunk] {
+        let removed = try await removedSourceStore.removedIDs()
+        let all = try await bundleStore.allChunks()
+        guard !removed.isEmpty else { return all }
+        return all.filter { !removed.contains($0.sourceID) }
+    }
+
+    /// The maximum maintained vocabulary size across all trainable slots — the
+    /// cheap anchor the autonomic governor's vocab-growth retrain trigger reads
+    /// (P3, item 5). Returns 0 when no trainable slot is present, so the trigger
+    /// never fires for a non-trainable corpus (correct: nothing to retrain).
+    ///
+    /// Reads the in-memory accumulators (current as of the last folded chunk),
+    /// not the store — the governor runs in-process with the resident corpus, so
+    /// this is a cheap field read, not a query.
+    public func maintainedVocabAnchor() -> Int {
+        slots.compactMap { $0.countsAccumulator?.countsVocabularySize }.max() ?? 0
+    }
+
+    /// Persist every trainable slot's maintained counts + growth anchors to the
+    /// counts table. Called at BATCH boundaries (end of ingest / ingestBatch /
+    /// reindex), never per chunk. Keyed by the slot's serving (modelID,
+    /// modelVersion) — the accumulator shares that key. `now` is the caller's
+    /// instant (determinism).
+    private func persistMaintainedCounts(now: Date) async throws {
+        for slot in slots {
+            guard let accumulator = slot.countsAccumulator else { continue }
+            try await countsStore.upsert(PersistedCounts(
+                modelID: slot.provider.modelID,
+                modelVersion: slot.provider.modelVersion,
+                counts: accumulator.serializeCounts(),
+                documentCount: slot.countsDocumentCount,
+                vocabSize: accumulator.countsVocabularySize,
+                updatedAt: now))
+        }
+    }
+
+    /// Enter deferred-index mode on the vector store for a drain burst.
+    ///
+    /// The ingest drain (CorpusIngestQueue) calls this before ingesting a drained
+    /// batch so the burst's resident-index rebuilds collapse into a single rebuild
+    /// at `publishVectorIndex()` — O(N) bulk import instead of O(N²). Internal:
+    /// `vectorStore` is file-private, so the ingest-queue extension reaches it
+    /// through this seam. Mirrors the Rust `Corpus::begin_deferred_vector_index`.
+    func beginDeferredVectorIndex() async throws {
+        try await vectorStore.beginDeferredIndex()
+    }
+
+    /// Publish the deferred resident vector index (one rebuild) at the end of a
+    /// drain burst / drain barrier. No-op when nothing was deferred. Internal seam
+    /// for the ingest-queue extension. Mirrors the Rust `Corpus::publish_vector_index`.
+    func publishVectorIndex() async throws {
+        try await vectorStore.publishResidentIndex()
     }
 
     /// Retrain the embedding basis on the full corpus and re-embed every chunk.
@@ -794,7 +1489,9 @@ public actor Corpus {
     ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;
     ///   never call `Date()` inside the engine.
     public func reindex(now: Date) async throws {
-        let chunks = try await bundleStore.allChunks()
+        // Active chunks only: a source cleared by `remove(sourceID:)` must NOT be
+        // re-embedded back into recall by a (possibly auto-triggered) reindex.
+        let chunks = try await activeChunks()
 
         // Fan out: refresh every held provider slot. For N=1 this loops once
         // over the default slot — byte-identical to the pre-6a-iii reindex.
@@ -810,11 +1507,16 @@ public actor Corpus {
 
             // Re-embed every chunk under this slot's (now possibly retrained)
             // provider, replacing stale vectors. Done whether or not a retrain
-            // occurred: for a non-trainable provider — or a reopened-from-blob
-            // slot with no fresh-basis blob — reindex is a vector refresh under
-            // the current basis, with no basis row written.
+            // occurred: for a non-trainable slot (no factory blob) reindex is a
+            // pure vector refresh under the current basis, with no basis row
+            // written.
             try await reembedChunks(slotIndex: index, chunks, now: now)
         }
+
+        // Persist the maintained counts + growth anchors after the refresh. The
+        // accumulators were kept current by the ingest fold path; persisting here
+        // re-anchors the growth trigger to the just-reindexed state.
+        try await persistMaintainedCounts(now: now)
     }
 
     /// Train a FRESH provider on the given chunks' texts and persist the
@@ -873,37 +1575,46 @@ public actor Corpus {
     /// untouched.
     private func reembedChunks(slotIndex: Int, _ chunks: [Chunk], now: Date) async throws {
         let provider = slots[slotIndex].provider
+        var batch: [VectorPayloadInput] = []
+        batch.reserveCapacity(chunks.count * 2)
         for chunk in chunks {
             // Delete-all before re-adding so a chunk that already had vectors
             // under a previous basis ends up with exactly the new vectors, not
             // a mix. deleteAllVectors clears both lanes (v0 binary + v1 float)
-            // for THIS slot's modelID only.
+            // for THIS slot's modelID only. The re-adds are batched below.
             try await vectorStore.deleteAllVectors(
                 itemID: chunk.id.uuidString,
                 modelID: provider.modelID
             )
-            let engram = try await provider.embed(chunk.text)
-            try await vectorStore.addVector(
+            // Single inference pass (see ingest): embedPair returns the engram
+            // and the float vector from ONE computation; compute-then-project
+            // providers override it.
+            let (engram, floats) = try await provider.embedPair(chunk.text)
+            batch.append(VectorPayloadInput(
                 itemID: chunk.id.uuidString,
-                engram: engram,
+                vectorIndex: 0,
+                payload: VectorPayload(engram: engram),
                 modelID: provider.modelID,
                 modelVersion: provider.modelVersion,
                 filedAt: now
-            )
-            // Float lane (Lane D): retain the pooled vector the provider's
-            // embed already produced. Written only when the provider supports
-            // embedFloat; a non-float provider stores the binary lane only.
-            if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
-                try await vectorStore.addPayload(
+            ))
+            // Float lane (Lane D): the pooled vector embedPair produced. Added
+            // only when non-empty (the provider opts out of the float lane, or
+            // the chunk is unresolved → binary lane only).
+            if !floats.isEmpty {
+                batch.append(VectorPayloadInput(
                     itemID: chunk.id.uuidString,
                     vectorIndex: 1,
                     payload: VectorPayload(floats: floats),
                     modelID: provider.modelID,
                     modelVersion: provider.modelVersion,
                     filedAt: now
-                )
+                ))
             }
         }
+        // Single batched write: O(1) sidecar + index rebuild for the whole
+        // re-embed, after all per-chunk deletes have cleared the old rows.
+        try await vectorStore.addPayloads(batch)
     }
 
     /// Recall the top-k chunks relevant to a query.
@@ -931,7 +1642,7 @@ public actor Corpus {
             modelID: provider.modelID,
             limit: limit,
             vectorStore: vectorStore,
-            bm25: bm25,
+            invertedIndex: invertedIndex,
             bundleStore: bundleStore
         )
     }
@@ -939,9 +1650,10 @@ public actor Corpus {
     /// Remove a source document from the recall index.
     ///
     /// Removes the source's chunks from BM25 and deletes their vectors
-    /// from VectorStore. The BundleStore is append-only, so chunk rows
-    /// are not deleted from content storage; the source will no longer
-    /// appear in recall results after this call.
+    /// from VectorStore. Chunk rows are not deleted from content storage;
+    /// the source will no longer appear in recall results after this call.
+    /// To additionally erase the verbatim chunk text, use
+    /// `expunge(sourceID:)` instead.
     ///
     /// - Parameter sourceID: The source document identifier supplied to
     ///   `ingest`.
@@ -953,7 +1665,7 @@ public actor Corpus {
         // corpus lifetime) so the per-chunk loop does not re-read `slots`.
         let modelIDs = slots.map { $0.provider.modelID }
         for chunk in chunks {
-            await bm25.remove(chunk.id)
+            try await invertedIndex.remove(itemID: chunk.id.uuidString)
             chunkSourceMap.removeValue(forKey: chunk.id)
             // Delete ALL vector_index rows for this chunk under EVERY held
             // modelID, not just the binary engram at vector_index=0: the float
@@ -968,40 +1680,75 @@ public actor Corpus {
                 )
             }
         }
+        // Record the source as removed so a subsequent reindex / first-ingest
+        // train (including the auto-triggered governor reindex) does NOT re-embed
+        // it back into recall from the chunks table. (Keyword recall is already
+        // suppressed above by removing the source's rows from the durable
+        // InvertedIndexStore.)
+        // `removed_at` is audit-only metadata (presence is what the active-chunk
+        // filter reads), so it uses `Date()` directly — mirroring BundleStore's
+        // `created_at` stamp; it is not a deterministic computation input.
+        try await removedSourceStore.markRemoved(sourceID, now: Date())
+    }
+
+    // MARK: - Hard-delete erasure (secfix/ws2-coredelete)
+
+    /// Zero all verbatim chunk text for `sourceID` and remove it from recall.
+    ///
+    /// This is the hard-delete variant of `remove(sourceID:)`. `remove` suppresses
+    /// a source from recall (invertedIndex, vectorStore, removedSourceStore) but
+    /// leaves the verbatim chunk text rows in the chunks table — content remains
+    /// in SQLite. `expunge` additionally zeroes the text column of every chunk row
+    /// for this source via `BundleStore.scrubText(sourceID:)`, ensuring the
+    /// verbatim content is unrecoverable even if the structural rows persist.
+    ///
+    /// Call sequence:
+    ///   1. Scrub text first — content is destroyed even if later steps fail.
+    ///   2. Remove from recall — identical to `remove(sourceID:)`.
+    ///
+    /// Called by `GeniusLocusKit` as part of the two-step expunge flow
+    /// (`VerbSurface.expunge`). Callers that only want recall suppression
+    /// (no content erasure) continue to use `remove(sourceID:)`.
+    ///
+    /// (secfix/ws2-coredelete: hard-delete destruction contract)
+    public func expunge(sourceID: String) async throws {
+        // Step 1: zero verbatim text in the chunks table. Content is gone at
+        // the database level before any recall-removal step can fail.
+        try await bundleStore.scrubText(sourceID: sourceID)
+        // Step 2: remove from recall — invertedIndex, vectorStore chunks,
+        // removedSourceStore. Delegates to the existing remove() path so
+        // the two are guaranteed identical recall-suppression behaviour.
+        try await remove(sourceID: sourceID)
     }
 
     // MARK: - Lifecycle (GLK_PROVISION_001)
 
     /// Destroy the corpus's recall index.
     ///
-    /// Clears the in-memory BM25 index, the chunk-source map, and all vector
-    /// rows from the VectorStore so this corpus no longer participates in recall.
+    /// Clears the durable InvertedIndexStore (SQLite iix_termfreqs + iix_doclens
+    /// rows), the chunk-source map, and all vector rows from the VectorStore so
+    /// this corpus no longer participates in recall.
     ///
-    /// The BundleStore's `chunks` table is append-only (PersistenceKit schema
-    /// invariant enforced by write triggers). Chunk rows are not deleted by this
-    /// call — they remain in the backing storage for audit and migration purposes.
-    /// What is destroyed is the corpus's active recall capability: after this
-    /// call, `recall` returns empty results and `ingest` would re-index from
-    /// scratch.
+    /// Chunk rows are not deleted by this call — they remain in the backing
+    /// storage. What is destroyed is the corpus's active recall capability:
+    /// after this call, `recall` returns empty results and `ingest` would
+    /// re-index from scratch. To erase verbatim chunk content, call
+    /// `expunge(sourceID:)` before `destroyRecallIndex`.
     ///
     /// Called by `GeniusLocusKit.destroy(storage:corpusStorage:handle:)` as part
     /// of the coordinated estate teardown path. The caller must ensure the estate
     /// is closed (not in use) before calling this.
     public func destroyRecallIndex() async throws {
-        // 1. Clear the in-memory BM25 index and chunk-source map.
-        //    BM25Index is a separate actor; clearing it requires removing each
-        //    tracked chunk. Since we are destroying everything, rebuild from empty.
-        let allChunks = try await bundleStore.allChunks()
-        for chunk in allChunks {
-            await bm25.remove(chunk.id)
-        }
+        // 1. Clear the durable InvertedIndexStore and chunk-source map.
+        //    deleteAll() removes every iix_termfreqs and iix_doclens row in one
+        //    call and wipes the in-memory state — no per-chunk iteration needed.
+        try await invertedIndex.deleteAll()
         chunkSourceMap.removeAll()
 
         // 2. Delete all vector rows from the VectorStore.
         //    VectorStore.destroyAllVectors() deletes every row in the vectors
         //    table regardless of modelID, so it clears ALL held signals' rows
-        //    in one call (no per-slot fan-out needed). Vectors are not
-        //    append-only so deletion is permitted.
+        //    in one call (no per-slot fan-out needed).
         try await vectorStore.destroyAllVectors()
 
         // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
@@ -1009,9 +1756,10 @@ public actor Corpus {
         //    next open would otherwise reconstruct a trained provider whose
         //    basis no longer matches any stored vectors. basisStore.deleteAll()
         //    clears every row regardless of modelID, so all held signals' bases
-        //    are wiped in one call. The basis table is not append-only, so
-        //    deletion is permitted.
+        //    are wiped in one call.
         try await basisStore.deleteAll()
+        try await countsStore.deleteAll()
+        try await removedSourceStore.deleteAll()
     }
 
     /// BM25-only top-k recall at the source granularity, using a bounded min-heap.
@@ -1035,8 +1783,9 @@ public actor Corpus {
     public func bm25TopKBySource(query: String, limit: Int) async -> [(sourceID: String, score: Float)] {
         guard limit > 0, !query.isEmpty else { return [] }
         // Tokenise using the same vocabulary as the indexed chunks. The
-        // CorpusDefaultTokenizer is stateless; a fresh instance is equivalent
-        // to the instance stored inside bm25.
+        // CorpusDefaultTokenizer is stateless; a fresh instance is semantically
+        // equivalent to the tokenizer used at ingest — same FNV-1a fold and
+        // vocab parameters, matching InvertedIndexStore's stored term frequencies.
         let tokens = CorpusDefaultTokenizer().keywordTokens(query)
         guard !tokens.isEmpty else { return [] }
 
@@ -1044,7 +1793,20 @@ public actor Corpus {
         // source-level aggregation we still have at least `limit` sources.
         // The over-fetch is bounded: frontierK <= 256 per the RecallDirector
         // contract, so limit * 4 <= 1024 at most.
-        let chunkHits = await bm25.topK(limit * 4, for: tokens)
+        // InvertedIndexStore.topK is synchronous internally (it builds or
+        // returns the cached in-memory InvertedIndex and runs WAND/BMW), but
+        // as an actor method it requires await to enter the actor's isolation
+        // context. No async I/O occurs; the hop is cheap.
+        let sparseHits = await invertedIndex.topK(queryTerms: tokens, k: limit * 4)
+
+        // Map SparseHit (itemID: String, impact: Float) to (id: UUID, score: Float).
+        // Hits whose itemID is not a valid UUID string are dropped — should not
+        // occur since InvertedIndexStore only receives chunk.id.uuidString at
+        // ingest time, but dropping is correct defensive behaviour.
+        let chunkHits: [(id: UUID, score: Float)] = sparseHits.compactMap { hit in
+            guard let uuid = UUID(uuidString: hit.itemID) else { return nil }
+            return (id: uuid, score: hit.impact)
+        }
 
         // Aggregate by sourceID — take the max chunk score per source.
         var sourceScores: [String: Float] = [:]
@@ -1488,11 +2250,17 @@ public actor Corpus {
 
     /// Count the total chunks in the bundle store across all sources.
     ///
-    /// Because BundleStore is append-only, this count does not decrease
-    /// when `remove(sourceID:)` is called — removed chunks are still
-    /// stored but no longer appear in recall results.
+    /// This count does not decrease when `remove(sourceID:)` is called —
+    /// removed chunks are still stored but no longer appear in recall results.
+    /// After `expunge(sourceID:)`, rows remain but their text is zeroed.
     public func count() async throws -> Int {
-        try await bundleStore.count()
+        // Excludes removed (recall-suppressed) sources: a removed source's chunks
+        // remain stored but must not be counted as live recall content.
+        // Fast path when nothing is removed (a plain row count).
+        let removed = try await removedSourceStore.removedIDs()
+        if removed.isEmpty { return try await bundleStore.count() }
+        let all = try await bundleStore.allChunks()
+        return all.filter { !removed.contains($0.sourceID) }.count
     }
 
     /// Return the set of all distinct source IDs (drawer IDs) currently in the
@@ -1504,6 +2272,20 @@ public actor Corpus {
     /// in maintenance/admin contexts, never on hot paths.
     public func indexedSourceIDs() async throws -> Set<String> {
         try await bundleStore.allSourceIDs()
+    }
+
+    // MARK: - Merkle attestation (NT-C1)
+
+    /// Per-corpus Merkle root for a given source.
+    /// Returns `MerkleRoot.empty` when no metadata row exists.
+    public func corpusMerkleRoot(for sourceID: String) async throws -> MerkleRoot {
+        try await bundleStore.corpusMerkleRoot(for: sourceID)
+    }
+
+    /// Estate-level corpus Merkle root — interior hash over all per-corpus roots.
+    /// Returns `MerkleRoot.empty` when no corpora exist.
+    public func globalCorpusMerkleRoot() async throws -> MerkleRoot {
+        try await bundleStore.globalCorpusMerkleRoot()
     }
 }
 
@@ -1606,6 +2388,20 @@ extension EmbeddingModel {
                 maxTokenLen: 2048,
                 inference: inference
             )
+
+#if canImport(NaturalLanguage)
+        case .nlEmbedding(let provider):
+            // The caller constructed an NLEmbeddingProvider (or a compatible
+            // EmbeddingProvider) externally and passes it through here — same
+            // pattern as .fdc(provider:). No further construction needed.
+            return provider
+
+        case .nlContextualEmbedding(let provider):
+            // Same pass-through pattern. The caller constructed an
+            // NLContextualEmbeddingProvider externally; we register it
+            // as the serving provider for the "apple-nlcontextual-v1" lane.
+            return provider
+#endif // canImport(NaturalLanguage)
         }
     }
 }
@@ -1620,7 +2416,7 @@ extension EmbeddingModel {
 /// [2, vocabSize)). Defined here because CorpusKitProviders depends on
 /// CorpusKit — importing it from here would create a circular dependency.
 // Internal (not private) so HybridRecall.swift can tokenise queries
-// with the same vocabulary before calling BM25Index.topK(_:for:).
+// with the same vocabulary before calling InvertedIndexStore.topK(queryTerms:k:).
 struct CorpusDefaultTokenizer: Tokenizer {
     let vocabID: String
     let maxTokens: Int
@@ -1696,5 +2492,20 @@ private struct CorpusTextProvider: EmbeddingProvider {
         guard !text.isEmpty else { return [] }
         let tokens = tokenizer.tokenize(text)
         return try await inference(tokens)
+    }
+
+    /// Single-inference override: `embed` and `embedFloat` both tokenize and
+    /// run the same inference pass — `embed` projects the pooled vector to the
+    /// 256-bit engram, `embedFloat` returns it raw. Running both separately
+    /// pays for two inference passes over identical tokens. This computes the
+    /// pooled vector ONCE and returns both the projected engram and the floats,
+    /// halving inference cost on the capture/reembed path. Output is identical
+    /// to calling `embed` and `embedFloat` separately: empty input opts out of
+    /// the float lane (`[]`) and yields `Engram.zero`, matching both methods.
+    func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        guard !text.isEmpty else { return (.zero, []) }
+        let tokens = tokenizer.tokenize(text)
+        let floats = try await inference(tokens)
+        return (FloatSimHash.project(vector: floats, seed: projectionSeed), floats)
     }
 }

@@ -56,6 +56,163 @@ struct ObsidianAdapterTests {
         #expect(note.tags == ["chemistry", "reference"])
     }
 
+    // MARK: - Vault containment (path-traversal hardening)
+
+    /// Corpus of wing/room values that must fail closed before any directory
+    /// is created under the selected vault root.
+    @Test("fromIR rejects stableSourceKey path traversal — full corpus")
+    func fromIRRejectsPathTraversalCorpus() {
+        // Each of these keys would escape the vault root if written naively
+        // via appendingPathComponent. The containment gate must fail closed
+        // before createDirectory is called, and no file must appear outside
+        // the vault root.
+        let maliciousKeys = [
+            "../escape",                    // single parent traversal
+            "notes/../../../escape",        // nested traversal
+            "/absolute/escape",             // absolute path
+            "~/tilde/escape",               // tilde expansion
+            "folder\\backslash",            // Windows separator
+            "a//double-slash",              // double slash (empty component)
+        ]
+        for key in maliciousKeys {
+            let vault = makeTempVault()
+            defer { try? FileManager.default.removeItem(at: vault) }
+            #expect(throws: VaultKitError.self, "key '\(key)' must be rejected by containment gate") {
+                try ObsidianAdapter().fromIR(
+                    [NoteIR(stableSourceKey: key, body: [Block(kind: "markdown", text: "body")])],
+                    to: vault)
+            }
+        }
+    }
+
+    // MARK: - Symlink boundary hardening (PR #42)
+
+    @Test("toIR skips symlinked markdown files — following them could read outside the vault")
+    func toIRSkipsSymlinkedMarkdownFiles() throws {
+        // Place a legitimate note and a symlink inside the vault. The symlink
+        // points outside the vault root to a file the importer must never read.
+        let base = makeTempVault()
+        let vault = base.appendingPathComponent("vault", isDirectory: true)
+        let outside = base.appendingPathComponent("outside-secret.md")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        try "EXFILTRATED_SECRET".write(to: outside, atomically: true, encoding: .utf8)
+        // Pre-plant a symlink inside the vault pointing to the file outside.
+        try FileManager.default.createSymbolicLink(
+            at: vault.appendingPathComponent("secret.md"),
+            withDestinationURL: outside)
+        try write("safe", to: vault.appendingPathComponent("safe.md"))
+
+        let notes = try ObsidianAdapter().toIR(vaultURL: vault)
+
+        // Only the legitimate note must appear; the symlinked file must be skipped.
+        #expect(notes.count == 1)
+        #expect(notes.first?.stableSourceKey == "safe")
+        #expect(notes.first?.flattenedBody == "safe")
+    }
+
+    @Test("fromIR rejects a pre-existing symlinked output file and does not follow it")
+    func fromIRRejectsSymlinkedOutputFile() throws {
+        // Attacker scenario: a symlink is pre-planted at the exact export path
+        // (vault/note.md → /tmp/outside.md). The adapter must refuse the write
+        // rather than following the link and modifying the target outside the vault.
+        let base = makeTempVault()
+        let vault = base.appendingPathComponent("vault", isDirectory: true)
+        let outside = base.appendingPathComponent("outside.md")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        try "original-outside-content".write(to: outside, atomically: true, encoding: .utf8)
+        // Pre-plant the symlink at the export target path.
+        try FileManager.default.createSymbolicLink(
+            at: vault.appendingPathComponent("note.md"),
+            withDestinationURL: outside)
+
+        #expect(throws: VaultKitError.self, "fromIR must reject a pre-existing symlinked export path") {
+            try ObsidianAdapter().fromIR(
+                [NoteIR(stableSourceKey: "note",
+                        body: [Block(kind: "markdown", text: "changed")])],
+                to: vault)
+        }
+        // The file outside the vault must be untouched.
+        #expect(try String(contentsOf: outside, encoding: .utf8) == "original-outside-content")
+    }
+
+    @Test("fromIR accepts legitimate non-symlink export and writes correctly")
+    func fromIRAcceptsLegitimateExport() throws {
+        // Baseline: a normal export to a clean vault directory must succeed.
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        try ObsidianAdapter().fromIR(
+            [NoteIR(stableSourceKey: "Wing/Room/note",
+                    body: [Block(kind: "markdown", text: "hello")])],
+            to: vault)
+
+        let expected = vault.appendingPathComponent("Wing/Room/note.md")
+        #expect(FileManager.default.fileExists(atPath: expected.path),
+                "legitimate export must create the note file inside the vault")
+        let content = try String(contentsOf: expected, encoding: .utf8)
+        #expect(content.contains("hello"), "exported note must contain the body text")
+    }
+
+    @Test("fromIR accepts legitimate nested paths and writes them correctly")
+    func fromIRAcceptsLegitimateNestedPaths() throws {
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let notes = [
+            NoteIR(stableSourceKey: "Wing/Room/my-note",
+                   body: [Block(kind: "markdown", text: "# Note")]),
+            NoteIR(stableSourceKey: "root-note",
+                   body: [Block(kind: "markdown", text: "# Root")]),
+        ]
+        // Must not throw; the containment gate must not block safe paths.
+        try ObsidianAdapter().fromIR(notes, to: vault)
+        #expect(FileManager.default.fileExists(
+            atPath: vault.appendingPathComponent("Wing/Room/my-note.md").path),
+                "nested note must be written inside the vault")
+        #expect(FileManager.default.fileExists(
+            atPath: vault.appendingPathComponent("root-note.md").path),
+                "root-level note must be written inside the vault")
+        // Index files should also be present.
+        #expect(FileManager.default.fileExists(
+            atPath: vault.appendingPathComponent("Wing/Room/index.md").path),
+                "index for nested folder must be written inside the vault")
+    }
+
+    @Test("containedVaultURL rejects traversal paths before filesystem access")
+    func containedVaultURLRejectsTraversal() {
+        let root = URL(fileURLWithPath: "/tmp/vault-root", isDirectory: true)
+        let traversalPaths = [
+            "../escape.md",
+            "notes/../../etc/passwd",
+            "/absolute/path.md",
+            "~/home/escape.md",
+            "folder\\evil.md",
+        ]
+        for path in traversalPaths {
+            #expect(throws: VaultKitError.self, "'\(path)' must be rejected") {
+                try ObsidianAdapter.containedVaultURL(forRelativePath: path, under: root)
+            }
+        }
+    }
+
+    @Test("containedVaultURL accepts legitimate relative paths")
+    func containedVaultURLAcceptsLegitimateRelativePaths() throws {
+        let root = URL(fileURLWithPath: "/tmp/vault-root", isDirectory: true)
+        let safePaths = [
+            "Wing/Room/note.md",
+            "note-at-root.md",
+            "A/B/C/deep-note.md",
+            "index.md",
+        ]
+        for path in safePaths {
+            let url = try ObsidianAdapter.containedVaultURL(forRelativePath: path, under: root)
+            #expect(url.path.hasPrefix("/tmp/vault-root/"), "'\(path)' must produce URL inside vault root")
+        }
+    }
+
     // MARK: - OKF default-mode (pureObsidianLinks = false)
 
     @Test("OKF default: emitted note carries type: frontmatter key derived from kind")
@@ -264,8 +421,8 @@ struct ObsidianAdapterTests {
             try? FileManager.default.removeItem(at: dest)
         }
 
-        // Notes without explicit links in body — links live in NoteIR.links only.
-        // In OKF mode, links are emitted as standard-md then re-parsed on read.
+        // Note body contains an explicit [[Link]] wikilink and a #topic tag —
+        // both are parsed into NoteIR.links and NoteIR.tags by toIR.
         try write(
             """
             ---
@@ -342,9 +499,9 @@ struct ObsidianAdapterTests {
         try adapter.fromIR(first, to: dest)
         let second = try adapter.toIR(vaultURL: dest)
 
-        // Full equality check — wikilink mode is byte-stable.
-        // Exclude frontmatter difference: OKF keys (type:, tags:) are injected on
-        // write and survive round-trip in the frontmatter map.
+        // Partial round-trip check: compares count, stable key, body, links, and
+        // tags. Full value equality is not asserted — frontmatter fields (type:,
+        // tags:) injected on write are excluded.
         #expect(first.count == second.count)
         for (a, b) in zip(first.sorted { $0.stableSourceKey < $1.stableSourceKey },
                           second.sorted { $0.stableSourceKey < $1.stableSourceKey }) {

@@ -43,6 +43,34 @@ struct LsaBasisFixture: Codable {
 @Suite("LsaBasisSerialization")
 struct LsaBasisSerializationTests {
 
+    // MARK: - Counts codec (incremental-counts change set)
+
+    @Test("counts round-trip preserves vocabulary size + document count")
+    func countsRoundTripPreservesAnchors() throws {
+        let original = buildTrainedLsaProvider()
+        let restored = LsaProvider(rank: 3, svdSweeps: 30)
+        try restored.restoreCounts(from: original.serializeCounts())
+        #expect(restored.vocabularySize == original.vocabularySize)
+        #expect(restored.documentCount == original.documentCount)
+    }
+
+    @Test("counts blob begins with the LSAC magic and the v1 format byte")
+    func countsBlobHeaderIsVersioned() {
+        let bytes = [UInt8](buildTrainedLsaProvider().serializeCounts())
+        #expect(bytes.count >= 5)
+        #expect(Array(bytes[0..<4]) == Array("LSAC".utf8))
+        #expect(bytes[4] == basisFormatVersion)
+    }
+
+    @Test("truncated counts blob throws decodingFailure, never crashes")
+    func countsTruncatedBlobThrows() {
+        let blob = buildTrainedLsaProvider().serializeCounts()
+        let fresh = LsaProvider(rank: 3, svdSweeps: 30)
+        #expect(throws: CorpusKitError.self) {
+            try fresh.restoreCounts(from: Data(blob.prefix(blob.count / 2)))
+        }
+    }
+
     @Test("train+finalize → serialize → deserialize → embed is bit-identical")
     func roundTripEmbeddingIdentity() async throws {
         let original = buildTrainedLsaProvider()

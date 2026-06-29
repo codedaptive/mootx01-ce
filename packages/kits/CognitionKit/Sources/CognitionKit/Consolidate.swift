@@ -13,7 +13,7 @@
 //        item, captures factoid drawers in "_distilled", writes _distilled_from
 //        tunnels. Returns factoid count (Int).
 //
-// RecipeCatalog registration: deferred to the Dc4 mission.
+// RecipeCatalog registration: present.
 
 import Foundation
 import GeniusLocusKit
@@ -34,11 +34,31 @@ public struct Consolidate: Recipe {
 
     /// Parameters controlling the consolidation sweep.
     public struct Input: Sendable {
-        /// Reserved for future per-item filtering (e.g. limit by room or tag).
-        /// Currently unused — the sweep processes all eligible items.
+        /// Optional cluster scope filter — accepted for API stability, intentionally
+        /// unused by the intra-item distillation model.
+        ///
+        /// Why not implemented: the per-item sweep reduces EACH stored item from its
+        /// OWN sentences (the intra-item model). A cluster filter would restrict which
+        /// items are swept. That restriction belongs to the sweep layer (GLK), not the
+        /// recipe layer, and GLK's current sweep contract is estate-wide. When a scoped
+        /// sweep is added to GLK, this parameter will wire through. Until then it is
+        /// accepted so callers can pass it without breakage.
+        ///
+        /// Parity: Rust `ConsolidateInput.cluster_id` carries the same no-op contract
+        /// with identical documentation. AriaMcpKit accepts and decodes it for API
+        /// stability, passing it through to this Input without forwarding to GLK.
         public let clusterID: String?
 
-        /// Reserved for future use. Currently unused in the per-item model.
+        /// When `true`, include items that are in a held/withdrawn state in the sweep.
+        /// Accepted for API stability; intentionally unused by the intra-item model.
+        ///
+        /// Why not implemented: the per-item sweep currently skips only tombstoned items
+        /// (`tombstonedAt != nil`). Items in other states (held, withdrawn) are swept
+        /// regardless of this flag. When held-item exclusion is added to the sweep, this
+        /// parameter will gate the filter. Until then it is accepted so callers can pass
+        /// it without breakage.
+        ///
+        /// Parity: Rust `ConsolidateInput.include_held` carries the same no-op contract.
         public let includeHeld: Bool
 
         public init(clusterID: String? = nil, includeHeld: Bool = false) {
@@ -125,6 +145,11 @@ public struct Consolidate: Recipe {
         // selection over one corpus). Sweeps active, not-yet-distilled items
         // and produces one factoid per item that carries enough intra-item
         // recurrence (M ≥ 3 sentences, non-zero dominant component F*).
+        //
+        // input.clusterID and input.includeHeld are intentional no-ops at this layer:
+        // both are accepted for API stability but distillItemsSweep currently
+        // operates estate-wide. See Input.clusterID and Input.includeHeld for the
+        // full rationale and the contract for when these will be wired through.
         let factoidsProduced = try await kit.distillItemsSweep(
             handle: estate,
             distillFn: distillFn,

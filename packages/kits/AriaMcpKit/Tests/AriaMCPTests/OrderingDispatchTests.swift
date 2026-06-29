@@ -28,8 +28,8 @@ import PersistenceKitInMemory
 ///   C. Other orderings unchanged — byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc
 ///      still succeed and unknown orderings still throw invalidParams.
 ///
-///   D. Schema roundtrip — decodeOrdering("byRelevanceDesc") returns .byCaptureTimeDesc
-///      (the internal tie-break value) without throwing.
+///   D. Absent ordering arg — omitting the ordering argument defaults gracefully
+///      to the byCaptureTimeDesc tie-break path.
 @Suite("Ordering dispatch", .serialized)
 struct OrderingDispatchTests {
 

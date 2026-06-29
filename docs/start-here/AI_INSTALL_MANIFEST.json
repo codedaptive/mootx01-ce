@@ -22,11 +22,11 @@
     "windows": { "build": "rust", "products": ["mootx01.exe", "moot-mgr.exe"], "hosts_estate": true, "service_manager": "task-scheduler", "note": "install.ps1 only places the binaries and adds them to PATH; client wiring is the 'mootx01 install' step (same cross-platform CLI and client roster as macOS/Linux), which also registers the Task Scheduler daemon. moot-mgr (dashboard) ships as the headless Rust build; its admin control channel is a named pipe on Windows (a Unix-domain socket on Linux/macOS)" }
   },
   "install": {
-    "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh",
-    "download_windows": "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex \"& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }\"",
-    "download_windows_note": "the TLS 1.2 prefix is required on Windows PowerShell 5.1 (the default shell), which otherwise negotiates TLS 1.0/1.1 and is refused by GitHub's CDN",
+    "download_unix": "build from the checked-out source; do not pipe mutable remote installer scripts into a shell",
+    "download_windows": "build from the checked-out source, or use a pinned authenticated release artifact if one is published",
+    "download_windows_note": "Do not evaluate remote PowerShell installer content; authenticate any installer before it runs.",
     "wire_clients": "mootx01 install",
-    "local_build": "./install-local.sh",
+    "local_build": "macOS: swift build -c release --package-path apps/aria-mcp-server; Linux: cd apps/aria-mcp-server/rust && cargo build --release",
     "uninstall": "mootx01 uninstall"
   },
   "verify": {

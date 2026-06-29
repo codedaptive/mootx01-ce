@@ -5,15 +5,15 @@
 // DESIGN: The cookbook states the pool endpoint is a config value and
 // submission is fire-and-forget with no retry obligation. The reducer that
 // consumes these files (`pool_reduce`) is driven on a low cadence by the
-// resident Autonomic Governor (packages/kits/AriaMcpKit). The durable landing zone is
+// resident Autonomic Governor (NeuronKit). The durable landing zone is
 // a local directory configured via:
 //   1. LATTICE_POOL_DIR environment variable (takes priority).
 //   2. XDG_DATA_HOME/mootx01/lattice/pool/ or
 //      ~/.local/share/mootx01/lattice/pool/ (non-Apple default).
 //
 // Terminal state: token drained → JSON file written to pool directory →
-// file observable at endpoint → future pool-reducer consumes files and
-// merges novel tokens back into the WordClassTable.
+// pool-reducer (`pool_reducer::reduce`) consumes files and merges novel
+// tokens back into the WordClassTable.
 //
 // Use in production: call `local_dir_submitter(dir)` to get a Submitter
 // that writes files to a given directory. Call `default_pool_dir()` to

@@ -5,8 +5,8 @@
 //
 // Three axes: row (up to N_rows), field (36 across the bitmap
 // columns), bit (6 per field — invariant I-6). Storage is six
-// flat byte buffers, one per bit position. Scans are O(N/64) word
-// operations regardless of the matched value.
+// flat byte buffers, one per bit position. Scans loop row-by-row
+// within each of the six bit-slice passes; not yet vectorized.
 
 #[derive(Debug, Clone)]
 pub struct ThreeDBitTensor {
@@ -99,7 +99,9 @@ impl ThreeDBitTensor {
         hits
     }
 
-    /// Reserve additional row capacity. Existing data preserved.
+    /// Expand the tensor to `new_row_count` rows. Slice buffers are
+    /// resized with zero bytes and `row_count` is updated. No-op if
+    /// `new_row_count` ≤ current `row_count`. Existing data preserved.
     pub fn reserve_capacity(&mut self, new_row_count: usize) {
         if new_row_count <= self.row_count { return; }
         let bits_per_slice = new_row_count * Self::FIELD_COUNT;

@@ -92,12 +92,19 @@ impl Intellectus {
     /// prefer the `report!` macro, which avoids evaluating the payload
     /// expression when monitoring is disabled.
     ///
-    /// If called directly when monitoring is disabled, the sample IS
-    /// delivered (no second gate here). Use `report!` for the full
-    /// short-circuit behaviour.
+    /// Both this function and the `report!` macro check `is_enabled()`
+    /// before forwarding to the sink — a direct call when disabled is a
+    /// no-op, matching Swift's `Intellectus.report(_:)` semantics.
     #[doc(hidden)]
     #[inline]
     pub fn report_sample(sample: StatSample) {
+        // Disabled gate: if monitoring is off, discard the sample. Matches
+        // Swift's `Intellectus.report(_:)` which checks `isEnabled` before
+        // forwarding. The `report!` macro already gates; this protects direct
+        // callers of `report_sample` from delivering to the sink when disabled.
+        if !Self::is_enabled() {
+            return;
+        }
         let sink = {
             let guard = global()._sink.lock()
                 .expect("Intellectus sink lock poisoned");

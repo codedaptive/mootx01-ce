@@ -14,8 +14,9 @@
 // and HTTPServer suites. This suite proves the observer program glue: the
 // window, the enable decision, and the explicit off state.
 //
-// These tests modify the process-wide Intellectus global; the install suite
-// runs serially so the global gate is not raced.
+// These tests modify the process-wide Intellectus global; cross-suite
+// isolation is provided by `intellectusGlobalGate.withLock`, which gates
+// each test body against concurrent global state access.
 
 import Testing
 import Foundation

@@ -17,8 +17,8 @@
 //   - Row ID + before/after field deltas
 //   - Provenance (origin of the mutation)
 //
-// CRDT join operator: set union over entries keyed by
-// (hlc, verb, row_id, field_path). Idempotent because identical
+// CRDT join operator: set union over entries keyed by content-hash
+// `id` (SHA-256 over wire fields). Idempotent because identical
 // entries deduplicate; commutative and associative because set
 // union is. Projection over the joined set is deterministic
 // because HLC gives a total order to apply entries.

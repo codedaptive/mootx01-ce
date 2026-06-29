@@ -20,12 +20,13 @@
 //! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
 //!   at a caller-supplied filesystem path. Database file is created if absent.
 //!   **Semantic recall lanes (BM25 + vector) are wired** after `coord.open` by
-//!   registering a `Corpus` and a `VectorStore` on a second `SqliteStorage`
-//!   handle pointing at the same file. Mirrors the Swift `wireSemanticRecall`
-//!   branch: `Corpus(storage: .deterministic)` + `VectorStore(storage:)` +
-//!   `kit.registerCorpus` + `kit.registerVectorStore`. Idempotent across
-//!   restarts: both constructors run schema migrations via `migrate` (idempotent
-//!   upsert), and the registry writes are plain in-memory replacements.
+//!   registering a `Corpus` and borrowing its single dense `VectorStore`
+//!   (`Corpus::shared_vector_store`) for the scored-recall lane — one store over
+//!   the `vectors` table, not a second instance. Mirrors the Swift wiring:
+//!   `Corpus(storage:)` + `kit.registerCorpus` +
+//!   `kit.registerVectorStore(corpus.sharedVectorStore)`. Idempotent across
+//!   restarts: Corpus runs the schema migrations via `migrate` (idempotent
+//!   upsert), and the registry writes are plain replacements.
 //! - **PostgreSQL** (`new_postgres`, `register_postgres`): pooled durable estate
 //!   at a libpq connection string. Pool defaults match the Swift leg (size=10,
 //!   connect_timeout=5.0s, idle_timeout=300.0s). **Semantic recall lanes are
@@ -57,7 +58,6 @@ use persistence_kit::sqlite::SqliteStorage;
 use persistence_kit::storage::{BackendConfiguration, EstateConfiguration};
 use persistence_kit::storage::Storage;
 use uuid::Uuid;
-use vectorkit::vector_store::VectorStore;
 
 // Compile-time constant for the default estate owner identifier — stable
 // across runs so log messages identify the server's own estate clearly.
@@ -89,6 +89,9 @@ pub struct OpenEstate {
     pub coord: Arc<std::sync::Mutex<EstateCoordinator>>,
     pub handle: EstateHandle,
     pub estate_id: Uuid,
+    /// Human-readable estate name. Defaults to the UUID string when no
+    /// name is provided (mirrors Swift's `EstateHandle.estateName`).
+    pub estate_name: String,
     /// The live DrawerStore backing this estate. The same Arc is held by
     /// the coordinator internally; this clone lets callers (e.g. AutonomicGovernor)
     /// write proposals/diary entries directly without routing through the
@@ -111,11 +114,10 @@ pub struct EstateRegistry {
     /// coordinator for all estates so the federated lenses can cross-address).
     pub coord: Arc<std::sync::Mutex<EstateCoordinator>>,
     /// The host identity written into rows filed by this server (memories,
-    /// tunnels, facts). Set to "aria-mcp-server" by all constructors; the
+    /// tunnels, facts). Set to "mootx01" by all constructors; the
     /// production entry point (`runtime::run`) overrides it with the banner
-    /// ("aria-mcp" or "mootx01") so the shared dispatcher stamps the correct
-    /// provenance for whichever binary is hosting it. Mirrors Swift
-    /// `ToolDispatcher.serverIdentity`.
+    /// so the shared dispatcher stamps the correct provenance for whichever
+    /// binary is hosting it. Mirrors Swift `ToolDispatcher.serverIdentity`.
     pub server_identity: String,
 }
 
@@ -158,6 +160,7 @@ impl EstateRegistry {
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -168,7 +171,7 @@ impl EstateRegistry {
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
-            server_identity: "aria-mcp-server".to_owned(),
+            server_identity: "mootx01".to_owned(),
         }
     }
 
@@ -197,6 +200,7 @@ impl EstateRegistry {
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -206,7 +210,7 @@ impl EstateRegistry {
             default: default_estate,
             extras,
             coord,
-            server_identity: "aria-mcp-server".to_owned(),
+            server_identity: "mootx01".to_owned(),
         }
     }
 
@@ -295,6 +299,7 @@ impl EstateRegistry {
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -305,7 +310,7 @@ impl EstateRegistry {
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
-            server_identity: "aria-mcp-server".to_owned(),
+            server_identity: "mootx01".to_owned(),
         })
     }
 
@@ -330,6 +335,7 @@ impl EstateRegistry {
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -368,6 +374,7 @@ impl EstateRegistry {
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -434,6 +441,7 @@ impl EstateRegistry {
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -444,7 +452,7 @@ impl EstateRegistry {
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
-            server_identity: "aria-mcp-server".to_owned(),
+            server_identity: "mootx01".to_owned(),
         })
     }
 
@@ -480,6 +488,7 @@ impl EstateRegistry {
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,
+            estate_name: estate_id.to_string(),
             estate_id,
             store,
         };
@@ -505,6 +514,10 @@ impl EstateRegistry {
     /// behavior). Present but malformed (not a UUID) → invalidParams.
     /// Present but unknown (UUID not registered) → invalidParams.
     /// Matches Swift `ToolDispatcher.resolveHandle(_:)` exactly.
+    ///
+    /// This method is unrestricted — it allows targeting any registered estate.
+    /// Use `resolve_direct` for tool dispatch where the caller may only target
+    /// the default estate.
     pub fn resolve(
         &self,
         args: &std::collections::BTreeMap<String, crate::jsonrpc::JsonValue>,
@@ -534,6 +547,63 @@ impl EstateRegistry {
             )
         })
     }
+
+    /// Resolve the estate targeted by a tool call's `estateID` argument,
+    /// restricted to the default estate only.
+    ///
+    /// Security gate for Item 3 (secfix/batch2-aria): direct MCP tool calls
+    /// may only target the default estate. Additional registered estates are
+    /// addressable through `moot_federated_search`, which enforces active,
+    /// unexpired, scope-narrowing grants before any cross-estate read or write.
+    /// Allowing `estateID` to target any registered estate would bypass that
+    /// grant gate. Mirrors Swift `ToolDispatcher.resolveHandle(_:)`.
+    ///
+    /// - Absent `estateID` → default estate (single-estate v1.0 path).
+    /// - Present, malformed (not a UUID) → invalidParams.
+    /// - Present, valid UUID, unknown (not registered) → invalidParams.
+    /// - Present, valid UUID, registered but NOT the default → invalidParams
+    ///   (security refusal).
+    /// - Present, valid UUID, matches the default → returns the default estate.
+    pub fn resolve_direct(
+        &self,
+        args: &std::collections::BTreeMap<String, crate::jsonrpc::JsonValue>,
+    ) -> Result<&OpenEstate, crate::jsonrpc::JSONRPCError> {
+        use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+        let raw = match args.get("estateID") {
+            None => return Ok(&self.default),
+            Some(JsonValue::String(s)) => s.to_owned(),
+            Some(_) => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "estateID must be a UUID string; omit it to use the default estate"
+                        .to_string(),
+                ))
+            }
+        };
+        let uuid = Uuid::parse_str(&raw).map_err(|_| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("Malformed estateID (not a UUID): {raw}"),
+            )
+        })?;
+        // Verify the UUID is registered at all before the default check, so that
+        // both unknown and non-default UUIDs produce a meaningful error.
+        if !self.extras.contains_key(&uuid) && uuid != self.default.estate_id {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("Unknown estateID: {raw}"),
+            ));
+        }
+        if uuid != self.default.estate_id {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "Direct estateID routing is limited to the default estate; \
+                 use moot_federated_search for grant-authorized cross-estate reads."
+                    .to_string(),
+            ));
+        }
+        Ok(&self.default)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +612,7 @@ impl EstateRegistry {
 
 /// Idempotently seed the seven ADR-016 default wings for `handle`.
 ///
-/// Reads existing `_charter` drawers and skips wings that are already
+/// Reads existing `AI_Charter_Hint` drawers and skips wings that are already
 /// present — safe to call on re-opens of an existing estate. Failure is
 /// non-fatal: a warning is printed to stderr and the caller continues.
 /// This matches the Swift `ServeCommand` seeding policy (error.log + continue).
@@ -613,16 +683,17 @@ fn wire_inmemory_semantic_recall(
     let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
         .map_err(|e| format!("Corpus::open_many for in-memory semantic recall: {e}"))?;
 
-    // VectorStore: standalone vector lane; schema migration is idempotent.
-    // VectorKitError has no Display impl — use describe_vector_kit_error so no
-    // internal Rust enum variant name reaches the caller.
-    let vector_store = VectorStore::open(Arc::clone(&storage))
-        .map_err(|e| format!("VectorStore::open for in-memory semantic recall: {}", describe_vector_kit_error(&e)))?;
+    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
+    // instead of constructing a second VectorStore over the same `vectors` table.
+    // Corpus already migrated the VectorStore schema; one shared store means one
+    // resident array and one on-disk sidecar kept in sync by every write.
+    let corpus = Arc::new(corpus);
+    let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator.
     let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::new(corpus));
-    guard.register_vector_store(handle, Arc::new(vector_store));
+    guard.register_corpus(handle, Arc::clone(&corpus));
+    guard.register_vector_store(handle, vector_store);
     drop(guard);
 
     Ok(())
@@ -675,16 +746,17 @@ fn wire_postgres_semantic_recall(
     let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
         .map_err(|e| format!("Corpus::open_many for postgres semantic recall at {conn_str:?}: {e}"))?;
 
-    // VectorStore: idempotent schema migration.
-    // VectorKitError has no Display impl — use describe_vector_kit_error so no
-    // internal Rust enum variant name reaches the caller.
-    let vector_store = VectorStore::open(Arc::clone(&storage))
-        .map_err(|e| format!("VectorStore::open for postgres semantic recall at {conn_str:?}: {}", describe_vector_kit_error(&e)))?;
+    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
+    // instead of constructing a second VectorStore over the same `vectors` table.
+    // Corpus already migrated the VectorStore schema; one shared store means one
+    // resident array and one on-disk sidecar kept in sync by every write.
+    let corpus = Arc::new(corpus);
+    let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator.
     let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::new(corpus));
-    guard.register_vector_store(handle, Arc::new(vector_store));
+    guard.register_corpus(handle, Arc::clone(&corpus));
+    guard.register_vector_store(handle, vector_store);
     drop(guard);
 
     Ok(())
@@ -736,53 +808,31 @@ fn wire_sqlite_semantic_recall(
     let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
         .map_err(|e| format!("Corpus::open_many for {path:?}: {e}"))?;
 
-    // VectorStore: standalone vector lane; applies its own schema migration.
-    // VectorKitError has no Display impl — use describe_vector_kit_error so no
-    // internal Rust enum variant name reaches the caller.
-    let vector_store = VectorStore::open(Arc::clone(&storage))
-        .map_err(|e| format!("VectorStore::open for {path:?}: {}", describe_vector_kit_error(&e)))?;
+    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
+    // instead of constructing a second VectorStore over the same `vectors` table.
+    // Corpus already migrated the VectorStore schema; one shared store means one
+    // resident array and one on-disk sidecar kept in sync by every write.
+    let corpus = Arc::new(corpus);
+    let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator so recall_scored hybrid/corpus-only/
     // union-best modes route through the BM25 and vector lanes.
     let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::new(corpus));
-    guard.register_vector_store(handle, Arc::new(vector_store));
+    guard.register_corpus(handle, Arc::clone(&corpus));
+    guard.register_vector_store(handle, vector_store);
     drop(guard);
 
-    Ok(())
-}
-
-/// Produce a human-readable English description of a `VectorKitError` for
-/// surfacing at the MCP boundary. `VectorKitError` does not implement
-/// `std::fmt::Display`, so we match exhaustively and extract the embedded
-/// payload string rather than leaking the internal Rust enum variant name.
-fn describe_vector_kit_error(e: &vectorkit::VectorKitError) -> String {
-    use vectorkit::VectorKitError;
-    match e {
-        VectorKitError::EmbeddingFailed(reason) => {
-            format!("embedding inference failed: {reason}")
-        }
-        VectorKitError::ModelUnavailable(model) => {
-            format!("embedding model '{model}' is not available on this platform")
-        }
-        VectorKitError::StoreUnavailable(reason) => {
-            format!("vector store could not be opened: {reason}")
-        }
-        VectorKitError::NotFound => "vector record not found".to_string(),
-        VectorKitError::InvalidPayload(reason) => {
-            format!("invalid vector payload: {reason}")
-        }
-        VectorKitError::DecodingFailure(reason) => {
-            format!("vector decoding failed: {reason}")
-        }
-        VectorKitError::Int8QuantizationPolicyUndefined(reason) => {
-            format!("int8 quantization policy is not yet defined: {reason}")
-        }
-        VectorKitError::EmbedFloatVocabMiss(reason) => {
-            // Trained distributional provider, all query tokens OOV. This is an
-            // expected degradation (dark lane, not a hard error), but when it
-            // surfaces at the MCP boundary describe it clearly for observability.
-            format!("embed_float vocabulary miss: {reason}")
-        }
+    // EAGER mount of the Corpus ingest queue + drain worker (mirrors Swift
+    // `wireSubstores`, which mounts on wire rather than lazily on first capture).
+    // T5: this is what resumes a non-empty persisted queue the moment a restarted
+    // daemon opens the estate — the lease-gated worker drains the backlog without
+    // waiting for a fresh capture — and what lets a standalone `drain` command
+    // (which never captures) actually drain. Idempotent: a later lazy mount is a
+    // no-op. Non-fatal: a mount failure logs and continues (the lazy path on the
+    // first capture is the fallback).
+    if let Err(e) = corpus.mount_ingest_queue() {
+        eprintln!("aria-mcp: corpus ingest queue eager mount failed (will mount lazily on first capture): {e:?}");
     }
+
+    Ok(())
 }

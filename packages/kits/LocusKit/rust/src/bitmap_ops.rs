@@ -56,13 +56,13 @@ pub fn and_mask(bitmap: i64, mask: i64, expected: i64) -> bool {
 /// Comparison operators used by [`threshold_compare`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThresholdOp {
-    /// Field value is strictly less than `value`. Used for open-upper
-    /// cluster boundaries (e.g. `state < 3` for know-now).
+    /// Field value is strictly less than `value`. Used for threshold
+    /// comparisons on continuous fields (e.g. trust, sensitivity).
     LessThan,
     /// Field value is less than or equal to `value`.
     LessThanOrEqual,
     /// Field value is greater than or equal to `value`. Used for
-    /// open-lower cluster boundaries (e.g. `state >= 3` for knew-past).
+    /// threshold comparisons on continuous fields (e.g. trust, confidence).
     GreaterThanOrEqual,
 }
 

@@ -57,8 +57,8 @@ struct ObserverSinkConformanceTests {
     func schemaVersion() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
-        // Schema version 2: topology_snapshots table added (v1→v2 migration).
-        #expect(StatsStore.schemaVersion == 2)
+        // Schema version 3: topology_snapshots.topology_fingerprint added (v2→v3).
+        #expect(StatsStore.schemaVersion == 3)
     }
 
     @Test("StatsStore seeds control rows on open")
@@ -417,10 +417,10 @@ struct ObserverSinkConformanceTests {
 
     // MARK: 12. Topology snapshot — schema version bump
 
-    @Test("StatsStore schema is version 2 after topology_snapshots table added")
-    func schemaVersionIsTwo() async throws {
-        // Schema version bumped from 1 → 2 when topology_snapshots table was added.
-        #expect(StatsStore.schemaVersion == 2)
+    @Test("StatsStore schema is version 3 after topology_fingerprint column added")
+    func schemaVersionIsThree() async throws {
+        // v1→v2 added topology_snapshots; v2→v3 added topology_fingerprint.
+        #expect(StatsStore.schemaVersion == 3)
     }
 
     // MARK: 13. Topology snapshot write and read
@@ -441,6 +441,62 @@ struct ObserverSinkConformanceTests {
         let result = try await store.latestTopologySnapshot(estate: estate)
         let roundtripped = try #require(result, "Expected non-nil snapshot after write")
         #expect(roundtripped == payload, "Stored payload must round-trip verbatim")
+    }
+
+    // MARK: 13b. Topology fingerprint persist / load round-trip (F5)
+
+    @Test("writeTopologySnapshot persists the fingerprint and loadTopologyFingerprint returns it")
+    func topologyFingerprintRoundTrip() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let estate = "estate-topology-fp-001"
+        let generatedAt = Date(timeIntervalSince1970: 1_700_000_000.0)
+        let payload = Data(#"{"nodes":[],"edges":[],"communities":[],"structurePending":false,"generatedTs":"x"}"#.utf8)
+        let fingerprint = "3:1:0:0:0:42:7:18446744073709551615"
+
+        // No fingerprint persisted yet → load returns nil.
+        let before = try await store.loadTopologyFingerprint(estate: estate)
+        #expect(before == nil, "No fingerprint should exist before the first write")
+
+        try await store.writeTopologySnapshot(
+            estate: estate, generatedAt: generatedAt, payload: payload, fingerprint: fingerprint)
+
+        let after = try await store.loadTopologyFingerprint(estate: estate)
+        #expect(after == fingerprint, "Persisted fingerprint must round-trip verbatim")
+    }
+
+    @Test("writeTopologySnapshot without a fingerprint leaves the column null")
+    func topologyFingerprintNullWhenOmitted() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let estate = "estate-topology-fp-002"
+        let generatedAt = Date(timeIntervalSince1970: 1_700_000_000.0)
+        let payload = Data(#"{"nodes":[],"structurePending":false}"#.utf8)
+
+        // Omit the fingerprint (legacy 3-arg call path).
+        try await store.writeTopologySnapshot(estate: estate, generatedAt: generatedAt, payload: payload)
+
+        let fp = try await store.loadTopologyFingerprint(estate: estate)
+        #expect(fp == nil, "Omitted fingerprint must read back as nil (null column)")
+    }
+
+    @Test("a later write updates the persisted fingerprint")
+    func topologyFingerprintLatestWins() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let estate = "estate-topology-fp-003"
+        let payload = Data(#"{"structurePending":false}"#.utf8)
+        let t1 = Date(timeIntervalSince1970: 1_000_000.0)
+        let t2 = Date(timeIntervalSince1970: 2_000_000.0)
+
+        try await store.writeTopologySnapshot(estate: estate, generatedAt: t1, payload: payload, fingerprint: "fp-old")
+        try await store.writeTopologySnapshot(estate: estate, generatedAt: t2, payload: payload, fingerprint: "fp-new")
+
+        let fp = try await store.loadTopologyFingerprint(estate: estate)
+        #expect(fp == "fp-new", "Latest write must supersede the previous fingerprint")
     }
 
     // MARK: 14. Topology snapshot latest-wins upsert

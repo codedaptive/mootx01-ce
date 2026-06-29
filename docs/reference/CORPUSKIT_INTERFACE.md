@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-17
+date: 2026-06-25
 spec_type: kit
-version: 1.7.0
+version: 1.13.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -42,6 +42,8 @@ Two library targets plus tests:
 - `Sources/CorpusKitProviders/` — providers (imply a model bundle):
   - `MiniLMTextProvider.swift`, `MPNetTextProvider.swift`,
     `EmbeddingGemmaProvider.swift`, `DeterministicTokenizer.swift`
+  - `NLEmbeddingProvider.swift`, `NLContextualEmbeddingProvider.swift`
+    (Swift-only, `#if canImport(NaturalLanguage)` — see ADR-019)
 - `Tests/CorpusKitTests/`, `Package.swift`
 
 **Rust:** `packages/kits/CorpusKit/rust/` (crate `corpus-kit`,
@@ -253,31 +255,35 @@ Swift over a PersistenceKit `Storage`.
 
 ```swift
 public actor BundleStore {
-    public static let schemaDeclaration: SchemaDeclaration   // chunks table (kit-ID "CorpusKit", v2), appendOnly; carries ext JSON nullable (ADR-012, inert in 1.0)
+    public static let schemaDeclaration: SchemaDeclaration   // chunks + corpus_metadata tables (kit-ID "CorpusKit", v3), appendOnly; chunks carries content_hash BLOB nullable (hash-on-write, ADR-017 §19) and ext JSON nullable (ADR-012, inert in 1.0)
     public init(storage: any Storage)
-    public func insert(_ chunks: [Chunk]) async throws        // idempotent (B-5)
-    public func get(id: UUID) async throws -> Chunk?
-    public func getMany(ids: [UUID]) async throws -> [Chunk]
-    public func chunksForSource(_ sourceID: String) async throws -> [Chunk]
-    public func count() async throws -> Int
-    public func allChunks() async throws -> [Chunk]           // HLC-ordered
+    public func insert(_ chunks: [Chunk]) async throws        // idempotent (B-5); hash-on-write + Merkle rollup (I-11, I-13)
+    public func get(id: UUID, asOf: AsOfCoordinate? = nil) async throws -> Chunk?
+    public func getMany(ids: [UUID], asOf: AsOfCoordinate? = nil) async throws -> [Chunk]
+    public func chunksForSource(_ sourceID: String, asOf: AsOfCoordinate? = nil) async throws -> [Chunk]
+    public func count(asOf: AsOfCoordinate? = nil) async throws -> Int   // asOf accepted but not forwarded (I-12)
+    public func allChunks(asOf: AsOfCoordinate? = nil) async throws -> [Chunk]           // HLC-ordered
+    public func corpusMerkleRoot(for sourceID: String) async throws -> MerkleRoot   // I-13; .empty if no chunks
+    public func globalCorpusMerkleRoot() async throws -> MerkleRoot   // I-13; interior hash over all per-corpus roots
 }
 ```
 
 **Rust:**
 
 ```rust
-pub struct BundleStore { /* Arc<dyn Storage> */ }
+pub struct BundleStore { /* Arc<dyn Storage>, HashingRowStore, ParentChainCache */ }
 impl BundleStore {
-    pub fn schema_declaration() -> SchemaDeclaration;
+    pub fn schema_declaration() -> SchemaDeclaration;   // chunks + corpus_metadata (kit-ID "CorpusKit", v3)
     pub fn new(storage: Arc<dyn Storage>) -> Self;
-    pub fn open(storage: Arc<dyn Storage>) -> CorpusKitResult<Self>;  // applies schema
-    pub fn insert(&self, chunks: &[Chunk]) -> CorpusKitResult<()>;
-    pub fn get(&self, id: Uuid) -> CorpusKitResult<Option<Chunk>>;
-    pub fn get_many(&self, ids: &[Uuid]) -> CorpusKitResult<Vec<Chunk>>;
-    pub fn chunks_for_source(&self, source_id: &str) -> CorpusKitResult<Vec<Chunk>>;
-    pub fn count(&self) -> CorpusKitResult<usize>;
-    pub fn all_chunks(&self) -> CorpusKitResult<Vec<Chunk>>;
+    pub fn open(storage: Arc<dyn Storage>) -> CorpusKitResult<Self>;  // applies schema, wires HashingRowStore
+    pub fn insert(&self, chunks: &[Chunk]) -> CorpusKitResult<()>;   // hash-on-write + Merkle rollup (I-11, I-13)
+    pub fn get(&self, id: Uuid, as_of: Option<AsOfCoordinate>) -> CorpusKitResult<Option<Chunk>>;
+    pub fn get_many(&self, ids: &[Uuid], as_of: Option<AsOfCoordinate>) -> CorpusKitResult<Vec<Chunk>>;
+    pub fn chunks_for_source(&self, source_id: &str, as_of: Option<AsOfCoordinate>) -> CorpusKitResult<Vec<Chunk>>;
+    pub fn count(&self, as_of: Option<AsOfCoordinate>) -> CorpusKitResult<usize>;   // as_of accepted but not forwarded (I-12)
+    pub fn all_chunks(&self, as_of: Option<AsOfCoordinate>) -> CorpusKitResult<Vec<Chunk>>;
+    pub fn corpus_merkle_root(&self, source_id: &str) -> CorpusKitResult<MerkleRoot>;   // I-13; EMPTY if no chunks
+    pub fn global_corpus_merkle_root(&self) -> CorpusKitResult<MerkleRoot>;   // I-13; interior hash over all per-corpus roots
 }
 ```
 
@@ -481,6 +487,78 @@ impl EmbeddingProvider for EmbeddingGemmaProvider { /* embed, embed_float */ }
 > the kit owns only the tokenizer and projection; model weights remain
 > the host's concern on every platform.
 
+#### Apple NL providers — Swift-only (ADR-019)
+
+Two additional providers exist in `CorpusKitProviders` behind
+`#if canImport(NaturalLanguage)`. They are **not** available in the
+Rust port (sanctioned divergence — same class as the `.nlTagger`
+word-class path; see ADR-019). They are item-local (stateless,
+compute-once-on-write) and **opt-in** (not part of the default ensemble).
+
+**`NLEmbeddingProvider`** — OS-bundled sentence embedding (macOS 12+/iOS 15+):
+
+```swift
+#if canImport(NaturalLanguage)
+/// model_id "apple-nlembedding-v1", seed nlEmbeddingProjectionSeed ("APNLEMB1",
+/// 0x4150_4E4C_454D_4231). Float lane: NLEmbedding.vector(for:) → [Float],
+/// L2-normalised. Absent lane (no OS model for language): embedFloat → [].
+public struct NLEmbeddingProvider: EmbeddingProvider, Sendable {
+    public let modelID: String          // default "apple-nlembedding-v1"
+    public let modelVersion: String     // default "1.0.0"
+    public init(modelID: String = "apple-nlembedding-v1",
+                modelVersion: String = "1.0.0",
+                language: NLLanguage = .english,
+                projectionSeed: UInt64 = nlEmbeddingProjectionSeed)
+    public func embed(_ text: String) async throws -> Engram
+    public func embedFloat(_ text: String) async throws -> [Float]
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+}
+
+public let nlEmbeddingProjectionSeed: UInt64  // 0x4150_4E4C_454D_4231 ("APNLEMB1")
+#endif
+```
+
+**`NLContextualEmbeddingProvider`** — on-device transformer embedding (macOS 13+/iOS 16+):
+
+```swift
+#if canImport(NaturalLanguage)
+/// model_id "apple-nlcontextual-v1", seed nlContextualEmbeddingProjectionSeed
+/// ("APNLCTX1", 0x4150_4E4C_4354_5831). Float lane: NLContextualEmbedding
+/// per-token vectors, mean-pooled → [Float], L2-normalised. Absent lane
+/// (asset not downloaded / language unsupported): embedFloat → [].
+/// NEVER downloads proactively; asset management is the host app's responsibility.
+public struct NLContextualEmbeddingProvider: EmbeddingProvider, Sendable {
+    public let modelID: String          // default "apple-nlcontextual-v1"
+    public let modelVersion: String     // default "1.0.0"
+    public init(modelID: String = "apple-nlcontextual-v1",
+                modelVersion: String = "1.0.0",
+                language: NLLanguage = .english,
+                projectionSeed: UInt64 = nlContextualEmbeddingProjectionSeed)
+    public func embed(_ text: String) async throws -> Engram
+    public func embedFloat(_ text: String) async throws -> [Float]
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+}
+
+public let nlContextualEmbeddingProjectionSeed: UInt64  // 0x4150_4E4C_4354_5831 ("APNLCTX1")
+#endif
+```
+
+**`EmbeddingModel` cases (Swift-only, `#if canImport(NaturalLanguage)`):**
+
+```swift
+#if canImport(NaturalLanguage)
+extension EmbeddingModel {
+    /// Opt-in NL sentence embedding (item-local, no training, no basis).
+    case nlEmbedding(provider: any EmbeddingProvider & Sendable)
+    /// Opt-in NL contextual transformer embedding (item-local, no training).
+    case nlContextualEmbedding(provider: any EmbeddingProvider & Sendable)
+}
+#endif
+```
+
+Neither case joins `CorpusEnsemble.defaultEnsemble()`. Neither conforms to
+`TrainableEmbeddingBasis`. Rust has no counterpart. Recorded in SPEC I-14 and ADR-019.
+
 ### Distributional-provider basis serialization (both ports)
 
 The four stateful distributional providers — `RandomIndexingProvider`,
@@ -573,6 +651,23 @@ It surfaces three operations:
   — never a crash/panic. `EmbeddingModel.isTrainable` / `is_trainable()` is the
   capability-detection helper.
 
+The seam also carries the **maintained-counts** operations (the incremental
+counts table — see the `CorpusProviderCountsStore` section below). These let the
+host keep each trainable provider's raw additive statistics current as chunks are
+written, through the type-erased provider, instead of rebuilding from scratch on
+every reindex:
+- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one chunk into
+  the maintained accumulated counts (RI/PPMI fold a term sequence; LSA/NMF fold a
+  document into a lightweight vocab+doc-count anchor, O(vocab) not O(corpus)).
+- `serializeCounts()` / `serialize_counts()` — snapshot the raw additive state
+  (distinct from `serializeBasis`; the counts codec, persisted in
+  `corpus_provider_counts`). Byte-identical across ports.
+- `restoreCounts(from:)` / `restore_counts(&mut self, bytes:)` — resume the
+  snapshot in place; does NOT rebuild the derived basis. Throws/returns
+  `decodingFailure` / `DecodingFailure` on a bad blob — never crashes.
+- `countsVocabularySize` / `counts_vocabulary_size()` — the cheap vocabulary
+  anchor the autonomic governor's vocab-growth retrain trigger reads.
+
 **Swift:**
 
 ```swift
@@ -580,6 +675,11 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     func trainOnCorpus(texts: [String])
     func serializeBasis() -> Data
     func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable
+    // Maintained counts (incremental counts table):
+    func addToCounts(text: String)
+    func serializeCounts() -> Data
+    func restoreCounts(from data: Data) throws
+    var countsVocabularySize: Int { get }
 }
 
 // On EmbeddingModel:
@@ -598,6 +698,16 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     fn serialize_basis(&self) -> Vec<u8>;
     fn reconstruct_basis(&self, basis: &[u8])
         -> Result<Box<dyn EmbeddingProvider>, CorpusKitError>;
+    // reconstruct_trainable_basis — Rust-only sibling that retains trainability
+    // (the Swift `as?` cross-cast has no Rust equivalent); used by reindex /
+    // first-ingest to rebuild a fresh trainable provider from the empty blob.
+    fn reconstruct_trainable_basis(&self, basis: &[u8])
+        -> Result<Box<dyn TrainableEmbeddingBasis>, CorpusKitError>;
+    // Maintained counts (incremental counts table):
+    fn add_to_counts(&mut self, text: &str);
+    fn serialize_counts(&self) -> Vec<u8>;
+    fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError>;
+    fn counts_vocabulary_size(&self) -> usize;
 }
 
 // On EmbeddingModelConfig:
@@ -634,6 +744,80 @@ public enum CorpusEnsemble {
 
 ```rust
 pub fn default_ensemble() -> Vec<EmbeddingModelConfig>;
+```
+
+### `CorpusProviderCountsStore` — incremental maintained counts (both ports)
+
+The persisted **counts table**: each trainable provider's raw additive statistics
+(RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary + document-count
+anchor), kept current as chunks are written so a retrain reads the maintained
+table instead of re-reading and re-tokenizing the whole corpus. Sibling of
+`BasisStore`; CorpusKit-core, depends only on PersistenceKit + SubstrateTypes,
+never interprets the bytes (the provider owns the codec via the
+`TrainableEmbeddingBasis` counts seam). One row per `(model_id, model_version)`,
+keyed identically to the basis and vector rows; the two cheap integer columns
+`doc_count` / `vocab_size` are the growth-trigger anchors, readable without
+deserializing the blob.
+
+Lifecycle (driven by `Corpus`): the accumulator is restored on open, folded
+once per written chunk (`addToCounts`), and persisted at **batch boundaries**
+(end of `ingest` / `ingestBatch` / `reindex`) — never per chunk (that would be
+O(N·vocab) over an import). `Corpus.maintainedVocabAnchor()` /
+`maintained_vocab_anchor()` exposes the maximum maintained vocabulary size across
+trainable slots — the in-process read the autonomic governor's vocab-growth
+retrain trigger consumes (NeuronKit `CorpusGrowthProbe`).
+
+**Swift:**
+
+```swift
+public struct PersistedCounts: Sendable, Equatable {
+    public let modelID: String
+    public let modelVersion: String
+    public let counts: Data          // opaque provider-serialized counts
+    public let documentCount: Int    // growth anchor
+    public let vocabSize: Int        // growth anchor
+    public let updatedAt: Date
+}
+public struct CountsGrowthAnchor: Sendable, Equatable {
+    public let documentCount: Int
+    public let vocabSize: Int
+}
+public actor CorpusProviderCountsStore {
+    public static let schemaDeclaration: SchemaDeclaration
+    public init(storage: any Storage)
+    public func upsert(_ row: PersistedCounts) async throws
+    public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts?
+    public func growthAnchor(modelID: String, modelVersion: String) async throws -> CountsGrowthAnchor?
+    public func deleteAll() async throws
+}
+
+// On Corpus:
+public func maintainedVocabAnchor() -> Int
+```
+
+**Rust:**
+
+```rust
+pub struct PersistedCounts {
+    pub model_id: String,
+    pub model_version: String,
+    pub counts: Vec<u8>,
+    pub document_count: usize,
+    pub vocab_size: usize,
+    pub updated_at_secs: i64,
+}
+pub struct CountsGrowthAnchor { pub document_count: usize, pub vocab_size: usize }
+impl CorpusProviderCountsStore {
+    pub fn schema_declaration() -> SchemaDeclaration;
+    pub fn new(storage: Arc<dyn Storage>) -> Self;
+    pub fn upsert(&self, row: &PersistedCounts) -> CorpusKitResult<()>;
+    pub fn load(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<PersistedCounts>>;
+    pub fn growth_anchor(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<CountsGrowthAnchor>>;
+    pub fn delete_all(&self) -> CorpusKitResult<()>;
+}
+
+// On Corpus:
+pub fn maintained_vocab_anchor(&self) -> CorpusKitResult<usize>;
 ```
 
 ### `Chunker`, `HybridRecall`, `CorpusKitSync`
@@ -945,6 +1129,78 @@ public actor Corpus {
     /// frozen basis (no retrain — LSA/NMF cannot incrementally refactor).
     public func ingest(_ text: String, sourceID: String, now: Date) async throws
 
+    /// Batch ingest with the embedding COMPUTE parallelized across documents
+    /// (the CPU-bound cost) and the chunk/BM25/bundle/vector WRITES serial.
+    /// Output is byte-identical to calling `ingest` once per item — same chunks,
+    /// vectors, content-addressed idempotency — deterministic regardless of task
+    /// completion order. Falls back to serial `ingest` per item while any
+    /// trainable slot still lacks a persisted basis (first-ingest training cannot
+    /// parallelize). The cross-document parallelism the ingest drain drives.
+    /// Each item is `(text, sourceID, now)`. Rust: `ingest_batch(&[(String,String,i64)])`.
+    public func ingestBatch(_ items: [(text: String, sourceID: String, now: Date)]) async throws
+
+    // MARK: Ingest pipeline (queue + drain + worker pool — § 11 of the SPEC)
+    //
+    // A Corpus owns its encode pipeline and drains itself with no orchestrator
+    // (CorpusKit is a standalone substrate). Relocated from GeniusLocusKit's
+    // EncodeIntake. Rust mirrors take `&Arc<Self>` for the mount/enqueue paths
+    // (the drain worker holds a cloned Arc<Corpus>); the job payload is the
+    // CorpusKit-internal `IngestJob`, not a public type.
+
+    /// Mount the per-corpus QueueKit-backed ingest queue (transient in-memory
+    /// PersistenceKit backend) and start its foreground poll drain worker.
+    /// Idempotent. Rust: `mount_ingest_queue(self: &Arc<Self>)`.
+    public func mountIngestQueue() async throws
+
+    /// Tear down the ingest queue and cancel the drain worker. Idempotent.
+    /// Rust: `drop_ingest_queue(&self)`.
+    public func dropIngestQueue()
+
+    /// Enqueue text for asynchronous ingest (lazily mounts the queue). Empty
+    /// text is skipped. `sourceID` is the stable source handle (drawer id in the
+    /// GLK context); `now` is the capture instant. Rust:
+    /// `enqueue_ingest(self: &Arc<Self>, text, source_id, now_millis)`.
+    public func enqueueIngest(_ text: String, sourceID: String, now: Date) async throws
+
+    /// Block until the ingest queue has fully drained (every enqueued item
+    /// ingested + replied). Returns promptly when empty; no-op when no queue is
+    /// mounted. Rust: `await_ingest_drain(&self)`.
+    public func awaitIngestDrain(timeout: Duration = .seconds(30)) async throws
+
+    /// Drain the ingest queue once (drivable by tests): ingest every available
+    /// job via the parallel `ingestBatch` (with per-job at-least-once retry
+    /// fallback), reply terminal, then fire `onEncoded`. Returns the job count.
+    /// Rust: `drain_ingest_queue_once(&self)`.
+    @discardableResult
+    public func drainIngestQueueOnce() async throws -> Int
+
+    /// Read-only depth probe of the ingest drain's outstanding work:
+    /// `(pending, inFlight)`. Their sum is the encode work left; both zero means
+    /// idle. OBSERVES the queue frontiers — never claims or drains — so it is
+    /// safe to poll from any task while the drain runs. Returns `(0, 0)` when no
+    /// queue is mounted. Rust: `ingest_queue_depth(&self) -> (usize, usize)`.
+    public func ingestQueueDepth() async throws -> (pending: Int, inFlight: Int)
+
+    /// Set the encode drain's SPEED (the import `mode`). `.foreground` (default)
+    /// embeds across all logical cores; `.background` caps embed concurrency to
+    /// ~`cores / 4` (x=4) so a large import leaves the machine headroom. SPEED
+    /// axis only — write strategy is size-gated, not set here. Rust:
+    /// `set_encode_speed(&self, speed: EncodeSpeed)`.
+    public func setEncodeSpeed(_ speed: EncodeSpeed)
+
+    /// The encode-speed knob. Swift `enum EncodeSpeed { case foreground, background }`;
+    /// Rust `enum EncodeSpeed { Foreground, Background }`. Selects the embed
+    /// fan-out concurrency (all cores vs ~a quarter) via `available cores`
+    /// (`ProcessInfo.activeProcessorCount` / `std::thread::available_parallelism`),
+    /// uniform across platforms and identical Swift↔Rust.
+
+    /// Set (or clear) the `onEncoded` coordination callback, fired after each
+    /// drained batch with the encoded sourceIDs. `nil` when standalone; the
+    /// orchestrator (GeniusLocusKit) sets it to roll up the touched LocusKit
+    /// rooms. CorpusKit never reaches into LocusKit itself. Rust:
+    /// `set_on_encoded(&self, F)`.
+    public func setOnEncoded(_ callback: (@Sendable ([String]) async -> Void)?)
+
     /// Embed the query and return fused kNN + BM25 results (SPEC B-10).
     /// Runs on the DEFAULT signal (models[0]).
     public func recall(_ query: String, limit: Int = 10, now: Date) async throws -> [ScoredChunk]
@@ -1181,6 +1437,64 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.13.0 -- 2026-06-25
+T1 (encode mode + QoS throttle): new `EncodeSpeed` enum (`foreground` /
+`background`) + `Corpus.setEncodeSpeed(_:)` (Rust `set_encode_speed`). The embed
+fan-out in `ingest` / `ingestBatch` is now CONCURRENCY-THROTTLED by the speed:
+foreground uses all logical cores, background caps to `cores / 4` (x=4, floor 1)
+so a large background import leaves ~75% of the machine free. Uniform across
+platforms (`activeProcessorCount` / `available_parallelism`) and identical
+Swift↔Rust (a chunked-batch fan-out replaces the prior unbounded task-per-item
+spawn). Output is byte-identical regardless of speed — only scheduling changes.
+
+### 1.12.0 -- 2026-06-25
+Additive (T6 — drain status): `Corpus.ingestQueueDepth() -> (pending, inFlight)`
+(Swift) / `ingest_queue_depth(&self) -> (usize, usize)` (Rust) — a read-only
+probe of the ingest drain's outstanding work. OBSERVES the queue's `new/` +
+`cur/` frontiers (via the new `QueueKit.pendingCount` + existing `inFlight`),
+never claiming or draining; returns `(0, 0)` when no queue is mounted. Feeds the
+GLK `drainStatuses` aggregation and the `moot_drain_status` MCP tool. No change
+to the drain pipeline or byte-identity.
+
+### 1.11.0 -- 2026-06-24
+Documented the incremental provider-counts table (both ports). New
+`CorpusProviderCountsStore` (sibling of `BasisStore`, `corpus_provider_counts`
+table, one row per `(model_id, model_version)`, `PersistedCounts` /
+`CountsGrowthAnchor`, `upsert` / `load` / `growthAnchor` / `deleteAll`).
+`TrainableEmbeddingBasis` gains the maintained-counts seam (`addToCounts`,
+`serializeCounts`, `restoreCounts`, `countsVocabularySize`); the Rust trait also
+documents `reconstruct_trainable_basis`. `Corpus.maintainedVocabAnchor()` exposes
+the vocab-growth anchor the autonomic governor's retrain trigger reads. The
+governor's auto-reindex gate moved from a +25-chunk delta to a vocabulary-growth
+trigger (NeuronKit). ADDITIVE — no existing surface changed; the counts table is
+maintained on write, restored on open, persisted at batch boundaries.
+
+### 1.10.0 -- 2026-06-24
+Added two Apple NaturalLanguage embedding providers (ADR-019), Swift-only
+(`#if canImport(NaturalLanguage)`), no Rust counterpart (sanctioned divergence):
+`NLEmbeddingProvider` (model_id "apple-nlembedding-v1", seed "APNLEMB1"
+`0x4150_4E4C_454D_4231`) and `NLContextualEmbeddingProvider` (model_id
+"apple-nlcontextual-v1", seed "APNLCTX1" `0x4150_4E4C_4354_5831`). Both are
+item-local (stateless, no TrainableEmbeddingBasis), opt-in (not in the default
+ensemble), and gracefully absent when the OS model/asset is unavailable
+(embedFloat → [], never throw/crash). Added two EmbeddingModel cases
+`.nlEmbedding(provider:)` / `.nlContextualEmbedding(provider:)` behind the same
+`#if canImport(NaturalLanguage)` gate. Updated § 1 package layout. ADDITIVE —
+no existing provider, EmbeddingModel case, or default changed.
+
+### 1.9.0 -- 2026-06-23
+Added the Corpus-owned **ingest pipeline** to § 7: `ingestBatch`,
+`mountIngestQueue`, `dropIngestQueue`, `enqueueIngest`, `awaitIngestDrain`,
+`drainIngestQueueOnce`, `setOnEncoded` (+ the `onEncoded` callback). A Corpus
+now owns its encode queue + drain worker pool and drains itself with no
+orchestrator — relocated from GeniusLocusKit's `EncodeIntake`. Rust mount/enqueue
+take `&Arc<Self>`; the job payload is the internal `IngestJob` (not public).
+Behaviorally specified in CORPUSKIT_SPEC § 11. Additive; no existing signature
+removed.
+
+### 1.8.0 -- 2026-06-21
+BundleStore schema v2 → v3 (NT-C1, ADR-017 §19): all six query methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`) now accept an `AsOfCoordinate` parameter for temporal reads (I-12); `count` accepts it for API parity but does not forward it. New `content_hash` BLOB nullable column on `chunks` (hash-on-write via HashingRowStore, I-11). New `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable). New public methods: `corpusMerkleRoot(for:)` / `corpus_merkle_root` returns per-corpus Merkle root (I-13), `globalCorpusMerkleRoot()` / `global_corpus_merkle_root` returns interior hash over all per-corpus roots. Updated schemaDeclaration comment from v2 to v3. Additive; no existing signature removed.
 
 ### 1.7.0 -- 2026-06-17
 Schema bumps (ADR-012): `chunks` (BundleStore, kit-ID "CorpusKit") v1 → v2 and `corpus_provider_basis` (BasisStore, kit-ID "CorpusKitBasis") v1 → v2, each gaining a nullable `.json` `ext` forward-compat slot. Both ports; inert in 1.0 (NULL / omitted on insert, never read). `chunks.ext` is distinct from the existing per-chunk `metadata` column. Updated the BundleStore / BasisStore schema concordance.

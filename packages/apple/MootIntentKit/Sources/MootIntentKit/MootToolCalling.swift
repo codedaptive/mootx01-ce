@@ -1,5 +1,5 @@
 import Foundation
-import AriaMCP   // JSONValue, GatewayCall
+import AriaMCP   // JSONValue
 
 // MARK: - MootToolCalling
 //
@@ -8,9 +8,9 @@ import AriaMCP   // JSONValue, GatewayCall
 // package imports GeniusLocusKit, LocusKit, or PersistenceKit directly.
 //
 // MootBridge (in apps/Mootx01-App/Sources/MootGateway/) conforms to this
-// protocol. Test code (in Tests/MootIntentKitTests/) provides a concrete
-// in-process conformance that wires up a real MootBridge so perform()
-// exercises actual substrate behaviour. The protocol carries only what the
+// protocol. Test code (in Tests/MootIntentKitTests/) provides a TestBridge
+// conformance (a MootBridge-equivalent over a real in-memory estate) so
+// perform() exercises actual substrate behaviour. The protocol carries only what the
 // intent layer needs: tool calls and the result shape.
 //
 // `actor` isolation: the intents drive `callTool` from @MainActor contexts;

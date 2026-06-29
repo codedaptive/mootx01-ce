@@ -31,7 +31,11 @@ use crate::manager_config::ManagerConfig;
 pub const HTTP_PORT_ENV_KEY: &str = "MOOT_MGR_HTTP_PORT";
 /// Env var supplying the bearer token gating the HTTP control surface.
 pub const CONTROL_TOKEN_ENV_KEY: &str = "MOOT_MGR_CONTROL_TOKEN";
-/// Env var overriding the UDS control-socket path.
+/// Default user-local file containing the bearer token for Windows scheduled-task
+/// installs. Used only when `MOOT_MGR_CONTROL_TOKEN` is not set.
+pub const CONTROL_TOKEN_FILE_NAME: &str = "control.token";
+/// Env var overriding the local IPC control-channel path (UDS socket on Unix,
+/// named-pipe seed on Windows).
 pub const CONTROL_SOCKET_ENV_KEY: &str = "MOOT_MGR_CONTROL_SOCKET";
 /// Env var overriding the admin-plane estates directory.
 pub const ESTATES_DIR_ENV_KEY: &str = "MOOT_MGR_ESTATES_DIR";
@@ -67,6 +71,10 @@ pub struct ResidentHostConfig {
     /// `from_environment` path; false for memberwise (test/embedded) hosts so
     /// parallel tests never touch the live machine's port file.
     pub write_port_file: bool,
+    /// Override for the HTTP concurrency cap. `None` means use the default
+    /// (`MAX_LOOPBACK_CONNECTIONS` / `MOOT_MGR_HTTP_MAX_CONNECTIONS` env var).
+    /// Set only in tests that need precise cap control.
+    pub http_max_connections: Option<usize>,
 }
 
 impl ResidentHostConfig {
@@ -88,6 +96,7 @@ impl ResidentHostConfig {
             // of port: exact bind, no hunting, no §3 port file.
             http_port_explicit: true,
             write_port_file: false,
+            http_max_connections: None,
         }
     }
 
@@ -113,7 +122,11 @@ impl ResidentHostConfig {
             .get(HTTP_PORT_ENV_KEY)
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(DEFAULT_HTTP_PORT);
-        let control_token = env.get(CONTROL_TOKEN_ENV_KEY).cloned().unwrap_or_default();
+        let control_token = env
+            .get(CONTROL_TOKEN_ENV_KEY)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| read_default_control_token(&store_dir).unwrap_or_default());
         let control_socket_path = env.get(CONTROL_SOCKET_ENV_KEY).cloned().unwrap_or_else(|| {
             store_dir
                 .join("control.sock")
@@ -131,6 +144,9 @@ impl ResidentHostConfig {
             estates_directory,
             http_port_explicit,
             write_port_file: true,
+            // Production hosts always read the cap from the env var (handled
+            // inside HttpReadApi::new). No override at this layer.
+            http_max_connections: None,
         }
     }
 }
@@ -183,6 +199,12 @@ fn lock_memory_from_swap() {
     // Windows: per-region VirtualLock only; not applied process-wide here.
 }
 
+fn read_default_control_token(store_dir: &std::path::Path) -> Option<String> {
+    let token = std::fs::read_to_string(store_dir.join(CONTROL_TOKEN_FILE_NAME)).ok()?;
+    let token = token.trim().to_string();
+    if token.is_empty() { None } else { Some(token) }
+}
+
 impl ResidentHost {
     /// Create a resident host. `start_instant_epoch` is the host start time
     /// (uptime base) in epoch seconds — injected so uptime is deterministic in
@@ -198,6 +220,20 @@ impl ResidentHost {
             api: None,
             control: None,
         }
+    }
+
+    /// Test-only constructor: same as `new` but with an explicit HTTP connection
+    /// cap, bypassing the env-var read. Allows integration tests to exercise the
+    /// shed path without mutating global process environment (which would affect
+    /// tests running in parallel in the same process).
+    #[doc(hidden)]
+    pub fn new_with_http_cap(
+        mut config: ResidentHostConfig,
+        start_instant_epoch: f64,
+        max_connections: usize,
+    ) -> Self {
+        config.http_max_connections = Some(max_connections);
+        Self::new(config, start_instant_epoch)
     }
 
     /// Start the host: open the store, then bring up the read-API and the gated
@@ -231,13 +267,27 @@ impl ResidentHost {
         let mut api_result: Option<Arc<crate::http_read_api::HttpReadApi>> = None;
         let mut last_err: Option<String> = None;
         for port in candidates {
-            let api = Arc::new(crate::http_read_api::HttpReadApi::new(
-                Arc::clone(&self.manager),
-                Arc::clone(&self.admin),
-                port,
-                self.config.control_token.clone(),
-                self.start_instant_epoch,
-            ));
+            // When an explicit cap override is present (test/embedded use only),
+            // bypass the env-var read in `HttpReadApi::new` by using the
+            // `new_with_cap` constructor. Production hosts always use `new`
+            // (env-var / default path). This avoids env-var mutation in tests.
+            let api = Arc::new(match self.config.http_max_connections {
+                Some(cap) => crate::http_read_api::HttpReadApi::new_with_cap(
+                    Arc::clone(&self.manager),
+                    Arc::clone(&self.admin),
+                    port,
+                    self.config.control_token.clone(),
+                    self.start_instant_epoch,
+                    cap,
+                ),
+                None => crate::http_read_api::HttpReadApi::new(
+                    Arc::clone(&self.manager),
+                    Arc::clone(&self.admin),
+                    port,
+                    self.config.control_token.clone(),
+                    self.start_instant_epoch,
+                ),
+            });
             match api.clone().start() {
                 Ok(()) => {
                     if port != self.config.http_port {

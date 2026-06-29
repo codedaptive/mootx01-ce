@@ -25,3 +25,20 @@ SyncMeta | Apple-only CloudKit sync-metadata type in CloudKit target
 # MetalKernel is the Apple Silicon GPU compute path. Metal is a system
 # framework with no Rust equivalent; the Rust port uses scalar/BLAS/NEON.
 MetalKernel | Apple-only Metal GPU kernel; Rust uses scalar/BLAS/NEON path
+
+# --- ADR-017 architectural idiom differences ---
+# Swift organizes schema declarations via protocol/enum types (Ops, Schema,
+# Tables); Rust handles the same concern via inline module structure. These
+# are not contract surface — they are language-specific patterns for the same
+# underlying tables. No Rust counterpart will ever exist with this name.
+ErasureLedgerOps | Swift schema-organization protocol; Rust uses inline module
+ErasureLedgerSchema | Swift schema-organization enum; Rust uses inline module
+ErasureLedgerTables | Swift schema-organization enum; Rust uses inline module
+SnapshotRegistryOps | Swift schema-organization protocol; Rust uses inline module
+SnapshotSchema | Swift schema-organization enum; Rust uses inline module
+SnapshotTables | Swift schema-organization enum; Rust uses inline module
+
+# Rust-only observer dispatcher. Swift uses the StorageObserver actor pattern
+# for the same fan-out concern. The names differ because the concurrency
+# models differ (Rust: explicit Hub struct; Swift: actor + async sequences).
+DirtyChainHub | Rust-only observer dispatcher; Swift uses StorageObserver actor

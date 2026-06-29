@@ -4,10 +4,11 @@
 // cross-port sign/verify. These tests are the anchor that prevents
 // the envelope from drifting between the Swift and Rust ports.
 //
-// Every test in this file has a mirror in
+// The canonical signing-byte and sign/verify cases are mirrored in
 // `convergence-kit/tests/federation_tests.rs` under the
-// "Canonical signing bytes conformance" section. Both ports must
-// produce identical output for the golden vector.
+// "Canonical signing bytes conformance" section. The Swift file also
+// contains `payloadKindRawValue` and `signedEnvelopeCodableRoundtrip`,
+// which are not mirrored in that Rust section.
 
 import Testing
 import Foundation

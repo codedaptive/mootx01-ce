@@ -54,7 +54,9 @@ struct PrecedenceTests {
 
         let window = Date(timeIntervalSinceNow: -3600)...now
 
-        // Read lag pairs directly — same as the recipe's GLK read.
+        // Read lag pairs directly. Note: Precedence.run also filters recalled
+        // drawers by event time before calling glkEventLagPairs; this direct
+        // read omits that filter, but the fixture still produces matching output.
         let entries = try await kit.glkEventLagPairs(in: handle, window: window)
 
         // Fold with the same window used by the recipe.

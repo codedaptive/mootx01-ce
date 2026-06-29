@@ -93,8 +93,8 @@ public actor ParallelRunHandle {
     /// if the source capture fails, the error is surfaced (both writes
     /// must succeed in mirror mode).
     ///
-    /// mode: .regular — all migration captures enqueue an EncodeJob so the
-    /// migrated content is indexed in the Corpus. Using the legacy no-mode
+    /// mode: .regular — all migration captures enqueue onto the Corpus ingest
+    /// queue so the migrated content is indexed in the Corpus. Using the legacy no-mode
     /// overload here would leave all migrated drawers dark for BM25/vector
     /// recall even after migration completes (same root cause as the import
     /// path bug: the row lands, but the semantic lane is never fed).

@@ -6,9 +6,9 @@
 // above topical distractors for a QUESTION-phrased query that shares almost
 // no words with the answer.
 //
-// The estate is SQLite-backed so the test exercises the real persistent
-// vector table, the actual float-row INSERT path, and the float-index build
-// from stored rows — not an in-memory shortcut.
+// The estate is SQLite-backed, but the corpus and vector store use
+// InMemoryStorage. The test exercises the injection seam with controlled
+// vectors, not the persistent SQLite vector table.
 //
 // The semantics are PLANTED deterministically. CorpusKit's default
 // deterministic provider hashes text, so its float vectors are not
@@ -115,10 +115,11 @@ struct DenseFusedSemanticPairTests {
         }
     }
 
-    /// Open a SQLite-backed estate, seed the four planted phrases into the
-    /// corpus (BM25 + binary engram + float row) and the binary vector lane,
-    /// and register both with the kit. Returns the kit, handle, and the drawer
-    /// id for each phrase in input order.
+    /// Open a SQLite-backed estate and capture the provided `contents` into the
+    /// corpus (BM25 + binary engram + float row). The planted query is embedded
+    /// by callers for lookup; the captured `contents` are the answer plus
+    /// distractors. Returns the kit, handle, and the drawer id for each captured
+    /// phrase in input order.
     private func makeSeededEstate(
         url: URL,
         capturing contents: [String]

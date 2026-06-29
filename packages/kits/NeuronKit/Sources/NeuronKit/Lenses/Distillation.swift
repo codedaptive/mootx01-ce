@@ -3,8 +3,9 @@
 // Thin NeuronKit lens wrapper over SubstrateML.DistillationPipeline.
 //
 // Responsibilities:
-//   1. Provide the EideticLib HMM tagger as the production FeatureExtractor
-//      (defaulting to DistillationPipeline.defaultExtractor for tests).
+//   1. Provide the LatticeLib HMM tagger as the production FeatureExtractor
+//      via `NeuronKit.hmmFeatureExtractor` (defaulting to
+//      DistillationPipeline.defaultExtractor for tests).
 //   2. Call DistillationPipeline.run(input:extractFeatures:).
 //   3. Project DistillationOutput → DistillationLensResult (adds InjectionDepth).
 //

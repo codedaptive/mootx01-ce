@@ -1,8 +1,8 @@
 // FederationIdentity.swift
 //
-// Per-estate Ed25519 keypair. Generated on first call to
-// `establish`. Persisted in the PersistenceKit estate's audit-log
-// metadata (a small blob row) so it survives restarts.
+// Per-estate Ed25519 keypair. LocalIdentity() generates an in-memory
+// keypair; init(privateKeyBytes:) restores from caller-supplied bytes.
+// This module does not persist or load identity metadata itself.
 
 import Foundation
 import SubstrateTypes

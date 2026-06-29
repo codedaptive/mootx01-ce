@@ -175,6 +175,82 @@ struct MatrixTierTests {
         #expect(rebuilt.coOccurrence == incremental.coOccurrence)
     }
 
+    // MARK: - Incremental hydration conformance (persist + load-forward)
+
+    /// For EVERY split point, a snapshot `fullRebuild(prefix)` then
+    /// `incrementalUpdate(fullLog)` must equal `fullRebuild(fullLog)` cell-for-
+    /// cell — F, O, T, liveRowCount, and both HLC cursors (MatrixTier is
+    /// Equatable over all of them). This proves loading a persisted snapshot and
+    /// folding only the tail forward is identical to a from-scratch rebuild, so
+    /// the matrix tier can be read from disk instead of recomputed on launch.
+    ///
+    /// Exercises a CROSS-CURSOR expunge (rowA captured before the split, expunged
+    /// after) and a withdraw — precisely the cases a naive delta-rebuild-then-
+    /// merge corrupts (liveRowCount clamps at 0; a fresh delta tier never saw the
+    /// original capture).
+    @Test
+    func incrementalUpdateMatchesFullRebuildAtEverySplit() {
+        let rowA = UUID(), rowB = UUID(), rowC = UUID(), rowD = UUID()
+        func cap(_ row: UUID, _ field: String, _ bm: UInt64, _ at: HLC) -> UnifiedAuditEntry {
+            UnifiedAuditEntry(tier: .locus, hlc: at, verb: .capture, rowID: row,
+                              fieldPath: field, beforeValue: .null, afterValue: .bitmap(bm))
+        }
+        func exp(_ row: UUID, _ field: String, _ bm: UInt64, _ at: HLC) -> UnifiedAuditEntry {
+            UnifiedAuditEntry(tier: .locus, hlc: at, verb: .expunge, rowID: row,
+                              fieldPath: field, beforeValue: .bitmap(bm), afterValue: .bitmap(bm))
+        }
+        func wdr(_ row: UUID, _ at: HLC) -> UnifiedAuditEntry {
+            UnifiedAuditEntry(tier: .locus, hlc: at, verb: .withdraw, rowID: row,
+                              fieldPath: "bm.a", beforeValue: .null, afterValue: .null)
+        }
+        // Ordered audit history. HLCs spread wide so some temporal pairs fall
+        // inside the 256-minute T window and some outside.
+        let entries: [UnifiedAuditEntry] = [
+            cap(rowA, "bm.a", 0b101, hlc(1_000)),
+            cap(rowB, "bm.a", 0b001, hlc(2_000)),
+            cap(rowB, "bm.b", 0b010, hlc(2_000)),
+            cap(rowC, "bm.a", 0b111, hlc(3_000)),
+            exp(rowA, "bm.a", 0b101, hlc(4_000)),    // cross-cursor expunge of rowA
+            wdr(rowB,            hlc(5_000)),          // withdraw rowB
+            cap(rowD, "bm.a", 0b011, hlc(6_000)),
+            cap(rowD, "bm.b", 0b100, hlc(6_000)),
+        ]
+        var fullLog = UnifiedAuditLog()
+        for e in entries { fullLog.add(e) }
+        let full = MatrixTier.fullRebuild(from: fullLog)
+
+        // Only split at whole-HLC boundaries (plus the full set). A row's
+        // multi-field capture is one atomic transaction: every field emits a
+        // UnifiedAuditEntry stamped with that row's single HLC. A snapshot is
+        // taken by the dreaming pass over COMMITTED state, so its watermark
+        // (lastHLC / temporalWatermarkHLC) always lands on a complete row —
+        // never between two fields of the same capture. The incremental cursor
+        // is therefore whole-HLC by design (`hlc > cursor`, matching the T fold's
+        // emit gate; `>=` would double-count). Splitting mid-HLC here would
+        // simulate persisting a snapshot in the middle of one atomic capture,
+        // which cannot occur — so those split points are excluded, not "fixed".
+        let splitPoints = (1...entries.count).filter { k in
+            k == entries.count || entries[k - 1].hlc != entries[k].hlc
+        }
+        for k in splitPoints {
+            var prefixLog = UnifiedAuditLog()
+            for e in entries.prefix(k) { prefixLog.add(e) }
+            var snapshot = MatrixTier.fullRebuild(from: prefixLog)   // persisted state
+            snapshot.incrementalUpdate(from: fullLog)                // load-forward
+            #expect(snapshot.fieldPresence == full.fieldPresence, "F differs at split \(k)")
+            #expect(snapshot.coOccurrence == full.coOccurrence, "O differs at split \(k)")
+            #expect(snapshot.liveRowCount == full.liveRowCount,
+                    "liveRowCount differs at split \(k): \(snapshot.liveRowCount) vs \(full.liveRowCount)")
+            #expect(snapshot.lastHLC == full.lastHLC, "lastHLC differs at split \(k)")
+            #expect(snapshot.temporalWatermarkHLC == full.temporalWatermarkHLC,
+                    "temporalWatermark differs at split \(k)")
+            let tExtra = snapshot.temporalCausality.filter { full.temporalCausality[$0.key] != $0.value }
+            let tMissing = full.temporalCausality.filter { snapshot.temporalCausality[$0.key] != $0.value }
+            #expect(tExtra.isEmpty && tMissing.isEmpty,
+                    "T differs at split \(k): \(tExtra.count) wrong/extra, \(tMissing.count) missing — e.g. extra \(tExtra.first.map { "\($0.value)" } ?? "-"), missing \(tMissing.first.map { "\($0.value)" } ?? "-")")
+        }
+    }
+
     // MARK: - Persistence
 
     @Test

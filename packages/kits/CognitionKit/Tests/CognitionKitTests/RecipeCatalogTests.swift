@@ -14,15 +14,12 @@ struct RecipeCatalogTests {
 
     @Test("catalog lists all shipped recipes")
     func catalogListsAllShippedRecipes() {
-        // Both versions of every recipe ship, so every recipe registers
-        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
-        // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
-        // plus the 3 analytics lenses plus
-        // the 4 temporal/entropy lenses (moment, rhythm, precedence,
-        // complexity) plus the steerable-fusion recipe (shaped_recall)
-        // plus the exploratory-recall recipe (recall_exploratory)
-        // plus the 3 distillation-family recipes (Dc1–Dc3, registered Dc4)
-        // = 30 total.
+        // Every catalog descriptor registers (LENS_DISCOVERABILITY_DECISION v2.0):
+        // the 2 foundational recipes plus the 16 reasoning lenses plus the 3
+        // analytics lenses plus the 4 temporal/entropy lenses plus shaped_recall,
+        // recall_exploratory, and the 3 distillation-family recipes = 30 total.
+        // Catalog/descriptor parity is verified here; the Rust distillation entries
+        // have catalog descriptors but not full Rust recipe bodies in the Rust kit.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
             "apriori_rules",
@@ -35,7 +32,6 @@ struct RecipeCatalogTests {
             "distilled_recall",
             "drift",
             "estate_divergence",
-            "expand_memory",
             "formal_concepts",
             "free_association",
             "grounded_synthesis",
@@ -49,6 +45,7 @@ struct RecipeCatalogTests {
             "partial_cue_recall",
             "precedence",
             "recall_exploratory",
+            "recollect",
             "rhythm",
             "shaped_recall",
             "theme_weather",
@@ -100,8 +97,7 @@ struct RecipeCatalogTests {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
         // All 30 entries are registered in both Swift and Rust. The three
         // distillation-family entries (consolidate, distilled_recall,
-        // expand_memory) carry descriptor metadata in Rust; their full Rust
-        // implementations ship in a future mission. Any reordering on either
+        // recollect) carry descriptor metadata in Rust. Any reordering on either
         // side, or a Swift recipe absent from this list, breaks this test —
         // that is its purpose.
         #expect(RecipeCatalog.names == [
@@ -134,7 +130,7 @@ struct RecipeCatalogTests {
             "recall_exploratory",
             "consolidate",
             "distilled_recall",
-            "expand_memory",
+            "recollect",
         ])
     }
 

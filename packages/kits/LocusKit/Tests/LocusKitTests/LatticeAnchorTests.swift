@@ -13,11 +13,7 @@ import Testing
 /// 2. Round-trip with the three optionals nil and `udcCode` empty.
 /// 3. Default behavior of `Drawer.init` — `udcCode` defaults to `""`,
 ///    the three optionals default to nil.
-/// 4. ALTER migration from a pre-04 schema — a database written with
-///    `provenance`, `adjectiveBitmap`, `operationalBitmap` but no
-///    lattice columns must gain all four columns on first open and
-///    surface the seeded row with the documented defaults.
-/// 5. `CREATE INDEX IF NOT EXISTS idx_drawers_udcCode` is applied.
+/// 4. `CREATE INDEX IF NOT EXISTS idx_drawers_udcCode` is applied.
 @Suite("LatticeAnchorTests")
 struct LatticeAnchorTests {
 
@@ -70,8 +66,7 @@ struct LatticeAnchorTests {
     func latticeAnchorDefaults() {
         let d = Drawer(
             content: "x",
-            wing: "w",
-            room: "r",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6"
@@ -97,8 +92,7 @@ struct LatticeAnchorTests {
         let d = Drawer(
             id: TestStorage.tid("la-full"),
             content: "organic chemistry note",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "minilm-v6",
@@ -132,8 +126,7 @@ struct LatticeAnchorTests {
         let d = Drawer(
             id: TestStorage.tid("la-empty"),
             content: "no anchor",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "minilm-v6"

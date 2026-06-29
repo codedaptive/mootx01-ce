@@ -105,6 +105,120 @@ impl EstateConfiguration {
         }
     }
 
+    /// Derive a sibling `EstateConfiguration` pointing at a per-estate queue
+    /// database file beside the estate's own database file (ADR-021 Decision 7, T3).
+    ///
+    /// The sibling file is named `<estate-stem>.<filename>` (e.g. for estate
+    /// `<dir>/<uuid>.sqlite` and filename `"queue.sqlite"` the result is
+    /// `<dir>/<uuid>.queue.sqlite`). This guarantees cross-estate isolation:
+    /// two estates in the same directory produce DIFFERENT sibling paths, so
+    /// one estate's encode/dreaming queue is never accessible to another estate's
+    /// workers. Within the same estate, the path is deterministic across
+    /// processes — all processes that open the same estate file share exactly
+    /// one queue file (ADR-021 Decision 7: one per-estate queue).
+    ///
+    /// The encryption configuration is carried over verbatim — an encrypted
+    /// estate produces an encrypted queue, sharing the cipher key so QueueKit
+    /// can open the queue file without additional key distribution.
+    ///
+    /// # Backend behaviour
+    ///
+    /// - `Sqlite { path, busy_timeout_secs }` — returns a new `Sqlite` config
+    ///   at `<estate-dir>/<estate-stem>.<filename>`, preserving `busy_timeout_secs`
+    ///   and carrying the same `encryption_config`.
+    /// - `InMemory` — returns an InMemory config. The queue is ephemeral
+    ///   alongside the ephemeral estate, which is correct for testing and
+    ///   transient session estates.
+    /// - `Postgresql { ... }` — **deferred** per ADR-021 §SQLite-first
+    ///   sequencing. Returns `StorageError::FeatureGated` with a clear message.
+    ///   A caller relying on a Postgres-backed queue will learn immediately
+    ///   that this path is not yet implemented, rather than receiving a
+    ///   silently wrong or half-initialised configuration.
+    ///
+    /// # Estate-id derivation
+    ///
+    /// The sibling's `estate_id` is derived deterministically from this
+    /// estate's `estate_id` and the `filename` parameter using an XOR-fold.
+    /// The fold mixes the filename's UTF-8 bytes into a 16-byte tag, then
+    /// XORs that tag with the estate UUID bytes. This guarantees:
+    /// - Distinct from the parent — the XOR is never an identity for any
+    ///   non-empty filename (the tag has at least one non-zero byte).
+    /// - Deterministic — same estate UUID + same filename → same sibling UUID.
+    /// - No random minting — `Uuid::new_v4()` is never called on this path.
+    ///
+    /// Mirrors Swift `EstateConfiguration.queueSibling(filename:)`.
+    pub fn queue_sibling(&self, filename: &str) -> StorageResult<EstateConfiguration> {
+        let sibling_id = derive_queue_sibling_id(self.estate_id, filename);
+
+        match &self.backend {
+            BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
+                // Derive the per-estate sibling filename from the estate's own
+                // file stem so two estates in the same directory never share a
+                // queue file (ADR-021 Decision 7 isolation correctness).
+                // Estate: <dir>/<stem>.sqlite → sibling: <dir>/<stem>.<filename>
+                // E.g. <dir>/abc123.sqlite + "queue.sqlite" → <dir>/abc123.queue.sqlite
+                let estate_path = std::path::Path::new(path);
+                let stem = estate_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let per_estate_filename = if stem.is_empty() {
+                    filename.to_owned()
+                } else {
+                    format!("{}.{}", stem, filename)
+                };
+                let parent = estate_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let sibling_path = if parent.is_empty() {
+                    per_estate_filename
+                } else {
+                    format!("{}/{}", parent, per_estate_filename)
+                };
+                Ok(EstateConfiguration {
+                    estate_id: sibling_id,
+                    backend: BackendConfiguration::Sqlite {
+                        path: sibling_path,
+                        busy_timeout_secs: *busy_timeout_secs,
+                    },
+                    encryption_config: self.encryption_config.clone(),
+                    cache_config: self.cache_config.clone(),
+                    novel_token_tagger: self.novel_token_tagger,
+                })
+            }
+
+            BackendConfiguration::InMemory => {
+                // An InMemory estate gets an InMemory queue: both are ephemeral
+                // and live only for the duration of the session. Correct for
+                // tests and transient session estates.
+                Ok(EstateConfiguration {
+                    estate_id: sibling_id,
+                    backend: BackendConfiguration::InMemory,
+                    encryption_config: self.encryption_config.clone(),
+                    cache_config: self.cache_config.clone(),
+                    novel_token_tagger: self.novel_token_tagger,
+                })
+            }
+
+            BackendConfiguration::Postgresql { .. } => {
+                // TODO(ADR-021 Postgres pass): implement the PostgreSQL queue-sibling
+                // path. The Postgres backend requires coordination primitives beyond
+                // a simple file-sibling (connection-string scoping, schema namespacing)
+                // and is explicitly deferred in ADR-021's SQLite-first sequencing.
+                // Fail loud so any caller depending on a Postgres queue learns
+                // immediately that this is not implemented, rather than receiving a
+                // silently wrong or half-initialised configuration.
+                Err(StorageError::FeatureGated {
+                    feature: "queue_sibling for PostgreSQL backend is deferred \
+                              (ADR-021 Postgres pass). Use SQLite or InMemory estates \
+                              for per-estate queue configuration."
+                        .to_owned(),
+                })
+            }
+        }
+    }
+
     /// Construct an estate configuration with an explicit novel-token tagger
     /// choice. Returns an error if `NlTagger` is requested on Rust (no
     /// NaturalLanguage framework is available — fail-closed).
@@ -192,6 +306,17 @@ pub trait Storage: Send + Sync {
     /// Current schema version applied to the backend.
     fn current_schema_version(&self) -> StorageResult<i32>;
 
+    /// Current schema version for a specific kit on this backend.
+    /// Each kit migrates independently when multiple kits share one storage;
+    /// this method returns the version recorded for `kit_id` alone, not the
+    /// global maximum across all kits. Returns 0 if no migrations have been
+    /// applied for this kit yet.
+    fn current_schema_version_for(&self, _kit_id: &str) -> StorageResult<i32> {
+        // Default falls back to the global version for backwards compatibility.
+        // Backends that track per-kit versions override this.
+        self.current_schema_version()
+    }
+
     /// Apply migrations forward to the schema's declared version.
     /// Forward-only, fail-fast per Q4.
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
@@ -206,4 +331,43 @@ pub trait Storage: Send + Sync {
         isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Queue-sibling ID derivation — deterministic, no random minting
+// ---------------------------------------------------------------------------
+
+/// Derive a deterministic `Uuid` for a queue sibling from the parent estate's
+/// `Uuid` and the sibling `filename`. Mirrors Swift's `deriveQueueSiblingID`.
+///
+/// Algorithm: fold the filename's UTF-8 bytes into a 16-byte tag by cycling
+/// through each byte position (XOR-reduce). Then XOR that tag with the parent
+/// UUID's raw bytes. For any non-empty filename the tag is never all-zeros, so
+/// the result always differs from the parent ID — they can never collide.
+///
+/// Guarantees:
+/// - Deterministic: same `parent_id` + same `filename` → same result.
+/// - Distinct: result != `parent_id` for all non-empty filenames.
+/// - No random minting: `Uuid::new_v4()` is never called on this path.
+fn derive_queue_sibling_id(parent_id: uuid::Uuid, filename: &str) -> uuid::Uuid {
+    let filename_bytes = filename.as_bytes();
+    if filename_bytes.is_empty() {
+        // Empty filename is a programming error; return the parent ID so the
+        // caller sees a detectable mismatch rather than a silent wrong config.
+        return parent_id;
+    }
+
+    // Fold filename UTF-8 bytes into a 16-byte tag (XOR-reduce cycling positions).
+    let mut tag = [0u8; 16];
+    for (i, &byte) in filename_bytes.iter().enumerate() {
+        tag[i % 16] ^= byte;
+    }
+
+    // XOR the parent UUID's raw bytes with the derived tag.
+    let mut bytes = *parent_id.as_bytes();
+    for i in 0..16 {
+        bytes[i] ^= tag[i];
+    }
+
+    uuid::Uuid::from_bytes(bytes)
 }

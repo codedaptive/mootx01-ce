@@ -84,8 +84,8 @@ public extension NeuronKit {
     /// and on-demand-trigger API.
     ///
     /// The daemon talks to the substrate only through these seams (B-1):
-    /// `reader` for the reads it mines, `sink` for its two writes
-    /// (proposal + cycle diary), `policyStore` for the manifest-resident
+    /// `reader` for the reads it mines, `sink` for its three writes
+    /// (proposal, cycle diary, and enrichment-status update), `policyStore` for the manifest-resident
     /// policy, `rewardSource` for the reward signal, and `bandit` for the
     /// Thompson-Sampling Beta trigger-mode selector (NEURONKIT_SPEC § 3.4).
     ///

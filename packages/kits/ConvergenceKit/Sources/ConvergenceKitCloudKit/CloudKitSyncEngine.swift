@@ -1,14 +1,15 @@
 // CloudKitSyncEngine.swift
 //
 // CloudKit-backed sync. A generalized SyncCoordinator
-// pattern: setup zone + subscription, push
-// pending local changes, pull remote changes since last token,
-// apply via PersistenceKit.
+// pattern: setup zone, push pending local changes,
+// pull remote changes since last token,
+// apply via PersistenceKit. No CloudKit subscription is created.
 //
 // ConvergenceKit-CloudKit listens to StorageObserver for outbound changes
 // and queues them for push. On pull, decodes CKRecords into
-// SyncRecords and applies through the local PersistenceKit's rowStore
-// (which fires StorageObserver naturally, waking downstream watchers).
+// DecodedRecord values via CKRecordMapping.decode, then applies through
+// rowStore directly (which fires StorageObserver naturally, waking
+// downstream watchers).
 
 import Foundation
 import CloudKit
@@ -125,7 +126,7 @@ actor CloudKitStateActor {
             logger.info("zone setup (may already exist): \(String(describing: error))")
         }
 
-        // Start observing each declared table.
+        // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
             let task = Task { [weak self] in
@@ -256,7 +257,7 @@ actor CloudKitStateActor {
         guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
         let zoneID = CKRecordZone.ID(zoneName: manifest.zoneIdentifier, ownerName: CKCurrentUserDefaultName)
 
-        // Use CKFetchRecordZoneChangesOperation with the last token.
+        // Pull via async recordZoneChanges(inZoneWith:since:) API.
         let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration()
         config.previousServerChangeToken = serverChangeToken
 
@@ -310,12 +311,11 @@ actor CloudKitStateActor {
             }
         }
 
-        // Apply deletions.
+        // Apply deletions. Deletion events carry only a CKRecord.ID, no record type
+        // that could identify the target table. Deletion is attempted against every
+        // non-pushOnly manifest table; the manifest is the scope guard.
         for recordID in deletedIDs {
             let parts = recordID.recordName.split(separator: ":")
-            // Convention: recordName is the UUID, recordType encodes kit_table.
-            // For deletions CloudKit gives us the recordType separately via the deletions array.
-            // We rely on the manifest matching the active tables; just attempt delete on every table.
             guard let rowKey = UUID(uuidString: String(parts[0])) else { continue }
             for syncedTable in manifest.tables where syncedTable.direction != .pushOnly {
                 let predicate = StoragePredicate.eq(
@@ -407,8 +407,8 @@ actor CloudKitStateActor {
     }
 
     /// Current wall-clock in milliseconds, passed explicitly into
-    /// the HLC generator. Isolated in one method so the single
-    /// remaining clock read in the engine is easy to audit.
+    /// the HLC generator. Note: the engine also reads Date() when
+    /// assigning lastPushAt and lastPullAt on receipts.
     private func nowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
     }

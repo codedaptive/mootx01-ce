@@ -260,9 +260,8 @@ pub fn map4_batch<F: Fn(u64) -> u64>(
 
 // Test vectors (cookbook conformance § 18.2)
 //
-// These are illustrative; the canonical Tier-2 test vectors will
-// live in glref-test-vectors-fingerprint.json once the matching
-// Swift harness lands.
+// Illustrative; the Swift conformance suite carries the canonical
+// Tier-2 test vectors (Fingerprint256.swift test block).
 
 #[cfg(test)]
 mod tests {

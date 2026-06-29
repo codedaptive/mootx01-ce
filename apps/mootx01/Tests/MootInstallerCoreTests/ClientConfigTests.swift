@@ -1,9 +1,10 @@
 // ClientConfigTests.swift
 //
-// Verifies the shape of the MCP server entry the bash installer
-// merges into client config files, and the localConfigPath values
-// that drive --local mode. The Python merge in install.sh reads the
-// JSON this code emits; if the shape drifts, the merge breaks silently.
+// Verifies the shape of the legacy MCPServerEntryBuilder stdio entry
+// and the localConfigPath values that drive --local mode. The Swift
+// installer (Installer.swift) writes client config directly; these
+// tests exercise MCPServerEntryBuilder, which is no longer used by
+// production install paths and is referenced only by this test suite.
 
 import XCTest
 @testable import MootInstallerCore
@@ -38,9 +39,9 @@ final class ClientConfigTests: XCTestCase {
         let json = try MCPServerEntryBuilder.entryJSON(
             binaryPath: "/abs/path/mootx01"
         )
-        // Sorted-keys formatting is what makes the Python merge in
-        // install.sh produce stable diffs across runs. If JSONEncoder
-        // ever loses the option the diff churn returns; lock it in.
+        // Sorted-keys formatting produces stable JSON output across runs.
+        // If JSONEncoder ever loses the sortedKeys option the key order
+        // becomes insertion-order and diff churn returns; lock it in.
         XCTAssertEqual(
             json,
             "{\"args\":[],\"command\":\"/abs/path/mootx01\",\"env\":{}}"
@@ -52,7 +53,8 @@ final class ClientConfigTests: XCTestCase {
     func testOnlyClaudeCodeHasNonNilLocalConfigPath() {
         // Only Claude Code supports project-local scoping (.mcp.json).
         // All other clients are global-only; their localConfigPath must
-        // be nil so install.sh --local leaves them on their global paths.
+        // be nil so `mootx01 install --location local` leaves them on
+        // their global config paths.
         for client in MCPClients.supported where client.id != "claude-code" {
             XCTAssertNil(
                 client.localConfigPath,

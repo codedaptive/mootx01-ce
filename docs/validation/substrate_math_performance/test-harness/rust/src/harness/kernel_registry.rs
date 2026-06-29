@@ -16,18 +16,21 @@ use substrate_kernel::kernel::KernelKind;
 /// Ordered list of kernel kinds available on this build. The
 /// order is stable across runs so JSON output is reproducible.
 pub fn available() -> Vec<KernelKind> {
-    let mut out = vec![KernelKind::Scalar];
-
     // SimdKernel is gated on the simd-nightly feature in
     // geniuslocus-reference. The harness re-exports the
     // feature via its own simd-nightly feature flag (see
     // test-harness/rust/Cargo.toml).
     #[cfg(feature = "simd-nightly")]
     {
+        let mut out = vec![KernelKind::Scalar];
         out.push(KernelKind::Simd);
+        out
     }
 
-    out
+    #[cfg(not(feature = "simd-nightly"))]
+    {
+        vec![KernelKind::Scalar]
+    }
 }
 
 /// Filename-safe name for a kernel, suitable for embedding in

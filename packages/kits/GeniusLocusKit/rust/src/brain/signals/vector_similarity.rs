@@ -137,6 +137,14 @@ impl VectorSimilaritySignal {
                 let pair_key = format!("{}||{}", a, b);
                 if seen_pairs.insert(pair_key) {
                     // Weight: 1.0 - distance/256. Identical vectors → 1.0.
+                    // ADMIN — entrance gate: weight is derived FREE from the
+                    // already-computed proximity-gate distance (no extra origin
+                    // work). It is carried on the AssociationFrame but is
+                    // VESTIGIAL past the `associate` verb, which has no weight
+                    // column to persist it into (see verbs.rs `associate`, the
+                    // drop site). Retained on purpose for a pre-2.0 gauntlet
+                    // experiment on whether weight improves recall. Mirrors
+                    // Swift `VectorSimilaritySignal`.
                     let weight = 1.0 - (m.distance as f64 / 256.0);
                     candidate_pairs.push((a, b, weight));
                 }

@@ -74,7 +74,7 @@ struct InstallDepthTests {
     func serverDepthNoop() throws {
         let home = sandbox()
         defer { cleanup(home) }
-        let outcome = try DepthInstaller.apply(clientID: "claude-code", depth: .server, homeDirectory: home)
+        let outcome = try DepthInstaller.apply(clientID: "claude-code", depth: .server, homeDirectory: home, binaryPath: "/safe/bin/mootx01")
         #expect(outcome == .server)
     }
 
@@ -82,7 +82,7 @@ struct InstallDepthTests {
     func skillsDepthWritesSkill() throws {
         let home = sandbox()
         defer { cleanup(home) }
-        let outcome = try DepthInstaller.apply(clientID: "claude-code", depth: .skills, homeDirectory: home)
+        let outcome = try DepthInstaller.apply(clientID: "claude-code", depth: .skills, homeDirectory: home, binaryPath: "/safe/bin/mootx01")
         // ~/.claude/skills/mootx01-memory/SKILL.md
         let dest = home.appendingPathComponent(".claude/skills/mootx01-memory/SKILL.md")
         guard case let .skills(path) = outcome else {
@@ -97,7 +97,7 @@ struct InstallDepthTests {
     func pluginDepthInstallsPackage() throws {
         let home = sandbox()
         defer { cleanup(home) }
-        let outcome = try DepthInstaller.apply(clientID: "claude-code", depth: .plugin, homeDirectory: home)
+        let outcome = try DepthInstaller.apply(clientID: "claude-code", depth: .plugin, homeDirectory: home, binaryPath: "/safe/bin/mootx01")
         guard case let .plugin(path) = outcome else {
             Issue.record("expected .plugin, got \(outcome)"); return
         }
@@ -109,13 +109,17 @@ struct InstallDepthTests {
         let manifest = root.appendingPathComponent(".claude-plugin/plugin.json")
         #expect(FileManager.default.fileExists(atPath: skill.path))
         #expect(FileManager.default.fileExists(atPath: manifest.path))
+        let mcp = root.appendingPathComponent(".mcp.json")
+        let mcpContents = try String(contentsOf: mcp, encoding: .utf8)
+        #expect(mcpContents.contains("\"command\" : \"/safe/bin/mootx01\""))
+        #expect(!mcpContents.contains("\"command\" : \"mootx01\""))
     }
 
     @Test("plugin depth falls back to skills (reported) for a module-code host")
     func pluginFallsBackToSkills() throws {
         let home = sandbox()
         defer { cleanup(home) }
-        let outcome = try DepthInstaller.apply(clientID: "opencode", depth: .plugin, homeDirectory: home)
+        let outcome = try DepthInstaller.apply(clientID: "opencode", depth: .plugin, homeDirectory: home, binaryPath: "/safe/bin/mootx01")
         guard case let .pluginFellBackToSkills(path, reason) = outcome else {
             Issue.record("expected fallback, got \(outcome)"); return
         }
@@ -130,8 +134,8 @@ struct InstallDepthTests {
     func mcpOnlyDegradesToServer() throws {
         let home = sandbox()
         defer { cleanup(home) }
-        #expect(try DepthInstaller.apply(clientID: "claude-desktop", depth: .plugin, homeDirectory: home) == .server)
-        #expect(try DepthInstaller.apply(clientID: "kiro", depth: .skills, homeDirectory: home) == .server)
+        #expect(try DepthInstaller.apply(clientID: "claude-desktop", depth: .plugin, homeDirectory: home, binaryPath: "/safe/bin/mootx01") == .server)
+        #expect(try DepthInstaller.apply(clientID: "kiro", depth: .skills, homeDirectory: home, binaryPath: "/safe/bin/mootx01") == .server)
     }
 
     // MARK: - sandbox helpers

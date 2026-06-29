@@ -60,10 +60,16 @@ pub fn run(banner: &str) {
     // config or an unusable path/URL (unreachable PostgreSQL fails fast here).
     let mut config = ServerConfig::from_env();
     // Inject the host identity so rows filed by this server are stamped with
-    // the correct source. The banner ("aria-mcp" or "mootx01") is the
-    // canonical name for whichever binary is hosting the runtime. Mirrors
-    // Swift's `ToolDispatcher(serverIdentity:)` injection pattern.
+    // the correct source. The banner ("mootx01" for the product binary and the
+    // aria-mcp dev binary alike) is the canonical name for whichever binary is
+    // hosting the runtime. Mirrors Swift's `ToolDispatcher(serverIdentity:)`.
     config.registry.server_identity = banner.to_owned();
+    // The MCP `serverInfo.name` reported to the client must match the host
+    // identity too — otherwise the product (`mootx01 serve`) presents itself to
+    // an MCP client as the stale default "ARIA_MCP_Rust". Drive it from the
+    // banner so the Rust product reports "mootx01", byte-for-byte matching the
+    // Swift product's `ServerInfo(name: "mootx01")` in ServeCommand.swift.
+    config.server_name = banner.to_owned();
 
     // Telemetry wiring (durable default for resident mode, opt-in for stdio).
     //

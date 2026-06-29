@@ -83,13 +83,35 @@ private func resetIntellectus() {
 
 // MARK: - Fake dreaming infrastructure
 
+/// Drain-queue fake for telemetry tests. The `windows` parameter seeds the
+/// first (and only) call to drainDreamingWindow(); subsequent calls return
+/// [] (drain-once semantics). The convenience init that maps pair count to
+/// windows is provided to keep the call sites readable.
 private actor FakeDreamingReader: DreamingSubstrateReader {
-    let observations: [CoOccurrenceObservation]
-    init(observations: [CoOccurrenceObservation] = []) {
-        self.observations = observations
+    /// Window batches to drain. Each element is one call's return value.
+    private var batches: [[[String]]]
+
+    /// Seed with explicit window batches (each inner array is one drain event).
+    init(batches: [[[String]]] = []) {
+        self.batches = batches
     }
+
+    /// Convenience: seed N distinct pairs as N single-window batches so
+    /// `candidatesConsidered` equals `pairCount` after one drain call.
+    /// Pair IDs are "ep-\(i)-a" / "ep-\(i)-b" for i in 0 ..< pairCount.
+    init(pairCount: Int) {
+        self.batches = (0 ..< pairCount).map { i in [["ep-\(i)-a", "ep-\(i)-b"]] }
+    }
+
     func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem] { [] }
-    func coOccurrenceObservations() async throws -> [CoOccurrenceObservation] { observations }
+
+    func drainDreamingWindow() async throws -> [[String]] {
+        // Flatten all batches into a single return (one call returns everything).
+        let all = batches.flatMap { $0 }
+        batches = []
+        return all
+    }
+
     func existingTunnels() async throws -> [Tunnel] { [] }
 }
 
@@ -290,8 +312,10 @@ struct NeuronKitTelemetrySuite {
             }
         }
 
-        /// Cycle observations count is reflected in the drawers_touched tag.
-        @Test("drawers_touched tag matches observation count")
+        /// Distinct pair count from the drain is reflected in the drawers_touched tag.
+        /// Two distinct drain windows — one for pair (a,b) and one for (c,d) — yield
+        /// candidatesConsidered == 2, which maps to drawers_touched == "2".
+        @Test("drawers_touched tag matches drained pair count")
         func drawersTouchedTagMatchesObservationCount() async throws {
             try await withIntellectusLock {
                 let sink = CapturingSink()
@@ -299,13 +323,9 @@ struct NeuronKitTelemetrySuite {
                 Intellectus.setEnabled(true)
                 defer { resetIntellectus() }
 
-                let obs = [
-                    CoOccurrenceObservation(endpointA: "a", endpointB: "b", attempts: 2, evidenceTargets: []),
-                    CoOccurrenceObservation(endpointA: "c", endpointB: "d", attempts: 1, evidenceTargets: []),
-                ]
-
+                // Two distinct pairs from one drain call → candidatesConsidered = 2.
                 let daemon = DreamingDaemon(
-                    reader: FakeDreamingReader(observations: obs),
+                    reader: FakeDreamingReader(batches: [[["a", "b"], ["c", "d"]]]),
                     sink: FakeDreamingSink(),
                     policyStore: FakeDreamingPolicyStore()
                 )
@@ -320,7 +340,7 @@ struct NeuronKitTelemetrySuite {
                 }
                 if case let .metric(_, _, tags, _) = complete {
                     #expect(tags["drawers_touched"] == "2",
-                        "drawers_touched must equal observation count; got \(tags["drawers_touched"] ?? "nil")")
+                        "drawers_touched must equal distinct pair count; got \(tags["drawers_touched"] ?? "nil")")
                 }
             }
         }
@@ -487,15 +507,15 @@ struct NeuronKitTelemetrySuite {
         @Test("dreaming cycle report identical with monitoring on vs off")
         func dreamingCycleReportIdentical() async throws {
             try await withIntellectusLock {
-                let obs = [
-                    CoOccurrenceObservation(endpointA: "ep-a", endpointB: "ep-b", attempts: 2, evidenceTargets: []),
-                ]
+                // One pair (ep-a, ep-b) drained from one window.
+                // Each daemon gets its own reader so the drain queue is
+                // independent — the actor's queue is consumed per drain call.
                 let now = Date(timeIntervalSince1970: 1_000_000)
 
                 // OFF path.
                 Intellectus.setEnabled(false)
                 let daemonOff = DreamingDaemon(
-                    reader: FakeDreamingReader(observations: obs),
+                    reader: FakeDreamingReader(batches: [[["ep-a", "ep-b"]]]),
                     sink: FakeDreamingSink(),
                     policyStore: FakeDreamingPolicyStore()
                 )
@@ -506,7 +526,7 @@ struct NeuronKitTelemetrySuite {
                 Intellectus.install(sink: sink)
                 Intellectus.setEnabled(true)
                 let daemonOn = DreamingDaemon(
-                    reader: FakeDreamingReader(observations: obs),
+                    reader: FakeDreamingReader(batches: [[["ep-a", "ep-b"]]]),
                     sink: FakeDreamingSink(),
                     policyStore: FakeDreamingPolicyStore()
                 )
@@ -535,8 +555,7 @@ private extension Drawer {
         Drawer(
             id: "test-\(abs(content.hashValue))",
             content: content,
-            wing: "test-wing",
-            room: "test-room",
+            parentNodeId: "test-room-node",
             addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "test-embed-v1",

@@ -186,8 +186,10 @@ pub struct SignedEnvelope {
     /// Ed25519 signature over `envelope_signing_bytes(...)`.
     /// Not over raw payload bytes — this closes the relabel/replay seam.
     pub signature: [u8; SIGNATURE_LENGTH],
-    /// Batch-level HLC timestamp. Strictly ordered after the records it carries
-    /// (the sender advances the clock once more after minting record HLCs).
+    /// Batch-level HLC timestamp. The sender advances the clock once more after
+    /// minting record HLCs; records that already carry their own HLCs may have
+    /// higher logical counts, so strict ordering after every record is not
+    /// guaranteed.
     pub hlc: PackedHLC,
 }
 
@@ -204,6 +206,13 @@ pub trait Relay: Send + Sync {
     fn register(&self, identity: PeerIdentity) -> Receiver<SignedEnvelope>;
     /// Deliver a signed envelope to every registered peer except `from`.
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    /// Deliver a signed envelope to a specific registered peer.
+    fn send_to(
+        &self,
+        from: &PeerIdentity,
+        to_public_key: &[u8; PUBLIC_KEY_LENGTH],
+        envelope: SignedEnvelope,
+    );
 }
 
 /// In-process federation relay (the local/test `Relay`). Federation
@@ -237,9 +246,34 @@ impl Relay for FederationRelay {
             let _ = tx.send(envelope.clone());
         }
     }
+
+    fn send_to(
+        &self,
+        from: &PeerIdentity,
+        to_public_key: &[u8; PUBLIC_KEY_LENGTH],
+        envelope: SignedEnvelope,
+    ) {
+        let inboxes = self.inboxes.lock().unwrap();
+        for (id, tx) in inboxes.iter() {
+            if id == from || &id.public_key != to_public_key {
+                continue;
+            }
+            // Best-effort: drop send errors (receiver gone).
+            let _ = tx.send(envelope.clone());
+        }
+    }
 }
 
 // ----- engine -----
+
+/// A peer that has been explicitly paired via `pair()`. Mirrors Swift's
+/// `FederationStateActor.PairedPeer`. The engine only pushes when at
+/// least one paired peer exists; without pairing, push returns empty.
+#[derive(Debug, Clone)]
+pub struct PairedPeer {
+    pub public_key: [u8; PUBLIC_KEY_LENGTH],
+    pub family: crate::pairing::HyperplaneFamilySpec,
+}
 
 struct EngineState {
     enabled: bool,
@@ -248,6 +282,9 @@ struct EngineState {
     last_push_secs: Option<i64>,
     last_pull_secs: Option<i64>,
     inbox: Option<Receiver<SignedEnvelope>>,
+    /// Explicitly paired peers. Mirrors Swift's `FederationStateActor.peers`.
+    /// Push is gated on this list being non-empty.
+    paired_peers: Vec<PairedPeer>,
     /// Pending records awaiting the next push. Shared (`Arc<Mutex<…>>`) because
     /// the observer worker threads append to it on every observed write while
     /// the engine drains it on `push`. Mirrors the Swift `pendingOutbound`
@@ -273,6 +310,13 @@ struct EngineState {
     /// still holds an `Arc<dyn Storage>` clone keeps the observer hub — and its
     /// senders — alive, so the receiver would never disconnect on its own.
     observer_stop: Arc<AtomicBool>,
+    /// Guard flag set to `true` for the duration of `pull()`'s apply loop.
+    /// When the flag is set the observer workers skip appending inbound-write
+    /// events to the outbox, preventing a sync echo: without this guard, each
+    /// `apply_record` write triggers the storage observer, causing received
+    /// records to be re-enqueued for the next `push` and bounced back to the
+    /// peer that sent them.
+    pulling: Arc<AtomicBool>,
 }
 
 pub struct FederationSyncEngine {
@@ -301,6 +345,7 @@ impl FederationSyncEngine {
                 last_push_secs: None,
                 last_pull_secs: None,
                 inbox: None,
+                paired_peers: Vec::new(),
                 outbox: Arc::new(Mutex::new(Vec::new())),
                 // Random low node id in [1, 15], matching the Swift actor's
                 // `HLCGenerator(nodeID: Int32.random(in: 1...0x0F))`.
@@ -310,6 +355,7 @@ impl FederationSyncEngine {
                 hlc_counter: 0,
                 observer_workers: Vec::new(),
                 observer_stop: Arc::new(AtomicBool::new(false)),
+                pulling: Arc::new(AtomicBool::new(false)),
             },
             subscribers: Vec::new(),
         }
@@ -331,6 +377,29 @@ impl FederationSyncEngine {
             return Err(SyncError::NotEnabled);
         }
         self.state.outbox.lock().unwrap().push(record);
+        Ok(())
+    }
+
+    /// Pair with another engine. Both sides must call `pair` on each other
+    /// (symmetric). After pairing, `push` will route envelopes through the
+    /// relay; before pairing, `push` returns an empty receipt.
+    ///
+    /// Note: this method records only the caller-side peer. Swift's
+    /// `FederationSyncEngine.pair(with:via:family:)` also registers the peer
+    /// symmetrically through `acceptPeering`.
+    pub fn pair(
+        &mut self,
+        peer: &FederationSyncEngine,
+        family: crate::pairing::HyperplaneFamilySpec,
+    ) -> SyncResult<()> {
+        let peer_pk = peer.identity.public_key_bytes();
+        self.state.paired_peers.push(PairedPeer {
+            public_key: peer_pk,
+            family,
+        });
+        self.emit(SyncEvent::PeerConnected {
+            identity: format!("{:?}", &peer_pk[..8]),
+        });
         Ok(())
     }
 
@@ -374,6 +443,7 @@ impl FederationSyncEngine {
             let outbox = Arc::clone(&self.state.outbox);
             let hlc_generator = Arc::clone(&self.state.hlc_generator);
             let stop = Arc::clone(&self.state.observer_stop);
+            let pulling = Arc::clone(&self.state.pulling);
             let schema_version = manifest.schema_version;
             let kit_id = manifest.kit_id.clone();
 
@@ -386,6 +456,14 @@ impl FederationSyncEngine {
                     }
                     match rx.recv_timeout(tick) {
                         Ok(change) => {
+                            // Skip while a pull is in progress: the write was
+                            // caused by apply_record, not by a local user
+                            // mutation. Suppressing here prevents a sync echo
+                            // where inbound records are re-enqueued and pushed
+                            // back to the peer that originally sent them.
+                            if pulling.load(Ordering::Acquire) {
+                                continue;
+                            }
                             if let Some(record) =
                                 change_to_record(change, schema_version, &kit_id, &hlc_generator)
                             {
@@ -461,12 +539,18 @@ impl SyncEngine for FederationSyncEngine {
         self.state.storage = None;
         self.state.inbox = None;
         self.state.outbox.lock().unwrap().clear();
+        self.state.paired_peers.clear();
         Ok(())
     }
 
     fn push(&mut self) -> SyncResult<SyncReceipt> {
         if !self.state.enabled {
             return Err(SyncError::NotEnabled);
+        }
+        // Gate on paired peers: without explicit pairing, return empty.
+        // Mirrors Swift's `if peers.isEmpty { return .empty }`.
+        if self.state.paired_peers.is_empty() {
+            return Ok(SyncReceipt::empty());
         }
         let to_send: Vec<SyncRecord> = std::mem::take(&mut *self.state.outbox.lock().unwrap());
         let record_count = to_send.len();
@@ -509,7 +593,13 @@ impl SyncEngine for FederationSyncEngine {
             signature,
             hlc: batch_hlc,
         };
-        self.relay.broadcast(&self.peer_identity, envelope);
+        // Route only to explicitly paired peers rather than broadcasting to
+        // all registered relay participants. Broadcasting allowed unpaired
+        // observers to receive every push; send_to enforces the pairing
+        // authorization boundary at the push path. Mirrors the Swift port.
+        for peer in &self.state.paired_peers {
+            self.relay.send_to(&self.peer_identity, &peer.public_key, envelope.clone());
+        }
 
         let receipt = SyncReceipt::now(record_count, 0, 0);
         self.state.last_push_secs = Some(receipt.timestamp_secs);
@@ -539,9 +629,32 @@ impl SyncEngine for FederationSyncEngine {
             out
         };
 
+        // Block the observer workers from appending to the outbox for the
+        // duration of the apply loop: writes made by apply_record are inbound
+        // sync writes, not local user mutations, and must not be re-pushed back
+        // to the sending peer. The flag is cleared in the finally-equivalent
+        // block below (after all applies, before returning).
+        self.state.pulling.store(true, Ordering::Release);
+
         let mut pulled = 0;
         let mut conflicts = 0;
         for envelope in envelopes {
+            // Only accept envelopes from explicitly paired peers. Signature
+            // verification proves key ownership; this check enforces the
+            // pairing authorization boundary before applying any records.
+            // Without this gate an attacker can craft a valid self-signed
+            // envelope (ADR-013) and inject records even without a pairing
+            // handshake — the signature alone does not prove authorization.
+            if !self
+                .state
+                .paired_peers
+                .iter()
+                .any(|peer| peer.public_key == envelope.sender_public_key)
+            {
+                conflicts += 1;
+                continue;
+            }
+
             // Reject unknown payload kinds to avoid misinterpreting future
             // payload types. Known: SyncRecordBatch. Unknown kinds are
             // counted as conflicts; no panic.
@@ -602,6 +715,10 @@ impl SyncEngine for FederationSyncEngine {
                 }
             }
         }
+        // Clear the pull guard: local writes from this point forward are user
+        // mutations and must be captured by the observer workers as normal.
+        self.state.pulling.store(false, Ordering::Release);
+
         let receipt = SyncReceipt::now(0, pulled, conflicts);
         self.state.last_pull_secs = Some(receipt.timestamp_secs);
         self.emit(SyncEvent::RemoteChangesApplied { count: pulled });
@@ -638,8 +755,9 @@ impl SyncEngine for FederationSyncEngine {
 /// `LastWriterWinsByHLC` compares the incoming record's HLC against the stored
 /// row's `_syncHLC`. If the incoming HLC is older (strictly less), the write is
 /// silently dropped. On every apply that wins the comparison the row is written
-/// with `_syncHLC` so the next inbound can compare. This mirrors the Swift
-/// CloudKitStateActor.applyInbound semantics exactly.
+/// with `_syncHLC` so the next inbound can compare. Note: this path persists
+/// only `_syncHLC`; the Swift CloudKitStateActor.applyInbound also persists
+/// `_syncSchemaVersion` and `_syncKitID`.
 /// The same HLC gate applies to delete events: a stale delete (incoming HLC <
 /// local `_syncHLC`) is silently rejected; a newer delete proceeds.
 fn apply_record(
@@ -681,8 +799,8 @@ fn apply_record(
                             return Ok(());
                         }
                     }
-                    // Merge sync meta into the persisted row so the next inbound
-                    // write can read _syncHLC back and compare.
+                    // Persist _syncHLC so the next inbound write can compare.
+                    // (Schema version and kit ID are not persisted here.)
                     values.insert("_syncHLC".to_string(), TypedValue::Hlc(record.hlc.into()));
                     row_store
                         .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
@@ -775,9 +893,9 @@ fn change_to_record(
 }
 
 /// Current wall-clock in milliseconds, passed explicitly into the HLC
-/// generator. The single clock read is isolated here so the rest of the
-/// engine stays deterministic and the read is easy to audit. Mirrors the
-/// Swift actor's `nowMillis()`.
+/// generator. Note: the engine also reads wall-clock time through
+/// `SyncReceipt::now()` during push and pull receipt creation. Mirrors
+/// the Swift actor's `nowMillis()`.
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

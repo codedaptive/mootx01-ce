@@ -194,12 +194,12 @@ public enum Intellectus {
     /// `true` when the host has installed a real sink and is ready
     /// to receive samples.
     ///
-    /// The resident observer program drives this from the stats-store
-    /// monitoring flag: `AriaResident.Observer` calls `setEnabled(true)`
-    /// when monitoring is on (env `ARIA_MCP_OBSERVER` or the store flag)
-    /// and `setEnabled(false)` when it is off, polling the flag on its
-    /// monitoring-gate interval so a moot-mgr toggle takes effect without
-    /// a daemon restart.
+    /// The resident daemon (`AriaResident.runResidentDaemon`) controls this
+    /// gate: it reads the stats-store monitoring flag on its polling interval
+    /// and calls `setEnabled(true/false)` accordingly, so a moot-mgr toggle
+    /// takes effect without a daemon restart. `AriaResident.Observer` exposes
+    /// `shouldEnable(...)` and `setEnabled(_:)`, but the polling loop that
+    /// actually drives this call lives in `runResidentDaemon`.
     ///
     /// - Parameter enabled: `true` to start receiving samples; `false`
     ///   to stop (samples are discarded from this call forward).

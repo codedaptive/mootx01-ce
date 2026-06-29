@@ -62,7 +62,7 @@ BUNDLE="results/${DATE}-${TAG}"
 
 mkdir -p "$BUNDLE"
 
-# ---- run all four benches -------------------------------------------
+# ---- run all six benches -------------------------------------------
 echo "==> moot-math-benchmark bundle: $BUNDLE"
 echo "==> $(date)"
 echo ""
@@ -82,14 +82,14 @@ run_bin() {
 }
 
 (
-    cd rust
+    cd rust-bench
     run_bin "rust topk-bench   " "cargo run --release --quiet --bin topk-bench --"   "../$BUNDLE/hamming_topk-rust.json"
     run_bin "rust stress-test  " "cargo run --release --quiet --bin stress-test --"  "../$BUNDLE/"
     run_bin "rust ml-bench     " "cargo run --release --quiet --bin ml-bench --"     "../$BUNDLE/substrate_ml-rust.json"
 )
 
 (
-    cd swift
+    cd swift-bench
     swift build -c release 2>&1 | tail -1
     run_bin "swift topk-bench  " ".build/release/topk-bench"  "../$BUNDLE/hamming_topk-swift.json"
     run_bin "swift stress-test " ".build/release/stress-test" "../$BUNDLE/"

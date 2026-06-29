@@ -39,8 +39,8 @@ public struct CaptureDrawerIntent: AppIntent {
     public var sensitivity: SensitivityAppEnum
 
     /// The tool caller injected by the host. `nil` triggers the
-    /// `GatewayRuntime.shared.bridge()` fallback so the system-instantiated
-    /// Shortcuts path also reaches the live estate.
+    /// `IntentRuntimeBridge.shared.bridge()` fallback so the
+    /// system-instantiated Shortcuts path also reaches the live estate.
     public var caller: (any MootToolCalling)?
 
     public init() {}

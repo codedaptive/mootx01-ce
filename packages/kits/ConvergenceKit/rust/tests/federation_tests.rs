@@ -153,6 +153,11 @@ fn two_peer_push_pull_roundtrip() {
     engine_a.enable(sample_manifest(), make_storage()).unwrap();
     engine_b.enable(sample_manifest(), make_storage()).unwrap();
 
+    // Symmetric pairing required before push delivers envelopes.
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family.clone()).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
+
     engine_a.enqueue(sample_record()).unwrap();
     let push_receipt = engine_a.push().unwrap();
     assert_eq!(push_receipt.pushed, 1);
@@ -160,6 +165,90 @@ fn two_peer_push_pull_roundtrip() {
     let pull_receipt = engine_b.pull().unwrap();
     assert_eq!(pull_receipt.pulled, 1);
     assert_eq!(pull_receipt.conflicts, 0);
+}
+
+/// Push routes envelopes only to explicitly paired peers. A third engine
+/// registered on the same relay but not paired with the sender must not
+/// receive any envelope. Enforces the pairing authorization boundary at
+/// the push path (ADR-013).
+#[test]
+fn push_routes_only_to_paired_peers() {
+    let relay = Arc::new(FederationRelay::new());
+    let id_a = Arc::new(LocalIdentity::generate());
+    let id_b = Arc::new(LocalIdentity::generate());
+    let id_c = Arc::new(LocalIdentity::generate());
+    let mut engine_a = FederationSyncEngine::new(id_a, relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
+    let mut engine_c = FederationSyncEngine::new(id_c, relay.clone());
+
+    engine_a.enable(sample_manifest(), make_storage()).unwrap();
+    engine_b.enable(sample_manifest(), make_storage()).unwrap();
+    engine_c.enable(sample_manifest(), make_storage()).unwrap();
+
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family.clone()).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
+    // engine_c is registered on the relay but NOT paired with engine_a.
+
+    engine_a.enqueue(sample_record()).unwrap();
+    let push_receipt = engine_a.push().unwrap();
+    assert_eq!(push_receipt.pushed, 1);
+
+    let paired_receipt = engine_b.pull().unwrap();
+    assert_eq!(paired_receipt.pulled, 1);
+    assert_eq!(paired_receipt.conflicts, 0);
+
+    let unpaired_receipt = engine_c.pull().unwrap();
+    assert_eq!(unpaired_receipt.pulled, 0, "unpaired engine must not receive envelopes");
+    assert_eq!(unpaired_receipt.conflicts, 0);
+}
+
+/// Pull rejects a valid self-signed envelope from an engine that is NOT
+/// a paired peer. A valid signature alone does not prove pairing
+/// authorization (ADR-013); the sender must be in the paired peer list.
+#[test]
+fn pull_rejects_signed_envelope_from_unpaired_sender() {
+    let relay = Arc::new(FederationRelay::new());
+    let id_victim = Arc::new(LocalIdentity::generate());
+    let id_trusted = Arc::new(LocalIdentity::generate());
+    let id_attacker = Arc::new(LocalIdentity::generate());
+    let mut victim = FederationSyncEngine::new(id_victim, relay.clone());
+    let mut trusted = FederationSyncEngine::new(id_trusted, relay.clone());
+    let mut attacker = FederationSyncEngine::new(id_attacker.clone(), relay.clone());
+
+    victim.enable(sample_manifest(), make_storage()).unwrap();
+    trusted.enable(sample_manifest(), make_storage()).unwrap();
+    attacker.enable(sample_manifest(), make_storage()).unwrap();
+
+    // Victim is paired with trusted, not with attacker.
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    victim.pair(&trusted, family.clone()).unwrap();
+    trusted.pair(&victim, family).unwrap();
+
+    // Craft a valid self-signed envelope from the attacker identity.
+    let payload_bytes = serde_json::to_vec(&vec![sample_record()]).unwrap();
+    let batch_hlc = PackedHLC { physical_time: 1000, logical_count: 1, node_id: 0 };
+    let attacker_pk = id_attacker.public_key_bytes();
+    let signing_bytes = envelope_signing_bytes(
+        &attacker_pk,
+        PayloadKind::SyncRecordBatch,
+        &payload_bytes,
+        &batch_hlc,
+    );
+    let envelope = SignedEnvelope {
+        sender_public_key: attacker_pk,
+        payload_kind: PayloadKind::SyncRecordBatch,
+        payload: payload_bytes,
+        signature: id_attacker.sign(&signing_bytes),
+        hlc: batch_hlc,
+    };
+
+    // Inject via broadcast so it lands in victim's inbox even without pairing.
+    relay.broadcast(attacker.peer_identity(), envelope);
+
+    let receipt = victim.pull().unwrap();
+    assert_eq!(receipt.pulled, 0, "unpaired sender must not inject records");
+    assert_eq!(receipt.conflicts, 1, "rejected envelope counted as conflict");
 }
 
 #[test]
@@ -175,6 +264,10 @@ fn pull_rejects_kit_mismatch() {
     let mut alt_manifest = sample_manifest();
     alt_manifest.kit_id = "different-kit".to_string();
     engine_b.enable(alt_manifest, make_storage()).unwrap();
+
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family.clone()).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
 
     engine_a.enqueue(sample_record()).unwrap();
     engine_a.push().unwrap();
@@ -197,6 +290,10 @@ fn pull_rejects_schema_mismatch() {
     alt_manifest.schema_version = 99;
     engine_b.enable(alt_manifest, make_storage()).unwrap();
 
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family.clone()).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
+
     engine_a.enqueue(sample_record()).unwrap();
     engine_a.push().unwrap();
 
@@ -209,8 +306,14 @@ fn pull_rejects_schema_mismatch() {
 fn subscriber_receives_push_completed_event() {
     let relay = Arc::new(FederationRelay::new());
     let id = Arc::new(LocalIdentity::generate());
-    let mut engine = FederationSyncEngine::new(id, relay);
+    let mut engine = FederationSyncEngine::new(id, relay.clone());
+    // A second engine serves as the paired peer so push is not gated.
+    let id_b = Arc::new(LocalIdentity::generate());
+    let mut peer = FederationSyncEngine::new(id_b, relay);
+    peer.enable(sample_manifest(), make_storage()).unwrap();
     engine.enable(sample_manifest(), make_storage()).unwrap();
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine.pair(&peer, family).unwrap();
     let rx = engine.subscribe();
     engine.enqueue(sample_record()).unwrap();
     engine.push().unwrap();
@@ -307,8 +410,8 @@ fn envelope_signing_bytes_differ_on_different_inputs() {
 ///
 /// This vector is the authoritative cross-port conformance anchor.
 /// The same inputs fed to the Swift `envelopeSigningBytes(...)` MUST
-/// produce the same 53-byte output (32 + 1 + 4 + 4 + 8 + 4 = 53 bytes
-/// for a 4-byte payload "ABCD").
+/// produce the same 57-byte output (32 + 1 + 4 + 4 + 4 + 8 + 4 = 57 bytes
+/// for a 4-byte payload "ABCD", including the 4-byte node_id field).
 ///
 /// Layout:
 ///   [0..31]  sender_public_key: 0x01 × 32
@@ -365,4 +468,48 @@ fn envelope_sign_and_verify_roundtrip() {
     let other_id = LocalIdentity::generate();
     assert!(!verify_signature(&signature, &signing_bytes, &other_id.public_key_bytes()),
         "wrong key should not verify");
+}
+
+// MARK: - Pairing gate tests
+
+#[test]
+fn push_without_pairing_returns_empty() {
+    // An enabled engine with no paired peers returns an empty receipt
+    // on push — matching Swift's `if peers.isEmpty { return .empty }`.
+    let relay = Arc::new(FederationRelay::new());
+    let id = Arc::new(LocalIdentity::generate());
+    let mut engine = FederationSyncEngine::new(id, relay);
+    engine.enable(sample_manifest(), make_storage()).unwrap();
+    engine.enqueue(sample_record()).unwrap();
+    let receipt = engine.push().unwrap();
+    assert_eq!(receipt.pushed, 0, "push without pairing must return empty");
+    assert_eq!(receipt.pulled, 0);
+    assert_eq!(receipt.conflicts, 0);
+}
+
+#[test]
+fn disable_clears_paired_peers() {
+    // After disable, the paired-peers list is cleared. Re-enabling
+    // requires re-pairing — matching Swift's `disable` clearing `peers`.
+    let relay = Arc::new(FederationRelay::new());
+    let id_a = Arc::new(LocalIdentity::generate());
+    let id_b = Arc::new(LocalIdentity::generate());
+    let mut engine_a = FederationSyncEngine::new(id_a, relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b, relay);
+    engine_a.enable(sample_manifest(), make_storage()).unwrap();
+    engine_b.enable(sample_manifest(), make_storage()).unwrap();
+
+    let family = convergence_kit::HyperplaneFamilySpec::new(42);
+    engine_a.pair(&engine_b, family).unwrap();
+
+    engine_a.enqueue(sample_record()).unwrap();
+    let receipt = engine_a.push().unwrap();
+    assert_eq!(receipt.pushed, 1, "should push when paired");
+
+    // Disable clears pairing state.
+    engine_a.disable().unwrap();
+    engine_a.enable(sample_manifest(), make_storage()).unwrap();
+    engine_a.enqueue(sample_record()).unwrap();
+    let receipt2 = engine_a.push().unwrap();
+    assert_eq!(receipt2.pushed, 0, "re-enabled engine with no pairing must return empty");
 }

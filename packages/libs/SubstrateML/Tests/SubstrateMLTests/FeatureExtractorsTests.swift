@@ -4,12 +4,12 @@
 // swift-testing peer suite for Sources/SubstrateML/FeatureExtractors.swift.
 //
 // rust/src/feature_extractors.rs carries NO #[test], so this suite
-// asserts the documented behavior set: each extractor is pure
-// (deterministic on its inputs), tags the correct stream-source flag
-// and UDC lattice anchor, passes the rowId/HLC through unchanged,
-// reacts to materially different samples, and — for EventKit — is
-// invariant to attendee ordering (attendees are sorted before
-// hashing). Fingerprints are computed under a fixed, deterministically
+// provides partial Swift-side coverage: HealthKit determinism,
+// stream-source flag and UDC lattice anchor for HealthKit + CoreLocation
+// only, rowId/HLC passthrough (HealthKit), input-sensitivity (HealthKit),
+// EventKit attendee-order independence, and CoreLocation geohash bucketing.
+// ScreenTime and SystemTelemetry extractors have no explicit test coverage
+// in this file. Fingerprints are computed under a fixed, deterministically
 // generated hyperplane family.
 
 import Foundation

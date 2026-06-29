@@ -17,7 +17,7 @@
 //   isolation and allows re-entry by another caller before body() finishes.
 //   This is actor reentrancy, and it defeats the serialisation intent.
 //
-//   This class implements a proper async mutex using a checked-continuation
+//   This actor implements a proper async mutex using a checked-continuation
 //   waiter queue. acquire() queues the caller if the lock is already held;
 //   release() resumes the oldest waiter (FIFO). No suspension point exists
 //   *inside* the actor that would allow re-entry while the lock is held.

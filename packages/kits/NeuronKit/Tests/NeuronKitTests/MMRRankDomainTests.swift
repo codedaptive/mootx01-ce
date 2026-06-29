@@ -103,8 +103,7 @@ private func makeTestDrawer(_ id: String) -> Drawer {
     Drawer(
         id: id,
         content: "",
-        wing: "test-wing",
-        room: "test-room",
+        parentNodeId: "test-room-node",
         sourceFile: nil,
         chunkIndex: nil,
         addedBy: "test",

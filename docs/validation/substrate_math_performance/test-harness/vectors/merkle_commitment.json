@@ -1,0 +1,149 @@
+{
+  "case_count": 6,
+  "cases": [
+    {
+      "description": "leaf hash with NFC content and zero vectors",
+      "expected_output": {
+        "digest": "0x017f6eff9d42130e8dd14156d2e18385e60a30d4f30ced028dff96f9f69045a4"
+      },
+      "id": "leaf_empty_vectors",
+      "inputs": {
+        "content": "hello moot",
+        "drawer_id": "0x11111111111141118111111111111111",
+        "op": "leaf",
+        "vectors": []
+      }
+    },
+    {
+      "description": "leaf hash with vectors sorted by modelID bytes then vectorIndex",
+      "expected_output": {
+        "digest": "0x937c7cf4760983e48f2d2ce32adf0515fb104a10c258d65bb7421f7db7fba0d0"
+      },
+      "id": "leaf_vector_order",
+      "inputs": {
+        "content": "Café",
+        "drawer_id": "0x22222222222242228222222222222222",
+        "op": "leaf",
+        "vectors": [
+          {
+            "model_id": "zeta-v1",
+            "values": [
+              "0x00006040",
+              "0x00000080"
+            ],
+            "vector_index": "0x02000000"
+          },
+          {
+            "model_id": "alpha-v1",
+            "values": [
+              "0x0000a03f",
+              "0x000020c0",
+              "0x00000000"
+            ],
+            "vector_index": "0x01000000"
+          },
+          {
+            "model_id": "alpha-v1",
+            "values": [
+              "0x0000003f"
+            ],
+            "vector_index": "0x00000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "interior root with children sorted by raw UUID bytes",
+      "expected_output": {
+        "digest": "0x7ec9d63c22acc7a581329342485c61327cae35aaf21486223b755c0ae4d79437"
+      },
+      "id": "interior_sorted_children",
+      "inputs": {
+        "children": [
+          {
+            "child_id": "0xffffffffffff4fff8fffffffffffffff",
+            "root": "0x937c7cf4760983e48f2d2ce32adf0515fb104a10c258d65bb7421f7db7fba0d0"
+          },
+          {
+            "child_id": "0x00000000000040008000000000000001",
+            "root": "0x017f6eff9d42130e8dd14156d2e18385e60a30d4f30ced028dff96f9f69045a4"
+          }
+        ],
+        "op": "interior"
+      }
+    },
+    {
+      "description": "tombstone hash over domain tag and drawer id",
+      "expected_output": {
+        "digest": "0xa98a608b97da82809ed9485f74fa7669a8642d90e3a7bd635ef7a5ee080d656f"
+      },
+      "id": "tombstone",
+      "inputs": {
+        "drawer_id": "0x33333333333343338333333333333333",
+        "op": "tombstone"
+      }
+    },
+    {
+      "description": "empty subtree root over the empty-root domain tag",
+      "expected_output": {
+        "digest": "0x4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+      },
+      "id": "empty_root",
+      "inputs": {
+        "op": "empty_root"
+      }
+    },
+    {
+      "description": "HMAC commitment over the canonical leaf payload with key version",
+      "expected_output": {
+        "digest": "0x6dd67bbe42dd69d34c9c88e9d5c52c1d3382a064ee6545c60947b3cbd71384ae",
+        "key_version": "0x07000000"
+      },
+      "id": "keyed_commitment",
+      "inputs": {
+        "content": "Café",
+        "drawer_id": "0x22222222222242228222222222222222",
+        "key": "0x6e742d70302063616e6f6e6963616c206b6579",
+        "key_version": "0x07000000",
+        "op": "keyed_commitment",
+        "vectors": [
+          {
+            "model_id": "zeta-v1",
+            "values": [
+              "0x00006040",
+              "0x00000080"
+            ],
+            "vector_index": "0x02000000"
+          },
+          {
+            "model_id": "alpha-v1",
+            "values": [
+              "0x0000a03f",
+              "0x000020c0",
+              "0x00000000"
+            ],
+            "vector_index": "0x01000000"
+          },
+          {
+            "model_id": "alpha-v1",
+            "values": [
+              "0x0000003f"
+            ],
+            "vector_index": "0x00000000"
+          }
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "NT-P0",
+  "format_version": "1",
+  "generated_at": "2026-06-21T00:57:59Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "SubstrateKernel/MerkleCommitment.swift"
+  },
+  "output_crc32": "0x2476cee9",
+  "primitive": "merkle_commitment",
+  "seed": "0xcafebabedeadbeef"
+}

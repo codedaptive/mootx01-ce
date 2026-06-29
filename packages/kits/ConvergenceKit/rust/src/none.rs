@@ -1,6 +1,7 @@
-//! NoSyncEngine: passthrough backend. enable/disable succeed
-//! trivially; push/pull return empty receipts; subscribe returns
-//! a never-emitting receiver.
+//! NoSyncEngine: passthrough backend. enable returns AlreadyEnabled
+//! on repeat calls; push/pull return NotEnabled before enable, then
+//! empty receipts; subscribe returns a receiver whose sender is
+//! dropped immediately rather than a long-lived never-emitting receiver.
 //!
 //! Used when sync is structurally not wanted (development,
 //! tests, deployments without iCloud or federation).

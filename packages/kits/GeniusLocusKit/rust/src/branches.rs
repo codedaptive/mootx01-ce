@@ -161,11 +161,16 @@ impl EstateBranch {
     /// capture channel, room, the full lattice anchor, author, embedding
     /// model, adjective sensitivity, and content kind (the fields the Swift
     /// re-capture preserves).
-    fn capture_frame_from(row: &Drawer) -> CaptureFrame {
+    ///
+    /// `room_name` is the resolved display name of the drawer's parent
+    /// room node — Drawer no longer stores wing/room strings directly
+    /// (ADR-017 node tree migration). Callers resolve it from the
+    /// source estate's NodeStore via `resolve_room_name`.
+    fn capture_frame_from(row: &Drawer, room_name: &str) -> CaptureFrame {
         let mut frame = CaptureFrame::new(
             row.content.clone(),
             row.capture_channel(),
-            row.room.clone(),
+            room_name,
             LatticeAnchor::new(
                 row.udc_code.clone(),
                 row.udc_facets.clone(),
@@ -178,6 +183,29 @@ impl EstateBranch {
         frame.sensitivity = row.adjective_sensitivity();
         frame.kind = row.content_kind();
         frame
+    }
+
+    /// Resolve a drawer's room display name from its parent_node_id
+    /// via a NodeStore reference. Falls back to empty string when the
+    /// store is absent or lookup fails (non-fatal). The NodeStore comes
+    /// from the coordinator's `node_stores` registry — `estate.node_store`
+    /// is `pub(crate)` in LocusKit and not accessible from this crate.
+    fn resolve_room_name(
+        ns: Option<&Arc<locus_kit::node_store::NodeStore>>,
+        drawer: &Drawer,
+    ) -> String {
+        let ns = match ns {
+            Some(ns) => ns,
+            None => return String::new(),
+        };
+        let room_uuid = match Uuid::parse_str(&drawer.parent_node_id) {
+            Ok(u) => u,
+            Err(_) => return String::new(),
+        };
+        match ns.get_node(room_uuid) {
+            Ok(Some(n)) => n.display_name,
+            _ => String::new(),
+        }
     }
 
     /// Build a fresh, isolated in-memory branch estate (owner encodes the
@@ -199,12 +227,14 @@ impl EstateBranch {
         snapshot_rows: &[Drawer],
         lineage_depth: usize,
         now: i64,
+        node_store: Option<&Arc<locus_kit::node_store::NodeStore>>,
     ) -> Result<Self, BranchError> {
         let branch_id = Uuid::new_v4();
         let branch_estate = Self::new_branch_estate(branch_id, now)?;
         let mut snapshot_ids = BTreeSet::new();
         for row in snapshot_rows {
-            let stored = branch_estate.capture(Self::capture_frame_from(row), now)?;
+            let room = Self::resolve_room_name(node_store, row);
+            let stored = branch_estate.capture(Self::capture_frame_from(row, &room), now)?;
             snapshot_ids.insert(stored.id);
         }
         Ok(EstateBranch {
@@ -294,8 +324,11 @@ impl EstateBranch {
         for id in drawer_ids {
             match rows.iter().find(|r| &r.id == id) {
                 Some(row) => {
+                    let room = Self::resolve_room_name(
+                        self.branch_estate.node_store(), row,
+                    );
                     self.parent_estate
-                        .capture(Self::capture_frame_from(row), now)?;
+                        .capture(Self::capture_frame_from(row, &room), now)?;
                     merged.push(id.clone());
                 }
                 None => skipped.push(id.clone()),
@@ -330,7 +363,7 @@ impl EstateCoordinator {
         // (which requires non-empty content). Mirrors the Swift derive
         // `recallRows` `.full` frame.
         let snapshot_rows = EstateBranch::recall_all_full(parent, now);
-        let branch = EstateBranch::build(name.into(), parent.clone(), &snapshot_rows, 1, now)?;
+        let branch = EstateBranch::build(name.into(), parent.clone(), &snapshot_rows, 1, now, parent.node_store())?;
         let id = branch.branch_id;
         self.branches.insert(id, branch);
         Ok(id)
@@ -355,7 +388,8 @@ impl EstateCoordinator {
         let snapshot_rows = EstateBranch::recall_all_full(parent_branch.branch_estate(), now);
         let parent_estate = parent_branch.branch_estate().clone();
         let depth = parent_branch.lineage_depth + 1;
-        let branch = EstateBranch::build(name.into(), parent_estate, &snapshot_rows, depth, now)?;
+        let ns = parent_estate.node_store().cloned();
+        let branch = EstateBranch::build(name.into(), parent_estate, &snapshot_rows, depth, now, ns.as_ref())?;
         let id = branch.branch_id;
         self.branches.insert(id, branch);
         Ok(id)
@@ -384,9 +418,10 @@ impl EstateCoordinator {
             .map_err(|_| BranchError::EstateNotOpen)?
             .estate_uuid();
 
-        // Phase 1 — extract the post-derivation rows with an immutable borrow
-        // of the branch so we can release it before calling capture_with_mode.
-        // The borrow conflict: `branches.get_mut()` mutably borrows `self`,
+        // Phase 1 — extract the post-derivation rows (and their resolved room
+        // names) with an immutable borrow of the branch so we can release it
+        // before calling capture_with_mode. The borrow conflict:
+        // `branches.get_mut()` mutably borrows `self`,
         // which prevents also calling `&mut self.capture_with_mode`. Collecting
         // the rows first lets us drop the branch reference before the capture loop.
         let new_rows: Vec<_> = {
@@ -399,18 +434,30 @@ impl EstateCoordinator {
             }
             // `.full` recall: each promoted row is re-captured into the parent
             // estate (which requires non-empty content). Mirrors Swift `.full` frame.
-            EstateBranch::recall_all_full(&branch.branch_estate, now)
+            let rows: Vec<Drawer> = EstateBranch::recall_all_full(&branch.branch_estate, now)
                 .into_iter()
                 .filter(|row| !branch.snapshot_ids.contains(&row.id))
-                .collect()
+                .collect();
+            // Resolve room names while we still hold the branch estate
+            // reference (Drawer no longer stores room — ADR-017).
+            let resolved: Vec<(Drawer, String)> = rows
+                .into_iter()
+                .map(|row| {
+                    let room = EstateBranch::resolve_room_name(
+                        branch.branch_estate.node_store(), &row,
+                    );
+                    (row, room)
+                })
+                .collect();
+            resolved
             // branch reference dropped here — immutable borrow of self.branches ends.
         };
 
         // Phase 2 — capture each post-derivation row through the coordinator's
         // GLK-level verb so the encode queue (BM25/vector lane) is fed. Parity
         // of Swift `capture(handle, captureFrame, mode: .regular)` in `glkPromoteBranch`.
-        for row in &new_rows {
-            self.capture_with_mode(handle, EstateBranch::capture_frame_from(row), now, WriteMode::Regular)
+        for (row, room) in &new_rows {
+            self.capture_with_mode(handle, EstateBranch::capture_frame_from(row, room), now, WriteMode::Regular)
                 .map_err(BranchError::from)?;
         }
 
@@ -739,7 +786,7 @@ mod tests {
             .expect("branch capture");
 
         // Promote the branch: post-derivation row should route through
-        // capture_with_mode(Regular), enqueuing an EncodeJob.
+        // capture_with_mode(Regular), enqueuing onto the Corpus ingest queue.
         let promoted = coord
             .glk_promote_branch(bid, &handle, T)
             .expect("promote branch");

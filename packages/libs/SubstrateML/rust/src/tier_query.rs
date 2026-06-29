@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use substrate_types::hlc::HLC;
-use substrate_types::{RecallScore, RecallResult};
+use substrate_types::{RecallScore, RecallResult, DistanceBreakdown};
 use substrate_types::row::RowId;
 use crate::dp_or_reduce::{DPParameters, DPORReduction};
 use crate::random_walks::SplitMix64;
@@ -72,7 +72,14 @@ impl TierAscendingQueryProtocol {
         let ci_half = 1.96_f32 * scale as f32;
         RecallResult::new(
             noised,
-            result.breakdown,
+            // Zero out the per-component breakdown. Forwarding the exact
+            // breakdown (lattice, fingerprint, temporal, bitmap contributions)
+            // leaks precise lane-level distances back to the originator even
+            // though the scores were noised. Suppressing the breakdown at the
+            // DP boundary prevents that side-channel. The originator's combine
+            // step uses local.breakdown for its own exact breakdown, so
+            // consumers that need attribution still have it for local results.
+            DistanceBreakdown::ZERO,
             Some((-ci_half, ci_half)),
             result.primitive_name.clone(),
         )
@@ -219,6 +226,28 @@ mod tests {
         let budget = dp(0.5);
         let noised = TierAscendingQueryProtocol::apply_dp_to_contribution(&result, &budget, 0);
         assert_eq!(noised.primitive_name, "recall_hybrid");
+    }
+
+    /// apply_dp_to_contribution must zero out the DistanceBreakdown.
+    ///
+    /// Forwarding the exact per-component breakdown (lattice, fingerprint,
+    /// temporal, bitmap contributions) leaks precise lane-level distances
+    /// to the originator even though scores are noised. The DP boundary
+    /// must suppress the breakdown by returning DistanceBreakdown::ZERO.
+    #[test]
+    fn dp_noise_zeroes_distance_breakdown() {
+        let non_zero = DistanceBreakdown::new(0.1, 0.2, 0.3, 0.4);
+        let result = RecallResult::new(
+            vec![score(1, 1.0)],
+            non_zero,
+            None,
+            "recall_vector",
+        );
+        let budget = dp(1.0);
+        let noised = TierAscendingQueryProtocol::apply_dp_to_contribution(&result, &budget, 42);
+        // Breakdown must be zeroed — the exact distances must not leak.
+        assert_eq!(noised.breakdown, DistanceBreakdown::ZERO,
+            "DP boundary must zero the breakdown to prevent exact-distance side-channel");
     }
 
     // --- combine ---

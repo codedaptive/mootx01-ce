@@ -3,13 +3,17 @@
 // Portable kernel layer per cookbook § 4.4. Mirror of
 // glref-swift-PortableKernel.swift.
 //
-// Trait + scalar reference impl. NEON / AVX-512 / AVX2 specializations
-// live in kernel-specific overlay files. All kernels MUST produce
-// bit-identical output for the same inputs.
+// Trait + scalar reference impl. The portable-SIMD fast path lives in
+// `kernel_simd.rs`. The AVX-512 VPOPCNTQ backend lives in
+// `kernel_avx512.rs` (x86_64 only; DARK path pending MatrixSprint
+// perf validation — see P11-VAL-015). No NEON or AVX2 overlay files
+// exist; those targets use scalar or the portable-SIMD path.
+// All kernels MUST produce bit-identical output for the same inputs.
 
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::hyperplane::HyperplaneFamily;
 use substrate_types::count_vector::CountVector256;
+use substrate_types::float_simhash_planes::FloatSimHashPlanes;
 // report! uses $crate::Intellectus internally (the macro expands to
 // intellectus_lib::Intellectus::is_enabled() / ::report_sample()),
 // so only StatSample and the macro itself are directly referenced here.
@@ -107,6 +111,57 @@ pub trait SubstrateKernel: Send + Sync {
             out[i] = self.count_fold_256(batch);
         }
     }
+
+    /// Float-input SimHash projection: sign-quantize the dot product of
+    /// `vector` against each of 256 ±1 hyperplanes carried by `planes` into a
+    /// `Fingerprint256` (bit k set ⟺ ⟨vector, plane_k⟩ > 0). The float analog of
+    /// `simhash_block`; the dispatch home for `substrate_ml::float_simhash`
+    /// (SUBSTRATEKERNEL_SPEC § 5.4). Planes are passed in as data — generated
+    /// from a seed in SubstrateML — so the kernel does pure signed-sum-and-sign
+    /// with no RNG. The default impl is the scalar reference; a SIMD backend
+    /// overrides it (over-hyperplanes vertical pattern, gated bit-for-bit;
+    /// DECISION_SIMHASH_BACKENDS_2026-05-18).
+    fn float_simhash_project(
+        &self,
+        vector: &[f32],
+        planes: &FloatSimHashPlanes,
+    ) -> Fingerprint256 {
+        if vector.is_empty() {
+            return Fingerprint256::ZERO;
+        }
+        let dim = vector.len();
+        // Invariant: planes must be materialised for exactly this vector
+        // dimensionality. A dim mismatch means the caller used the wrong
+        // plane set; the inner loop would index out of bounds on sign_bits
+        // and produce nonsense bits (SUBSTRATEKERNEL_SPEC § 5.4).
+        assert_eq!(
+            planes.dim, dim,
+            "FloatSimHashPlanes::dim ({}) must equal vector.len() ({})",
+            planes.dim, dim
+        );
+        let expected_words = (256 * dim + 63) / 64;
+        assert!(
+            planes.sign_bits.len() >= expected_words,
+            "FloatSimHashPlanes::sign_bits too short: need {} words, got {}",
+            expected_words,
+            planes.sign_bits.len()
+        );
+        let mut blocks: [u64; 4] = [0, 0, 0, 0];
+        for k in 0..256 {
+            let mut sum: f32 = 0.0;
+            let base = k * dim;
+            for i in 0..dim {
+                let bit_index = base + i;
+                let is_positive = (planes.sign_bits[bit_index >> 6] >> (bit_index & 63)) & 1 == 1;
+                let plane: f32 = if is_positive { 1.0 } else { -1.0 };
+                sum += plane * vector[i];
+            }
+            if sum > 0.0 {
+                blocks[k / 64] |= 1u64 << (k % 64);
+            }
+        }
+        Fingerprint256::new(blocks[0], blocks[1], blocks[2], blocks[3])
+    }
 }
 
 pub struct ScalarKernel;
@@ -182,6 +237,14 @@ impl Default for ScalarKernel {
     fn default() -> Self { Self::new() }
 }
 
+/// Compute backend selector for the kernel dispatch layer.
+///
+/// **Platform waiver — Metal:** The Swift port includes a `.metal`
+/// variant for GPU compute on Apple Silicon via the Metal framework.
+/// Metal is an Apple-only system framework with no equivalent on
+/// Linux/Windows targets. The Rust port intentionally omits a Metal
+/// variant; cross-language parity assertions must exclude Metal from
+/// backend-kind comparisons. See PAR-R2 blast radius report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KernelKind {
     Scalar,
@@ -237,9 +300,17 @@ impl PortableKernel {
     /// DECISION_OR_REDUCE_BACKENDS_2026-05-17). Stable builds
     /// without the feature fall through to `ScalarKernel`.
     ///
-    /// On other platforms, returns `ScalarKernel`. Future
-    /// platform-specific overlays may override this for AVX-512
-    /// / AVX2 on x86_64.
+    /// On all other platforms (including x86_64), returns
+    /// `ScalarKernel`. The `Avx512HammingKernel` (x86_64) is
+    /// built and wired via `of_kind(KernelKind::Avx512)` but is
+    /// intentionally NOT selected here — it is a DARK path pending
+    /// MatrixSprint performance validation on real AVX-512 hardware.
+    /// See P11-VAL-015 and `kernel_avx512.rs`.
+    ///
+    /// **Note:** The Swift port may select `.metal` on Apple
+    /// Silicon when a `MetalKernel` init succeeds. Metal is not
+    /// available in the Rust port (platform waiver — see
+    /// `KernelKind` doc comment).
     ///
     /// Telemetry: emits `substrate.kernel.backend_selected` via
     /// IntellectusLib when monitoring is enabled. When monitoring is
@@ -317,12 +388,37 @@ impl PortableKernel {
                     Box::new(ScalarKernel::new())
                 }
             }
-            // Direct-intrinsic kernels are conditional-compile in
-            // their own files; the reference build falls through
-            // to scalar. `Simd` (above) is the portable SIMD path
-            // via std::simd and is the recommended kernel on
-            // aarch64 today.
-            KernelKind::Neon | KernelKind::Avx512 | KernelKind::Avx2 => {
+            // Avx512 — CPUID safety contract (secfix 2026-06-28):
+            //
+            // On x86_64, constructs `Avx512HammingKernel`. That struct's methods
+            // call `Avx512HammingKernel::has_avx512_vpopcntdq()` (backed by
+            // `is_x86_feature_detected!`) before EVERY dispatch to an unsafe
+            // AVX-512 inner function. If avx512f + avx512vpopcntdq are absent on
+            // the current CPU, the methods fall back to the scalar path — AVX-512
+            // intrinsics are NEVER executed without runtime CPUID confirmation.
+            // Executing those intrinsics without the check would be UB / SIGILL.
+            //
+            // On non-x86_64 (aarch64 etc.): `kernel_avx512` is not compiled for
+            // this platform. The arm falls through to ScalarKernel directly.
+            //
+            // Dark-path posture: `for_current_platform()` never auto-selects
+            // Avx512. This override exists only for conformance tests and future
+            // MatrixSprint benchmarking. See P11-VAL-015 for gate-enable criteria.
+            KernelKind::Avx512 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    Box::new(crate::kernel_avx512::Avx512HammingKernel::new())
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    // AVX-512 is x86_64-only; no equivalent on this platform.
+                    Box::new(ScalarKernel::new())
+                }
+            }
+            // NEON and AVX2 do not have dedicated Rust overlay files;
+            // they fall through to scalar. Simd (portable SIMD via
+            // std::simd) is the recommended kernel on aarch64 today.
+            KernelKind::Neon | KernelKind::Avx2 => {
                 Box::new(ScalarKernel::new())
             }
         }
@@ -512,6 +608,40 @@ mod tests {
         ];
         let top = kernel.hamming_top_k(&probe, &candidates, 10);
         assert_eq!(top.len(), 2);
+    }
+
+    #[test]
+    fn float_simhash_project_valid_dim_is_deterministic() {
+        // Verifies that the Part-6 dim-check guard does not perturb output for
+        // valid inputs: two calls with matching planes.dim == vector.len()
+        // must produce the same Fingerprint256.
+        let dim = 4usize;
+        let word_count = (256 * dim + 63) / 64; // 16 words
+        // Alternating 0xAA/0x55 gives a deterministic mix of +1/-1 plane signs.
+        let sign_bits: Vec<u64> = (0..word_count)
+            .map(|i| if i % 2 == 0 { 0xAAAA_AAAA_AAAA_AAAA } else { 0x5555_5555_5555_5555 })
+            .collect();
+        let planes = FloatSimHashPlanes::new(dim, sign_bits);
+        let vector = vec![1.0f32, -0.5, 0.25, -0.125];
+
+        let kernel = ScalarKernel::new();
+        let fp1 = kernel.float_simhash_project(&vector, &planes);
+        let fp2 = kernel.float_simhash_project(&vector, &planes);
+        assert_eq!(fp1, fp2, "float_simhash_project must be deterministic for valid dim inputs");
+    }
+
+    #[test]
+    #[should_panic(expected = "FloatSimHashPlanes::dim")]
+    fn float_simhash_project_dim_mismatch_panics() {
+        // planes.dim=4 but vector.len()=3 — guard must panic.
+        let dim = 4usize;
+        let word_count = (256 * dim + 63) / 64;
+        let sign_bits: Vec<u64> = vec![0u64; word_count];
+        let planes = FloatSimHashPlanes::new(dim, sign_bits);
+        let vector = vec![1.0f32, 2.0, 3.0]; // len=3, not 4
+
+        let kernel = ScalarKernel::new();
+        let _ = kernel.float_simhash_project(&vector, &planes);
     }
 
 }

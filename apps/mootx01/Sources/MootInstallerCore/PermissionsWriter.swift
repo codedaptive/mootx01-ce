@@ -1,8 +1,8 @@
 // PermissionsWriter.swift
 //
 // Merges ARIA tool names into ~/.claude/settings.json under the
-// `permissions.allow` key so Claude Code does not prompt for per-tool
-// approval after a fresh mootx01 install.
+// `permissions.allow` key for users who explicitly opt in to per-tool
+// auto-approval.
 //
 // Schema confirmed against the live Claude Code settings format
 // (AIRA-INSTALL-P3 finding): the key is `permissions.allow` (nested
@@ -22,10 +22,11 @@ public enum PermissionsWriter {
 
     // MARK: - ARIA tool names
 
-    /// The 53 ARIA tool names projected by ToolProjection.tools().
-    /// Extracted from the acceptance matrix + RecipeTools + LensTools + VaultTools.
-    /// Kept as a static constant to avoid importing AriaMCP/AriaLexiconLib
-    /// from the installer core (which has no MCP stack dependency).
+    /// ARIA tool names for the macOS permission grant. The current projected
+    /// surface has 61 tools (11 recipe tools, 5 vault tools, and others added
+    /// since this list was built). This static copy avoids importing AriaMCP/
+    /// AriaLexiconLib from the installer core (no MCP stack dependency), but
+    /// must be updated when the tool surface changes.
     public static let ariaToolNames: [String] = [
         // Lexicon — drawer (6)
         "moot_capture_drawer", "moot_reanchor_drawer", "moot_mutate_drawer",

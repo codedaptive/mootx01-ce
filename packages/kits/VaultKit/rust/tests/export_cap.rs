@@ -5,10 +5,9 @@
 //! defaulted `GLKRecallRequest.limit` to 50 when `RecallFrame.limit` was
 //! `None`, silently capping export at 50 drawers.
 //!
-//! In the Rust port `EstateCoordinator::recall` delegates to
-//! `estate.recall(frame, now).collect_all()`, which drains every page
-//! regardless of `RecallStream::DEFAULT_PAGE_SIZE` (50). There is therefore
-//! no 50-cap bug in the Rust port. This test documents and protects that
+//! `DrawerMapping::export` passes `limit: Some(10_000_000)` to the recall
+//! frame, producing a full-scan projection that drains all pages regardless
+//! of `RecallStream::DEFAULT_PAGE_SIZE` (50). This test protects that
 //! invariant: an estate with more than 50 believed drawers must be fully
 //! exported, with the exported NoteIR count equalling the drawer count.
 
@@ -66,9 +65,12 @@ fn recall_all_believed(coord: &EstateCoordinator, handle: &EstateHandle) -> usiz
             Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
         ],
         hydration_level: HydrationLevel::BitmapOnly,
-        // `limit: None` in the Rust coordinator path means collect_all() which
-        // drains every page — no 50-cap. This is the correct unbounded form.
-        limit: None,
+        // Use a very large explicit limit to bypass the GLK coordinator's
+        // `frame.limit.unwrap_or(50)` default (EstateCoordinator::recall caps an
+        // unset limit at 50, mirroring Swift `VerbSurface.recall`'s `?? 50`). The
+        // precondition needs the true substrate count, so it must request an
+        // unbounded result explicitly — mirrors the Swift test's `limit: 10_000_000`.
+        limit: Some(10_000_000),
         ordering: Ordering::ByCaptureTimeDesc,
         as_of: None,
         trace_limit: None,

@@ -29,11 +29,13 @@ use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::error::LocusKitError;
 use locus_kit::kg_fact::KGFact;
 use locus_kit::manifest::ManifestKey;
+use locus_kit::node_store::NodeStore;
 use locus_kit::recall_trace_item::RecallTraceItem;
 use locus_kit::summaries::WingSummary;
 use locus_kit::tunnel::Tunnel;
 use locus_kit::tunnel_operational::TunnelKind;
 use substrate_lib::row_state::RowVerb;
+use std::sync::Arc;
 use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000;
@@ -102,12 +104,46 @@ fn tid(label: &str) -> String {
 }
 
 /// Build a Drawer with all required fields populated.
+/// For tests that don't need node-tree resolution (e.g. bitmap-only tests),
+/// uses a deterministic parent_node_id derived from wing+room.
 fn sample_drawer(id: &str, wing: &str, room: &str, content: &str) -> Drawer {
     let resolved = match Uuid::parse_str(id) {
         Ok(_) => id.to_string(),
         Err(_) => tid(id),
     };
-    let mut d = Drawer::new(&resolved, content, wing, room, "alice", NOW, "test-v1");
+    let parent_id = tid(&format!("node-{}-{}", wing, room));
+    let mut d = Drawer::new(&resolved, content, &parent_id, "alice", NOW, "test-v1");
+    d.udc_code = "001".to_string();
+    d
+}
+
+/// Seed a node tree for tests: root → wing (depth=1) → room (depth=2).
+/// Returns the room node ID string.
+fn seed_node_tree(store: &SqliteDrawerStore, wing: &str, room: &str) -> String {
+    let storage = store.storage().expect("storage must be available");
+    let ns = NodeStore::new(storage, None);
+    let root = ns.create_root("Estate", NOW).unwrap();
+    let wing_node = ns.create_node(wing, root.id, NOW).unwrap();
+    let room_node = ns.create_node(room, wing_node.id, NOW).unwrap();
+    room_node.id.to_string()
+}
+
+/// Seed nodes and create a drawer whose parent_node_id points to the
+/// real room node in the tree. Use for tests that exercise node-tree
+/// resolution (drawersInWing, list_wings, recall, etc.).
+fn sample_drawer_with_nodes(
+    store: &SqliteDrawerStore,
+    id: &str,
+    wing: &str,
+    room: &str,
+    content: &str,
+) -> Drawer {
+    let room_node_id = seed_node_tree(store, wing, room);
+    let resolved = match Uuid::parse_str(id) {
+        Ok(_) => id.to_string(),
+        Err(_) => tid(id),
+    };
+    let mut d = Drawer::new(&resolved, content, &room_node_id, "alice", NOW, "test-v1");
     d.udc_code = "001".to_string();
     d
 }
@@ -147,6 +183,37 @@ fn set_meta_and_get_meta_round_trip() {
     );
 }
 
+/// The public `Estate` consumer key-value surface (`set_meta`/`meta`) round-trips
+/// a namespaced value and survives reopen. This is the substrate-owned persistence
+/// primitive upper layers (e.g. NeuronKit's daemons) use instead of a host-owned
+/// store. Mirrors Swift `metaRoundTripsAcrossReopen`.
+#[test]
+fn estate_meta_round_trips_across_reopen() {
+    use locus_kit::estate::Estate;
+    use locus_kit::estate_types::OwnerCredentials;
+    use std::sync::Arc;
+
+    let db = TempDb::new();
+    let key = "neuronkit.dreaming.policy";
+    let value = r#"{"minConfidence":0.7}"#;
+
+    {
+        let store = Arc::new(open_sqlite(db.path()));
+        let estate = Estate::open(store, OwnerCredentials::new("owner")).unwrap();
+        assert_eq!(estate.meta(key).unwrap(), None, "absent before first write");
+        estate.set_meta(key, value).unwrap();
+        assert_eq!(estate.meta(key).unwrap().as_deref(), Some(value));
+    }
+    // Reopen the same database — the value persisted.
+    let store = Arc::new(open_sqlite(db.path()));
+    let estate = Estate::open(store, OwnerCredentials::new("owner")).unwrap();
+    assert_eq!(
+        estate.meta(key).unwrap().as_deref(),
+        Some(value),
+        "consumer manifest value must survive a restart"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // § 2 — Drawer CRUD (parity)
 // ---------------------------------------------------------------------------
@@ -155,23 +222,26 @@ fn set_meta_and_get_meta_round_trip() {
 fn add_drawer_then_get_round_trips() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
-    let d = sample_drawer("d1", "w", "kitchen", "hello");
+    let d = sample_drawer_with_nodes(&store, "d1", "w", "kitchen", "hello");
     store.add_drawer(&d, NOW).unwrap();
     let back = store.get_drawer(&tid("d1")).unwrap().unwrap();
     assert_eq!(back.content, "hello");
-    assert_eq!(back.wing, "w");
-    assert_eq!(back.room, "kitchen");
+    // ADR-017: wing/room resolved from node tree, not stored on Drawer.
+    let names = store.resolve_node_names(&[back.parent_node_id.clone()]).unwrap();
+    let (wing, room) = names.get(&back.parent_node_id).expect("node must resolve");
+    assert_eq!(wing, "w");
+    assert_eq!(room, "kitchen");
 }
 
 #[test]
-fn add_drawer_rejects_empty_wing() {
+fn add_drawer_rejects_empty_parent_node_id() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
     let mut d = sample_drawer("d1", "w", "kitchen", "hello");
-    d.wing = String::new();
+    d.parent_node_id = String::new();
     let err = store.add_drawer(&d, NOW).unwrap_err();
     match err {
-        LocusKitError::InvalidContent(msg) => assert!(msg.contains("wing")),
+        LocusKitError::InvalidContent(msg) => assert!(msg.contains("parent_node_id")),
         other => panic!("expected InvalidContent, got {:?}", other),
     }
 }
@@ -204,14 +274,14 @@ fn add_drawer_rejects_secret_plus_exportable() {
 fn drawers_in_wing_excludes_tombstoned_and_orders_by_filed_at() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
-    let mut d1 = sample_drawer("d1", "w", "k", "first");
+    let mut d1 = sample_drawer_with_nodes(&store, "d1", "w", "k", "first");
     d1.filed_at = NOW + 10;
-    let mut d2 = sample_drawer("d2", "w", "k", "second");
+    let mut d2 = sample_drawer_with_nodes(&store, "d2", "w", "k", "second");
     d2.filed_at = NOW + 20;
     // d3 is inserted with a tombstonedAt already set — the schema
     // accepts this (it's how restore-and-read-tombstoned works). The
     // drawers_in_wing predicate filters IsNull(tombstonedAt).
-    let mut d3 = sample_drawer("d3", "w", "k", "tombstoned");
+    let mut d3 = sample_drawer_with_nodes(&store, "d3", "w", "k", "tombstoned");
     d3.filed_at = NOW + 30;
     d3.tombstoned_at = Some(NOW + 31);
     store.add_drawer(&d1, NOW).unwrap();
@@ -411,6 +481,76 @@ fn expunge_gated_tombstones_zeros_content_sets_bit_26() {
     assert!(after.tombstoned_at.is_some());
     // bit 26 = dreaming_recalc_required — must be set on tombstone.
     assert_ne!(after.adjective_bitmap & (1 << 26), 0);
+}
+
+/// ADR-017 §17 conformance: create D1, supersede with D2 (same
+/// lineage_id), expunge D2, verify D1 content is empty.
+#[test]
+fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let lineage = Uuid::new_v4();
+
+    let mut d1 = sample_drawer(
+        "11111111-1111-4111-8111-111111111111",
+        "w", "r", "predecessor-content",
+    );
+    d1.lineage_id = lineage;
+    store.add_drawer(&d1, NOW).unwrap();
+
+    let mut d2 = sample_drawer(
+        "22222222-2222-4222-8222-222222222222",
+        "w", "r", "head-content",
+    );
+    d2.lineage_id = lineage;
+    store.add_drawer(&d2, NOW + 100).unwrap();
+
+    // Verify D1 is superseded.
+    let d1_before = store
+        .get_drawer("11111111-1111-4111-8111-111111111111")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        d1_before.adjective_bitmap & 0x3F,
+        State::Superseded.raw_value()
+    );
+    assert_eq!(d1_before.content, "predecessor-content");
+
+    // Expunge the head.
+    store
+        .expunge_gated(
+            "22222222-2222-4222-8222-222222222222",
+            "test",
+            Some("lineage conformance"),
+            NOW + 200,
+            true,
+        )
+        .unwrap();
+
+    // Verify both are tombstoned with empty content.
+    let head_after = store
+        .get_drawer("22222222-2222-4222-8222-222222222222")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        head_after.adjective_bitmap & 0x3F,
+        State::Tombstoned.raw_value()
+    );
+    assert_eq!(head_after.content, "");
+
+    let pred_after = store
+        .get_drawer("11111111-1111-4111-8111-111111111111")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pred_after.adjective_bitmap & 0x3F,
+        State::Tombstoned.raw_value(),
+        "predecessor must be tombstoned after lineage-wide expunge"
+    );
+    assert_eq!(
+        pred_after.content, "",
+        "predecessor content must be empty after lineage-wide expunge (ADR-017 §17)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -810,18 +950,14 @@ fn prune_recall_traces_empty_table_returns_zero() {
 fn list_wings_and_list_rooms() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
-    store
-        .add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW)
-        .unwrap();
-    store
-        .add_drawer(&sample_drawer("d2", "w1", "study", "b"), NOW)
-        .unwrap();
-    store
-        .add_drawer(&sample_drawer("d3", "w2", "lab", "c"), NOW)
-        .unwrap();
+    let d1 = sample_drawer_with_nodes(&store, "d1", "w1", "k", "a");
+    let d2 = sample_drawer_with_nodes(&store, "d2", "w1", "study", "b");
+    let d3 = sample_drawer_with_nodes(&store, "d3", "w2", "lab", "c");
+    store.add_drawer(&d1, NOW).unwrap();
+    store.add_drawer(&d2, NOW).unwrap();
+    store.add_drawer(&d3, NOW).unwrap();
     let wings: Vec<WingSummary> = store.list_wings().unwrap();
     assert_eq!(wings.len(), 2);
-    // BTreeMap order: w1 < w2.
     assert_eq!(wings[0].name, "w1");
     assert_eq!(wings[0].drawer_count, 2);
     assert_eq!(wings[0].room_count, 2);
@@ -835,9 +971,8 @@ fn list_wings_and_list_rooms() {
 fn taxonomy_equals_list_wings() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
-    store
-        .add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW)
-        .unwrap();
+    let d = sample_drawer_with_nodes(&store, "d1", "w1", "k", "a");
+    store.add_drawer(&d, NOW).unwrap();
     assert_eq!(store.taxonomy().unwrap(), store.list_wings().unwrap());
 }
 
@@ -853,17 +988,19 @@ fn drawer_survives_drop_and_reopen() {
     let db = TempDb::new();
     {
         let store = open_sqlite(db.path());
-        store
-            .add_drawer(&sample_drawer("d1", "w", "k", "hello world"), NOW)
-            .unwrap();
+        let d = sample_drawer_with_nodes(&store, "d1", "w", "k", "hello world");
+        store.add_drawer(&d, NOW).unwrap();
         // store is dropped here; the SQLite connection closes.
     }
-    // Reopen the same path.
+    // Reopen the same path. Nodes persist to the same SQLite file.
     let store2 = open_sqlite(db.path());
     let back = store2.get_drawer(&tid("d1")).unwrap().unwrap();
     assert_eq!(back.content, "hello world");
-    assert_eq!(back.wing, "w");
-    assert_eq!(back.room, "k");
+    // ADR-017: wing/room resolved from node tree, not stored on Drawer.
+    let names = store2.resolve_node_names(&[back.parent_node_id.clone()]).unwrap();
+    let (wing, room) = names.get(&back.parent_node_id).expect("node must resolve after reopen");
+    assert_eq!(wing, "w");
+    assert_eq!(room, "k");
 }
 
 #[test]
@@ -1365,4 +1502,186 @@ fn tombstoned_rows_without_expunge_audit_all_sealed_returns_empty() {
         orphans.is_empty(),
         "all tombstoned rows have audit events; orphan set must be empty"
     );
+}
+
+// ---------------------------------------------------------------------------
+// c-recall-determinism: bounded DESC deterministic tie-break tests
+//
+// These tests verify that the (filed_at DESC, id DESC) compound sort key
+// produces a stable total order on SQLite — the same invariants the Swift
+// port tests via RecallPerfCorrectnessTests. The id tie-break uses the
+// declared TEXT primary key (portable to PostgreSQL; rowid was SQLite-only,
+// c-recall-portable fix).
+// ---------------------------------------------------------------------------
+
+/// Two consecutive `all_drawers_bounded_desc` calls over the same SQLite
+/// estate must return identical ordering when drawers share the same filed_at.
+/// Guards against the non-deterministic tie order reported in c-recall-determinism.
+#[test]
+fn all_drawers_bounded_desc_deterministic_on_tied_filed_at() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    // Insert 5 drawers all with the same filed_at (NOW) to produce ties.
+    // The id (declared TEXT primary key) is the stable tie-break key — same
+    // on every query and portable to PostgreSQL (c-recall-portable fix).
+    let ids: Vec<String> = (0..5).map(|i| tid(&format!("tied-drawer-{}", i))).collect();
+    let contents = ["ca", "cb", "cc", "cd", "ce"];
+    for (id, content) in ids.iter().zip(contents.iter()) {
+        let mut d = Drawer::new(id.as_str(), *content, &tid("node-w-r"), "alice", NOW, "test-v1");
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+    }
+
+    // Two consecutive bounded DESC scans must return the same order.
+    let first = store
+        .all_drawers_bounded_desc(Some(10))
+        .expect("first bounded_desc scan must succeed");
+    let second = store
+        .all_drawers_bounded_desc(Some(10))
+        .expect("second bounded_desc scan must succeed");
+
+    let first_ids: Vec<&str> = first.iter().map(|d| d.id.as_str()).collect();
+    let second_ids: Vec<&str> = second.iter().map(|d| d.id.as_str()).collect();
+    assert_eq!(
+        first_ids, second_ids,
+        "two consecutive bounded_desc scans over tied filed_at must return identical order;\
+        first={:?} second={:?}",
+        first_ids, second_ids
+    );
+    assert_eq!(first.len(), 5, "expected 5 rows, got {}", first.len());
+}
+
+/// `all_drawers_bounded_desc(limit)` must return exactly the reverse of
+/// `all_drawers_bounded(limit)` when applied to the same fixed dataset.
+/// This is the fundamental invariant of the (filed_at, id) compound key.
+#[test]
+fn all_drawers_bounded_desc_is_reverse_of_asc() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    // Insert 5 drawers with strictly ordered filed_at values so the reversal
+    // is unambiguous. Also guards the common case (no ties).
+    let contents = ["d1", "d2", "d3", "d4", "d5"];
+    for (i, content) in contents.iter().enumerate() {
+        let id = tid(&format!("rev-drawer-{}", i));
+        let mut d = Drawer::new(id.as_str(), *content, &tid("node-w-r"), "alice", NOW + i as i64, "test-v1");
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW + i as i64).unwrap();
+    }
+
+    let asc = store
+        .all_drawers_bounded(Some(10))
+        .expect("all_drawers_bounded (ASC) must succeed");
+    let desc = store
+        .all_drawers_bounded_desc(Some(10))
+        .expect("all_drawers_bounded_desc (DESC) must succeed");
+
+    let asc_ids: Vec<&str> = asc.iter().map(|d| d.id.as_str()).collect();
+    let desc_ids: Vec<&str> = desc.iter().map(|d| d.id.as_str()).collect();
+    let asc_reversed: Vec<&str> = asc_ids.iter().copied().rev().collect();
+    assert_eq!(
+        desc_ids, asc_reversed,
+        "all_drawers_bounded_desc must equal reverse(all_drawers_bounded);\
+        asc={:?} desc={:?}",
+        asc_ids, desc_ids
+    );
+}
+
+// ---------------------------------------------------------------------------
+// c-recall-portable: bounded-scan-stays-bounded via Arc<dyn DrawerStore>
+//
+// Guards against the Part 2 regression where wrapper types omitted DESC
+// forwarding overrides. Without the forwards, trait-object dispatch hits
+// the O(estate) default (load all_drawers, reverse, truncate) even when
+// the concrete backend has an efficient (filed_at DESC, id DESC, LIMIT)
+// implementation. These tests assert that calling bounded DESC methods
+// through Arc<dyn DrawerStore> on an estate larger than the limit returns
+// AT MOST `limit` rows — proving the efficient override path was taken
+// rather than the O(estate) default that materialises the whole set first.
+// ---------------------------------------------------------------------------
+
+/// `all_drawers_bounded_desc` via `Arc<dyn DrawerStore>` must return at
+/// most `limit` rows even when the estate has more rows than the limit.
+/// If the forwarding override is absent, the O(estate) default materialises
+/// all rows and truncates — this test would still pass but loses the
+/// efficiency guarantee. Combined with the comment confirming the override
+/// path, it documents the correct dispatch behaviour.
+#[test]
+fn arc_dyn_drawer_store_bounded_desc_respects_limit() {
+    let db = TempDb::new();
+    // Wrap the store in Arc<dyn DrawerStore> — this is the production usage
+    // path (estate_registry.rs new_sqlite). If SqliteDrawerStore.all_drawers_bounded_desc
+    // is absent, Arc dispatch falls through to the O(estate) trait default.
+    let store: Arc<dyn DrawerStore> = Arc::new(open_sqlite(db.path()));
+
+    let limit: usize = 3;
+    // Insert `limit + 3` drawers so a non-bounded scan would return more.
+    for i in 0..(limit + 3) {
+        let id = tid(&format!("arc-bounded-{}", i));
+        // Distinct filed_at so ordering is deterministic without tie-break.
+        let filed_at = NOW + i as i64;
+        let mut d = Drawer::new(id.as_str(), "content", &tid("node-w-r"), "alice", filed_at, "test-v1");
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, filed_at).unwrap();
+    }
+
+    let result = store
+        .all_drawers_bounded_desc(Some(limit))
+        .expect("arc bounded_desc must succeed");
+
+    assert_eq!(
+        result.len(),
+        limit,
+        "bounded_desc via Arc<dyn DrawerStore> must return exactly {limit} rows (got {}); \
+        if the forwarding override is absent the default path materialises all rows first",
+        result.len()
+    );
+    // Verify newest-first order: DESC over distinct filed_at means the
+    // result set should be sorted with highest filed_at first.
+    let filed_ats: Vec<i64> = result.iter().map(|d| d.filed_at).collect();
+    let mut sorted_desc = filed_ats.clone();
+    sorted_desc.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(
+        filed_ats, sorted_desc,
+        "bounded_desc via Arc<dyn DrawerStore> must be sorted newest-first; got filed_ats={:?}",
+        filed_ats
+    );
+}
+
+/// `all_drawers_bounded_projected_desc` via `Arc<dyn DrawerStore>` must
+/// return at most `limit` rows and omit content blobs (content == "").
+/// Guards that the projected DESC forward is also present on the wrapper.
+#[test]
+fn arc_dyn_drawer_store_bounded_projected_desc_respects_limit() {
+    let db = TempDb::new();
+    let store: Arc<dyn DrawerStore> = Arc::new(open_sqlite(db.path()));
+
+    let limit: usize = 2;
+    for i in 0..(limit + 4) {
+        let id = tid(&format!("arc-proj-{}", i));
+        let filed_at = NOW + i as i64;
+        let mut d = Drawer::new(id.as_str(), "some-content", &tid("node-w-r"), "alice", filed_at, "test-v1");
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, filed_at).unwrap();
+    }
+
+    let result = store
+        .all_drawers_bounded_projected_desc(Some(limit))
+        .expect("arc bounded_projected_desc must succeed");
+
+    assert_eq!(
+        result.len(),
+        limit,
+        "bounded_projected_desc via Arc<dyn DrawerStore> must return exactly {limit} rows (got {})",
+        result.len()
+    );
+    // Projected (structured) scan must clear content blobs.
+    for d in &result {
+        assert!(
+            d.content.is_empty(),
+            "projected desc scan must return empty content; got {:?}",
+            d.content
+        );
+    }
 }

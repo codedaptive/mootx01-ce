@@ -87,14 +87,12 @@ fn build_star(registry: &EstateRegistry, spoke_count: usize) -> (String, Vec<Str
 fn produced_cache(registry: &EstateRegistry) -> (GraphCentralityCache, Vec<String>) {
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
-    // Exclude charter drawers (room == "_charter") — wing metadata, not user
-    // content. Mirrors the production graph_centrality_duty filter so the test
-    // proves the same contract the governor enforces.
+    // Hint drawers (AI_Charter_Hint room) are normal drawers — included in the
+    // centrality graph like any other drawer. No exclusion filter.
     let drawers: Vec<_> = coord
         .all_drawers(h)
         .expect("all_drawers")
         .into_iter()
-        .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
         .collect();
     let tunnels = coord.all_tunnels(h).expect("all_tunnels");
     let facts = coord.recall_kg_facts(h).expect("recall_kg_facts");
@@ -118,16 +116,14 @@ fn producer_equals_direct_keystones() {
 
     let (cache, node_ids) = produced_cache(&registry);
 
-    // Direct oracle call on the producer's graph.
-    // Charter drawers are excluded here (same filter as produced_cache)
-    // so the oracle and the producer operate on the same node set.
+    // Direct oracle call on the producer's graph — all drawers including hints.
+    // No hint-drawer filter: hint drawers are normal graph nodes.
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
     let drawers: Vec<_> = coord
         .all_drawers(h)
         .unwrap()
         .into_iter()
-        .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
         .collect();
     let tunnels = coord.all_tunnels(h).unwrap();
     let facts = coord.recall_kg_facts(h).unwrap();
@@ -200,7 +196,9 @@ fn kg_fact_subject_bond_contributes() {
 /// An estate with no drawers yields an empty cache; every score is 0.0.
 #[test]
 fn empty_estate_registers_zero_cache() {
-    let registry = EstateRegistry::new_inmemory();
+    // _bare: a genuinely empty estate (no seeded AI_Charter_Hint wing drawers),
+    // so the cache is empty and count() == 0.
+    let registry = EstateRegistry::new_inmemory_bare();
     let (cache, _) = produced_cache(&registry);
     assert_eq!(cache.graph_score("nonexistent"), 0.0);
     assert_eq!(cache.count(), 0);

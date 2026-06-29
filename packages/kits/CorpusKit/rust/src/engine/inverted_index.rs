@@ -1,4 +1,4 @@
-//! Weighted impact-ordered inverted index with WAND and Block-Max WAND
+//! Weighted inverted index with item-id-ordered posting lists, WAND and Block-Max WAND
 //! (BMW) exact top-k retrieval.
 //!
 //! Lane D — Sparse Engine (SPLADE generalization).

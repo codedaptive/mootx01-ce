@@ -58,7 +58,7 @@ public extension GeniusLocusKit {
         distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
         now: Date
     ) async throws -> String? {
-        guard let storage = storages[handle] else {
+        guard storages[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
         guard let vectorStore = vectorStores[handle] else { return nil }
@@ -92,7 +92,7 @@ public extension GeniusLocusKit {
         // Provenance: the single source item. captureFactoid writes the factoid
         // into "_distilled", stores its featureFingerprint in the
         // distillation-features-v1 lane, and links factoid → source.
-        let memberDrawers = try await fetchDrawerRows(ids: [drawerID], storage: storage)
+        let memberDrawers = try await fetchDrawerRows(ids: [drawerID], estate: estate)
         guard !memberDrawers.isEmpty else { return nil }
         return try await captureFactoid(
             output: output,
@@ -126,20 +126,27 @@ public extension GeniusLocusKit {
     ) async throws -> Int {
         let estate = try estate(for: handle)
         let allDrawers = try await estate.allDrawers()
-        // Items already distilled: a "_distilled" factoid's lineageID is its
+        // Items already distilled: a distilled factoid's lineageID is its
         // source item's UUID. Skip any source whose id is already in this set.
+        // Distilled drawers are identified by addedBy == "distillation-daemon"
+        // (the wing/room stored properties were removed from Drawer in the
+        // node-tree migration; identification is now by provenance actor).
         let distilledSources: Set<UUID> = Set(
-            allDrawers.filter { $0.room == "_distilled" }.map { $0.lineageID }
+            allDrawers.filter { $0.addedBy == "distillation-daemon" }.map { $0.lineageID }
         )
-        let candidates = allDrawers.filter { drawer in
+        let candidateIDs = allDrawers.compactMap { drawer -> String? in
             guard drawer.tombstonedAt == nil,
                   !drawer.content.isEmpty,
-                  drawer.room != "_distilled" else { return false }
+                  drawer.addedBy != "distillation-daemon" else { return nil }
             if let uuid = UUID(uuidString: drawer.id), distilledSources.contains(uuid) {
-                return false
+                return nil
             }
-            return true
+            return drawer.id
         }
+        let recallFrame = RecallFrame(filterChain: [], hydrationLevel: .full, limit: candidateIDs.count)
+        let candidates = try await estate.getDrawers(
+            ids: candidateIDs, matchingFrame: recallFrame, hydrationLevel: .full
+        ).admissible
         var produced = 0
         for drawer in candidates {
             if let cap = limit, produced >= cap { break }
@@ -166,32 +173,44 @@ private extension GeniusLocusKit {
         let wing: String
         let room: String
         let filedAt: Date?
+        /// Adjective sensitivity tier of the source drawer (bits 6–11 of
+        /// `adjectiveBitmap`). Carried through so `captureFactoid` can enforce
+        /// the sensitivity floor: a factoid must not be captured at a lower
+        /// sensitivity tier than its source (secfix/punt-g2).
+        let sensitivity: AdjectiveSensitivity
     }
 
-    /// Fetch content, wing, room, and filedAt for the given drawer UUIDs.
-    func fetchDrawerRows(ids: [String], storage: any Storage) async throws -> [DrawerRow] {
+    /// Fetch recall-admissible content, wing, room, and filedAt for the given
+    /// drawer UUIDs.
+    /// Resolves wing/room display names from the node tree via
+    /// `Estate.resolveNodeNames` (Drawer no longer stores wing/room).
+    ///
+    /// The distillation engine is a daemon-level reader that needs access to
+    /// source drawers at any sensitivity tier — it produces factoids that
+    /// inherit that tier (secfix/punt-g2). The filter chain uses
+    /// `.sensitivityAtMost(.secret)` so elevated/restricted/secret sources
+    /// are included; the factoid capture path applies the sensitivity floor.
+    func fetchDrawerRows(ids: [String], estate: LocusKit.Estate) async throws -> [DrawerRow] {
         guard !ids.isEmpty else { return [] }
-        let values = ids.map { TypedValue.text($0) }
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .in(Column(table: "drawers", name: "id"), values),
-            orderBy: [],
-            limit: nil,
-            offset: nil
+        let recallFrame = RecallFrame(
+            filterChain: [.sensitivityAtMost(.secret)],
+            hydrationLevel: .full,
+            limit: ids.count
         )
-        return rows.compactMap { row in
-            guard
-                let id = stringValue(row["id"]),
-                let content = stringValue(row["content"]),
-                let wing = stringValue(row["wing"]),
-                let room = stringValue(row["room"])
-            else { return nil }
+        let drawers = try await estate.getDrawers(
+            ids: ids, matchingFrame: recallFrame, hydrationLevel: .full
+        ).admissible
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawers.map(\.parentNodeId))
+        return drawers.map { d in
+            let names = nodeNames[d.parentNodeId] ?? (wing: "", room: "")
             return DrawerRow(
-                id: id,
-                content: content,
-                wing: wing,
-                room: room,
-                filedAt: dateValue(row["filedAt"])
+                id: d.id,
+                content: d.content,
+                wing: names.wing,
+                room: names.room,
+                filedAt: d.filedAt,
+                sensitivity: d.adjectiveSensitivity
             )
         }
     }
@@ -223,6 +242,15 @@ private extension GeniusLocusKit {
 
         let lineageID = UUID(uuidString: clusterID) ?? UUID()
 
+        // Sensitivity floor: a factoid must not be captured at a lower
+        // sensitivity tier than its source drawers. If any source is elevated,
+        // restricted, or secret, the factoid inherits that tier. For intra-item
+        // distillation there is exactly one source (distillItem); for cluster
+        // distillation memberDrawers may have several. Take the maximum raw
+        // value across all sources — the highest tier governs. (secfix/punt-g2)
+        let maxSensitivityRaw = memberDrawers.map(\.sensitivity.rawValue).max() ?? 0
+        let factoidSensitivity = AdjectiveSensitivity(rawValue: maxSensitivityRaw) ?? .normal
+
         // Capture the factoid as an ordinary drawer in "_distilled".
         // embeddingModelID = "distillation-features-v1": this is the lane
         // under which VectorKit will store the structural fingerprint below.
@@ -230,7 +258,8 @@ private extension GeniusLocusKit {
         // sourceType = .derived: inferred from existing content (Provenance §F13).
         // latticeAnchor "001": UDC Knowledge class — appropriate for synthesized
         // knowledge drawers per spec I-5 (udcCode must not be empty).
-        let captureFrame = CaptureFrame(
+        // sensitivity = factoidSensitivity: inherits max tier from source drawers.
+        var captureFrame = CaptureFrame(
             content: output.drawerContent,
             channel: .actuator,
             room: "_distilled",
@@ -240,6 +269,7 @@ private extension GeniusLocusKit {
             sourceType: .derived,
             lineageID: lineageID
         )
+        captureFrame.sensitivity = factoidSensitivity
 
         let factoid = try await estate.capture(captureFrame)
         let factoidID = factoid.id

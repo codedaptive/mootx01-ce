@@ -1,10 +1,10 @@
 // PortableKernel-NEON.swift
 //
-// Direct-NEON-intrinsics kernel implementation per
+// Swift simd-type kernel implementation per
 // DECISION_HAMMING_BACKENDS_2026-05-17.md Phase 2.β-2 candidate
-// expansion. Tests whether expressing the Hamming inner loop at
-// the byte-vector level (SIMD32<UInt8>) instead of the four-u64
-// level (SIMD4<UInt64>) produces tighter NEON codegen.
+// expansion. Uses Swift `simd` types and lane-wise nonzeroBitCount
+// rather than direct NEON intrinsics (Swift has no vector-wide popcount
+// primitive; see comments below for the per-lane approach used).
 //
 // The hypothesis: SIMD4<UInt64> + nonzeroBitCount per lane goes
 // through four scalar count_ones() reductions before summing.

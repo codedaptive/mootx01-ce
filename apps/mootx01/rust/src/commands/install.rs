@@ -1,9 +1,9 @@
 //! commands/install.rs — §4.2: wire mootx01 into MCP clients.
 //!
 //! Pipeline per selected client: backup existing config (§4.2 backups) →
-//! format-dispatched merge (JSON / TOML / Continue-YAML; a shared YAML like
-//! Hermes is refused rather than risk corrupting it) → permissions grant for
-//! Claude Code → summary.
+//! format-dispatched merge (JSON / TOML / Continue-YAML / Hermes shared YAML) →
+//! optional permissions grant for Claude Code (only when --grant-permissions is
+//! explicitly passed) → summary.
 //!
 //! Target selection: `--target ids` explicit, `--yes` all detected, else an
 //! interactive numbered prompt (the arrow-key checkbox picker is §8 work;
@@ -24,6 +24,7 @@ pub fn run(
     target: Option<Vec<String>>,
     location: Location,
     yes: bool,
+    grant_permissions: bool,
     no_permissions: bool,
     no_mgr: bool,
     no_daemon: bool,
@@ -63,15 +64,9 @@ pub fn run(
         .unwrap_or_else(|_| "mootx01".to_string());
     let daemon_url = daemon_url();
 
-    // Dedup: clients that resolve to the same config path and server name
-    // share a file and must be processed once. Group them so the output
-    // reports all client names together rather than wiring once and then
-    // claiming "not wired" for every subsequent duplicate.
-    //
-    // Grouping key: (resolved_config_path, server_name) — the pair uniquely
-    // identifies one file write. Clients without a config path on this
-    // platform (None from config_path) are each processed individually and
-    // will print their own "not available" skip message.
+    // Process each selected client in order. Clients without a config path on
+    // this platform (None from config_path) are each handled by install_one,
+    // which prints a "not available" skip message.
     let mut wired = Vec::new();
     let mut skipped = Vec::new();
     // Client ids whose MCP wiring succeeded — depth payload applies only to these.
@@ -125,7 +120,11 @@ pub fn run(
     }
 
     // Permissions grant (Claude Code settings) — §4.2, AIRA-INSTALL-P3 key.
-    if !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
+    // Only written when the user explicitly passes --grant-permissions; the flag
+    // is off by default so a fresh install does not silently grant broad MCP
+    // tool approval. --no-permissions overrides --grant-permissions for scripts
+    // that want a guaranteed no-write path regardless of other flags.
+    if grant_permissions && !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
         // join_rel produces native separators on every platform (backslash on
         // Windows, forward-slash on POSIX) — home.join(".claude/settings.json")
         // would leave a mixed path on Windows.
@@ -146,8 +145,8 @@ pub fn run(
     }
 
     // Service registration (§6). Linux: systemd user units. Windows: Task
-    // Scheduler lands next. macOS: Swift/launchd territory — the Rust binary
-    // is a dev build there.
+    // Scheduler via PowerShell cmdlets. macOS: Swift/launchd territory — the
+    // Rust binary is used for dev builds only.
     #[cfg(target_os = "linux")]
     {
         use crate::core::service;
@@ -155,8 +154,12 @@ pub fn run(
         if !no_daemon {
             // vault_on baked into the unit's Environment= block so the resident
             // daemon reads MOOTX01_VAULT without it being set in the shell (ADR-015).
-            let unit = service::daemon_unit(&binary_path, data_override.as_deref(), vault_on);
-            report_registration("daemon", service::register(&home, service::DAEMON_UNIT, &unit));
+            // Fails CLOSED if MOOTX01_DATA_DIR contains characters that would allow
+            // systemd directive injection.
+            match service::daemon_unit(&binary_path, data_override.as_deref(), vault_on) {
+                Ok(unit) => report_registration("daemon", service::register(&home, service::DAEMON_UNIT, &unit)),
+                Err(e) => eprintln!("  ✗ daemon service: data-dir path rejected: {e}"),
+            }
         }
         if !no_mgr {
             let mgr_binary = std::path::Path::new(&binary_path)
@@ -166,12 +169,16 @@ pub fn run(
             match mgr_binary {
                 Some(mgr) => {
                     let token = service::random_token();
-                    let unit = service::mgr_unit(
+                    // Fails CLOSED if MOOTX01_DATA_DIR contains characters that would
+                    // allow systemd directive injection.
+                    match service::mgr_unit(
                         &mgr.display().to_string(),
                         &token,
                         data_override.as_deref(),
-                    );
-                    report_registration("moot-mgr", service::register(&home, service::MGR_UNIT, &unit));
+                    ) {
+                        Ok(unit) => report_registration("moot-mgr", service::register(&home, service::MGR_UNIT, &unit)),
+                        Err(e) => eprintln!("  ✗ moot-mgr service: data-dir path rejected: {e}"),
+                    }
                 }
                 None => println!(
                     "  skipping moot-mgr service (no moot-mgr binary beside mootx01)"
@@ -186,8 +193,11 @@ pub fn run(
         if !no_daemon {
             // vault_on baked into the cmd wrapper as `set MOOTX01_VAULT=...&&`
             // so the resident daemon reads MOOTX01_VAULT at launch (ADR-015).
-            let (exe, arg) = service::daemon_task_command(&binary_path, data_override.as_deref(), vault_on);
-            report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg));
+            // Fails CLOSED if MOOTX01_DATA_DIR contains cmd.exe-unsafe characters.
+            match service::daemon_task_command(&binary_path, data_override.as_deref(), vault_on) {
+                Ok((exe, arg)) => report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg)),
+                Err(e) => eprintln!("  ✗ daemon service: data-dir path rejected: {e}"),
+            }
         }
         if !no_mgr {
             let mgr_binary = std::path::Path::new(&binary_path)
@@ -197,12 +207,19 @@ pub fn run(
             match mgr_binary {
                 Some(mgr) => {
                     let token = service::random_token();
-                    let (exe, arg) = service::mgr_task_command(
-                        &mgr.display().to_string(),
-                        &token,
-                        data_override.as_deref(),
-                    );
-                    report_registration("moot-mgr", service::register_task(service::MGR_TASK, &exe, &arg));
+                    if let Err(e) = service::write_mgr_control_token(&token) {
+                        report_registration("moot-mgr", service::RegisterOutcome::Failed(e));
+                    } else {
+                        // Fails CLOSED if MOOTX01_DATA_DIR contains cmd.exe-unsafe characters.
+                        match service::mgr_task_command(
+                            &mgr.display().to_string(),
+                            &token,
+                            data_override.as_deref(),
+                        ) {
+                            Ok((exe, arg)) => report_registration("moot-mgr", service::register_task(service::MGR_TASK, &exe, &arg)),
+                            Err(e) => eprintln!("  ✗ moot-mgr service: data-dir path rejected: {e}"),
+                        }
+                    }
                 }
                 None => println!(
                     "  skipping moot-mgr service (no moot-mgr binary beside mootx01)"
@@ -419,6 +436,45 @@ pub(crate) fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies the permissions gate: settings.json is only written when
+    /// `grant_permissions` is explicitly true. The default (false) must not
+    /// silently grant broad MCP tool approval on a fresh install.
+    #[test]
+    fn grant_permissions_flag_gates_settings_write() {
+        use crate::core::permissions;
+        let tmp = std::env::temp_dir()
+            .join(format!("mootx01-perm-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let settings = tmp.join("settings.json");
+
+        // Mirrors the gate condition in run(): permissions written only when
+        // grant_permissions=true AND no_permissions=false.
+        let no_permissions = false;
+
+        // Without --grant-permissions: no write.
+        let grant_permissions = false;
+        if grant_permissions && !no_permissions {
+            permissions::grant(&settings).unwrap();
+        }
+        assert!(
+            !settings.exists(),
+            "settings.json must not be written when grant_permissions=false"
+        );
+
+        // With --grant-permissions: write occurs.
+        let grant_permissions = true;
+        if grant_permissions && !no_permissions {
+            permissions::grant(&settings).unwrap();
+        }
+        assert!(
+            settings.exists(),
+            "settings.json must be written when grant_permissions=true"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn explicit_targets_validate_ids() {

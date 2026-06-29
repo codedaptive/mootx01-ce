@@ -15,14 +15,11 @@
 //   target tier (peer | fleet_aggregate | industry_aggregate)
 //   privacy budget (epsilon, delta)
 //
-// Five-step protocol:
-//   1. Local: compute the exact local result.
-//   2. Sign: sign the query with the pairing's shared key.
-//   3. Forward: send to paired peers (case 1) or to the fleet
-//      administrator (cases 2 and 3).
-//   4. Aggregate: each peer or aggregator applies DP to its
-//      contribution before returning.
-//   5. Combine: originating estate combines local + peer/aggregate.
+// This reference implements: local dispatch, DP-noising of a
+// contribution, and result combination. Signing, forwarding to
+// peers/aggregators, and privacy-ledger enforcement are not
+// implemented here. The full five-step protocol from cookbook
+// § 12.4 describes the intended production flow.
 //
 // Used by:
 //   § 12.4 cookbook  Protocol definition (this file)

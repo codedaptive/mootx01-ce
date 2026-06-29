@@ -69,6 +69,25 @@ public struct SolverBandit: Sendable, Codable, Equatable {
         arms = DreamingTriggerMode.allCases.map { Arm(mode: $0) }
     }
 
+    /// Validates that a decoded bandit has exactly one arm per
+    /// `DreamingTriggerMode` case. A malformed persisted JSON (wrong arm
+    /// count or missing modes) falls back to a fresh uniform-prior bandit
+    /// rather than crashing or entering a permanently broken state.
+    /// Mirrors the Rust `SolverBandit::validate()` fallback.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decoded = try container.decode([Arm].self, forKey: .arms)
+        let expected = DreamingTriggerMode.allCases.count
+        // Guard: persisted state must have one arm per trigger-mode case.
+        // A missing or extra arm (truncated JSON, schema mismatch) produces
+        // undefined select() behaviour; reset to a uniform prior instead.
+        if decoded.count == expected {
+            arms = decoded
+        } else {
+            arms = DreamingTriggerMode.allCases.map { Arm(mode: $0) }
+        }
+    }
+
     /// Select the trigger mode for the next cycle using Thompson Sampling.
     ///
     /// Draws θ_i ~ Beta(alpha_i, beta_i) for each arm; returns the arm with
@@ -76,6 +95,9 @@ public struct SolverBandit: Sendable, Codable, Equatable {
     /// index). `seed` is explicit for determinism — never calls arc4random
     /// or any non-deterministic source internally.
     public func select(seed: UInt64) -> DreamingTriggerMode {
+        // Guard against a malformed (zero-arm) bandit — fall through to the
+        // default mode rather than crashing on arms[0] below.
+        guard !arms.isEmpty else { return DreamingTriggerMode.allCases[0] }
         var rng = SplitMix64(seed: seed)
         var bestSample = -Double.infinity
         var bestMode = arms[0].mode

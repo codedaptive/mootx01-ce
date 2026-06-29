@@ -95,8 +95,8 @@ struct VaultToolsTests {
     // MARK: - Vault gating (ADR-015)
 
     /// When MOOTX01_VAULT=0 (installed with --vault-off), all five vault tools
-    /// are absent from the tools/list surface. The non-vault count (50) is
-    /// unchanged. Default (env absent or ≠ "0") is vault-on.
+    /// and the filesystem-importing palace import tool are absent from the
+    /// tools/list surface. Default (env absent or ≠ "0") is vault-on.
     @Test func vaultOffHidesAllFiveVaultTools() {
         let vaultOffEnv = ["MOOTX01_VAULT": "0"]
         let toolsOff = ToolProjection.tools(environment: vaultOffEnv)
@@ -106,8 +106,11 @@ struct VaultToolsTests {
         #expect(!names.contains("moot_vault_status"))
         #expect(!names.contains("moot_vault_reconcile"))
         #expect(!names.contains("moot_vault_job"))
-        // Non-vault surface is unaffected: 55 tools (60 − 5 vault).
-        #expect(toolsOff.count == 55)
+        // moot_palace_import is also hidden when vault is off: it opens
+        // arbitrary local SQLite files (same security posture as vault tools).
+        #expect(!names.contains("moot_palace_import"))
+        // Vault-off removes the five moot_vault_* tools plus palace import: 56.
+        #expect(toolsOff.count == 56)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -115,7 +118,7 @@ struct VaultToolsTests {
         let toolsNoEnv = ToolProjection.tools(environment: [:])
         let names = Set(toolsNoEnv.map(\.name))
         #expect(names.contains("moot_vault_export"))
-        #expect(toolsNoEnv.count == 60)
+        #expect(toolsNoEnv.count == 62)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.
@@ -615,8 +618,13 @@ struct VaultToolsTests {
     /// before proceeding — the manifest is written inside the background
     /// Task, so the export call alone does not guarantee its existence.
     private func runExportAndAwait(vault: URL, via dispatcher: ToolDispatcher) async throws {
+        // CAND-032: the default export scope is now `.exportable` (only
+        // exportable-marked rows). These reconcile fixtures are ordinary
+        // believed-tier notes, so the setup export uses the explicit `.believed`
+        // scope to populate the vault with full fidelity (the round-trip /
+        // reconcile behavior these tests exercise is scope-independent).
         let result = try await dispatcher.dispatch(
-            name: "moot_vault_export", arguments: args(["vaultPath": vault.path]))
+            name: "moot_vault_export", arguments: args(["vaultPath": vault.path, "scope": "believed"]))
         let jobID = try extractJobID(from: result)
         let status = try await waitForJob(id: jobID, via: dispatcher)
         #expect(status.contains("status: complete"), "Export job did not complete within 10 s")
@@ -801,5 +809,290 @@ struct VaultToolsTests {
         #expect(!secondJobText.contains("drawersSkippedUnchanged: 0") ||
                 secondJobText.contains("drawersWritten: 0"),
                 "Re-import of unchanged vault must not show all-zero activity; got:\n\(secondJobText)")
+    }
+
+    // MARK: - Vault job cap atomicity (Finding 1 — TOCTOU fix)
+
+    /// `checkAndRegister` enforces the cap in a single actor turn: after K
+    /// successful registrations the (K+1)th call must throw without registering.
+    /// This verifies the cap is enforced and that the error message is actionable.
+    @Test func vaultJobCapIsEnforcedAtomically() async throws {
+        let registry = VaultJobRegistry()
+        let maxJobs = 2
+
+        // Register up to the cap — both should succeed.
+        let id1 = try await registry.checkAndRegister(
+            kind: .`import`, vaultPath: "/tmp/a", maxJobs: maxJobs)
+        let id2 = try await registry.checkAndRegister(
+            kind: .`export`, vaultPath: "/tmp/b", maxJobs: maxJobs)
+        #expect(!id1.isEmpty)
+        #expect(!id2.isEmpty)
+        #expect(id1 != id2)
+
+        // Third call must throw — cap is reached.
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await registry.checkAndRegister(
+                kind: .`import`, vaultPath: "/tmp/c", maxJobs: maxJobs)
+        }
+    }
+
+    /// After a running job completes, the cap slot is freed and a new
+    /// `checkAndRegister` succeeds.
+    @Test func vaultJobCapFreesSlotOnCompletion() async throws {
+        let registry = VaultJobRegistry()
+        let maxJobs = 1
+
+        // Fill the cap.
+        let id1 = try await registry.checkAndRegister(
+            kind: .`import`, vaultPath: "/tmp/x", maxJobs: maxJobs)
+        // Cap is full — second call must throw.
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await registry.checkAndRegister(
+                kind: .`import`, vaultPath: "/tmp/y", maxJobs: maxJobs)
+        }
+
+        // Complete the running job — slot is freed.
+        await registry.complete(
+            jobID: id1,
+            result: .imported(ImportResult(
+                drawersWritten: 0, drawersUpdated: 0, itemsSkipped: 0,
+                tunnelsCreated: 0, fdcClassified: 0, fdcUnclassified: 0,
+                drawersSkippedUnchanged: 0, drawersSkippedTombstoned: 0)))
+
+        // Now a new registration must succeed.
+        let id2 = try await registry.checkAndRegister(
+            kind: .`export`, vaultPath: "/tmp/z", maxJobs: maxJobs)
+        #expect(!id2.isEmpty)
+    }
+
+    // MARK: - Availability hardening (secfix/c-vault-jobslot)
+
+    /// `hashAllNotes` must skip a sub-directory named `directory.md` rather
+    /// than throwing. Caller-controlled vault contents may include such an
+    /// entry; it is not a note and must not be treated as fatal.
+    ///
+    /// Security boundary: the enumerator's `.isRegularFileKey` check filters
+    /// out directories, symlinks, and special files with a `.md` extension
+    /// before the `Data(contentsOf:)` read is attempted.
+    @Test func hashAllNotes_skips_directory_named_md() throws {
+        let vault = makeTempVault()
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Create a sub-directory named "directory.md" — not a note.
+        let dirMD = vault.appendingPathComponent("directory.md", isDirectory: true)
+        try FileManager.default.createDirectory(at: dirMD, withIntermediateDirectories: true)
+
+        // Also add a real note alongside the directory.
+        try "# Real note\n\nContent.".write(
+            to: vault.appendingPathComponent("real_note.md"), atomically: true, encoding: .utf8)
+
+        // hashAllNotes must not throw; it must count only the regular .md file.
+        let hashes = try VaultTools.hashAllNotes(vaultURL: vault)
+        #expect(hashes.count == 1,
+                "directory.md must be skipped; only real_note.md should be counted, got: \(hashes.keys.sorted())")
+        #expect(hashes["real_note.md"] != nil,
+                "real_note.md must appear in the hash map")
+    }
+
+    /// Regression for the availability DoS (secfix/c-vault-jobslot, refined by
+    /// secfix/c-vault-cap): 4 consecutive imports into a vault that contains only
+    /// a sub-directory named `directory.md` (no regular notes) must NOT exhaust the
+    /// 4-slot concurrent-job cap. After all 4 complete, a 5th import to a valid
+    /// vault must succeed.
+    ///
+    /// With the register-first ordering (secfix/c-vault-cap):
+    /// `checkAndRegister` acquires the slot, then `hashAllNotes` runs. Because
+    /// `hashAllNotes` skips non-regular `.md` entries (fix B, secfix/c-vault-jobslot),
+    /// the directory is skipped and 0 notes are counted without throwing. The
+    /// background `Task` completes the import (0 drawers), calls `complete()`,
+    /// and releases the slot. No exhaustion occurs.
+    ///
+    /// The slot-release-on-throw guard (the pre-Task catch in `runImport`) would
+    /// fire if `hashAllNotes` threw — but for this case it does not throw because
+    /// fix B skips the directory entry before attempting a read.
+    @Test(.timeLimit(.minutes(3)))
+    func import_cap_not_exhausted_after_directory_md_vault() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "v-cap-dirmd"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Vault whose only `.md` entry is a directory — not a real note.
+        let problemVault = makeTempVault()
+        try FileManager.default.createDirectory(at: problemVault, withIntermediateDirectories: true)
+        let dirMD = problemVault.appendingPathComponent("directory.md", isDirectory: true)
+        try FileManager.default.createDirectory(at: dirMD, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: problemVault) }
+
+        // 4 consecutive imports — each must start, complete (0 notes), and
+        // release its slot via `complete()` inside the background Task.
+        for i in 1...4 {
+            let result = try await dispatcher.dispatch(
+                name: "moot_vault_import",
+                arguments: args(["vaultPath": problemVault.path]))
+            let jobID = try extractJobID(from: result)
+            let status = try await waitForJob(id: jobID, via: dispatcher)
+            #expect(status.contains("status: complete"),
+                    "Import \(i) must complete; got: \(status)")
+        }
+
+        // A 5th import to a valid single-note vault must succeed — cap not exhausted.
+        let validVault = makeTempVault()
+        try FileManager.default.createDirectory(at: validVault, withIntermediateDirectories: true)
+        try "# Valid note\n\nContent.".write(
+            to: validVault.appendingPathComponent("valid.md"), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: validVault) }
+
+        let validResult = try await dispatcher.dispatch(
+            name: "moot_vault_import",
+            arguments: args(["vaultPath": validVault.path]))
+        let validJobID = try extractJobID(from: validResult)
+        let validStatus = try await waitForJob(id: validJobID, via: dispatcher)
+        #expect(validStatus.contains("status: complete"),
+                "5th import must succeed (cap must not have been exhausted); got: \(validStatus)")
+        #expect(validStatus.contains("drawersWritten: 1"),
+                "Valid import must write the note; got: \(validStatus)")
+    }
+
+    // MARK: - Cap-before-preflight and slot-release-on-throw (secfix/c-vault-cap)
+
+    /// The vault import cap is enforced BEFORE the expensive preflight runs.
+    /// With the register-first ordering, `checkAndRegister` is the FIRST
+    /// operation in `runImport` — a full cap rejects the (N+1)th call
+    /// immediately, before `hashAllNotes` enumerates any files.
+    ///
+    /// Verified at the registry level: pre-fill N slots, then attempt a
+    /// registration. The cap error is thrown by `checkAndRegister` itself
+    /// (the first operation in the new ordering), so no filesystem work is
+    /// performed. Release one slot; the next registration must succeed,
+    /// confirming the slot count is exactly at the cap (no undercount, no
+    /// overflow).
+    @Test func import_cap_enforced_before_expensive_preflight() async throws {
+        let registry = VaultJobRegistry()
+        let maxJobs = 4
+
+        // Fill the cap to its limit.
+        var heldIDs: [String] = []
+        for i in 0..<maxJobs {
+            let id = try await registry.checkAndRegister(
+                kind: .`import`, vaultPath: "/tmp/held-\(i)", maxJobs: maxJobs)
+            heldIDs.append(id)
+        }
+
+        // The (N+1)th call must throw the cap error — `checkAndRegister` is the
+        // first operation in the new ordering, so no hashAllNotes has run yet.
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await registry.checkAndRegister(
+                kind: .`import`, vaultPath: "/tmp/overflow", maxJobs: maxJobs)
+        }
+
+        // Release one slot and confirm a new registration succeeds — the
+        // running count was exactly maxJobs (no over-count, no undercount).
+        await registry.complete(
+            jobID: heldIDs[0],
+            result: .imported(ImportResult(
+                drawersWritten: 0, drawersUpdated: 0, itemsSkipped: 0,
+                tunnelsCreated: 0, fdcClassified: 0, fdcUnclassified: 0,
+                drawersSkippedUnchanged: 0, drawersSkippedTombstoned: 0)))
+        let newID = try await registry.checkAndRegister(
+            kind: .`import`, vaultPath: "/tmp/after-release", maxJobs: maxJobs)
+        #expect(!newID.isEmpty, "After releasing one slot, a new registration must succeed")
+    }
+
+    /// When `hashAllNotes` throws after the slot is acquired, the pre-Task
+    /// catch in `runImport` releases the slot via `fail()` so the throwing
+    /// preflight never permanently consumes cap capacity. A subsequent valid
+    /// import must succeed.
+    ///
+    /// A regular `.md` file with no read permissions triggers the throw —
+    /// `hashAllNotes` successfully detects the file is regular (via the
+    /// cached `.isRegularFileKey` resource value, readable from directory
+    /// entry metadata) and then fails at `Data(contentsOf:)`.
+    @Test func import_throwing_preflight_releases_slot() async throws {
+        let vault = makeTempVault()
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // A regular .md file with mode 0o000 — readable metadata (stat),
+        // but Data(contentsOf:) throws EPERM. This triggers hashAllNotes to
+        // throw after checkAndRegister has already acquired the slot.
+        let unreadable = vault.appendingPathComponent("unreadable.md")
+        try "# Permission denied".write(to: unreadable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o000)],
+            ofItemAtPath: unreadable.path)
+        defer {
+            // Restore read permissions so the temp dir can be cleaned up.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o644)],
+                ofItemAtPath: unreadable.path)
+        }
+
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "v-throw-preflight"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // The import must throw — hashAllNotes cannot read the file and the
+        // error propagates after the slot-release guard runs fail().
+        await #expect(throws: (any Error).self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_vault_import",
+                arguments: args(["vaultPath": vault.path]))
+        }
+
+        // After the throwing preflight, the slot must be released. A subsequent
+        // valid import must succeed — cap not permanently exhausted.
+        let validVault = makeTempVault()
+        try FileManager.default.createDirectory(at: validVault, withIntermediateDirectories: true)
+        try "# Valid note\n\nContent.".write(
+            to: validVault.appendingPathComponent("valid.md"),
+            atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: validVault) }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_vault_import",
+            arguments: args(["vaultPath": validVault.path]))
+        let body = try text(result)
+        #expect(body.contains("job_id:"),
+                "Valid import must succeed after slot was released by throwing preflight; got: \(body)")
+    }
+
+    /// Concurrent `checkAndRegister` calls with maxJobs=K: exactly K succeed
+    /// and the remainder are rejected. Because `VaultJobRegistry` is an actor,
+    /// all calls are serialized — no two can observe the same running count
+    /// between check and insert.
+    @Test func vaultJobCapNeverExceededUnderConcurrentLaunches() async throws {
+        let registry = VaultJobRegistry()
+        let maxJobs = 3
+        let total = 10
+
+        // Fire total concurrent checkAndRegister calls in a TaskGroup.
+        let results: [Result<String, any Error>] = await withTaskGroup(
+            of: Result<String, any Error>.self
+        ) { group in
+            for i in 0..<total {
+                group.addTask {
+                    do {
+                        let id = try await registry.checkAndRegister(
+                            kind: .`import`, vaultPath: "/tmp/concurrent-\(i)", maxJobs: maxJobs)
+                        return .success(id)
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+            var collected: [Result<String, any Error>] = []
+            for await r in group { collected.append(r) }
+            return collected
+        }
+
+        let successes = results.filter { if case .success = $0 { return true }; return false }
+        let failures  = results.filter { if case .failure = $0 { return true }; return false }
+        #expect(successes.count == maxJobs,
+                "Expected exactly \(maxJobs) successful registrations; got \(successes.count)")
+        #expect(failures.count == total - maxJobs,
+                "Expected \(total - maxJobs) rejections; got \(failures.count)")
     }
 }

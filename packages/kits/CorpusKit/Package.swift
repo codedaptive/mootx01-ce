@@ -30,6 +30,10 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../libs/SubstrateTypes"),
+        // SubstrateLib: MerkleHash.leaf for the ContentHashProvider callback
+        // that HashingRowStore invokes on every chunk insert (ADR-017 §16).
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + ADR-017 §19.
+        .package(path: "../../libs/SubstrateLib"),
         // SubstrateKernel: float-vector ops (l2Norm, l2Normalize, dot,
         // cosine) now live here as the canonical conformance-gated
         // implementations. CorpusKitProviders consumes FloatVecOps;
@@ -52,21 +56,46 @@ let package = Package(
         .package(path: "../PersistenceKit"),
         .package(path: "../ConvergenceKit"),
         .package(path: "../VectorKit"),
+        // QueueKit: CorpusKit owns its own ingest queue + drain worker pool, so
+        // it mounts a QueueKit-backed encode queue and drains it directly — the
+        // SDK-standalone ingest pipeline (a Corpus queues, drains, and encodes
+        // itself with no GeniusLocusKit). QueueKit is a low-level primitive
+        // (SubstrateTypes + PersistenceKit + IntellectusLib); CorpusKit →
+        // QueueKit is downstream→upstream, no inversion.
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (in-repo kit
+        // dependency required by the encode-pipeline relocation into CorpusKit).
+        .package(path: "../QueueKit"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     ],
     targets: [
         .target(
             name: "CorpusKit",
             dependencies: [
-                "SubstrateTypes", "SubstrateML",
+                "SubstrateTypes", "SubstrateLib", "SubstrateML",
                 "EngramLib",
                 .product(name: "EideticLib", package: "EideticLib"),
                 // IntellectusLib for self-report telemetry (cp-corpuskit-report).
                 // Off by default; single Atomic<Bool> load on the disabled path.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
+                // PersistenceKitInMemory backs the Corpus ingest queue with a
+                // transient in-memory backend (no estate file directory; works
+                // for in-memory corpora). Mirrors the substrate the standing-
+                // signal scheduler queue uses.
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // PersistenceKitSQLite: CorpusKit's mountIngestQueue opens the shared
+                // encrypted queue.sqlite sibling via SQLiteStorage(configuration:). This
+                // is the same encrypted SQLite the estate itself uses — queueSibling
+                // derives the sibling config (path + encryption key) so the queue.sqlite
+                // is never plaintext beside a plaintext estate (ADR-021 Decision 7 / T4).
+                // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
                 "VectorKit",
+                // QueueKit backs the Corpus-owned ingest queue + drain worker
+                // pool (the SDK-standalone encode pipeline). See Package
+                // dependency note above.
+                .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Sources/CorpusKit"
@@ -109,6 +138,7 @@ let package = Package(
                 // persistence contract requires a real SQLite backend, not InMemory.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "SubstrateLib", package: "SubstrateLib"),
                 // IntellectusLib is required by CorpusKitTelemetryTests, which
                 // install capturing sinks and toggle the enabled flag.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),

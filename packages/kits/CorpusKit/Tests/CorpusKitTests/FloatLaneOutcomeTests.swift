@@ -13,8 +13,8 @@
 //       embedFloat, store is empty). Confirms dark_provider is 0.
 //   §2  emptyQuery    — limit=0 or query="" produces .emptyQuery with
 //       no telemetry emitted (the guard fires before any store access).
-//   §3  noFloatRows   — a float-capable provider that returned floats
-//       on ingest but a fresh corpus with no ingested documents →
+//   §3  noFloatRows   — a MiniLM-shaped provider ingests a document,
+//       the source is removed, and the source-map is emptied →
 //       the outcome is .unavailableNoFloatRows and the
 //       corpus.float_lane.dark_no_rows counter moves.
 //   §4  happyPath     — a real MiniLM-shaped provider + ingested document;
@@ -45,7 +45,8 @@ import EngramLib
 private let fixedNow = Date(timeIntervalSinceReferenceDate: 1_600_000)
 
 /// Creates a fresh SQLite-backed Corpus with the default deterministic
-/// provider (no float lane). Mirrors CorpusTests.makeCorpus.
+/// provider. Deterministic embedFloat succeeds; an empty corpus produces
+/// unavailableNoFloatRows rather than provider opt-out.
 private func makeDeterministicCorpus() async throws -> Corpus {
     let storage = try makeScratchStorage()
     return try await Corpus(storage: storage, model: .deterministic)

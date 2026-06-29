@@ -6,7 +6,8 @@
 //   Change 1: `moot_file_memory` accepts an optional `wing` argument that
 //             routes the drawer into the named wing; absent defaults to
 //             LocusKit.defaultWingName ("Agentic Memory").
-//   Change 2: `moot_estate_map` surfaces each wing's charter inline.
+//   Change 2: `moot_estate_map` shows hint drawers (AI_Charter_Hint room) as
+//             normal room count lines — no inline "charter:" special rendering.
 //   Change 3: `moot_memory_search`, `moot_recall_precise`, and
 //             `moot_recall_shaped` accept an optional `wing` argument
 //             that scopes recall to a single wing.
@@ -19,17 +20,17 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-/// ADR-016 wings surface tests — estate_map charters + recall wing scoping.
+/// ADR-016 wings surface tests — estate_map hint drawers as normal entries + recall wing scoping.
 ///
 /// `.serialized`: every case provisions a live in-memory GLK estate; preserve
 /// one-at-a-time execution to avoid shared state between cases.
-@Suite("ADR-016 Wings Surface — estate_map charters + recall wing scoping", .serialized)
+@Suite("ADR-016 Wings Surface — estate_map hint-drawer entries + recall wing scoping", .serialized)
 struct WingsSurfaceTests {
 
     // MARK: - Shared harness
 
     /// Provision a fresh GLK estate (seeds the seven default wings with their
-    /// `_charter` drawers per ADR-016) and return a wired ToolDispatcher.
+    /// hint drawers in AI_Charter_Hint room per ADR-016) and return a wired ToolDispatcher.
     private func makeProvisionedDispatcher() async throws -> (ToolDispatcher, GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "wings-surface-tests")
@@ -159,13 +160,12 @@ struct WingsSurfaceTests {
         }
     }
 
-    // MARK: - Change 2: estate_map surfaces wing charters inline
+    // MARK: - Change 2: estate_map shows hint drawers as normal room entries
 
-    /// `moot_estate_map` must surface the "Agentic Memory" charter inline.
-    /// The seven default wings are seeded at provision; their charters are
-    /// stored in the `_charter` room. The map must show each charter text
-    /// immediately after the wing header.
-    @Test func estateMapSurfacesAgenticMemoryCharterInline() async throws {
+    /// `moot_estate_map` must show the "Agentic Memory" wing with its hint drawer
+    /// counted as a normal room entry (AI_Charter_Hint: 1). No inline "charter: <text>"
+    /// special rendering — hint drawers are normal drawers.
+    @Test func estateMapSurfacesAgenticMemoryWithHintDrawerCount() async throws {
         let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
@@ -173,13 +173,15 @@ struct WingsSurfaceTests {
             name: "moot_estate_map", arguments: .object([:]))
         let output = text(of: result)
 
-        // The "Agentic Memory" wing must appear with its charter.
-        // Charter from DefaultWings.swift:
-        // "The AI's own observations, inferences, decisions, session learnings."
+        // The "Agentic Memory" wing must appear in the map.
         #expect(output.contains("Agentic Memory/"),
             "estate_map must list the Agentic Memory wing; got:\n\(output)")
-        #expect(output.contains("charter: The AI's own observations"),
-            "estate_map must surface the Agentic Memory charter inline; got:\n\(output)")
+        // Hint drawers appear as normal room count lines, not as inline charter text.
+        #expect(output.contains("AI_Charter_Hint:"),
+            "estate_map must show AI_Charter_Hint as a normal room count line; got:\n\(output)")
+        // No inline "charter:" special entry.
+        #expect(!output.contains("charter: The AI"),
+            "estate_map must not render inline charter text (removed); got:\n\(output)")
     }
 
     /// All seven default wings must appear in `moot_estate_map` output.
@@ -198,45 +200,27 @@ struct WingsSurfaceTests {
         }
     }
 
-    /// Charter text must appear under the correct wing — not orphaned or
-    /// attributed to a different wing.
-    @Test func estateMapCharterAppearsUnderCorrectWing() async throws {
+    /// Hint drawers (AI_Charter_Hint room) must appear as a normal room count line
+    /// under each wing, not as inline "charter: <text>" and not as "_charter: N".
+    @Test func estateMapShowsHintDrawerAsNormalRoomCount() async throws {
         let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
         let result = try await dispatcher.dispatch(
             name: "moot_estate_map", arguments: .object([:]))
         let output = text(of: result)
-        let lines = output.components(separatedBy: "\n")
 
-        // Find the "User Canon" wing header and check the next non-empty line
-        // is its charter.
-        var foundWingHeader = false
-        var charterLineChecked = false
-        for line in lines {
-            if line.contains("User Canon/") {
-                foundWingHeader = true
-                continue
-            }
-            if foundWingHeader && !charterLineChecked {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty {
-                    #expect(trimmed.hasPrefix("charter:"),
-                        "First entry under User Canon/ must be its charter; got: '\(trimmed)'")
-                    #expect(trimmed.contains("user directives"),
-                        "User Canon charter text must be present; got: '\(trimmed)'")
-                    charterLineChecked = true
-                    break
-                }
-            }
-        }
-        #expect(foundWingHeader, "User Canon/ header must appear in estate_map output")
+        // AI_Charter_Hint must appear as a room count entry under each wing.
+        #expect(output.contains("AI_Charter_Hint:"),
+            "estate_map must show AI_Charter_Hint as a normal room count line; got:\n\(output)")
+        // Old _charter room name must not appear anywhere.
+        #expect(!output.contains("_charter"),
+            "estate_map must not reference old _charter room name; got:\n\(output)")
     }
 
-    /// Charter drawers must NOT appear as a room count line. The `_charter`
-    /// room is reserved — surfacing it as "_charter: N" would mislead the AI
-    /// about the estate's content structure.
-    @Test func estateMapExcludesCharterRoomFromRoomCounts() async throws {
+    /// The old `_charter` room name must not appear in estate_map output at all —
+    /// neither as a count line nor as inline charter text.
+    @Test func estateMapDoesNotReferenceOldCharterRoomName() async throws {
         let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
@@ -244,10 +228,8 @@ struct WingsSurfaceTests {
             name: "moot_estate_map", arguments: .object([:]))
         let output = text(of: result)
 
-        // The `_charter` room must not appear as a room count entry —
-        // it is inlined as "charter: <text>", never as "_charter: <count>".
-        #expect(!output.contains("_charter:"),
-            "estate_map must not surface `_charter` as a room count line; got:\n\(output)")
+        #expect(!output.contains("_charter"),
+            "estate_map must not reference old _charter room name; got:\n\(output)")
     }
 
     // MARK: - Change 3: schema verification — wing argument declared

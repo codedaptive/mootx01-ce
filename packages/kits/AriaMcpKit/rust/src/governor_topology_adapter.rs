@@ -43,10 +43,17 @@ impl GovernorTopologySink for StatsStoreTopologySink {
         estate_id: &str,
         now_epoch_secs: f64,
         payload: &str,
+        fingerprint: &str,
     ) -> Result<(), String> {
         self.store
-            .write_topology_snapshot(estate_id, now_epoch_secs, payload)
+            .write_topology_snapshot(estate_id, now_epoch_secs, payload, Some(fingerprint))
             .map_err(|e| format!("{e:?}"))
+    }
+
+    fn load_topology_fingerprint(&self, estate_id: &str) -> Option<String> {
+        // Read failure maps to None: the governor then recomputes once, as if
+        // nothing was persisted (no silent freeze, no spurious skip).
+        self.store.load_topology_fingerprint(estate_id).unwrap_or(None)
     }
 
     fn is_monitoring_enabled(&self) -> bool {

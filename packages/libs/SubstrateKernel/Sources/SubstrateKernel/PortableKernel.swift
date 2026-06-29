@@ -3,18 +3,17 @@
 // Portable kernel layer per cookbook § 4.4 and paper § 11.3.
 //
 // The substrate's hot operations (Hamming-NN, OR-reduction,
-// bit-sliced field scan, SimHash) compile to one of three CPU
-// kernels depending on the platform:
+// bit-sliced field scan, SimHash) route to one of several backends
+// depending on the requested KernelKind:
 //
-//   - NEON          (ARMv8.2 SIMD, Apple silicon, ARM64 Linux/Windows)
-//   - AVX-512       (Intel/AMD x86-64 with AVX-512BW)
-//   - AVX2          (Intel/AMD x86-64 with AVX2, fallback for older
-//                   x86-64)
-//   - scalar        (portable C, used on platforms without SIMD
-//                   support and as the reference implementation
-//                   the conformance gate measures against)
+//   - simd          (Swift's `import simd` SIMD4<UInt64> — arm64 default)
+//   - neon          (direct NEON, available on Apple + aarch64 Linux)
+//   - metal         (GPU compute, Apple platforms only)
+//   - avx512/avx2   (x86-64 — specialized files; fall through to scalar
+//                   in the reference build)
+//   - scalar        (portable reference; the conformance gate baseline)
 //
-// All four kernels MUST produce bit-identical output for the
+// All backends MUST produce bit-identical output for the
 // substrate's documented inputs. The four-way conformance gate
 // (test-harness/) verifies this by running every cell with the
 // same seed and comparing the CRC32 of the resulting state.
@@ -115,6 +114,17 @@ public protocol SubstrateKernel: Sendable {
     /// Count-fold each batch independently. Output is the same length
     /// as `batches`, indexed identically.
     func countFoldBatch(batches: [[Fingerprint256]]) -> [CountVector256]
+
+    /// Float-input SimHash projection: sign-quantize the dot product of
+    /// `vector` against each of 256 ±1 hyperplanes carried by `planes` into a
+    /// `Fingerprint256` (bit k set ⟺ ⟨vector, plane_k⟩ > 0). The float analog
+    /// of `simhashCompute`; the dispatch home for `SubstrateML.FloatSimHash`
+    /// (SUBSTRATEKERNEL_SPEC § 5.4). The planes are passed in as data — generated
+    /// from a seed in SubstrateML — so the kernel does pure signed-sum-and-sign
+    /// with no RNG. The default impl is the scalar reference; a SIMD backend
+    /// overrides it with the over-hyperplanes vertical pattern, gated bit-for-bit
+    /// against the reference (DECISION_SIMHASH_BACKENDS_2026-05-18).
+    func floatSimHashProject(vector: [Float], planes: FloatSimHashPlanes) -> Fingerprint256
 }
 
 // MARK: - Default implementations for batched ops
@@ -159,6 +169,51 @@ extension SubstrateKernel {
 
     public func countFoldBatch(batches: [[Fingerprint256]]) -> [CountVector256] {
         return batches.map { countFold256($0) }
+    }
+
+    /// Scalar reference for `floatSimHashProject` — the canonical oracle (I-25).
+    /// For each of the 256 hyperplanes, accumulate the signed sum
+    /// `Σ_i plane(k,i) * vector[i]` in coordinate order (the fixed reduction
+    /// order every backend must reproduce; FP `+` is non-associative, so the
+    /// order is part of the contract), and set bit k when the sum is positive.
+    /// Empty input projects to the zero fingerprint. A backend with a vectorized
+    /// over-hyperplanes path overrides this method and is gated bit-for-bit
+    /// against it. Bit-identical to `SubstrateML.FloatSimHash.project` for the
+    /// planes that `FloatSimHash.planes(seed:dim:)` materializes.
+    public func floatSimHashProject(vector: [Float], planes: FloatSimHashPlanes) -> Fingerprint256 {
+        guard !vector.isEmpty else { return .zero }
+        let dim = vector.count
+        // Invariant: planes must be materialised for exactly this vector
+        // dimensionality.  A dim mismatch means the caller built the planes
+        // for a different embedding size; the inner loop would index out of
+        // bounds on signBits and produce nonsense bits with no other signal.
+        // Fail loudly here rather than silently corrupt every downstream
+        // conformance result (SUBSTRATEKERNEL_SPEC § 5.4).
+        precondition(
+            planes.dim == dim,
+            "FloatSimHashPlanes.dim (\(planes.dim)) must equal vector.count (\(dim))"
+        )
+        let expectedWords = (256 * dim + 63) / 64
+        precondition(
+            planes.signBits.count >= expectedWords,
+            "FloatSimHashPlanes.signBits too short: need \(expectedWords) words, got \(planes.signBits.count)"
+        )
+        var blocks: [UInt64] = [0, 0, 0, 0]
+        for k in 0..<256 {
+            var sum: Float = 0
+            let base = k * dim
+            for i in 0..<dim {
+                let bitIndex = base + i
+                let isPositive = (planes.signBits[bitIndex >> 6] >> UInt64(bitIndex & 63)) & 1 == 1
+                let plane: Float = isPositive ? 1 : -1
+                sum += plane * vector[i]
+            }
+            if sum > 0 {
+                blocks[k / 64] |= (UInt64(1) << UInt64(k % 64))
+            }
+        }
+        return Fingerprint256(
+            block0: blocks[0], block1: blocks[1], block2: blocks[2], block3: blocks[3])
     }
 }
 

@@ -4,13 +4,11 @@
 //! from spec."
 //!
 //! This file enforces that gate for the constants substrate_lib
-//! owns. As of F11 (2026-05-27) that's the ten RowState raw
-//! values (cookbook § 2.3 / § 2.8 rows 1-10). The remaining
-//! § 2.8 entries (Sensitivity, Exportability, Trust, Drawer
-//! feature flags, Provenance source/channel) are declared in
-//! locus_kit and will be added to a sibling locus_kit
-//! conformance test as part of the LocusKit cascade that
-//! follows F11.
+//! owns. Currently that covers the ten RowState raw values
+//! (cookbook § 2.3 / § 2.8 rows 1-10). substrate_lib also defines
+//! AuditSensitivity, AuditExportability, and AuditTrust constants
+//! in audit_gate.rs; conformance coverage for those is pending
+//! expansion of this test file.
 //!
 //! Rust mirror of `BitmapFieldConstantsConformanceTests.swift`;
 //! both legs run independently per cookbook I-19 byte-identical

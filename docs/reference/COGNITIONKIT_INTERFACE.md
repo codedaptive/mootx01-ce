@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Interface
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-06-17
+date: 2026-06-21
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -310,7 +310,7 @@ pub fn run_theme_weather(
 pub struct BiasReport {
     pub biased_for: Vec<CategoryBias>,        // bias > 0, most-favored first
     pub biased_against: Vec<CategoryBias>,    // bias < 0, most-avoided last
-    pub dismissal: Vec<(String, f64)>,        // per-room withdrawal rate, most-dismissed first
+    pub dismissal: Vec<(String, f64)>,        // per-parentNodeId withdrawal rate, most-dismissed first
     pub learned: Vec<PreferenceStrength>,     // Bradley-Terry, re-centered on neutral, strongest first
 }
 pub fn run_bias(
@@ -586,7 +586,7 @@ every row, so it is stated once here rather than repeated:
 | Theme weather (topics) | `ThemeWeather` enum (`ThemeWeather.swift:15`) | `run_theme_weather` fn (`theme_weather_recipe.rs:22`) | public both | Swift enum-namespace `static run` / Rust free fn; result `CategoryMomentum` from NeuronKit | `ThemeWeatherTests.swift` + `theme_weather_recipe.rs #[cfg(test)]` | Confirmed |
 | Bias (preference) | `Bias` enum (`Bias.swift:63`) | `run_bias` fn (`bias_recipe.rs:83`) | public both | Swift enum-namespace `static run` / Rust free fn | `BiasTests.swift` + `bias_recipe.rs #[cfg(test)]` | Confirmed |
 | Bias report | `BiasReport` struct (`Bias.swift:18`) | `BiasReport` struct (`bias_recipe.rs:37`) | public both | `biasedFor`/`biased_for` etc. (snake idiom); same fields | `BiasTests.swift` + `bias_recipe.rs #[cfg(test)]` | Confirmed |
-| Dismissal rate | `DismissalRate` struct (`Bias.swift:8`) | *(Rust `BiasReport.dismissal: Vec<(String, f64)>`, `bias_recipe.rs:37`)* | Swift public struct; Rust: inline tuple | Swift names the `(room, rate)` pair as a struct; Rust inlines it as a tuple field in `BiasReport` (sanctioned: same data, Swift gives it a nominal type) | `BiasTests.swift` + `bias_recipe.rs #[cfg(test)]` (report parity) | Confirmed |
+| Dismissal rate | `DismissalRate` struct (`Bias.swift:8`) | *(Rust `BiasReport.dismissal: Vec<(String, f64)>`, `bias_recipe.rs:37`)* | Swift public struct; Rust: inline tuple | Swift names the `(nodeId, rate)` pair as a struct (ADR-017: nodeId = parentNodeId); Rust inlines it as a tuple field in `BiasReport` (sanctioned: same data, Swift gives it a nominal type) | `BiasTests.swift` + `bias_recipe.rs #[cfg(test)]` (report parity) | Confirmed |
 | Drift (surprise) | `Drift` enum (`Drift.swift:29`) | `run_drift` fn (`drift_recipe.rs:38`) | public both | Swift enum-namespace `static run` / Rust free fn | `DriftTests.swift` + `drift_recipe.rs #[cfg(test)]` | Confirmed |
 | Drift output | `DriftOutput` struct (`Drift.swift:7`) | `DriftOutput` struct (`drift_recipe.rs:22`) | public both | `drift: DriftScore`, before/after counts; identical | `DriftTests.swift` + `drift_recipe.rs #[cfg(test)]` | Confirmed |
 | Contradiction (surprise) | `Contradiction` enum (`Contradiction.swift:28`) | `run_contradiction` fn (`contradiction_recipe.rs:32`) | public both | Swift enum-namespace `static run` / Rust free fn | `ContradictionTests.swift` + `contradiction_recipe.rs #[cfg(test)]` | Confirmed |
@@ -706,6 +706,13 @@ disabled.
 *End of CognitionKit Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-21
+ADR-017 native node ID migration (NT-K1): renamed `DismissalRate.room` →
+`DismissalRate.nodeId` (Swift struct field, `Bias.swift:9`). The field now
+carries the parentNodeId UUID (room node in the containment tree) rather than
+a display room name. Updated concordance row for DismissalRate (§ 5, row 589).
+Rust port uses inline tuple `(String, f64)` — unaffected by field rename.
 
 ### 1.2.0 -- 2026-06-17
 Additive (A-2 exploratory-recall): added `exploratoryRecall` to the capability enum

@@ -19,12 +19,22 @@ pub fn resolved_port() -> u16 {
 }
 
 /// Parse "http://127.0.0.1:4242" → port. Only loopback HTTP URLs are
-/// supported (the daemon binds loopback only).
+/// supported; non-loopback hosts are rejected to prevent the proxy and
+/// stdio bridge from being directed to a remote server (planned hardening —
+/// fails CLOSED if the host is not 127.0.0.1, localhost, or ::1).
 pub fn port_from_url(url: &str) -> Option<u16> {
     let rest = url.strip_prefix("http://")?;
     let hostport = rest.split('/').next()?;
-    let port = hostport.rsplit(':').next()?;
-    port.parse().ok()
+    // Split host and port on the last ':'. IPv6 addresses in brackets
+    // ("::1") also contain colons, so we strip brackets first.
+    let (host_raw, port_str) = hostport.rsplit_once(':')?;
+    // Strip IPv6 brackets (e.g. "[::1]" → "::1").
+    let host = host_raw.trim_matches(|c| c == '[' || c == ']');
+    // Enforce loopback: only 127.0.0.1, localhost, and ::1 are permitted.
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        return None;
+    }
+    port_str.parse().ok()
 }
 
 /// Whether the daemon answers on the port.
@@ -91,10 +101,19 @@ mod tests {
 
     #[test]
     fn url_port_parsing() {
+        // Loopback variants must parse correctly.
         assert_eq!(port_from_url("http://127.0.0.1:4242"), Some(4242));
         assert_eq!(port_from_url("http://127.0.0.1:4300/"), Some(4300));
+        assert_eq!(port_from_url("http://localhost:4242"), Some(4242));
+        assert_eq!(port_from_url("http://[::1]:4242"), Some(4242));
+        // Non-HTTP schemes must be rejected.
         assert_eq!(port_from_url("https://example.com"), None);
         assert_eq!(port_from_url("nonsense"), None);
+        // Non-loopback hosts must be rejected even when the URL is otherwise valid.
+        // Without this gate an attacker could point the proxy at a remote server.
+        assert_eq!(port_from_url("http://evil.com:4242"), None);
+        assert_eq!(port_from_url("http://192.168.1.1:4242"), None);
+        assert_eq!(port_from_url("http://0.0.0.0:4242"), None);
     }
 
     #[test]

@@ -123,4 +123,44 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
         &self,
         basis: &[u8],
     ) -> Result<Box<dyn TrainableEmbeddingBasis>, CorpusKitError>;
+
+    // ----- Maintained counts (incremental-counts change set, P3) -----------
+    //
+    // The counts seam lets `Corpus` keep each trainable provider's raw additive
+    // statistics current AS CHUNKS ARE WRITTEN — the "increment as we go" table —
+    // instead of rebuilding them from scratch by re-reading the whole corpus on
+    // every reindex. `Corpus` holds the provider as `Box<dyn ...>`, so these
+    // uniform methods are the bridge: each implementor routes them to its own
+    // method-specific accumulation (RI/PPMI fold term sequences; LSA/NMF fold
+    // documents). Persistence is the caller's job and happens at BATCH
+    // boundaries, never per chunk: re-serializing the whole counts blob on every
+    // chunk would be O(N·vocab) over an import — the very wall this removes.
+    //
+    // Swift mirror: the `addToCounts` / `serializeCounts` / `restoreCounts` /
+    // `countsVocabularySize` requirements on `TrainableEmbeddingBasis`.
+
+    /// Fold one chunk's raw text into the maintained accumulated counts.
+    ///
+    /// The implementor tokenizes with the canonical `default_keyword_tokens`
+    /// where its accumulation consumes term sequences (RI, PPMI), or folds the
+    /// raw document where it consumes documents (LSA, NMF). This is the per-chunk
+    /// half of the same additive logic `train_on_corpus` runs over a whole
+    /// corpus. Deterministic; does NOT finalize.
+    fn add_to_counts(&mut self, text: &str);
+
+    /// Serialize the maintained accumulated counts to a versioned blob — the RAW
+    /// additive state (the maintained statistics table), not the derived basis.
+    /// Persisted in `corpus_provider_counts`. Byte-identical to the Swift
+    /// implementor's `serializeCounts()`.
+    fn serialize_counts(&self) -> Vec<u8>;
+
+    /// Restore maintained counts from a blob, resuming incremental upkeep across
+    /// a restart. Mutates accumulation in place; does NOT rebuild the derived
+    /// basis. Returns `Err(CorpusKitError::DecodingFailure)` on a bad blob.
+    fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError>;
+
+    /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
+    /// trigger reads to decide when a basis has drifted enough to warrant a
+    /// refactor. Reflects the current accumulated state, not the derived basis.
+    fn counts_vocabulary_size(&self) -> usize;
 }

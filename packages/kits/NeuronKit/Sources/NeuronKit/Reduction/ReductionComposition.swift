@@ -12,10 +12,10 @@
 // set — found@10 holds while found@1/MRR lift.
 //
 // Determinism: the fold is a pure function of (query, candidates). The final
-// sort is stable by construction — weighted score descending, then coarse-pool
-// rank ascending — so equal-precision near-duplicates keep the coarse lane's
-// order and the reduce is bit-reproducible across runs and across the Swift and
-// (future) Rust ports.
+// sort is stable by construction — precision score descending, then candidate
+// content ascending (tie-break on content string for determinism across runs),
+// then coarse-pool rank ascending (last resort for identical-content pairs) —
+// so the reduce is bit-reproducible across the Swift and Rust ports.
 
 import Foundation
 
@@ -44,8 +44,9 @@ extension NeuronKit {
         /// `composition` arg value on `moot_recall_precise`.
         public let name: String
         /// The weighted signal terms summed into the per-candidate precision
-        /// score. Set-level signals (`mmr`) are applied as a re-rank pass after
-        /// the weighted-sum sort, in declaration order.
+        /// score. Set-level signals (`mmr`, `assembly`) are applied after the
+        /// weighted-sum sort: `mmr` as a diversity re-rank, `assembly` as a
+        /// split-fact partner expansion, both in declaration order.
         public let terms: [WeightedSignal]
         /// The MMR trade-off λ for the `mmr` re-rank term, in [0, 1]. 1.0 is
         /// pure relevance (no diversity); lower values trade relevance for
@@ -278,7 +279,11 @@ extension NeuronKit {
         // Bounded survivor set: a few× the limit, never below `limit`, never
         // above the pool. The true target cannot be pruned out of a generous
         // survivor window before content has a chance to promote it.
-        let survivorCount = min(candidates.count, max(limit, limit * max(survivorMultiple, 1)))
+        // Safe multiplication: limit * survivorMultiple can overflow when both
+        // values are large; report the overflow and clamp to pool size instead
+        // of returning a silently-wrong negative count. (NK-8 planned hardening)
+        let (product, overflowed) = limit.multipliedReportingOverflow(by: max(survivorMultiple, 1))
+        let survivorCount = min(candidates.count, max(limit, overflowed ? candidates.count : product))
         let survivors = Array(denseRanked.prefix(survivorCount))
 
         // Hydrate ONLY the survivors, then run the FULL composition (dense +
@@ -290,7 +295,9 @@ extension NeuronKit {
 
     /// Hydrate a candidate set: fetch each id's body via `hydrate` and return
     /// copies carrying that content. Candidates with no body returned keep their
-    /// existing (empty) content. Order is preserved. A `hydrate` failure
+    /// existing (empty) content. Order is preserved. Note: the reconstructed
+    /// copy does NOT carry `eventTime` or `isCurrentlyBelieved` — those are
+    /// populated by the reduce fold, not the hydrate step. A `hydrate` failure
     /// propagates — the caller decides whether an unhydratable survivor set is a
     /// failed result (it is, for fail-closed recall) rather than this helper
     /// silently returning body-free candidates.
@@ -305,9 +312,15 @@ extension NeuronKit {
             // hydration (for mixed compositions) or carried through unchanged
             // (for pure-dense compositions). The hydrate step only fills bodies;
             // it must not reset the precision score.
+            // Preserve eventTime and isCurrentlyBelieved: these are structural
+            // columns read at body-free hydration time (pool load) and must
+            // survive the content-fill hydration step. Losing them silently
+            // drops temporal state from the candidate before the precision fold
+            // and the T3 temporal scorer reads them. (NK-7 planned hardening)
             return ReductionCandidate(
                 id: c.id, content: body, room: c.room, score: c.score,
                 udcCode: c.udcCode, udcFacets: c.udcFacets, coarseRank: c.coarseRank,
+                eventTime: c.eventTime, isCurrentlyBelieved: c.isCurrentlyBelieved,
                 precisionScore: c.precisionScore)
         }
     }
@@ -327,7 +340,13 @@ extension NeuronKit {
     ) -> [ReductionCandidate] {
         let n = pool.count
         guard n > 1 else { return pool }
-        let lam = min(max(lambda, 0), 1)
+        // Guard NaN: IEEE 754 comparisons with NaN always return false, so a NaN
+        // lambda passes through min/max unchanged and then propagates to every MMR
+        // score, making all scores NaN. NaN > -inf is false, so bestIdx stays -1
+        // and the pool loop writes out-of-bounds. Default NaN to 0.5 (equal weight
+        // between relevance and diversity — the neutral MMR operating point).
+        // Mirrors Rust mmr_diversity_rerank NaN guard. (NK-9 planned hardening)
+        let lam = lambda.isNaN ? 0.5 : min(max(lambda, 0), 1)
 
         // Position-derived relevance: front of the pool is most relevant.
         // relevance(i) = (n - i) / n, in (0, 1], strictly decreasing.
@@ -417,7 +436,8 @@ extension NeuronKit {
     /// Extract reference codes of the form `REF-NNNN` (case-insensitive `ref`
     /// prefix, a hyphen, then digits) from `content`. The split-fact join key.
     /// Returns a set so a record naming several codes links to each partner.
-    /// Pure and deterministic; ASCII-only, matching the Rust port.
+    /// Pure and deterministic; uses Unicode `isLetter`/`isNumber` character
+    /// properties (not ASCII-restricted).
     static func referenceCodes(in content: String) -> Set<String> {
         guard !content.isEmpty else { return [] }
         var codes: Set<String> = []

@@ -7,9 +7,8 @@ import AriaMCP
 // This file is the headline demonstration of how an existing macOS
 // application attaches a MOOT and opens it over the ARIA_MCP server.
 //
-// Read MootSidecar.swift first. This file is the ten-line driver
-// around it. The pattern is the same as the bundled `aria-mcp`
-// executable (see ARIA_MCP/Sources/aria-mcp/AriaMCPMain.swift), with
+// Read MootSidecar.swift first. This file is the driver around it.
+// The pattern mirrors `apps/aria-mcp-server/Sources/aria-mcp/AriaMCPMain.swift`, with
 // one substitution: instead of constructing the dispatcher inline, we
 // ask `MootSidecar.attachInMemory()` for a ready-to-serve sidecar and
 // pass its dispatcher to the stdio server.

@@ -289,7 +289,7 @@ struct LexiconGapsTests {
             method: "tools/call",
             params: .object([
                 "name": .string("moot_write_journal"),
-                "arguments": .object([:]),  // content intentionally omitted
+                "arguments": .object([:]),  // entry intentionally omitted
             ])
         )
         let rawResponse = await dispatcher.handle(request)

@@ -46,6 +46,12 @@ impl UDCTreeDistance {
     /// Formula: raw = (len_a - lcp) + (len_b - lcp), divisor = max(len_a, len_b).
     /// Guard: both-empty strings are equal (caught by the identity check);
     /// when max_len = 0, return 0.0.
+    ///
+    /// The raw metric's codomain is [0, 2] (e.g. two non-empty strings with
+    /// no common prefix and equal length yield raw = 2 * len / len = 2.0).
+    /// CompositeDistance requires a normalized [0, 1] component and asserts
+    /// this invariant. Clamp before returning to satisfy that invariant at
+    /// the source. Mirrors Swift `UDCTreeDistance.distance`.
     pub fn distance(a: &str, b: &str) -> f64 {
         if a == b {
             return 0.0;
@@ -60,7 +66,9 @@ impl UDCTreeDistance {
         }
         let lcp = Self::longest_common_prefix_length(a, b);
         let raw = ((len_a - lcp) + (len_b - lcp)) as f64;
-        raw / max_len as f64
+        // Clamp to [0, 1] — the raw metric's codomain is [0, 2] but
+        // composite_distance requires a normalized [0, 1] component.
+        (raw / max_len as f64).clamp(0.0, 1.0)
     }
 }
 
@@ -205,11 +213,22 @@ mod tests {
     #[test]
     fn udc_no_common_prefix() {
         // "004" vs "37": lcp = "", raw = 3 + 2 = 5, divisor = max(3,2) = 3.
-        // d = 5/3 ≈ 1.667. The glref oracle uses max(len_a, len_b) as divisor
-        // which can exceed 1.0 when strings have no common prefix and differ
-        // in length. This matches the canonical lattice.json vectors.
+        // The raw formula gives 5/3 ≈ 1.667, but UDCTreeDistance clamps to
+        // [0, 1] before returning because CompositeDistance.distance requires
+        // a normalized [0, 1] component (enforced via precondition). Result: 1.0.
         let d = UDCTreeDistance::distance("004", "37");
-        assert!((d - 5.0 / 3.0).abs() < 1e-9);
+        assert_eq!(d, 1.0, "clamped to [0,1]: raw 5/3 ≈ 1.667 → 1.0");
+    }
+
+    #[test]
+    fn udc_no_prefix_equal_length_clamped_to_one() {
+        // Two strings with no common prefix and equal length produce raw = 2.0
+        // (the maximum of the unnormalized formula). After clamping, must return
+        // 1.0, not 2.0. Feeding 2.0 into CompositeDistance would trip its
+        // precondition(latticeDistance <= 1.0) invariant.
+        let d = UDCTreeDistance::distance("abc", "xyz");
+        assert_eq!(d, 1.0,
+            "no-common-prefix equal-length case must clamp to 1.0, not 2.0");
     }
 
     #[test]

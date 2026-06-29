@@ -233,13 +233,29 @@ public enum AriaResident {
         // Topology snapshot wiring: the governor writes via topologyHandler;
         // the HTTP server reads via topologyReader. Both closures capture the
         // same StatsStore reference — AriaMCP never imports ObserverSink.
-        let topologyHandler: (@Sendable (String, Date, Data) async -> Void)? = statsStore.map { store in
-            { @Sendable estate, generatedAt, payload in
+        // The handler's 4th argument is the stable topology-inputs fingerprint
+        // (F5): persisting it lets a restarting governor skip the full
+        // drawer/tunnel/fact read when inputs are unchanged.
+        let topologyHandler: (@Sendable (String, Date, Data, String) async -> Void)? = statsStore.map { store in
+            { @Sendable estate, generatedAt, payload, fingerprint in
                 do {
-                    try await store.writeTopologySnapshot(estate: estate, generatedAt: generatedAt, payload: payload)
+                    try await store.writeTopologySnapshot(
+                        estate: estate,
+                        generatedAt: generatedAt,
+                        payload: payload,
+                        fingerprint: fingerprint
+                    )
                 } catch {
                     Logging.stderr.log("AriaResident topology snapshot write failed: \(error)")
                 }
+            }
+        }
+        // F5: one-shot fingerprint loader. The governor calls this once on its
+        // first topology duty to learn the persisted fingerprint, so it can skip
+        // the full topology read when nothing changed since the last run.
+        let topologyFingerprintLoader: (@Sendable () async -> String?)? = statsStore.map { store in
+            { @Sendable in
+                try? await store.loadTopologyFingerprint(estate: handle.estateUUID.uuidString)
             }
         }
         let topologyReader: (@Sendable (String?) async -> Data?)? = statsStore.map { store in
@@ -277,7 +293,13 @@ public enum AriaResident {
         // current for the recall matrix without requiring any manual trigger.
         let graphAnalyticsHandler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void)? = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
-            let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+            // Resolve parentNodeIds to display names for per-wing iteration.
+            // Drawer no longer carries stored wing/room after ADR-017.
+            let estate = try await kit.estate(for: handle)
+            let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
+            let nodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
                 _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
@@ -289,6 +311,7 @@ public enum AriaResident {
             handle: handle,
             baseTickMs: config.brainTickMs,
             topologyHandler: topologyHandler,
+            topologyFingerprintLoader: topologyFingerprintLoader,
             topologyGate: topologyGate,
             graphAnalyticsHandler: graphAnalyticsHandler
         )

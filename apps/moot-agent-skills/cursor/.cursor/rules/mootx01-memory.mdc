@@ -33,6 +33,8 @@ or durable memory.
 - Use `moot_read_journal` to resume prior work.
 - Use `moot_memory_search` for broad recall.
 - Use `moot_recall_precise` for exact paths, versions, names, dates, numbers, and near-duplicates.
+- Use `moot_recall_shaped` for associative, conceptual, or other fusion-steered recall.
+- Use `moot_recall_distilled` for compact factoid answers from the distilled tier.
 - Use `moot_fact_search` for structured facts.
 - Use `moot_list_lenses`, relevant `moot_lens_*` tools, or `moot_synthesize` for analysis.
 - File durable decisions with `moot_file_memory`.
@@ -40,7 +42,7 @@ or durable memory.
 - Link related memories with `moot_link_memories`.
 - Write session continuity with `moot_write_journal`.
 - Correct memory with confirm/update/withdraw/retire tools.
-- Run `moot_dream` after bulk import or major memory growth.
+- Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
 If MOOTx01 is unavailable, disclose that and answer only from current context.
 

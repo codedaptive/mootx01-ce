@@ -24,8 +24,8 @@ pub trait Tokenizer: Send + Sync {
     fn tokenize(&self, text: &str) -> Vec<i32>;
 
     /// Split text into BM25-style keyword tokens. Default
-    /// implementation lowercases and splits on Unicode word
-    /// boundaries.
+    /// implementation lowercases and keeps runs of Unicode-alphabetic
+    /// or ASCII-digit characters, splitting on everything else.
     fn keyword_tokens(&self, text: &str) -> Vec<String> {
         default_keyword_tokens(text)
     }

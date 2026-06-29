@@ -6,9 +6,20 @@ import SubstrateML
 // MARK: - Distillation Lens Tests
 //
 // Verify the thin NeuronKit lens over SubstrateML.DistillationPipeline.
-// These tests use DistillationPipeline.defaultExtractor (capitalization heuristic)
-// to exercise the lens without pulling in EideticLib. The pass-through contract
-// is: every DistillationOutput field appears verbatim in DistillationLensResult.
+//
+// Two extractor paths are exercised here:
+//
+//   Stub path (DistillationPipeline.defaultExtractor, injected explicitly):
+//     Used by the pass-through tests to verify the lens projection contract
+//     independent of which extractor is the production default.
+//
+//   Production HMM path (NeuronKit.distillCluster with no explicit extractor):
+//     Uses the HMM feature extractor wired as the default in NeuronKit.
+//     Tests that call distillCluster without an extractor argument exercise
+//     this path (injectionDepthConsistentWithPipeline, injectionDepthFactoidWithProvenance).
+//
+// The pass-through contract is: every DistillationOutput field appears
+// verbatim in DistillationLensResult.
 
 @Suite("DistillationLens")
 struct DistillationLensTests {

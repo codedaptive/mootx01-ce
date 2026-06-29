@@ -6,8 +6,9 @@
 //!
 //! One-door (FDC seam): verifies that `moot_file_memory` content is classified
 //! in the GeniusLocusKit capture seam (`capture_with_mode`), not per-caller.
-//! The drawer's `udc_code` must be a real classified code, not the "000"
-//! unclassified sentinel (the UDC root; was incorrectly "000.000" before).
+//! The standard path produces a real classified code; later tests cover
+//! unclassifiable content and high-frequency jargon where "000" or non-empty
+//! is the accepted fallback (the UDC root; was incorrectly "000.000" before).
 //!
 //! Parity: the Swift counterpart tests live in
 //! `Tests/AriaMCPTests/FdcCaptureTests.swift`.
@@ -142,7 +143,9 @@ fn unknown_estate_id_error_is_clean_english() {
 /// than relying on the tool response text (which does not surface `udc_code`).
 #[test]
 fn file_memory_with_classifiable_content_sets_real_udc_code() {
-    let registry = EstateRegistry::new_inmemory();
+    // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
+    // so the "exactly one drawer" read-back targets this test's content.
+    let registry = EstateRegistry::new_inmemory_bare();
 
     // File a memory whose content the FDC encoder reliably classifies.
     let classifiable = "Biology is the scientific study of life and living organisms, including their physical structure, chemical processes, molecular interactions, physiological mechanisms, and evolution.";
@@ -237,12 +240,15 @@ fn empty_location_error_does_not_expose_invalid_content_prefix() {
 }
 
 /// Filing a memory whose content is not classifiable (short noise text)
-/// falls back gracefully to the "000" unclassified sentinel rather than
-/// failing. Confirms the fallback path is live and that FDC failure does
-/// not propagate as an error to the tool surface.
+/// falls back gracefully without failing. Confirms the fallback path is live
+/// and that FDC failure does not propagate as an error to the tool surface.
+/// The assertion requires only a non-empty `udc_code`; both "000" and a
+/// classified code are accepted.
 #[test]
 fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
-    let registry = EstateRegistry::new_inmemory();
+    // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
+    // so the "exactly one drawer" read-back targets this test's content.
+    let registry = EstateRegistry::new_inmemory_bare();
 
     // A string of random tokens with no meaningful FDC signature.
     let noise = "zzq xkj blrt fnp";
@@ -303,7 +309,9 @@ fn file_memory_and_direct_capture_produce_same_udc_code() {
     let classifiable = "Biology is the scientific study of life and living organisms, including their physical structure, chemical processes, molecular interactions, physiological mechanisms, and evolution.";
 
     // Path 1 — file_memory tool (the MCP caller path).
-    let registry1 = EstateRegistry::new_inmemory();
+    // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
+    // so drawers1[0] is this test's drawer.
+    let registry1 = EstateRegistry::new_inmemory_bare();
     let a = args!["content" => classifiable, "location" => "science-room"];
     dispatch_tool("moot_file_memory", &a, &registry1, &SurfacedRecallLedger::new())
         .expect("file_memory must succeed");
@@ -322,7 +330,8 @@ fn file_memory_and_direct_capture_produce_same_udc_code() {
     // Path 2 — direct capture_with_mode with the canonical "000" sentinel
     //           (mirrors what VaultKit's make_capture_frame produces when a
     //           note has no explicit frontmatter `udc`).
-    let registry2 = EstateRegistry::new_inmemory();
+    // _bare: controlled single-drawer estate (parity with Path 1 above).
+    let registry2 = EstateRegistry::new_inmemory_bare();
     let estate2 = registry2.resolve(&BTreeMap::new(), "estateID").expect("estate2 must resolve");
     let mut coord2 = estate2.coord.lock().expect("coord2 lock");
     let frame = CaptureFrame::new(
@@ -366,7 +375,9 @@ fn file_memory_and_direct_capture_produce_same_udc_code() {
 /// An anchor that differs from "000" passes through unchanged.
 #[test]
 fn explicit_udc_code_on_capture_frame_is_preserved_by_seam() {
-    let registry = EstateRegistry::new_inmemory();
+    // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
+    // so the "exactly one drawer" read-back targets this test's content.
+    let registry = EstateRegistry::new_inmemory_bare();
     let estate = registry.resolve(&BTreeMap::new(), "estateID").expect("estate must resolve");
     let mut coord = estate.coord.lock().expect("coord lock");
     let now: i64 = std::time::SystemTime::now()
@@ -413,8 +424,8 @@ fn explicit_udc_code_on_capture_frame_is_preserved_by_seam() {
 /// UDC code. The FdcMatcher tie-count guard (MAX_TIED_WINNERS_FOR_CLASSIFICATION)
 /// detects when a large set of codes are tied at the top IDF score — signalling
 /// that the bag is dominated by common cross-domain vocabulary rather than
-/// subject-specific terms — and returns UNRESOLVED. The capture seam then
-/// preserves the "000" unclassified sentinel.
+/// subject-specific terms — and returns UNRESOLVED. The assertion accepts "000"
+/// or an empty string; both represent an honest non-classification.
 ///
 /// Real examples of the pre-fix bug (raw-scoring tie-break accidents):
 ///   "computer software programming" → UDC 235 (angels/devotional) WRONG
@@ -445,7 +456,9 @@ fn high_frequency_jargon_produces_honest_unclassified_anchor() {
     ];
 
     for (content, location) in &high_frequency_items {
-        let registry = EstateRegistry::new_inmemory();
+        // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint
+        // drawers, so the "one drawer per content item" read-back is exact.
+        let registry = EstateRegistry::new_inmemory_bare();
         let a = args!["content" => *content, "location" => *location];
         let result =
             dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())

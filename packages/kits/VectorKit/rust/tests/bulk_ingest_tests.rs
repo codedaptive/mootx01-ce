@@ -168,6 +168,40 @@ fn sidecarless_bulk_import_builds_once_and_is_correct() {
     assert_eq!(store.sidecar_write_count(), 0, "no sidecar → no writes");
 }
 
+// Memory-only deferred-index window (no sidecar): begin → SEVERAL add_payloads
+// (one per simulated drain pass) → publish must rebuild the index ONCE and
+// recover every vector. The path the CorpusKit ingest drain exercises in serve
+// (resident array is memory-only). Mirrors Swift
+// `memoryOnlyDeferredWindowMergesAllPassesOnce`.
+#[test]
+fn memory_only_deferred_window_merges_all_passes_once() {
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    open_schema(&storage);
+    let store = VectorStore::new_with_threshold(
+        storage,
+        None,
+        100,
+        vectorkit::engine::mih::MIHBandCount::M16,
+    );
+
+    let n = 300usize;
+    store.begin_deferred_index().expect("begin");
+    // Three "drain passes" worth of writes inside one deferred window.
+    let p1: Vec<VectorPayloadInput> = (0..100).map(binary_input).collect();
+    let p2: Vec<VectorPayloadInput> = (100..200).map(binary_input).collect();
+    let p3: Vec<VectorPayloadInput> = (200..n).map(binary_input).collect();
+    store.add_payloads(&p1).expect("add p1");
+    store.add_payloads(&p2).expect("add p2");
+    store.add_payloads(&p3).expect("add p3");
+    store.publish_resident_index().expect("publish");
+
+    for i in (0..n).step_by(37) {
+        let m = store.find_nearest(&engram(i), "minilm", 1).expect("find");
+        assert_eq!(m.first().map(|x| x.item_id.as_str()), Some(format!("chunk-{i}").as_str()));
+        assert_eq!(m.first().map(|x| x.distance), Some(0));
+    }
+}
+
 // ── (c) Crash-safety: drop before flush, reopen → rebuild from table ─────────
 
 #[test]
@@ -290,4 +324,118 @@ fn mixed_binary_and_float_batch() {
     let fl = store.find_nearest_float(&float_vec(3), "minilm", 3).expect("find float");
     assert!(!fl.is_empty());
     assert_eq!(fl.first().map(|m| m.item_id.as_str()), Some("chunk-3"));
+}
+
+// ── Finding 2: deferred buffer back-pressure ─────────────────────────────
+
+/// A flood of memory-only deferred adds must trigger intermediate flushes and
+/// stay correct — the buffer must NOT grow without bound.
+///
+/// Uses a custom `deferred_pending_limit = 100` so only 100 records are needed
+/// to trigger a flush. Sends 300 records in 50-record batches → three flush
+/// events occur during the deferred window. After `publish_resident_index`,
+/// every seeded item must be retrievable at distance 0.
+///
+/// Mirrors Swift `testDeferredBufferBackPressureFlushesAndStaysCorrect`.
+#[test]
+fn deferred_buffer_back_pressure_bounds_memory() {
+    use vectorkit::engine::mih::MIHBandCount;
+
+    // Memory-only store with a tiny pending limit (100) so flush triggers at 101 records.
+    // mih_threshold = 10_000 to keep BruteForce active (avoids MIH build overhead).
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    open_schema(&storage);
+    let store = VectorStore::new_with_deferred_limit(
+        storage,
+        None,
+        10_000,
+        MIHBandCount::M16,
+        100,  // flush limit: triggers after 100 records
+    );
+
+    // 300 records in batches of 50 → three batches exceed the limit;
+    // three intermediate flushes should occur.
+    const TOTAL: usize = 300;
+    const BATCH_SIZE: usize = 50;
+
+    store.begin_deferred_index().expect("begin");
+
+    let mut batch_buf: Vec<VectorPayloadInput> = Vec::with_capacity(BATCH_SIZE);
+    for i in 0..TOTAL {
+        batch_buf.push(VectorPayloadInput {
+            item_id: format!("chunk-{i}"),
+            vector_index: 0,
+            payload: VectorPayload::from_engram(&engram(i)),
+            model_id: "minilm".to_string(),
+            model_version: "1.0.0".to_string(),
+            filed_at_unix_secs: FILED_AT,
+        });
+        if batch_buf.len() == BATCH_SIZE {
+            store.add_payloads(&batch_buf).expect("add_payloads");
+            batch_buf.clear();
+        }
+    }
+    if !batch_buf.is_empty() {
+        store.add_payloads(&batch_buf).expect("add_payloads final");
+    }
+    store.publish_resident_index().expect("publish");
+
+    // Every 37th item must be findable at distance 0 after the flushed publish.
+    for i in (0..TOTAL).step_by(37) {
+        let expected_id = format!("chunk-{i}");
+        let results = store.find_nearest(&engram(i), "minilm", 1).expect("find");
+        assert_eq!(
+            results.first().map(|h| h.item_id.as_str()),
+            Some(expected_id.as_str()),
+            "chunk-{i} must be findable at dist=0 after back-pressure flush"
+        );
+        assert_eq!(results.first().map(|h| h.distance), Some(0),
+            "self-match must be distance 0");
+    }
+}
+
+/// Same-itemID records survive in a deferred memory-only window and both
+/// are retrievable after publish. Verifies Finding 1 (MIH collision fix)
+/// works through the deferred write path as well as the immediate path.
+#[test]
+fn deferred_window_same_item_id_both_survive() {
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    open_schema(&storage);
+    let store = VectorStore::new_no_sidecar(storage);
+
+    store.begin_deferred_index().expect("begin");
+
+    // Two distinct vectors under the same item_id, different vector_index.
+    let batch = vec![
+        VectorPayloadInput {
+            item_id: "shared-item".to_string(),
+            vector_index: 0,
+            payload: VectorPayload::from_engram(&Engram::new(0, 0, 0, 0)),
+            model_id: "test-model".to_string(),
+            model_version: "1".to_string(),
+            filed_at_unix_secs: FILED_AT,
+        },
+        VectorPayloadInput {
+            item_id: "shared-item".to_string(),
+            vector_index: 1,
+            payload: VectorPayload::from_engram(&Engram::new(1, 0, 0, 0)),
+            model_id: "test-model".to_string(),
+            model_version: "1".to_string(),
+            filed_at_unix_secs: FILED_AT,
+        },
+    ];
+    store.add_payloads(&batch).expect("add_payloads");
+    store.publish_resident_index().expect("publish");
+
+    // Query with the zero-vector — both slots must be in the k=4 result.
+    // vector_index=0 encodes Engram(0,0,0,0) → distance 0 to zero-probe.
+    // vector_index=1 encodes Engram(1,0,0,0) → distance 1 to zero-probe.
+    let zero = Engram::new(0, 0, 0, 0);
+    let hits = store.find_nearest(&zero, "test-model", 4).expect("find");
+    assert_eq!(hits.len(), 2, "both same-item_id entries must survive after publish");
+    // Both hits share the same item_id; distinguish them by Hamming distance.
+    assert_eq!(hits[0].item_id, "shared-item");
+    assert_eq!(hits[0].distance, 0, "zero-vector slot must rank first (dist=0)");
+    assert_eq!(hits[1].item_id, "shared-item");
+    assert_eq!(hits[1].distance, 1, "one-bit-set slot must rank second (dist=1)");
 }

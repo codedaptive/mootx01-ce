@@ -1,10 +1,11 @@
 // StorageErrorTests.swift
 //
-// Part 2 coverage gap: PersistenceKitCoreTypeTests asserted Equatable only on
-// the schemaMismatch case. StorageError's Equatable conformance carries payloads
-// of several shapes (Int, String, TimeInterval, ColumnType), and the encryption
-// invariant tests rely on .constraintViolation matching. This suite pins
-// per-case equality, payload sensitivity, and cross-case inequality.
+// Representative equality and payload coverage for StorageError.
+// StorageError's Equatable conformance carries payloads of several shapes
+// (Int, String, TimeInterval, ColumnType), and the encryption invariant
+// tests rely on .constraintViolation matching. This suite covers
+// same-payload equality, differing-payload inequality, and cross-case inequality
+// for a representative subset of cases (not exhaustive per-case coverage).
 
 import Testing
 import Foundation

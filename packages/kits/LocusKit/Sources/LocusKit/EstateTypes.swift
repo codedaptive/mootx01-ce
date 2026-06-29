@@ -66,9 +66,8 @@ public struct OwnerCredentials: Sendable, Equatable {
 /// per spec I-5 and § 5.8.
 ///
 /// The four fields are already stored on `Drawer` directly. This type
-/// promotes them into a single named value so `CaptureFrame` (shipped
-/// by LOCI_V035_14) can pass an anchor as a unit rather than as four
-/// parallel parameters.
+/// promotes them into a single named value so `CaptureFrame` can pass
+/// an anchor as a unit rather than as four parallel parameters.
 ///
 /// `udcCode` is required at storage; the substrate enforces TEXT NOT
 /// NULL DEFAULT ''. Non-emptiness at capture time is enforced by the
@@ -133,4 +132,11 @@ public enum EstateError: Error, Sendable, Equatable {
     /// any database call is made so callers receive a structurally
     /// distinct error rather than a generic substrate failure.
     case emptyOwnerIdentifier
+
+    /// A Keychain `SecItem` call returned a non-success status code.
+    /// Thrown by `KeychainEstateIdentityKeyStore` when `SecItemAdd`,
+    /// `SecItemUpdate`, `SecItemCopyMatching`, or `SecItemDelete` fail.
+    /// `status` is the raw `OSStatus` value (Int32) from the failing call,
+    /// readable as a human-readable string via `SecCopyErrorMessageString`.
+    case keychainError(status: Int32)
 }

@@ -2,8 +2,9 @@
 //
 // Force-tests for the NEAR-REALTIME, LOAD- and SEQUENCE-robust encode drain
 // (the QueueKit near-realtime ingest+classify promise). The encode queue's
-// watch-driven background worker (mountEncodeQueue) ingests a regular capture
-// into the Corpus the instant the EncodeJob is committed — so captured content
+// foreground drain worker (Corpus.mountIngestQueue — CorpusKit owns the encode
+// pipeline) ingests a regular capture into the Corpus shortly after it is
+// enqueued — so captured content
 // becomes BM25/vector recallable in near-realtime, regardless of burst load or
 // arrival order, WITHOUT the caller driving the drain.
 //
@@ -19,7 +20,7 @@
 import Testing
 import Foundation
 import LocusKit
-import CorpusKit
+@testable import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
 import VectorKit
@@ -32,7 +33,7 @@ import QueueKit
 private struct InjectedTransientIngestError: Error {}
 
 /// Tracks which drawers have already had their (single) transient ingest failure
-/// injected. The encode-drain ingest hook runs on the GLK actor (serialised),
+/// injected. The encode-drain ingest hook runs on the Corpus actor (serialised),
 /// but the closure is `@Sendable`, so the set is lock-guarded for Sendable
 /// safety. The FIRST ingest attempt for a given drawer fails once; every
 /// subsequent attempt for that drawer succeeds — a transient fault that clears.
@@ -279,14 +280,20 @@ struct EncodeDrainNearRealtimeTests {
         // Inject a TRANSIENT per-drawer ingest failure: each drawer's FIRST
         // ingest attempt fails once, then its retry succeeds (a true transient
         // fault that clears, not a permanent one). The bounded at-least-once
-        // retry in `ingestAndReply` must re-attempt and land every job. Tracking
-        // per-drawer (not a global budget) is what makes the fault transient —
-        // a global "fail the next N attempts" budget would let early jobs exhaust
-        // their whole retry budget on themselves and be (correctly) dropped as
-        // permanent failures, which is a different scenario.
+        // retry in the Corpus drain's `ingestOneAndReply` must re-attempt and
+        // land every job. Tracking per-drawer (not a global budget) is what makes
+        // the fault transient — a global "fail the next N attempts" budget would
+        // let early jobs exhaust their whole retry budget on themselves and be
+        // (correctly) dropped as permanent failures, a different scenario.
+        //
+        // The encode pipeline lives in CorpusKit now, so the failure hook is
+        // armed on the estate's Corpus (reached via the GLK actor's corpusKits
+        // registry). Arming it flips the drain onto its serial per-job retry path.
         let failedOnce = FirstAttemptFailureSet()
-        await kit._setEncodeIngestFailureHook { drawerID in
-            if failedOnce.shouldFailFirstAttempt(drawerID) {
+        let corpus = await kit.corpusKits[handle]
+        #expect(corpus != nil, "a provisioned GLK estate must hold a Corpus to arm the ingest seam")
+        await corpus?._armIngestFailureHook { sourceID in
+            if failedOnce.shouldFailFirstAttempt(sourceID) {
                 throw InjectedTransientIngestError()  // transient: fails once per drawer, then clears
             }
         }

@@ -30,7 +30,8 @@ pub struct ReductionCandidate {
     pub id: String,
     /// The drawer's content (empty when the hit was not hydrated).
     pub content: String,
-    /// The drawer's room (echoed for serialization parity).
+    /// The drawer's room display name resolved from the node tree
+    /// (echoed for serialization parity).
     pub room: String,
     /// The dense per-lane recall signal carried from GLK (Step 2).
     pub score: RecallScoreVector,
@@ -61,7 +62,11 @@ impl ReductionCandidate {
     /// position `coarse_rank`. An unhydrated hit (no drawer) yields empty
     /// content and an unanchored lattice. The temporal fields come from the
     /// drawer's body-free columns. Mirrors Swift `ReductionCandidate.from(hit:coarseRank:)`.
-    pub fn from_hit(hit: &RecallHit, coarse_rank: usize) -> Self {
+    pub fn from_hit(
+        hit: &RecallHit,
+        coarse_rank: usize,
+        node_names: &std::collections::HashMap<String, (String, String)>,
+    ) -> Self {
         // Bits 0–5 of the adjective bitmap hold the state axis (cookbook §2.3).
         // Decode to a State and ask the Cluster-A predicate — the same
         // body-free currency read the Swift port does via `drawer.state.isClusterA`.
@@ -69,9 +74,16 @@ impl ReductionCandidate {
             match &hit.drawer {
                 Some(d) => {
                     let state = State::from_raw(d.adjective_bitmap & 0x3F);
+                    // Drawer no longer carries wing/room display names (ADR-017
+                    // node-tree migration). Resolve the room display name from
+                    // the node_names map keyed by parent_node_id.
+                    let (_wing, room) = node_names
+                        .get(&d.parent_node_id)
+                        .cloned()
+                        .unwrap_or_default();
                     (
                         d.content.clone(),
-                        d.room.clone(),
+                        room,
                         d.udc_code.clone(),
                         d.udc_facets.clone(),
                         Some(d.event_time),
@@ -331,8 +343,8 @@ pub fn token_exact_rate(query: &str, candidate: &str) -> f64 {
 
 /// Extract reference codes of the form `REF-NNNN` (case-insensitive `ref`
 /// prefix, a hyphen, then digits) from `content`. The split-fact join key.
-/// Pure and deterministic; ASCII-only, matching the Swift port. Mirrors Swift
-/// `referenceCodes(in:)`.
+/// Pure and deterministic; uses Unicode `char::is_alphanumeric` and
+/// `char::is_numeric` (not ASCII-restricted). Mirrors Swift `referenceCodes(in:)`.
 pub fn reference_codes(content: &str) -> BTreeSet<String> {
     let mut codes = BTreeSet::new();
     if content.is_empty() {

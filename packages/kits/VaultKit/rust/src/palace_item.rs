@@ -16,9 +16,10 @@
 //! pump. The per-noun read knowledge stays in the driver; the per-noun WIRE
 //! knowledge (tool, native args, envelope, verify) stays here in the kit.
 //!
-//! The envelope-field map uses `serde_json::Value` keyed in a `BTreeMap`, so
-//! serialization is sorted/deterministic and the four-noun envelope bytes match
-//! the Swift port for identical input (the cross-language conformance anchor).
+//! The envelope-field map top-level key order is deterministic via `BTreeMap`.
+//! Byte-identical cross-language output requires the codec to sort nested
+//! object keys explicitly — top-level BTree ordering alone is not sufficient
+//! if nested `serde_json::Value` maps use `IndexMap` order.
 
 use std::collections::BTreeMap;
 

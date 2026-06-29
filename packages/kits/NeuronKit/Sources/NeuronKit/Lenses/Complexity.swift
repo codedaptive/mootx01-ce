@@ -49,20 +49,32 @@ extension NeuronKit {
 
         let mi: Float32?
         if let j = joint {
-            // Normalise the joint matrix as a flat probability distribution,
-            // then reshape into the [[Float32]] form InformationTheory expects.
-            let flat = j.flatMap { $0 }
-            let total = flat.reduce(0.0, +)
-            let normJ: [[Float32]]
-            if total > 0 {
-                let cols = j.isEmpty ? 0 : j[0].count
-                let normFlat = flat.map { $0 / total }
-                normJ = stride(from: 0, to: normFlat.count, by: cols == 0 ? 1 : cols)
-                    .map { Array(normFlat[$0..<min($0 + (cols == 0 ? 1 : cols), normFlat.count)]) }
+            // Guard: reject empty, ragged, or zero-column joint matrices. (NK-10 planned hardening)
+            // A ragged matrix (rows with different column counts) would cause
+            // undefined MI computation — stride-slicing misaligns rows and
+            // InformationTheory.mutualInformation receives inconsistent input.
+            // An empty or zero-column matrix carries no joint information.
+            // Returning nil for invalid input follows the B-8 "all-zero → nil"
+            // convention and prevents a silent wrong-answer path.
+            // Mirrors Rust complexity() square-matrix guard.
+            let cols = j.first?.count ?? 0
+            if j.isEmpty || cols == 0 || !j.allSatisfy({ $0.count == cols }) {
+                mi = nil
             } else {
-                normJ = j.map { $0.map { _ in Float32(0) } }
+                // Normalise the joint matrix as a flat probability distribution,
+                // then reshape into the [[Float32]] form InformationTheory expects.
+                let flat = j.flatMap { $0 }
+                let total = flat.reduce(0.0, +)
+                let normJ: [[Float32]]
+                if total > 0 {
+                    let normFlat = flat.map { $0 / total }
+                    normJ = stride(from: 0, to: normFlat.count, by: cols)
+                        .map { Array(normFlat[$0..<min($0 + cols, normFlat.count)]) }
+                } else {
+                    normJ = j.map { $0.map { _ in Float32(0) } }
+                }
+                mi = InformationTheory.mutualInformation(joint: normJ)
             }
-            mi = InformationTheory.mutualInformation(joint: normJ)
         } else {
             mi = nil
         }

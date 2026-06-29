@@ -226,8 +226,8 @@ fn estates_payload_rolls_up_events_per_estate() {
     let a = p.estates.iter().find(|e| e.id == "estate-a").unwrap();
     assert_eq!(a.event_count, 2);
     assert!(a.last_event_ts.is_some());
-    // The manager's own estates_payload carries no admin section (HttpReadApi
-    // merges the host's EstateAdmin section in).
+    // admin is None here because no daemon proxy is available in this test
+    // environment; in production the proxy may populate admin from the daemon.
     assert!(p.admin.is_none());
     m.stop();
 }
@@ -278,7 +278,7 @@ fn graph_payload_serves_stored_snapshot() {
         let store = m.stats_store().unwrap();
         // A minimal stored snapshot the governor would write.
         let snapshot = r#"{"nodes":[{"id":"n1","nounType":0,"communityId":0,"centrality":0.5,"anomaly":false}],"edges":[],"structurePending":false,"generatedTs":"2023-11-14T22:13:20.000Z"}"#;
-        store.write_topology_snapshot("estate-a", NOW, snapshot).unwrap();
+        store.write_topology_snapshot("estate-a", NOW, snapshot, None).unwrap();
     }
     let p = m.graph_payload(NOW, Some("estate-a")).unwrap();
     assert!(!p.structure_pending);

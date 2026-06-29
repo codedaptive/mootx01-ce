@@ -5,9 +5,9 @@
 // T is a sparse 3D array indexed by
 //   (source_field_value, target_field_value, lag_bucket)
 // where source_field_value and target_field_value are compound
-// (field, value) pairs, and lag_bucket is an index in 0..8
+// (field, value) pairs, and lag_bucket is an index in 0..7
 // corresponding to the log-spaced minute thresholds
-// {1, 2, 4, 8, 16, 32, 64, 128} per cookbook § 6.4.
+// {1, 2, 4, 8, 16, 32, 64, 128} per cookbook § 6.4 (8 buckets, 0–7).
 //
 // Each cell counts the number of times a row with the source
 // (field, value) preceded a row with the target (field, value)
@@ -21,16 +21,14 @@
 // This is the substrate's primitive for distinguishing
 // co-activation from causation.
 //
-// Update schedule: T is updated weekly by the dreaming daemon
-// per cookbook § 6.4. Update pass iterates pairs of audit-log
-// rows (a, b) where 0 < (b.capture_time - a.capture_time) < 256
-// minutes, computes lag_bucket = log2_bucket(time_diff_minutes),
-// and increments T for every cross-product of (field, value)
-// pairs from row a × row b.
+// Update schedule: T is intended to be updated by the dreaming daemon
+// per cookbook § 6.4. The current ReferenceRuleExecutor does not update
+// MatrixT; the update pass described here (iterate audit-log row pairs,
+// compute lag_bucket, increment T) is not yet wired in this reference.
 //
-// Decay: T HAS decay (cookbook § 6.8 table). Half-life: 90 days
-// (faster than O because causal patterns drift faster than
-// co-occurrence patterns).
+// Decay: T HAS decay (cookbook § 6.8 table). Half-life: 30 days
+// per glref-swift-MatrixDecay (faster than O because causal
+// patterns drift faster than co-occurrence patterns).
 //
 // Storage estimate: ~10K-50K populated cells × (8 bytes key + 8
 // bytes value) per cookbook § 6.4 = 160-800 KB at v0.36.

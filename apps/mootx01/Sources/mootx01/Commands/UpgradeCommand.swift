@@ -1,18 +1,13 @@
 // UpgradeCommand.swift
 //
 // Replace the installed mootx01 binary with a newer release, then restart
-// both background agents. Two upgrade paths:
-//
-//   Online (default): hit GitHub releases API, download the platform asset,
-//   verify SHA-256, extract, and replace the installed binary. Falls back to
-//   the local-build path if the network call fails.
+// both background agents. Upgrade installs only from a local binary:
 //
 //   Local (--from <path>): mirrors the original developer workflow — copies a
 //   freshly built binary from an explicit path or searches .build/release/
 //   and .build/debug/ relative to the current directory.
 //
 // Use --check to query the latest release without downloading.
-// Use --yes to skip the confirmation prompt in the online path.
 
 import ArgumentParser
 import Foundation
@@ -21,21 +16,17 @@ import MootInstallerCore
 struct UpgradeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "upgrade",
-        abstract: "Upgrade mootx01 to the latest release or a local build.",
+        abstract: "Upgrade mootx01 from a local build.",
         discussion: """
-            Without arguments, upgrade downloads the latest release from GitHub,
-            verifies the SHA-256 checksum, installs the binary, and restarts
-            background services. Falls back to searching the local build tree
-            (.build/release/mootx01, .build/debug/mootx01) if the network call fails.
+            Upgrade installs a local binary and restarts background services.
+            Without --from, it searches the local build tree
+            (.build/release/mootx01, .build/debug/mootx01).
 
-            Use --from to skip the online check and install from a specific path:
+            Use --from to install from a specific path:
               mootx01 upgrade --from .build/release/mootx01
 
             Use --check to print the latest available version without downloading:
               mootx01 upgrade --check
-
-            Use --yes to skip the download confirmation prompt:
-              mootx01 upgrade --yes
             """
     )
 
@@ -45,16 +36,16 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("check"), help: "Print the latest available version and exit without downloading.")
     var checkOnly: Bool = false
 
-    @Flag(name: .long, help: "Skip the confirmation prompt before downloading a new release.")
+    @Flag(name: .long, help: "Deprecated; online binary installation is disabled.")
     var yes: Bool = false
 
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
 
-    // run() is intentionally inline: three mutually exclusive paths (--check, online,
-    // local-build) each terminate with an early return or throw. Extracting three
-    // single-use helpers that each return immediately would scatter closely-related
-    // prompt / fallback / error-handling logic without reducing actual complexity.
+    // run() is intentionally inline: --check terminates early, then the local-build
+    // path copies the selected binary and restarts services. Extracting single-use
+    // helpers would scatter closely-related error-handling logic without reducing
+    // actual complexity.
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd  = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -62,7 +53,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // --check: query GitHub and print the latest tag without downloading.
         if checkOnly {
             let downloader = ReleaseDownloader(
-                repo: "codedaptive/mootx01-ce",
+                repo: "codedaptive/mootx01-ee",
                 currentVersion: Mootx01.currentVersion)
             if let tag = try await downloader.latestTag() {
                 print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -70,37 +61,6 @@ struct UpgradeCommand: AsyncParsableCommand {
                 print("Already up to date (\(Mootx01.currentVersion)).")
             }
             return
-        }
-
-        // Online path: attempt a GitHub release download when --from is not given.
-        if from == nil {
-            let downloader = ReleaseDownloader(
-                repo: "codedaptive/mootx01-ce",
-                currentVersion: Mootx01.currentVersion)
-            do {
-                guard let tag = try await downloader.latestTag() else {
-                    print("Already up to date (\(Mootx01.currentVersion)).")
-                    return
-                }
-                print("New version available: \(Mootx01.currentVersion) \u{2192} \(tag)")
-                if !yes {
-                    print("Download and install \(tag)? [y/N] ", terminator: "")
-                    let response = readLine() ?? ""
-                    guard response.lowercased() == "y" || response.lowercased() == "yes" else {
-                        print("Upgrade cancelled.")
-                        return
-                    }
-                }
-                let newBinary  = try await downloader.download(tag: tag)
-                let binaryPath = try downloader.replace(newBinary: newBinary, homeDirectory: home)
-                print("Installed:      \(binaryPath)")
-                restartAgents(home: home)
-                print("\nUpgraded to \(tag). Run `mootx01 status` to confirm.")
-                return
-            } catch {
-                // Network failure or bad checksum: fall through to the local-build search.
-                print("Online upgrade failed (\(error)). Falling back to local build search\u{2026}")
-            }
         }
 
         // Local path: resolve from --from flag or search .build/ tree (original behavior).

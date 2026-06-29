@@ -278,7 +278,7 @@ fn drawer_labels(drawer: &Drawer) -> Vec<String> {
         content_kind_label(drawer.content_kind()).to_string(),
         capture_channel_label(drawer.capture_channel()).to_string(),
         sensitivity_label(drawer.adjective_sensitivity()).to_string(),
-        format!("room:{}", drawer.room),
+        format!("room:{}", drawer.parent_node_id),
     ]
 }
 
@@ -523,11 +523,11 @@ mod tests {
     }
 
     // CK-AR-OV: more than 64 distinct labels trips the documented cap.
-    // 70 unique rooms (+ kind/channel labels shared by every drawer)
-    // exceed the 64-label table; the recipe flags the overflow AND still
-    // mines rules over the kept labels — the sorted table keeps the
-    // channel:/kind: labels (they precede room:* alphabetically), which
-    // co-occur in every drawer.
+    // 70 unique rooms (+ kind/channel/sensitivity labels contributed by every
+    // drawer) exceed the 64-label table; the recipe flags the overflow AND
+    // still mines rules over the kept labels — the sorted table keeps the
+    // channel:/kind:/sensitivity: labels (they precede room:* alphabetically),
+    // which co-occur in every drawer.
     #[test]
     fn label_overflow_is_flagged_and_rules_still_mine() {
         let (coord, h) = coord_with_estate();
@@ -541,7 +541,12 @@ mod tests {
             );
         }
 
-        let out = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
+        // Mirrors Swift: LocusKit.RecallFrame(filterChain: [.unconfirmed], limit: 100).
+        // Explicit limit bypasses the coordinator.recall default-50 cap so
+        // the overflow code path (>64 labels) is reachable.
+        let mut large_frame = unconfirmed();
+        large_frame.limit = Some(100);
+        let out = run_association_rules(&coord, &h, large_frame, zero_thresholds(), NOW).unwrap();
 
         assert!(
             out.label_overflow,
@@ -575,15 +580,12 @@ mod tests {
         );
     }
 
-    // CK-AP-2: recipe has the expected capability gate (associationRuleMining).
-    // Verifies that `run_apriori_rules` calls the capability gate before any
-    // estate touch — mirrors Swift `aprioriCapabilityDeclaration`.
-    //
-    // The shipped capability set includes `AssociationRuleMining`, so the
-    // recipe runs. We verify the capability is in the shipped set so the
-    // recipe actually executes (rather than gating out), mirroring the Swift
-    // test which constructs an `AprioriRules` instance and inspects its
-    // `requiredCapabilities`.
+    // CK-AP-2: verify AssociationRuleMining is present in the shipped capability
+    // set. This test only checks the shipped set membership — it does not call
+    // `run_apriori_rules` or observe estate-access ordering. The Swift mirror
+    // (`aprioriCapabilityDeclaration`) constructs an `AprioriRules` instance
+    // and inspects `requiredCapabilities` directly; this Rust test is a
+    // shipped-set membership check that gives the same coverage guarantee.
     #[test]
     fn apriori_capability_gate_is_association_rule_mining() {
         use crate::capability::{shipped_capabilities, NeuronKitCapability};

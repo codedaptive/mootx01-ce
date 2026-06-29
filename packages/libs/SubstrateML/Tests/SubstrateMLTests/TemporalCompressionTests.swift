@@ -71,8 +71,8 @@ struct TemporalCompressionTests {
 
     @Test("cascadeRollup keeps the hour windows and buckets them into a day")
     func cascadeBucketsHoursIntoDay() {
-        // Two hour windows within the same calendar day (physical
-        // seconds 0 and 3600, both / 86400 = day bucket 0).
+        // Two hour windows within the same calendar day (HLC physical
+        // milliseconds 0 and 3,600,000, both within day bucket 0).
         let h1 = TemporalCompression.compress(rows: [fp(0xF0)], startHLC: hlc(0), endHLC: hlc(3000), level: .hour)
         let h2 = TemporalCompression.compress(rows: [fp(0x0F)], startHLC: hlc(3600_000), endHLC: hlc(3700_000), level: .hour)
         let byLevel = TemporalCompression.cascadeRollup(hourWindows: [h1, h2], upTo: .day)

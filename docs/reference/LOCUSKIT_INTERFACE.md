@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.6.0
+version: 1.11.0
 status: active
-date: 2026-06-17
+date: 2026-06-25
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -77,8 +77,26 @@ public actor Estate {
     public var manifest: ManifestValues { get async throws }
     public var estateUUID: UUID { get }
 
+    // Estate metadata — consumer key-value surface over the manifest table
+    // (Estate.swift). The substrate-owned, durable, lowest-level KV primitive
+    // upper layers (e.g. NeuronKit daemons) persist their own state through,
+    // rather than reaching around the substrate to a host-owned store. Consumers
+    // MUST namespace keys (e.g. "neuronkit.dreaming.policy") to avoid collision
+    // with the typed v1 ManifestKey set. Values survive restarts.
+    public func meta(key: String) async throws -> String?
+    public func setMeta(key: String, value: String) async throws
+
     // Verbs (extension Estate, EstateVerbs.swift):
     public func capture(_ frame: CaptureFrame) async throws -> Drawer
+    // captureBatch: insert all frames in a single storage.transaction() — one
+    // write-lock acquisition, one COMMIT, no per-row fsync under WAL mode.
+    // Handles with no active lineage predecessor use insertFreshBatch (all in
+    // one transaction). Frames with a predecessor fall back to per-item
+    // addDrawerCovered for correct supersession cascade. Post-insert coverage
+    // (containerFP.orIn + rollupMerkleRoots) runs for fresh-batch drawers.
+    // Returns drawers in input order. Callers invoke moot_reindex / moot_dream
+    // afterwards to light BM25/vector lanes.
+    public func captureBatch(_ frames: [CaptureFrame]) async throws -> [Drawer]
     public func recall(_ frame: RecallFrame) async -> RecallStream
     // Frame-aware by-id load (Estate.swift): O(candidates) by-id load that applies
     // the frame's filter chain via BitmapEvaluator (the exact recall pipeline), so
@@ -126,7 +144,10 @@ public actor Estate {
 }
 ```
 **Rust:** `pub struct Estate` with `open`, `create`, `close`, `manifest`,
-`estate_uuid`, and verbs `capture(frame, now: i64)`, `recall(frame, now: i64)`,
+`estate_uuid`, the consumer metadata surface `meta(key: &str) ->
+Result<Option<String>, EstateError>` / `set_meta(key: &str, value: &str) ->
+Result<(), EstateError>` (mirrors Swift `meta`/`setMeta`), and verbs
+`capture(frame, now: i64)`, `recall(frame, now: i64)`,
 `withdraw(...)`, `mutate(...)`, `expunge(...)`, `reanchor(...)`, `learn(...)`,
 each taking `now: i64`, plus the association-graph read
 `tunnels_from_wing(wing: &str) -> Result<Vec<Tunnel>, LocusKitError>`.
@@ -233,11 +254,13 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
     public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
     public let addedBy: String; public let filedAt: Date
     public let tombstonedAt: Date?; public let removedByBatch: String?
+    public let orderKey: Double?  // fractional-index sibling ordering under parent edges (ADR-017 §11)
     public init(id: String, sourceWing: String, sourceRoom: String, sourceDrawerId: String? = nil,
                 targetWing: String, targetRoom: String, targetDrawerId: String? = nil,
                 label: String, kind: TunnelKind = .references, adjectiveBitmap: Int64 = 0,
                 operationalBitmap: Int64 = 0, provenanceBitmap: Int64 = 0, addedBy: String,
-                filedAt: Date, tombstonedAt: Date? = nil, removedByBatch: String? = nil)
+                filedAt: Date, tombstonedAt: Date? = nil, removedByBatch: String? = nil,
+                orderKey: Double? = nil)
     public var direction: TunnelDirection; public var lifecycle: TunnelLifecycle
     public var originClass: TunnelOriginClass; public var strength: TunnelStrength
     public var hasInverse: Bool   // bit 12, computed (I-2)
@@ -620,6 +643,11 @@ public actor DrawerStore {
     /// Returns the total number of recall_trace rows in the estate. Used by moot_estate_status.
     public func countRecallTraces() async throws -> Int
     public func allTunnels() async throws -> [Tunnel]
+    // Outline helpers (ADR-017 §11) — typed parent edges with fractional ordering
+    public func outlineChildren(of parentDrawerId: String) async throws -> [Tunnel]
+    public func outlineAncestors(of drawerId: String) async throws -> [String]
+    public func reparentDrawer(_ childId: String, newParentId: String?, orderKey: Double,
+                               wing: String, room: String, addedBy: String, now: Date) async throws
     public func listWings() async throws -> [WingSummary]; public func listRooms(in wing: String?) async throws -> [RoomSummary]
     public func readManifest() async throws -> ManifestValues; public func setMeta(key: String, value: String) async throws
     public func bitmapAuditTrail(rowID: String) async throws -> [AuditRow]
@@ -911,6 +939,7 @@ Recurring sanctioned shapes:
 | Association | `Association` (Association.swift:67) | `Association` (association.rs:51) | public / pub | identical | `AssociationTests.swift` ↔ `association_tests.rs` | Confirmed |
 | Learned reference | `LearnedReference` (LearnedReference.swift:86) | `LearnedReference` (learned_reference.rs:132) | public / pub | identical | `LearnedReferenceTests.swift` ↔ `learned_reference_tests.rs` | Confirmed |
 | Container fingerprint | `ContainerFingerprint` (ContainerFingerprintStore.swift:40) | `ContainerFingerprint` (container_fingerprint_store.rs:62) | public / pub | identical | `ContainerFingerprintStoreTests.swift` | Confirmed |
+| Tree node | `Node` (Node.swift:25, `public struct`) | `Node` (node.rs:30, `pub struct`) | public / pub | identical; thirteen fields: `id`, `parentId`/`parent_id`, `displayName`/`display_name`, `lookupName`/`lookup_name`, `depth`, `lifecycle` (lifecycle-state bitmap, no-resurrection guard ADR-017), `createdHlc`/`created_hlc`, `tombstonedHlc`/`tombstoned_hlc`, `tombstonedAt`/`tombstoned_at`, `merkleRoot`/`merkle_root`, `createdAt`/`created_at`, `updatedAt`/`updated_at`, `ext` (JSON forward-compat). `Date?` / `Option<i64>` for date fields — ISO8601-TEXT seam (sanctioned). NT-L1. | `NodeStoreTests.swift` ↔ `node_store_tests.rs` | Confirmed |
 
 #### Adjective enums (proved by `adjective_bitmap_conformance.rs`)
 
@@ -998,7 +1027,7 @@ Recurring sanctioned shapes:
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---------|--------------|-------------|------------|------------|---------------------|--------|
-| Estate facade | `Estate` (Estate.swift:29, `public actor`) | `Estate` (estate.rs:48, `pub struct`) | public / pub | Swift `actor` (async, compiler-serialized) / Rust `struct` (sync; no async runtime — sanctioned, cf. NeuronKit policy-store seam) | `EstateTests.swift` / `EstateVerbTests.swift` ↔ `lp0_vectors.rs` (`Estate::create`) | Confirmed |
+| Estate Interface | `Estate` (Estate.swift:29, `public actor`) | `Estate` (estate.rs:48, `pub struct`) | public / pub | Swift `actor` (async, compiler-serialized) / Rust `struct` (sync; no async runtime — sanctioned, cf. NeuronKit policy-store seam) | `EstateTests.swift` / `EstateVerbTests.swift` ↔ `lp0_vectors.rs` (`Estate::create`) | Confirmed |
 | Owner credentials | `OwnerCredentials` (EstateTypes.swift:28) | `OwnerCredentials` (estate_types.rs:31) | public / pub | identical | `EstateTests.swift` | Confirmed |
 | Lattice anchor | `LatticeAnchor` (EstateTypes.swift:55) | `LatticeAnchor` (estate_types.rs:62) | public / pub | identical | `LatticeAnchorTests.swift` | Confirmed |
 | Estate error | `EstateError` (EstateTypes.swift:96) | `EstateError` (estate_types.rs:111) | public / pub | identical case set | `EstateTests.swift` | Confirmed |
@@ -1012,6 +1041,7 @@ Recurring sanctioned shapes:
 | Bundle kind | `BundleKind` (NodeBundleStore.swift:33, nested) | `BundleKind` (node_bundle_store.rs:68, flat) | public / pub | Swift nested in `NodeBundleStore` / Rust flat top-level (same case set) | `BundleMaterializerTests.swift` | Confirmed |
 | Room bundle | `rooms()` returns tuple `(room, bundle)` (NodeBundleStore.swift:120) | `RoomBundle` (node_bundle_store.rs:103) | public / pub | Swift labelled tuple / Rust named `pub struct` (same fields) | `BundleMaterializerTests.swift` | Confirmed |
 | Bundle materializer | `BundleMaterializer` (BundleMaterializer.swift:35) | `BundleMaterializer` (bundle_materializer.rs:65, `<'a, K: SubstrateKernel>`) | public / pub | identical concept; Rust is generic over the substrate kernel (lifetime + `K` param) | `BundleMaterializerTests.swift` | Confirmed |
+| Node store | `NodeStore` (NodeStore.swift:37, `public actor`) | `NodeStore` (node_store.rs:50, `pub struct`) | public / pub | Swift `actor` (async) / Rust `struct` (sync; no async runtime — sanctioned); verbs: `createNode`/`create_node`, `getNode`/`get_node`, `childNodes`/`child_nodes`, `rootNode`/`root_node`, `tombstoneNode`/`tombstone_node`, `updateMerkleRoot`/`update_merkle_root`, `createRoot`/`create_root`. NT-L1. | `NodeStoreTests.swift` ↔ `node_store_tests.rs` | Confirmed |
 
 #### Recall / trace types
 
@@ -1061,6 +1091,9 @@ future pass can decide whether Rust should narrow it to `pub(crate)`.
 | Source catalog entry | `SourceCatalogEntry` (`SourceCatalogEntry.swift:50`) | `SourceCatalogEntry` (`source_catalog_entry.rs:75`) | both public/pub | identical 6-field struct: `id`, `kind: SourceKind`/`SourceKind`, `handle`, `displayName`/`display_name`, `addedAt`/`added_at` (Date/i64 ISO8601-TEXT seam — sanctioned), `metadata: [String:String]`/`BTreeMap<String,String>` | `EstateTests.swift` (source-catalog paths) ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
 | Source kind | `SourceKind` (`SourceCatalogEntry.swift:103`) | `SourceKind` (`source_catalog_entry.rs:42`) | both public/pub | identical 4-case enum stored as Int raw value: `.user`/`User`=0, `.federation`/`Federation`=1, `.householdPairing`/`HouseholdPairing`=2, `.fleetPairing`/`FleetPairing`=3; Swift lowerCamel / Rust UpperCamel — idiom | `EstateTests.swift` ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
 | Recall internal-read fault seam | `Estate.RecallInternalRead` (`Estate.swift:66`, nested public enum; `_testForceInternalReadError` stored property) | `RecallInternalRead` (`estate.rs:100`, `#[cfg(any(test, feature = "test-seams"))]` pub enum; `_test_force_internal_read_error: AtomicU8` field) | Swift public nested in `Estate` actor / Rust pub (test-seams only) | 5-case test fault-injection seam (`liveRows`/`LiveRows`, `roomFingerprints`/`RoomFingerprints`, `roomDrawerRead`/`RoomDrawerRead`, `bitmapEval`/`BitmapEval`, `traceWrite`/`TraceWrite`); Swift lowerCamel / Rust UpperCamel — idiom. Present in both ports; Rust gates behind `#[cfg(any(test, feature="test-seams"))]` (not in the production binary). The seam declaration lives on `Estate` in both ports (Swift stored property, Rust `AtomicU8` field) — not on `EstateVerbs`, which is an extension/impl that cannot own stored properties. | `EstateRecallFaultTests.swift` ↔ `estate_recall_fault_tests.rs` (recall degraded-stage suite) | Confirmed (test-seam; production binary excludes the Rust enum) |
+| Wing provisioning definition | `WingDefinition` (DefaultWings.swift:48, `public struct`) | `WingDefinition` (default_wings.rs:48, `pub struct`) | public / pub | identical concept; two fields: `name` (String / `&'static str`), `hint` (String / `&'static str`) — the wing's role-description text, seeded as a NORMAL drawer in the wing's `AI_Charter_Hint` room (no special room/provenance/embedding; see ADR-016 §2 amendment 2026-06-23). Swift uses owned `String`; Rust uses static string literals — same semantic values at runtime. Seeded at estate provision as the seven ADR-016 default wings. NT-L1. | `EstateTests.swift` (provision path) ↔ `node_store_tests.rs` (estate provision exercises WingDefinition) | Confirmed |
+| Snapshot attestation (LocusKit-homed) | — | `SnapshotAttestation` (merkle_rollup.rs:269, `pub struct`) | — / pub | **Layering note:** Rust port places `SnapshotAttestation` in `LocusKit/merkle_rollup.rs`. The Swift equivalent is `PersistenceKit.SnapshotAttestation` (SnapshotRegistry.swift:47). Relocate to PersistenceKit Rust in a future parity mission (NT-P1/L4). Until relocated, this row documents the Rust declaration site so the concordance audit does not flag it as an undocumented gap. | `MerkleRollupTests.swift` ↔ `merkle_rollup_tests.rs` | Documented (layering mismatch — see PersistenceKit concordance for Swift counterpart) |
+| Snapshot record (LocusKit-homed) | — | `SnapshotRecord` (merkle_rollup.rs:260, `pub struct`) | — / pub | **Layering note:** same as `SnapshotAttestation` above. Rust port places this in `LocusKit/merkle_rollup.rs`; Swift equivalent is `PersistenceKit.SnapshotRecord` (SnapshotRegistry.swift:32). NT-P1/L4. | `MerkleRollupTests.swift` ↔ `merkle_rollup_tests.rs` | Documented (layering mismatch — see PersistenceKit concordance for Swift counterpart) |
 
 ---
 
@@ -1202,6 +1235,21 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 
 ## Changelog
 
+### 1.11.0 -- 2026-06-25
+Added the `Estate` consumer metadata surface (`meta(key:)` / `setMeta(key:value:)`
+Swift; `meta` / `set_meta` Rust) — the public, durable, lowest-level key-value
+primitive over the manifest table that upper layers persist their own state
+through (resolves the "future verb surface" the manifest accessor anticipated;
+see ADR-020). Additive, both ports.
+
+### 1.10.0 -- 2026-06-23
+Charter special-casing removed (ADR-016 §2 amendment). `WingDefinition`'s second
+field renamed `charter` → `hint` on both ports; the seeded wing hint is now a
+NORMAL drawer (filed into the `AI_Charter_Hint` room, normal embedding,
+recallable, counted, user-deletable) — no reserved room, no `added_by` sentinel,
+no `embeddingModelID = "none"`, no recall/estate_map exclusion. Updated the
+WingDefinition concordance row.
+
 ### 1.6.0 -- 2026-06-17
 `DrawerStore.addDrawer` narrowed from `public` to `internal` in Swift (§11.5
 Option B structural add-coverage guarantee). The only sanctioned verb-layer add
@@ -1248,6 +1296,28 @@ authority DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28, required by the #7
 feature). Removed the stale "Q-ID closure cache deferred (I-17)" comments. The
 fingerprint output changes only for drawers whose `wikidataQID` has ancestors;
 cross-port conformance preserved.
+
+### 1.9.0 -- 2026-06-22
+GLK_BATCH1: `Estate.captureBatch(_:)` added — inserts all frames in a single
+`storage.transaction()`. Fresh drawers (no active lineage predecessor) go
+through `DrawerStore.insertFreshBatch(_:now:)` for a one-lock, one-commit write;
+drawers needing supersession cascade fall back to per-item `addDrawerCovered`.
+Post-insert coverage (`containerFP.orIn` + `rollupMerkleRoots`) runs for
+fresh-batch drawers. `DrawerStore.findActivePredecessor` visibility widened from
+`private` to `internal` to support the batch split. Returns drawers in input
+order. Callers must invoke `moot_reindex` / `moot_dream` to rebuild BM25/vector
+lanes after batch import.
+
+### 1.8.0 -- 2026-06-21
+NT-DOC-1: Added 5 ADR-017 concordance rows to § 7. Entities section gains `Node`
+(tree node entity, 13 fields, ISO8601-TEXT date seam). Estate/store types gains
+`NodeStore` (Swift actor / Rust struct, 7 verbs). Additional public types gains
+`WingDefinition` (2-field provisioning struct, static string seam), plus
+`SnapshotAttestation` and `SnapshotRecord` documented as Rust-only (LocusKit-homed)
+with layering-mismatch notes pointing to the PersistenceKit Swift counterparts.
+
+### 1.7.0 -- 2026-06-21
+Schema v5 → v6 (ADR-017 §11): `TunnelKind.parent` (raw 9) adds typed parent edges to the tunnel graph for outline containment, orthogonal to the node-tree containment hierarchy. `Tunnel` gains `orderKey: Double?` (`order_key: Option<f64>` in Rust) for fractional-index sibling ordering. Schema adds `order_key REAL` nullable column and two new indices (`idx_tunnels_kind_source_drawer`, `idx_tunnels_kind_target_drawer`). Three new `DrawerStore` methods: `outlineChildren(of:)` (children sorted by order_key), `outlineAncestors(of:)` (root-first ancestor walk, 256-depth ceiling), `reparentDrawer(_:newParentId:orderKey:wing:room:addedBy:now:)` (tombstone + recreate). One-parent-per-child enforced in `addTunnel`. All three backends (InMemory, SQLite, Postgres). Rust `Tunnel` uses manual `PartialEq`/`Eq`/`Hash` via `f64::to_bits()` for the `order_key` field.
 
 ### 1.3.0 -- 2026-06-17
 `ProposeFrame` now carries the three proposal provenance axes in both ports: `confirmation` (`ProposalConfirmationSource`, default `.human`), `generatedBy` (`ProposalGeneratedByClass`, default `.dreamingDaemon`), and `confidence` (`ProposalConfidenceBucket`, default `.null`). The `propose` verb wires all three into the proposal operational bitmap at bits 12–17 / 18–23 / 24–29 — the exact windows the `confirmationSource` / `generatedByClass` / `confidenceBucket` read accessors (cookbook §2.4) decode — replacing the previous behaviour where those windows were hard-zeroed regardless of producer. Additive and behaviour-preserving: the three defaults reproduce the pre-wire bitmap byte-for-byte, so existing callers (NeuronKit daemon sinks, GLK boundary, scheduler) are unaffected. Daemon-emitted proposals may now set their true producer class so provenance reflects reality rather than the zero fallback. Cross-port round-trip + default-byte-identity conformance added (`ProposeProvenanceTests.swift` ↔ `estate_verbs.rs` propose-provenance tests). Removed the stale "a later sub-mission wires them through the Brain layer ProposalFrame" deferral comment in both ports.

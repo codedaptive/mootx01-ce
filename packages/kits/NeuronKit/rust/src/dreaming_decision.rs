@@ -37,8 +37,10 @@ pub const TEMPERATURE: f64 = 0.2;
 /// Matches `DreamingDecision.ewcRetention`.
 pub const EWC_RETENTION: f32 = 0.9;
 
-/// A latent co-occurrence candidate — the identity-free projection of the
-/// Swift `CoOccurrenceObservation` (`RowID` is its `String` alias).
+/// A latent co-recall candidate built from drained dreaming-queue windows.
+/// `endpoint_a` / `endpoint_b` are the two drawer IDs; `attempts` is the
+/// cumulative co-recall count (from `DreamingDaemon.co_recall_counts`).
+/// Mirrors Swift `dreaming_decision.Observation` (T8 v2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Observation {
     pub endpoint_a: String,

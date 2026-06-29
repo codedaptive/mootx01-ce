@@ -1,8 +1,10 @@
 //! Estate verb surface. Ports `EstateVerbs.swift`.
 //!
-//! Implements all seven verbs as working verbs: `capture`, `recall`,
-//! `withdraw`, `expunge`, `mutate`, `reanchor`, and `learn`. `learn`
-//! derives a `LearnedReference` from a `SourceCatalogEntry`
+//! Implements the seven ARIA verbs (`capture`, `recall`, `withdraw`,
+//! `expunge`, `mutate`, `reanchor`, `learn`) plus additional estate
+//! operations (`capture_batch`, `capture_tunnel`, `seed_wing`,
+//! `propose`, `associate`, KG-fact and diary accessors, etc.).
+//! `learn` derives a `LearnedReference` from a `SourceCatalogEntry`
 //! (spec § 7.8.2). Mirrors the Swift split: `Estate.swift` carries the
 //! lifecycle surface; this file carries the verbs.
 //!
@@ -42,7 +44,7 @@
 use crate::adjectives::{State, Trust};
 use crate::bitmap_evaluator::BitmapEvaluator;
 use crate::default_wings::{
-    CHARTER_ADDED_BY, CHARTER_EMBEDDING_MODEL_ID, CHARTER_ROOM, CHARTER_UDC_CODE,
+    HINT_ADDED_BY, HINT_ROOM, HINT_UDC_CODE,
     DEFAULT_WING_NAME,
 };
 use crate::drawer::Drawer;
@@ -77,7 +79,7 @@ use substrate_kernel::bit_field;
 use substrate_lib::row_state::RowVerb;
 
 use crate::estate_types::RowID;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Result of `Estate::get_drawers_matching_frame`: the frame-admissible drawers
 /// plus the set of ids whose rows physically loaded.
@@ -122,6 +124,59 @@ pub(crate) mod recall_stage {
 
 impl Estate {
     // -----------------------------------------------------------------------
+    // node-name resolution (ADR-017)
+    // -----------------------------------------------------------------------
+
+    /// Build a `parent_node_id → (wing_name, room_name)` map for the given
+    /// drawers by querying the estate's node tree. Used to supply the
+    /// `BitmapEvaluator::evaluate` node_names parameter after drawers lost
+    /// their denormalized wing/room fields (ADR-017 §3).
+    ///
+    /// Returns an empty map when `node_store` is `None` (e.g. legacy estates
+    /// opened without a node tree). The bitmap evaluator tolerates missing
+    /// entries by treating unresolved drawers as matching no wing/room filter.
+    fn resolve_node_names_for_drawers(
+        &self,
+        drawers: &[Drawer],
+    ) -> BTreeMap<String, (String, String)> {
+        let node_store = match &self.node_store {
+            Some(ns) => ns,
+            None => return BTreeMap::new(),
+        };
+        // Collect unique parent_node_ids.
+        let parent_ids: BTreeSet<String> = drawers
+            .iter()
+            .filter(|d| !d.parent_node_id.is_empty())
+            .map(|d| d.parent_node_id.clone())
+            .collect();
+        if parent_ids.is_empty() {
+            return BTreeMap::new();
+        }
+        // Resolve each room node → (wing_name, room_name).
+        let mut result = BTreeMap::new();
+        for pid in &parent_ids {
+            let room_uuid = match Uuid::parse_str(pid) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let room_node = match node_store.get_node(room_uuid) {
+                Ok(Some(n)) => n,
+                _ => continue,
+            };
+            let wing_name = if let Some(wing_uuid) = room_node.parent_id {
+                match node_store.get_node(wing_uuid) {
+                    Ok(Some(w)) => w.display_name,
+                    _ => String::new(),
+                }
+            } else {
+                String::new()
+            };
+            result.insert(pid.clone(), (wing_name, room_node.display_name));
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
     // capture
     // -----------------------------------------------------------------------
 
@@ -132,7 +187,7 @@ impl Estate {
     /// and an active predecessor with that lineage exists, the supersession
     /// cascade fires inside `add_drawer` (spec § 6.2 / § 6.3): the new
     /// drawer is captured through the gate (a genesis `AuditEvent`), the
-    /// predecessor's state nibble flips to `Superseded` via
+    /// predecessor's 6-bit state field flips to `Superseded` via
     /// `mutate_state(State::Superseded, RowVerb::Supersede)` (which
     /// appends one sealed `AuditEvent`), and a `supersedes` tunnel is
     /// created.
@@ -253,14 +308,28 @@ impl Estate {
             6,
         );
 
-        // ADR-016: when the caller supplies an explicit wing, file the drawer
-        // there; otherwise fall back to the estate default ("Agentic Memory").
-        // The None → DEFAULT_WING_NAME fold keeps all existing callers
-        // byte-identical. Mirrors Swift `frame.wing ?? defaultWing()`.
-        let wing = frame
+        // ADR-017 §7: resolve wing/room display names to node IDs via
+        // NodeStore's create-on-demand resolution. The root must exist
+        // (seeded at provision time); wing and room nodes are created
+        // if absent, returned if already present.
+        let wing_name = frame
             .wing
             .clone()
             .unwrap_or_else(|| DEFAULT_WING_NAME.to_string());
+        let room_name = frame.room.clone();
+
+        let node_store = self.node_store.as_ref().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "capture: NodeStore not available — estate not fully initialized".to_string(),
+            )
+        })?;
+        let root = node_store.root_node()?.ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "capture: estate root node not found — estate not provisioned".to_string(),
+            )
+        })?;
+        let wing_node = node_store.create_node(&wing_name, root.id, now)?;
+        let room_node = node_store.create_node(&room_name, wing_node.id, now)?;
 
         // Stamp a lineage id: use the caller's if provided, otherwise fresh.
         let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
@@ -269,8 +338,7 @@ impl Estate {
         let mut drawer = Drawer::new(
             drawer_id,
             frame.content,
-            wing,
-            frame.room,
+            room_node.id.to_string(),
             frame.added_by,
             now,
             frame.embedding_model_id,
@@ -295,6 +363,13 @@ impl Estate {
         // or_in_container_fingerprint call is needed or correct here.
         // The clear-side (withdraw / bit-off) is intentionally a no-op.
         self.store.add_drawer(&drawer, now)?;
+        // NT-L3: the Merkle rollup is NOT done inline here — doing it per drawer
+        // is O(room) per write → O(N²) for a bulk import and pegs the CPU on the
+        // write path. The rollup is deferred and rides the estate's QueueKit work
+        // queue: streaming captures (capture_with_mode Regular) enqueue an encode
+        // job, and the encode drain worker rolls up the touched rooms off-path
+        // (coalesced); bulk-import paths defer to the O(N) full-tree pass in
+        // `reindex_missing` (rollup_all_merkle_roots). Same mechanism as encode.
         // Emit a Capture event for the new drawer. NounType::Drawer = 0 (wire-stable,
         // matches SubstrateTypes/NounType.swift). The report!() macro is a no-op when
         // no sink is installed, so this is zero-cost in stdio/test mode.
@@ -309,39 +384,192 @@ impl Estate {
     }
 
     // -----------------------------------------------------------------------
+    // capture_batch
+    // -----------------------------------------------------------------------
+
+    /// Capture a batch of drawers without triggering per-drawer Merkle rollup.
+    ///
+    /// Intended for bulk-import paths (e.g. `moot_palace_import`) where calling
+    /// `rollup_merkle_roots` after every drawer write produces O(N²) recomputation
+    /// work. Callers MUST call `rollup_all_merkle_roots(now)` — or trigger
+    /// `reindex_missing` (which calls it) — after the batch.
+    ///
+    /// Each frame passes the same validation guards as the single-drawer `capture` verb.
+    ///
+    /// # Arguments
+    /// * `frames` - Capture frames to store.
+    /// * `now` - Epoch-seconds wall-clock passed to store write operations.
+    pub fn capture_batch(
+        &self,
+        frames: Vec<CaptureFrame>,
+        now: i64,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let node_store = self.node_store.as_ref().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "capture_batch: NodeStore not available — estate not fully initialized".to_string(),
+            )
+        })?;
+        let root = node_store.root_node()?.ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "capture_batch: estate root node not found — estate not provisioned".to_string(),
+            )
+        })?;
+
+        let mut drawers = Vec::with_capacity(frames.len());
+        // Node cache: avoids N redundant create_node round-trips for frames that
+        // share a wing/room (common in bulk import where all content lands in one
+        // room). Key = "wingName\0roomName" (null separator avoids collision).
+        let mut room_node_cache: std::collections::HashMap<String, crate::node::Node> =
+            std::collections::HashMap::new();
+
+        for frame in frames {
+            // Validate all required fields (same contract as capture).
+            if frame.content.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "content must not be empty".to_string(),
+                ));
+            }
+            if frame.room.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "room must not be empty".to_string(),
+                ));
+            }
+            if frame.lattice_anchor.udc_code.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "latticeAnchor.udcCode must not be empty (spec I-5)".to_string(),
+                ));
+            }
+            if frame.added_by.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "addedBy must not be empty".to_string(),
+                ));
+            }
+            if frame.embedding_model_id.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "embeddingModelID must not be empty".to_string(),
+                ));
+            }
+
+            // Bitmap assembly (same layout as capture verb, spec §§ 5.6 / 2.3 / 2.5).
+            let op_bitmap = bit_field::write_field(
+                frame.kind.raw_value(),
+                bit_field::write_field(frame.channel.raw_value(), 0, 0, 6),
+                6,
+                6,
+            ) | (frame.feature_flags & DrawerFeatureFlags::FIELD_MASK);
+
+            let adj_bitmap = bit_field::write_field(
+                frame.exportability.raw_value(),
+                bit_field::write_field(frame.sensitivity.raw_value(), 0, 6, 6),
+                12,
+                6,
+            );
+
+            let provenance_bitmap = bit_field::write_field(
+                frame.provenance_sensitivity.raw_value(),
+                bit_field::write_field(
+                    frame.confidence.raw_value(),
+                    bit_field::write_field(
+                        frame.confirmation.raw_value(),
+                        bit_field::write_field(
+                            frame.provenance_channel.raw_value(),
+                            bit_field::write_field(frame.source_type.raw_value(), 0, 0, 6),
+                            6,
+                            6,
+                        ),
+                        18,
+                        6,
+                    ),
+                    24,
+                    6,
+                ),
+                30,
+                6,
+            );
+
+            // Resolve wing/room nodes; create_node is create-on-demand (idempotent).
+            let wing_name = frame
+                .wing
+                .clone()
+                .unwrap_or_else(|| DEFAULT_WING_NAME.to_string());
+            let room_name = frame.room.clone();
+            let cache_key = format!("{}\0{}", wing_name, room_name);
+            let room_node = if let Some(cached) = room_node_cache.get(&cache_key) {
+                cached.clone()
+            } else {
+                let wing_node = node_store.create_node(&wing_name, root.id, now)?;
+                let fresh = node_store.create_node(&room_name, wing_node.id, now)?;
+                room_node_cache.insert(cache_key, fresh.clone());
+                fresh
+            };
+
+            let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
+            let drawer_id = Uuid::new_v4().to_string();
+            let mut drawer = Drawer::new(
+                drawer_id,
+                frame.content,
+                room_node.id.to_string(),
+                frame.added_by,
+                now,
+                frame.embedding_model_id,
+            );
+            drawer.adjective_bitmap = adj_bitmap;
+            drawer.operational_bitmap = op_bitmap;
+            drawer.provenance = provenance_bitmap;
+            drawer.lineage_id = lineage_id;
+            drawer.udc_code = frame.lattice_anchor.udc_code;
+            drawer.udc_facets = frame.lattice_anchor.udc_facets;
+            drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
+            drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
+            drawer.event_time = frame.event_time.unwrap_or(now);
+
+            // Store drawer. Unlike capture, rollup_merkle_roots is deliberately omitted —
+            // that O(N²) call is the root cause of the moot_palace_import hang (NT_R1).
+            // The deferred full-tree pass (rollup_all_merkle_roots) must be called after
+            // the batch. DrawerStore.add_drawer maintains the container FP aggregate
+            // internally (spec § 11.5 Option B), so no separate or_in call is needed.
+            self.store.add_drawer(&drawer, now)?;
+
+            drawers.push(drawer);
+        }
+        Ok(drawers)
+    }
+
+    // -----------------------------------------------------------------------
     // seed_wing
     // -----------------------------------------------------------------------
 
-    /// Seed a named wing by writing a charter drawer into the `_charter` room.
+    /// Seed a named wing by writing a hint memory into the `AI_Charter_Hint` room.
     ///
-    /// ADR-016 §2: wings emerge from `SELECT DISTINCT wing` across drawers —
-    /// there is no wings table. Filing a drawer with `room = "_charter"` in
-    /// a given wing IS the act of creating that wing. This is the only verb
-    /// that writes a drawer with a caller-supplied wing name; all other paths
-    /// through `capture` use `DEFAULT_WING_NAME` unconditionally.
+    /// ADR-016 §2 / ADR-017: wings are node rows in the `nodes` table.
+    /// `seed_wing` resolves `wing_name` to a wing node (create-on-demand
+    /// via NodeStore) and files the hint drawer under it. Other capture
+    /// paths resolve wing via `CaptureFrame.wing`, falling back to
+    /// `DEFAULT_WING_NAME` when no wing is supplied.
     ///
     /// `seed_wing` routes through `DrawerStore::add_drawer` (the same
     /// structural chokepoint as `capture`) so the container fingerprint OR
-    /// aggregate is maintained. The charter drawer is filed with:
+    /// aggregate is maintained. The hint drawer is filed with:
     /// - `wing`: the supplied `wing_name`
-    /// - `room`: `CHARTER_ROOM` ("_charter")
-    /// - `added_by`: `CHARTER_ADDED_BY` ("estate-provision")
-    /// - `embedding_model_id`: `CHARTER_EMBEDDING_MODEL_ID` ("none")
+    /// - `room`: `HINT_ROOM` ("AI_Charter_Hint")
+    /// - `added_by`: `HINT_ADDED_BY` ("estate-provision") — honest provenance only
+    /// - `embedding_model_id`: the caller-supplied model id (normal embedding)
     /// - `lattice_anchor`: UDC "001" (Knowledge class — spec I-5)
     ///
-    /// Idempotent at the business level: re-seeding an already-chartered wing
-    /// adds a second charter drawer, but the seven default wings are seeded
+    /// Idempotent at the business level: re-seeding an already-seeded wing
+    /// adds a second hint drawer, but the seven default wings are seeded
     /// exactly once at `provision`. GeniusLocusKit's seed loop is the only
     /// caller in production.
     ///
     /// Returns an error if `wing_name` is empty (same guard as Swift
     /// `seedWing` in `EstateVerbs.swift`).
     ///
-    /// Mirrors Swift `Estate.seedWing(_:charter:addedBy:now:)`.
+    /// Mirrors Swift `Estate.seedWing(_:hint:addedBy:embeddingModelID:now:)`.
     pub fn seed_wing(
         &self,
         wing_name: &str,
-        charter: &str,
+        hint: &str,
+        embedding_model_id: &str,
         now: i64,
     ) -> Result<Drawer, LocusKitError> {
         if wing_name.is_empty() {
@@ -349,16 +577,30 @@ impl Estate {
                 "seed_wing: wing_name must not be empty".to_string(),
             ));
         }
+        // ADR-017 §7: resolve wing/room to node IDs via NodeStore's
+        // create-on-demand resolution, same as the capture verb.
+        let node_store = self.node_store.as_ref().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "seed_wing: NodeStore not available — estate not fully initialized".to_string(),
+            )
+        })?;
+        let root = node_store.root_node()?.ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "seed_wing: estate root node not found — estate not provisioned".to_string(),
+            )
+        })?;
+        let wing_node = node_store.create_node(wing_name, root.id, now)?;
+        let room_node = node_store.create_node(HINT_ROOM, wing_node.id, now)?;
+
         let drawer_id = Uuid::new_v4().to_string();
-        let lattice_anchor = LatticeAnchor::udc(CHARTER_UDC_CODE);
+        let lattice_anchor = LatticeAnchor::udc(HINT_UDC_CODE);
         let mut drawer = Drawer::new(
             drawer_id,
-            charter.to_string(),
-            wing_name.to_string(),
-            CHARTER_ROOM.to_string(),
-            CHARTER_ADDED_BY.to_string(),
+            hint.to_string(),
+            room_node.id.to_string(),
+            HINT_ADDED_BY.to_string(),
             now,
-            CHARTER_EMBEDDING_MODEL_ID.to_string(),
+            embedding_model_id.to_string(),
         );
         drawer.udc_code = lattice_anchor.udc_code;
         drawer.udc_facets = lattice_anchor.udc_facets;
@@ -703,10 +945,16 @@ impl Estate {
                     degraded_stages.push(recall_stage::LIVE_ROWS_READ_FAILED.to_string());
                     Vec::new()
                 } else {
+                    // P4-secfix: use DESC-ordered bounded scan so the cap
+                    // selects the NEWEST drawers rather than the oldest.
+                    // With ASC ordering and a 256-row cap, any drawer filed
+                    // after the 256th-oldest was permanently invisible to
+                    // Director-style callers. DESC ordering guarantees the
+                    // cap window covers the most-recently-filed content.
                     let scanned = if needs_content_for_filter || caller_needs_blob {
-                        self.store.all_drawers_bounded(Some(scan_bound))
+                        self.store.all_drawers_bounded_desc(Some(scan_bound))
                     } else {
-                        self.store.all_drawers_bounded_projected(Some(scan_bound))
+                        self.store.all_drawers_bounded_projected_desc(Some(scan_bound))
                     };
                     match scanned {
                         Ok(rows) => rows
@@ -721,20 +969,8 @@ impl Estate {
                 }
             };
 
-        // RECALL-HYGIENE: exclude charter drawers from scored content recall.
-        //
-        // Charter drawers (room == CHARTER_ROOM, embedding_model_id == "none") are
-        // wing metadata seeded at provision time — they describe the purpose of each
-        // wing, not recallable user content. Excluding them here keeps them out of
-        // every recall lane (locus bitmap, BM25, vector) without removing them from
-        // the estate: they remain accessible via all_drawers and estate-map paths.
-        //
-        // Parity with Swift EstateVerbs.liveRows() charter filter (fix/recall-hygiene-charters-ghosts).
-        // CHARTER_ROOM == "_charter" (crate::default_wings::CHARTER_ROOM).
-        let candidates: Vec<Drawer> = candidates
-            .into_iter()
-            .filter(|d| d.room != crate::default_wings::CHARTER_ROOM)
-            .collect();
+        // Hint memories (seeded at provision in AI_Charter_Hint room) are normal
+        // drawers — embedded and recallable like any other drawer. No filter here.
 
         // Run the four-tier bitmap evaluator pipeline. A failure is SURFACED as
         // a named degraded stage rather than masquerading as a genuine-empty
@@ -748,7 +984,7 @@ impl Estate {
             degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
             Vec::new()
         } else {
-            match BitmapEvaluator::evaluate(&frame, &candidates, self.store.as_ref()) {
+            match BitmapEvaluator::evaluate(&frame, &candidates, self.store.as_ref(), &self.resolve_node_names_for_drawers(&candidates)) {
                 Ok(f) => f,
                 Err(_) => {
                     degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
@@ -836,24 +1072,30 @@ impl Estate {
         ids: &[RowID],
         frame: &RecallFrame,
     ) -> Result<FrameFilteredDrawers, LocusKitError> {
+        // P6-secfix: load full rows (with content) so BitmapEvaluator::evaluate can
+        // run ContentMatches predicates correctly. Content stripping for BitmapOnly
+        // callers is applied AFTER evaluation so the predicate sees the real body.
+        // The old ordering stripped first, then evaluated — so a ContentMatches
+        // predicate always saw "" and never matched.
         let mut loaded: Vec<Drawer> = Vec::with_capacity(ids.len());
         let mut loaded_ids: HashSet<String> = HashSet::with_capacity(ids.len());
         for id in ids {
             if let Some(drawer) = self.store.get_drawer(id)? {
                 loaded_ids.insert(drawer.id.clone());
-                // Honor BitmapOnly stripping so the by-id load matches the recall
-                // page-emission hydration contract for the requested level.
-                let row = if frame.hydration_level == HydrationLevel::BitmapOnly {
-                    let mut d = drawer;
-                    d.content = String::new();
-                    d
-                } else {
-                    drawer
-                };
-                loaded.push(row);
+                loaded.push(drawer);
             }
         }
-        let admissible = BitmapEvaluator::evaluate(frame, &loaded, self.store.as_ref())?;
+        let node_names = self.resolve_node_names_for_drawers(&loaded);
+        // Evaluate with full content available for ContentMatches predicates.
+        let mut admissible =
+            BitmapEvaluator::evaluate(frame, &loaded, self.store.as_ref(), &node_names)?;
+        // Honor BitmapOnly stripping AFTER evaluation so the hydration contract
+        // for the requested level is applied to the already-filtered result set.
+        if frame.hydration_level == HydrationLevel::BitmapOnly {
+            for d in &mut admissible {
+                d.content = String::new();
+            }
+        }
         Ok(FrameFilteredDrawers {
             admissible,
             loaded_ids,
@@ -1055,11 +1297,71 @@ impl Estate {
         self.store.room_level_fingerprints()
     }
 
+    /// Time-bucketed fingerprint bit-activity series for `bit` over the most
+    /// recent `bucket_count` buckets of width `bucket_seconds`, ending at
+    /// `ending_at` (epoch seconds — deterministic clock, never read system time).
+    ///
+    /// Estate-level pass-through over `DrawerStore::fingerprint_bit_series`.
+    /// Used by GLK to expose the bit-series surface the Rhythm lens needs without
+    /// NeuronKit (or CognitionKit) reaching the store directly (B-1 compliance —
+    /// mirrors Swift `GeniusLocusKit.glkFingerprintBitSeries`).
+    ///
+    /// Returns `Err(LocusKitError::InvalidContent)` when `bit > 255`
+    /// or `bucket_seconds < 1`. Returns an empty `Vec` when `bucket_count == 0`.
+    pub fn fingerprint_bit_series(
+        &self,
+        bit: usize,
+        bucket_seconds: i64,
+        bucket_count: usize,
+        ending_at: i64,
+    ) -> Result<Vec<bool>, LocusKitError> {
+        self.store.fingerprint_bit_series(bit, bucket_seconds, bucket_count, ending_at)
+    }
+
     /// All tunnels in the estate across all wings. Estate-level pass-through
     /// over `DrawerStore::all_tunnels`. Used by GLK to expose the full
     /// association graph the dreaming reader needs (B-1 compliance).
     pub fn all_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.store.all_tunnels()
+    }
+
+    /// All non-tombstoned, non-retired tunnels estate-wide (T13 / ADR-021 Phase 7).
+    ///
+    /// Active-edge view: retired tunnels (bit 13 of `operational_bitmap` set) are
+    /// excluded so that OMEGA retirement removes a tunnel from the dreaming
+    /// suppression set — allowing a later co-recall to re-propose it.
+    /// Full history remains available via `all_tunnels()`.
+    pub fn all_active_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.store.all_active_tunnels()
+    }
+
+    /// Flip bit 13 of `operational_bitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Throws `TunnelNotFound` if no non-tombstoned tunnel with `tunnel_id` exists.
+    /// The caller (NeuronKit via the GLK seam) is responsible for writing a diary
+    /// entry recording the OMEGA retirement decision — this method performs only
+    /// the bitmap update (B-1 compliant).
+    pub fn retire_tunnel(
+        &self,
+        tunnel_id: &str,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.retire_tunnel(tunnel_id, changed_by, now)
+    }
+
+    /// Clear bit 13 of `operational_bitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    ///
+    /// Reverses a prior `retire_tunnel`. The tunnel re-enters active reads
+    /// (`all_active_tunnels`) and the dreaming suppression set once persisted.
+    /// Throws `TunnelNotFound` if no non-tombstoned tunnel with `tunnel_id` exists.
+    pub fn unretire_tunnel(
+        &self,
+        tunnel_id: &str,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.unretire_tunnel(tunnel_id, changed_by, now)
     }
 
     /// Recall-trace rows whose `recalled_at` falls in `[since, now]` (both
@@ -1137,7 +1439,12 @@ impl Estate {
             &changed_by,
             Some(reason.unwrap_or("withdrawn via Estate.withdraw")),
             now,
-        )
+        )?;
+        // NT-L3: Merkle rollup after state change.
+        if let Ok(room_uuid) = Uuid::parse_str(&drawer.parent_node_id) {
+            let _ = self.rollup_merkle_roots(room_uuid, now);
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1157,9 +1464,9 @@ impl Estate {
     /// ordering invariant: success audit seals only after the full expunge
     /// (storage + cross-kit delete) completes.
     ///
-    /// The `now` parameter is millis since UNIX epoch. Passing it explicitly
-    /// makes the operation deterministic — callers use their own clock snapshot;
-    /// this function never calls `SystemTime::now`.
+    /// The `now` parameter is epoch seconds (same unit as `capture` and
+    /// `withdraw`). Passing it explicitly makes the operation deterministic —
+    /// callers use their own clock snapshot.
     pub fn expunge(
         &self,
         row_id: &str,
@@ -1173,11 +1480,10 @@ impl Estate {
                 "expunge requires confirmation: true (destructive op)".to_string(),
             ));
         }
-        if self.store.get_drawer(row_id)?.is_none() {
-            return Err(LocusKitError::DrawerNotFound {
+        let drawer = self.store.get_drawer(row_id)?
+            .ok_or_else(|| LocusKitError::DrawerNotFound {
                 id: row_id.to_string(),
-            });
-        }
+            })?;
         let changed_by = self
             .store
             .read_manifest()
@@ -1193,8 +1499,45 @@ impl Estate {
         } else {
             Some(reason)
         };
-        self.store
-            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)
+        // WS2-F2: expunge_gated tombstones the full lineage chain, which
+        // may span multiple rooms (lineage members can migrate via reanchor).
+        // Collect all distinct parent room IDs for the lineage BEFORE
+        // expunge so they can all be rolled up after tombstoning.
+        let lineage_ids = self.store.lineage_chain(row_id).unwrap_or_default();
+        let ids_to_fetch: Vec<&str> = if lineage_ids.is_empty() {
+            vec![row_id]
+        } else {
+            lineage_ids.iter().map(String::as_str).collect()
+        };
+        let mut affected_room_ids: std::collections::HashSet<Uuid> =
+            std::collections::HashSet::new();
+        for id in &ids_to_fetch {
+            if let Ok(Some(d)) = self.store.get_drawer(id) {
+                if let Ok(room_uuid) = Uuid::parse_str(&d.parent_node_id) {
+                    affected_room_ids.insert(room_uuid);
+                }
+            }
+        }
+
+        let result = self.store
+            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)?;
+        // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
+        // contained any lineage member — not just the room of the
+        // initiating drawer — so cross-room lineage expunge keeps every
+        // affected room's root correct (WS2-F2, fixed 2026-06-28).
+        for room_uuid in affected_room_ids {
+            let _ = self.rollup_merkle_roots(room_uuid, now);
+        }
+        Ok(result)
+    }
+
+    /// Return all drawer ids sharing the same lineage as `row_id`.
+    ///
+    /// Used by GLK's cross-kit vector-delete fan-out: after the storage
+    /// expunge walks the lineage and scrubs all versions, GLK needs the
+    /// same id set to delete vectors for every version.
+    pub fn lineage_chain(&self, row_id: &str) -> Result<Vec<String>, LocusKitError> {
+        self.store.lineage_chain(row_id)
     }
 
     /// Seal the success audit event produced by `expunge(seal_audit: false)`.
@@ -1308,6 +1651,18 @@ impl Estate {
         self.store.tombstoned_rows_without_expunge_audit()
     }
 
+    /// Zero the `content` column for every row in the `drawers` table.
+    ///
+    /// Called by the GLK coordinator's `destroy` path to erase all drawer
+    /// content blobs from LocusKit's SQLite storage before `close()` releases
+    /// the connection. Part of the destruction contract (secfix/ws2-coredelete
+    /// §Cluster E): after `wipe_all_content` returns, no verbatim captured
+    /// text survives in the LocusKit SQLite rows. The application layer
+    /// (moot-mgr) then deletes the SQLite file itself.
+    pub fn wipe_all_content(&self) -> Result<(), LocusKitError> {
+        self.store.wipe_all_content()
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -1328,15 +1683,18 @@ impl Estate {
         }
     }
 
-    /// Current time as epoch milliseconds. Used anywhere a store method takes
-    /// `now: i64`. The HLC generator (`hlc.rs`) expects milliseconds; using
-    /// seconds produces physical_time ~1000× too small (timestamps in 1970).
-    /// Mirrors the pre-existing `expunge` and `reanchor` arms, which both
-    /// compute `as_millis()`.
-    fn now_millis() -> i64 {
+    /// Current time as epoch **seconds**. Used anywhere a store method takes
+    /// `now: i64`. The DrawerStore layer (both InMemory and SQLite) multiplies
+    /// the caller-supplied value by 1_000 before handing it to the HLC
+    /// generator (`hlc.rs`), so callers must supply seconds — not milliseconds.
+    /// Passing milliseconds here produces HLC physical_time values ~1_000×
+    /// too large (microsecond magnitudes instead of millisecond magnitudes),
+    /// causing mutate/reanchor audit rows to sort incorrectly against capture
+    /// and expunge rows on the same replica. (secfix/punt-g2 — HLC double-multiply)
+    fn now_secs() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     }
 
@@ -1382,7 +1740,7 @@ impl Estate {
 
                 let changed_by = self.changed_by_or_estate();
                 // Store `now` is epoch-milliseconds (HLC physical_time).
-                let now = Self::now_millis();
+                let now = Self::now_secs();
 
                 self.store.mutate_provenance(
                     row_id,
@@ -1405,7 +1763,7 @@ impl Estate {
                 // anything else (e.g. Active, Accepted), so no extra guard is
                 // needed here.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_state(
                     row_id,
                     State::Rejected,
@@ -1422,7 +1780,7 @@ impl Estate {
                 })?;
                 // active/pending → contest → contested per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_state(
                     row_id,
                     State::Contested,
@@ -1449,7 +1807,7 @@ impl Estate {
                     )));
                 }
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_state(
                     row_id,
                     State::Active,
@@ -1477,7 +1835,7 @@ impl Estate {
                 }
                 // active → promote → accepted per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_state(
                     row_id,
                     State::Accepted,
@@ -1494,7 +1852,7 @@ impl Estate {
                 })?;
                 // active/accepted → supersede → superseded per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_state(
                     row_id,
                     State::Superseded,
@@ -1596,7 +1954,7 @@ impl Estate {
                 // revives); the lineage contradiction for superseded was caught
                 // above, so by here the transition is unconditionally legal.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_state(
                     row_id,
                     State::Active,
@@ -1622,7 +1980,7 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
@@ -1647,7 +2005,7 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
@@ -1678,7 +2036,7 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_millis();
+                let now = Self::now_secs();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
@@ -1692,7 +2050,8 @@ impl Estate {
 
     /// Reanchor a drawer to a different room and/or lattice position.
     ///
-    /// Moves the row's placement: `to_room` changes the `room` column;
+    /// Moves the row's placement: `to_room`/`to_wing` resolve to a new
+    /// room node and update `parent_node_id` via NodeStore (ADR-017);
     /// `to_lattice` updates the lattice anchor columns. At least one must
     /// be supplied (belt-and-suspenders; the primary empty check is GLK's
     /// boundary). An absent row returns `LocusKitError::DrawerNotFound`.
@@ -1728,10 +2087,8 @@ impl Estate {
         } else {
             changed_by
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        // Store expects epoch seconds (it multiplies by 1_000 before HLC).
+        let now = Self::now_secs();
         self.store.reanchor_gated(
             row_id,
             to_room,
@@ -1869,8 +2226,34 @@ impl Estate {
             .get_drawer(&frame.b)?
             .ok_or_else(|| LocusKitError::DrawerNotFound { id: frame.b.clone() })?;
 
+        // Resolve wing/room names from the node tree for each drawer's
+        // parent_node_id. Room node (depth 2) → parent is wing node (depth 1).
+        // Falls back to empty strings if node_store is unavailable.
+        let resolve_names = |parent_node_id: &str| -> (String, String) {
+            if let Some(ref ns) = self.node_store {
+                let room_uuid = Uuid::parse_str(parent_node_id).ok();
+                let room_node = room_uuid.and_then(|u| ns.get_node(u).ok().flatten());
+                let room_name = room_node
+                    .as_ref()
+                    .map(|n| n.display_name.clone())
+                    .unwrap_or_default();
+                let wing_node = room_node
+                    .and_then(|n| n.parent_id)
+                    .and_then(|pid| ns.get_node(pid).ok().flatten());
+                let wing_name = wing_node
+                    .map(|n| n.display_name)
+                    .unwrap_or_default();
+                (wing_name, room_name)
+            } else {
+                (String::new(), String::new())
+            }
+        };
+
+        let (source_wing, source_room) = resolve_names(&drawer_a.parent_node_id);
+        let (target_wing, target_room) = resolve_names(&drawer_b.parent_node_id);
+
         // Association label derives from endpoint A's room and endpoint B's room.
-        let label = format!("{}→{}", drawer_a.room, drawer_b.room);
+        let label = format!("{}→{}", source_room, target_room);
 
         // Adjective bitmap: state .active is the zero baseline (raw 0),
         // so adjective_bitmap = 0. Associations are born active, not pending.
@@ -1885,11 +2268,11 @@ impl Estate {
 
         let association = crate::association::Association {
             id: Uuid::new_v4().to_string(),
-            source_wing: drawer_a.wing.clone(),
-            source_room: drawer_a.room.clone(),
+            source_wing,
+            source_room,
             source_drawer_id: Some(drawer_a.id.clone()),
-            target_wing: drawer_b.wing.clone(),
-            target_room: drawer_b.room.clone(),
+            target_wing,
+            target_room,
             target_drawer_id: Some(drawer_b.id.clone()),
             label,
             lattice_anchor,
@@ -2202,11 +2585,15 @@ mod tests {
     }
 
     #[test]
-    fn capture_stores_content_and_room() {
+    fn capture_stores_content_and_resolves_room() {
         let estate = make_estate();
         let drawer = basic_capture(&estate, "my content", "study");
         assert_eq!(drawer.content, "my content");
-        assert_eq!(drawer.room, "study");
+        // ADR-017: room is resolved from the node tree via parent_node_id,
+        // not stored on the Drawer struct. Verify via resolve_node_names.
+        let names = estate.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+        let (_, room) = names.get(&drawer.parent_node_id).expect("room node must resolve");
+        assert_eq!(room, "study");
     }
 
     #[test]
@@ -2215,9 +2602,12 @@ mod tests {
         // ("Agentic Memory") regardless of the estate's owner identifier.
         // The prior dynamic derivation ("wing_<owner>" / "wing_default")
         // is retired.
+        // ADR-017: wing resolved from node tree via parent_node_id.
         let estate = make_estate();
         let drawer = basic_capture(&estate, "x", "r");
-        assert_eq!(drawer.wing, DEFAULT_WING_NAME);
+        let names = estate.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+        let (wing, _) = names.get(&drawer.parent_node_id).expect("wing node must resolve");
+        assert_eq!(wing, DEFAULT_WING_NAME);
     }
 
     // --- capture container-fingerprint maintenance (P0-PARITY #33) ---
@@ -2234,7 +2624,10 @@ mod tests {
         let entries = estate.store.room_level_fingerprints().unwrap();
         assert_eq!(entries.len(), 1, "the captured drawer's room is enumerated");
         let entry = &entries[0];
-        assert_eq!(entry.wing, d.wing);
+        // ADR-017: wing is resolved from the node tree, not stored on Drawer.
+        let names = estate.store.resolve_node_names(&[d.parent_node_id.clone()]).unwrap();
+        let (d_wing, _) = names.get(&d.parent_node_id).expect("room node must resolve");
+        assert_eq!(&entry.wing, d_wing);
         assert_eq!(entry.room, "study");
         // The room aggregate equals the OR of the (single) captured drawer's
         // own bitmaps — the canonical container-fingerprint definition.
@@ -2425,7 +2818,10 @@ mod tests {
         // other axis is preserved (room/state unchanged).
         let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
         assert_eq!(after.confirmation(), Confirmation::UserConfirmed);
-        assert_eq!(after.room, "study");
+        // ADR-017: room resolved from node tree via parent_node_id.
+        let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
+        let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
+        assert_eq!(room, "study");
         assert_eq!(
             State::from_raw(after.adjective_bitmap & 0x3F),
             State::Active
@@ -3161,7 +3557,10 @@ mod tests {
         let d = basic_capture(&estate, "content", "original-room");
         estate.reanchor(&d.id, Some("new-room"), None, None).unwrap();
         let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(updated.room, "new-room");
+        // ADR-017: room resolved from node tree via parent_node_id.
+        let names = estate.store.resolve_node_names(&[updated.parent_node_id.clone()]).unwrap();
+        let (_, room) = names.get(&updated.parent_node_id).expect("room node must resolve");
+        assert_eq!(room, "new-room");
         // Bitmaps unchanged.
         assert_eq!(updated.adjective_bitmap, d.adjective_bitmap);
         assert_eq!(updated.operational_bitmap, d.operational_bitmap);
@@ -3739,6 +4138,45 @@ mod tests {
         );
     }
 
+    // P4-secfix: DESC-ordered bounded scan returns NEWEST drawers.
+    //
+    // With 300 drawers (doc-0 .. doc-299, timestamps 1_700_000_001..1_700_000_300)
+    // and a Director-style frame (limit = None → scan_bound = 256), the cap must
+    // retain the 256 most-recently-filed drawers (doc-44..doc-299), not the
+    // oldest 256 (doc-0..doc-255). We verify by checking that the freshly-filed
+    // "doc-299" appears in the result and the oldest "doc-0" does not.
+    #[test]
+    fn desc_bounded_scan_returns_newest_drawers_above_cap() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        // Insert 300 drawers in strictly-ascending filedAt order so the
+        // oldest/newest distinction is unambiguous.
+        capture_n(&estate, 300);
+
+        // Director-style frame: no explicit limit → scan_bound = max(0, 256) = 256.
+        let mut frame = unconfirmed_frame();
+        frame.hydration_level = HydrationLevel::Full; // need content to identify drawer
+
+        let rows = estate.recall(frame, 1_700_001_000).collect_all();
+
+        // Exactly 256 rows (the cap); not 300 (full estate) and not fewer.
+        assert_eq!(
+            rows.len(),
+            RECALL_CANDIDATE_CAP,
+            "P4-secfix: 300-drawer estate with no limit should yield {} rows; got {}",
+            RECALL_CANDIDATE_CAP,
+            rows.len(),
+        );
+
+        // The newest drawer ("doc-299") must be in the cap window.
+        let has_newest = rows.iter().any(|d| d.content == "doc-299");
+        assert!(has_newest, "P4-secfix: doc-299 (newest) must be within the 256-row cap");
+
+        // The oldest drawer ("doc-0") must have been excluded by the DESC cap.
+        let has_oldest = rows.iter().any(|d| d.content == "doc-0");
+        assert!(!has_oldest, "P4-secfix: doc-0 (oldest) must be excluded by the 256-row DESC cap");
+    }
+
     #[test]
     fn structured_recall_returns_empty_content() {
         let db = TempDb::new();
@@ -3864,6 +4302,55 @@ mod tests {
         let rows = estate.recall(frame, 1_700_001_000).collect_all();
         assert_eq!(rows.len(), 1, "exactly one drawer matches 'doc-3'");
         assert_eq!(rows[0].content, "doc-3");
+    }
+
+    // P6-secfix: ContentMatches predicate in get_drawers_matching_frame must see
+    // real content, not the empty string left by premature BitmapOnly stripping.
+    #[test]
+    fn get_drawers_matching_frame_content_predicate_sees_real_content() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+
+        // Capture two drawers with distinct content bodies.
+        let d_alpha = estate
+            .capture(
+                CaptureFrame::new("needle text", CaptureChannel::Typed, "r",
+                    LatticeAnchor::udc("5"), "bilby", "v1"),
+                1_700_000_001,
+            )
+            .unwrap();
+        let _d_other = estate
+            .capture(
+                CaptureFrame::new("haystack", CaptureChannel::Typed, "r",
+                    LatticeAnchor::udc("5"), "bilby", "v1"),
+                1_700_000_002,
+            )
+            .unwrap();
+
+        // Query both IDs with a ContentMatches predicate at BitmapOnly hydration.
+        // P6-secfix: evaluate must see the real body (not "") so "needle" matches;
+        // then the content is stripped AFTER evaluation for the BitmapOnly result.
+        let ids = vec![d_alpha.id.clone(), _d_other.id.clone()];
+        let mut frame = RecallFrame::new(vec![
+            Filter::CurrentlyBelieve,
+            Filter::Unconfirmed,
+            Filter::ContentMatches("needle".to_string()),
+        ]);
+        frame.hydration_level = HydrationLevel::BitmapOnly;
+
+        let result = estate.get_drawers_matching_frame(&ids, &frame).unwrap();
+
+        // Only "needle text" matches the predicate.
+        assert_eq!(
+            result.admissible.len(), 1,
+            "P6-secfix: only the drawer containing 'needle' must be admissible; got {}",
+            result.admissible.len()
+        );
+        assert_eq!(result.admissible[0].id, d_alpha.id,
+            "P6-secfix: the admissible drawer must be d_alpha");
+        // BitmapOnly stripping must still apply to the result (content == "").
+        assert_eq!(result.admissible[0].content, "",
+            "P6-secfix: BitmapOnly hydration must strip content AFTER predicate eval");
     }
 
     // --- fingerprint pruning in recall (mirrors Swift RecallPruningTests) ---
@@ -4326,39 +4813,41 @@ mod tests {
     /// recall (CurrentlyBelieve) must return exactly the two content drawers
     /// and zero charter drawers.
     ///
-    /// Parity with Swift RecallHygieneTests H1, H3, H8 — verifies that
-    /// the Rust candidate filter `d.room != CHARTER_ROOM` applies.
+    /// Hint drawers (seeded at provision in AI_Charter_Hint room) are normal
+    /// drawers — they ARE returned by recall like any other drawer.
+    ///
+    /// Parity with Swift RecallHygieneTests updated for new normal behavior.
     #[test]
-    fn recall_excludes_charter_drawers_and_returns_only_content() {
+    fn recall_includes_hint_drawers_as_normal_content() {
         let estate = make_estate();
         let now = 1_700_000_000_i64;
 
-        // Seed one wing — produces a charter drawer in room "_charter".
+        // Seed one wing — produces a hint drawer in room "AI_Charter_Hint".
         estate
-            .seed_wing("Agentic Memory", "AI observations and inferences.", now)
+            .seed_wing("Agentic Memory", "AI observations and inferences.", "test-model", now)
             .expect("seed_wing must succeed");
 
         // Capture two content drawers in a normal room.
-        let content_a = basic_capture(&estate, "content alpha — hygiene test", "hygiene-room");
-        let content_b = basic_capture(&estate, "content beta — hygiene test", "hygiene-room");
+        let content_a = basic_capture(&estate, "content alpha — hint test", "hygiene-room");
+        let content_b = basic_capture(&estate, "content beta — hint test", "hygiene-room");
 
-        // Recall with CurrentlyBelieve — should surface content drawers only.
+        // Recall with CurrentlyBelieve — hint drawers are now recallable.
         let frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
         let rows = estate.recall(frame, now + 10).collect_all();
 
-        // Verify charter drawers are excluded.
-        let charter_hits: Vec<_> = rows
+        // All three drawers (1 hint + 2 content) must be in recall results.
+        let hint_hits: Vec<_> = rows
             .iter()
-            .filter(|d| d.room == crate::default_wings::CHARTER_ROOM)
+            .filter(|d| d.added_by == crate::default_wings::HINT_ADDED_BY)
             .collect();
-        assert!(
-            charter_hits.is_empty(),
-            "recall must return zero charter drawers; got {} (rooms: {:?})",
-            charter_hits.len(),
-            charter_hits.iter().map(|d| &d.room).collect::<Vec<_>>()
+        assert_eq!(
+            hint_hits.len(),
+            1,
+            "recall must include the 1 hint drawer; got {}",
+            hint_hits.len()
         );
 
-        // Verify the content drawers ARE returned.
+        // The content drawers must also be returned.
         let content_ids: std::collections::HashSet<&str> =
             rows.iter().map(|d| d.id.as_str()).collect();
         assert!(
@@ -4370,63 +4859,114 @@ mod tests {
             "recall must return content drawer B"
         );
 
-        // Exact count: 2 content drawers, no charters.
+        // Total: 1 hint + 2 content drawers.
         assert_eq!(
             rows.len(),
-            2,
-            "recall must return exactly 2 content drawers; got {}",
+            3,
+            "recall must return 3 drawers (1 hint + 2 content); got {}",
             rows.len()
         );
     }
 
-    /// Charter drawers excluded from recall must still be accessible via
-    /// store reads (they are not deleted, just filtered from scored recall).
+    /// Hint drawers are accessible via both recall and store reads.
     ///
-    /// Parity with Swift RecallHygieneTests H7.
+    /// Parity with Swift RecallHygieneTests H7 updated for new normal behavior.
     #[test]
-    fn charter_drawers_exist_in_store_but_not_in_recall() {
+    fn hint_drawers_present_in_both_recall_and_store() {
         let estate = make_estate();
         let now = 1_700_000_000_i64;
 
-        // Seed two wings → two charter drawers in "_charter".
+        // Seed two wings → two hint drawers in "AI_Charter_Hint".
         estate
-            .seed_wing("Wing One", "First wing charter.", now)
+            .seed_wing("Wing One", "First wing hint.", "test-model", now)
             .expect("seed_wing one");
         estate
-            .seed_wing("Wing Two", "Second wing charter.", now + 1)
+            .seed_wing("Wing Two", "Second wing hint.", "test-model", now + 1)
             .expect("seed_wing two");
 
         // Capture one content drawer.
-        let _content = basic_capture(&estate, "user content — charter hygiene", "content-room");
+        let _content = basic_capture(&estate, "user content — hint presence test", "content-room");
 
-        // Recall must not surface charter drawers.
+        // Recall returns hint drawers (normal recall behavior now).
         let frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
         let recall_rows = estate.recall(frame, now + 10).collect_all();
-        let recalled_charter: Vec<_> = recall_rows
+        let recalled_hints: Vec<_> = recall_rows
             .iter()
-            .filter(|d| d.room == crate::default_wings::CHARTER_ROOM)
+            .filter(|d| d.added_by == crate::default_wings::HINT_ADDED_BY)
             .collect();
-        assert!(
-            recalled_charter.is_empty(),
-            "recall must exclude charter drawers; got {}",
-            recalled_charter.len()
+        assert_eq!(
+            recalled_hints.len(),
+            2,
+            "recall must include both hint drawers; got {}",
+            recalled_hints.len()
         );
 
-        // Charter drawers must still exist in the store (not deleted).
-        // Access via all_drawers_bounded — the raw store path bypasses the recall filter.
+        // Hint drawers also exist in the raw store.
         let all_drawers = estate
             .store
             .all_drawers_bounded(None)
             .expect("all_drawers_bounded must succeed");
-        let stored_charters: Vec<_> = all_drawers
+        let stored_hints: Vec<_> = all_drawers
             .iter()
-            .filter(|d| d.room == crate::default_wings::CHARTER_ROOM)
+            .filter(|d| d.added_by == crate::default_wings::HINT_ADDED_BY)
             .collect();
         assert_eq!(
-            stored_charters.len(),
+            stored_hints.len(),
             2,
-            "store must still contain both charter drawers after recall exclusion; got {}",
-            stored_charters.len()
+            "store must contain both hint drawers; got {}",
+            stored_hints.len()
+        );
+    }
+
+    // --- secfix/punt-g2: HLC double-multiply regression guard ---
+    //
+    // DrawerStore convention: callers pass epoch SECONDS; the store
+    // multiplies by 1_000 before feeding HLC (so HLC physical_time is
+    // always in epoch-millisecond magnitude). The pre-fix `now_millis()`
+    // helper returned epoch milliseconds, causing the store to multiply
+    // again → HLC physical_time was ~1_000× too large (microsecond magnitude).
+    //
+    // now_secs() must return epoch seconds so the store produces the correct
+    // millisecond-magnitude physical_time in audit rows.
+
+    #[test]
+    fn now_secs_returns_epoch_seconds_magnitude() {
+        // Epoch-seconds floor: 2023-01-01 UTC ≈ 1_672_531_200
+        // Epoch-seconds ceil:  2035-01-01 UTC ≈ 2_051_222_400
+        let now = Estate::now_secs();
+        assert!(
+            now >= 1_672_531_200 && now < 2_051_222_400,
+            "now_secs() must return epoch seconds (magnitude ~1.7e9, got {now}); \
+             if this is ~1_000x too large the double-multiply is not fixed"
+        );
+    }
+
+    #[test]
+    fn mutate_confirm_hlc_physical_time_is_millisecond_magnitude() {
+        // After mutate(Confirm), the audit event's HLC physical_time must be
+        // in epoch-millisecond range (~1.7e12). Pre-fix it was in microsecond
+        // range (~1.7e15) because now_millis() * 1000 was double-multiplied.
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "hlc-magnitude check", "study");
+        estate
+            .mutate(&drawer.id, MutationKind::Confirm, None)
+            .unwrap();
+
+        // Two audit events: capture (index 0) and confirm (index 1).
+        let events = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .expect("InMemoryDrawerStore must return audit events");
+        assert_eq!(events.len(), 2, "expected capture + confirm audit events");
+
+        let hlc = events[1].hlc;
+        // Epoch-milliseconds floor: 2023-01-01 UTC ≈ 1_672_531_200_000 ms
+        // Epoch-milliseconds ceil:  2035-01-01 UTC ≈ 2_051_222_400_000 ms
+        assert!(
+            hlc.physical_time >= 1_672_531_200_000 && hlc.physical_time < 2_051_222_400_000,
+            "confirm audit HLC physical_time must be epoch milliseconds (~1.7e12, got {}); \
+             if ~1_000x too large the double-multiply is not fixed",
+            hlc.physical_time
         );
     }
 }

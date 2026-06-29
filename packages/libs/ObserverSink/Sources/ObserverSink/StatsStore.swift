@@ -122,6 +122,15 @@ public enum StatsStoreSchema {
 
     /// TEXT NOT NULL — JSON-encoded ARIAGraphPayload bytes. Served verbatim by /api/graph.
     public static let payloadColumn = "payload"
+
+    /// TEXT NULL (v3) — stable topology-inputs fingerprint for the persisted snapshot.
+    /// The autonomic governor writes this alongside the payload so that, on restart,
+    /// it can compare the persisted fingerprint against freshly-computed topology
+    /// inputs WITHOUT re-reading all drawers/tunnels/facts when nothing changed.
+    /// The fingerprint is a process-independent stable hash (FNV-1a), never Swift's
+    /// salted `hashValue`. Nullable so v2 rows migrated forward read back as nil
+    /// (treated as "unknown" → governor recomputes once, then writes the fingerprint).
+    public static let topologyFingerprintColumn = "topology_fingerprint"
 }
 
 // MARK: - StatsStore
@@ -162,7 +171,9 @@ public final class StatsStore: Sendable {
     /// Bumping this value requires a Migration entry to be added to `schema`.
     /// v1: initial schema (metric_samples, event_samples, control).
     /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
-    public static let schemaVersion = 2
+    /// v3: added topology_snapshots.topology_fingerprint (nullable) so the governor
+    ///     can skip the full topology read on restart when inputs are unchanged.
+    public static let schemaVersion = 3
 
     // MARK: - Schema declaration
 
@@ -179,6 +190,7 @@ public final class StatsStore: Sendable {
     ///
     /// Version 1: initial schema — metric_samples, event_samples, control.
     /// Version 2: additive migration — topology_snapshots table added.
+    /// Version 3: additive migration — topology_snapshots.topology_fingerprint added.
     public static let schema = SchemaDeclaration(
         kitID: "ObserverSink",
         version: schemaVersion,
@@ -271,7 +283,7 @@ public final class StatsStore: Sendable {
             // by the governor. The HTTP server and moot-mgr serve these bytes verbatim —
             // no re-encoding on read.
             //
-            // Added by v1→v2 migration (schema version bump from 1 to 2).
+            // Added by v1→v2 migration (table); topology_fingerprint added by v2→v3.
             TableDeclaration(
                 name: StatsStoreSchema.topologySnapshotsTable,
                 columns: [
@@ -281,6 +293,9 @@ public final class StatsStore: Sendable {
                     .timestamp(StatsStoreSchema.generatedAtColumn),
                     // JSON payload bytes (TEXT). Served verbatim; no decode on read path.
                     .text(StatsStoreSchema.payloadColumn),
+                    // Stable topology-inputs fingerprint (v3). Nullable — pre-v3 rows
+                    // and snapshots written without a fingerprint read back as nil.
+                    .text(StatsStoreSchema.topologyFingerprintColumn, nullable: true),
                 ],
                 primaryKey: [StatsStoreSchema.estateColumn]
             ),
@@ -318,6 +333,20 @@ public final class StatsStore: Sendable {
                         ],
                         primaryKey: [StatsStoreSchema.estateColumn]
                     )),
+                ]
+            ),
+            // v2 → v3: add the nullable topology_fingerprint column.
+            // Additive migration — existing snapshot rows keep their payload and
+            // read back the fingerprint as nil (governor recomputes once, then
+            // backfills the fingerprint on its next topology duty cycle).
+            Migration(
+                fromVersion: 2,
+                toVersion: 3,
+                operations: [
+                    .addColumn(
+                        table: StatsStoreSchema.topologySnapshotsTable,
+                        column: .text(StatsStoreSchema.topologyFingerprintColumn, nullable: true)
+                    ),
                 ]
             ),
         ]
@@ -541,8 +570,17 @@ public final class StatsStore: Sendable {
     ///   - generatedAt: Caller-supplied timestamp of when the governor produced this
     ///                  snapshot. No `Date()` call inside the store (determinism rule).
     ///   - payload:     JSON payload bytes. Stored as UTF-8 TEXT.
+    ///   - fingerprint: Stable topology-inputs fingerprint (FNV-1a based, process
+    ///                  independent) so a restarting governor can skip the full
+    ///                  topology read when inputs are unchanged. `nil` leaves the
+    ///                  column null (e.g. callers that do not compute a fingerprint).
     /// - Throws: `StorageError` on I/O failure.
-    public func writeTopologySnapshot(estate: String, generatedAt: Date, payload: Data) async throws {
+    public func writeTopologySnapshot(
+        estate: String,
+        generatedAt: Date,
+        payload: Data,
+        fingerprint: String? = nil
+    ) async throws {
         guard let payloadStr = String(data: payload, encoding: .utf8) else {
             // Payload must be valid UTF-8 JSON; the governor always produces valid UTF-8.
             throw StorageError.invalidQuery(detail: "topology snapshot payload is not valid UTF-8")
@@ -554,6 +592,9 @@ public final class StatsStore: Sendable {
                 // ISO-8601 TEXT per schema invariant.
                 StatsStoreSchema.generatedAtColumn: .timestamp(generatedAt),
                 StatsStoreSchema.payloadColumn: .text(payloadStr),
+                // Null when the caller supplies no fingerprint.
+                StatsStoreSchema.topologyFingerprintColumn:
+                    fingerprint.map { .text($0) } ?? .null,
             ],
             conflictColumns: [StatsStoreSchema.estateColumn]
         )
@@ -600,6 +641,36 @@ public final class StatsStore: Sendable {
               case let .text(payloadStr) = payloadTyped
         else { return nil }
         return payloadStr.data(using: .utf8)
+    }
+
+    /// Read the persisted topology fingerprint for `estate`.
+    ///
+    /// The autonomic governor calls this once on startup so it can compare the
+    /// persisted topology-inputs fingerprint against freshly-computed inputs and
+    /// skip the full drawer/tunnel/fact read when they match. Returns `nil` when
+    /// no snapshot exists yet, when the row predates v3 (column null), or when a
+    /// snapshot was written without a fingerprint.
+    ///
+    /// - Parameter estate: Estate identifier string (PRIMARY KEY lookup).
+    /// - Returns: The stored fingerprint string, or `nil` if absent/null.
+    /// - Throws: `StorageError` on I/O failure.
+    public func loadTopologyFingerprint(estate: String) async throws -> String? {
+        let rows = try await storage.rowStore.query(
+            table: StatsStoreSchema.topologySnapshotsTable,
+            where: .eq(
+                Column(table: StatsStoreSchema.topologySnapshotsTable,
+                       name: StatsStoreSchema.estateColumn),
+                .text(estate)
+            )
+        )
+        // PRIMARY KEY lookup yields ≤1 row. The column is written as `.text` or
+        // `.null`; the backend may read it back as `.text` (SQLite/InMemory) — any
+        // non-text representation (null, absent) yields nil.
+        guard let row = rows.first,
+              let cell = row[StatsStoreSchema.topologyFingerprintColumn],
+              case let .text(fingerprint) = cell
+        else { return nil }
+        return fingerprint
     }
 
     /// The `generated_at` cell as a comparable instant, tolerating both

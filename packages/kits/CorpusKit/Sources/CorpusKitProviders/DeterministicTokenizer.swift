@@ -3,11 +3,11 @@
 // Deterministic, model-agnostic tokenizer used as a test fixture
 // and as the v1.0 stand-in until model-specific tokenizers
 // (BERT WordPiece, SentencePiece) land. Maps each whitespace-and-
-// punctuation token to a stable hash-folded id in [0, vocabSize).
+// punctuation token to a stable hash-folded id in [2, vocabSize)
+// (IDs 0 and 1 are reserved for PAD/UNK; empty input returns padTokenID).
 //
-// Matches the tokenizer shape the CorpusKitProviders text providers use;
-// migrating that provider to consume this tokenizer is the kit-
-// graph cleanup. Mission 7 keeps both surfaces compatible.
+// The MiniLM, MPNet, and EmbeddingGemma provider initializers already
+// default to DeterministicTokenizer; no further migration is pending.
 
 import Foundation
 import CorpusKit

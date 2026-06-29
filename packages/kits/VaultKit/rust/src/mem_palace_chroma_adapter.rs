@@ -45,16 +45,16 @@ use crate::note_ir::{Block, FactIR, NoteIR, OccurredAt, SourceRef, WikiLink};
 use crate::vault_adapter::VaultAdapter;
 
 /// `chroma.sqlite3` location under the palace root. Required.
-const CHROMA_RELATIVE_PATH: &str = "palace/chroma.sqlite3";
+pub(crate) const CHROMA_RELATIVE_PATH: &str = "palace/chroma.sqlite3";
 
 /// `tunnels.json` location under the palace root. Optional — a palace
 /// with no explicit tunnels has no file (MemPalace `_load_tunnels`
 /// treats absence as the empty list; so does this adapter).
-const TUNNELS_RELATIVE_PATH: &str = "tunnels.json";
+pub(crate) const TUNNELS_RELATIVE_PATH: &str = "tunnels.json";
 
 /// `knowledge_graph.sqlite3` location under the palace root. Optional —
 /// a palace whose KG was never populated has no file.
-const KNOWLEDGE_GRAPH_RELATIVE_PATH: &str = "knowledge_graph.sqlite3";
+pub(crate) const KNOWLEDGE_GRAPH_RELATIVE_PATH: &str = "knowledge_graph.sqlite3";
 
 /// Reads one whole MemPalace palace (all three stores) into `NoteIR`.
 /// Import-only; see `from_ir`. Mirrors Swift `MemPalaceChromaAdapter`.
@@ -175,7 +175,7 @@ fn sql_err(context: &str, e: rusqlite::Error) -> VaultKitError {
 /// collection does not exist in this file. ChromaDB stores per-row
 /// metadata under the collection's metadata segment, so this id is the
 /// join key for everything we read.
-fn metadata_segment_id(
+pub(crate) fn metadata_segment_id(
     db: &Connection,
     collection: &str,
 ) -> Result<Option<String>, VaultKitError> {
@@ -205,7 +205,7 @@ fn metadata_segment_id(
 /// The value is COALESCEd across the four typed columns with the numeric
 /// ones CAST to text by SQLite itself — the cross-port determinism anchor
 /// (see the module header).
-fn metadata_rows(
+pub(crate) fn metadata_rows(
     db: &Connection,
     segment_id: &str,
 ) -> Result<Vec<(String, HashMap<String, String>)>, VaultKitError> {

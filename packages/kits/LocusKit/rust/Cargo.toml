@@ -34,6 +34,13 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 uuid = { version = "1", features = ["v4"] }
+# Ed25519 keypair generation for the federation signing identity minted at
+# first open. Mirrors Swift's CryptoKit Curve25519.Signing.PrivateKey().
+# Authority: DECISION_SYNCKIT_DESIGN_2026-05-19 §8.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["std"] }
+# Base64 encoding for the Ed25519 key material persisted to the manifest.
+base64 = "0.22"
 # IntellectusLib is the zero-dep telemetry floor. LocusKit emits
 # path, recall, and KG-fact operation metrics via the report! macro,
 # which is a no-op when monitoring is disabled (the default).
@@ -45,6 +52,9 @@ intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # the edge is strictly downstream→upstream (kit → lib), no cycle. Authority:
 # DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (the #7 feature requires it).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
+# unicode-normalization provides NFC normalization for lookup_name derivation
+# (ADR-017 §8). Already a transitive dependency via the idna crate.
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 # JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.

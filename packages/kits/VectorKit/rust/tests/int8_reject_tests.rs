@@ -6,8 +6,11 @@
 //! `VectorStore::add_payload` and `add_payloads` return
 //! `VectorKitError::Int8QuantizationPolicyUndefined` on any int8 payload.
 //!
-//! The read side is symmetric: `decode_payload` returns an error for int8
-//! rows, so a hand-crafted int8 row cannot be silently consumed.
+//! The read side: `decode_payload` is documented to return an error for int8
+//! rows. Because the write path now blocks int8 rows from ever reaching the
+//! store, the read-side guard cannot be directly exercised through the public
+//! API in these integration tests (no row to decode). The `decode_payload`
+//! unit coverage lives in the crate's internal tests in payload.rs.
 //!
 //! These tests change NO current behavior: there are zero existing int8
 //! producers. They are precondition guards for a latent trap.

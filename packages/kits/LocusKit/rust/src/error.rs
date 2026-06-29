@@ -6,7 +6,7 @@
 
 /// Errors returned by LocusKit operations.
 ///
-/// Maps exactly to the Swift `LocusKitError` enum. All nine cases are
+/// Maps exactly to the Swift `LocusKitError` enum. All eleven cases are
 /// present; associated-value types match the Swift definitions.
 ///
 /// `DisciplineViolation` carries `from` and `to` as `i64` (matching the
@@ -57,7 +57,7 @@ pub enum LocusKitError {
 
     /// A verb call or mutation would violate a substrate invariant —
     /// an illegal state transition (§ 6.2), a forbidden combination
-    /// (I-3), or an expunge without confirmation.
+    /// (I-22), or an expunge without confirmation.
     ///
     /// `from` and `to` are `State` raw values as `i64`. Callers that
     /// need the typed cases convert via `State::try_from(value)`.
@@ -228,7 +228,7 @@ mod tests {
         // This matches the Swift comment: error is Equatable without requiring
         // State in LocusKitError's dependency set.
         let err = LocusKitError::DisciplineViolation {
-            from: 9, // tombstoned raw value
+            from: 9, // arbitrary raw value (tombstoned is 33 in the scale-gapped layout)
             to: 0,   // active raw value
             reason: "terminal rows cannot transition".to_string(),
         };

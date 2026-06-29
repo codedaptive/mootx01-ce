@@ -13,7 +13,7 @@ impl CompositeDistance {
     /// Composite distance between two rows.
     ///
     /// Both component distances must be in [0, 1]; callers that pass
-    /// out-of-range values will trip the debug assertions below.
+    /// out-of-range values will panic (matching Swift's precondition).
     /// `lattice_distance` is guaranteed in-range by `UDCTreeDistance` and
     /// `WikidataGraphDistance` after the normalization fix.
     /// `fingerprint_hamming_distance` must not exceed `FINGERPRINT_TOTAL_BITS` (256).
@@ -24,12 +24,12 @@ impl CompositeDistance {
         alpha_fingerprint: f64,
         compatible_seed_scope: bool,
     ) -> f64 {
-        debug_assert!(
+        assert!(
             lattice_distance >= 0.0 && lattice_distance <= 1.0,
             "lattice_distance must be in [0, 1]; got {}",
             lattice_distance
         );
-        debug_assert!(
+        assert!(
             fingerprint_hamming_distance <= Self::FINGERPRINT_TOTAL_BITS,
             "fingerprint_hamming_distance {} exceeds total bits {}",
             fingerprint_hamming_distance,

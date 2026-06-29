@@ -6,7 +6,7 @@
 // 32 bytes/fingerprint, the working set is 32 MB; at typical
 // LPDDR5 bandwidth (~60 GB/s on Apple Silicon M-series) a full
 // scan takes ~500 µs. K=10 top-K maintenance adds negligible
-// overhead via a small min-heap (cookbook § 17.1 budget).
+// overhead via a small bounded max-heap (cookbook § 17.1 budget).
 //
 // The structure here is deliberate:
 //
@@ -151,9 +151,8 @@ public enum HammingNN {
 
 // MARK: - GPU implementation
 //
-// A Metal kernel for Hamming-NN lives in
-// `glref-metal-hamming_nn.metal`. The Metal version becomes the
-// preferred backend on M-series and A-series chips when the
-// candidate count exceeds ~100K rows (the threshold where GPU
-// dispatch overhead amortizes). Below that threshold AMX/NEON
-// dominate.
+// The Metal backend is implemented in `PortableKernel-Metal.swift`
+// (embedded shader string, explicit `KernelKind.metal` selection).
+// It is NOT automatically selected: `kernelForCurrentPlatform()`
+// returns the SIMD kernel on arm64. Metal must be requested explicitly
+// via `PortableKernel.kernel(of: .metal)`.

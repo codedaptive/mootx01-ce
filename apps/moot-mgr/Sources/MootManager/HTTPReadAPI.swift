@@ -13,11 +13,12 @@
 //    127.0.0.1"). Because the bind is loopback-only, off-host peers cannot reach
 //    the port at all.
 //
-//  * READ ENDPOINTS ARE UNAUTHENTICATED BUT READ-ONLY. GET /api/server,
+//  * READ ENDPOINTS ARE UNAUTHENTICATED BUT HOST-VALIDATED. GET /api/server,
 //    /api/estates, /api/events, /api/config return metadata only (counts,
 //    enums, ISO-8601 timestamps). No memory/rung content ever crosses this
-//    surface (concepts §1.6, GUI SPEC §10). A loopback-only, read-only GET can
-//    neither leak content nor mutate state.
+//    surface (concepts §1.6, GUI SPEC §10). A GET with a non-loopback Host
+//    header is rejected 421 (DNS-rebinding guard: `isLoopbackHost` in serve(_:)).
+//    Absent/empty Host is allowed (curl, direct native connections).
 //
 //  * CONTROL OVER HTTP IS GATED. POST /api/control/* (monitoring on/off, set
 //    retention) requires BOTH:
@@ -51,6 +52,105 @@ import Glibc
 #else
 import Darwin
 #endif
+
+// MARK: - Concurrency cap
+
+// The moot-mgr loopback control/read-API server is a single-user local service.
+// 16 concurrent connections is generous for any realistic local dashboard or CLI
+// tool, and low enough to protect against a caller that opens many blocking
+// connections before the auth/control checks run (CAND-011 MEDIUM finding).
+//
+// The gate uses the same two-phase protocol as AriaMcpKit's ConcurrencyGate:
+//   1. tryEnqueue() — NON-BLOCKING on the accept thread. Returns false
+//      immediately when the cap is reached; the connection is shed with HTTP
+//      503 + Retry-After: 1. The accept thread NEVER blocks on the gate.
+//   2. waitForSlot() — BLOCKING semaphore wait inside the spawned Task.
+//      Enforces the concurrent-service cap.
+//   3. release() — called (via defer) when the connection handler exits,
+//      including on all error and timeout paths.
+//
+// Configurable via `MOOT_MGR_HTTP_MAX_CONNECTIONS` environment variable.
+
+/// Maximum concurrent connections for the moot-mgr loopback HTTP server.
+///
+/// 16 is generous for a single-user local management surface (dashboard, CLI).
+/// Connections beyond this cap are shed with HTTP 503 + `Retry-After: 1` rather
+/// than allowed to accumulate as unbounded blocking tasks. Matches the Rust port
+/// (`MAX_LOOPBACK_CONNECTIONS`).
+private let MootMgrMaxLoopbackConnections: Int = {
+    if let v = ProcessInfo.processInfo.environment["MOOT_MGR_HTTP_MAX_CONNECTIONS"],
+       let n = Int(v) {
+        return max(1, min(n, 1024))
+    }
+    return 16
+}()
+
+/// Bounded concurrency gate for the moot-mgr loopback HTTP server.
+///
+/// Backed by a `DispatchSemaphore` (same pattern as AriaMcpKit's
+/// `ConcurrencyGate`). `@unchecked Sendable` because `DispatchSemaphore` and
+/// the `Atomic` counter satisfy the cross-thread safety requirement.
+///
+/// The accept thread calls `tryEnqueue()` (non-blocking). If it returns `false`
+/// the connection is shed immediately with HTTP 503. If it returns `true` the
+/// accept thread dispatches a Task that calls `waitForSlot()` before serving.
+/// Call `release()` when the handler finishes — always pair via `defer`.
+final class MootMgrConnGate: @unchecked Sendable {
+    let maxConcurrent: Int
+
+    /// Number of connections currently enqueued (waiting or actively serving).
+    /// Incremented by tryEnqueue, decremented by release.
+    private var activeCount: Int = 0
+    private let lock = NSLock()
+    /// Semaphore: starts at maxConcurrent free slots. waitForSlot() decrements
+    /// (blocks if 0); release() signals (wakes one waiter).
+    private let semaphore: DispatchSemaphore
+
+    init(maxConcurrent: Int = MootMgrMaxLoopbackConnections) {
+        self.maxConcurrent = maxConcurrent
+        self.semaphore = DispatchSemaphore(value: maxConcurrent)
+    }
+
+    /// Phase 1 (accept thread, NON-BLOCKING): test whether a new connection fits
+    /// within the cap. Returns `true` and increments the active count if so
+    /// (caller MUST eventually call `release()`); returns `false` if the cap is
+    /// already reached (caller should shed with HTTP 503 and close the fd).
+    ///
+    /// This method NEVER blocks — no semaphore wait, no parking.
+    func tryEnqueue() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeCount < maxConcurrent else { return false }
+        activeCount += 1
+        return true
+    }
+
+    /// Phase 2 (worker Task, BLOCKING): wait until a concurrency slot is free.
+    /// Must be called after a successful `tryEnqueue()`, before serving the
+    /// request. In the current single-layer design, tryEnqueue only returns true
+    /// when a slot is immediately available, so this wait returns without
+    /// blocking. Present for structural parity with AriaMcpKit's gate.
+    func waitForSlot() {
+        semaphore.wait()
+    }
+
+    /// Release a previously acquired slot. Decrements activeCount and signals
+    /// the semaphore so the next waiting Task can proceed. Always call via
+    /// `defer` in the connection handler to ensure release on all exit paths.
+    func release() {
+        lock.lock()
+        if activeCount > 0 { activeCount -= 1 }
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    /// Current active connection count. Informational; used in tests.
+    var currentDepth: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeCount
+    }
+}
 
 // MARK: - HTTPReadAPI
 
@@ -87,6 +187,12 @@ public actor HTTPReadAPI {
 
     private let logger = Logger(subsystem: "com.mootx01.kit", category: "HTTPReadAPI")
 
+    /// Bounded concurrency gate: limits simultaneous in-flight connections to
+    /// `MootMgrMaxLoopbackConnections` (default 16, overrideable via env var).
+    /// Connections beyond the cap are shed with HTTP 503 + Retry-After before
+    /// any request parsing runs. Mirrors the Rust port's `LoopbackConnGate`.
+    private let connGate: MootMgrConnGate
+
     /// The listening socket fd; -1 when not running.
     private var listenFD: Int32 = -1
     /// The actual bound port (resolved when requestedPort was 0).
@@ -118,7 +224,8 @@ public actor HTTPReadAPI {
         controlToken: String,
         startInstant: Date,
         clock: @escaping @Sendable () -> Date = { Date() },
-        admin: EstateAdmin? = nil
+        admin: EstateAdmin? = nil,
+        maxConnections: Int? = nil
     ) {
         self.manager = manager
         self.requestedPort = port
@@ -126,6 +233,13 @@ public actor HTTPReadAPI {
         self.startInstant = startInstant
         self.clock = clock
         self.admin = admin
+        // Use the explicit override when provided (tests); otherwise read the env
+        // var / default inside MootMgrConnGate.init.
+        if let cap = maxConnections {
+            self.connGate = MootMgrConnGate(maxConcurrent: max(1, cap))
+        } else {
+            self.connGate = MootMgrConnGate()
+        }
     }
 
     // MARK: - Lifecycle
@@ -140,16 +254,43 @@ public actor HTTPReadAPI {
         running.set(true)
 
         // The accept loop blocks on accept(); run it on a dedicated thread so it
-        // never occupies the cooperative pool. Each accepted connection is
-        // handed to the actor for serving.
-        let thread = Thread { [weak self, fd, running] in
+        // never occupies the cooperative pool. Each accepted connection is handed
+        // to the actor for serving, subject to the concurrency gate.
+        let gate = connGate
+        let thread = Thread { [weak self, fd, running, gate] in
             while running.get() {
                 guard let cfd = POSIXSocket.acceptOne(fd) else {
                     if !running.get() { break }
                     continue
                 }
                 guard let self else { close(cfd); break }
-                Task { await self.serve(cfd) }
+
+                // Phase 1 (accept thread, NON-BLOCKING): depth check only.
+                // tryEnqueue increments the active count and returns false
+                // immediately when the cap is reached — it never blocks. The
+                // accept loop sheds the connection inline with HTTP 503 +
+                // Retry-After and loops back to accept() without parking.
+                guard gate.tryEnqueue() else {
+                    // Cap exceeded: write 503 and close before any request
+                    // parsing runs. This keeps the shed path on the accept
+                    // thread (fast, no dispatch) and matches the Rust port.
+                    Self.sendShedResponse(fd: cfd)
+                    close(cfd)
+                    continue
+                }
+
+                Task {
+                    // Phase 2 (worker Task): wait for a concurrency slot.
+                    // In the current single-layer design tryEnqueue only
+                    // returns true when a slot is available, so this returns
+                    // immediately. Present for structural parity with
+                    // AriaMcpKit's two-phase gate.
+                    gate.waitForSlot()
+                    // Slot-release invariant: release MUST be called on every
+                    // exit path — normal completion, host shutdown, or error.
+                    defer { gate.release() }
+                    await self.serve(cfd)
+                }
             }
         }
         thread.name = "com.mootx01.kit.HTTPReadAPI.accept"
@@ -178,7 +319,26 @@ public actor HTTPReadAPI {
 
     /// Serve one accepted connection: read the request, route it, respond.
     private func serve(_ fd: Int32) async {
+        // Bound blocking reads: a peer that trickles bytes cannot stall a handler
+        // thread longer than this window. Mirrors the Rust port's
+        // `stream.set_read_timeout(Duration::from_secs(30))`.
+        var tv = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
         guard let request = HTTPRequest.read(fd: fd) else { close(fd); return }
+
+        // DNS-rebinding guard: reject any GET whose Host header is present but
+        // not a loopback address. A browser always sends Host; a rebinding attack
+        // uses a non-loopback domain that resolves to 127.0.0.1. Absent/empty
+        // Host is allowed (curl, direct native connections). POST /api/control/*
+        // is already gated by Origin + Bearer token which provides stronger
+        // protection there.
+        if request.method == "GET", !Self.isLoopbackHost(request.headers["host"]) {
+            HTTPResponse.json(status: 421, body: Data(#"{"error":"misdirected_request"}"#.utf8)).send(fd: fd)
+            close(fd)
+            return
+        }
+
         // The SSE live-tail is the one streaming path. Decide it here, before
         // routing: LoopbackHTTP's response writer is buffered-only, and the
         // stream's source + lifetime are the consumer's (ADR-LOOPBACKHTTP-001).
@@ -395,6 +555,34 @@ public actor HTTPReadAPI {
         }
     }
 
+    // MARK: - Test support
+
+    /// The concurrency gate for this server. Exposed so tests can inspect
+    /// gate depth without going through the full resident-host harness.
+    var testConnGate: MootMgrConnGate { connGate }
+
+    // MARK: - Shed response
+
+    /// Write an HTTP 503 Service Unavailable response to `fd` and close it.
+    /// Called on the accept thread when the connection cap is reached, before
+    /// any request parsing or auth check runs. Mirrors the Rust port's
+    /// `send_shed_response`. The `shutdown(.send)` after writing ensures a
+    /// FIN is sent so the client sees a clean EOF and can parse the body.
+    static func sendShedResponse(fd: Int32) {
+        let body = Data(#"{"error":"service_unavailable","retry_after":1}"#.utf8)
+        let head = "HTTP/1.1 503 Service Unavailable\r\n" +
+            "Content-Type: application/json\r\n" +
+            "Retry-After: 1\r\n" +
+            "Content-Length: \(body.count)\r\n" +
+            "Connection: close\r\n\r\n"
+        let headData = Data(head.utf8)
+        headData.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress!, $0.count) }
+        body.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress!, $0.count) }
+        // Graceful shutdown: send FIN so the client can read the response body
+        // before the connection closes. Mirrors Rust `stream.shutdown(Write)`.
+        Darwin.shutdown(fd, SHUT_WR)
+    }
+
     // MARK: - Auth helpers
 
     /// Constant-time bearer-token check.
@@ -422,15 +610,80 @@ public actor HTTPReadAPI {
     /// True if the Origin header is acceptable for a control write: absent
     /// (curl / native fetch with no Origin) or a loopback origin. Any other
     /// origin is cross-origin and rejected (CSRF guard).
+    ///
+    /// The scheme+host prefix is matched exactly and the suffix validated to be
+    /// empty or a port — this is equivalent to extracting the host and comparing
+    /// it. Prefix-only comparison would accept attacker-owned names like
+    /// `localhost.evil` or `127.0.0.1.evil` (the DNS-rebinding spoofing vector).
     static func isOriginAllowed(_ origin: String?) -> Bool {
-        guard let origin, !origin.isEmpty else { return true }
-        let lowered = origin.lowercased()
-        return lowered.hasPrefix("http://127.0.0.1")
-            || lowered.hasPrefix("http://localhost")
-            || lowered.hasPrefix("https://127.0.0.1")
-            || lowered.hasPrefix("https://localhost")
-            || lowered.hasPrefix("http://[::1]")
-            || lowered.hasPrefix("https://[::1]")
+        guard let origin else { return true }
+        let lowered = origin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lowered.isEmpty else { return true }
+        return Self.isLoopbackOrigin(lowered)
+    }
+
+    /// True if `origin` (already lowercased) is an exact loopback origin.
+    /// The check matches one of six canonical loopback scheme+host prefixes
+    /// and then validates the suffix is empty (bare host) or a port (`:<digits>`).
+    /// Prefix-only comparison would accept attacker-owned names like
+    /// `localhost.evil` or `127.0.0.1.evil`; the suffix validation closes that gap.
+    private static func isLoopbackOrigin(_ origin: String) -> Bool {
+        [
+            "http://127.0.0.1",
+            "http://localhost",
+            "https://127.0.0.1",
+            "https://localhost",
+            "http://[::1]",
+            "https://[::1]",
+        ].contains { prefix in
+            guard origin.hasPrefix(prefix) else { return false }
+            return Self.isValidOriginSuffix(String(origin.dropFirst(prefix.count)))
+        }
+    }
+
+    /// True if `suffix` is the remainder of an origin after the loopback host:
+    /// either empty (bare host) or `:` followed by one or more digits (port).
+    private static func isValidOriginSuffix(_ suffix: String) -> Bool {
+        if suffix.isEmpty { return true }
+        guard suffix.first == ":" else { return false }
+        let port = suffix.dropFirst()
+        return !port.isEmpty && port.allSatisfy(\.isNumber)
+    }
+
+    /// True if the Host header is acceptable for a GET route: absent/empty (curl /
+    /// native connections that omit Host) or a loopback host+port pair.
+    ///
+    /// The Host header contains only `host` or `host:port`, never a scheme. IPv6
+    /// literals carry brackets: `[::1]` or `[::1]:PORT`. Absent/empty Host is
+    /// allowed — curl and direct native connections may omit it.
+    ///
+    /// Mirrors Rust `is_loopback_host`. Called from `serve(_:)` to block DNS
+    /// rebinding attacks on the unauthenticated GET routes.
+    static func isLoopbackHost(_ host: String?) -> Bool {
+        guard let host = host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty else {
+            return true // absent or empty — allow (curl / direct native connections)
+        }
+        let lower = host.lowercased()
+        // Strip port. IPv6 literals `[::1]` or `[::1]:PORT` need special handling
+        // because they contain colons inside the brackets.
+        let bare: String
+        if lower.hasPrefix("[") {
+            // Extract the content inside the leading `[…]`.
+            bare = lower
+                .components(separatedBy: "]").first
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "[")) }
+                ?? lower
+        } else {
+            // IPv4 or hostname: strip port after the LAST colon so
+            // "127.0.0.1:4242" → "127.0.0.1".
+            if let lastColon = lower.lastIndex(of: ":") {
+                bare = String(lower[lower.startIndex..<lastColon])
+            } else {
+                bare = lower
+            }
+        }
+        return bare == "127.0.0.1" || bare == "localhost" || bare == "::1"
     }
 
     // MARK: - SSE live tail

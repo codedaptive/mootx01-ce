@@ -323,15 +323,17 @@ knowledge. The None backend is the default for local-only estates.
 - `inFlight()`, `completed(streamID:)`
 - Filesystem backend (maildir-pattern, atomic POSIX renames)
 - PersistenceKit-backed backend for durable queues
-- InMemoryStorage backend for GLK Brain layer serial lane
+- InMemoryStorage backend for the GLK Brain serial lane and the CorpusKit
+  ingest queue
 
 **Does NOT:** No domain logic, no message routing, not a pub/sub system.
 Deterministic serial-dispatch queue only.
 
-**Key invariant:** GeniusLocusKit uses QueueKit internally in its Brain
-layer (StandingSignalScheduler). NeuronKit and CognitionKit do NOT import
-QueueKit directly — they get queue behavior through GLK's estate surface.
-One estate. One queue. One authority over serial dispatch.
+**Key invariant:** two kits consume QueueKit. GeniusLocusKit uses it in its
+Brain layer (`StandingSignalScheduler` — the standing-signal serial lane), and
+CorpusKit uses it as the per-corpus **ingest queue** (the encode pipeline,
+relocated from GLK's `EncodeIntake`). NeuronKit and CognitionKit do NOT import
+QueueKit directly — they reach queue behavior through the owning kit's surface.
 
 **Dependencies:** SubstrateLib, PersistenceKit  
 **Languages:** Swift + Rust + Python (three-way conformance parity)  
@@ -416,11 +418,18 @@ recall tier (structured knowledge, KG facts, diary, associations).
 - `EmbeddingProvider` protocol + `CorpusKitProviders` (MiniLM, MPNet, Gemma)
 - `SyncManifest` — replication metadata
 - `TokenizerProtocol`
+- **Ingest pipeline** (`mountIngestQueue` / `enqueueIngest` / `awaitIngestDrain`
+  / `drainIngestQueueOnce` + the `onEncoded` callback): a Corpus owns a
+  per-corpus QueueKit-backed encode queue and drains it on its own bounded
+  worker pool (`ingestBatch` — cross-document parallel embed compute, serial
+  batched writes). A Corpus queues, drains, and encodes its own content with no
+  orchestrator; GeniusLocusKit only enqueues and coordinates the room rollup.
+  Relocated from GLK's `EncodeIntake`.
 
 **Does NOT:** No KG facts, no audit trail, no tunnels, no diary entries.
 Those live in LocusKit. CorpusKit is content-for-retrieval, not content-for-memory.
 
-**Dependencies:** VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateLib  
+**Dependencies:** VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateLib, QueueKit  
 **Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`
 
@@ -495,9 +504,12 @@ separate architecture decision — deferred, not adopted here.)
 A B-1 conformance test in `packages/kits/NeuronKit/rust/tests/brain_kit_boundary_test.rs`
 enforces the reader boundary mechanically for both reader adapters.
 
-**Queue authority:** GLK holds one QueueKit instance per estate in
-StandingSignalScheduler. NeuronKit and CognitionKit never import QueueKit
-directly. One estate. One queue. One authority over serial dispatch.
+**Queue authority:** GLK holds the standing-signal QueueKit instance per estate
+in `StandingSignalScheduler` (the Brain serial-dispatch lane). The encode/ingest
+queue is NOT GLK's — it relocated to CorpusKit (a Corpus owns its own ingest
+queue + drain worker pool). NeuronKit and CognitionKit never import QueueKit
+directly. Each queue has one owner; GLK orchestrates the encode path but does
+not own its queue.
 
 **Dependencies:** AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit  
 **Languages:** Swift + Rust (conformance-gated)  
@@ -602,7 +614,7 @@ ConvergenceKit  ← SubstrateTypes, PersistenceKit
 QueueKit        ← SubstrateTypes, PersistenceKit
 LocusKit        ← SubstrateTypes, SubstrateKernel, SubstrateML, SubstrateLib, PersistenceKit
 VectorKit       ← EngramLib, SubstrateTypes, SubstrateML, PersistenceKit
-CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateTypes, SubstrateML
+CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateTypes, SubstrateML, QueueKit
 GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit, SubstrateTypes, SubstrateKernel
 NeuronKit       ← EideticLib, EngramLib, GeniusLocusKit, LocusKit, SubstrateTypes
 CognitionKit    ← GeniusLocusKit, NeuronKit, LocusKit, SubstrateTypes

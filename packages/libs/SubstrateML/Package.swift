@@ -6,20 +6,17 @@
 // (I-30, cookbook v1.0 §20). Cold-path and dreaming-driven
 // algorithms — learning, graph algorithms, projection.
 //
-// What lives here (Tier 2 + Tier 3 of HARNESS_REFERENCE §2.2-§2.3):
-//   MatrixDecay (lazy multiplicative half-life)
-//   MomentSummary (OR-reduce over active rows in a window)
-//   BradleyTerry (online pairwise comparison gradient)
-//   Anomaly (z-score from cohort centroid)
-//   InfoTheory (entropy / MI / KL)
-//   TemporalCompression (cascading OR-reduce, retention rollups)
-//   PartialStateRecall
-//   FFT (rhythm analysis)
-//   NMF (alternating least squares on O)
-//   EigenvalueCentrality (power iteration with Perron-Frobenius shift)
-//   AuditLogFold (project current / as-of state from event sequence)
-//   TierContribution (re-fingerprint under shared seeds + OR-reduce)
-//   PairingHandshake (generate-and-exchange shared hyperplane family)
+// What lives here (selected; see Sources/SubstrateML/ for the full list):
+//   MatrixDecay, MomentSummary, BradleyTerry, Anomaly, InfoTheory,
+//   TemporalCompression, PartialStateRecall, FFT, NMF,
+//   EigenvalueCentrality, AuditLogFold, TierContribution,
+//   PairingHandshake, ActionOutcomeMatrix, AprioriMining,
+//   AssociationRuleMining, ConceptImplications, DPORReduction,
+//   DeltaFeatureExtractor, DistillationPipeline, DistillationScorer,
+//   FeatureExtractors, FloatSimHash, FormalConceptAnalysis, JacobiSVD,
+//   LLMCalibrationCurve, LatticeDistance, RandomWalks, RowAttributeView,
+//   Sampling, ShingleSimilarity, TemporalCausalityFold,
+//   TierAscendingQuery, TypedDecayWeighting, VizGraphSignals
 //
 // What does NOT live here:
 //   Pure types (SubstrateTypes)

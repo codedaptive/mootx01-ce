@@ -132,18 +132,21 @@ Windows check:
     $PSVersionTable
     [System.Environment]::OSVersion.VersionString
 
-### 2. Use The Current Product Install Route
+### 2. Use The Current Source Install Route
 
-Use the current install instructions from the repository.
+Use the current install instructions from the repository. Do not run mutable remote install scripts with `sh`, `bash`, PowerShell `iex`, or equivalent shell-evaluation primitives.
 
-Typical Unix-style product install shape:
+Typical Unix-style source install shape:
 
-    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
+    # macOS 26+
+    swift build -c release --package-path apps/aria-mcp-server
+
+    # PC/Linux
+    cd apps/aria-mcp-server/rust && cargo build --release
+
     mootx01 install
 
-On Windows, use the repository's PowerShell installer if present.
-
-Before running a remote install script, tell the user that the command downloads and runs the installer from the MOOTx01 CE repository.
+On Windows, build from the checked-out source or use a signed, pinned release artifact if the repository publishes one.
 
 ### 3. Run The Installer
 

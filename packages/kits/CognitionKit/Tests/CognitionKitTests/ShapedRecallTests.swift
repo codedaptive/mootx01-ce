@@ -3,8 +3,8 @@
 // End-to-end test of the ShapedRecall recipe against a real GeniusLocusKit
 // estate over in-memory storage — no mocks. Proves a named RecallShape preset
 // resolves and runs through GLK, that an unknown name degrades to balanced, that
-// the balanced preset is byte-identical to an unshaped recall, and that a shaped
-// recall differs from balanced as expected.
+// the balanced preset is byte-identical to an unshaped recall, that all presets
+// run successfully, and that the recipe is registered in the RecipeCatalog.
 //
 // The estate is seeded into BOTH the corpus (BM25) and vector lanes so the
 // .unionBest recall has real multi-lane candidates — the same join discipline

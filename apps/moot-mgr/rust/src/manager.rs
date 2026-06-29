@@ -28,10 +28,10 @@
 //   /api/lattice      — proxied from `{base}/api/lattice` → LatticeSnapshotPayload
 //                       with FDC heading labels from the bundled frame. On any
 //                       failure (connect/timeout/non-200/parse): {addresses:[],pending:true}.
-//   /api/admin/estates — proxied from `{base}/api/admin/estates` → merged into
-//                        EstatesPayload.admin. On failure: None (honest degrade;
-//                        the host's own EstateAdmin section is still merged in by
-//                        HttpReadApi).
+//   /api/admin/estates — proxied from `{base}/api/admin/estates` → stored in
+//                        EstatesPayload.admin. On failure: None (honest degrade).
+//                        Note: HttpReadApi overwrites admin with the local
+//                        EstateAdmin payload rather than merging the two sections.
 //
 // Daemon address: ARIA_MCP_API_BASE env var, default http://127.0.0.1:4242.
 // Mirrors Swift `MootManager.ariaAPIBase`. See `daemon_client` for the raw GET.
@@ -123,6 +123,22 @@ impl MootManager {
             std::fs::create_dir_all(parent).map_err(|e| ManagerError::Storage {
                 reason: format!("create store parent dir failed: {e}"),
             })?;
+            // Restrict the stats store directory to the owning user (planned
+            // hardening). SQLite WAL/SHM files land here and must not be readable
+            // by other local users. Mirrors Swift `start()` passing `.posixPermissions:
+            // 0o700` through `FileManager.createDirectory(attributes:)`. Best-effort:
+            // a chmod failure is logged but does not abort start() — the directory
+            // was created and the store can still be opened.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = std::fs::set_permissions(
+                    parent,
+                    std::fs::Permissions::from_mode(0o700),
+                ) {
+                    eprintln!("moot-mgr: warning: could not chmod stats store dir to 0700: {e}");
+                }
+            }
         }
         let store = StatsStore::new(&self.config.store_path)?;
         store.open()?;
@@ -283,6 +299,8 @@ impl MootManager {
     ) -> Result<ServerPayload, ManagerError> {
         let store = self.require_store()?;
         let monitoring_enabled = store.is_monitoring_enabled()?;
+        // Full scan for per-dropbox summaries and capability self-reports (by-dropbox
+        // rollups cover every metric name; capabilities are self-reported by any name).
         let all_metrics = store.query_metrics(None)?;
         let events = store.query_events(None)?;
         let estate_count = events
@@ -293,19 +311,24 @@ impl MootManager {
         let health = store.storage_stats(now_epoch as i64)?;
 
         // --- Server-metric extraction (latest + second-latest per named metric) ---
-        let server_metric_names: BTreeSet<&str> = [
+        //
+        // Bounded query: the name set is fixed and small (6 names). Using the
+        // targeted SQL query instead of filtering `all_metrics` in-memory bounds
+        // the server-metric surface to its intended names and avoids the DoS window
+        // where a noisy producer floods arbitrary metric names into the server section.
+        // Mirrors Swift `serverPayload()` which calls `store.queryMetricsByNames(serverMetricNames)`.
+        let server_metric_names: &[&str] = &[
             "server.rss_mb",
             "server.cpu_user_ms",
             "server.rpc_count",
             "server.connections",
             "server.proto_version",
             "substrate.kernel.backend_selected",
-        ]
-        .into_iter()
-        .collect();
+        ];
+        let server_metrics = store.query_metrics_by_names(server_metric_names, None)?;
         // latest_by_name[name] = (newer, older). older is None until the second sample.
         let mut latest_by_name: BTreeMap<String, (MetricRow, Option<MetricRow>)> = BTreeMap::new();
-        for m in all_metrics.iter().filter(|m| server_metric_names.contains(m.name.as_str())) {
+        for m in server_metrics.iter() {
             match latest_by_name.get(&m.name) {
                 Some((prev, _)) if m.ts_epoch > prev.ts_epoch => {
                     let prev_clone = clone_metric(prev);
@@ -484,10 +507,10 @@ impl MootManager {
             .collect();
 
         // Proxy the daemon's admin/hosted-estate section. On any failure (daemon
-        // down, decode error, timeout) admin is None — the host's own EstateAdmin
-        // section is still merged in by HttpReadApi, so the console degrades
-        // gracefully rather than fabricating data. Matches Swift's equivalent
-        // `ariaAdmin` block in MootManager.estatesPayload().
+        // down, decode error, timeout) admin is None. HttpReadApi overwrites this
+        // field with the local admin payload, so the two admin sections are not
+        // merged. Matches Swift's equivalent `ariaAdmin` block in
+        // MootManager.estatesPayload().
         let aria_admin = proxy_admin_estates();
 
         Ok(EstatesPayload {
@@ -594,7 +617,11 @@ impl MootManager {
             latest.keys().filter(|k| k.1 == "community.assignment").collect();
         comm_keys.sort();
         for key in comm_keys {
-            let count = latest[key].value.round().max(0.0) as i64;
+            // Cap the untrusted metric value to prevent a crafted sample from
+            // triggering an unbounded allocation loop. 10,000 community nodes is
+            // a generous ceiling; legitimate graph analytics never approach it.
+            // Mirrors Swift `graphPayload()` which clamps via max(0, min(Int(...), 10_000)).
+            let count = latest[key].value.round().max(0.0).min(10_000.0) as i64;
             for _ in 0..count {
                 communities.push(GraphCommunityPayload {
                     id: communities.len() as i64,
@@ -710,13 +737,22 @@ impl MootManager {
     /// Filesystem path of the sidecar JSON file that persists the retention override.
     ///
     /// Placed alongside the stats store so the manager's data is self-contained —
-    /// the manager already creates/owns that directory. Format:
-    /// `<store-parent>/moot-mgr-prefs.json`. Mirrors Swift `MootManager.retentionPrefsURL`.
+    /// the manager already creates/owns that directory. The filename is derived from
+    /// the store's filename stem to prevent collisions when two manager instances
+    /// use stores in the same parent directory (e.g. `moot-mgr.sqlite` →
+    /// `moot-mgr-prefs.json`). Mirrors Swift `MootManager.retentionPrefsURL`.
     fn retention_prefs_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(&self.config.store_path)
+        let store_path = std::path::Path::new(&self.config.store_path);
+        // Derive the prefs filename from the store stem so multiple stores in the
+        // same directory do not share the same prefs file (filename collision fix).
+        let stem = store_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("moot-mgr");
+        store_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
-            .join("moot-mgr-prefs.json")
+            .join(format!("{stem}-prefs.json"))
     }
 
     /// Persist the retention override to the sidecar JSON file.
@@ -987,4 +1023,122 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager_config::ManagerConfig;
+
+    /// Build a started manager backed by a unique temp directory.
+    fn temp_manager() -> MootManager {
+        let dir = std::env::temp_dir().join(format!("moot-mgr-rust-test-{}", uuid_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store_path = dir.join("stats.sqlite").to_string_lossy().to_string();
+        let mut mgr = MootManager::new(ManagerConfig::new(
+            store_path,
+            crate::manager_config::DEFAULT_RETENTION_WINDOW_SECS,
+            crate::manager_config::DEFAULT_RETENTION_CADENCE_SECS,
+        ));
+        mgr.start().expect("manager start must succeed in tests");
+        mgr
+    }
+
+    /// Tiny deterministic ID for temp paths (no rand dep).
+    fn uuid_hex() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        format!("{:08x}-{:p}", nanos, &nanos as *const _)
+    }
+
+    // ── community count cap — unbounded allocation guard ─────────────────────
+
+    #[test]
+    fn graph_payload_community_count_capped_at_10000() {
+        // A crafted metric carrying a value far above any sane community count
+        // must be clamped to 10,000 so graph_payload() cannot allocate an
+        // unbounded Vec in response to a crafted sample.
+        let mut mgr = temp_manager();
+        let store = mgr.stats_store().unwrap();
+        // Insert a metric with a value of 999_999 — simulates a crafted sample.
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("estate".to_string(), "home".to_string());
+        tags.insert("node_count".to_string(), "12".to_string());
+        tags.insert("community_count".to_string(), "999999".to_string());
+        store
+            .insert_metric("community.assignment", 999_999.0, &tags, 100.0, "substrateml")
+            .expect("insert must succeed");
+        let payload = mgr.graph_payload(100.0, None).expect("graph_payload must succeed");
+        // The cap is 10,000 — the Vec must never exceed that regardless of the
+        // stored value.
+        assert!(
+            payload.communities.len() <= 10_000,
+            "community count must be capped at 10,000; got {}",
+            payload.communities.len()
+        );
+        assert_eq!(payload.communities.len(), 10_000, "cap is exactly 10,000");
+    }
+
+    // ── retention prefs filename — stem-derived, not fixed ───────────────────
+
+    #[test]
+    fn retention_prefs_path_derives_from_store_stem() {
+        // Two instances in the same parent directory with different store names
+        // must write different prefs files — preventing the filename collision
+        // that a fixed "moot-mgr-prefs.json" would cause.
+        let dir = std::env::temp_dir().join(format!("moot-prefs-stem-{}", uuid_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store_a = dir.join("alpha.sqlite").to_string_lossy().to_string();
+        let mgr_a = MootManager::new(ManagerConfig::new(
+            store_a,
+            crate::manager_config::DEFAULT_RETENTION_WINDOW_SECS,
+            crate::manager_config::DEFAULT_RETENTION_CADENCE_SECS,
+        ));
+        let prefs_a = mgr_a.retention_prefs_path();
+
+        let store_b = dir.join("beta.sqlite").to_string_lossy().to_string();
+        let mgr_b = MootManager::new(ManagerConfig::new(
+            store_b,
+            crate::manager_config::DEFAULT_RETENTION_WINDOW_SECS,
+            crate::manager_config::DEFAULT_RETENTION_CADENCE_SECS,
+        ));
+        let prefs_b = mgr_b.retention_prefs_path();
+
+        assert_eq!(
+            prefs_a.file_name().unwrap().to_str().unwrap(),
+            "alpha-prefs.json",
+            "stem-derived prefs filename must match store stem"
+        );
+        assert_eq!(
+            prefs_b.file_name().unwrap().to_str().unwrap(),
+            "beta-prefs.json",
+            "stem-derived prefs filename must match store stem"
+        );
+        assert_ne!(prefs_a, prefs_b, "two stores in the same dir must use different prefs files");
+    }
+
+    // ── store directory permissions — owner-only (0700) ──────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn start_creates_store_dir_with_0700_permissions() {
+        // The stats store directory must not be world- or group-readable.
+        // SQLite WAL/SHM files land here and must stay private to the owning user.
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("moot-perms-{}", uuid_hex()));
+        let store_path = dir.join("stats.sqlite").to_string_lossy().to_string();
+        let mut mgr = MootManager::new(ManagerConfig::new(
+            store_path,
+            crate::manager_config::DEFAULT_RETENTION_WINDOW_SECS,
+            crate::manager_config::DEFAULT_RETENTION_CADENCE_SECS,
+        ));
+        mgr.start().expect("manager start must succeed");
+        let meta = std::fs::metadata(&dir).expect("dir must exist after start");
+        let mode = meta.mode() & 0o777;
+        assert_eq!(mode, 0o700, "store dir must be 0700; got {:o}", mode);
+    }
 }

@@ -1,7 +1,12 @@
 // frames.rs — Rust mirror of the verb frames the GLK surface accepts.
 //
-// Slot sets and field names match the Swift `Frames.swift` in
-// `Sources/GeniusLocusKit/Verbs/`. These GLK-level frames use
+// This file defines the Rust GLK verb boundary frames. Field names
+// broadly follow `Frames.swift` in `Sources/GeniusLocusKit/Verbs/`,
+// but several frames are intentional subsets of the current Swift
+// surfaces: `CaptureFrame` omits the newer provenance adjective slots,
+// `MutationKind` omits `correctExportability`, `LearnFrame` is
+// handle-only (Swift carries source/mode/refreshPolicy), and
+// `ReanchorFrame` has no wing field. These GLK-level frames use
 // string-typed ids and i64 raw enum values by design: the GLK boundary
 // layer is intentionally decoupled from locus_kit nominal types so the
 // coordinator can translate at the boundary (see coordinator.rs verb
@@ -37,12 +42,13 @@ impl LatticeAnchor {
     }
 }
 
-/// Named mutation operations for `mutate`. Mirrors
-/// `LocusKit.MutationKind`. The Swift variant carries associated
-/// values for `correctSensitivity` and `correctTrust`; this GLK
-/// frame keeps them as raw i64 values to stay independent of the
-/// locus_kit adjective enum types — the coordinator maps these to
-/// the LocusKit `MutationKind` enum at the dispatch boundary.
+/// Named mutation operations for `mutate`. Mirrors the core cases of
+/// `LocusKit.MutationKind`. The Swift variant also carries
+/// `correctExportability`; that case is not yet present at this Rust
+/// boundary. `correctSensitivity` and `correctTrust` carry raw i64
+/// values to stay independent of the locus_kit adjective enum types —
+/// the coordinator maps them to the LocusKit `MutationKind` enum at
+/// the dispatch boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationKind {
     Confirm,
@@ -52,8 +58,9 @@ pub enum MutationKind {
     Supersede,
     Revive,
     Accept,
-    /// Carries a raw sensitivity value (Swift uses an enum); the
-    /// numeric domain is fixed by the scale-gapped layout 0/4/8/12.
+    /// Carries a raw sensitivity value (Swift uses `AdjectiveSensitivity`);
+    /// the numeric domain is the scale-gapped layout 0/16/32/48
+    /// (normal=0, elevated=16, restricted=32, secret=48).
     CorrectSensitivity(i64),
     /// Carries a raw trust value (Swift uses an enum); domain is
     /// 0..=5 per `Adjectives.swift`.
@@ -72,7 +79,8 @@ pub struct CaptureFrame {
     /// Content kind raw value (prose=0, code=1, transcript=2, list=3,
     /// structured_json=4, image_caption=5).
     pub kind: i64,
-    /// Sensitivity raw value (scale-gapped 0/4/8/12; default 0).
+    /// Sensitivity raw value (scale-gapped 0/16/32/48 per `AdjectiveSensitivity`;
+    /// normal=0, elevated=16, restricted=32, secret=48; default 0).
     pub sensitivity: i64,
     pub lineage_id: Option<String>,
     pub room: RoomId,
@@ -99,9 +107,11 @@ pub struct RecallFrame {
     pub hydration_level: HydrationLevel,
     pub limit: Option<i64>,
     pub ordering: Ordering,
-    /// As-of HLC timestamp for historical reconstruction. ISO-8601 in
-    /// scaffold form; replaced by HLC type when SubstrateLib Rust
-    /// publishes one.
+    /// As-of HLC timestamp for historical reconstruction. Kept as an
+    /// ISO-8601 string at this Rust GLK boundary layer; a native Rust
+    /// HLC type is available in SubstrateLib but this boundary field
+    /// intentionally stays string-typed so the coordinator can accept
+    /// the raw string from callers and parse it internally at dispatch.
     pub as_of: Option<String>,
 }
 
@@ -126,11 +136,50 @@ pub enum Ordering {
     ByRoomAsc,
 }
 
-/// Learn frame. Mirrors `LocusKit.LearnFrame`. The GLK learn verb
-/// body is wired through to locus_kit in coordinator.rs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Learn frame. Full mirror of `LocusKit.LearnFrame`, aligned with
+/// the Swift `LearnFrame` surface (`source`, `handle`, `mode`, `refreshPolicy`).
+///
+/// The GLK boundary previously exposed only `handle`, requiring callers to
+/// construct `LocusLearnFrame` (the locus_kit internal type) directly —
+/// bypassing the GLK verb abstraction. This struct now carries the complete
+/// slot set so the coordinator can map it to `LocusLearnFrame` at the
+/// dispatch boundary (same pattern as `ProposeFrame` → `LocusProposeFrame`).
+///
+/// Field semantics mirror Swift's `LearnFrame`:
+///   - `source`: the catalog entry whose lattice anchor the learned reference
+///     inherits. `Estate::learn` catalogs it if not already present.
+///   - `handle`: the URI / locator of the reference. Must be non-empty.
+///   - `mode`: by-reference (pointer only) vs by-ingestion (content stored).
+///   - `refresh_policy`: how often the reference is re-grounded.
+#[derive(Debug, Clone)]
 pub struct LearnFrame {
+    /// The source this reference is learned from. Carries the genuine lattice
+    /// anchor the learned reference inherits.
+    pub source: locus_kit::source_catalog_entry::SourceCatalogEntry,
+    /// The reference handle — the URI / locator the learned reference points at.
+    /// Must be non-empty; `estate.learn` rejects empty handles.
     pub handle: String,
+    /// Whether the reference is held by pointer (ByReference) or its content
+    /// was ingested (ByIngestion). Defaults to ByReference.
+    pub mode: locus_kit::learned_reference::LearnMode,
+    /// How often the reference is re-grounded against its source. Defaults to Weekly.
+    pub refresh_policy: locus_kit::learned_reference::RefreshPolicy,
+}
+
+impl LearnFrame {
+    /// Create a `LearnFrame` with defaults matching the Swift initializer:
+    /// `mode = .byReference`, `refreshPolicy = .weekly`.
+    pub fn new(
+        source: locus_kit::source_catalog_entry::SourceCatalogEntry,
+        handle: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            handle: handle.into(),
+            mode: locus_kit::learned_reference::LearnMode::ByReference,
+            refresh_policy: locus_kit::learned_reference::RefreshPolicy::Weekly,
+        }
+    }
 }
 
 /// Withdraw frame. Mirrors Swift `WithdrawFrame`.
@@ -158,9 +207,11 @@ pub struct ExpungeFrame {
     pub confirmation: bool,
 }
 
-/// Reanchor frame. Mirrors Swift `ReanchorFrame`. At least one of
-/// `to_room` or `to_lattice` must be present; an empty reanchor
-/// raises `VerbError::EmptyReanchor`.
+/// Reanchor frame. Partial mirror of Swift `ReanchorFrame` — supports
+/// room and lattice targets only. Wing moves (`to_wing`) are not yet
+/// wired at this Rust boundary. At least one of `to_room` or
+/// `to_lattice` must be present; an empty frame raises
+/// `VerbError::EmptyReanchor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReanchorFrame {
     pub row_id: RowId,
@@ -168,9 +219,10 @@ pub struct ReanchorFrame {
     pub to_lattice: Option<LatticeAnchor>,
 }
 
-/// Propose frame. Mirrors Swift `ProposeFrame`. The `kind` field
-/// carries the typed `ProposalKind` vocabulary; the surface boundary
-/// uses `kind.raw_value()` when writing to persistent storage.
+/// Propose frame. Mirrors Swift `ProposeFrame`. The coordinator maps
+/// the Brain-layer `ProposalKind` to the substrate `ProposalKind`
+/// before persistence; the substrate-axis enum's raw value is what
+/// is written to storage, not the GLK `ProposalKind` raw value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposeFrame {
     pub target: RowId,

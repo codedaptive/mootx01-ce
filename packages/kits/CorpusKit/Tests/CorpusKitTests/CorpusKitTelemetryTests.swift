@@ -89,13 +89,13 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 
 // MARK: - Helper: fresh storage
 
-/// Creates fresh InMemory-backed storage for each test.
+/// Creates a fresh SQLite-backed storage for each test (via makeScratchStorage()).
 private func makeFreshStorage() async throws -> any Storage {
     let storage = try makeScratchStorage()
     return storage
 }
 
-/// Creates a fresh BundleStore against InMemory storage.
+/// Creates a fresh BundleStore against SQLite-backed storage (via makeFreshStorage()).
 private func makeFreshBundleStore() async throws -> BundleStore {
     let storage = try await makeFreshStorage()
     try await storage.migrate(to: BundleStore.schemaDeclaration)
@@ -152,13 +152,15 @@ struct CorpusKitTelemetryDisabledTests {
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(false)
 
-            // Build fresh VectorStore + BundleStore + BM25 for a recall call.
+            // Build fresh VectorStore + BundleStore + InvertedIndexStore for a recall call.
             let storage = try await makeFreshStorage()
             try await storage.migrate(to: BundleStore.schemaDeclaration)
             try await storage.migrate(to: VectorStore.schemaDeclaration)
+            try await storage.migrate(to: InvertedIndexStore.schemaDeclaration)
             let bundleStore = BundleStore(storage: storage)
             let vectorStore = VectorStore(storage: storage)
-            let bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
+            let invertedIndex = InvertedIndexStore(storage: storage)
+            try await invertedIndex.open()
 
             let probe = Engram(
                 blocks: 0xCAFE_BABE_DEAD_BEEF,
@@ -172,7 +174,7 @@ struct CorpusKitTelemetryDisabledTests {
                 modelID: "corpus-deterministic-v1",
                 limit: 5,
                 vectorStore: vectorStore,
-                bm25: bm25,
+                invertedIndex: invertedIndex,
                 bundleStore: bundleStore
             )
 
@@ -224,9 +226,11 @@ struct CorpusKitTelemetryEnabledTests {
             let storage = try await makeFreshStorage()
             try await storage.migrate(to: BundleStore.schemaDeclaration)
             try await storage.migrate(to: VectorStore.schemaDeclaration)
+            try await storage.migrate(to: InvertedIndexStore.schemaDeclaration)
             let bundleStore = BundleStore(storage: storage)
             let vectorStore = VectorStore(storage: storage)
-            let bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
+            let invertedIndex = InvertedIndexStore(storage: storage)
+            try await invertedIndex.open()
 
             let probe = Engram(
                 blocks: 0xCAFE_BABE_DEAD_BEEF,
@@ -245,7 +249,7 @@ struct CorpusKitTelemetryEnabledTests {
                 modelID: "corpus-deterministic-v1",
                 limit: 5,
                 vectorStore: vectorStore,
-                bm25: bm25,
+                invertedIndex: invertedIndex,
                 bundleStore: bundleStore
             )
 
@@ -339,9 +343,11 @@ struct CorpusKitTelemetryShapeTests {
             let storage = try await makeFreshStorage()
             try await storage.migrate(to: BundleStore.schemaDeclaration)
             try await storage.migrate(to: VectorStore.schemaDeclaration)
+            try await storage.migrate(to: InvertedIndexStore.schemaDeclaration)
             let bundleStore = BundleStore(storage: storage)
             let vectorStore = VectorStore(storage: storage)
-            let bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
+            let invertedIndex = InvertedIndexStore(storage: storage)
+            try await invertedIndex.open()
 
             // Insert one chunk and its vector with monitoring OFF so the
             // ingest metrics don't contaminate the recall assertion.
@@ -357,7 +363,11 @@ struct CorpusKitTelemetryShapeTests {
                 metadata: [:]
             )
             try await bundleStore.insert([chunk])
-            await bm25.index([chunk])
+            try await invertedIndex.index(
+                itemID: chunkID.uuidString,
+                tokens: CorpusDefaultTokenizer().keywordTokens(chunk.text),
+                now: Date(timeIntervalSince1970: 1_700_000_000)
+            )
             let probe = Engram(
                 blocks: 0xAAAA_AAAA_AAAA_AAAA,
                         0xBBBB_BBBB_BBBB_BBBB,
@@ -383,7 +393,7 @@ struct CorpusKitTelemetryShapeTests {
                 modelID: "test-model",
                 limit: 5,
                 vectorStore: vectorStore,
-                bm25: bm25,
+                invertedIndex: invertedIndex,
                 bundleStore: bundleStore
             )
 
@@ -449,9 +459,11 @@ struct CorpusKitTelemetryConformanceTests {
             let storage = try await makeFreshStorage()
             try await storage.migrate(to: BundleStore.schemaDeclaration)
             try await storage.migrate(to: VectorStore.schemaDeclaration)
+            try await storage.migrate(to: InvertedIndexStore.schemaDeclaration)
             let bundleStore = BundleStore(storage: storage)
             let vectorStore = VectorStore(storage: storage)
-            let bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
+            let invertedIndex = InvertedIndexStore(storage: storage)
+            try await invertedIndex.open()
 
             // Fixed inputs — same IDs computed both times the test runs.
             let fixtures: [(String, String, Engram)] = [
@@ -465,6 +477,7 @@ struct CorpusKitTelemetryConformanceTests {
                  Engram(blocks: 0x9999_9999_9999_9999, 0xAAAA_AAAA_AAAA_AAAA,
                                0xBBBB_BBBB_BBBB_BBBB, 0xCCCC_CCCC_CCCC_CCCC)),
             ]
+            let ingestNow = Date(timeIntervalSince1970: 1_700_000_000)
             for (sourceID, text, eng) in fixtures {
                 // Use content-addressed IDs so both recall calls see the same UUIDs.
                 let chunkID = Chunk.deriveID(sourceID: sourceID, startOffset: 0, text: text)
@@ -478,13 +491,17 @@ struct CorpusKitTelemetryConformanceTests {
                     metadata: [:]
                 )
                 try await bundleStore.insert([chunk])
-                await bm25.index([chunk])
+                try await invertedIndex.index(
+                    itemID: chunkID.uuidString,
+                    tokens: CorpusDefaultTokenizer().keywordTokens(text),
+                    now: ingestNow
+                )
                 try await vectorStore.addVector(
                     itemID: chunkID.uuidString,
                     engram: eng,
                     modelID: "m",
                     modelVersion: "1",
-                    filedAt: Date(timeIntervalSince1970: 1_700_000_000)
+                    filedAt: ingestNow
                 )
             }
 
@@ -496,7 +513,7 @@ struct CorpusKitTelemetryConformanceTests {
                 modelID: "m",
                 limit: 5,
                 vectorStore: vectorStore,
-                bm25: bm25,
+                invertedIndex: invertedIndex,
                 bundleStore: bundleStore
             )
 
@@ -511,7 +528,7 @@ struct CorpusKitTelemetryConformanceTests {
                 modelID: "m",
                 limit: 5,
                 vectorStore: vectorStore,
-                bm25: bm25,
+                invertedIndex: invertedIndex,
                 bundleStore: bundleStore
             )
 

@@ -52,10 +52,12 @@ public enum StatSample: Sendable {
     /// A topology-worker lifecycle event. Records that a substrate
     /// verb (capture or think) was applied to a noun row in an estate.
     ///
-    /// The resident topology worker — the `AutonomicGovernor`'s
-    /// topology-snapshot duty — consumes the observed estate-event stream
-    /// alongside its periodic recompute, and the resident observer program
-    /// retains these in its bounded recent window (`RecentWindowSink`).
+    /// Event samples are emitted by callers such as `LocusKit.EstateVerbs`
+    /// and `NeuronKit.EstateDreamingSink`, then retained by `RecentWindowSink`
+    /// and persisted through `ObserverSink.PersistenceStatsSink`. The
+    /// `AutonomicGovernor`'s topology-snapshot duty recomputes from estate
+    /// drawers/tunnels/facts on its own cadence; it does not consume this
+    /// event stream.
     ///
     /// - Parameters:
     ///   - kind:      The verb kind: `.capture` or `.think`.

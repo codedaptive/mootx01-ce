@@ -71,7 +71,12 @@ impl FormalConceptAnalysisPrimitive {
         let crc_actual = crc.finalize();
 
         Ok(ValidationResult {
-            passed: case_results.iter().all(|r| r.passed),
+            // CRC gate: case-level checks verify numeric correctness; the CRC
+            // gates the output encoding. A CRC mismatch means the serialised
+            // output drifted from the canonical form even if all per-case
+            // values are correct — catching encoding bugs that per-case
+            // comparisons can miss. All other validators use this pattern.
+            passed: case_results.iter().all(|r| r.passed) && crc_actual == vf.output_crc32,
             case_results,
             crc_expected: vf.output_crc32,
             crc_actual,

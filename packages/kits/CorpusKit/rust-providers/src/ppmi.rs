@@ -98,6 +98,12 @@ pub const PPMI_PROJECTION_SEED: u64 = 0x5050_4D49_5F56_314D;
 /// constant `PpmiProvider.basisMagic`.
 pub const PPMI_BASIS_MAGIC: &[u8; 4] = b"PPB1";
 
+/// 4-byte magic identifying a PPMI COUNTS blob ("PPMC"). Distinct from the basis
+/// magic: the counts blob persists the RAW additive co-occurrence state (the
+/// maintained statistics table), not the derived `ppmi_vectors`. Mirrors the
+/// Swift constant `PpmiProvider.countsMagic`.
+pub const PPMI_COUNTS_MAGIC: &[u8; 4] = b"PPMC";
+
 // MARK: - PpmiProvider
 
 /// PPMI distributional-semantics embedding provider.
@@ -368,6 +374,104 @@ impl PpmiProvider {
         Ok(provider)
     }
 
+    // MARK: - Counts serialization (incremental-counts change set)
+
+    /// Serialize the raw accumulated co-occurrence counts (the additive state
+    /// `finalize` consumes) so they can be persisted and incrementally extended
+    /// rather than rebuilt from scratch on every reindex. Byte-identical to the
+    /// Swift `PpmiProvider.serializeCounts` (cross-port gate): map writers sort
+    /// keys by raw UTF-8 bytes, and the `co_count` outer keys are sorted the same
+    /// way here so the order matches Swift's emission.
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   model_id (string) | model_version (string) | projection_seed (u64)
+    ///   | total_pairs (u64) | total_terms (u64)
+    ///   | term_count (String→u32 map, byte-sorted keys)
+    ///   | co_count: u32 outer-count, then per byte-sorted outer key:
+    ///       outer key (string) | inner (String→u32 map, byte-sorted keys)
+    pub fn serialize_counts(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(PPMI_COUNTS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u64(self.projection_seed);
+        w.write_u64(self.total_pairs as u64);
+        w.write_u64(self.total_terms as u64);
+        w.write_string_u32_map(&self.term_count);
+        // co_count is nested; serialize the outer level inline (the codec has no
+        // nested-map primitive) with outer keys sorted by UTF-8 bytes to match
+        // Swift's outer-key order.
+        let mut outer_keys: Vec<&String> = self.co_count.keys().collect();
+        outer_keys.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        w.write_u32(outer_keys.len() as u32);
+        for key in outer_keys {
+            w.write_string(key);
+            w.write_string_u32_map(&self.co_count[key]);
+        }
+        w.into_bytes()
+    }
+
+    /// Reconstruct a provider from a serialized PPMI counts blob, restoring the
+    /// raw co-occurrence state ready for incremental extension + `finalize`.
+    /// `ppmi_vectors` is left empty (call `finalize` to derive it). Returns
+    /// `Err(BasisCodecError)` on a truncated blob, unknown version, or magic
+    /// mismatch — never panics.
+    pub fn from_serialized_counts(bytes: &[u8]) -> Result<Self, BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(PPMI_COUNTS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let model_id = r.read_string()?;
+        let model_version = r.read_string()?;
+        let projection_seed = r.read_u64()?;
+        let total_pairs = r.read_u64()? as usize;
+        let total_terms = r.read_u64()? as usize;
+        let term_count = r.read_string_u32_map()?;
+        let outer_count = r.read_u32()? as usize;
+        let mut co_count: HashMap<String, HashMap<String, usize>> =
+            HashMap::with_capacity(outer_count);
+        for _ in 0..outer_count {
+            let key = r.read_string()?;
+            co_count.insert(key, r.read_string_u32_map()?);
+        }
+        let mut provider = PpmiProvider::with_parameters(model_id, model_version, projection_seed);
+        provider.co_count = co_count;
+        provider.term_count = term_count;
+        provider.total_pairs = total_pairs;
+        provider.total_terms = total_terms;
+        Ok(provider)
+    }
+
+    /// Restore the accumulated co-occurrence counts in place from a counts blob,
+    /// so incremental maintenance resumes after a restart. Sets `co_count`,
+    /// `term_count`, and the running totals WITHOUT clearing the derived
+    /// `ppmi_vectors` (the serving basis is restored separately from the basis
+    /// blob). Mirrors `from_serialized_counts`, but mutates self. Returns
+    /// `Err(BasisCodecError)` on a bad blob — never panics.
+    pub fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(PPMI_COUNTS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let _model_id = r.read_string()?;
+        let _model_version = r.read_string()?;
+        let _projection_seed = r.read_u64()?;
+        let total_pairs = r.read_u64()? as usize;
+        let total_terms = r.read_u64()? as usize;
+        let term_count = r.read_string_u32_map()?;
+        let outer_count = r.read_u32()? as usize;
+        let mut co_count: HashMap<String, HashMap<String, usize>> =
+            HashMap::with_capacity(outer_count);
+        for _ in 0..outer_count {
+            let key = r.read_string()?;
+            co_count.insert(key, r.read_string_u32_map()?);
+        }
+        self.co_count = co_count;
+        self.term_count = term_count;
+        self.total_pairs = total_pairs;
+        self.total_terms = total_terms;
+        Ok(())
+    }
+
     // MARK: - Private helpers
 
     /// Compute the L2-normalised PPMI context vector for `text`.
@@ -464,6 +568,27 @@ impl EmbeddingProvider for PpmiProvider {
         }
         Ok(self.ppmi_context_vector(text).unwrap_or_default())
     }
+
+    /// Produce the engram AND the normalised PPMI context vector from a SINGLE
+    /// context-vector computation.
+    ///
+    /// `embed` projects the PPMI context vector and `embed_float` returns it, so
+    /// a caller that needs both would otherwise run `ppmi_context_vector` twice.
+    /// This override computes it ONCE and returns both outputs.
+    ///
+    /// Byte-identical to calling `embed` then `embed_float` separately: the
+    /// engram is `float_simhash::project` of the vector (or `Engram::ZERO` when
+    /// `ppmi_context_vector` returns `None`), and `floats` reproduces
+    /// `embed_float`'s result with its vocab-miss error collapsed to `vec![]`
+    /// (the `embed_pair` opt-out contract). An untrained basis makes
+    /// `ppmi_context_vector` return `None`, so the engram is `Engram::ZERO` and
+    /// floats are empty — identical to the separate calls.
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        match self.ppmi_context_vector(text) {
+            None => Ok((Engram::ZERO, Vec::new())),
+            Some(v) => Ok((float_simhash::project(&v, self.projection_seed), v)),
+        }
+    }
 }
 
 // MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
@@ -517,6 +642,35 @@ impl TrainableEmbeddingBasis for PpmiProvider {
             .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
         Ok(Box::new(provider))
     }
+
+    /// Fold one chunk into the accumulated co-occurrence counts. PPMI's
+    /// accumulation consumes a term slice, so the text is tokenized with the
+    /// canonical `default_keyword_tokens` and folded at `PPMI_WINDOW` — the same
+    /// per-document step `train_on_corpus` runs, minus the finalize.
+    fn add_to_counts(&mut self, text: &str) {
+        let terms = corpus_kit::default_keyword_tokens(text);
+        let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+        self.train(&term_refs, PPMI_WINDOW);
+    }
+
+    /// Serialize the accumulated co-occurrence counts (6a-i counts codec),
+    /// surfaced through the seam.
+    fn serialize_counts(&self) -> Vec<u8> {
+        PpmiProvider::serialize_counts(self)
+    }
+
+    /// Restore accumulated counts; a codec error maps to
+    /// `CorpusKitError::DecodingFailure`.
+    fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError> {
+        PpmiProvider::restore_counts(self, bytes)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))
+    }
+
+    /// Maintained vocabulary size for the growth trigger: unique target terms
+    /// seen during accumulation (before PPMI filtering).
+    fn counts_vocabulary_size(&self) -> usize {
+        self.co_count.len()
+    }
 }
 
 // MARK: - Unit tests
@@ -541,6 +695,91 @@ mod tests {
         }
         provider.finalize();
         provider
+    }
+
+    /// The canonical mini-corpus (same texts as `build_trained_provider`, and as
+    /// the Swift `ppmiBasisCorpus`), shared by the counts-codec tests.
+    fn ppmi_corpus() -> Vec<Vec<&'static str>> {
+        vec![
+            vec!["car", "engine", "drive", "road", "vehicle"],
+            vec!["vehicle", "road", "transport", "car", "fuel"],
+            vec!["engine", "fuel", "combustion", "power", "car"],
+            vec!["dog", "bark", "run", "fetch", "animal"],
+            vec!["animal", "run", "cat", "dog", "pet"],
+        ]
+    }
+
+    // ── Counts codec (incremental-counts change set), mirrors the Swift suite ──
+
+    #[test]
+    fn counts_round_trip_rederives() {
+        let corpus = ppmi_corpus();
+        let mut original = PpmiProvider::new();
+        for doc in &corpus {
+            original.train(doc, PPMI_WINDOW);
+        }
+        // Serialize counts before finalize. finalize() clears ppmi_vectors and recomputes but does not clear co_count, term_count, or total_pairs.
+        let blob = original.serialize_counts();
+        original.finalize();
+        let mut restored = PpmiProvider::from_serialized_counts(&blob).expect("restore counts");
+        restored.finalize();
+        for text in ["car engine", "vehicle road", "dog animal"] {
+            let a = original.embed_float(text).expect("embed original");
+            let b = restored.embed_float(text).expect("embed restored");
+            assert_eq!(a, b, "re-derived float vector must match for '{text}'");
+        }
+    }
+
+    /// The core promise: persisted counts can be extended incrementally after
+    /// restore, equalling a from-scratch train over the full corpus. Mirrors the
+    /// Swift `countsIncrementalExtendEqualsFromScratch`.
+    #[test]
+    fn counts_incremental_extend_equals_from_scratch() {
+        let corpus = ppmi_corpus();
+        let mut head = PpmiProvider::new();
+        for doc in corpus.iter().take(3) {
+            head.train(doc, PPMI_WINDOW);
+        }
+        let mut restored =
+            PpmiProvider::from_serialized_counts(&head.serialize_counts()).expect("restore");
+        for doc in corpus.iter().skip(3) {
+            restored.train(doc, PPMI_WINDOW);
+        }
+        restored.finalize();
+        let mut scratch = PpmiProvider::new();
+        for doc in &corpus {
+            scratch.train(doc, PPMI_WINDOW);
+        }
+        scratch.finalize();
+        for text in ["car engine", "vehicle road", "dog animal"] {
+            assert_eq!(
+                restored.embed_float(text).unwrap(),
+                scratch.embed_float(text).unwrap(),
+                "incrementally-extended counts must equal from-scratch for '{text}'"
+            );
+        }
+    }
+
+    #[test]
+    fn counts_blob_header_versioned() {
+        let mut p = PpmiProvider::new();
+        for doc in ppmi_corpus().iter() {
+            p.train(doc, PPMI_WINDOW);
+        }
+        let bytes = p.serialize_counts();
+        assert!(bytes.len() >= 5);
+        assert_eq!(&bytes[0..4], PPMI_COUNTS_MAGIC);
+        assert_eq!(bytes[4], BASIS_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn counts_truncated_blob_errors() {
+        let mut p = PpmiProvider::new();
+        for doc in ppmi_corpus().iter() {
+            p.train(doc, PPMI_WINDOW);
+        }
+        let blob = p.serialize_counts();
+        assert!(PpmiProvider::from_serialized_counts(&blob[..blob.len() / 2]).is_err());
     }
 
     #[test]
@@ -679,7 +918,8 @@ mod tests {
 
     #[test]
     fn finalize_before_embed_returns_empty() {
-        // Without finalize, ppmi_vectors is empty → all terms are OOV.
+        // Without finalize, ppmi_vectors is empty → embed_float returns empty
+        // immediately (no-basis opt-out before OOV detection).
         let mut provider = PpmiProvider::new();
         let corpus = vec![
             vec!["car", "engine", "drive"],
@@ -687,7 +927,8 @@ mod tests {
         for doc in &corpus {
             provider.train(doc, PPMI_WINDOW);
         }
-        // NOT finalized: embed_float must return empty (all OOV in ppmi_vectors).
+        // NOT finalized: embed_float returns empty because ppmi_vectors is empty
+        // (structural no-basis opt-out, not OOV detection).
         let v = provider.embed_float("car engine").unwrap();
         assert!(v.is_empty(), "embed_float must return empty before finalize() is called");
 

@@ -7,7 +7,9 @@
 //!   §1 Disabled gate: no metric emitted when monitoring is OFF.
 //!   §2 GroundedSynthesis emissions: start + complete pair per run call.
 //!   §3 MigrationBenchmark emissions: start + complete pair per run call.
-//!   §4 Conformance: output is identical with monitoring ON and OFF (C-Det).
+//!   §4 Conformance: selected output fields are compared with monitoring ON and OFF
+//!      to verify monitoring does not alter computed results (C-Det). Full output
+//!      identity is not asserted — only the fields tested in each §4 case.
 //!
 //! ISOLATION STRATEGY
 //! These tests manipulate the global Intellectus singleton (enabled flag +
@@ -22,6 +24,7 @@
 //! Tests that ONLY test precondition guards (empty plans, duplicate names)
 //! do not need the lock because those paths return before any emit occurs.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use intellectus_lib::{Intellectus, NoOpSink, StatSample, StatsSink};
@@ -222,6 +225,7 @@ fn grounded_synthesis_emits_nothing_when_disabled() {
         unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
+        &HashMap::new(),
     );
 
     assert_eq!(
@@ -275,6 +279,7 @@ fn grounded_synthesis_emits_start_and_complete() {
         unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
+        &HashMap::new(),
     );
 
     let metrics = sink.all_named(METRIC_RECIPE_RUN);
@@ -319,8 +324,8 @@ fn two_grounded_synthesis_runs_emit_four_metrics() {
     Intellectus::install(sink.clone());
     Intellectus::set_enabled(true);
 
-    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW);
-    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW);
+    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &HashMap::new());
+    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &HashMap::new());
 
     assert_eq!(
         sink.count_named(METRIC_RECIPE_RUN),
@@ -350,6 +355,7 @@ fn grounded_synthesis_step_count_tag_matches_drawer_count() {
         unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
+        &HashMap::new(),
     )
     .expect("run");
 
@@ -474,35 +480,42 @@ fn migration_benchmark_no_emit_when_empty_plans() {
 
 // MARK: - §4 Conformance gate (C-Det)
 
-/// run_grounded_synthesis output is identical whether monitoring is ON or OFF.
-/// The return value must NOT depend on whether Intellectus is enabled.
+/// run_grounded_synthesis: selected output fields (drawer_count, context.summary,
+/// context.patterns) are identical whether monitoring is ON or OFF. The full
+/// GroundedOutput/ContextDocument value is not compared — only these three fields.
 #[test]
 fn grounded_synthesis_output_identical_with_and_without_telemetry() {
     let _guard = global_lock();
-    let (coord_off, h_off) = coord_with_rows(&["the cat sat on the mat", "a dog barked"]);
-    let (coord_on, h_on) = coord_with_rows(&["the cat sat on the mat", "a dog barked"]);
+    // ONE estate for both runs: the telemetry-equivalence invariant is about
+    // monitoring not changing the computed output, so both paths must read the
+    // SAME input. (Two separate estates would assign distinct parent_node_ids,
+    // and the node-tree summary names the dominant parent node — so different
+    // estates legitimately yield different summaries.)
+    let (coord, h) = coord_with_rows(&["the cat sat on the mat", "a dog barked"]);
 
     // OFF path.
     Intellectus::set_enabled(false);
     let out_off = run_grounded_synthesis(
-        &coord_off,
-        &h_off,
+        &coord,
+        &h,
         unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
+        &HashMap::new(),
     )
     .expect("off-path run");
 
-    // ON path.
+    // ON path — same estate.
     let sink = Arc::new(CapturingSink::new());
     Intellectus::install(sink.clone());
     Intellectus::set_enabled(true);
     let out_on = run_grounded_synthesis(
-        &coord_on,
-        &h_on,
+        &coord,
+        &h,
         unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
+        &HashMap::new(),
     )
     .expect("on-path run");
 
@@ -530,7 +543,8 @@ fn grounded_synthesis_output_identical_with_and_without_telemetry() {
     Intellectus::install(Arc::new(NoOpSink));
 }
 
-/// run_migration_benchmark output is identical whether monitoring is ON or OFF.
+/// run_migration_benchmark: winner and ranking/disqualified/plan_results lengths
+/// are identical whether monitoring is ON or OFF. Entry contents are not compared.
 #[test]
 fn migration_benchmark_output_identical_with_and_without_telemetry() {
     let _guard = global_lock();
@@ -551,7 +565,7 @@ fn migration_benchmark_output_identical_with_and_without_telemetry() {
     let out_on =
         run_migration_benchmark(&mut fake_on, &plans_vec, &origin_vec).expect("on-path run");
 
-    // CoreReport fields must be identical.
+    // Compare winner and collection lengths; full entry contents are not asserted.
     assert_eq!(
         out_off.winner, out_on.winner,
         "winner must be identical regardless of monitoring state"

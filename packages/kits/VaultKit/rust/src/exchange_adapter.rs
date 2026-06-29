@@ -115,8 +115,13 @@ impl ExchangeAdapter {
         let mut notes: Vec<NoteIR> = payload
             .entries
             .into_iter()
-            .map(|entry| {
-                let path_components = entry.path_components.unwrap_or_default();
+            .map(|entry| -> Result<NoteIR, VaultKitError> {
+                // Validate path components before projecting them into substrate
+                // room paths or vault directory trees — traversal sequences (..)
+                // and embedded separators must be rejected at decode time so no
+                // downstream adapter can be tricked into escaping the vault root.
+                let path_components = validated_path_components(
+                    entry.path_components.unwrap_or_default(), &entry.id)?;
                 let mut note = NoteIR::new(
                     entry.id,
                     vec![Block::markdown(entry.content)],
@@ -135,9 +140,9 @@ impl ExchangeAdapter {
                 if let Some(kind) = entry.kind {
                     note.kind = kind;
                 }
-                note
+                Ok(note)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         // Deterministic order, sorted by stable_source_key — the
         // VaultAdapter contract, so repeated decodes are stable.
         notes.sort_by(|a, b| a.stable_source_key.cmp(&b.stable_source_key));
@@ -287,6 +292,22 @@ impl VaultAdapter for ExchangeAdapter {
         if let Some(parent) = vault_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // CAND-014: symlink containment guard. Reject the write if `vault_path`
+        // is a pre-existing symbolic link. A symlink at the output path could be
+        // used to redirect the export write to an attacker-controlled location
+        // outside the vault root — the atomic rename would silently redirect the
+        // document. `symlink_metadata` is used instead of `metadata` because the
+        // latter follows symlinks and would report the target's metadata, not the
+        // link itself. Mirrors Swift ExchangeAdapter.fromIR(_:to:).
+        if let Ok(meta) = std::fs::symlink_metadata(vault_path) {
+            if meta.file_type().is_symlink() {
+                return Err(VaultKitError::AdapterError(format!(
+                    "exchange-adapter export target is a pre-existing symlink: {}",
+                    vault_path.display()
+                )));
+            }
+        }
+
         // Atomic write (Perkins advisory, VK-EXPORT-01): stage to a temp
         // file in the same directory, then rename — atomic on POSIX when
         // both paths share a filesystem — so a concurrent reader or a
@@ -297,4 +318,34 @@ impl VaultAdapter for ExchangeAdapter {
         std::fs::rename(&staged, vault_path)?;
         Ok(())
     }
+}
+
+/// Validate the `path_components` array from a decoded export entry.
+///
+/// Path components are semantic labels, not filesystem paths. Embedded
+/// separators, traversal sequences (`..`), absolute-path markers, and empty
+/// strings are invalid because they may be reinterpreted as filesystem escape
+/// paths when a downstream adapter (e.g. `ObsidianAdapter::from_ir`) projects
+/// them into a vault directory tree.
+///
+/// Mirrors Swift `ExchangeAdapter.validatedPathComponents(_:entryID:)`.
+fn validated_path_components(
+    components: Vec<String>,
+    entry_id: &str,
+) -> Result<Vec<String>, VaultKitError> {
+    for component in &components {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('/')
+            || component.contains('\\')
+            || component.starts_with('~')
+        {
+            return Err(VaultKitError::AdapterError(format!(
+                "unsafe pathComponents entry {:?} in export entry {entry_id}",
+                component
+            )));
+        }
+    }
+    Ok(components)
 }

@@ -1,12 +1,13 @@
 // novel_token_tagger_choice_test.rs — Layer-2a: NovelTokenTaggerChoice in LatticeLib Rust
 //
-// Verifies:
+// Selected HMM/choice smoke regressions:
 //   (a) NovelTokenTaggerChoice::default() is Hmm
 //   (b) word_class_with_tagger(Hmm) on a novel -tion token → Noun
 //   (c) word_class_with_tagger(NlTagger) on Rust falls back to HMM
 //   (d) build_bag_with_tagger(Hmm) on a novel noun token produces a non-empty bag
 //   (e) build_bag_with_tagger determinism: same input, same output
-//   (f) HMM conformance regression: tag vectors still pass (regression guard)
+//
+// Full shared tag-vector conformance gate lives in `lattice_conformance_test.rs`.
 
 use lattice_lib::{
     NovelTokenTaggerChoice,
@@ -23,9 +24,9 @@ fn novel_token_tagger_choice_default_is_hmm() {
 }
 
 // (b) word_class_with_tagger(.Hmm) on a novel -tion token classifies as Noun.
-// "xylophonation" is not in the bundled table; trained model -tion emission:
-//   noun -3091, verb -7466. With noun-prior -1480 vs verb-prior -1884:
-//   noun total -4571, verb total -9350, other total -10853. Noun wins.
+// "xylophonation" is not in the bundled table; hmm-viterbi-3 -tion emission (obs 5):
+//   noun -3103, verb -6317. With noun-prior -643, verb-prior -1562, other-prior -1329:
+//   noun total -3746, verb total -7879, other total -7877. Noun wins.
 #[test]
 fn hmm_choice_novel_tion_token_is_noun() {
     let table = global_table();

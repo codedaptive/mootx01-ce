@@ -14,6 +14,7 @@ pub mod hlc;
 pub mod info_theory;
 pub mod lattice;
 pub mod matrix_decay;
+pub mod merkle_commitment;
 pub mod eigenvalue_centrality;
 pub mod moment_summary;
 pub mod field_presence_matrix_f;

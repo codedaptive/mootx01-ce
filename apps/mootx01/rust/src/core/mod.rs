@@ -1,8 +1,7 @@
 //! core/mod.rs — installer-core for the Rust vertical.
 //!
-//! Ported from Swift MootInstallerCore piece by piece as each subcommand
-//! comes online. paths is the foundation; client registry, config merge,
-//! permissions, picker, and service backends land next.
+//! Exports: clients, daemon_client, depth, merge, paths, permissions,
+//! release, and service — the full installer-core module set.
 
 pub mod clients;
 pub mod daemon_client;

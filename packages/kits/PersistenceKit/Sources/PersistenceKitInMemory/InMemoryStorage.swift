@@ -95,14 +95,25 @@ public final class InMemoryStorage: Storage, Sendable {
         // queued encode jobs (~5-10% under a 120-capture burst), leaving those
         // drawers un-ingested and BM25/vector-dark. Mutating live state preserves
         // concurrent inserts because both paths target the one actor.
+        //
+        // Notification isolation (SECFIX-WS2-PK F2): begin buffering BEFORE
+        // taking the snapshot so that any notifications emitted by the block are
+        // buffered and only flushed to observers after the block completes
+        // successfully. On rollback, `rollback(to:)` discards the buffer.
+        await stateActor.beginNotificationBuffering()
         let snapshot = await stateActor.snapshot()
         let txn = InMemoryTransaction(stateActor: stateActor)
 
         do {
-            return try await block(txn)
+            let result = try await block(txn)
+            // Commit: flush buffered notifications to observers now that all
+            // writes have been applied to the live state.
+            await stateActor.commitNotifications()
+            return result
         } catch {
             // Restore the pre-transaction snapshot and record the rollback so
-            // StorageIntrospection can surface it.
+            // StorageIntrospection can surface it. rollback(to:) also discards
+            // the buffered notifications for this transaction.
             await stateActor.rollback(to: snapshot)
             throw error
         }
@@ -135,12 +146,53 @@ actor InMemoryStateActor {
     var state: InMemoryState
     let observerRegistry: ObserverRegistry?
 
+    // MARK: - Notification buffering (SECFIX-WS2-PK F2)
+    //
+    // During a transaction, row and blob notifications are buffered here rather
+    // than delivered immediately. On commit they are flushed to observers in
+    // order; on rollback they are discarded with the state snapshot. This
+    // ensures observers never see phantom notifications for writes that were
+    // rolled back (e.g. a failing InMemoryStorage.transaction block).
+
+    /// True while a transaction's block is executing; writes buffer notifications.
+    private var isBufferingNotifications: Bool = false
+    /// Row change notifications accumulated during the current transaction.
+    private var pendingRowNotifications: [TableChange] = []
+    /// Blob change notifications accumulated during the current transaction.
+    private var pendingBlobNotifications: [BlobChange] = []
+
     init(initial: InMemoryState = InMemoryState(), observerRegistry: ObserverRegistry? = nil) {
         self.state = initial
         self.observerRegistry = observerRegistry
     }
 
+    /// Begin buffering notifications for the duration of a transaction.
+    /// Called by `InMemoryStorage.transaction` before executing the block.
+    func beginNotificationBuffering() {
+        isBufferingNotifications = true
+        pendingRowNotifications.removeAll()
+        pendingBlobNotifications.removeAll()
+    }
+
+    /// Flush all buffered notifications to observers after a successful commit.
+    /// Called by `InMemoryStorage.transaction` after the block returns without
+    /// throwing.
+    func commitNotifications() async {
+        let rowNotifs = pendingRowNotifications
+        let blobNotifs = pendingBlobNotifications
+        isBufferingNotifications = false
+        pendingRowNotifications.removeAll()
+        pendingBlobNotifications.removeAll()
+        guard let registry = observerRegistry else { return }
+        for change in rowNotifs { await registry.notify(change) }
+        for change in blobNotifs { await registry.notifyBlob(change) }
+    }
+
     private func notify(_ change: TableChange) async {
+        if isBufferingNotifications {
+            pendingRowNotifications.append(change)
+            return
+        }
         if let registry = observerRegistry {
             // Awaited, not fire-and-forget: changes are delivered to observers in
             // the exact order their mutations were applied. The prior
@@ -212,6 +264,11 @@ actor InMemoryStateActor {
             guard var t = state.tables[table] else {
                 throw StorageError.invalidQuery(detail: "addColumn: table \(table) not found")
             }
+            // Idempotent (mirrors CREATE TABLE IF NOT EXISTS): the fresh-DB path
+            // creates the table at the latest schema before replaying migrations
+            // from version 0, so the column may already be present. Skip in that
+            // case to avoid a duplicate column entry in the declaration.
+            if t.declaration.columns.contains(where: { $0.name == column.name }) { break }
             t.declaration = TableDeclaration(
                 name: t.declaration.name,
                 columns: t.declaration.columns + [column],
@@ -424,10 +481,15 @@ actor InMemoryStateActor {
 
     func putBlob(_ key: BlobKey, bytes: Data) async {
         state.blobs[key] = bytes
+        // Buffer the notification when inside a transaction (SECFIX-WS2-PK F2).
         // Notify blob subscribers so the incremental replication session can
-        // track which keys became dirty since the last sync run.
-        if let registry = observerRegistry {
-            await registry.notifyBlob(BlobChange(key: key, event: .put, bytes: bytes))
+        // track which keys became dirty since the last sync run. Buffering
+        // ensures rolled-back puts are never delivered to observers.
+        let change = BlobChange(key: key, event: .put, bytes: bytes)
+        if isBufferingNotifications {
+            pendingBlobNotifications.append(change)
+        } else if let registry = observerRegistry {
+            await registry.notifyBlob(change)
         }
     }
 
@@ -435,8 +497,13 @@ actor InMemoryStateActor {
 
     func deleteBlob(_ key: BlobKey) async {
         state.blobs.removeValue(forKey: key)
-        if let registry = observerRegistry {
-            await registry.notifyBlob(BlobChange(key: key, event: .delete, bytes: nil))
+        // Buffer the notification when inside a transaction (SECFIX-WS2-PK F2).
+        // Mirrors the put path.
+        let change = BlobChange(key: key, event: .delete, bytes: nil)
+        if isBufferingNotifications {
+            pendingBlobNotifications.append(change)
+        } else if let registry = observerRegistry {
+            await registry.notifyBlob(change)
         }
     }
 
@@ -514,9 +581,17 @@ actor InMemoryStateActor {
     /// whole state to its pre-transaction snapshot. Restoring the whole snapshot
     /// (rather than only the block's mutations) matches the Rust port's
     /// single-threaded transaction semantics.
+    ///
+    /// Also discards all buffered notifications from the rolled-back transaction
+    /// (SECFIX-WS2-PK F2): observers must never see phantom changes for writes
+    /// that were rolled back.
     func rollback(to snapshot: InMemoryState) {
         state = snapshot
         rollbackStats += 1
+        // Discard buffered notifications — the writes they describe were rolled back.
+        isBufferingNotifications = false
+        pendingRowNotifications.removeAll()
+        pendingBlobNotifications.removeAll()
     }
 }
 

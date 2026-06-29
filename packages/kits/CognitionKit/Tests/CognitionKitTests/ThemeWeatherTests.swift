@@ -33,9 +33,10 @@ struct ThemeWeatherTests {
         return (kit, handle)
     }
 
+    @discardableResult
     private func capture(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, room: String
-    ) async throws {
+    ) async throws -> Drawer {
         let frame = CaptureFrame(
             content: "content",
             channel: .typed,
@@ -43,7 +44,7 @@ struct ThemeWeatherTests {
             latticeAnchor: .udc("0"),
             addedBy: "alice",
             embeddingModelID: "test-v1")
-        _ = try await kit.capture(handle, frame)
+        return try await kit.capture(handle, frame)
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
@@ -57,14 +58,15 @@ struct ThemeWeatherTests {
     @Test("uniform capture time washes momentum to zero per room")
     func uniformCaptureTimeWashesMomentum() async throws {
         let (kit, handle) = try await openEstate()
-        for _ in 0..<3 { try await capture(kit, handle, room: "alpha") }
-        try await capture(kit, handle, room: "beta")
+        let alphaDrawer = try await capture(kit, handle, room: "alpha")
+        for _ in 0..<2 { try await capture(kit, handle, room: "alpha") }
+        let betaDrawer = try await capture(kit, handle, room: "beta")
 
         let weather = try await ThemeWeather.run(
             kit: kit, handle: handle, frame: unconfirmed,
             halfLifeSeconds: 1_000_000_000, now: Date())
 
-        #expect(Set(weather.map(\.category)) == Set(["alpha", "beta"]),
+        #expect(Set(weather.map(\.category)) == Set([alphaDrawer.parentNodeId, betaDrawer.parentNodeId]),
                 "each populated room reports a momentum")
         for momentum in weather {
             #expect(abs(momentum.momentum) < 1e-6,

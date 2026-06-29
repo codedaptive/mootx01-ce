@@ -10,7 +10,9 @@
 // Metric namespace: server.*
 //   server.rss_mb              — resident set size in megabytes
 //   server.cpu_user_ms         — user-mode CPU time (ms) since process start
-//   server.rpc_count           — cumulative RPC calls since process start
+//   server.rpc_count           — cumulative non-202 HTTP responses since process start
+//                                (includes JSON-RPC tool calls and GET side-channel
+//                                endpoints such as /api/graph and /api/lattice)
 //   server.connections         — active in-flight HTTP connections (live count)
 //   server.connections_hwm     — all-time high-water mark of simultaneous in-flight
 //   server.4xx_count           — cumulative 4xx responses (client errors)
@@ -47,7 +49,9 @@ import Darwin
 /// so this layer reads the live state without any lock or copy.
 ///
 /// - Parameters:
-///   - rpcCount: Total RPC calls since process start (read from globalRPCCounter).
+///   - rpcCount: Cumulative non-202 HTTP responses since process start (read
+///     from globalRPCCounter; includes JSON-RPC tool calls and GET side-channel
+///     endpoints such as /api/graph, /api/lattice, and /api/admin/estates).
 ///   - activeConnections: Current in-flight connection count (globalInflightCounter).
 ///   - connectionsHWM: All-time peak simultaneous connections (globalInflightHighWater).
 ///   - count4xx: Cumulative 4xx responses (global4xxCounter).

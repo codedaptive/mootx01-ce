@@ -36,22 +36,22 @@ private let logger = Logger(subsystem: "com.mootx01.kit", category: "InvertedInd
 /// BM25-weighted `InvertedIndex` on demand (cached between mutations).
 ///
 /// Lifecycle:
-/// 1. `open(storage:)` — call with an already-opened SQLiteStorage.
-///    Opens the schema, loads persisted term frequencies and doc lengths.
-/// 2. `index(itemID:tokens:now:)` — add/update a document's terms.
-/// 3. `remove(itemID:)` — remove a document.
-/// 4. `buildIndex(parameters:)` — produce an InvertedIndex + term mapping.
-/// 5. `topK(queryTerms:k:parameters:algorithm:)` — convenience retrieve.
+/// 1. `init(storage:)` — create with an already-opened Storage backend.
+/// 2. `open()` — load persisted term frequencies and doc lengths from storage.
+/// 3. `index(itemID:tokens:now:)` — add/update a document's terms.
+/// 4. `remove(itemID:)` — remove a document.
+/// 5. `buildIndex(parameters:)` — produce an InvertedIndex + term mapping.
+/// 6. `topK(queryTerms:k:parameters:algorithm:)` — convenience retrieve.
 ///
 /// Thread-safety: all mutations are serialized by the actor.
 public actor InvertedIndexStore {
 
-    // MARK: - Schema declaration (public for open(schema:) callers)
+    // MARK: - Schema declaration (public for migration callers)
 
     /// Schema declaration for the inverted index sidecar tables.
     ///
-    /// Callers open storage with `storage.open(schema: InvertedIndexStore.schemaDeclaration)`
-    /// before calling `InvertedIndexStore.open(storage:)`.
+    /// Callers migrate storage with `storage.migrate(to: InvertedIndexStore.schemaDeclaration)`,
+    /// then construct `InvertedIndexStore(storage:)` and call `open()`.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "InvertedIndexStore",
         version: 1,
@@ -155,7 +155,7 @@ public actor InvertedIndexStore {
     /// - Parameters:
     ///   - itemID: stable item identifier (chunk UUID string or any unique string).
     ///   - tokens: tokenized keyword terms using the same vocabulary as query time.
-    ///   - now: the indexing timestamp. Passed as parameter per the deterministic-date rule.
+    ///   - now: present for deterministic-date discipline; not currently read — only term frequencies and document length are persisted.
     public func index(itemID: String, tokens: [String], now: Date) async throws {
         // Remove existing state for this item first (idempotent re-index).
         try await deleteFromStorage(itemID: itemID)
@@ -259,6 +259,34 @@ public actor InvertedIndexStore {
         let (index, termMapping) = buildIndex(parameters: parameters)
         let query = BM25Weighting.queryPairs(queryTerms: queryTerms, termMapping: termMapping)
         return index.topK(query: query, k: k, algorithm: algorithm)
+    }
+
+    // MARK: - Bulk clear
+
+    /// Delete all persisted term frequencies and document lengths, and clear
+    /// in-memory state. Used by `Corpus.destroyRecallIndex` to wipe the
+    /// durable inverted index in one call (no per-item iteration needed).
+    ///
+    /// Mirrors BasisStore.deleteAll() and VectorStore.destroyAllVectors() in
+    /// its semantics: the store is left empty but structurally intact (tables
+    /// remain, indices remain; only rows are removed).
+    public func deleteAll() async throws {
+        // `.isTrue` is the always-match predicate — delete requires a non-optional
+        // predicate (the RowStore API does not expose a nil shortcut for "delete all"),
+        // so `.isTrue` is the standard pattern used across the codebase (see BasisStore.deleteAll).
+        _ = try await storage.rowStore.delete(
+            table: "iix_termfreqs",
+            where: .isTrue
+        )
+        _ = try await storage.rowStore.delete(
+            table: "iix_doclens",
+            where: .isTrue
+        )
+        // Clear in-memory state to match the now-empty tables.
+        termFreqs.removeAll()
+        docLengths.removeAll()
+        cachedPair = nil
+        logger.info("InvertedIndexStore: deleteAll cleared all term-freq + doc-len rows")
     }
 
     // MARK: - Accessors

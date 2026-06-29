@@ -13,8 +13,8 @@ import PersistenceKitInMemory
 ///   §1  activeDrawers: returns only non-tombstoned Cluster-A drawers
 ///   §2  tombstonedDrawers: returns only tombstoned drawers (expunged via GLK)
 ///   §3  currentAuditLog: returns a UnifiedAuditLog whose chain verifies
-///   §4  signal reads: learnedReferences, and fingerprintBaselines returning
-///       real per-room drift observations once content is captured
+///   §4  signal reads: learnedReferences (empty for estate with no references),
+///       and fingerprintBaselines (empty for fresh estate — no content yet)
 ///   §5  Integration: MaintenanceDaemon with production adapters triggers a
 ///       cycle, emits decay proposals, and writes a diary entry
 ///   §6  Protocol conformance: EstateMaintenanceReader constructs cleanly
@@ -115,7 +115,7 @@ struct EstateMaintenanceReaderTests {
         _ = log
     }
 
-    // MARK: - § 4  Signal reads and v1 stubs
+    // MARK: - § 4  Signal reads
 
     @Test("learnedReferences returns [] for estate with no references")
     func learnedReferencesEmptyForEstateWithNoReferences() async throws {
@@ -138,24 +138,24 @@ struct EstateMaintenanceReaderTests {
         #expect(baselines.isEmpty, "fresh estate → no room-level fingerprints")
     }
 
-    @Test("fingerprintBaselines returns a real per-room drift observation after capture")
+    @Test("fingerprintBaselines returns a real per-node drift observation after capture")
     func fingerprintBaselinesReturnsRealObservationAfterCapture() async throws {
-        // Swift capture ORs the drawer's bitmaps into the container aggregate
-        // (Estate.capture → containerFP.orIn). After a capture in one room the
-        // reader returns one observation for that room with a real, non-negative
-        // drift fraction — the dark signal is now lit on the Swift port.
+        // The reader computes OR-aggregates of drawer bitmaps grouped by
+        // parentNodeId (room-level node per ADR-017). After a capture the
+        // reader returns one observation for that node with a real,
+        // non-negative drift fraction.
         let (kit, handle) = try await makeKit()
         _ = try await kit.capture(handle, captureFrame(content: "alpha", room: "study"))
 
         let reader = EstateMaintenanceReader(handle: handle, kit: kit)
         let baselines = try await reader.fingerprintBaselines()
-        #expect(!baselines.isEmpty, "a captured drawer populates a room-level fingerprint")
-        // scopeKey is "wing/room"; the captured room is the suffix.
-        let study = baselines.first { $0.scopeKey.hasSuffix("/study") }
-        #expect(study != nil, "the captured room appears as a scope (\(baselines.map(\.scopeKey)))")
-        if let study {
-            // Drift is a real bit-density fraction in [0, 1].
-            #expect(study.driftFraction >= 0.0 && study.driftFraction <= 1.0)
+        #expect(!baselines.isEmpty, "a captured drawer populates a node-level fingerprint")
+        // scopeKey is the parentNodeId — a UUID string, not wing/room.
+        // nodeId matches scopeKey in the current implementation.
+        if let first = baselines.first {
+            #expect(!first.scopeKey.isEmpty, "scope key is non-empty")
+            #expect(first.nodeId == first.scopeKey, "nodeId matches scopeKey")
+            #expect(first.driftFraction >= 0.0 && first.driftFraction <= 1.0)
         }
     }
 

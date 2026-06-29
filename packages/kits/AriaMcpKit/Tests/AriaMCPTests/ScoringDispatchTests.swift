@@ -18,7 +18,7 @@ import PersistenceKitInMemory
 ///
 /// ## What these tests prove
 ///   A. Unknown scoring throws invalidParams (fail-closed).
-///   B. A known scoring (raw / rrf / matrixAware) still succeeds.
+///   B. A known scoring value (raw) still succeeds; rrf and matrixAware are not separately covered.
 ///   C. Absent scoring keeps the documented default and succeeds.
 @Suite("Scoring dispatch (P0-4 fail-closed)", .serialized)
 struct ScoringDispatchTests {

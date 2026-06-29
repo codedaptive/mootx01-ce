@@ -10,8 +10,9 @@
 //   ENT (entity):    noun-tagged tokens via lattice_lib::word_class::hmm_tag
 //   REL (relation):  verb-tagged tokens via lattice_lib::word_class::hmm_tag
 //   NUM (numerical): tokens where every byte is an ASCII decimal digit (0x30–0x39)
-//   TMP (temporal):  tokens matching a 4-digit year (YYYY) or ISO-8601 date
-//                    (YYYY-MM-DD), detected by a pure byte-class scan
+//   TMP (temporal):  4-digit year tokens (YYYY) — the UAX #29 tokenizer
+//                    splits "YYYY-MM-DD" on hyphens so only the year component
+//                    reaches this check; detected by a pure byte-class scan
 //
 // Cross-port parity:
 //   - Tokenisation via lattice_lib::tokenizer::tokenize (UAX #29, conformance-gated
@@ -97,7 +98,8 @@ pub fn hmm_feature_extractor() -> FeatureExtractor {
 /// - ENT: noun-tagged tokens (HMM says Noun)
 /// - REL: verb-tagged tokens (HMM says Verb)
 /// - NUM: tokens where every byte is an ASCII decimal digit
-/// - TMP: 4-digit year tokens or YYYY-MM-DD date tokens
+/// - TMP: 4-digit year tokens (YYYY); "YYYY-MM-DD" is split by the tokenizer
+///        into three tokens so only the year component is classified TMP
 fn hmm_extract(
     content: &str,
     feature_type: DistillationFeatureType,

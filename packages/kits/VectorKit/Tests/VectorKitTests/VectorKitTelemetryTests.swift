@@ -89,7 +89,7 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 
 // MARK: - Helper: fresh store
 
-/// Creates a fresh InMemory-backed VectorStore for each test.
+/// Creates a fresh scratch-SQLite-backed VectorStore for each test.
 private func makeFreshStore() async throws -> VectorStore {
     let storage = try makeScratchStorage()
     try await storage.open(schema: VectorStore.schemaDeclaration)

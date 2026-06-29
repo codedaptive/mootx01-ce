@@ -7,21 +7,25 @@
 // agent reads what recipes exist and triggers them, and the human-in-the-
 // loop confirms the migration promotion.
 //
-// Five foundational tools ship here:
+// Eleven recipe tools ship here:
 //   - moot_list_lenses           → ProjectedTool descriptor enumeration
-//                                   (LensTools + RecipeTools, Tier 6 only — read)
+//                                   (LensTools + Tier 6 RecipeTools — read)
 //   - moot_list_recipes          → RecipeCatalog descriptor enumeration
-//                                   (all 23 shipped recipes — catalog discovery)
+//                                   (catalog discovery)
 //   - moot_synthesize            → GroundedSynthesis recipe (read)
+//   - moot_recall_precise        → PreciseRecall recipe (read)
+//   - moot_recall_shaped         → ShapedRecall recipe (read)
 //   - moot_run_migration         → MigrationBenchmark.run (read; no
 //                                   promotion — B-3)
 //   - moot_confirm_migration     → MigrationBenchmark.confirmPromotion
 //                                   by branch id (the human-gated write)
+//   - moot_dream, moot_consolidate, moot_recall_distilled, moot_recollect
+//                                 → distillation-family and Brain-layer tools
 //
-// The analytics recipes (moot_association_rules, moot_formal_concepts) and
-// all 14 reasoning-lens recipes ship through LensTools.swift — same
-// provenance (.recipe), dispatched through the lens surface per
-// LENS_DISCOVERABILITY_DECISION v2.0.
+// The 23 lens tools (16 reasoning/federated, 4 temporal/information-theoretic,
+// 3 analytics: moot_lens_associations, moot_lens_concepts, moot_lens_apriori)
+// ship through LensTools.swift — same provenance (.recipe), dispatched
+// through the lens surface per LENS_DISCOVERABILITY_DECISION v2.0.
 //
 // Stateless-boundary discipline: MCP `tools/call` is stateless across
 // invocations, so the run tool cannot hand live `BranchHandle`s to a
@@ -75,10 +79,10 @@ enum RecipeTools {
     /// VectorKit lane — no embedding model inference. Returns factoid prose
     /// (~10 tokens/hit) + confidence metadata. Full spec: DISTILLATION_ARIA_TOOLS.md §2.
     static let recallDistilledToolName = "moot_recall_distilled"
-    /// Expand a distilled factoid to its source memories by following the
+    /// Fan-out from a distilled factoid to its source memories by following the
     /// _distilled_from tunnel graph. Returns full episodic content from the M
     /// source memories that produced the factoid. Full spec: DISTILLATION_ARIA_TOOLS.md §3.
-    static let expandMemoryToolName = "moot_expand_memory"
+    static let recollectToolName = "moot_recollect"
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
@@ -92,7 +96,7 @@ enum RecipeTools {
             || name == dreamToolName
             || name == consolidateToolName
             || name == recallDistilledToolName
-            || name == expandMemoryToolName
+            || name == recollectToolName
     }
 
     // MARK: - tools/list projection
@@ -112,7 +116,7 @@ enum RecipeTools {
             dreamTool(),
             consolidateTool(),
             recallDistilledTool(),
-            expandMemoryTool(),
+            recollectTool(),
         ]
     }
 
@@ -155,8 +159,9 @@ enum RecipeTools {
     }
 
     /// The cognition-discovery tool. At runtime (`runListRecipes`), returns
-    /// one block per Tier 6 tool drawn from `LensTools.tools()` and the two
-    /// non-migration entries in `RecipeTools.tools()` — not `RecipeCatalog`.
+    /// one block per Tier 6 tool drawn from `LensTools.tools()` and the four
+    /// Tier 6 recipe tools (`moot_list_lenses`, `moot_synthesize`,
+    /// `moot_recall_precise`, `moot_recall_shaped`) — not `RecipeCatalog`.
     /// Takes no arguments; it is the conscious mind enumerating its surface.
     private static func listRecipesTool() -> ProjectedTool {
         ProjectedTool(
@@ -343,7 +348,7 @@ enum RecipeTools {
                 + "prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint "
                 + "Hamming NN — no embedding model inference, no full corpus scan. Factoids "
                 + "carry confidence scores and source counts. For full episodic detail on a "
-                + "specific factoid call moot_expand_memory with the returned drawer_id. "
+                + "specific factoid call moot_recollect with the returned drawer_id. "
                 + "Returns a discrimination signal over confidence scores.",
             inputSchema: objectSchema(
                 properties: [
@@ -365,16 +370,16 @@ enum RecipeTools {
             provenance: .recipe)
     }
 
-    // MARK: - expand_memory descriptor
+    // MARK: - recollect descriptor
 
-    /// Expand a distilled factoid to its M source memories by following the
+    /// Fan-out from a distilled factoid to its M source memories by following the
     /// _distilled_from tunnel graph. Returns full episodic content for the AI
     /// to synthesize into a user-facing narrative.
-    private static func expandMemoryTool() -> ProjectedTool {
+    private static func recollectTool() -> ProjectedTool {
         ProjectedTool(
-            name: expandMemoryToolName,
-            description: "Expand a distilled factoid to its source memories: follows the "
-                + "_distilled_from tunnel graph from a _distilled drawer and returns the "
+            name: recollectToolName,
+            description: "Recollect: fan-out from a distilled factoid to its source memories. "
+                + "Follows the _distilled_from tunnel graph from a _distilled drawer and returns the "
                 + "full episodic content of the M source memories that produced it. Use "
                 + "when the user needs the full explanation behind a dense factoid returned "
                 + "by moot_recall_distilled. You synthesize the sources into a narrative — "
@@ -433,8 +438,8 @@ enum RecipeTools {
             return try await runConsolidate(args, kit: kit, handle: handle)
         case recallDistilledToolName:
             return try await runRecallDistilled(args, kit: kit, handle: handle)
-        case expandMemoryToolName:
-            return try await runExpandMemory(args, kit: kit, handle: handle)
+        case recollectToolName:
+            return try await runRecollect(args, kit: kit, handle: handle)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -446,19 +451,20 @@ enum RecipeTools {
 
     /// Return a one-block-per-tool cognition menu drawn from the shipped
     /// `ProjectedTool` descriptors. Shows name, description, and required
-    /// args for each Tier 6 cognition tool — the 21 lens tools plus
-    /// `moot_synthesize` and `moot_list_lenses` itself.
-    /// Migration tools (Tier 7) are intentionally excluded here; they have
-    /// their own teachme guides and a separate caller workflow.
+    /// args for each Tier 6 cognition tool — the 23 lens tools plus four
+    /// recipe tools (`moot_list_lenses`, `moot_synthesize`,
+    /// `moot_recall_precise`, `moot_recall_shaped`) for 27 total.
+    /// Migration and distillation tools (Tier 7) are intentionally excluded;
+    /// they have their own teachme guides and a separate caller workflow.
     private static func runListRecipes() -> JSONValue {
         // Tier 6 recipe tools: list-lenses + synthesize + precise recall + shaped
-        // recall (not migration, which is Tier 7).
+        // recall (not migration or distillation, which are Tier 7).
         let tier6RecipeNames: Set<String> = [
             listRecipesToolName, groundedSynthesisToolName,
             preciseRecallToolName, shapedRecallToolName,
         ]
         let recipeTools = tools().filter { tier6RecipeNames.contains($0.name) }
-        // All 21 lens tools from LensTools.
+        // All 23 lens tools from LensTools.
         let lensTools = LensTools.tools()
         let cognitionTools = recipeTools + lensTools
 
@@ -506,7 +512,11 @@ enum RecipeTools {
         handle: EstateHandle
     ) async throws -> JSONValue {
         let filterChain = try decodeFilterChain(args["filter"])
-        let limit = try optionalInt(args["limit"], argument: "limit")
+        // Route through clampLimit so negative and over-ceiling values are
+        // rejected/clamped at the MCP boundary. Parity: Rust recipe_tools.rs
+        // run_grounded_synthesis_tool uses clamp_limit with the same ceiling.
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         let frame = LocusKit.RecallFrame(
             filterChain: filterChain,
             hydrationLevel: .structured,
@@ -534,7 +544,7 @@ enum RecipeTools {
 
     /// Run the PreciseRecall recipe and serialize its matches in the SAME
     /// plain-text shape `moot_memory_search` emits: a `found N memory(s)`
-    /// header line then one `id  [room]  preview` line per ranked match.
+    /// header line then up to `prefix(50)` `id  [room]  preview` lines.
     /// Mirroring that shape (including the 120-char content preview) keeps
     /// every mootText parser — the gauntlet's included — working unchanged.
     ///
@@ -552,11 +562,18 @@ enum RecipeTools {
         handle: EstateHandle
     ) async throws -> JSONValue {
         let query = try requireString(args, "query")
-        // 20 is moot_memory_search's own default limit; keep parity.
-        let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        // Clamp to [1, 500]: reject negative/zero, cap absurdly-large values.
+        // DoS prevention at the MCP boundary before the substrate is touched.
+        // Parity: Rust run_precise_recall_tool uses clamp_limit with same ceiling.
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         // Default coarse pool is CognitionKit's own default (30); honour an
         // explicit override. The recipe clamps pool >= limit internally.
-        let pool = try optionalInt(args["pool"], argument: "pool") ?? CognitionKit.PreciseRecall.defaultPool
+        // Pool is also clamped: an unbounded pool drives an unbounded substrate scan.
+        let pool = try ToolDispatcher.clampLimit(
+            try optionalInt(args["pool"], argument: "pool"),
+            argument: "pool",
+            default: CognitionKit.PreciseRecall.defaultPool)
         // ADR-016 §4: optional `wing` scopes recall to a single wing.
         // When present, compose with the explicit filter via Filter.all so both
         // constraints apply. When absent, the filter arg stands alone.
@@ -623,20 +640,20 @@ enum RecipeTools {
         let preciseScores = matches.map { $0.score }
         let preciseDiscrimination = RecallDiscrimination.classify(preciseScores)
 
+        // ADR-017 §3: resolve parentNodeIds to room display names via the
+        // node tree, matching moot_memory_search's resolution path.
+        let estate = try await kit.estate(for: handle)
+        let parentNodeIds = matches.map { $0.room }
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: parentNodeIds)
+
         var lines: [String] = ["found \(matches.count) memory(s)"]
         for match in matches.prefix(50) {
-            // Match moot_memory_search's preview: first 120 chars of content.
             let preview = match.content.prefix(120)
-            let room = match.room.isEmpty ? "?" : match.room
+            let room = nodeNames[match.room]?.room ?? (match.room.isEmpty ? "?" : match.room)
             lines.append("\(match.id)  [\(room)]  \(preview)")
         }
         lines.append(RecallDiscrimination.resultLine(for: preciseDiscrimination))
         if !hasDistinctive {
-            // Coaching hint: query has no distinctive tokens (numbers or proper
-            // nouns), so exact containment cannot be verified. The result set
-            // may include near-duplicates that are semantically close but not
-            // the specific record the user wants. Encourage narrowing the query
-            // with specific numbers or proper nouns for higher precision.
             lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
                 + "results may be imprecise. Refine with specific identifiers for higher confidence.")
         }
@@ -664,8 +681,11 @@ enum RecipeTools {
         handle: EstateHandle
     ) async throws -> JSONValue {
         let query = try requireString(args, "query")
-        // 20 is moot_memory_search's own default limit; keep parity.
-        let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        // Clamp to [1, 500]: reject negative/zero, cap absurdly-large values.
+        // DoS prevention at the MCP boundary before the substrate is touched.
+        // Parity: Rust run_shaped_recall_tool uses clamp_limit with same ceiling.
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         // ADR-016 §4: optional `wing` scopes recall to a single wing.
         // When present, compose with the explicit filter via Filter.all.
         let baseFilter = try decodeSingleFilter(args["filter"])
@@ -701,10 +721,16 @@ enum RecipeTools {
         let shapedScores = out.matches.map { $0.score }
         let shapedDiscrimination = RecallDiscrimination.classify(shapedScores)
 
+        // ADR-017 §3: resolve parentNodeIds to room display names via the
+        // node tree, matching moot_memory_search's resolution path.
+        let estate = try await kit.estate(for: handle)
+        let parentNodeIds = out.matches.map { $0.room }
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: parentNodeIds)
+
         var lines: [String] = ["found \(out.matches.count) memory(s)"]
         for match in out.matches.prefix(50) {
             let preview = match.content.prefix(120)
-            let room = match.room.isEmpty ? "?" : match.room
+            let room = nodeNames[match.room]?.room ?? (match.room.isEmpty ? "?" : match.room)
             lines.append("\(match.id)  [\(room)]  \(preview)")
         }
         lines.append(RecallDiscrimination.resultLine(for: shapedDiscrimination))
@@ -833,12 +859,27 @@ enum RecipeTools {
     ) async throws -> JSONValue {
         // Deterministic `now` when supplied; otherwise the wall clock. A
         // malformed instant is an out-of-band client error.
+        //
+        // Upper-bound guard: a future `now` causes pruneRecallTraces(olderThan: now - 30.days)
+        // to delete ALL recall traces (since every trace is older than a future minus 30 days).
+        // Reject any `now` that is more than 24 hours in the future; this is generous enough
+        // for timezone edge cases and deliberate benchmark offsets while closing the wipe vector.
         let now: Date
         if let raw = try optionalString(args["now"], argument: "now") {
             guard let parsed = ISO8601DateFormatter().date(from: raw) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
                     message: "now is not a valid ISO8601 instant: \(raw)")
+            }
+            // Future-now guard: reject timestamps more than 86400s (24 h) ahead of
+            // wall clock. A far-future `now` causes pruneRecallTraces(olderThan:
+            // now − 30 days) to prune recent real recall traces, corrupting the
+            // reward signal. Hard ceiling: 24 h. Parity: Rust run_dream_tool.
+            guard parsed.timeIntervalSince(Date()) <= 86400 else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "now is more than 24 hours in the future; "
+                        + "pass a timestamp close to the current time")
             }
             now = parsed
         } else {
@@ -923,7 +964,10 @@ enum RecipeTools {
         handle: EstateHandle
     ) async throws -> JSONValue {
         let query = try requireString(args, "query")
-        let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        // Clamp to [1, 500]: same DoS gate as moot_memory_search and the other
+        // recall tools. Parity: Rust run_recall_distilled_tool uses clamp_limit.
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         let filter = try decodeSingleFilter(args["filter"])
 
         let out: DistilledRecall.Output
@@ -932,9 +976,9 @@ enum RecipeTools {
                 input: .init(query: query, filter: filter, limit: limit),
                 estate: handle, kit: kit)
         } catch {
-            // The distillation-features-v1 VectorKit lane may not exist yet
-            // (estate has never been consolidated). Per DISTILLATION_ARIA_TOOLS.md §2.3:
-            // return "found 0" and suggest moot_consolidate to build the tier.
+            // Any error from DistilledRecall().run — including a missing
+            // distillation-features-v1 VectorKit lane — returns "found 0"
+            // and suggests moot_consolidate to build the distilled tier.
             let body = """
             found 0 distilled factoid(s) for: \(query)
 
@@ -952,7 +996,11 @@ enum RecipeTools {
         for (idx, match) in out.matches.enumerated() {
             lines.append("")
             lines.append("[\(idx + 1)] drawer_id: \(match.id)")
-            lines.append("    \(match.prose)")
+            // Preview cap: distilled prose can be arbitrarily long; cap at 300 chars
+            // to prevent context-window overflow in the LLM caller.
+            // Parity: Rust run_recall_distilled_tool uses DISTILLED_PROSE_PREVIEW_CAP.
+            let prose = String(match.prose.prefix(ToolDispatcher.distilledProseCap))
+            lines.append("    \(prose)")
 
             // Metadata line — delta and uncertain are optional.
             var meta = "confidence: \(String(format: "%.2f", match.confidence))"
@@ -981,11 +1029,11 @@ enum RecipeTools {
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
-    // MARK: - expand_memory
+    // MARK: - recollect
 
-    /// Run `moot_expand_memory`: fan-out from a distilled factoid to its source memories.
+    /// Run `moot_recollect`: fan-out from a distilled factoid to its source memories.
     ///
-    /// Decodes `drawer_id` and estateID, runs the ExpandMemory recipe, and formats
+    /// Decodes `drawer_id` and estateID, runs the Recollect recipe, and formats
     /// output as:
     ///   expand: {drawer_id}
     ///   factoid: {prose}
@@ -995,20 +1043,20 @@ enum RecipeTools {
     ///   {full content}
     ///   ...
     ///
-    /// ExpandError cases map to errorResult with guidance for the caller.
-    private static func runExpandMemory(
+    /// RecollectError cases map to errorResult with guidance for the caller.
+    private static func runRecollect(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> JSONValue {
         let drawerID = try requireString(args, "drawer_id")
 
-        let out: ExpandMemory.Output
+        let out: Recollect.Output
         do {
-            out = try await ExpandMemory().run(
+            out = try await Recollect().run(
                 input: .init(factoidDrawerID: drawerID),
                 estate: handle, kit: kit)
-        } catch let err as ExpandError {
+        } catch let err as RecollectError {
             switch err {
             case .notADistilledDrawer(let id):
                 return ToolDispatcher.errorResult(
@@ -1036,6 +1084,7 @@ enum RecipeTools {
         }
         lines.append(meta)
 
+        // ADR-017 §3 bridge consumer: source.room is a display name for provenance.
         for (idx, source) in out.sources.enumerated() {
             lines.append("")
             lines.append("source [\(idx + 1)] — room: \(source.room) | id: \(source.id)")
@@ -1147,9 +1196,9 @@ enum RecipeTools {
         }
     }
 
-    /// PreciseRecall's current public API accepts one filter entry. Omitted
-    /// filter uses the same active-recall default as an empty chain without
-    /// adding a confirmation constraint.
+    /// Shared single-filter decoder used by precise recall, shaped recall, and
+    /// distilled recall. Omitted filter maps to the active-recall default
+    /// (.currentlyBelieve) without adding a confirmation constraint.
     private static func decodeSingleFilter(_ value: JSONValue?) throws -> LocusKit.Filter {
         guard let name = try optionalString(value, argument: "filter") else { return .currentlyBelieve }
         switch name {

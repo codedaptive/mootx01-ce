@@ -31,10 +31,13 @@ let package = Package(
     products: [
         .executable(name: "gen-vectors",      targets: ["GenVectors"]),
         .executable(name: "validate-vectors", targets: ["ValidateVectors"]),
+        .executable(name: "nt-p0-bakeoff",    targets: ["NTP0Bakeoff"]),
         .library(name: "Harness", targets: ["Harness"]),
     ],
     dependencies: [
         .package(path: "../../GeniusLocusReference"),
+        .package(path: "../../../../../packages/libs/SubstrateTypes"),
+        .package(path: "../../../../../packages/libs/SubstrateKernel"),
         // SubstrateML wired in so the Swift harness can validate
         // association_rule_mining and formal_concept_analysis vectors using
         // the production Swift implementations, matching the Rust harness.
@@ -49,6 +52,8 @@ let package = Package(
             dependencies: [
                 "Harness",
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
             ]
         ),
@@ -59,6 +64,18 @@ let package = Package(
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
             ]
+        ),
+        .executableTarget(
+            name: "NTP0Bakeoff",
+            dependencies: [
+                "PlatformCryptoCandidate",
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
+            ]
+        ),
+        .target(
+            name: "PlatformCryptoCandidate",
+            dependencies: []
         ),
         .target(
             name: "Harness",

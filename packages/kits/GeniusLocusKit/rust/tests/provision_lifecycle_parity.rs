@@ -31,9 +31,10 @@ use std::sync::Arc;
 
 use corpus_kit::corpus::EmbeddingModelConfig;
 use genius_locus_kit::coordinator::{
-    EstateCoordinator, EstateKind, EstateMountState, EstateProvisionParams, GeniusLocusKitError,
-    SyncMode,
+    EstateCoordinator, EstateKind, EstateMountState, EstateProvisionParams,
+    GeniusLocusKitError, SyncMode,
 };
+use genius_locus_kit::EstateHandle;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
@@ -42,6 +43,37 @@ use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::storage::Storage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
 use uuid::Uuid;
+
+/// Resolve (wing_name, room_name) for a drawer via the coordinator's
+/// node-tree lookup (ADR-017: Drawer no longer has wing/room fields).
+fn resolve_names(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    drawers: &[genius_locus_kit::Drawer],
+) -> std::collections::HashMap<String, (String, String)> {
+    let node_ids: Vec<String> = drawers.iter().map(|d| d.parent_node_id.clone()).collect();
+    coord.resolve_drawer_node_names(handle, &node_ids)
+}
+
+/// Get the wing display name for a single drawer from a pre-resolved names map.
+fn wing_of(
+    names: &std::collections::HashMap<String, (String, String)>,
+    drawer: &genius_locus_kit::Drawer,
+) -> String {
+    names.get(&drawer.parent_node_id)
+        .map(|(w, _)| w.clone())
+        .unwrap_or_default()
+}
+
+/// Get the room display name for a single drawer from a pre-resolved names map.
+fn room_of(
+    names: &std::collections::HashMap<String, (String, String)>,
+    drawer: &genius_locus_kit::Drawer,
+) -> String {
+    names.get(&drawer.parent_node_id)
+        .map(|(_, r)| r.clone())
+        .unwrap_or_default()
+}
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -782,8 +814,9 @@ fn adr016_provision_seeds_seven_distinct_wings() {
 
     let estate = coord.estate_for(&handle).expect("estate must be open");
     let all_drawers = estate.all_drawers_bounded(None).expect("all_drawers must succeed");
+    let names = resolve_names(&coord, &handle, &all_drawers);
     let wing_names: std::collections::HashSet<String> =
-        all_drawers.iter().map(|d| d.wing.clone()).collect();
+        all_drawers.iter().map(|d| wing_of(&names, d)).collect();
 
     let expected: std::collections::HashSet<String> =
         DEFAULT_WINGS.iter().map(|w| w.name.to_string()).collect();
@@ -793,11 +826,11 @@ fn adr016_provision_seeds_seven_distinct_wings() {
     );
 }
 
-/// T15: Each of the 7 default wings has exactly one charter drawer in the
-/// reserved `_charter` room (`CHARTER_ROOM`).
+/// T15: Each of the 7 default wings has exactly one hint drawer in the
+/// `AI_Charter_Hint` room (`HINT_ROOM`).
 #[test]
-fn adr016_each_default_wing_has_one_charter_drawer() {
-    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+fn adr016_each_default_wing_has_one_hint_drawer() {
+    use locus_kit::default_wings::{HINT_ROOM, DEFAULT_WINGS};
 
     let (store, storage) = make_stores();
     let mut coord = EstateCoordinator::new();
@@ -814,23 +847,24 @@ fn adr016_each_default_wing_has_one_charter_drawer() {
 
     let estate = coord.estate_for(&handle).expect("estate must be open");
     let all_drawers = estate.all_drawers_bounded(None).expect("all_drawers must succeed");
-    let charters: Vec<_> = all_drawers.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    let names = resolve_names(&coord, &handle, &all_drawers);
+    let hints: Vec<_> = all_drawers.iter().filter(|d| room_of(&names, d) == HINT_ROOM).collect();
 
     assert_eq!(
-        charters.len(),
+        hints.len(),
         DEFAULT_WINGS.len(),
-        "must have one charter drawer per default wing; got {}",
-        charters.len()
+        "must have one hint drawer per default wing; got {}",
+        hints.len()
     );
 
     for wing in DEFAULT_WINGS {
-        let wing_charters: Vec<_> = charters.iter().filter(|d| d.wing == wing.name).collect();
+        let wing_hints: Vec<_> = hints.iter().filter(|d| wing_of(&names, d) == wing.name).collect();
         assert_eq!(
-            wing_charters.len(),
+            wing_hints.len(),
             1,
-            "wing '{}' must have exactly 1 charter drawer; got {}",
+            "wing '{}' must have exactly 1 hint drawer; got {}",
             wing.name,
-            wing_charters.len()
+            wing_hints.len()
         );
     }
 }
@@ -870,17 +904,19 @@ fn adr016_default_wing_name_is_agentic_memory() {
     );
     let estate = coord.estate_for(&handle).expect("estate must be open");
     let drawer = estate.capture(frame, NOW).expect("capture must succeed");
+    let names = resolve_names(&coord, &handle, &[drawer.clone()]);
+    let wing = wing_of(&names, &drawer);
     assert_eq!(
-        drawer.wing, DEFAULT_WING_NAME,
+        wing, DEFAULT_WING_NAME,
         "capture without explicit wing must land in DEFAULT_WING_NAME"
     );
 }
 
-/// T17: Charter drawers carry the "none" embedding sentinel.
-/// Structural metadata drawers must not enter the semantic pipeline.
+/// T17: Hint drawers do NOT carry the "none" embedding sentinel.
+/// Hint drawers are normal content — they enter the semantic pipeline.
 #[test]
-fn adr016_charter_drawers_carry_none_embedding_sentinel() {
-    use locus_kit::default_wings::{CHARTER_EMBEDDING_MODEL_ID, CHARTER_ROOM};
+fn adr016_hint_drawers_do_not_carry_none_embedding_sentinel() {
+    use locus_kit::default_wings::HINT_ROOM;
 
     let (store, storage) = make_stores();
     let mut coord = EstateCoordinator::new();
@@ -897,13 +933,14 @@ fn adr016_charter_drawers_carry_none_embedding_sentinel() {
 
     let estate = coord.estate_for(&handle).expect("estate must be open");
     let all_drawers = estate.all_drawers_bounded(None).expect("all_drawers must succeed");
-    let charters: Vec<_> = all_drawers.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    let names = resolve_names(&coord, &handle, &all_drawers);
+    let hints: Vec<_> = all_drawers.iter().filter(|d| room_of(&names, d) == HINT_ROOM).collect();
 
-    for charter in &charters {
-        assert_eq!(
-            charter.embedding_model_id, CHARTER_EMBEDDING_MODEL_ID,
-            "charter drawer for '{}' must have embedding_model_id == 'none'; got '{}'",
-            charter.wing, charter.embedding_model_id
+    for hint in &hints {
+        assert_ne!(
+            hint.embedding_model_id, "none",
+            "hint drawer for '{}' must NOT have embedding_model_id == 'none'; got '{}'",
+            wing_of(&names, hint), hint.embedding_model_id
         );
     }
 }
@@ -943,8 +980,9 @@ fn adr016_all_estate_kinds_seed_default_wings() {
 
         let estate = coord.estate_for(&handle).expect("estate must be open");
         let all_drawers = estate.all_drawers_bounded(None).expect("all_drawers must succeed");
+        let names = resolve_names(&coord, &handle, &all_drawers);
         let wing_names: std::collections::HashSet<String> =
-            all_drawers.iter().map(|d| d.wing.clone()).collect();
+            all_drawers.iter().map(|d| wing_of(&names, d)).collect();
 
         let expected: std::collections::HashSet<String> =
             DEFAULT_WINGS.iter().map(|w| w.name.to_string()).collect();
@@ -973,7 +1011,7 @@ fn adr016_all_estate_kinds_seed_default_wings() {
 /// Mirrors Swift T19: `serveStyleOpenThenSeedDefaultWingsYieldsSevenWings`.
 #[test]
 fn t19_serve_style_open_seed_default_wings_yields_seven_wings() {
-    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+    use locus_kit::default_wings::{HINT_ROOM, DEFAULT_WINGS};
 
     let mut coord = EstateCoordinator::new();
     // Bare open — no provision, no wing seeding.
@@ -996,12 +1034,13 @@ fn t19_serve_style_open_seed_default_wings_yields_seven_wings() {
         .seed_default_wings(&handle, NOW)
         .expect("seed_default_wings must succeed");
 
-    // After seeding: exactly 7 wings each with one _charter drawer.
+    // After seeding: exactly 7 wings each with one hint drawer (AI_Charter_Hint room).
     let estate = coord.estate_for(&handle).expect("estate must be open after seeding");
     let all_drawers = estate.all_drawers().expect("all_drawers must succeed");
-    let charters: Vec<_> = all_drawers.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    let names = resolve_names(&coord, &handle, &all_drawers);
+    let hints: Vec<_> = all_drawers.iter().filter(|d| room_of(&names, d) == HINT_ROOM).collect();
 
-    let wing_names: std::collections::HashSet<String> = charters.iter().map(|d| d.wing.clone()).collect();
+    let wing_names: std::collections::HashSet<String> = hints.iter().map(|d| wing_of(&names, d)).collect();
     let expected: std::collections::HashSet<String> = DEFAULT_WINGS.iter().map(|w| w.name.to_string()).collect();
     assert_eq!(
         wing_names, expected,
@@ -1009,31 +1048,31 @@ fn t19_serve_style_open_seed_default_wings_yields_seven_wings() {
         wing_names
     );
     assert_eq!(
-        charters.len(),
+        hints.len(),
         DEFAULT_WINGS.len(),
-        "must have exactly one charter drawer per wing; got {}",
-        charters.len()
+        "must have exactly one hint drawer per wing; got {}",
+        hints.len()
     );
 
-    // Each wing has exactly one charter.
+    // Each wing has exactly one hint drawer.
     for wing in DEFAULT_WINGS {
-        let wing_charters: Vec<_> = charters.iter().filter(|d| d.wing == wing.name).collect();
+        let wing_hints: Vec<_> = hints.iter().filter(|d| wing_of(&names, d) == wing.name).collect();
         assert_eq!(
-            wing_charters.len(), 1,
-            "wing '{}' must have exactly 1 charter after seed_default_wings; got {}",
-            wing.name, wing_charters.len()
+            wing_hints.len(), 1,
+            "wing '{}' must have exactly 1 hint drawer after seed_default_wings; got {}",
+            wing.name, wing_hints.len()
         );
     }
 }
 
-/// T20: Calling seed_default_wings twice is idempotent — no duplicate charters.
+/// T20: Calling seed_default_wings twice is idempotent — no duplicate hint drawers.
 ///
 /// Mirrors Swift T20: `seedDefaultWingsTwiceIsIdempotentNoDuplicateCharters`.
 /// Simulates the serve restart scenario: process exits, estate is re-opened,
 /// seed_default_wings is called again — must be a no-op on the second call.
 #[test]
 fn t20_seed_default_wings_twice_is_idempotent() {
-    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+    use locus_kit::default_wings::{HINT_ROOM, DEFAULT_WINGS};
 
     let mut coord = EstateCoordinator::new();
     let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
@@ -1044,40 +1083,41 @@ fn t20_seed_default_wings_twice_is_idempotent() {
     // First call seeds 7 wings.
     coord.seed_default_wings(&handle, NOW).expect("first seed_default_wings must succeed");
 
-    // Second call must be a no-op (no additional charters inserted).
+    // Second call must be a no-op (no additional hint drawers inserted).
     coord.seed_default_wings(&handle, NOW).expect("second seed_default_wings must succeed");
 
     let estate = coord.estate_for(&handle).expect("estate must still be open");
     let all_drawers = estate.all_drawers().expect("all_drawers must succeed");
-    let charters: Vec<_> = all_drawers.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    let names = resolve_names(&coord, &handle, &all_drawers);
+    let hints: Vec<_> = all_drawers.iter().filter(|d| room_of(&names, d) == HINT_ROOM).collect();
 
-    // Still exactly 7 wing charters — no duplicates from the second call.
+    // Still exactly 7 wing hint drawers — no duplicates from the second call.
     assert_eq!(
-        charters.len(),
+        hints.len(),
         DEFAULT_WINGS.len(),
-        "seed_default_wings called twice must not produce duplicate charters; got {}",
-        charters.len()
+        "seed_default_wings called twice must not produce duplicate hint drawers; got {}",
+        hints.len()
     );
 
     for wing in DEFAULT_WINGS {
-        let wing_charters: Vec<_> = charters.iter().filter(|d| d.wing == wing.name).collect();
+        let wing_hints: Vec<_> = hints.iter().filter(|d| wing_of(&names, d) == wing.name).collect();
         assert_eq!(
-            wing_charters.len(), 1,
-            "wing '{}' must still have exactly 1 charter after second seed_default_wings; got {}",
-            wing.name, wing_charters.len()
+            wing_hints.len(), 1,
+            "wing '{}' must still have exactly 1 hint drawer after second seed_default_wings; got {}",
+            wing.name, wing_hints.len()
         );
     }
 }
 
 /// T21: seed_default_wings on a provisioned estate is a no-op — all 7 wings
-/// already present; no duplicate charters are added.
+/// already present; no duplicate hint drawers are added.
 ///
 /// Mirrors Swift T21: `seedDefaultWingsOnProvisionedEstateIsNoOp`.
 /// Proves that calling seed_default_wings from the serve path on an estate that
 /// was provisioned (and then re-opened by a subsequent serve invocation) is safe.
 #[test]
 fn t21_seed_default_wings_on_provisioned_estate_is_no_op() {
-    use locus_kit::default_wings::{CHARTER_ROOM, DEFAULT_WINGS};
+    use locus_kit::default_wings::{HINT_ROOM, DEFAULT_WINGS};
 
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
@@ -1096,12 +1136,13 @@ fn t21_seed_default_wings_on_provisioned_estate_is_no_op() {
 
     let estate = coord.estate_for(&handle).expect("estate must be open");
     let drawers_before = estate.all_drawers().expect("all_drawers must succeed");
-    let charters_before: Vec<_> = drawers_before.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    let names_before = resolve_names(&coord, &handle, &drawers_before);
+    let hints_before: Vec<_> = drawers_before.iter().filter(|d| room_of(&names_before, d) == HINT_ROOM).collect();
     assert_eq!(
-        charters_before.len(),
+        hints_before.len(),
         DEFAULT_WINGS.len(),
-        "provision must have seeded exactly {} charters; got {}",
-        DEFAULT_WINGS.len(), charters_before.len()
+        "provision must have seeded exactly {} hint drawers; got {}",
+        DEFAULT_WINGS.len(), hints_before.len()
     );
 
     // Calling seed_default_wings on a fully-seeded estate must be a complete no-op.
@@ -1111,13 +1152,14 @@ fn t21_seed_default_wings_on_provisioned_estate_is_no_op() {
 
     let estate = coord.estate_for(&handle).expect("estate must still be open");
     let drawers_after = estate.all_drawers().expect("all_drawers must succeed");
-    let charters_after: Vec<_> = drawers_after.iter().filter(|d| d.room == CHARTER_ROOM).collect();
+    let names_after = resolve_names(&coord, &handle, &drawers_after);
+    let hints_after: Vec<_> = drawers_after.iter().filter(|d| room_of(&names_after, d) == HINT_ROOM).collect();
 
-    // Charter count must be unchanged.
+    // Hint drawer count must be unchanged.
     assert_eq!(
-        charters_after.len(),
-        charters_before.len(),
-        "seed_default_wings on a provisioned estate must add 0 charters; before={}, after={}",
-        charters_before.len(), charters_after.len()
+        hints_after.len(),
+        hints_before.len(),
+        "seed_default_wings on a provisioned estate must add 0 hint drawers; before={}, after={}",
+        hints_before.len(), hints_after.len()
     );
 }

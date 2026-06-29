@@ -4,8 +4,9 @@
 //
 // At v1.0 the engine provides:
 // - Per-estate Ed25519 identity
-// - In-process peer registry (paired peers exchange messages
-//   directly through shared state)
+// - In-process peer registry (paired peers exchange SignedEnvelope
+//   messages through a shared Relay; the stored peer reference is
+//   used for pairing registration, not direct message exchange)
 // - Audit-event-style replication via SyncRecord wire format
 // - Last-writer-wins-by-HLC and append-only conflict policies
 //
@@ -72,7 +73,8 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
 
     /// Pair with a peer. Both sides exchange public keys plus a
     /// shared hyperplane family spec. After pairing, push/pull
-    /// will route audit-event-style messages through the peer.
+    /// routes JSON-encoded SyncRecord batches inside SignedEnvelope
+    /// messages through the peer's relay inbox.
     ///
     /// For v1.0 pairing is in-process: both peers share a
     /// FederationRelay instance.
@@ -377,8 +379,9 @@ actor FederationStateActor {
             throw SyncError.encodingFailure(detail: "encode SyncRecords: \(error)")
         }
 
-        // Batch-level HLC: advance the clock once more so the envelope timestamp
-        // is strictly ordered after all record HLCs in the batch.
+        // Batch-level HLC: advance the clock once more. Records that already
+        // carried change.hlc are not incorporated into the generator before this
+        // mint, so strict ordering after every record HLC is not guaranteed.
         let batchHLC = PackedHLC(hlcGenerator.send(now: nowMillis()))
 
         // Build canonical signing bytes and sign with sender's Ed25519 key.
@@ -425,6 +428,18 @@ actor FederationStateActor {
         for peer in peers {
             let envelopes = peer.relay.drain(for: localIdentity.publicKey)
             for envelope in envelopes {
+                // Only accept envelopes from explicitly paired peers. A valid
+                // signature alone does not prove pairing authorization
+                // (ADR-013): an attacker could craft a self-signed envelope
+                // and inject records without completing the pairing handshake.
+                // This check enforces the authorization boundary before any
+                // further processing. Mirrors Rust federation.rs pull().
+                guard envelope.senderPublicKey == peer.publicKey else {
+                    conflicts += 1
+                    logger.error("envelope from unpaired sender \(envelope.senderPublicKey.base64EncodedString()) rejected")
+                    continue
+                }
+
                 // Reject unknown payload kinds to avoid misinterpreting future
                 // payload types. Known: .syncRecordBatch. Unknown kinds are
                 // counted as conflicts and logged; no crash.
@@ -503,7 +518,8 @@ actor FederationStateActor {
     /// stored row's `_syncHLC`. If the incoming HLC is older (strictly less),
     /// the write is silently dropped. On every apply that wins the comparison
     /// the row is written with `_syncHLC` so the next inbound can compare.
-    /// This mirrors the CloudKitStateActor.applyInbound semantics exactly.
+    /// Note: this path persists only `_syncHLC`; CloudKitStateActor.applyInbound
+    /// also persists `_syncSchemaVersion` and `_syncKitID`.
     /// The same HLC gate applies to delete events: a stale delete (incoming
     /// HLC < local `_syncHLC`) is silently rejected; a newer delete proceeds.
     ///
@@ -549,8 +565,8 @@ actor FederationStateActor {
                         return
                     }
                 }
-                // Merge sync meta into the persisted row so the next inbound
-                // write can read _syncHLC back and compare.
+                // Persist _syncHLC so the next inbound write can compare.
+                // (Schema version and kit ID are not merged here.)
                 var rowValues = values
                 rowValues["_syncHLC"] = .hlc(record.hlc.asHLC)
                 _ = try await storage.rowStore.upsert(
@@ -621,8 +637,8 @@ actor FederationStateActor {
     }
 
     /// Current wall-clock in milliseconds, passed explicitly into
-    /// the HLC generator so the engine stays deterministic and the
-    /// single clock read is easy to audit.
+    /// the HLC generator. Note: the engine also reads Date() when
+    /// assigning lastPushAt and lastPullAt on receipts.
     private func nowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
     }

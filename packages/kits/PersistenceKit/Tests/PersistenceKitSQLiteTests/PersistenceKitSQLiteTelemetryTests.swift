@@ -353,9 +353,9 @@ struct PKSQLiteTelemetryConformanceTests {
 
             let after = try await storage.stats(now: now)
 
-            // Page count must not change — reportStorageStats is read-only.
-            // (It may be equal or slightly higher if SQLite checkpoints, but
-            // it must not decrease.)
+            // Page count must not decrease — reportStorageStats is read-only.
+            // (It may be equal or slightly higher if SQLite performs a checkpoint
+            // during the call, but it must never go down.)
             if let beforePages = before.pageCount, let afterPages = after.pageCount {
                 #expect(afterPages >= beforePages,
                     "pageCount must not decrease after reportStorageStats")

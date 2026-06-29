@@ -90,8 +90,7 @@ struct UninstallCommand: AsyncParsableCommand {
 
             // Remove the placed binaries (~/.mootx01) and the PATH symlinks
             // (~/.local/bin/mootx01, ~/.local/bin/moot-mgr). Inverse of install's
-            // placeBinary/placeMgrBinary; mirrors codegraph's `--uninstall` which
-            // removes both the install dir and the launcher symlink.
+            // placeBinary/placeMgrBinary.
             do {
                 try Installer.removePlacedBinary(homeDirectory: home)
                 print("  ✓ Removed placed binaries and PATH symlinks.")

@@ -14,7 +14,9 @@
 //   2. RECONSTRUCT DISPATCH: `EmbeddingModel.reconstruct(from:)` returns a
 //      provider whose embeddings round-trip the originally-trained provider's,
 //      for every trainable case; and throws `CorpusKitError.notTrainable` for
-//      the deterministic / named-model / FDC (stateless) cases — never crashes.
+//      deterministic / named-model (miniLM, mpNet, embeddingGemma) / FDC
+//      (stateless) cases — never crashes. Apple-only nlEmbedding and
+//      nlContextualEmbedding cases are tested in NLEmbeddingProviderTests.swift.
 //
 //   3. CAPABILITY DETECTION: `EmbeddingModel.isTrainable` is true exactly for
 //      RI/PPMI/LSA/NMF and false for deterministic/named/FDC.
@@ -209,5 +211,79 @@ struct TrainableEmbeddingBasisTests {
         #expect(!EmbeddingModel.deterministic.isTrainable)
         #expect(!EmbeddingModel.fdc(provider: FDCProvider()).isTrainable)
         #expect(!EmbeddingModel.miniLM(inference: { _ in [] }).isTrainable)
+    }
+
+    // MARK: - §4 maintained-counts seam (incremental-counts change set, P3)
+    //
+    // Drives the counts seam THROUGH the protocol: `addToCounts` per chunk grows
+    // the maintained vocabulary anchor, and `serializeCounts` → `restoreCounts`
+    // resumes that anchor in a fresh provider. Each conformer routes the uniform
+    // methods to its own accumulation (RI/PPMI fold term sequences; LSA/NMF fold
+    // documents via the lightweight anchor). The Rust twin
+    // (`trainable_embedding_basis_tests.rs`, §4) asserts the same shape.
+
+    private static let countsCorpus: [String] = [
+        "car engine drive road vehicle",
+        "vehicle road transport car fuel",
+        "engine fuel combustion power car",
+        "dog bark run fetch animal",
+        "animal run cat dog pet",
+    ]
+
+    /// Fold the corpus through `addToCounts`, then assert the anchor survives a
+    /// `serializeCounts` → `restoreCounts` round trip on a fresh provider.
+    private func assertCountsSeamRoundTrips(
+        trained: any TrainableEmbeddingBasis,
+        fresh: any TrainableEmbeddingBasis
+    ) throws {
+        for chunk in Self.countsCorpus { trained.addToCounts(text: chunk) }
+        let vocab = trained.countsVocabularySize
+        #expect(vocab > 0, "addToCounts must grow the maintained vocabulary")
+
+        let blob = trained.serializeCounts()
+        try fresh.restoreCounts(from: blob)
+        #expect(fresh.countsVocabularySize == vocab,
+                "restored maintained vocabulary size must match the source")
+
+        // A truncated blob is rejected, never a crash.
+        #expect(throws: CorpusKitError.self) {
+            try fresh.restoreCounts(from: Data(blob.prefix(blob.count / 2)))
+        }
+    }
+
+    @Test("RI counts seam round-trips the maintained vocabulary anchor")
+    func riCountsSeamRoundTrips() throws {
+        try assertCountsSeamRoundTrips(
+            trained: RandomIndexingProvider(), fresh: RandomIndexingProvider())
+    }
+
+    @Test("PPMI counts seam round-trips the maintained vocabulary anchor")
+    func ppmiCountsSeamRoundTrips() throws {
+        try assertCountsSeamRoundTrips(trained: PpmiProvider(), fresh: PpmiProvider())
+    }
+
+    @Test("LSA counts seam round-trips the maintained vocabulary anchor")
+    func lsaCountsSeamRoundTrips() throws {
+        try assertCountsSeamRoundTrips(
+            trained: LsaProvider(rank: 3, svdSweeps: 30),
+            fresh: LsaProvider(rank: 3, svdSweeps: 30))
+    }
+
+    @Test("NMF counts seam round-trips the maintained vocabulary anchor")
+    func nmfCountsSeamRoundTrips() throws {
+        try assertCountsSeamRoundTrips(
+            trained: NmfProvider(rank: 3, maxIterations: 100),
+            fresh: NmfProvider(rank: 3, maxIterations: 100))
+    }
+
+    @Test("LSA/NMF anchor tracks document count without retaining TF rows")
+    func lsaNmfAnchorTracksDocumentCount() {
+        // The lightweight anchor grows vocab + document count WITHOUT keeping the
+        // per-document TF rows (bounding maintained state to O(vocab)). Document
+        // count must equal the number of non-empty chunks folded.
+        let lsa = LsaProvider(rank: 3, svdSweeps: 30)
+        for chunk in Self.countsCorpus { lsa.addToCounts(text: chunk) }
+        #expect(lsa.documentCount == Self.countsCorpus.count,
+                "anchor must bump documentCount once per non-empty chunk")
     }
 }

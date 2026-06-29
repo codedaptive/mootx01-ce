@@ -46,6 +46,10 @@ use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::frames::CaptureFrame;
+use persistence_kit::inmemory::InMemoryStorage;
+use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
+use queuekit::{HLC, Job, JobId, ObservationStatus, PersistenceKitBackend, QueueBackend, QueueKit, StreamId};
+use substrate_types::hlc::HLCGenerator;
 use uuid::Uuid;
 
 // Epoch-seconds for the coordinator's `capture` and verb calls. The
@@ -101,6 +105,18 @@ fn handle_id(handle: &genius_locus_kit::handle::EstateHandle) -> String {
     Uuid::from_bytes(handle.estate_uuid).to_string()
 }
 
+/// Build a transient in-memory signals queue for tests that do not need crash
+/// durability. Unique store UUID per call so concurrent tests do not share state.
+fn inmem_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, HLCGenerator) {
+    let storage = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+    PersistenceKitBackend::open_schema(storage.as_ref())
+        .expect("InMemoryStorage open_schema cannot fail");
+    let backend = PersistenceKitBackend::new(storage);
+    let queue: QueueKit<Box<dyn QueueBackend>> =
+        QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+    (queue, HLCGenerator::new(1))
+}
+
 // ── Test 1: Propose emission lands as a queryable Proposal ─────────
 
 /// Force test F-1: a Propose emission routed through the
@@ -121,7 +137,8 @@ fn f1_propose_emission_lands_as_queryable_proposal() {
     // Build the scheduler with the live CoordinatorDispatcher.
     let dispatcher = SchedulerCoordinatorDispatcher::new(Arc::clone(&coord), handle);
     let hid = handle_id(&handle);
-    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher, queue, None, hlc);
 
     // Register a signal that emits one Propose targeting `row_id`.
     let row_id_clone = row_id.clone();
@@ -191,7 +208,8 @@ fn f2_associate_emission_lands_as_queryable_association() {
 
     let dispatcher = SchedulerCoordinatorDispatcher::new(Arc::clone(&coord), handle);
     let hid = handle_id(&handle);
-    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher, queue, None, hlc);
 
     let (a_clone, b_clone) = (row_a.clone(), row_b.clone());
     let spec = SignalSpec {
@@ -261,7 +279,8 @@ fn f3_verb_failure_records_route_failed() {
 
     let dispatcher = SchedulerCoordinatorDispatcher::new(Arc::clone(&coord), handle);
     let hid = handle_id(&handle);
-    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher, queue, None, hlc);
 
     // Emit a proposal targeting a row that does not exist. The
     // coordinator's Estate::propose will return DrawerNotFound, which
@@ -332,7 +351,8 @@ fn f4_lane_ordering_preserved_across_multiple_proposals() {
 
     let dispatcher = SchedulerCoordinatorDispatcher::new(Arc::clone(&coord), handle);
     let hid = handle_id(&handle);
-    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut scheduler = SerialLaneScheduler::new(hid.clone(), dispatcher, queue, None, hlc);
 
     // Register three signals each emitting one proposal. Registration
     // order is s1, s2, s3; SignalID generation mixes a monotonic counter
@@ -426,7 +446,8 @@ fn f4_lane_ordering_preserved_across_multiple_proposals() {
 /// (scheduler_parity.rs) continue to see RoutedButVerbStubbed.
 #[test]
 fn f5_noop_dispatcher_still_records_routed_but_verb_stubbed() {
-    let mut s = SerialLaneScheduler::new("noop-estate".to_string(), SchedulerNoopDispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut s = SerialLaneScheduler::new("noop-estate".to_string(), SchedulerNoopDispatcher, queue, None, hlc);
     let spec = SignalSpec {
         name: "noop-check".into(),
         trigger: SignalTrigger::Interval { seconds: Duration::from_secs(1) },
@@ -462,7 +483,8 @@ fn f6_diagnostic_emission_bypasses_dispatcher() {
 
     let dispatcher = SchedulerCoordinatorDispatcher::new(Arc::clone(&coord), handle);
     let hid = handle_id(&handle);
-    let mut s = SerialLaneScheduler::new(hid, dispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut s = SerialLaneScheduler::new(hid, dispatcher, queue, None, hlc);
 
     let spec = SignalSpec {
         name: "diag-bypass".into(),
@@ -490,4 +512,152 @@ fn f6_diagnostic_emission_bypasses_dispatcher() {
     assert_eq!(report.recent_diagnostics.len(), 1);
     assert_eq!(report.recent_diagnostics[0].title, "health-check");
     assert_eq!(report.state, SignalState::LastRan);
+}
+
+// ── Test 7: SQLite crash-durability and stream isolation ─────────
+
+/// Parity gate for ADR-021 Decision 7 (T5) crash-durability invariant.
+///
+/// Two properties are verified:
+///
+/// **Crash durability** — a job sent to the shared `queue.sqlite`
+/// (stream "signals") survives a scheduler drop-and-reopen. A new
+/// scheduler wired to the same SQLite-backed QueueKit claims and
+/// processes the orphaned job on its next `drain_lane` call.
+///
+/// **Stream isolation** — a job sent on stream "encode" to the same
+/// SQLite database is NOT claimed by the signals drainer
+/// (`drain_for_stream("signals")`). After the signals drainer runs,
+/// the encode job remains available in the queue.
+///
+/// Swift parity: mirrors `StandingSignalScheduler` crash-durability
+/// property described in DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21:
+/// "SQLite estates get durable standing-signal queuing; a process restart
+/// must not lose pending signal jobs."
+#[test]
+fn f7_sqlite_queue_survives_scheduler_drop_and_streams_are_isolated() {
+    // ── Build a SQLite-backed QueueKit. ──
+    // Use a unique temp path so parallel test runs do not share state.
+    let db_path = std::env::temp_dir().join(format!(
+        "glk-signal-crash-{}.sqlite",
+        Uuid::new_v4()
+    ));
+    let estate_id = Uuid::new_v4();
+    let cfg = EstateConfiguration::new(
+        estate_id,
+        BackendConfiguration::Sqlite {
+            path: db_path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage =
+        SqliteStorage::new(cfg).expect("SqliteStorage::new must succeed for crash-durability test");
+    // Coerce to Arc<dyn Storage> so PersistenceKitBackend::new accepts it.
+    // All three QueueKit backends (initial, reopen, isolation drain) share this
+    // same Arc, which is safe: SqliteStorage uses WAL-mode SQLite internally
+    // and serializes concurrent reads/writes through the connection.
+    let storage_arc: Arc<dyn Storage> = Arc::new(storage);
+    PersistenceKitBackend::open_schema(storage_arc.as_ref())
+        .expect("open_schema must succeed");
+    let backend = PersistenceKitBackend::new(Arc::clone(&storage_arc));
+    let queue: QueueKit<Box<dyn QueueBackend>> = QueueKit::new(Box::new(backend));
+
+    // ── Part 1: crash-durability. ──
+    // Directly send a signals-stream job to the SQLite queue (simulating a
+    // prior scheduler that enqueued a job and then crashed before draining).
+    // The envelope encodes a Diagnostic emission — chosen because it exercises
+    // the full decode path and does not require a live dispatcher to route.
+    let signals_payload = serde_json::to_vec(&serde_json::json!({
+        "signal_id": "crash-test-signal",
+        "class_tag": "diagnostic",
+        "diagnostic_title": "crash-survived",
+        "diagnostic_detail": "recovered from simulated crash",
+        "diagnostic_observed_at_nanos": NOW_NS,
+    }))
+    .expect("payload serialization cannot fail");
+
+    let crashed_job = Job {
+        id: JobId(Uuid::new_v4().simple().to_string()),
+        stream_id: StreamId("signals".to_string()),
+        submitted_at: HLC { physical_time: 1_700_000_000_000, logical_count: 0, node_id: 1 },
+        priority: 50,
+        payload: signals_payload,
+        extensions: serde_json::Map::new(),
+    };
+    queue.send(&crashed_job).expect("send crashed_job must succeed");
+
+    // ── Part 2: stream isolation. ──
+    // Send a job on stream "encode" to the SAME SQLite queue.
+    // The signals drainer must NOT claim this job.
+    let encode_job_id = JobId(Uuid::new_v4().simple().to_string());
+    let encode_job = Job {
+        id: encode_job_id.clone(),
+        stream_id: StreamId("encode".to_string()),
+        submitted_at: HLC { physical_time: 1_700_000_000_001, logical_count: 0, node_id: 1 },
+        priority: 50,
+        payload: b"encode-payload".to_vec(),
+        extensions: serde_json::Map::new(),
+    };
+    queue.send(&encode_job).expect("send encode_job must succeed");
+
+    // ── Reopen: build a fresh scheduler on the same SQLite queue. ──
+    // Simulates a process restart: same database, new scheduler instance.
+    // Share the storage_arc so both schedulers reference the same SQLite file.
+    let backend2 = PersistenceKitBackend::new(Arc::clone(&storage_arc));
+    let queue2: QueueKit<Box<dyn QueueBackend>> = QueueKit::new(Box::new(backend2));
+    let hlc2 = HLCGenerator::new(1);
+    let mut s2 = SerialLaneScheduler::new(
+        "crash-durability-estate".to_string(),
+        SchedulerNoopDispatcher,
+        queue2,
+        None,
+        hlc2,
+    );
+
+    // Tick with a now_nanos that would not fire any registered signals
+    // (no signals registered — tick only drains the queue, which is the
+    // crash-recovery path we're testing).
+    s2.tick(NOW_NS + 1_000);
+
+    // ── Verify crash-durability. ──
+    // The orphaned signals job must have been claimed and drained. The
+    // scheduler has no registered signal for "crash-test-signal", so the
+    // outcome is not reflected in report() — but the drain_history shows
+    // the job was processed.
+    let history = s2.drain_history();
+    assert_eq!(
+        history.len(),
+        1,
+        "signals drainer must claim the orphaned job from the prior scheduler"
+    );
+    assert_eq!(history[0].1, "diagnostic", "drained job must decode as a diagnostic emission");
+
+    // ── Verify stream isolation. ──
+    // Drain the queue directly with the "encode" stream to confirm the
+    // encode job is still available (the signals drainer did not consume it).
+    // Re-open a third backend view of the same SQLite file.
+    let backend3 = PersistenceKitBackend::new(Arc::clone(&storage_arc));
+    let queue3: QueueKit<Box<dyn QueueBackend>> = QueueKit::new(Box::new(backend3));
+    let encode_stream = StreamId("encode".to_string());
+    let claimed = queue3
+        .drain_for_stream(&encode_stream, 0.0)
+        .expect("drain_for_stream(encode) must succeed");
+    assert_eq!(
+        claimed.len(),
+        1,
+        "encode job must still be in the queue after signals drainer ran"
+    );
+    assert_eq!(
+        claimed[0].0.id.0, encode_job_id.0,
+        "encode job ID must match what was sent"
+    );
+    // Reply Done to clean up.
+    queue3
+        .reply(&claimed[0].0.id, ObservationStatus::Done, vec![])
+        .expect("reply encode job Done");
+
+    // Cleanup: remove the temp SQLite file and sidecars.
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
 }

@@ -23,11 +23,13 @@
 // ─────────────────────────────────────────────────────────────────
 
 use corpus_kit::{fuse, fuse_scored, LaneTag};
-use corpus_kit::{recall, BM25Index, BundleStore, Chunk, HybridRecallConfiguration};
-use corpus_kit_providers::DeterministicTokenizer;
+use corpus_kit::{
+    recall, default_keyword_tokens, BundleStore, Chunk, HybridRecallConfiguration, InvertedIndexStore,
+};
 use engram_lib::Engram;
 use intellectus_lib::Intellectus;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
+use rusqlite::Connection;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use substrate_types::hlc::HLC;
@@ -217,8 +219,8 @@ fn hybrid_recall_rrf_formula_conformance() {
 //   - results are score descending.
 //   - top result has a non-nil vector_score (it contributed a vector hit).
 //
-// Uses InMemoryStorage (no SQLite on the Rust side for integration tests;
-// the Swift test covers SQLite). The lock prevents telemetry leakage.
+// Uses in-memory SQLite (rusqlite's ":memory:" backend). The lock prevents
+// telemetry leakage.
 
 #[test]
 fn hybrid_recall_conformance_end_to_end() {
@@ -250,9 +252,13 @@ fn hybrid_recall_conformance_end_to_end() {
     }
     bundle_store.insert(&chunks).expect("insert chunks");
 
-    let tokenizer = Arc::new(DeterministicTokenizer::new());
-    let mut bm25 = BM25Index::new(tokenizer);
-    bm25.index_documents(chunks.iter().map(|c| (c.id, c.text.as_str())));
+    // Index keyword lane via InvertedIndexStore (SQLite-backed, in-memory for tests).
+    let inverted_index = InvertedIndexStore::open(Connection::open_in_memory().expect("conn"))
+        .expect("open inverted index");
+    for chunk in &chunks {
+        let tokens = default_keyword_tokens(chunk.text.as_str());
+        inverted_index.index(&chunk.id.to_string(), &tokens, "").expect("index chunk");
+    }
 
     // Probe is all-zeros; Hamming distances are popcount(engram) = 1, 2, 3.
     let engrams = [
@@ -273,7 +279,7 @@ fn hybrid_recall_conformance_end_to_end() {
         "test-model",
         3,
         &vector_store,
-        &bm25,
+        &inverted_index,
         &bundle_store,
         HybridRecallConfiguration::default(),
     )
@@ -356,9 +362,11 @@ fn distance_zero_probe_produces_non_none_vector_score() {
     );
     bundle_store.insert(&[chunk.clone()]).expect("insert chunk");
 
-    let tokenizer = Arc::new(DeterministicTokenizer::new());
-    let mut bm25 = BM25Index::new(tokenizer);
-    bm25.index_documents(std::iter::once((chunk.id, chunk.text.as_str())));
+    // Index keyword lane via InvertedIndexStore (SQLite-backed, in-memory for tests).
+    let inverted_index = InvertedIndexStore::open(Connection::open_in_memory().expect("conn"))
+        .expect("open inverted index");
+    let tokens = default_keyword_tokens(chunk.text.as_str());
+    inverted_index.index(&chunk.id.to_string(), &tokens, "").expect("index chunk");
 
     // Store the engram and use the IDENTICAL engram as the probe → distance 0.
     let stored_engram = Engram::new(0xCAFE_BABE, 0, 0, 0);
@@ -373,7 +381,7 @@ fn distance_zero_probe_produces_non_none_vector_score() {
         "test-model",
         5,
         &vector_store,
-        &bm25,
+        &inverted_index,
         &bundle_store,
         HybridRecallConfiguration::default(),
     )

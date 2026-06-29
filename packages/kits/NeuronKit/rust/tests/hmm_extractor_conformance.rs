@@ -172,13 +172,12 @@ fn doc_frequency_is_zero() {
 
 // ── Integration: pipeline succeeds with HMM extractor ────────────────────────
 
-// Integration: pipeline produces features (not "No features extracted") when
-// given the HMM extractor and a noun-rich cluster.
-// The pipeline may or may not succeed depending on the SNR gate — the SNR gate
-// is a cluster-quality property, not an extractor property. This test verifies
-// that the HMM extractor produces MEANINGFUL features (ENT/REL) rather than the
-// empty-feature failure that happens with a no-op extractor.
-// Mirrors Swift "pipeline produces succeeded=true with HMM extractor on tight entity cluster".
+// No-empty-feature guard: the HMM extractor must not produce the
+// "No features extracted from memories" failure on a noun-rich cluster.
+// The pipeline may or may not succeed the SNR gate — that is a
+// cluster-quality property, not an extractor property. This test
+// verifies the extractor produces MEANINGFUL features (ENT/REL) rather
+// than the empty-feature failure that happens with a no-op extractor.
 #[test]
 fn pipeline_produces_features_with_hmm_extractor() {
     let input = DistillationInput::new(

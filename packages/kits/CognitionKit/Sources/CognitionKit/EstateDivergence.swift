@@ -39,10 +39,17 @@ public struct EstateDivergence: Sendable, Equatable {
 /// type, so one frame serves both recalls).
 public enum EstateDivergenceLens {
 
-    /// Room → drawer count over a recalled set.
-    private static func roomCounts(_ drawers: [Drawer]) -> [String: Double] {
+    /// Room-name → drawer count over a recalled set. Resolves each
+    /// drawer's `parentNodeId` to its room display name via the estate's
+    /// node tree, so the vocabulary is human-readable and consistent
+    /// across estates that share room names.
+    private static func roomCounts(
+        _ drawers: [Drawer],
+        nodeNames: [String: (wing: String, room: String)]
+    ) -> [String: Double] {
         drawers.reduce(into: [:]) { counts, drawer in
-            counts[drawer.room, default: 0] += 1
+            let room = nodeNames[drawer.parentNodeId]?.room ?? drawer.parentNodeId
+            counts[room, default: 0] += 1
         }
     }
 
@@ -50,6 +57,9 @@ public enum EstateDivergenceLens {
     /// their room distributions, recalling each with `frame`. Either
     /// estate empty ⇒ zero divergence (nothing to compare). Read-only;
     /// a recall failure propagates.
+    ///
+    /// Distributions are keyed by resolved room names (not parentNodeId
+    /// UUIDs), so estates with identically-named rooms compare correctly.
     public static func run(
         kit: GeniusLocusKit,
         handleA: EstateHandle,
@@ -65,10 +75,13 @@ public enum EstateDivergenceLens {
                 aCount: drawersA.count, bCount: drawersB.count)
         }
 
-        let roomsA = roomCounts(drawersA)
-        let roomsB = roomCounts(drawersB)
-        // Shared, aligned support across both estates (sorted ⇒
-        // deterministic bin order).
+        let nodeIdsA = Array(Set(drawersA.map(\.parentNodeId)))
+        let nodeIdsB = Array(Set(drawersB.map(\.parentNodeId)))
+        let namesA = try await kit.resolveNodeNames(handleA, parentNodeIds: nodeIdsA)
+        let namesB = try await kit.resolveNodeNames(handleB, parentNodeIds: nodeIdsB)
+
+        let roomsA = roomCounts(drawersA, nodeNames: namesA)
+        let roomsB = roomCounts(drawersB, nodeNames: namesB)
         let vocabulary = Set(roomsA.keys).union(roomsB.keys).sorted()
         let p = vocabulary.map { Float((roomsA[$0] ?? 0) / Double(drawersA.count)) }
         let q = vocabulary.map { Float((roomsB[$0] ?? 0) / Double(drawersB.count)) }

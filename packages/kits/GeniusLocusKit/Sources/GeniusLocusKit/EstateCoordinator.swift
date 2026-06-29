@@ -37,10 +37,10 @@ public extension GeniusLocusKit {
 
     /// Open an estate and admit it into the kit's registry.
     ///
-    /// Composes `LocusKit.Estate.open(storage:owner:)` against the
-    /// supplied `Storage`, captures the manifest snapshot the
-    /// coordinator needs (UUID, zoom window, name), and issues an
-    /// `EstateHandle` keyed on the estate's manifest UUID.
+    /// Composes `LocusKit.Estate.open(storage:owner:identityKeyStore:)` against
+    /// the supplied `Storage`, captures the manifest snapshot the coordinator
+    /// needs (UUID, zoom window, name), and issues an `EstateHandle` keyed on
+    /// the estate's manifest UUID.
     ///
     /// Refuses to admit an estate whose UUID is already in the
     /// registry: per spec § 7.7 estate UUIDs are immutable, so a
@@ -55,6 +55,12 @@ public extension GeniusLocusKit {
     ///     lifecycle; closing the handle does not close the storage.
     ///   - owner: credentials for the estate's owner. Forwarded to
     ///     `LocusKit.Estate.open` unchanged.
+    ///   - identityKeyStore: the key store used to persist and retrieve the
+    ///     estate's Ed25519 private signing key (secfix/ed25519-keychain,
+    ///     ADR-007). Defaults to `KeychainEstateIdentityKeyStore` which
+    ///     stores the key in the macOS/iOS Keychain. Tests supply
+    ///     `InMemoryEstateIdentityKeyStore` to avoid Keychain entitlement
+    ///     requirements and cross-test pollution.
     /// - Returns: a fresh `EstateHandle` the caller uses to address
     ///   this estate.
     /// - Throws:
@@ -66,11 +72,16 @@ public extension GeniusLocusKit {
     ///     in the registry.
     func open(
         storage: any Storage,
-        owner: OwnerCredentials
+        owner: OwnerCredentials,
+        identityKeyStore: any EstateIdentityKeyStore = KeychainEstateIdentityKeyStore()
     ) async throws -> EstateHandle {
         let estate: LocusKit.Estate
         do {
-            estate = try await LocusKit.Estate.open(storage: storage, owner: owner)
+            estate = try await LocusKit.Estate.open(
+                storage: storage,
+                owner: owner,
+                identityKeyStore: identityKeyStore
+            )
         } catch {
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
         }
@@ -91,6 +102,11 @@ public extension GeniusLocusKit {
         // Mark the estate mounted (GLK_PROVISION_001) so the admin plane
         // can observe mount state without polling the registry directly.
         mountStates[handle] = .mounted
+        // Auto-register substrate-native topology provider (ADR-017 §10,
+        // NT-G1). Shares the estate's NodeStore so .nodeTreeNative recall
+        // works without a host-supplied provider (NT-Q1).
+        let topologyAdapter = SubstrateNodeTopologyProvider(nodeStore: await estate.nodeStore)
+        registerNodeTopology(topologyAdapter, for: handle)
         Self.log.info("opened estate \(handle.estateUUID, privacy: .public)")
 
         // Telemetry: emit mount-state transition (GLK_ROLLUPS_001).
@@ -181,10 +197,16 @@ public extension GeniusLocusKit {
             calibrationRegistries[handle] = nil
             matrixPersistenceBackends[handle] = nil
             nodeTopologyProviders[handle] = nil
+            // Drop dreaming queue + HLC (ADR-021 Phase 2b). No drain worker to
+            // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
+            dreamingQueues[handle] = nil
+            dreamingHLCs[handle] = nil
+            // Cancel the Corpus's ingest drain worker and drop its queue
+            // (CorpusKit owns the encode pipeline) BEFORE releasing the corpus
+            // registration, so no orphan worker outlives the estate.
+            await corpusKits[handle]?.dropIngestQueue()
             corpusKits[handle] = nil
             vectorStores[handle] = nil
-            // Cancel the encode drain worker and drop its queue (Dual-Path Intake).
-            dropEncodeQueue(for: handle)
             mountStates[handle] = nil
             // Drop the sync engine so no engine reference outlives the estate.
             syncEngines[handle] = nil
@@ -204,16 +226,20 @@ public extension GeniusLocusKit {
         calibrationRegistries[handle] = nil
         matrixPersistenceBackends[handle] = nil
         nodeTopologyProviders[handle] = nil
+        // Drop dreaming queue + HLC (ADR-021 Phase 2b). No drain worker to
+        // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
+        dreamingQueues[handle] = nil
+        dreamingHLCs[handle] = nil
         // Drop corpus and vector store registrations (GLK_PROVISION_001):
         // these are set by provision() and must be released with the estate.
         // Register-only path (existing callers) also sets these via
         // registerCorpus/registerVectorStore — both paths benefit from cleanup.
+        // Cancel the Corpus's ingest drain worker and drop its queue (CorpusKit
+        // owns the encode pipeline) BEFORE releasing the corpus registration, so
+        // no orphan worker outlives the estate.
+        await corpusKits[handle]?.dropIngestQueue()
         corpusKits[handle] = nil
         vectorStores[handle] = nil
-        // Cancel the encode drain worker and drop its queue (Dual-Path Intake):
-        // set by mountEncodeQueue at provision (and lazily on first regular
-        // capture); must be released with the estate so no orphan worker runs.
-        dropEncodeQueue(for: handle)
         mountStates[handle] = nil
         // Drop the sync engine so no engine reference outlives the estate.
         syncEngines[handle] = nil
@@ -246,7 +272,7 @@ public extension GeniusLocusKit {
     /// not mediate verb calls; it only routes by handle.
     ///
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
-    func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
+    public func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
         guard let estate = registry[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }

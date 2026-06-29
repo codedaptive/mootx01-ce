@@ -262,23 +262,36 @@ public actor FloatBruteForceIndex: DenseIndex {
 
     /// Add a single float32 vector record to the index.
     ///
-    /// FloatBruteForceIndex does not maintain a delta structure between
-    /// builds. A full rebuild from the ResidentArrayStore (Lane A) is
-    /// required to make the added record searchable. The add() method
-    /// here updates the resident array in place for incremental use.
+    /// Appends to the resident array in place; the added record is
+    /// immediately searchable on the next `search` call. Tombstoned
+    /// slots are preserved.
     ///
-    /// Throws VectorKitError.invalidPayload if the vector kind is not
-    /// float32.
+    /// Throws `VectorKitError.invalidPayload` if the vector kind is not float32
+    /// or if the vector's byte count does not match the index's established stride
+    /// (i.e. all vectors in one index must have the same dimension). A mismatched
+    /// vector would corrupt the resident array and cause an out-of-bounds slice
+    /// on the next `search` call — the guard makes that a thrown error instead.
     public func add(key: VectorRecordKey, vector: VectorPayload) async throws {
         guard vector.kind == .float32 else {
             throw VectorKitError.invalidPayload(
                 "FloatBruteForceIndex.add: vector.kind=\(vector.kind); expected .float32")
         }
         if array == nil {
-            // First add: create a single-slot resident array.
+            // First add: establishes the index's stride. All subsequent adds
+            // must carry a vector.bytes.count equal to this stride.
             array = ResidentVectorArray.empty(kind: .float32, stride: UInt32(vector.bytes.count))
         }
         guard let existing = array else { return }
+
+        // Dimension guard: a vector whose byte count differs from the established
+        // stride would corrupt the resident array (storage is a flat byte buffer
+        // indexed by stride*slot). Throw rather than silently corrupt.
+        guard vector.bytes.count == Int(existing.stride) else {
+            throw VectorKitError.invalidPayload(
+                "FloatBruteForceIndex.add: vector has \(vector.bytes.count) bytes "
+                + "but index stride=\(existing.stride); all vectors in one index "
+                + "must share the same dimension")
+        }
 
         // Append to the existing array: new storage, new keys list.
         var newStorage = existing.storage
@@ -433,17 +446,17 @@ private func floatSlice(from bytes: ArraySlice<UInt8>, count: Int) -> [Float] {
     return result
 }
 
-/// Build the sorted model partition index from a keys array.
+/// Build the model partition index from a keys array.
 ///
 /// Iterates the keys in order and records consecutive runs sharing the
-/// same modelID. The keys array need not be sorted for this to work —
-/// partitions record the actual layout, not a sorted projection.
+/// same modelID. The keys array need not be sorted — partitions record
+/// the actual layout, not a sorted projection. When keys are inserted
+/// in modelID order the partition is compact; when interleaved, each
+/// model gets one entry per run.
 ///
-/// For FloatBruteForceIndex the partition index is informational (the
-/// brute-force scan uses it to skip irrelevant model ranges when a
-/// MetadataFilter is applied). When keys are inserted in modelID order
-/// the partition is compact; when interleaved, each model gets one entry
-/// per run.
+/// For FloatBruteForceIndex the partition is built but the brute-force
+/// scan walks every slot via `filter.accepts(key)` rather than using
+/// `partitionRange(for:)` to skip ranges.
 private func buildPartitions(keys: [VectorRecordKey]) -> [ModelPartitionEntry] {
     guard !keys.isEmpty else { return [] }
     var result: [ModelPartitionEntry] = []

@@ -11,7 +11,22 @@ publish = false
 name = "substrate_types"
 path = "src/lib.rs"
 
+[dependencies]
+# Optional serde support: activated by the `serde-support` feature.
+# These are the same crate versions already present in substrate-lib's
+# lock file. Declared here so types migrated to substrate-types (Hlc,
+# Fingerprint256, RowState, GSet, CountVector256) can carry their serde
+# derives without depending on a higher-layer crate.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_repr = { version = "0.1", optional = true }
+# serde's built-in array impls only cover N ≤ 32. CountVector256's
+# [u32; 256] counts field needs serde-big-array for the missing impl.
+# Mirrors the declaration in substrate-lib's Cargo.toml.
+serde-big-array = { version = "0.5", optional = true }
+
 [features]
-# Mirrors substrate-lib's `serde-support` feature for migrated
-# types that carry serde derives. Off by default.
-serde-support = []
+# `serde-support` enables JSON wire-format serde derives on the migrated
+# types (Hlc, Fingerprint256, RowState, GSet, CountVector256 and their
+# dependencies). Mirrors substrate-lib's feature of the same name so
+# consumers can enable both with a single feature flag.
+serde-support = ["dep:serde", "dep:serde_repr", "dep:serde-big-array"]

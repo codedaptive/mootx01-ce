@@ -7,11 +7,10 @@
 // HYDRATE SEQUENCE (authoritative, from REPLICATION_GROUND_TRUTH.md §7):
 //
 //   1. Schema open    — open both in_memory and durable with the composite
-//                       GLK schema (version 7: LocusKit v2 + VectorKit v3 +
-//                       CorpusKit/BundleStore v2, post-ADR-012 `ext` slot).
-//                       This advances both storages to version 7 so the
-//                       replication schema gate (global version check) passes.
-//   2. Row snapshot   — replication::hydrate copies all 14 schema-declared
+//                       GLK schema (LocusKit + VectorKit + CorpusKit + grants).
+//                       This advances both storages to the composite version so
+//                       the replication schema gate (global version check) passes.
+//   2. Row snapshot   — replication::hydrate copies all schema-declared
 //                       tables (including tombstones and append-only rows)
 //                       verbatim from durable into in_memory.
 //   3. Audit events   — replication::hydrate also copies _storagekit_audit
@@ -20,7 +19,7 @@
 //                       schema on the already-populated in_memory storage (the
 //                       open() call is a no-op because the LocusKit per-kit
 //                       schema version is below the already-applied composite
-//                       version 7). Estate::open reads the manifest that was
+//                       version). Estate::open reads the manifest that was
 //                       copied in step 2.
 //   5. Audit log feed — walk all drawers in the estate; for each drawer call
 //                       estate.audit_trail(id) and bridge each
@@ -36,10 +35,10 @@
 //
 // Schema gate note: the Rust replication::replicate_full checks the GLOBAL
 // current_schema_version() on both backends (not per-kit). The composite
-// GLK schema (version 7) is opened on BOTH sides so MAX(versions) = 7 on
+// GLK schema is opened on BOTH sides so MAX(versions) matches on
 // both, satisfying the gate. Because the composite version is the SUM of the
 // component versions it is always >= every component's per-kit version, so
-// opening the composite always advances the global counter to exactly 7.
+// opening the composite always advances the global counter to the composite version.
 //
 // Reference: REPLICATION_GROUND_TRUTH.md §Required hydrate ordering,
 //            REPLICATION_TRACK_PLAN.md §3 GLK estate-level hydrate integration.
@@ -78,8 +77,9 @@ use crate::audit::{
     AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
 };
 use crate::coordinator::{EstateCoordinator, GeniusLocusKitError};
+use crate::grants::GrantStore;
 use crate::handle::EstateHandle;
-use crate::matrix::MatrixTier;
+use crate::matrix::{MatrixTier, MatrixSnapshotStore};
 
 // MARK: - Composite GLK SchemaDeclaration
 
@@ -87,15 +87,21 @@ use crate::matrix::MatrixTier;
 ///
 /// Mirrors `GeniusLocusKitSchema.estateSchemaDeclaration` in Swift.
 ///
-/// A GeniusLocus estate is a composition of three kits, each with its own
-/// per-kit schema. The composite schema aggregates all 14 user-visible tables
-/// and uses the SUM of the three component versions — post-ADR-012 `ext` slot
-/// that is LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
+/// A GeniusLocus estate is a composition of three kits plus GLK-owned tables.
+/// The composite schema aggregates all user-visible tables and uses the SUM of
+/// the component versions plus two GLK-owned addends:
+///   +1 grants         — security-sensitive estate authorization state
+///   +1 matrix_snapshot — matrix tier calibration persistence
 /// (BasisStore is the separate "CorpusKitBasis" kit-ID schema, not part of
 /// this composite, so its version is not summed.) The version is computed
 /// from the live component declarations below, so a future component bump
 /// self-corrects the composite without a hand-edited literal — matching
 /// Swift's sum convention.
+///
+/// IMPORTANT: matrix_snapshot MUST be in this composite so replication::hydrate
+/// copies it from the durable SQLite backend into the in-memory backend before
+/// rebuild_derived_accelerators runs. Without it, hydrated estates silently
+/// cold-rebuild the matrix tier, discarding persisted calibration state.
 ///
 /// The composite schema is opened on both source and destination storages
 /// before calling `replication::hydrate` or `replication::flush` so the
@@ -110,23 +116,39 @@ use crate::matrix::MatrixTier;
 /// SUM of the component versions it is always >= every component version,
 /// so opening it writes exactly the composite version to the migrations table
 /// without touching existing data tables (CREATE TABLE IF NOT EXISTS). For
-/// fresh in-memory storages it creates all 15 tables at once (13 LocusKit + 1 VectorKit + 1 CorpusKit).
+/// fresh in-memory storages it creates all component tables plus the GLK-owned
+/// tables at once.
 pub fn composite_schema() -> SchemaDeclaration {
     let lk = locus_kit::schema::schema();
     let vk = vectorkit::VectorStore::schema_declaration();
     let ck = corpus_kit::BundleStore::schema_declaration();
 
     // Composite version = sum of the three GLK-composed component versions
-    // (mirrors Swift `GeniusLocusKitSchema.version`). Derived, not a literal,
-    // so it can never drift from the components. No GLK-only addend: the
-    // cross-memory cluster path (DG5) was removed; GeniusLocusKit owns no
-    // tables beyond what the three component kits declare.
-    let composite_version = lk.version + vk.version + ck.version;
+    // plus two GLK-owned addends:
+    //   +1 grants        — security-sensitive estate authorization state
+    //   +1 matrix_snapshot — matrix tier calibration persistence
+    //
+    // IMPORTANT: matrix_snapshot MUST be in this composite so replication::hydrate
+    // copies it from the durable SQLite backend into the in-memory backend before
+    // rebuild_derived_accelerators runs. Without it, hydrated estates always
+    // cold-rebuild the matrix tier, discarding persisted calibration state.
+    //
+    // Mirrors Swift `GeniusLocusKitSchema.version` (= 16).
+    let grants_schema_version = 1;
+    let matrix_snapshot_schema_version = MatrixSnapshotStore::schema_declaration().version;
+    let composite_version = lk.version + vk.version + ck.version
+        + grants_schema_version
+        + matrix_snapshot_schema_version;
+
+    let mx_snapshot = MatrixSnapshotStore::schema_declaration();
 
     let mut tables = Vec::new();
     tables.extend(lk.tables);
     tables.extend(vk.tables);
     tables.extend(ck.tables);
+    tables.push(GrantStore::grants_table());
+    // matrix_snapshot: must be last so version ordering matches Swift composite.
+    tables.extend(mx_snapshot.tables);
 
     let mut indices = Vec::new();
     indices.extend(lk.indices);
@@ -135,13 +157,14 @@ pub fn composite_schema() -> SchemaDeclaration {
 
     SchemaDeclaration {
         kit_id: "GeniusLocusKit".to_string(),
-        version: composite_version, // LocusKit v2 + VectorKit v3 + CorpusKit v2 = 7
+        // LocusKit v8 + VectorKit v3 + CorpusKit v3 + Grants v1 + MatrixSnapshot v1 = 16
+        version: composite_version,
         tables,
         indices,
         // No cross-kit migrations at the composite level — each component kit
         // manages its own schema evolution. The composite version is derived
-        // from the component versions above, so a component bump self-corrects
-        // the composite; no hand-edited literal to keep in sync.
+        // from the component versions above plus the two GLK-owned addends,
+        // so a component bump self-corrects the composite.
         migrations: vec![],
     }
 }
@@ -151,7 +174,9 @@ mod composite_version_tests {
     use super::*;
 
     /// The composite version is the SUM of the three GLK-composed component
-    /// versions. LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
+    /// versions plus two GLK-owned addends: grants (+1) and matrix_snapshot (+1).
+    /// LocusKit v8 + VectorKit v3 + CorpusKit/BundleStore v3 + Grants v1
+    ///   + MatrixSnapshot v1 = 16.
     /// This guards the coupling the global-MAX replication gate depends on:
     /// a drift between composite and components would let a fresh estate open
     /// at a version the gate rejects. Mirrors Swift `CompositeSchemaVersionTests`.
@@ -160,9 +185,14 @@ mod composite_version_tests {
         let lk = locus_kit::schema::SCHEMA_VERSION;
         let vk = vectorkit::VectorStore::schema_declaration().version;
         let ck = corpus_kit::BundleStore::schema_declaration().version;
+        let mx = MatrixSnapshotStore::schema_declaration().version;
         let s = composite_schema();
-        assert_eq!(s.version, lk + vk + ck);
-        assert_eq!(s.version, 7);
+        // Two GLK-owned addends: +1 grants, +matrix_snapshot version
+        assert_eq!(s.version, lk + vk + ck + 1 + mx);
+        assert_eq!(s.version, 16);
+        assert!(s.tables.iter().any(|t| t.name == "grants"));
+        // matrix_snapshot must be in composite for hydration to copy it from durable storage
+        assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));
         assert_eq!(s.kit_id, "GeniusLocusKit");
     }
 }
@@ -263,6 +293,11 @@ pub struct HydratedEstate {
     pub estate: Estate,
     pub unified_log: UnifiedAuditLog,
     pub matrix_tier: MatrixTier,
+    /// The in-memory storage the hydrated estate runs on. Retained so the
+    /// coordinator can register it in `storages[handle]` exactly as `coord.open`
+    /// does — `Estate::open` moves the `DrawerStore` Arc, so this is the only
+    /// surviving handle to the backing storage after open.
+    pub storage: Arc<dyn Storage>,
 }
 
 /// Hydrate a fresh in-memory estate from a durable storage, returning the
@@ -312,6 +347,11 @@ pub fn open_hydrating(
     // LocusKit per-kit version is below the already-applied composite version
     // (the storage was advanced to the composite version in step 1), so the
     // open does not re-create or downgrade anything.
+    // Retain a handle to the backing storage before it is moved into the
+    // DrawerStore — `Estate::open` consumes the DrawerStore Arc, so this clone is
+    // the only surviving reference, and it is what the coordinator registers in
+    // `storages[handle]` (parity with `coord.open`'s `store.storage()` capture).
+    let storage: Arc<dyn Storage> = in_memory.clone();
     let store = InMemoryDrawerStore::with_storage(in_memory, now, None)
         .map_err(|e| HydrateError::Estate(format!("{e:?}")))?;
     let store_arc: Arc<dyn DrawerStore> = Arc::new(store);
@@ -327,7 +367,7 @@ pub fn open_hydrating(
     // Step 6 — Matrix rebuild (full: both passes).
     let matrix_tier = MatrixTier::full_rebuild(&unified_log);
 
-    Ok(HydratedEstate { estate, unified_log, matrix_tier })
+    Ok(HydratedEstate { estate, unified_log, matrix_tier, storage })
 }
 
 // MARK: - EstateCoordinator extension
@@ -379,7 +419,12 @@ impl EstateCoordinator {
         // The coordinator's registry takes an Estate directly (it's a HashMap).
         // We use `open_estate_directly` which bypasses the DrawerStore layer.
         let handle = self
-            .open_estate_directly(hydrated.estate, zoom_window_low, zoom_window_high)
+            .open_estate_directly(
+                hydrated.estate,
+                Arc::clone(&hydrated.storage),
+                zoom_window_low,
+                zoom_window_high,
+            )
             .map_err(|e| HydrateError::Coordinator(format!("{e:?}")))?;
 
         // Install the rebuilt audit log and matrix tier on the coordinator so a
@@ -396,17 +441,25 @@ impl EstateCoordinator {
 // MARK: - Internal helper: open_estate_directly
 
 impl EstateCoordinator {
-    /// Register an already-opened `Estate` with the coordinator.
+    /// Register an already-opened `Estate` (and its backing storage) with the
+    /// coordinator.
     ///
     /// Used by `open_hydrating` to admit a hydrated estate without going
     /// through the DrawerStore + Estate::open path a second time.
     ///
     /// Parity note: in Swift, `GeniusLocusKit.open(storage:owner:)` calls
-    /// `Estate.open` and then registers the result. In Rust, the hydration
-    /// path (which already ran `Estate::open`) calls this to register.
+    /// `Estate.open` and then registers BOTH the estate and `storages[handle]`.
+    /// In Rust, `Estate::open` consumes the DrawerStore Arc, so this path cannot
+    /// recover the storage from the estate; the caller passes the storage handle
+    /// it retained before open. Registering it in `storages[handle]` is required
+    /// so the matrix snapshot store (and any other storage-keyed accelerator)
+    /// reaches the hydrated estate's backing storage — without it, a hydrated
+    /// estate would silently fall back to a from-scratch matrix rebuild on every
+    /// dream instead of the load-and-fold-forward path.
     pub fn open_estate_directly(
         &mut self,
         estate: Estate,
+        storage: Arc<dyn Storage>,
         zoom_window_low: i64,
         zoom_window_high: i64,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
@@ -421,6 +474,17 @@ impl EstateCoordinator {
             return Err(GeniusLocusKitError::DuplicateEstate { estate_uuid });
         }
         self.register_estate(handle, estate);
+        // Retain the backing storage exactly as `coord.open` does, so every
+        // storage-keyed accelerator resolves for a hydrated estate too.
+        // The same hydrated storage also backs GrantStore so copied grant
+        // issuance/revocation rows are the authorization source immediately.
+        let grant_store = GrantStore::new(Arc::clone(&storage))
+            .map_err(|e| GeniusLocusKitError::InvalidManifest {
+                key: "grants".to_string(),
+                detail: format!("could not open hydrated grant store: {e:?}"),
+            })?;
+        self.set_grant_store(handle, grant_store);
+        self.storages.insert(handle, storage);
         Ok(handle)
     }
 }

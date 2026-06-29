@@ -33,6 +33,15 @@ use aria_mcp::estate_registry::EstateRegistry;
 use aria_mcp::governor_topology_adapter::StatsStoreTopologySink;
 use intellectus_lib::{EventKind, Intellectus, NoOpSink, StatSample, StatsSink};
 
+// Dreaming-queue seeding imports (v2 pending-count gate).
+// Used by seed_dreaming_queue and tests that assert dreaming fires.
+use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
+    RecallFallbackPolicy};
+use locus_kit::filter::{Filter, RecallFrame};
+use locus_kit::frames::CaptureFrame;
+use locus_kit::drawer_operational::CaptureChannel;
+use locus_kit::estate_types::LatticeAnchor;
+
 // ─────────────────────────────────────────────────────────────────
 // Process-wide serialisation lock (for Intellectus singleton tests)
 // ─────────────────────────────────────────────────────────────────
@@ -116,18 +125,81 @@ fn make_governor_with_flag(flag: Arc<AtomicBool>, base_tick_ms: u64) -> Autonomi
     AutonomicGovernor::with_stop_flag_and_tick(coord, handle, store, flag, base_tick_ms)
 }
 
+// ── Dreaming-queue seed helper ───────────────────────────────────────────────
+
+/// Seed the dreaming queue for a registry so the v2 pending-count gate
+/// (`dreaming_queue_pending_count_for_gate`) returns `Some(n > 0)` on the
+/// next governor tick.
+///
+/// The v2 gate (§12.2 REM-ALPHA, ADR-021 Phase 4) skips the dreaming cycle
+/// entirely when the estate's dreaming queue is empty or not yet mounted —
+/// an idle tick costs nothing. Tests that assert `dreaming_fired == true`
+/// must therefore ensure ≥1 pending item is in the queue before the tick.
+///
+/// Mechanism (mirrors `dreaming_pump_emits_think_events`):
+///   1. Capture 2 drawers into the estate so recall_scored surfaces ≥2 drawers.
+///   2. Fire one external-origin `recall_scored` call. The coordinator mounts
+///      the dreaming queue on first use, wraps the 2 drawer ids in a `DreamingItem`,
+///      and enqueues it — `pending_count` becomes 1.
+///
+/// Call this once per tick that should fire dreaming (the tick drains the queue,
+/// so each subsequent fire-tick needs a fresh enqueue). Captures are reused
+/// across calls on the same registry.
+///
+/// `now_epoch_i64` is passed to capture and recall as the deterministic clock.
+fn seed_dreaming_queue(registry: &EstateRegistry, now_epoch_i64: i64) {
+    let capture_frame = |content: &str| {
+        let frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "cadence-test-room",
+            LatticeAnchor::udc("000"),
+            "cadence-test",
+            "test-model-v1",
+        );
+        registry.coord
+            .lock()
+            .unwrap()
+            .capture(&registry.default.handle, frame, now_epoch_i64)
+            .expect("seed capture must succeed");
+    };
+    capture_frame("cadence-seed-alpha");
+    capture_frame("cadence-seed-beta");
+
+    // External-origin recall: coordinator mounts the dreaming queue and
+    // enqueues one DreamingItem with the 2 captured drawer ids, making
+    // pending_count = 1 so the pending-count gate passes on the next tick.
+    let external_request = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+        .with_mode(GLKRecallMode::LocusOnly)
+        .with_scoring(GLKRecallScoring::Raw)
+        .with_limit(50)
+        .with_fallback(RecallFallbackPolicy::FailClosed)
+        .external();
+    registry.coord
+        .lock()
+        .unwrap()
+        .recall_scored(&registry.default.handle, external_request, now_epoch_i64)
+        .expect("seed recall_scored must succeed");
+}
+
 // MARK: - §1 Cadence
 
-/// AG-1: First tick always fires both daemons (no prior fire timestamp).
+/// AG-1: First tick always fires both daemons when the dreaming queue has
+/// pending work (v2 pending-count gate: cadence + pending > 0 → fire).
 /// Mirrors Swift `firstTickFiresDreamingAndMaintenance`.
 #[test]
 fn ag1_first_tick_always_fires_both_daemons() {
-    let (mut governor, _registry) = make_governor();
+    let (mut governor, registry) = make_governor();
+    // Seed the dreaming queue so the v2 pending-count gate passes.
+    // The gate skips dreaming when the queue is empty; one external-origin
+    // recall enqueues a DreamingItem (pending_count = 1) so the cadence
+    // gate (no prior fire) + pending gate both pass on this tick.
+    seed_dreaming_queue(&registry, 0);
     // At t=0 there is no prior fire for either daemon.
     let report = governor.tick(UNIX_EPOCH);
     assert!(
         report.dreaming_fired,
-        "dreaming must fire on first tick"
+        "dreaming must fire on first tick (pending-count gate seeded)"
     );
     assert!(
         report.maintenance_fired,
@@ -139,19 +211,29 @@ fn ag1_first_tick_always_fires_both_daemons() {
 /// The dreaming interval default is 30 s; maintenance is 300 s.
 /// At t=29 s (after t=0 fired), both are still within their intervals.
 /// Mirrors Swift `dreamingRespectsCadence`.
+///
+/// v2 pending-count gate: the first tick is seeded so dreaming fires there.
+/// The second tick at t=29 s is before the cadence boundary — the cadence
+/// gate fires before the pending-count gate is even consulted, so both
+/// assertions remain unchanged: cadence gate dominates.
 #[test]
 fn ag2_tick_before_interval_returns_no_fire() {
-    let (mut governor, _registry) = make_governor();
+    let (mut governor, registry) = make_governor();
+    // Seed the dreaming queue so the first tick fires dreaming.
+    // The cadence gate fires first; the pending-count gate is the second gate.
+    seed_dreaming_queue(&registry, 0);
     // First tick fires (t=0).
     let first = governor.tick(UNIX_EPOCH);
-    assert!(first.dreaming_fired, "first tick must fire dreaming");
+    assert!(first.dreaming_fired, "first tick must fire dreaming (pending-count gate seeded)");
     assert!(first.maintenance_fired, "first tick must fire maintenance");
 
-    // Second tick at t=29 s — both intervals (30 s and 300 s) have not elapsed.
+    // Second tick at t=29 s — the cadence gate (30 s interval) has not elapsed,
+    // so dreaming is skipped before the pending-count gate is consulted.
+    // No seeding needed: the cadence gate is the controlling gate here.
     let second = governor.tick(UNIX_EPOCH + Duration::from_secs(29));
     assert!(
         !second.dreaming_fired,
-        "dreaming must not fire before 30 s interval"
+        "dreaming must not fire before 30 s interval (cadence gate dominates)"
     );
     assert!(
         !second.maintenance_fired,
@@ -162,16 +244,28 @@ fn ag2_tick_before_interval_returns_no_fire() {
 /// AG-3: Dreaming fires at its interval boundary (30 s) while maintenance
 /// has not yet reached its boundary (300 s). Mirrors Swift
 /// `dreamingRespectsCadence`.
+///
+/// v2 pending-count gate: seed before each tick that must fire dreaming.
+/// The first tick (t0) drains the queue; the second tick (+30 s) needs a
+/// fresh enqueue so pending_count > 0 when the cadence gate opens.
 #[test]
 fn ag3_dreaming_fires_at_interval_maintenance_does_not() {
-    let (mut governor, _registry) = make_governor();
-    // First tick fires both at t=0.
-    let _ = governor.tick(UNIX_EPOCH);
-    // At t=30 s exactly — dreaming interval (30 s) elapsed, maintenance (300 s) not.
-    let second = governor.tick(UNIX_EPOCH + Duration::from_secs(30));
+    let (mut governor, registry) = make_governor();
+    // Realistic base instant (Swift dreamingRespectsCadence t0 = 2_000_000) so the
+    // post-cycle bandit re-selection is conformant with Swift — the seed keeps the
+    // trigger mode on .timer, so this exercises the cadence gate, not a mode flip.
+    let t0 = UNIX_EPOCH + Duration::from_secs(2_000_000);
+    // Seed and fire first tick (result unused; seeds cadence state for second tick).
+    seed_dreaming_queue(&registry, 2_000_000);
+    let _ = governor.tick(t0);
+    // Seed again: the first tick drained the queue; re-enqueue so pending_count > 0
+    // for the second tick at +30 s (cadence elapsed, pending gate must also pass).
+    seed_dreaming_queue(&registry, 2_000_000);
+    // At +30 s exactly — dreaming interval (30 s) elapsed, maintenance (300 s) not.
+    let second = governor.tick(t0 + Duration::from_secs(30));
     assert!(
         second.dreaming_fired,
-        "dreaming must fire at the 30 s boundary"
+        "dreaming must fire at the 30 s boundary (pending-count gate seeded)"
     );
     assert!(
         !second.maintenance_fired,
@@ -182,16 +276,26 @@ fn ag3_dreaming_fires_at_interval_maintenance_does_not() {
 /// AG-4: Both daemons fire when their intervals have both elapsed.
 /// At t=300 s both dreaming (every 30 s) and maintenance (every 300 s)
 /// have elapsed since the last fire at t=270/t=0.
+///
+/// v2 pending-count gate: seed before the +300 s tick so the dreaming
+/// pending-count gate passes alongside the elapsed cadence gate.
 #[test]
 fn ag4_both_fire_after_long_gap() {
-    let (mut governor, _registry) = make_governor();
-    // First tick fires both at t=0.
-    let _ = governor.tick(UNIX_EPOCH);
-    // Advance to t=300 — both intervals have elapsed.
-    let later = governor.tick(UNIX_EPOCH + Duration::from_secs(300));
+    let (mut governor, registry) = make_governor();
+    // Realistic base instant (Swift t0 = 2_000_000) so the bandit re-selection is
+    // conformant and the trigger mode stays .timer across the gap.
+    let t0 = UNIX_EPOCH + Duration::from_secs(2_000_000);
+    // Seed and fire first tick (sets cadence state; result unused).
+    seed_dreaming_queue(&registry, 2_000_000);
+    let _ = governor.tick(t0);
+    // Seed again: the first tick drained the queue; re-enqueue so pending_count > 0
+    // for the +300 s tick where both dreaming and maintenance must fire.
+    seed_dreaming_queue(&registry, 2_000_000);
+    // Advance +300 s — both intervals have elapsed.
+    let later = governor.tick(t0 + Duration::from_secs(300));
     assert!(
         later.dreaming_fired,
-        "dreaming must fire after 300 s gap (many intervals)"
+        "dreaming must fire after 300 s gap (pending-count gate seeded)"
     );
     assert!(
         later.maintenance_fired,
@@ -203,26 +307,45 @@ fn ag4_both_fire_after_long_gap() {
 
 /// AG-5: AutonomicGovernor::new() is constructable; tick returns a GovernorReport.
 /// Smoke test — verifies no panic at construction or on first tick.
+///
+/// v2 pending-count gate: seed the dreaming queue so the first tick fires
+/// dreaming (cadence gate: no prior fire; pending gate: seeded to > 0).
 #[test]
 fn ag5_construction_smoke() {
-    let (mut governor, _registry) = make_governor();
+    let (mut governor, registry) = make_governor();
+    // Seed the dreaming queue before the first tick so the v2 pending-count
+    // gate passes alongside the cadence gate (no prior fire timestamp).
+    seed_dreaming_queue(&registry, 1_000_000);
     let report = governor.tick(UNIX_EPOCH + Duration::from_secs(1_000_000));
-    // The first tick always fires both daemons.
-    assert!(report.dreaming_fired);
+    // The first tick fires both daemons when cadence gate + pending gate pass.
+    assert!(report.dreaming_fired, "dreaming must fire on first tick (pending-count gate seeded)");
     assert!(report.maintenance_fired);
 }
 
 /// AG-6: Consecutive ticks at increasing timestamps stay coherent.
 /// Three dreaming-interval steps: t=0, t=30, t=60. Each should fire dreaming.
+///
+/// v2 pending-count gate: each tick drains the queue, so seed once before
+/// each tick that asserts dreaming fires (cadence gate + pending gate both
+/// must pass for every fire assertion).
 #[test]
 fn ag6_consecutive_dreaming_firings() {
-    let (mut governor, _registry) = make_governor();
-    let r0 = governor.tick(UNIX_EPOCH);
-    assert!(r0.dreaming_fired, "t=0 must fire");
-    let r1 = governor.tick(UNIX_EPOCH + Duration::from_secs(30));
-    assert!(r1.dreaming_fired, "t=30 must fire (exactly one interval)");
-    let r2 = governor.tick(UNIX_EPOCH + Duration::from_secs(60));
-    assert!(r2.dreaming_fired, "t=60 must fire (two intervals)");
+    let (mut governor, registry) = make_governor();
+    // Realistic base instant (Swift t0 = 2_000_000) so the post-cycle bandit
+    // re-selections stay conformant on .timer across consecutive intervals — the
+    // test exercises the cadence gate over multiple ticks, not a mode flip.
+    let t0 = UNIX_EPOCH + Duration::from_secs(2_000_000);
+    seed_dreaming_queue(&registry, 2_000_000);
+    let r0 = governor.tick(t0);
+    assert!(r0.dreaming_fired, "first tick must fire (pending-count gate seeded)");
+    // Re-seed: first tick drained the queue; enqueue a fresh DreamingItem.
+    seed_dreaming_queue(&registry, 2_000_000);
+    let r1 = governor.tick(t0 + Duration::from_secs(30));
+    assert!(r1.dreaming_fired, "+30 s must fire (exactly one interval; pending-count gate seeded)");
+    // Re-seed again for the third tick.
+    seed_dreaming_queue(&registry, 2_000_000);
+    let r2 = governor.tick(t0 + Duration::from_secs(60));
+    assert!(r2.dreaming_fired, "+60 s must fire (two intervals; pending-count gate seeded)");
 }
 
 // MARK: - §3 Stop flag
@@ -265,17 +388,20 @@ fn ag7_stop_flag_exits_run_loop() {
 /// the live store — proves the sinks write through to the real estate
 /// and not a throwaway InMemoryDrawerStore.
 ///
-/// An empty estate produces no dreaming proposals (no co-occurrence pairs),
-/// but the daemon ALWAYS writes one diary entry per cycle. Asserting the
-/// diary entry proves end-to-end live wiring.
+/// v2 pending-count gate: seed the dreaming queue before the tick so the
+/// pending-count gate passes and the dreaming daemon runs (diary entry write).
 #[test]
 fn ag8_dreaming_fire_writes_diary_entry_to_live_estate() {
     use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
 
     let (mut governor, registry) = make_governor();
+    // Seed the dreaming queue so the v2 pending-count gate passes on this tick.
+    // The seed captures 2 drawers and fires one external-origin recall, enqueuing
+    // one DreamingItem — pending_count = 1 so the gate opens.
+    seed_dreaming_queue(&registry, 1_700_000_000);
     // Tick at a large epoch so the ISO8601 formatter exercises real dates.
     let report = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
-    assert!(report.dreaming_fired, "first tick must fire dreaming");
+    assert!(report.dreaming_fired, "first tick must fire dreaming (pending-count gate seeded)");
 
     // The dreaming daemon writes exactly one diary entry per cycle.
     // Read it back directly from the live store — this is the proof that
@@ -330,46 +456,68 @@ fn ag9_maintenance_fire_writes_diary_entry_to_live_estate() {
 /// `StatSample::Event` samples with `kind=Think` and `noun_type=4`
 /// (NounType::Proposal, wire-stable) for each proposal.
 ///
-/// Test setup: populates the estate with ≥3 drawers in the same
-/// (wing, room) so the co-occurrence reader produces observations with
-/// `attempts ≥ 3` (meets `min_attempts`). Recall traces with `used=true`
-/// and timestamps within the 30-second dreaming window yield
-/// `contrastive_confidence ≈ 0.88` (meets `min_confidence = 0.7`).
+/// Test setup (v2 drain-fed model):
+///   1. Capture 3 drawers into the estate so they co-surface on external-origin recall.
+///   2. Fire 3 external-origin `recall_scored` calls → 3 DreamingItems enqueued
+///      on the estate's dreaming queue, one per co-surfaced set.
+///   3. Insert recall traces with `used=true` inside the dreaming reward window
+///      for each drawer → reward=1.0 for all targets →
+///      `contrastive_confidence ≈ 0.88` (> `min_confidence=0.7`).
+///   4. Governor tick: `EstateDreamingReader` drains the 3 windows, bumps
+///      `co_recall_count(a,b)` ≥ 3 (meets `min_attempts`), `decide` emits
+///      proposals → Think events flow via Intellectus.
+///
+/// The v2 path: candidates come ONLY from draining the dreaming queue.
+/// Removing the 3 `recall_scored` enqueues would leave the queue empty → 0
+/// candidates → 0 proposals → 0 Think events — that is the correct v2 sentinel.
 ///
 /// Mirrors Swift `dreamingPumpEmitsThinkEvents` (TEL-01 §7 analog).
 #[test]
 fn dreaming_pump_emits_think_events() {
-    use locus_kit::drawer::Drawer;
+    use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
+        RecallFallbackPolicy};
     use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
+    use locus_kit::filter::{Filter, RecallFrame};
+    use locus_kit::frames::CaptureFrame;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
     use locus_kit::recall_trace_item::RecallTraceItem;
     use uuid::Uuid;
 
     let _guard = global_lock();
 
-    // ── Build estate with 3 drawers in the same room ─────────────────────────
-    // Each drawer must be in the same (wing, room) so build_co_occurrence_observations
-    // creates pairs with attempts=3, satisfying DreamingPolicy::default(min_attempts=3).
     let registry = EstateRegistry::new_inmemory();
     let now_epoch_i64 = 1_700_000_000i64;
-    let wing = "wing-think-test";
-    let room = "room-think-test";
 
-    let id_a = Uuid::new_v4().to_string();
-    let id_b = Uuid::new_v4().to_string();
-    let id_c = Uuid::new_v4().to_string();
+    // ── Capture 3 drawers so they co-surface on external-origin recall ────────
+    // Using coord.capture so the drawers are registered on the coordinator's
+    // estate and surface in recall_scored. The coordinator is the same Arc
+    // shared with the governor below.
+    let capture_frame = |content: &str| -> String {
+        let frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "think-test-room",
+            LatticeAnchor::udc("000"),
+            "think-test",
+            "test-model-v1",
+        );
+        registry.coord
+            .lock()
+            .unwrap()
+            .capture(&registry.default.handle, frame, now_epoch_i64)
+            .expect("capture must succeed")
+            .id
+    };
+    let id_a = capture_frame("think-test alpha content");
+    let id_b = capture_frame("think-test beta content");
+    let id_c = capture_frame("think-test gamma content");
 
-    for id in &[&id_a, &id_b, &id_c] {
-        let drawer = Drawer::new(*id, "think-test content", wing, room, "test-agent", now_epoch_i64, "minilm-v2");
-        registry.default.store.add_drawer(&drawer, now_epoch_i64)
-            .expect("add_drawer must succeed");
-    }
-
-    // ── Recall traces with used=true within the dreaming window ──────────────
-    // The dreaming window is [now - 30s, now] = ["2023-11-14T22:12:50Z", "2023-11-14T22:13:20Z"].
-    // Use a timestamp 10 seconds before now so it falls inside the window.
-    // Each target is one of the three drawers so all co-occurrence evidence_targets
-    // get reward=1.0, yielding contrastive_confidence ≈ 0.88 (> min_confidence=0.7).
-    let recall_at = "2023-11-14T22:13:10Z"; // 10 s before 2023-11-14T22:13:20Z
+    // ── Insert recall traces with used=true inside the dreaming reward window ──
+    // The dreaming window is [now - 30s, now].
+    // A trace at now-10s falls inside; reward=1.0 for each drawer endpoint.
+    // With 3 enqueues and reward=1.0, contrastive_confidence ≈ 0.88 (> min_confidence=0.7).
+    let recall_at = "2023-11-14T22:13:10Z"; // 10 s before now (1_700_000_000)
     for drawer_id in &[&id_a, &id_b, &id_c] {
         let trace = RecallTraceItem::new(
             Uuid::new_v4().to_string(),
@@ -382,7 +530,31 @@ fn dreaming_pump_emits_think_events() {
             .expect("insert_recall_trace must succeed");
     }
 
-    // ── Create governor from populated registry ───────────────────────────────
+    // ── Fire 3 external-origin recalls → 3 DreamingItems enqueued ────────────
+    // B-10a: dreaming enqueue fires ONLY on external-origin scored recalls.
+    // Each call surfaces all 3 drawers and writes one DreamingItem to the estate's
+    // dreaming queue. After 3 calls, co_recall_count(a,b), co_recall_count(a,c),
+    // co_recall_count(b,c) each reach 3 — meeting DreamingPolicy::default min_attempts=3.
+    let external_request = || {
+        GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+            .with_mode(GLKRecallMode::LocusOnly)
+            .with_scoring(GLKRecallScoring::Raw)
+            .with_limit(50)
+            .with_fallback(RecallFallbackPolicy::FailClosed)
+            .external()
+    };
+    for _ in 0..3 {
+        registry.coord
+            .lock()
+            .unwrap()
+            .recall_scored(&registry.default.handle, external_request(), now_epoch_i64)
+            .expect("recall_scored must succeed");
+    }
+
+    // ── Create governor from the populated registry ───────────────────────────
+    // The coordinator Arc is shared: recall_scored above and the governor's tick
+    // below operate on the same estate, so the enqueued dreaming items are visible
+    // to the governor's EstateDreamingReader on the first tick.
     let estate_str = uuid::Uuid::from_bytes(registry.default.handle.estate_uuid).to_string();
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
@@ -394,18 +566,23 @@ fn dreaming_pump_emits_think_events() {
     Intellectus::install(sink.clone());
     Intellectus::set_enabled(true);
 
-    // ── First tick at now_epoch — dreaming fires ──────────────────────────────
+    // ── First tick at now_epoch — dreaming fires, drains 3 windows, emits proposals ──
     let report = governor.tick(UNIX_EPOCH + Duration::from_secs(now_epoch_i64 as u64));
     assert!(
         report.dreaming_fired,
-        "dreaming must fire on first tick (estate has 3 co-occurring drawers)"
+        "dreaming must fire on first tick (3 co-recall windows enqueued)"
     );
 
     // ── Assert at least one Think event was emitted ───────────────────────────
+    // Think events are emitted once per proposal. With 3 enqueued windows and
+    // reward=1.0, at least one pair clears both the min_confidence and min_attempts
+    // gates in DreamingDecision.decide and becomes a proposal.
     let events = sink.event_samples_for_estate(&estate_str);
     assert!(
         !events.is_empty(),
-        "dreaming pump must emit at least one StatSample::Event for estate {}; got 0",
+        "dreaming pump must emit at least one StatSample::Event for estate {}; got 0 \
+         (verify that 3 external-origin recalls were enqueued above — removing them \
+         returns 0 events, which is the correct v2 no-queue sentinel)",
         estate_str
     );
     for event in &events {
@@ -614,14 +791,14 @@ fn ag15_unchanged_estate_skips_recompute() {
                "unchanged estate must not rewrite the snapshot (generatedTs preserved)");
 }
 
-/// AG-15b: the inputs dirty token is PROCESS-LOCAL and is NEVER persisted. The
-/// only thing the duty writes to the stats store is the topology JSON payload
-/// (`write_topology_snapshot` takes estate_id, secs, payload — the token is not
-/// an argument). Prove the boundary from the persisted bytes: no token field
-/// name and no token vocabulary appears in the stored snapshot.
-/// Mirrors Swift `topologyInputsTokenIsNeverPersisted`.
+/// AG-15b: F5 — the stable fingerprint IS persisted (in its own column, so a
+/// restarting governor can skip the recompute), but it must NOT leak into the
+/// served topology JSON payload, which moot-mgr renders verbatim. Two things:
+///   1. The fingerprint is persisted and loadable (`load_topology_fingerprint`).
+///   2. The served payload is the topology wire shape only — no token fields.
+/// Mirrors Swift `topologyPayloadExcludesTokenFieldsButFingerprintIsDelivered`.
 #[test]
-fn ag15b_inputs_token_is_never_persisted() {
+fn ag15b_fingerprint_persisted_but_excluded_from_payload() {
     use uuid::Uuid;
     use observer_sink::StatsStore;
 
@@ -647,29 +824,90 @@ fn ag15b_inputs_token_is_never_persisted() {
         .expect("read must not error")
         .expect("snapshot present");
 
-    // The persisted payload is the topology wire shape only — no token field.
+    // (1) The fingerprint is persisted for the post-restart skip.
+    let fingerprint = stats_store_arc
+        .load_topology_fingerprint(&estate_id)
+        .expect("load must not error")
+        .expect("a fingerprint must be persisted alongside the snapshot");
+    assert!(!fingerprint.is_empty(), "persisted fingerprint must be non-empty");
+
+    // (2) The served payload is the topology wire shape only — no token fields,
+    // and the fingerprint travels as a separate column, not embedded in the JSON.
     assert!(!payload.contains("inputs_digest"),
-            "token field name (rust) must not appear in persisted payload");
+            "token field name (rust) must not appear in served payload");
     assert!(!payload.contains("inputsDigest"),
-            "token field name (swift wire) must not appear in persisted payload");
-    assert!(!payload.contains("token"),
-            "no token vocabulary may leak into the persisted payload");
+            "token field name (swift wire) must not appear in served payload");
+    assert!(!payload.contains(&fingerprint),
+            "fingerprint must travel as a separate column, not embedded in the payload JSON");
     // What SHOULD be there: the topology snapshot wire shape.
     assert!(payload.contains("structurePending"),
-            "persisted payload must be the topology snapshot");
+            "served payload must be the topology snapshot");
+}
+
+/// AG-15c: F5 — a FRESH governor (simulating a process restart) loads the
+/// persisted fingerprint on its first duty and skips the recompute when the
+/// estate is unchanged. Proves the persist→load→skip chain holds across the
+/// governor's in-memory state boundary, not just within one governor instance.
+#[test]
+fn ag15c_restart_loads_fingerprint_and_skips_recompute() {
+    use uuid::Uuid;
+    use observer_sink::StatsStore;
+
+    // One shared store across both governor "lifetimes".
+    let store = StatsStore::new(":memory:").expect("in-memory stats store must open");
+    store.open().expect("store.open must succeed");
+    let stats_store_arc = Arc::new(store);
+    stats_store_arc.set_monitoring_enabled(true).expect("enable monitoring");
+
+    let registry = EstateRegistry::new_inmemory();
+    let coord = Arc::clone(&registry.coord);
+    let handle = registry.default.handle;
+    let estate_id = Uuid::from_bytes(handle.estate_uuid).to_string();
+    let drawer_store = Arc::clone(&registry.default.store);
+
+    // First "process": governor writes a snapshot + persists the fingerprint.
+    {
+        let sink: Box<dyn GovernorTopologySink> =
+            Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
+        let mut governor = AutonomicGovernor::new_for_testing(
+            Arc::clone(&coord), handle, Arc::clone(&drawer_store), 0, Some(sink));
+        let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(16_000_000));
+    }
+    let first = stats_store_arc
+        .latest_topology_snapshot(Some(&estate_id))
+        .expect("read must not error")
+        .expect("first snapshot present");
+
+    // Second "process": a brand-new governor (no in-memory fingerprint) opens on
+    // the same store + unchanged estate. Its first duty loads the persisted
+    // fingerprint, finds it matches, and skips the write — generatedTs unchanged.
+    {
+        let sink: Box<dyn GovernorTopologySink> =
+            Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
+        let mut governor = AutonomicGovernor::new_for_testing(
+            coord, handle, drawer_store, 0, Some(sink));
+        let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(16_000_600));
+    }
+    let second = stats_store_arc
+        .latest_topology_snapshot(Some(&estate_id))
+        .expect("read must not error")
+        .expect("snapshot still present");
+
+    assert_eq!(first, second,
+               "restart with unchanged estate must skip recompute (loaded fingerprint matched)");
 }
 
 // MARK: - §7 Encode drain — production wiring (parity gap fix)
 //
-// Force-tests that the governor tick drives the encode drain so regular-mode
-// captures become BM25/vector indexed in production (closing the Rust parity
-// gap). Swift parity: EncodeIntake.swift P4 background drain Task.
+// Force-tests that regular-mode captures become BM25/vector indexed in
+// production. The encode pipeline lives in CorpusKit now (a Corpus self-drains
+// via its own background worker); these tests drive it to completion with the
+// await_encode_drain barrier. Swift parity: the Corpus drain worker.
 //
 // Test list:
-//   AG-16: regular capture + governor tick → BM25 recall FINDS the drawer
+//   AG-16: regular capture + drain → BM25 recall FINDS the drawer
 //   AG-17: impatient mode unchanged — still inline-indexed, no drain wait
-//   AG-18: encode_drain_fired is true every tick (idempotent on empty queue)
-//   AG-19: multiple ticks drain progressively — second tick is idempotent
+//   AG-19: multiple regular captures all searchable after the drain
 
 use std::collections::BTreeMap;
 use aria_mcp::{
@@ -695,19 +933,16 @@ fn content_text(result: &serde_json::Value) -> &str {
     result["content"][0]["text"].as_str().unwrap_or("")
 }
 
-/// AG-16: Regular-mode capture → governor tick → BM25 recall finds the drawer.
+/// AG-16: Regular-mode capture → drain → BM25 recall finds the drawer.
 ///
-/// This is the load-bearing test for the parity gap fix. Before this wiring,
-/// a regular `moot_file_memory` (default mode) would enqueue an EncodeJob but
-/// NO production code would drain it — the drawer remained recall-dark
-/// indefinitely. After this fix, the first governor tick drains the queue
-/// and the drawer becomes BM25/vector searchable.
-///
-/// Parity: Swift's P4 background drain Task (EncodeIntake.swift:149-153)
-/// performs the same drain on its 15 ms poll cadence; here the governor tick
-/// is the equivalent consumer.
+/// This is the load-bearing test for the dual-path intake: a regular
+/// `moot_file_memory` (default mode) enqueues the drawer onto the Corpus ingest
+/// queue, and once the Corpus drain worker has ingested it (awaited here via
+/// await_encode_drain) the drawer becomes BM25/vector searchable. The encode
+/// pipeline lives in CorpusKit (a Corpus self-drains); both ports run the same
+/// foreground drain worker on a ~15 ms poll cadence.
 #[test]
-fn ag16_regular_capture_governor_tick_makes_drawer_bm25_searchable() {
+fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
@@ -726,20 +961,20 @@ fn ag16_regular_capture_governor_tick_makes_drawer_bm25_searchable() {
     // structured lane only (not BM25). We don't assert the pre-tick state here;
     // the important proof is AFTER the tick.
 
-    // Governor tick — drives drain_encode_queue_once, ingesting the pending job
-    // into the Corpus (BM25 + vector indexed). This is the production drain path.
-    let coord = Arc::clone(&registry.coord);
-    let handle = registry.default.handle;
-    let store = Arc::clone(&registry.default.store);
-    let mut governor = AutonomicGovernor::new(coord, handle, store);
-    let report = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_001));
-
-    // encode_drain_fired must be true — drain was called (idempotent even if 0
-    // jobs, but here we expect at least 1 job ingested).
-    assert!(
-        report.encode_drain_fired,
-        "governor tick must fire encode drain; encode_drain_fired was false"
-    );
+    // Drain the Corpus ingest queue to completion. The encode pipeline lives in
+    // CorpusKit now — a Corpus self-drains via its own background worker;
+    // await_encode_drain pumps it to empty and confirms both frontiers clear,
+    // the deterministic barrier that replaced the old governor-tick drain (the
+    // governor no longer pumps the encode queue).
+    {
+        let handle = registry.default.handle;
+        registry
+            .coord
+            .lock()
+            .expect("coordinator lock")
+            .await_encode_drain(&handle)
+            .expect("await_encode_drain");
+    }
 
     // BM25 recall now finds the drawer — the semantic lane is lit.
     let search_result = dispatch_tool(
@@ -806,56 +1041,13 @@ fn ag17_impatient_capture_is_immediately_searchable_no_tick_needed() {
     );
 }
 
-/// AG-18: encode_drain_fired is true on every tick — idempotent on empty queue.
+/// AG-19: Multiple regular captures all become searchable after the drain.
 ///
-/// `drain_encode_queue_once` returns `Ok(0)` when the queue is empty (no queue
-/// mounted, or queue empty). The governor reports `encode_drain_fired = true`
-/// on every tick regardless of jobs processed — reflecting that the drain was
-/// called, not that jobs were found. This matches the topology_snapshot_fired
-/// semantics (cadence gate, not write result).
-///
-/// Tests that an estate with NO pending encode jobs still sets encode_drain_fired
-/// true on every tick — zero-cost idempotent drain.
+/// Captures two drawers via regular mode (both enqueued onto the Corpus ingest
+/// queue), drains to completion via await_encode_drain (the Corpus self-drains —
+/// CorpusKit owns the encode pipeline), and asserts both are BM25 searchable.
 #[test]
-fn ag18_encode_drain_fired_is_true_even_on_empty_queue() {
-    let (mut governor, _registry) = make_governor();
-
-    // First tick — no pending encode jobs (no captures done).
-    let r1 = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_100));
-    assert!(
-        r1.encode_drain_fired,
-        "encode_drain_fired must be true on tick 1 even with no pending jobs"
-    );
-
-    // Second tick — still empty queue.
-    let r2 = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_200));
-    assert!(
-        r2.encode_drain_fired,
-        "encode_drain_fired must be true on tick 2 (idempotent empty drain)"
-    );
-
-    // Third tick — confirms repeated empty-queue drains are stable.
-    let r3 = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_300));
-    assert!(
-        r3.encode_drain_fired,
-        "encode_drain_fired must be true on tick 3 (repeated idempotent empty drain)"
-    );
-}
-
-/// AG-19: Multiple regular captures drained across ticks — second tick is
-/// idempotent after first tick drained all jobs.
-///
-/// Captures two drawers via regular mode. First governor tick drains both.
-/// Second governor tick finds the queue empty, returns encode_drain_fired=true
-/// (the drain WAS called — it returned Ok(0)). Both drawers are BM25 searchable
-/// after the first tick.
-///
-/// Tests: error in one job doesn't poison the queue — encode_drain_queue_once
-/// replies Blocked for failures and continues; subsequent ticks process the
-/// remaining jobs. (Here no failure is injected; second-tick idempotence is
-/// verified instead, which is the observable contract.)
-#[test]
-fn ag19_two_regular_captures_drained_by_tick_second_tick_idempotent() {
+fn ag19_two_regular_captures_both_searchable_after_drain() {
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
@@ -874,17 +1066,16 @@ fn ag19_two_regular_captures_drained_by_tick_second_tick_idempotent() {
         &registry, &ledger,
     ).expect("capture 2 must succeed");
 
-    let coord = Arc::clone(&registry.coord);
-    let handle = registry.default.handle;
-    let store = Arc::clone(&registry.default.store);
-    let mut governor = AutonomicGovernor::new(coord, handle, store);
-
-    // First tick — drains both enqueued jobs into the Corpus.
-    let r1 = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_500));
-    assert!(
-        r1.encode_drain_fired,
-        "first tick must fire encode drain (two jobs present)"
-    );
+    // Drain the Corpus ingest queue to completion (deterministic barrier).
+    {
+        let handle = registry.default.handle;
+        registry
+            .coord
+            .lock()
+            .expect("coordinator lock")
+            .await_encode_drain(&handle)
+            .expect("await_encode_drain");
+    }
 
     // Both drawers must now be BM25/vector searchable.
     let r_spoonbill = dispatch_tool(
@@ -896,7 +1087,7 @@ fn ag19_two_regular_captures_drained_by_tick_second_tick_idempotent() {
     let t1 = content_text(&r_spoonbill);
     assert!(
         t1.starts_with("found ") && !t1.starts_with("found 0"),
-        "spoonbill must be BM25 searchable after first governor tick; got: {t1}"
+        "spoonbill must be BM25 searchable after the drain; got: {t1}"
     );
 
     let r_ibis = dispatch_tool(
@@ -908,15 +1099,7 @@ fn ag19_two_regular_captures_drained_by_tick_second_tick_idempotent() {
     let t2 = content_text(&r_ibis);
     assert!(
         t2.starts_with("found ") && !t2.starts_with("found 0"),
-        "ibis must be BM25 searchable after first governor tick; got: {t2}"
-    );
-
-    // Second tick — queue is now empty; encode_drain_fired is still true
-    // (drain was called — returned Ok(0) — idempotent).
-    let r2 = governor.tick(UNIX_EPOCH + Duration::from_secs(1_700_000_600));
-    assert!(
-        r2.encode_drain_fired,
-        "second tick must still report encode_drain_fired=true (empty-queue drain is idempotent)"
+        "ibis must be BM25 searchable after the drain; got: {t2}"
     );
 }
 

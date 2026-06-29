@@ -30,11 +30,12 @@
 //! re-score over hydrated survivors) — rank-identical results — without a
 //! second substrate round-trip. The recipe never reaches the store itself.
 //!
-//! TRACE BUDGET (B-10a / F3): `limit` (the request.limit) is the coarse pool
-//! scan width; `trace_limit` is the CALLER'S final limit — what the caller
-//! receives after the precision re-rank. The coordinator uses `trace_limit`
-//! (not the pool size) for the reward-cycle trace write. Internal recalls
-//! (origin == Internal, the default) write no trace rows at all.
+//! TRACE BUDGET (B-10a / F3): `pool_size = pool.max(limit)` is the coarse scan
+//! width used for both the recall frame and the request limit; `limit` is the
+//! final result count returned to the caller. `trace_limit` is the CALLER'S
+//! final limit used by the coordinator for the reward-cycle trace write (not
+//! `pool_size`). Internal recalls (origin == Internal, the default) write no
+//! trace rows at all.
 //!
 //! Read-only. Deterministic: the signal components read no clock, the
 //! composition fold is a pure function of (query, candidates), and the recipe
@@ -70,10 +71,11 @@ pub struct PreciseMatch {
     pub room: String,
     /// The drawer's content.
     pub content: String,
-    /// The precision score this drawer was ranked by, in `[0, 1]`. The
-    /// composition does not re-score after ranking; this surfaces the
-    /// candidate's final fused coarse score (informational — rank order is the
-    /// composition's), mirroring the Swift recipe.
+    /// The precision score this drawer was ranked by, in `[0, 1]`. The value
+    /// is `candidate.precision_score`, which is the composition score that drove
+    /// the re-rank (not the coarse fusion score). The composition does not
+    /// re-score after ranking; this field is informational, mirroring the Swift
+    /// recipe.
     pub score: f64,
 }
 
@@ -97,6 +99,7 @@ pub fn run(
     pool: usize,
     composition: Option<&str>,
     now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
 ) -> Result<Vec<PreciseMatch>, RecipeRunError> {
     // The pool must be at least `limit`: the bounded reduce returns the top
     // `limit` of the pool, so a pool smaller than `limit` could only shrink the
@@ -165,7 +168,7 @@ pub fn run(
         .iter()
         .enumerate()
         .map(|(index, hit)| {
-            let mut candidate = ReductionCandidate::from_hit(hit, index);
+            let mut candidate = ReductionCandidate::from_hit(hit, index, node_names);
             if !candidate.content.is_empty() {
                 body_map.insert(candidate.id.clone(), candidate.content.clone());
                 // Strip the body: the SELECTION lane is body-free; the closure
@@ -264,6 +267,7 @@ mod tests {
             "a dog ran in the park",
             "cats and dogs are pets",
         ]);
+        let node_names = HashMap::new();
         let matches = run(
             &coord,
             &h,
@@ -273,6 +277,7 @@ mod tests {
             DEFAULT_POOL,
             None,
             NOW,
+            &node_names,
         )
         .expect("run");
         assert!(!matches.is_empty(), "the coarse grab surfaces the captured rows");
@@ -286,7 +291,8 @@ mod tests {
     #[test]
     fn pr2_unknown_composition_degrades_to_text() {
         let (coord, h) = coord_with_rows(&["alpha beta", "gamma delta"]);
-        let default_run = run(&coord, &h, "alpha", Filter::Unconfirmed, 10, DEFAULT_POOL, None, NOW)
+        let node_names = HashMap::new();
+        let default_run = run(&coord, &h, "alpha", Filter::Unconfirmed, 10, DEFAULT_POOL, None, NOW, &node_names)
             .expect("default run");
         let unknown_run = run(
             &coord,
@@ -297,6 +303,7 @@ mod tests {
             DEFAULT_POOL,
             Some("no-such-composition"),
             NOW,
+            &node_names,
         )
         .expect("unknown-name run still succeeds");
         assert_eq!(default_run.len(), unknown_run.len());
@@ -308,7 +315,8 @@ mod tests {
     fn pr3_pool_clamped_to_limit() {
         let (coord, h) = coord_with_rows(&["one", "two", "three", "four", "five"]);
         // pool 1 < limit 5: the recipe clamps pool up to 5 internally.
-        let matches = run(&coord, &h, "one", Filter::Unconfirmed, 5, 1, None, NOW).expect("run");
+        let node_names = HashMap::new();
+        let matches = run(&coord, &h, "one", Filter::Unconfirmed, 5, 1, None, NOW, &node_names).expect("run");
         assert!(matches.len() >= 1);
     }
 }

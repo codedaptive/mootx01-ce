@@ -109,4 +109,56 @@ struct FederationPairingTests {
         try await engineA.disable()
         try await engineB.disable()
     }
+
+    /// Pull rejects a valid self-signed envelope from an engine that is NOT
+    /// a paired peer. A valid signature alone does not prove pairing
+    /// authorization (ADR-013); the sender must be in the paired peer list.
+    @Test("pull rejects signed envelope from sender that is not a paired peer")
+    func pullRejectsSignedEnvelopeFromUnpairedSender() async throws {
+        let storageVictim = try await makeStorage()
+        let storageTrusted = try await makeStorage()
+        let engineVictim = FederationSyncEngine()
+        let engineTrusted = FederationSyncEngine()
+        // Attacker identity — NOT paired with victim.
+        let attackerIdentity = LocalIdentity()
+
+        let manifest = makeManifest()
+        try await engineVictim.enable(manifest: manifest, storage: storageVictim)
+        try await engineTrusted.enable(manifest: manifest, storage: storageTrusted)
+
+        let relay = FederationRelay()
+        let family = HyperplaneFamilySpec(seed: 0xDEADC0DE)
+        try await engineVictim.pair(with: engineTrusted, via: relay, family: family)
+        // Attacker is NOT paired with victim.
+
+        // Build a valid self-signed envelope from the attacker's identity.
+        let victimPubKey = await engineVictim.identity.publicKey
+        let fakeBatch = try JSONEncoder().encode([String]())  // empty-array JSON
+        let batchHLC = PackedHLC(HLC(physicalTime: 1000, logicalCount: 1, nodeID: 0))
+        let signingBytes = envelopeSigningBytes(
+            senderPublicKey: attackerIdentity.publicKey,
+            payloadKind: .syncRecordBatch,
+            payload: fakeBatch,
+            hlc: batchHLC
+        )
+        let signature = try attackerIdentity.sign(signingBytes)
+        let envelope = SignedEnvelope(
+            senderPublicKey: attackerIdentity.publicKey,
+            payloadKind: .syncRecordBatch,
+            payload: fakeBatch,
+            signature: signature,
+            hlc: batchHLC
+        )
+
+        // Inject the attacker's envelope directly into victim's relay inbox,
+        // simulating what a broadcast relay would deliver without pairing checks.
+        relay.send(to: victimPubKey, message: envelope)
+
+        let receipt = try await engineVictim.pull()
+        #expect(receipt.pulled == 0, "unpaired sender must not inject records")
+        #expect(receipt.conflicts == 1, "rejected envelope must be counted as conflict")
+
+        try await engineVictim.disable()
+        try await engineTrusted.disable()
+    }
 }

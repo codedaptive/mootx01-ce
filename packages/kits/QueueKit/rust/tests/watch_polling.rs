@@ -1,21 +1,25 @@
-// watch_polling.rs — Parity tests for the default-build (no `watch` feature)
-// `FilesystemBackend::watch()` polling implementation.
+// watch_polling.rs — Contract tests for `FilesystemBackend::poll_watch_loop`.
+//
+// These tests run when the `watch` feature is disabled
+// (`cargo test --no-default-features --features filesystem`), exercising the
+// poll-only path directly. Since `watch` is now a default feature, these tests
+// are EXCLUDED from the default `cargo test` run — they are preserved for:
+//   - Explicit poll-path validation in constrained / embedded builds.
+//   - Regression guard: the polling contract must hold independently of the
+//     evented path. The same contract (drain-first, fail-closed, near-realtime)
+//     is tested via `poll_watch_loop` called directly in `watch_evented.rs`.
 //
 // CONTRACT UNDER TEST (QUEUEKIT_SPEC §3, §5 B-3):
-//   1. watch() works in a default build (no --features watch) — it is NOT
-//      BackendUnavailable. Swift's filesystem backend watches by default via
-//      kqueue/poll; the Rust default must match.
-//   2. Drain-first semantics: the handler is invoked through drain_available(),
-//      not from the wake payload. A job written AFTER watch() starts is delivered
-//      within a bounded time (near-realtime via polling).
-//   3. handler() errors propagate: watch() returns Err when the handler returns
-//      Err, satisfying the fail-closed contract (SPEC §5 B-3).
-//   4. Jobs already present before watch() starts are drained in the initial
-//      drain pass (before the poll loop), not lost.
+//   1. poll_watch_loop is not BackendUnavailable — it always delivers jobs.
+//   2. Drain-first semantics: handler is called through drain_available(), not
+//      the wake payload. A job written AFTER the loop starts is delivered within
+//      a bounded time (near-realtime via 200 ms polling).
+//   3. handler() errors propagate fail-closed (SPEC §5 B-3).
+//   4. Jobs already present before watch() starts are drained in the initial pass.
 //
 // All tests terminate in well under 3 seconds (watchdog rule).
-// The 200 ms WATCH_POLL_INTERVAL means any test waiting for a handler
-// invocation needs to allow at most a few poll ticks — 1 s is generous.
+// The 200 ms WATCH_POLL_INTERVAL means any test waiting for handler invocation
+// needs at most a few poll ticks — 1 s is generous.
 
 #[cfg(not(feature = "watch"))]
 mod polling_tests {
@@ -68,14 +72,14 @@ mod polling_tests {
 
         let b = Arc::clone(&backend);
         let result = std::thread::spawn(move || {
-            b.watch(move |job, _session| {
+            b.watch(Box::new(move |job, _session| {
                 collected2.lock().unwrap().push(
                     String::from_utf8_lossy(&job.payload).to_string()
                 );
                 // Return a deliberate error to terminate watch() after
                 // collecting the first job — controlled test exit.
                 Err(QueueError::WatcherFailed("test-exit".to_string()))
-            })
+            }))
         }).join().unwrap();
 
         // The result is Err("test-exit") from the handler — NOT BackendUnavailable.
@@ -115,12 +119,12 @@ mod polling_tests {
         // Spawn the watcher thread first.
         let b_watch = Arc::clone(&backend);
         let watch_handle = std::thread::spawn(move || {
-            b_watch.watch(move |job, _session| {
+            b_watch.watch(Box::new(move |job, _session| {
                 collected2.lock().unwrap().push(
                     String::from_utf8_lossy(&job.payload).to_string()
                 );
                 Err(QueueError::WatcherFailed("test-exit".to_string()))
-            })
+            }))
         });
 
         // Small stagger: let the watcher enter its poll loop before the write,
@@ -171,9 +175,9 @@ mod polling_tests {
 
         let b = Arc::clone(&backend);
         let _ = std::thread::spawn(move || {
-            b.watch(|_job, _session| {
+            b.watch(Box::new(|_job, _session| {
                 Err(QueueError::WatcherFailed("test-exit".to_string()))
-            })
+            }))
         }).join().unwrap();
 
         // After the handler ran, the job has been claimed (moved new/ → cur/).
@@ -201,13 +205,34 @@ mod polling_tests {
 
         backend.write(&make_job("fail-me")).unwrap();
 
-        let result = backend.watch(|_job, _session| {
+        let result = backend.watch(Box::new(|_job, _session| {
             Err(QueueError::BackendUnavailable("injected-failure".to_string()))
-        });
+        }));
 
         match result {
             Err(QueueError::BackendUnavailable(ref msg)) if msg == "injected-failure" => {}
             other => panic!("expected injected failure to propagate, got: {:?}", other),
         }
+    }
+
+    // Crash recovery: a job claimed (new -> cur) by a process that exits before
+    // completing it must be re-drivable after restart. reclaim_in_flight() moves
+    // it cur -> new so the next drain returns it. Mirrors the Swift
+    // FilesystemBackendTests.reclaimInFlightMovesCurBackToNew.
+    #[test]
+    fn reclaim_in_flight_moves_cur_back_to_new() {
+        let dir = make_dir("reclaim");
+        let fs = FilesystemBackend::new(&dir, 1).unwrap();
+        fs.write(&make_job("recover-me")).unwrap();
+        // Claim it — simulates an in-flight job at crash time.
+        let claimed = fs.drain_available().unwrap();
+        assert_eq!(claimed.len(), 1);
+        // Restart recovery.
+        let reclaimed = fs.reclaim_in_flight().unwrap();
+        assert_eq!(reclaimed, 1);
+        // The reclaimed job is re-drivable.
+        let again = fs.drain_available().unwrap();
+        assert_eq!(again.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

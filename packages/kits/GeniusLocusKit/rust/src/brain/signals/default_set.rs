@@ -3,10 +3,10 @@
 //
 // Signal history:
 //   Signals 1–6  GLK-05: original six v1 signals.
-//   Signal 7     ADR-017 F1 / 2026-06-20: TemporalCausalitySignal (hourly
+//   Signal 7     ADR-018 F1 / 2026-06-20: TemporalCausalitySignal (hourly
 //                T-population fold per DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04).
 //   Signal 8     DG2 / 2026-06-19: DistillationSignal (hourly distillation sweep).
-//   Signal 9     ADR-017 F1 / 2026-06-20: TrainingSignal (hourly training daemon,
+//   Signal 9     ADR-018 F1 / 2026-06-20: TrainingSignal (hourly training daemon,
 //                previously orphaned — zero production callers before this wire).
 //
 // The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
@@ -92,7 +92,7 @@ pub fn default_standing_signal_specs(
         // distillation sweep on each hourly fire.
         DistillationSignal::default_spec(),
         // Signal 9: TrainingSignal registered with its diagnostic no-op spec
-        // per ADR-017 F1. Production callers wire a live training_cycle closure
+        // per ADR-018 F1. Production callers wire a live training_cycle closure
         // via TrainingSignal::spec(training_cycle) to invoke
         // TrainingDaemon::run_once against the estate's audit log, matrix tier,
         // and calibration registry. The daemon's threshold gate handles the

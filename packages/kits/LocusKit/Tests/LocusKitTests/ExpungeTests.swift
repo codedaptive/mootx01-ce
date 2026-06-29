@@ -64,8 +64,7 @@ struct ExpungeTests {
         Drawer(
             id: id,
             content: "content-\(id)",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_700_000_000),
             embeddingModelID: "minilm-v6",
@@ -408,5 +407,72 @@ struct ExpungeTests {
         // Canonical form has a decimal point in the time component, e.g. "…:00.234Z".
         // The non-canonical (bare ISO8601DateFormatter) form omits the decimal: "…:00Z".
         #expect(raw.contains("."), "tombstonedAt stored value '\(raw)' must contain fractional seconds (a '.' in the time component) — write must use TypedValue.timestamp, not a bare ISO8601DateFormatter")
+    }
+
+    // MARK: - Lineage-wide expunge conformance (ADR-017 §17)
+
+    /// The exact governance defect test: create D1, supersede it with D2
+    /// (same lineageID), expunge D2 (the head), verify D1's content is
+    /// empty. This confirms the lineage walk scrubs predecessors.
+    @Test("expungeGated: superseded predecessor content is zeroed when head is expunged")
+    func lineageWideExpungeConformance() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+
+        let lineage = UUID()
+        let predecessorId = "11111111-1111-4111-8111-111111111111"
+        let headId = "22222222-2222-4222-8222-222222222222"
+
+        // Step 1: create D1 with a lineageID.
+        let d1 = Drawer(
+            id: predecessorId,
+            content: "predecessor-content",
+            parentNodeId: "test-parent",
+            addedBy: "test",
+            filedAt: t(1_700_000_000),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 0,
+            operationalBitmap: 0,
+            lineageID: lineage
+        )
+        try await store.addDrawer(d1)
+
+        // Step 2: supersede D1 by capturing D2 with the same lineageID.
+        let d2 = Drawer(
+            id: headId,
+            content: "head-content",
+            parentNodeId: "test-parent",
+            addedBy: "test",
+            filedAt: t(1_700_000_100),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 0,
+            operationalBitmap: 0,
+            lineageID: lineage
+        )
+        try await store.addDrawer(d2)
+
+        // Verify D1 is now superseded.
+        let d1Before = try await store.getDrawer(id: predecessorId)
+        #expect(d1Before?.state == .superseded)
+        #expect(d1Before?.content == "predecessor-content")
+
+        // Step 3: expunge the head (D2).
+        try await store.expungeGated(
+            drawerId: headId,
+            changedBy: "test",
+            reason: "lineage conformance test",
+            now: t(1_700_000_200)
+        )
+
+        // Step 4: verify both drawers are tombstoned with empty content.
+        let headAfter = try await store.getDrawer(id: headId)
+        #expect(headAfter?.state == .tombstoned)
+        #expect(headAfter?.content == "")
+
+        let predecessorAfter = try await store.getDrawer(id: predecessorId)
+        #expect(predecessorAfter?.state == .tombstoned)
+        #expect(predecessorAfter?.content == "",
+                "Predecessor content must be empty after lineage-wide expunge (ADR-017 §17)")
     }
 }

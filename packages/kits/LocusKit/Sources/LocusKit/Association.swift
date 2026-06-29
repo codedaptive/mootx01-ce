@@ -13,10 +13,9 @@ import Foundation
 /// produces. Associations are on the *graph* side of the content-vs-graph
 /// distinction (cookbook §9.5.1).
 ///
-/// This mission ships only the value type, its operational accessors, the
-/// `associations` table, and store persistence. No verb behaviour
-/// (mutate / expunge / recall) is implemented here — the verb missions
-/// target this substrate later.
+/// Association verb behaviour (mutate, expunge, recall) is implemented
+/// through `EstateVerbs.associate` and `DrawerStore` — the full verb
+/// surface is wired.
 ///
 /// `Association` mirrors `Tunnel` structurally — both are directional
 /// edges carrying source + target endpoints (wing + room + optional

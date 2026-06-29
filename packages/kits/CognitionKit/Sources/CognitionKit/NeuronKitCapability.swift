@@ -1,11 +1,14 @@
 // NeuronKitCapability.swift
 //
 // The set of NeuronKit reasoning capabilities a recipe may declare it
-// depends on. Per COGNITIONKIT_SPEC § 2, every recipe declares the
-// NeuronKit functions it will call in `requiredCapabilities`, and that
+// depends on. Per COGNITIONKIT_SPEC § 2, `Recipe` protocol conformers declare
+// the NeuronKit functions they will call in `requiredCapabilities`, and that
 // declaration is verified BEFORE any execution begins — a recipe that
 // cannot be fully executed fails immediately at the capability check
 // (`RecipeError.missingCapability`), never mid-execution (spec B-5).
+// Note: lens entry points that are static enums (Moment, Rhythm, Precedence,
+// Complexity, etc.) do not declare `requiredCapabilities` or call
+// `verifyCapabilities`; this pattern applies to `Recipe` conformers only.
 //
 // Each case names a shipped surface that is ACTUALLY PRESENT in the
 // in-tree kit or library:
@@ -28,11 +31,10 @@
 //
 // The four lenses added by TASK-MXE-ASSIGNED (moment, rhythm, precedence,
 // complexity) are pure math free functions (no SubstrateML gate, no branch
-// or recall capability). They declare requiredCapabilities: [] intentionally.
-// No new cases were added: each calls an already-gated NeuronKit free function
-// (momentSignature, rhythm, precedence, complexity) whose inputs are pre-shaped
-// by the recipe — the capability gate exists at the function level, not the
-// recipe level, and these functions carry no capability declaration of their own.
+// or recall capability). Their catalog entries in RecipeCatalog.swift declare
+// empty capability lists. No new enum cases were needed: each calls an
+// already-gated NeuronKit free function whose inputs are pre-shaped by the
+// recipe — the capability gate exists at the function level, not the recipe level.
 
 import Foundation
 

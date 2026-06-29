@@ -5,12 +5,13 @@ import Testing
 
 /// Tests for RecallTraceItem noun and recall_trace persistence.
 ///
-/// Covers the four behaviours specified by NK-1b Part 2:
+/// Covers six behaviour groups:
 ///   1. `used` computed property backed by operationalBitmap bit 0
 ///   2. insert + fetch round-trip via DrawerStore
 ///   3. `markRecallTraceUsed` flips bit 0 and persists
 ///   4. `markRecallTraceUsed` on a missing id throws `recallTraceItemNotFound`
 ///   5. `recallTraceSince` returns rows at or after the given timestamp
+///   6. `recentRecallTraces(since:now:)` window filter and ordering
 ///
 /// All timestamps are deterministic (no `Date()` calls in the tested
 /// code paths; tests inject concrete dates). The bitmap flag

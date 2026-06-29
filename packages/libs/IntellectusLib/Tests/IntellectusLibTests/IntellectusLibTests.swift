@@ -3,15 +3,16 @@
 // swift-testing suite for IntellectusLib. Covers:
 //   §1 Gating: disabled → payload never evaluated
 //   §2 Gating: enabled → sink receives exact sample
-//   §3 Default no-op discard is safe
+//   §3 NoOpSink: default no-op discard is safe
 //   §4 Install/enable are thread-safe (concurrent stress)
 //   §5 StatSample constructors and ts accessor
 //   §6 EventKind exhaustiveness (all cases)
-//   §7 NoOpSink.shared is callable and safe
+//   §7 Performance gate: off-path (disabled) overhead is minimal
+//   §8 RecentWindowSink: bounded recent window, eviction, concurrent access
 //
-// These tests mirror the Rust conformance tests in
-// rust/tests/intellectus_lib_tests.rs. Parity is verified by
-// matching test names in both suites.
+// These tests mirror the core sections of the Rust conformance tests in
+// rust/tests/intellectus_lib_tests.rs (section/behavior parity;
+// exact test names may differ between ports).
 
 import Foundation
 import Testing

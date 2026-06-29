@@ -34,9 +34,20 @@ pub fn complexity(
 ) -> ComplexityResult {
     let entropy_a = InformationTheory::entropy(&normalise(counts_a));
     let entropy_b = counts_b.map(|c| InformationTheory::entropy(&normalise(c)));
-    let mutual_information = joint.map(|j| {
+    // Guard: reject empty, ragged, or zero-column joint matrices before
+    // calling InformationTheory::mutual_information. A ragged matrix (rows
+    // with different column counts) produces misaligned probability rows
+    // and undefined MI. An empty or zero-column matrix carries no joint
+    // information. Returning None for invalid input follows the B-8 convention
+    // and prevents a silent wrong-answer path.
+    // Mirrors Swift Complexity.swift ragged-matrix guard. (NK-10 planned hardening)
+    let mutual_information = joint.and_then(|j| {
+        let cols = j.first().map(|r| r.len()).unwrap_or(0);
+        if j.is_empty() || cols == 0 || !j.iter().all(|r| r.len() == cols) {
+            return None;
+        }
         let norm_j = normalise_joint(j);
-        InformationTheory::mutual_information(&norm_j)
+        Some(InformationTheory::mutual_information(&norm_j))
     });
     ComplexityResult { entropy_a, entropy_b, mutual_information }
 }

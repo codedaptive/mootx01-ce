@@ -1,8 +1,8 @@
 // NovelPoolSubmitter.swift
 //
 // The real pool submitter: writes each PoolSubmission as a dated JSON file
-// into a local directory so the (future) pool-reducer process can consume it
-// (cookbook §2.2, §2.3).
+// into a local directory for the pool-reducer (`PoolReducer.reduce`) to
+// consume (cookbook §2.2, §2.3).
 //
 // DESIGN: The cookbook states the pool endpoint is a config value and
 // submission is fire-and-forget with no retry obligation. The reducer that

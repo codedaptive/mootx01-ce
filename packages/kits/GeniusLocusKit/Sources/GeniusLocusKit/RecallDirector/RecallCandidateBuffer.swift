@@ -4,13 +4,16 @@ import LocusKit
 ///
 /// Capacity is fixed at init — never reallocates after construction. All
 /// score columns are stored as parallel Float arrays indexed by the same
-/// position. Lane membership is tracked in a UInt16 bitset (`sourceMask`)
-/// where each bit corresponds to a `RecallEvidencePath` case by ordinal:
-///   - bit 0: locusBitmap
-///   - bit 1: locusGraph
-///   - bit 2: corpusBM25
-///   - bit 3: vectorHamming
-///   - bit 4: vectorDense
+/// position. Lane membership is tracked in a UInt16 bitset (`sourceMask`).
+/// The bitset covers only the five primary candidate-supply lanes, defined by
+/// the static `bit*` constants on this type — not all `RecallEvidencePath`
+/// cases by ordinal (matrix, graph, and preference signals are scoring columns,
+/// not candidate lanes, and have no `sourceMask` bit):
+///   - bit 0 (`bitLocusBitmap`): locusBitmap
+///   - bit 1 (`bitLocusGraph`): locusGraph
+///   - bit 2 (`bitCorpusBM25`): corpusBM25
+///   - bit 3 (`bitVectorHamming`): vectorHamming
+///   - bit 4 (`bitVectorDense`): vectorDense
 ///
 /// `merge` provides O(1) deduplication via `idToIndex`: if the ID is
 /// already in the buffer, the source bit is unioned and per-column scores

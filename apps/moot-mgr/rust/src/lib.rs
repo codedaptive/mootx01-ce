@@ -1,7 +1,7 @@
 //! moot-mgr — the Rust twin of the Swift moot-mgr observer/manager + resident
 //! multi-plane host.
 //!
-//! A headless Linux server that:
+//! A headless cross-platform server (Windows and Linux) that:
 //!   1. Owns the central ObserverSink `StatsStore` (SQLite) — the global
 //!      monitoring on/off switch and the retention window. A PURE OBSERVER at
 //!      the manager core: it never hosts an estate DB through the manager.
@@ -9,7 +9,8 @@
 //!      plane) — the host's privileged writes, reached only via the gated
 //!      control surface.
 //!   3. Serves the loopback HTTP read-API dashboard (read plane).
-//!   4. Exposes a gated UDS control channel (admin/control plane).
+//!   4. Exposes a gated local IPC control channel (UDS on Unix, named pipe on
+//!      Windows) for the admin/control plane.
 //!   5. Runs the retention loop on the configured cadence.
 //!
 //! This is the wire-contract peer of the Swift host; the internal architecture

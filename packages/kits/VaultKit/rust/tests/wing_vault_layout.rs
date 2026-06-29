@@ -15,7 +15,6 @@
 //!
 //! Mirrors Swift `VaultBridgeTests.wingVaultLayoutRoundTrip`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
@@ -28,6 +27,7 @@ use locus_kit::{
     frames::CaptureFrame,
 };
 use vault_kit::{DrawerMapping, ObsidianAdapter, VaultAdapter, VaultBridge, VaultExportScope};
+use vault_kit::drawer_mapping::resolve_drawer_node_names;
 
 /// Fixed instant (ms-since-epoch) so tests are deterministic.
 const NOW: i64 = 1_765_000_000_000;
@@ -126,8 +126,9 @@ fn wing_vault_layout_round_trip() {
         2,
         "precondition: two believed drawers before export"
     );
+    let names_before = resolve_drawer_node_names(&coord, &handle, &believed);
     let wings_before: std::collections::HashSet<String> =
-        believed.iter().map(|d| d.wing.clone()).collect();
+        believed.iter().filter_map(|d| names_before.get(&d.parent_node_id).map(|(w, _)| w.clone())).collect();
     assert!(
         wings_before.contains("User Canon"),
         "precondition: chemistry drawer must land in 'User Canon'; wings: {:?}",
@@ -215,7 +216,7 @@ fn wing_vault_layout_round_trip() {
     // --- Phase 3: import vault into a FRESH estate. ---
     let (mut coord2, handle2) = open_one("wing-layout-import");
     let first_import = bridge(&mut coord2)
-        .import_vault(&vault_dir, &handle2, NOW)
+        .import_vault(&vault_dir, &handle2, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("first import");
 
     assert_eq!(
@@ -234,8 +235,9 @@ fn wing_vault_layout_round_trip() {
     let imported = current_drawers(&coord2, &handle2);
     assert_eq!(imported.len(), 2, "two drawers must be active after first import");
 
+    let imported_node_names = resolve_drawer_node_names(&coord2, &handle2, &imported);
     let imported_wings: std::collections::HashSet<String> =
-        imported.iter().map(|d| d.wing.clone()).collect();
+        imported.iter().filter_map(|d| imported_node_names.get(&d.parent_node_id).map(|(w, _)| w.clone())).collect();
 
     assert!(
         imported_wings.contains("User Canon"),
@@ -255,7 +257,7 @@ fn wing_vault_layout_round_trip() {
 
     // Room preservation: frontmatter `room:` survives export→import.
     let rooms: std::collections::HashSet<String> =
-        imported.iter().map(|d| d.room.clone()).collect();
+        imported.iter().filter_map(|d| imported_node_names.get(&d.parent_node_id).map(|(_, r)| r.clone())).collect();
     assert!(
         rooms.contains("chemistry"),
         "room 'chemistry' must be preserved through export→import; found rooms: {:?}",
@@ -269,7 +271,7 @@ fn wing_vault_layout_round_trip() {
 
     // --- Phase 4: re-import the SAME vault — idempotency. ---
     let second_import = bridge(&mut coord2)
-        .import_vault(&vault_dir, &handle2, NOW)
+        .import_vault(&vault_dir, &handle2, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("second import (idempotency)");
 
     assert_eq!(

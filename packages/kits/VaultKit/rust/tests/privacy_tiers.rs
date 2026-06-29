@@ -110,7 +110,7 @@ fn default_scope_enforces_tiers() {
     let vault = temp_vault("default");
 
     let report = bridge(&mut coord)
-        .export(&handle, &vault, NOW, VaultExportScope::Believed)
+        .export(&handle, &vault, NOW, VaultExportScope::Believed, None)
         .expect("export");
 
     assert_eq!(report.notes_exported, 2);
@@ -136,7 +136,7 @@ fn explicit_scope_includes_private_tier_never_secret() {
     let vault = temp_vault("private");
 
     let report = bridge(&mut coord)
-        .export(&handle, &vault, NOW, VaultExportScope::BelievedIncludingPrivate)
+        .export(&handle, &vault, NOW, VaultExportScope::BelievedIncludingPrivate, None)
         .expect("export");
 
     assert_eq!(report.notes_exported, 3);
@@ -158,7 +158,7 @@ fn secret_never_exports_under_any_scope() {
     for scope in VaultExportScope::all_cases() {
         let vault = temp_vault(scope.as_str());
         bridge(&mut coord)
-            .export(&handle, &vault, NOW, *scope)
+            .export(&handle, &vault, NOW, *scope, None)
             .expect("export");
         assert!(
             !all_markdown(&vault).contains("secret note"),
@@ -182,7 +182,7 @@ fn import_preserves_sensitivity_from_frontmatter() {
     );
 
     let report = bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import");
     assert_eq!(report.drawers_written, 1);
 
@@ -225,14 +225,14 @@ fn sensitivity_round_trips_via_frontmatter() {
 
     let vault = temp_vault("roundtrip");
     bridge(&mut coord)
-        .export(&handle, &vault, NOW, VaultExportScope::Believed)
+        .export(&handle, &vault, NOW, VaultExportScope::Believed, None)
         .expect("export");
     assert!(all_markdown(&vault).contains("sensitivity: elevated"));
 
     // Re-import into a fresh estate; the tier must survive the trip.
     let (mut coord_b, handle_b) = open_one();
     bridge(&mut coord_b)
-        .import_vault(&vault, &handle_b, NOW)
+        .import_vault(&vault, &handle_b, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import");
     let recall_frame = RecallFrame {
         filter_chain: vec![
@@ -285,7 +285,7 @@ fn reimport_cannot_downgrade_sensitivity() {
     );
 
     bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import");
 
     // The floor held: the drawer is still Restricted, not Normal.
@@ -319,7 +319,7 @@ fn reimport_cannot_downgrade_sensitivity() {
     // And it still does not ride a default bulk export.
     let export_vault = temp_vault("attack-export");
     let report = bridge(&mut coord)
-        .export(&handle, &export_vault, NOW, VaultExportScope::Believed)
+        .export(&handle, &export_vault, NOW, VaultExportScope::Believed, None)
         .expect("export");
     assert_eq!(report.excluded_private_tier, 1);
     assert!(!all_markdown(&export_vault).contains("a restricted secret kept private"));
@@ -353,7 +353,7 @@ fn reimport_may_raise_sensitivity() {
     );
 
     bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import");
 
     let frame = RecallFrame {
@@ -395,7 +395,7 @@ fn export_writes_exactly_one_receipt_with_counts_and_now() {
     let vault = temp_vault("receipt-export");
 
     bridge(&mut coord)
-        .export(&handle, &vault, NOW, VaultExportScope::Believed)
+        .export(&handle, &vault, NOW, VaultExportScope::Believed, None)
         .expect("export");
 
     let receipts = coord
@@ -430,7 +430,7 @@ fn import_writes_exactly_one_receipt_with_counts() {
     );
 
     bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import");
 
     let receipts = coord
@@ -456,7 +456,7 @@ fn receipts_accumulate_per_run() {
     for i in 0..2 {
         let vault = temp_vault(&format!("accumulate-{i}"));
         bridge(&mut coord)
-            .export(&handle, &vault, NOW, VaultExportScope::Believed)
+            .export(&handle, &vault, NOW, VaultExportScope::Believed, None)
             .expect("export");
         let _ = std::fs::remove_dir_all(&vault);
     }
@@ -467,8 +467,8 @@ fn receipts_accumulate_per_run() {
     assert_eq!(receipts.len(), 2);
 }
 
-// VK-EXPORT-01 — the 0125 tier machinery exercised end-to-end through the
-// exchange adapter write side (mirrors the Swift bridge tests in
+// VK-EXPORT-01 — ADR-007 Decision 2 tier-partition exercised end-to-end
+// through the exchange adapter write side (mirrors the Swift bridge tests in
 // ExchangeAdapterTests.swift): the bridge filters tiers and writes the
 // receipt BEFORE the adapter sees notes; the adapter serializes exactly
 // what it is handed.
@@ -487,10 +487,10 @@ fn bridge_export_through_exchange_write_side_enforces_tiers_and_writes_receipt()
         DrawerMapping::new("tier-tests", "test-v1", false),
     );
     let report = bridge
-        .export(&handle, &out, NOW, VaultExportScope::Believed)
+        .export(&handle, &out, NOW, VaultExportScope::Believed, None)
         .expect("export");
 
-    // Tier partition (0125) flowed through unchanged.
+    // ADR-007 Decision 2 tier partition flowed through unchanged.
     assert_eq!(report.notes_exported, 2);
     assert_eq!(report.excluded_private_tier, 1);
     assert_eq!(report.excluded_secret_tier, 1);
@@ -516,4 +516,83 @@ fn bridge_export_through_exchange_write_side_enforces_tiers_and_writes_receipt()
     assert!(receipts[0].entry.contains("\"notesExported\":2"));
 
     let _ = std::fs::remove_dir_all(out.parent().unwrap());
+}
+
+/// CAND-050: KG facts anchored to a secret-tier drawer must not appear in a
+/// default-scope export. Export of a normal drawer's KG fact must be
+/// unaffected; only the secret-anchored fact is excluded.
+#[test]
+fn cand050_kg_facts_excluded_for_secret_anchored_drawers() {
+    let (mut coord, handle) = open_one();
+
+    // Capture a normal drawer and a secret drawer, then anchor one KG fact to each.
+    let mut normal_frame = CaptureFrame::new(
+        "normal drawer content",
+        CaptureChannel::Typed,
+        "tiers",
+        LatticeAnchor::udc("000"),
+        "cand050-test",
+        "test-v1",
+    );
+    normal_frame.sensitivity = AdjectiveSensitivity::Normal;
+    let normal_drawer = coord.capture(&handle, normal_frame, NOW).expect("capture normal");
+
+    let mut secret_frame = CaptureFrame::new(
+        "secret drawer content",
+        CaptureChannel::Typed,
+        "tiers",
+        LatticeAnchor::udc("000"),
+        "cand050-test",
+        "test-v1",
+    );
+    secret_frame.sensitivity = AdjectiveSensitivity::Secret;
+    let secret_drawer = coord.capture(&handle, secret_frame, NOW).expect("capture secret");
+
+    // Anchor one KG fact (a tag) to each drawer.
+    coord
+        .add_kg_fact(
+            &handle,
+            "tag:normal-tag",
+            "tagged",
+            &normal_drawer.id,
+            &normal_drawer.id,
+            NOW / 1000,
+        )
+        .expect("add normal KG fact");
+    coord
+        .add_kg_fact(
+            &handle,
+            "tag:secret-tag",
+            "tagged",
+            &secret_drawer.id,
+            &secret_drawer.id,
+            NOW / 1000,
+        )
+        .expect("add secret KG fact");
+
+    // Export under the default (Believed) scope: secret drawer is excluded.
+    let vault = temp_vault("cand050");
+    bridge(&mut coord)
+        .export(&handle, &vault, NOW, VaultExportScope::Believed, None)
+        .expect("export");
+
+    let exported_md = all_markdown(&vault);
+
+    // The normal drawer and its KG-backed tag must appear in the export.
+    assert!(
+        exported_md.contains("normal drawer content"),
+        "CAND-050: normal drawer content must appear in export"
+    );
+    assert!(
+        exported_md.contains("normal-tag"),
+        "CAND-050: normal-tier KG tag must appear in export"
+    );
+    // Secret-anchored KG fact (tag) must NOT appear — the tag value
+    // is derived from the KG fact's subject field ("tag:secret-tag").
+    assert!(
+        !exported_md.contains("secret-tag"),
+        "CAND-050: secret-anchored KG tag must not appear in default-scope export"
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
 }

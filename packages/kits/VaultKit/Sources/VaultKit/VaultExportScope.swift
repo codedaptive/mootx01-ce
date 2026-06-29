@@ -16,8 +16,10 @@ import LocusKit
 /// - **Private tier** (`.restricted`) is excluded by default; only the
 ///   explicit `.believedIncludingPrivate` scope includes it
 ///   (`includesPrivateTier`). The owner-key ceremony that authorizes
-///   selecting that scope is v1.0-gold access-surface work; this scope is
-///   the enforcement hook it will gate.
+///   selecting that scope is the planned 1.1 vault authorization gate
+///   (ADR-015): a human-presence consent check, not encryption. Vault
+///   ships open through the 1.0.x-beta line by design; this scope is the
+///   enforcement hook that gate will attach to.
 /// - **Normal tier** (`.normal` + `.elevated`) exports freely.
 ///
 /// `DrawerMapping.export` recalls with an explicit
@@ -27,17 +29,20 @@ import LocusKit
 ///
 /// ## Scope semantics
 ///
-/// - `believed` (default): currently-believed drawers regardless of
-///   confirmation state — the projection-of-my-estate semantics. Fixes
-///   the confirmed-drop bug present when the filter was hard-coded to
-///   `.unconfirmed` (confirmed drawers were silently excluded).
+/// - `believed`: currently-believed drawers regardless of confirmation
+///   state — the projection-of-my-estate semantics. Fixes the confirmed-drop
+///   bug present when the filter was hard-coded to `.unconfirmed` (confirmed
+///   drawers were silently excluded). An explicit opt-in (no longer the
+///   default — see `exportable`).
 ///
 /// - `believedIncludingPrivate`: same selection as `believed`, plus
 ///   Private-tier (`.restricted`) drawers. The explicit opt-in for
 ///   private-tier bulk export. Secret is still excluded.
 ///
-/// - `exportable`: only drawers explicitly marked exportable (exportability
-///   == .public_). A curated "safe to share" subset.
+/// - `exportable` (default, CAND-032): only drawers explicitly marked
+///   exportable (exportability == .public_). A curated "safe to share" subset.
+///   The default so a disk export never writes non-exportable/private rows;
+///   broader scopes are explicit opt-ins.
 ///
 /// - `confirmed`: only user-confirmed currently-believed drawers. The
 ///   manually-reviewed portion of the estate.

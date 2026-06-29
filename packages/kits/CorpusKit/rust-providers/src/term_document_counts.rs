@@ -135,6 +135,37 @@ impl TermDocumentCounts {
         self.tf_counts.push(doc_tf);
     }
 
+    /// Fold one document into the maintained COUNTS ANCHOR only: grow the
+    /// vocabulary (encounter order) and increment the document count, WITHOUT
+    /// retaining the per-document TF row or accumulating document frequency.
+    ///
+    /// Used by the incremental-counts maintenance path (P3). The heavy TF/DF
+    /// inputs the factorization needs are re-derived by re-tokenizing the corpus
+    /// at refactor (re-tokenize-at-refactor decision), so the maintained table
+    /// keeps only the lightweight growth anchor — vocabulary size and document
+    /// count — current, bounding maintained state to O(vocab) rather than the
+    /// O(corpus) a full `add_document` per chunk would accumulate.
+    ///
+    /// Vocabulary indices are assigned in the SAME encounter order as
+    /// `add_document`, so the anchor's vocab map is deterministic and matches the
+    /// Swift port byte-for-byte. An empty TF row is pushed so `document_count`
+    /// reports correctly (the raw counts are intentionally not retained).
+    ///
+    /// - Note: Does not call `SystemTime::now()` — determinism invariant.
+    pub fn add_document_for_counts_anchor(&mut self, text: &str) {
+        let terms = default_keyword_tokens(text);
+        if terms.is_empty() {
+            return;
+        }
+        for term in &terms {
+            if !self.vocab.contains_key(term.as_str()) {
+                let idx = self.vocab.len();
+                self.vocab.insert(term.clone(), idx);
+            }
+        }
+        self.tf_counts.push(HashMap::new());
+    }
+
     /// Number of documents added so far.
     pub fn document_count(&self) -> usize {
         self.tf_counts.len()

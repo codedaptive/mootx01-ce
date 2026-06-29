@@ -308,6 +308,8 @@ struct ReductionSignalsTests {
         #expect(!NeuronKit.ReductionSignal.lattice.needsContent)
         #expect(!NeuronKit.ReductionSignal.bm25.needsContent)
         #expect(!NeuronKit.ReductionSignal.vector.needsContent)
+        // dense: body-free float cosine similarity from GLK dense lane.
+        #expect(!NeuronKit.ReductionSignal.dense.needsContent)
         // temporalState reads only body-free structured columns.
         #expect(!NeuronKit.ReductionSignal.temporalState.needsContent)
     }

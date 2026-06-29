@@ -42,9 +42,10 @@ struct MomentTests {
     }
 
     // CK-MO-1: recipe result equals the lens result on the same shaped input.
-    // Captures three drawers in the primary window and two in a comparison
-    // window, reads both sets through the GLK surface, shapes input identically
-    // to what the recipe does, and asserts output equality.
+    // Captures three drawers and two comparison drawers; window membership
+    // depends on the wall-clock time at capture vs the primaryStart/primaryEnd
+    // and cmpEnd boundaries. Asserts output equality between the recipe call
+    // and the direct lens call on the same shaped input.
     @Test("recipe result matches direct lens call on same shaped input")
     func recipeResultMatchesDirectLensCall() async throws {
         let (kit, handle) = try await openEstate()

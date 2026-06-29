@@ -143,8 +143,9 @@ fn count_increases_after_ingest() {
 }
 
 #[test]
-fn count_unchanged_after_remove() {
-    // BundleStore is append-only: count does not decrease on remove.
+fn count_excludes_removed_source() {
+    // count() reports live recall content only: removing the sole source drops it
+    // to zero (chunk rows survive in the append-only store). Re-ingest reactivates.
     let _guard = global_lock();
     Intellectus::set_enabled(false);
     let corpus = make_corpus();
@@ -152,9 +153,87 @@ fn count_unchanged_after_remove() {
         .ingest("Some content for removal test.", "src-x", NOW_MILLIS)
         .unwrap();
     let before = corpus.count().unwrap();
+    assert!(before >= 1);
     corpus.remove("src-x").unwrap();
-    let after = corpus.count().unwrap();
-    assert_eq!(after, before, "count must not decrease after remove (BundleStore is append-only)");
+    assert_eq!(corpus.count().unwrap(), 0, "removed source must not be counted");
+    corpus
+        .ingest("Some content for removal test.", "src-x", NOW_MILLIS)
+        .unwrap();
+    assert_eq!(corpus.count().unwrap(), before, "re-ingest reactivates the source");
+}
+
+// REGRESSION (Codex finding 2): a reindex after remove must NOT resurrect the
+// removed source — reindex reads the append-only chunks table and must use ACTIVE
+// chunks only (the auto-reindex daemon makes this a normal-operation hazard).
+#[test]
+fn reindex_does_not_resurrect_removed_source() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let corpus = make_corpus();
+    let text_a = "Cryptography secures communication using mathematical algorithms and keys.";
+    let text_b = "Machine learning trains neural networks on data without explicit rules.";
+    corpus.ingest(text_a, "source-crypto", NOW_MILLIS).unwrap();
+    corpus.ingest(text_b, "source-ml", NOW_MILLIS).unwrap();
+
+    corpus.remove("source-crypto").expect("remove");
+    corpus.reindex(NOW_MILLIS).expect("reindex");
+
+    let results = corpus
+        .recall("cryptography authentication keys", 10, NOW_MILLIS)
+        .unwrap();
+    assert!(
+        results.iter().all(|r| r.chunk.source_id != "source-crypto"),
+        "reindex must not resurrect the removed source"
+    );
+    let ml = corpus
+        .recall("neural network learning data", 10, NOW_MILLIS)
+        .unwrap();
+    assert!(
+        ml.iter().any(|r| r.chunk.source_id == "source-ml"),
+        "non-removed source must survive reindex"
+    );
+}
+
+// REGRESSION (Codex finding 2, BATCH import path): sources arrive via
+// ingest_batch (the drain path); the active-chunks fix must hold there too.
+#[test]
+fn batch_import_reindex_does_not_resurrect_removed_source() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let corpus = make_corpus();
+    corpus
+        .ingest_batch(&[
+            (
+                "Cryptography secures communication using mathematical algorithms and keys."
+                    .to_string(),
+                "source-crypto".to_string(),
+                NOW_MILLIS,
+            ),
+            (
+                "Machine learning trains neural networks on data without explicit rules."
+                    .to_string(),
+                "source-ml".to_string(),
+                NOW_MILLIS,
+            ),
+        ])
+        .expect("ingest_batch");
+    corpus.remove("source-crypto").expect("remove");
+    corpus.reindex(NOW_MILLIS).expect("reindex");
+
+    let results = corpus
+        .recall("cryptography authentication keys", 10, NOW_MILLIS)
+        .unwrap();
+    assert!(
+        results.iter().all(|r| r.chunk.source_id != "source-crypto"),
+        "batch-imported removed source must not resurrect on reindex"
+    );
+    let ml = corpus
+        .recall("neural network learning data", 10, NOW_MILLIS)
+        .unwrap();
+    assert!(
+        ml.iter().any(|r| r.chunk.source_id == "source-ml"),
+        "non-removed batch-imported source must survive reindex"
+    );
 }
 
 // MARK: - Deduplication
@@ -270,7 +349,8 @@ fn float_lane_outcome_hits_after_ingest() {
 }
 
 /// §4-rust Conformance: telemetry must not alter result content or order.
-/// Run float_nearest with monitoring off, then on; results must be identical.
+/// Run float_nearest with monitoring off, then on; compares outcome variant,
+/// hit count, and item IDs — similarity values are not compared.
 #[test]
 fn float_lane_outcome_identical_with_monitoring_off_and_on() {
     use intellectus_lib::{StatSample, StatsSink};
@@ -571,8 +651,7 @@ fn float_lane_outcome_store_error_hook_consumed_on_first_call() {
 // carry a host-supplied inference closure, exactly like Swift. These
 // tests use a fake inference closure (a model bundle is never bundled)
 // to prove the facade wires the named providers correctly: ingest +
-// recall succeed, and the float lane is AVAILABLE (unlike Deterministic,
-// whose provider opts out of the float lane).
+// recall succeed, and the float lane is AVAILABLE.
 
 /// Fake inference: a fixed-dimension vector derived from the token
 /// count. Stands in for a real model pass — the kit owns tokenization

@@ -14,9 +14,9 @@ public struct GLKRecallResult: Sendable {
 
     /// Dense float lane (Lane D) status for this query. Non-nil when the lane
     /// was dark (did not contribute hits), carrying the observable reason as a
-    /// short string. Nil ONLY when the lane ran and returned hits — every other
-    /// case now carries an explicit dark tag so callers can distinguish "active"
-    /// from "never attempted".
+    /// short string. Nil when the lane ran and returned hits (`.unionBest` only)
+    /// or when the active recall mode does not attempt the dense float lane
+    /// (`.locusOnly`, `.corpusOnly`, `.hybrid`, `.nodeTreeNative`).
     ///
     /// Values follow the `dark:<reason>` convention:
     /// - `"dark:providerOptOut"` — the corpus's embedding provider has no float lane.

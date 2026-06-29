@@ -14,10 +14,9 @@ import MootGateway   // CaptureDrawerIntent / RecallDrawerIntent are public here
 //
 // HOW THESE INTENTS REACH THE SAME MOOT AS THE UI
 // -----------------------------------------------
-// Both intents resolve their estate through GatewayRuntime.shared.bridge().
-// Our app calls GatewayRuntime.shared.configure(databaseURL:) at launch
-// (see MootTodoApp.bootstrapMoot). Because the intents and the UI both pull
-// from GatewayRuntime.shared, a Shortcut that captures a memory writes into the
+// Intents resolve their estate through `IntentRuntimeBridge.shared.bridge()`.
+// At launch, `GatewayRuntime.shared.bridge()` registers the app's bridge with
+// `IntentRuntimeBridge`, so a Shortcut that captures a memory writes into the
 // EXACT same SQLite estate the to-do sidecar mirrors into — and the app's
 // "Search memory" field will find it. One MOOT, many front doors.
 //

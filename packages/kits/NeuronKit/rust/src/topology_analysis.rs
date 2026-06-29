@@ -50,6 +50,17 @@ pub const TOPOLOGY_MAX_LEVELS: usize = 10;
 /// bridge gain negative. Mirrors Swift `NeuronKit.topologyResolution`.
 pub const TOPOLOGY_RESOLUTION: f64 = 0.05;
 
+/// Maximum number of drawers per KGFact subject group bonded into the
+/// shared-subject clique. Planned hardening: a subject shared by many drawers
+/// (generic label or data-quality issue) generates O(n²) adjacency edges;
+/// capping at KGFACT_CLIQUE_CAP limits one group to at most
+/// KGFACT_CLIQUE_CAP*(KGFACT_CLIQUE_CAP-1)/2 = 1 225 edges. Drawers beyond
+/// the cap are excluded from bonding for that subject — they still appear in
+/// the graph as isolated or tunnel-bonded nodes. Cap hit is printed once per
+/// group (no subject content — avoids logging user data).
+/// Parity-aligned with `NeuronKit.kgFactCliqueCap` in TopologyAnalysis.swift.
+pub const KGFACT_CLIQUE_CAP: usize = 50;
+
 // MARK: input descriptors
 
 /// One drawer, reduced to the fields topology analysis reads. The caller
@@ -237,6 +248,17 @@ pub fn graph_topology(
         let mut unique: Vec<&str> = drawer_ids.clone();
         unique.sort_unstable();
         unique.dedup();
+        // Planned hardening: cap group size to prevent O(n²) edge explosion
+        // on pathological inputs (generic subject shared by many drawers).
+        // Drawers beyond KGFACT_CLIQUE_CAP receive no bond for this subject.
+        // Parity: mirrors NeuronKit.kgFactCliqueCap in TopologyAnalysis.swift.
+        if unique.len() > KGFACT_CLIQUE_CAP {
+            eprintln!(
+                "NeuronKit.graph_topology: KGFact group has {} drawers; capping at {} (planned hardening)",
+                unique.len(), KGFACT_CLIQUE_CAP
+            );
+            unique.truncate(KGFACT_CLIQUE_CAP);
+        }
         for i in 0..unique.len() {
             for j in (i + 1)..unique.len() {
                 // created_ts is None: a shared-subject bond aggregates facts

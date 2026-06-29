@@ -98,6 +98,7 @@ public enum PrimitiveRegistry {
         FormalConceptAnalysisPrimitive.descriptor,
         SamplingPrimitive.descriptor,
         ShingleSimilarityPrimitive.descriptor,
+        MerkleCommitmentPrimitive.descriptor,
     ]
 
     public static func find(_ name: String) -> PrimitiveDescriptor? {

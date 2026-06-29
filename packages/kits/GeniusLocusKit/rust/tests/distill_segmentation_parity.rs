@@ -30,6 +30,7 @@
 use std::sync::Arc;
 
 use genius_locus_kit::EstateCoordinator;
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -37,6 +38,11 @@ use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
+
+// Actor string for factoid drawers produced by distill_items_sweep.
+// Mirrors brain::distillation_cycle::DISTILLATION_DAEMON_ACTOR — duplicated
+// here to avoid a pub(crate) boundary crossing in tests.
+const DISTILLATION_DAEMON_ACTOR: &str = "distillation-daemon";
 
 // The exact probe text used in the head-to-head parity test that revealed
 // the segmentation divergence. Swift counted ≥3 sentences; Rust must too.
@@ -201,4 +207,60 @@ fn eidetic_segmenter_handles_trailing_period_text() {
         "old split('. ') FAILS on `!`-terminated text (returns {} segments, not 3) — confirms the bug boundary",
         old_exclaim.len()
     );
+}
+
+// MARK: - T5 (secfix/punt-g2): factoid inherits source drawer sensitivity
+
+/// T5: A factoid produced from a secret-sensitivity source drawer must carry
+/// secret sensitivity. Pre-fix, `distill_items_sweep` always used the default
+/// `AdjectiveSensitivity::Normal` on the factoid `CaptureFrame` regardless of
+/// the source drawer — allowing secret memories to be downgraded into
+/// normal-tier recall.
+#[test]
+fn distill_items_sweep_factoid_inherits_source_sensitivity() {
+    let (coord, h) = open_one();
+
+    // Content with ≥3 sentences and recurring tokens so the pipeline emits
+    // a non-zero fingerprint (same pattern as T2).
+    let content = "Both Swift and Rust implement the same algorithm. \
+                   Rust parity is verified by the same tests. \
+                   Swift and Rust must produce identical factoid sensitivity.";
+
+    // Capture with secret sensitivity.
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "notes",
+        LatticeAnchor::udc("004"),
+        "test-secfix",
+        "minilm-v6",
+    );
+    frame.sensitivity = AdjectiveSensitivity::Secret;
+    coord.capture(&h, frame, NOW).expect("capture secret drawer");
+
+    // Run the sweep; expect at least one factoid.
+    let produced = coord
+        .distill_items_sweep(&h, NOW, None)
+        .expect("distill_items_sweep");
+    assert!(produced >= 1, "sweep must produce ≥1 factoid (got {produced})");
+
+    // Find factoid drawers produced by the distillation daemon.
+    // `all_drawers` is the public coordinator API (no estate_for_verb crossing
+    // a pub(crate) boundary). Filter by added_by == DISTILLATION_DAEMON_ACTOR
+    // (the constant "distillation-daemon") to isolate factoid rows.
+    let factoids: Vec<_> = coord
+        .all_drawers(&h)
+        .expect("all_drawers")
+        .into_iter()
+        .filter(|d| d.added_by == DISTILLATION_DAEMON_ACTOR)
+        .collect();
+    assert!(!factoids.is_empty(), "must find factoid drawer produced by distillation-daemon");
+    for factoid in &factoids {
+        assert_eq!(
+            factoid.adjective_sensitivity(),
+            AdjectiveSensitivity::Secret,
+            "factoid produced from Secret source must inherit Secret sensitivity; got {:?}",
+            factoid.adjective_sensitivity()
+        );
+    }
 }

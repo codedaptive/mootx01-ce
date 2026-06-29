@@ -17,9 +17,9 @@ import Testing
 ///
 /// Note: Tunnel/KGFact/Diary operational bitmaps are LocusKit-internal
 /// layouts not specified by cookbook §2.4 v0.6. Their tests live in
-/// their respective Tests/LocusKitTests files (TunnelOperationalTests,
-/// KGFactStoreTests, DiaryOperationalTests) and are not gated by this
-/// conformance file.
+/// their respective Tests/LocusKitTests files (`TunnelBitmapTests.swift`,
+/// `TunnelKindTests.swift`, `TunnelTests.swift`, `KGFactStoreTests.swift`,
+/// `DiaryOperationalTests.swift`) and are not gated by this conformance file.
 @Suite("OperationalBitmapConformanceTests")
 struct OperationalBitmapConformanceTests {
 
@@ -52,7 +52,7 @@ struct OperationalBitmapConformanceTests {
         for entry in Self.captureChannelTable {
             let bitmap = Int64(entry.expectedRaw)  // bits 0-5
             let drawer = Drawer(
-                content: "c", wing: "w", room: "r", addedBy: "test",
+                content: "c", parentNodeId: "test-parent", addedBy: "test",
                 filedAt: Date(timeIntervalSince1970: 0),
                 embeddingModelID: "minilm-v6",
                 operationalBitmap: bitmap
@@ -92,7 +92,7 @@ struct OperationalBitmapConformanceTests {
         for entry in Self.contentKindTable {
             let bitmap = Int64(entry.expectedRaw) << 6
             let drawer = Drawer(
-                content: "c", wing: "w", room: "r", addedBy: "test",
+                content: "c", parentNodeId: "test-parent", addedBy: "test",
                 filedAt: Date(timeIntervalSince1970: 0),
                 embeddingModelID: "minilm-v6",
                 operationalBitmap: bitmap
@@ -133,7 +133,7 @@ struct OperationalBitmapConformanceTests {
         // Set bit 0 (capture_channel.voiced) and bit 30 (out-of-field) AND a real flag bit.
         let bitmap: Int64 = 0x1 | (1 << 30) | DrawerFeatureFlags.hasImage.rawValue
         let drawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             operationalBitmap: bitmap
@@ -148,7 +148,7 @@ struct OperationalBitmapConformanceTests {
     @Test("state_extension flag lives at bit 24 (cookbook §2.4)")
     func stateExtensionAtBit24() {
         let drawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             operationalBitmap: 1 << 24
@@ -160,7 +160,7 @@ struct OperationalBitmapConformanceTests {
     @Test("lineage_clustering flag lives at bit 25 (NEW in v0.6 per cookbook §2.4)")
     func lineageClusteringAtBit25() {
         let drawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             operationalBitmap: 1 << 25
@@ -183,7 +183,7 @@ struct OperationalBitmapConformanceTests {
         #expect(raw == 0x14042, "composite encoding mismatch: \(raw) != 0x14042")
 
         let drawer = Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             operationalBitmap: raw

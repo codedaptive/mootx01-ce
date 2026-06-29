@@ -24,11 +24,12 @@
 // scalar reference is the in-process oracle. This expands coverage
 // beyond the Rust unit tests without narrowing any of their assertions.
 //
-// Backend gating mirrors how the Rust tests gate (Known Ambiguity #1):
-// SIMD/NEON behind `canImport(simd)`, Metal behind `canImport(Metal)` AND
-// a non-nil `MTLCreateSystemDefaultDevice` (the `MetalKernel?` initializer).
-// Kernels the host can't run are simply not exercised; the scalar reference
-// is always present.
+// Backend reachability for the conformance sweep (Known Ambiguity #1):
+// NEON behind `canImport(simd)` (per the `reachableKernels()` helper);
+// SIMD is always reachable (SimdKernel() is unconditional);
+// Metal behind `canImport(Metal)` AND a non-nil default device.
+// Kernels the host can't run are simply not exercised; the scalar
+// reference is always present.
 
 import Testing
 @testable import SubstrateKernel
@@ -109,8 +110,9 @@ struct PortableKernelDispatcherTests {
     @Test("of_kind(.simd) returns a SIMD kernel where import simd is available")
     func ofKindSimdReturnsSimd() {
         // Swift has no stable/nightly split: `import simd` is available
-        // on Darwin, so the SIMD kernel is always selectable here. The
-        // Rust counterpart gates this on the `simd-nightly` feature.
+        // on Apple platforms and aarch64 Linux, so the SIMD kernel is
+        // always selectable here. The Rust counterpart gates this on the
+        // `simd-nightly` feature.
         #if canImport(simd)
         #expect(PortableKernel.kernel(of: .simd).kind == .simd)
         #else
@@ -292,6 +294,28 @@ struct PortableKernelConformanceTests {
             #expect(k.countFold256(foldFixture) == refFold,
                     "countFold256 diverged on \(kind)")
         }
+    }
+
+    @Test("floatSimHashProject: valid dim input produces deterministic output (guard does not perturb math)")
+    func floatSimHashProjectValidDimIsDeterministic() {
+        // Constructs a minimal FloatSimHashPlanes for dim=4
+        // (256 planes × 4 coords = 1024 bits = 16 UInt64 words) with a
+        // known sign-bit pattern and verifies the scalar reference produces
+        // the same Fingerprint256 on two calls — the main invariant that
+        // Part-6's dim-check guard must not perturb.
+        let dim = 4
+        let wordCount = (256 * dim + 63) / 64  // = 16
+        // Alternating 0xAA / 0x55 gives a deterministic mix of +1/-1 planes.
+        var words = [UInt64]()
+        words.reserveCapacity(wordCount)
+        for i in 0..<wordCount { words.append(i % 2 == 0 ? 0xAAAA_AAAA_AAAA_AAAA : 0x5555_5555_5555_5555) }
+        let planes = FloatSimHashPlanes(dim: dim, signBits: words)
+        let vector: [Float] = [1.0, -0.5, 0.25, -0.125]
+
+        let scalar = ScalarKernel()
+        let fp1 = scalar.floatSimHashProject(vector: vector, planes: planes)
+        let fp2 = scalar.floatSimHashProject(vector: vector, planes: planes)
+        #expect(fp1 == fp2, "floatSimHashProject must be deterministic for valid dim inputs")
     }
 
     @Test("batched SimHash backends match the scalar reference")

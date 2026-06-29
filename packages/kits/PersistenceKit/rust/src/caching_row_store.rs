@@ -6,12 +6,26 @@
 //! `Arc<CachingRowStore>` with `Mutex<CacheState>` for mutable hot-tier
 //! state — equivalent to Swift's actor isolation of `CacheActor`.
 //!
+//! Cache key: (table, UUID key, AsOfCoordinate). A present read and an
+//! as-of snapshot read of the same row are distinct cache entries per
+//! ADR-017 §18. Snapshot reads (AsOf(hlc)) against pinned immutable
+//! views are safely cacheable because the GC pin (NT-P3) prevents
+//! vacuum of pinned rows. Present reads remain invalidation-driven.
+//!
+//! Parent-chain callback: when a write mutates a hashable row, the
+//! optional parent_chain_provider returns the Merkle-aggregate parent
+//! chain (e.g. drawer→room→wing). CachingRowStore evicts cached
+//! aggregates for every node in the chain.
+//!
 //! Sensitivity gate: rows whose `provenance` column encodes a sensitivity
-//! level above the configured threshold — or equal to Secret (level 3) —
-//! are never admitted. Absent column → admit; unparseable value → reject
-//! (fail closed). Encoding per ARIA adjective contract:
-//!   level = (raw_i64 >> 4) & 0x7   (bits [6:4])
-//!   0 = Normal, 1 = Elevated, 2 = Restricted, 3 = Secret
+//! level above the configured threshold — or equal to Secret (ordinal 3) —
+//! are never admitted. Absent column → admit; unparseable value or
+//! unrecognised bit pattern → reject (fail closed).
+//! Encoding per provenance bitmap spec (cookbook §2.5 v0.6):
+//!   field = (raw_i64 >> 30) & 0x3F   (bits [35:30])
+//!   raw 0 = Normal, 16 = Elevated, 32 = Restricted, 48 = Secret (scale-gapped)
+//! EstateCacheConfig.sensitivity_threshold is an ordinal (0–2); the gate maps
+//! scale-gapped raw values to ordinals before comparing.
 //!
 //! LRU eviction fires when estimated hot-tier bytes exceed `ceiling_bytes`.
 //! `ceiling_bytes == 0` means no limit.
@@ -23,6 +37,32 @@ use crate::row_store::RowStore;
 use crate::types::{RowHandle, RowKey, StorageRow, TypedValue};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use substrate_types::AsOfCoordinate;
+
+/// Callback that maps a changed row to its Merkle-aggregate parent chain.
+/// Returns RowHandles for each ancestor whose cached aggregate must be
+/// invalidated (e.g. [room, wing, estate]). Returns empty when no chain
+/// invalidation is needed.
+pub type ParentChainProvider = Box<dyn Fn(&str, RowKey) -> Vec<RowHandle> + Send + Sync>;
+
+// ─────────────────────────────────────────────────────────────────
+// Temporal cache key
+// ─────────────────────────────────────────────────────────────────
+
+/// Internal key type that adds the temporal coordinate to a RowHandle.
+/// A present read and an as-of snapshot read of the same row produce
+/// distinct keys, so they occupy separate cache entries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TemporalCacheKey {
+    handle: RowHandle,
+    as_of: AsOfCoordinate,
+}
+
+impl TemporalCacheKey {
+    fn new(handle: RowHandle, as_of: AsOfCoordinate) -> Self {
+        TemporalCacheKey { handle, as_of }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Internal cache state
@@ -35,7 +75,7 @@ struct CacheEntry {
 }
 
 struct CacheState {
-    entries: HashMap<RowHandle, CacheEntry>,
+    entries: HashMap<TemporalCacheKey, CacheEntry>,
     access_counter: u64,
     total_bytes: usize,
 }
@@ -49,17 +89,17 @@ impl CacheState {
         }
     }
 
-    /// Return the cached row for `handle`, updating its LRU position.
-    fn get(&mut self, handle: &RowHandle) -> Option<StorageRow> {
-        let entry = self.entries.get_mut(handle)?;
+    /// Return the cached row for `key`, updating its LRU position.
+    fn get(&mut self, key: &TemporalCacheKey) -> Option<StorageRow> {
+        let entry = self.entries.get_mut(key)?;
         self.access_counter += 1;
         entry.access_order = self.access_counter;
         Some(entry.row.clone())
     }
 
-    /// Admit `row` under `handle` subject to the sensitivity gate and byte
+    /// Admit `row` under `key` subject to the sensitivity gate and byte
     /// budget. Evicts LRU entries as needed.
-    fn admit(&mut self, handle: RowHandle, row: StorageRow, config: &EstateCacheConfig) {
+    fn admit(&mut self, key: TemporalCacheKey, row: StorageRow, config: &EstateCacheConfig) {
         if !config.enabled {
             return;
         }
@@ -67,18 +107,14 @@ impl CacheState {
             return;
         }
         let size = estimated_bytes(&row);
-        // Remove any stale entry before budget accounting.
-        if let Some(existing) = self.entries.remove(&handle) {
+        if let Some(existing) = self.entries.remove(&key) {
             self.total_bytes -= existing.byte_size;
         }
-        // When a ceiling is set, evict LRU entries to make room.
-        // ceiling_bytes == 0 means unlimited (enabled=false is guarded above).
         if config.ceiling_bytes > 0 {
             let ceiling = config.ceiling_bytes as usize;
             while !self.entries.is_empty() && self.total_bytes + size > ceiling {
                 self.evict_lru();
             }
-            // Skip admission if the row is larger than the entire ceiling.
             if self.total_bytes + size > ceiling {
                 return;
             }
@@ -86,7 +122,7 @@ impl CacheState {
         self.access_counter += 1;
         self.total_bytes += size;
         self.entries.insert(
-            handle,
+            key,
             CacheEntry {
                 row,
                 access_order: self.access_counter,
@@ -95,23 +131,27 @@ impl CacheState {
         );
     }
 
-    /// Remove the entry for `handle`.
-    fn evict(&mut self, handle: &RowHandle) {
-        if let Some(entry) = self.entries.remove(handle) {
+    /// Remove the present-read entry for `handle`. Snapshot entries
+    /// (AsOf(hlc)) are left intact because pinned snapshot data is
+    /// immutable — writes cannot invalidate them.
+    fn evict_present(&mut self, handle: &RowHandle) {
+        let key = TemporalCacheKey::new(handle.clone(), AsOfCoordinate::Present);
+        if let Some(entry) = self.entries.remove(&key) {
             self.total_bytes -= entry.byte_size;
         }
     }
 
-    /// Remove all entries whose `RowHandle::table` matches `table`.
-    fn evict_all_for_table(&mut self, table: &str) {
-        let to_remove: Vec<RowHandle> = self
+    /// Remove all present-read entries whose table matches. Snapshot
+    /// entries are left intact.
+    fn evict_all_present_for_table(&mut self, table: &str) {
+        let to_remove: Vec<TemporalCacheKey> = self
             .entries
             .keys()
-            .filter(|h| h.table == table)
+            .filter(|k| k.handle.table == table && k.as_of == AsOfCoordinate::Present)
             .cloned()
             .collect();
-        for handle in to_remove {
-            if let Some(entry) = self.entries.remove(&handle) {
+        for key in to_remove {
+            if let Some(entry) = self.entries.remove(&key) {
                 self.total_bytes -= entry.byte_size;
             }
         }
@@ -124,9 +164,9 @@ impl CacheState {
             .entries
             .iter()
             .min_by_key(|(_, e)| e.access_order)
-            .map(|(h, _)| h.clone());
-        if let Some(handle) = lru {
-            if let Some(entry) = self.entries.remove(&handle) {
+            .map(|(k, _)| k.clone());
+        if let Some(key) = lru {
+            if let Some(entry) = self.entries.remove(&key) {
                 self.total_bytes -= entry.byte_size;
             }
         }
@@ -148,24 +188,37 @@ fn extract_key(predicate: Option<&StoragePredicate>) -> Option<RowKey> {
 
 /// Returns `true` when `row` is eligible for the hot tier.
 ///
-/// `provenance` encodes sensitivity in bits [6:4]: `level = (raw >> 4) & 0x7`.
+/// Sensitivity is encoded in the `provenance` bitmap at bits 30–35 (6-bit
+/// field, scale-gapped per cookbook §2.5 v0.6). The gate converts the raw
+/// field value to an ordinal (0–3) and compares it against the config
+/// threshold, which is also expressed as an ordinal.
 ///
-///   - Column absent           → admit
-///   - level > threshold       → reject
-///   - level == 3 (Secret)     → reject always regardless of threshold
-///   - Unparseable value       → reject (fail closed)
+///   - Column absent              → admit
+///   - ordinal > threshold        → reject
+///   - ordinal == 3 (Secret)      → reject always regardless of threshold
+///   - Unrecognised bit pattern   → reject (fail closed)
+///   - Unparseable value          → reject (fail closed)
 fn is_admissible(row: &StorageRow, config: &EstateCacheConfig) -> bool {
     match row.get("provenance") {
         None => true,
         Some(TypedValue::Int(raw)) | Some(TypedValue::Bitmap(raw)) => {
-            let level = ((raw >> 4) & 0x7) as i32;
+            // Sensitivity at capture lives in bits 30–35 of the provenance bitmap
+            // (6-bit field, scale-gapped: 0/16/32/48 per cookbook §2.5 v0.6).
+            let raw_field = ((raw >> 30) & 0x3F) as i32;
+            let ordinal = match raw_field {
+                0  => 0,  // Normal
+                16 => 1,  // Elevated
+                32 => 2,  // Restricted
+                48 => 3,  // Secret
+                _  => return false, // Unrecognised bit pattern → fail closed
+            };
             // Hard Secret exclusion is defence-in-depth: threshold is already
             // clamped to ≤2 by EstateCacheConfig, but the guard is correct
             // even if that clamp were bypassed.
-            if level == 3 {
+            if ordinal == 3 {
                 return false;
             }
-            level <= config.sensitivity_threshold
+            ordinal <= config.sensitivity_threshold
         }
         Some(_) => false, // unparseable → fail closed
     }
@@ -211,31 +264,73 @@ fn estimated_value_bytes(value: &TypedValue) -> usize {
 pub struct CachingRowStore {
     backing: Arc<dyn RowStore>,
     config: EstateCacheConfig,
-    // Mutex satisfies Send + Sync; poison on panic is propagated to callers.
+    parent_chain_provider: Option<ParentChainProvider>,
     state: Mutex<CacheState>,
 }
 
 impl CachingRowStore {
     /// Wrap `backing` with an in-memory LRU hot tier governed by `config`.
-    pub fn new(backing: Arc<dyn RowStore>, config: EstateCacheConfig) -> Self {
+    ///
+    /// `parent_chain_provider`: optional callback that returns the
+    /// Merkle-aggregate parent chain for a changed row. When set,
+    /// writes evict cached aggregates for every node in the chain.
+    pub fn new(
+        backing: Arc<dyn RowStore>,
+        config: EstateCacheConfig,
+    ) -> Self {
         CachingRowStore {
             backing,
             config,
+            parent_chain_provider: None,
             state: Mutex::new(CacheState::new()),
         }
     }
 
-    /// Invalidate a cached entry. Called by `CacheInvalidator` when an
-    /// external write arrives via `StorageObserver`. Pass `key: None` to
-    /// evict all entries for `table` (bulk-update semantics).
+    /// Wrap `backing` with an in-memory LRU hot tier and a parent-chain
+    /// callback for Merkle-aggregate invalidation.
+    pub fn with_parent_chain(
+        backing: Arc<dyn RowStore>,
+        config: EstateCacheConfig,
+        provider: ParentChainProvider,
+    ) -> Self {
+        CachingRowStore {
+            backing,
+            config,
+            parent_chain_provider: Some(provider),
+            state: Mutex::new(CacheState::new()),
+        }
+    }
+
+    /// Invalidate cached present-read entries. Called by `CacheInvalidator`
+    /// when an external write arrives via `StorageObserver`. Pass `key: None`
+    /// to evict all present entries for `table`.
+    ///
+    /// Snapshot-read entries (AsOf(hlc)) are never evicted because the
+    /// pinned snapshot data is immutable.
     pub fn invalidate(&self, table: &str, key: Option<RowKey>) {
         if !self.config.enabled {
             return;
         }
         let mut state = self.state.lock().unwrap();
         match key {
-            Some(k) => state.evict(&RowHandle::new(table, k)),
-            None => state.evict_all_for_table(table),
+            Some(k) => {
+                state.evict_present(&RowHandle::new(table, k));
+                drop(state);
+                self.invalidate_parent_chain(table, k);
+            }
+            None => state.evict_all_present_for_table(table),
+        }
+    }
+
+    /// Evict cached Merkle-aggregate entries for every node in the parent
+    /// chain. No-op when no provider is registered.
+    fn invalidate_parent_chain(&self, table: &str, key: RowKey) {
+        if let Some(ref provider) = self.parent_chain_provider {
+            let chain = provider(table, key);
+            let mut state = self.state.lock().unwrap();
+            for parent_handle in &chain {
+                state.evict_present(parent_handle);
+            }
         }
     }
 }
@@ -246,9 +341,11 @@ impl RowStore for CachingRowStore {
         table: &str,
         values: BTreeMap<String, TypedValue>,
     ) -> StorageResult<RowHandle> {
-        // Insert always goes to the backing store. The returned handle is new,
-        // so there is no prior cache entry to invalidate.
-        self.backing.insert(table, values)
+        let handle = self.backing.insert(table, values)?;
+        if self.config.enabled {
+            self.invalidate_parent_chain(table, handle.key);
+        }
+        Ok(handle)
     }
 
     fn upsert(
@@ -258,10 +355,9 @@ impl RowStore for CachingRowStore {
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
         let handle = self.backing.upsert(table, values, conflict_columns)?;
-        // Upsert may have updated an existing cached row; evict so the next
-        // read falls through to the backing store.
         if self.config.enabled {
-            self.state.lock().unwrap().evict(&handle);
+            self.state.lock().unwrap().evict_present(&handle);
+            self.invalidate_parent_chain(table, handle.key);
         }
         Ok(handle)
     }
@@ -274,11 +370,11 @@ impl RowStore for CachingRowStore {
     ) -> StorageResult<usize> {
         let count = self.backing.update(table, values, predicate)?;
         if self.config.enabled && count > 0 {
-            let mut state = self.state.lock().unwrap();
             if let Some(key) = extract_key(Some(predicate)) {
-                state.evict(&RowHandle::new(table, key));
+                self.state.lock().unwrap().evict_present(&RowHandle::new(table, key));
+                self.invalidate_parent_chain(table, key);
             } else {
-                state.evict_all_for_table(table);
+                self.state.lock().unwrap().evict_all_present_for_table(table);
             }
         }
         Ok(count)
@@ -287,11 +383,11 @@ impl RowStore for CachingRowStore {
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
         let count = self.backing.delete(table, predicate)?;
         if self.config.enabled && count > 0 {
-            let mut state = self.state.lock().unwrap();
             if let Some(key) = extract_key(Some(predicate)) {
-                state.evict(&RowHandle::new(table, key));
+                self.state.lock().unwrap().evict_present(&RowHandle::new(table, key));
+                self.invalidate_parent_chain(table, key);
             } else {
-                state.evict_all_for_table(table);
+                self.state.lock().unwrap().evict_all_present_for_table(table);
             }
         }
         Ok(count)
@@ -305,32 +401,97 @@ impl RowStore for CachingRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
+        self.temporal_query(table, predicate, order_by, limit, offset, AsOfCoordinate::Present)
+    }
+
+    fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
+        self.backing.count(table, predicate)
+    }
+
+    fn query_as_of(
+        &self,
+        table: &str,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        as_of: Option<AsOfCoordinate>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        let coordinate = as_of.unwrap_or(AsOfCoordinate::Present);
+        self.temporal_query(table, predicate, order_by, limit, offset, coordinate)
+    }
+
+    // ----------------------------------------------------------------
+    // Explicit transaction boundary (GLK_BATCH1)
+    // ----------------------------------------------------------------
+
+    /// Open a write transaction on the backing store.
+    ///
+    /// Explicitly delegates to `backing.begin_transaction()` rather than
+    /// relying on the `RowStore` trait's no-op default. Live GLK estates wrap
+    /// `SqliteRowStore` in a `CachingRowStore`; the no-op default would
+    /// silently swallow the transaction boundary, defeating the batch API.
+    fn begin_transaction(&self) -> StorageResult<()> {
+        self.backing.begin_transaction()
+    }
+
+    /// Commit the current transaction on the backing store.
+    fn commit_transaction(&self) -> StorageResult<()> {
+        self.backing.commit_transaction()
+    }
+
+    /// Roll back the current transaction on the backing store.
+    fn rollback_transaction(&self) -> StorageResult<()> {
+        self.backing.rollback_transaction()
+    }
+}
+
+impl CachingRowStore {
+    /// Shared implementation for both present and as-of queries with
+    /// temporal cache key isolation.
+    fn temporal_query(
+        &self,
+        table: &str,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        as_of: AsOfCoordinate,
+    ) -> StorageResult<Vec<StorageRow>> {
         if self.config.enabled {
             if let Some(key) = extract_key(predicate) {
                 let handle = RowHandle::new(table, key);
-                // Check cache first; release the lock before calling the
-                // backing store to avoid holding it across a potentially
-                // slow operation.
-                let cached = self.state.lock().unwrap().get(&handle);
+                let cache_key = TemporalCacheKey::new(handle, as_of);
+                let cached = self.state.lock().unwrap().get(&cache_key);
                 if let Some(row) = cached {
                     return Ok(vec![row]);
                 }
-                // Cache miss: query backing store and admit the result.
-                let rows = self.backing.query(table, predicate, order_by, limit, offset)?;
+                // Cache miss: query backing store with temporal coordinate.
+                let rows = match as_of {
+                    AsOfCoordinate::Present => {
+                        self.backing.query(table, predicate, order_by, limit, offset)?
+                    }
+                    AsOfCoordinate::AsOf(_) => {
+                        self.backing.query_as_of(table, predicate, order_by, limit, offset, Some(as_of))?
+                    }
+                };
                 if rows.len() == 1 {
                     self.state
                         .lock()
                         .unwrap()
-                        .admit(handle, rows[0].clone(), &self.config);
+                        .admit(cache_key, rows[0].clone(), &self.config);
                 }
                 return Ok(rows);
             }
         }
         // All other predicates pass through; no query-result caching.
-        self.backing.query(table, predicate, order_by, limit, offset)
-    }
-
-    fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
-        self.backing.count(table, predicate)
+        match as_of {
+            AsOfCoordinate::Present => {
+                self.backing.query(table, predicate, order_by, limit, offset)
+            }
+            AsOfCoordinate::AsOf(_) => {
+                self.backing.query_as_of(table, predicate, order_by, limit, offset, Some(as_of))
+            }
+        }
     }
 }

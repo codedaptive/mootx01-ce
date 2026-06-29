@@ -154,10 +154,9 @@ public struct ARIA_MCPDispatcher: Sendable {
     }
 
     /// Notifications carry one-way information from the client
-    /// (initialized, cancellations). Today we accept any notification
-    /// and do nothing — the server has no async client work to cancel
-    /// and the initialized handshake is purely informational on the
-    /// MemPalace pattern.
+    /// (initialized, cancellations). The server logs every notification
+    /// to stderr and sends no JSON-RPC reply — per spec, notifications
+    /// never receive a response.
     private func handleNotification(_ request: JSONRPCRequest) async {
         Logging.stderr.log("notification: \(request.method)")
     }
@@ -300,9 +299,16 @@ public struct StdioServer {
     /// writes responses to stdout. Malformed lines emit a parseError
     /// response with a null id; that lets a client recover by sending
     /// the next well-formed request without restarting the server.
+    ///
+    /// Frame size cap (CAND-051 hardening): if the in-memory buffer grows
+    /// beyond `maxFrameBytes` without a newline the peer is writing a
+    /// frame that has no valid end; the loop breaks and stdin is abandoned.
+    /// Default cap is 4 MiB — large enough for any legitimate MCP payload
+    /// (the largest tool argument body accepted by HTTP is also 4 MiB).
     public func run(
         input: FileHandle = .standardInput,
-        output: FileHandle = .standardOutput
+        output: FileHandle = .standardOutput,
+        maxFrameBytes: Int = 4 * 1024 * 1024
     ) async {
         // Read in chunks rather than line-by-line through Foundation's
         // streamed-strings convenience because FileHandle's reader is
@@ -325,6 +331,16 @@ public struct StdioServer {
                 buffer.removeSubrange(buffer.startIndex...newlineIndex)
                 if frame.isEmpty { continue }
                 await handleFrame(frame, output: output)
+            }
+            // Frame size cap: if no newline arrived and the buffer already
+            // exceeds the cap, the peer is either misbehaving or writing a
+            // frame too large for any legitimate MCP use case. Break the
+            // loop — attempting to serve further frames from a runaway peer
+            // would exhaust process memory (local DoS). The peer will see
+            // stdin close and can reconnect.
+            if buffer.count > maxFrameBytes {
+                Logging.stderr.log("aria-mcp stdio: frame size cap exceeded (\(buffer.count) > \(maxFrameBytes)), closing input")
+                break
             }
         }
     }

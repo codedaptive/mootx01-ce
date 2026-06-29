@@ -2,7 +2,7 @@
 //
 // Count-vector over the 256-bit fingerprint space, the stored object
 // for the bundle algebra. Mirror of
-// glref-swift-CountVector256.swift; see
+// Sources/SubstrateTypes/CountVector256.swift; see
 // DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20.md and the scope in
 // docs/analysis/bundle_algebra/SCOPE_MAJORITY_VOTE_TREE_FOLD_2026-05-20.md.
 //
@@ -27,9 +27,10 @@ use std::ops::Add;
 ///
 /// `counts[j]` is the number of accumulated members whose bit j is
 /// set; `n` is the member count. The all-zero value is the fold
-/// identity. Counts are `u32`, bounding one vector to about 4.3
-/// billion members before a count could saturate, above any realistic
-/// node subtree size.
+/// identity. Counts are `u32`; `accumulate` and `merge` use
+/// `wrapping_add`, so a count wraps rather than panics on overflow.
+/// In practice 4.3 billion members per vector exceeds any realistic
+/// node subtree size, so wrap is not expected.
 #[cfg_attr(feature = "serde-support", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountVector256 {

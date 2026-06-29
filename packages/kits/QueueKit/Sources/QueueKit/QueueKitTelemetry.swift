@@ -13,7 +13,7 @@
 //   queue.idle_nonempty      — 1.0 when depth>0 but drain returned 0
 //   queue.latency_p50_ms     — median drain latency (ms) over recent window
 //   queue.latency_p95_ms     — 95th-pct drain latency (ms) over recent window
-//   queue.head_of_line_age_s — age of oldest pending job (seconds)
+//   queue.head_of_line_age_s — age of oldest drained job (seconds), or 0.0 when drain returned no jobs
 //
 // Tags: estate (estate UUID string), kit ("QueueKit")
 
@@ -36,8 +36,13 @@ public struct QueueLatencyWindow: Sendable {
     }
 
     /// Returns the p-th percentile of the current window (0–100).
-    /// Returns 0 when the window is empty.
+    /// Returns 0 when the window is empty or `p` is out of range / non-finite.
+    ///
+    /// P7-secfix: a NaN or out-of-range `p` produced an out-of-bounds index crash
+    /// (`Int(nan) == 0` but `Int(inf)` traps; `p < 0` or `p > 100` produces
+    /// indices outside [0, count-1]). Guard added before the index computation.
     public func percentile(_ p: Double) -> Double {
+        guard p.isFinite, p >= 0, p <= 100 else { return 0 }
         guard !samples.isEmpty else { return 0 }
         let sorted = samples.sorted()
         let idx = Int((p / 100.0) * Double(sorted.count - 1))

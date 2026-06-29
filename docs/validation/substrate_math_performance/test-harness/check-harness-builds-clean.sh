@@ -2,7 +2,8 @@
 # check-harness-builds-clean.sh
 #
 # Forces a clean rebuild of the conformance harness on both ports,
-# then runs the 23-primitive 4-way conformance gate. Catches the
+# then runs Swift and Rust validate-vectors against each vector file.
+# Catches the
 # "stale release binary" class of bug where the harness compiles
 # from cache against a pre-refactor substrate-lib snapshot.
 #
@@ -11,7 +12,7 @@
 #   - Cargo feature gating (simd-nightly, serde-support, etc.)
 #   - the harness's own primitive registry
 #
-# Exit 0 = harness clean-builds + all 23 conformance PASS
+# Exit 0 = harness clean-builds + all conformant primitives PASS
 # Exit 1 = build failure or any conformance FAIL
 
 set -e
@@ -39,7 +40,7 @@ if ! (cd swift && swift build 2>&1 | tail -3 | grep -q "Build complete"); then
 fi
 
 echo ""
-echo "=== full 23-primitive 4-way conformance ==="
+echo "=== full conformant-primitive 4-way conformance ==="
 PASS=0; FAIL=0; FAILED=""
 for vec in vectors/*.json; do
     name=$(basename "$vec" .json)
@@ -59,4 +60,4 @@ if [ "$FAIL" -gt 0 ]; then
     exit 1
 fi
 echo ""
-echo "PASS — harness rebuilds clean + all 23 primitives conformance-gated"
+echo "PASS — harness rebuilds clean + all conformant primitives conformance-gated"

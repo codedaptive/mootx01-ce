@@ -99,8 +99,8 @@ fn acceptance_matrix_matches_swift() {
         (KgFact, &[Mutate, Withdraw, Expunge, Recall]),
         (Vector, &[]),
         (DiaryEntry, &[Recall]),
-        (Proposal, &[Mutate, Withdraw, Expunge, Recall]),
-        (Association, &[Mutate, Expunge, Recall]),
+        (Proposal, &[Propose, Mutate, Withdraw, Expunge, Recall]),
+        (Association, &[Associate, Mutate, Expunge, Recall]),
         (
             LearnedReference,
             &[Learn, Mutate, Withdraw, Expunge, Recall],

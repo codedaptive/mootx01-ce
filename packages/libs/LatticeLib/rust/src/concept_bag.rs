@@ -19,7 +19,8 @@
 // it falls back to the deterministic HMM/Viterbi tagger (`word_class::hmm_tag`),
 // which is byte-identical to Swift's `HMMTagger.tag` (integer Viterbi, no
 // floating point). Novel nouns and verbs identified by the HMM are thus kept in
-// the bag, matching the non-Apple Swift behavior.
+// the bag. This matches the Swift default behavior, which also uses HMM for
+// novel tokens on all platforms (`NLTagger` is an explicit Apple-only opt-in).
 //
 // Deterministic and pure given a fixed lexicon and word-class table.
 

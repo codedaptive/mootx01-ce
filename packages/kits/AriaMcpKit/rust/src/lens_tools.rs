@@ -43,8 +43,8 @@ use substrate_ml::formal_concept_analysis::BoundedConceptMiner;
 use substrate_ml::temporal_causality_fold::TemporalFieldCoord;
 
 use crate::dispatch::{
-    error_result, opt_float, opt_integer, optional_string, recall_frame, require_string,
-    text_result, wall_now,
+    clamp_limit, error_result, opt_float, opt_integer, optional_integer, optional_string,
+    recall_frame, require_string, text_result, wall_now, LIMIT_HARD_CEILING,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::interface_tools::epoch_to_iso8601;
@@ -100,14 +100,21 @@ pub fn dispatch(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve(args, "estateID")?;
+    // resolve_direct: primary estate is restricted to the default (Item 3 hardening).
+    // The estateIDB comparison estate inside the overlap/divergence arms uses
+    // registry.resolve(args, "estateIDB") directly — unrestricted cross-estate
+    // reads for lens comparison are opt-in via the estateIDB argument.
+    let estate = registry.resolve_direct(args)?;
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
     match name {
         "moot_lens_keystones" => {
+            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
-            let top_k = opt_integer(args, "topK", 5)? as usize;
+            let top_k = crate::dispatch::clamp_limit(
+                Some(opt_integer(args, "topK", 5)?), "topK", 5, crate::dispatch::LIMIT_HARD_CEILING
+            )?;
             let ranked = run_keystones(&coord, &estate.handle, wing, top_k).map_err(lens_error)?;
             Ok(list(
                 "keystones",
@@ -119,6 +126,7 @@ pub fn dispatch(
         }
 
         "moot_lens_constellation" => {
+            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let out = run_constellation(&coord, &estate.handle, wing).map_err(lens_error)?;
             Ok(list(
@@ -128,10 +136,19 @@ pub fn dispatch(
         }
 
         "moot_lens_free_association" => {
+            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let seed = require_string(args, "seedDrawerID")?;
-            let walk_length = opt_integer(args, "walkLength", 10_000)? as usize;
-            let k = opt_integer(args, "k", 10)? as usize;
+            // walkLength ceiling 100_000: walk steps are bounded separately from result
+            // counts; the default (10_000) is well within the ceiling, but Int::MAX
+            // exhausts CPU. Parity: Swift uses clampLimit with ceiling 100_000.
+            let walk_length = crate::dispatch::clamp_limit(
+                Some(opt_integer(args, "walkLength", 10_000)?),
+                "walkLength", 10_000, 100_000,
+            )?;
+            let k = crate::dispatch::clamp_limit(
+                Some(opt_integer(args, "k", 10)?), "k", 10, crate::dispatch::LIMIT_HARD_CEILING
+            )?;
             let out = run_free_association(&coord, &estate.handle, wing, seed, walk_length, k)
                 .map_err(lens_error)?;
             // free_association is a forward walk; a seed with no outgoing tunnels
@@ -347,6 +364,8 @@ pub fn dispatch(
                 lines.push("contradicts_tunnels: none".to_string());
             } else {
                 lines.push(format!("contradicts_tunnels: {}", contradicts_tunnels.len()));
+                // ADR-017 §3 bridge consumer: source_wing/target_wing used as
+                // display fallback when drawer IDs are absent on tunnel metadata.
                 for t in contradicts_tunnels.iter().take(50) {
                     let src = t
                         .source_drawer_id
@@ -414,9 +433,11 @@ pub fn dispatch(
 
         "moot_lens_trust_synthesis" => {
             let frame = recall_frame(args)?;
-            // calibration_curve: None — v1.1.0 optional calibrated confidence
-            // pass (MatrixCalibrationCurve); MCP surface does not yet expose it.
-            let out = run_trust_grounded_synthesis(&coord, &estate.handle, frame, None, now)
+            // calibration_curve: None — the MCP surface does not expose the optional
+            // calibrated-confidence pass (MatrixCalibrationCurve).
+            // node_names: empty — the MCP surface does not plumb display names from the node tree.
+            let node_names = std::collections::HashMap::new();
+            let out = run_trust_grounded_synthesis(&coord, &estate.handle, frame, None, now, &node_names)
                 .map_err(lens_error)?;
             Ok(text_result(&format!(
                 "trust_grounded_synthesis: {} drawer(s), {} high-trust\nranked: {}\nsummary: {}",
@@ -496,7 +517,7 @@ pub fn dispatch(
                     .map(|p| {
                         let action_name = channel_name(p.action);
                         format!(
-                            "action={action_name} successRate={} n={}",
+                            "action={action_name} successRate={:.1} n={}",
                             p.success_rate, p.count
                         )
                     })
@@ -505,6 +526,7 @@ pub fn dispatch(
         }
 
         "moot_lens_successors" => {
+            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let anchor_id = require_string(args, "anchorID")?;
             let k = opt_integer(args, "k", 5)? as usize;
@@ -561,8 +583,11 @@ pub fn dispatch(
 
             let frame = recall_frame(args)?;
             let make_frame = || frame.clone();
+            // Node-name map: the MCP surface does not yet plumb display names
+            // from the node tree; pass empty for now.
+            let node_names = std::collections::HashMap::new();
             let out =
-                run_estate_divergence(&coord, &estate.handle, &estate_b.handle, make_frame, now)
+                run_estate_divergence(&coord, &estate.handle, &estate_b.handle, make_frame, now, &node_names)
                     .map_err(lens_error)?;
             Ok(text_result(&format!(
                 "estate_divergence: jensenShannon={} klDivergence={}\na={} drawer(s), b={} drawer(s)",
@@ -574,7 +599,14 @@ pub fn dispatch(
         "moot_lens_associations" => {
             // Analytics lens: recall drawers, project categorical facets into
             // a co-occurrence matrix, mine pairwise association rules.
-            let frame = recall_frame(args)?;
+            // Route limit through clamp_limit so negative and over-ceiling values
+            // are rejected/clamped. Parity: Swift moot_lens_associations uses
+            // ToolDispatcher.clampLimit with the same ceiling.
+            let mut frame = recall_frame(args)?;
+            let limit = clamp_limit(
+                optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
+            )?;
+            frame.limit = Some(limit);
             let min_support = opt_float(args, "minSupport", 0.0)?;
             let min_confidence = opt_float(args, "minConfidence", 0.0)?;
             let thresholds = MiningThresholds {
@@ -605,7 +637,14 @@ pub fn dispatch(
         "moot_lens_concepts" => {
             // Analytics lens: recall drawers, build a formal context, mine
             // bounded formal concepts.
-            let frame = recall_frame(args)?;
+            // Route limit through clamp_limit so negative and over-ceiling values
+            // are rejected/clamped. Parity: Swift moot_lens_concepts uses
+            // ToolDispatcher.clampLimit with the same ceiling.
+            let mut frame = recall_frame(args)?;
+            let limit = clamp_limit(
+                optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
+            )?;
+            frame.limit = Some(limit);
             let min_support = opt_integer(args, "minSupport", 1)? as usize;
             let max_intent_size = opt_integer(args, "maxIntentSize", 8)? as usize;
             let max_concepts = opt_integer(args, "maxConcepts", 20)? as usize;
@@ -665,7 +704,10 @@ pub fn dispatch(
             // Moment.run flow over GeniusLocusKit.glkFingerprintsCaptured.
             let start_epoch = require_iso8601(args, "windowStart")?;
             let end_epoch = require_iso8601(args, "windowEnd")?;
-            let window = (start_epoch, end_epoch);
+            // Guard: reject reversed windows (inverted range → nonsense histogram math)
+            // and excessively wide windows (decades-long scan exhausts memory).
+            // Parity: Swift moot_lens_moment uses requireWindowRange with the same checks.
+            let window = require_window_range(start_epoch, end_epoch)?;
 
             // Parse optional comparisonWindows array of {windowStart, windowEnd} objects.
             let comparison_windows: Vec<(i64, i64)> =
@@ -698,7 +740,8 @@ pub fn dispatch(
                                     "comparisonWindows entry missing valid windowEnd",
                                 )
                             })?;
-                        result.push((ws, we));
+                        // Guard each comparison window the same way as the primary window.
+                        result.push(require_window_range(ws, we)?);
                     }
                     result
                 } else {
@@ -723,7 +766,9 @@ pub fn dispatch(
             let bucket_seconds = opt_integer(args, "bucketSeconds", 86400)? as i64;
             let bucket_count = opt_integer(args, "bucketCount", 32)? as usize;
             let ending_at = require_iso8601(args, "endingAt")?;
-            let top_k = opt_integer(args, "topK", 3)? as usize;
+            let top_k = crate::dispatch::clamp_limit(
+                Some(opt_integer(args, "topK", 3)?), "topK", 3, crate::dispatch::LIMIT_HARD_CEILING
+            )?;
             let buckets: Vec<bool> = estate
                 .store
                 .fingerprint_bit_series(bit, bucket_seconds, bucket_count, ending_at)
@@ -746,12 +791,18 @@ pub fn dispatch(
         "moot_lens_precedence" => {
             let start_epoch = require_iso8601(args, "windowStart")?;
             let end_epoch = require_iso8601(args, "windowEnd")?;
+            // Guard: reject reversed windows (nonsense causal-pair output) and
+            // excessively wide windows. Same guards as moot_lens_moment.
+            // Parity: Swift moot_lens_precedence uses requireWindowRange.
+            require_window_range(start_epoch, end_epoch)?;
             // event_lag_pairs takes milliseconds; parse_iso8601 returns seconds.
             let lower_ms = start_epoch * 1000;
             let upper_ms = end_epoch * 1000;
             let target_field = require_string(args, "targetField")?;
             let target_value = require_string(args, "targetValue")?;
-            let k = opt_integer(args, "k", 5)? as usize;
+            let k = crate::dispatch::clamp_limit(
+                Some(opt_integer(args, "k", 5)? as i64), "k", 5, crate::dispatch::LIMIT_HARD_CEILING
+            )?;
             // Option A (Bob's ruling): filter drawers by eventTime BEFORE gathering
             // audit entries — only drawers whose event_time (epoch seconds, resolved
             // to filed_at when no explicit back-date was supplied) falls within
@@ -814,6 +865,8 @@ pub fn dispatch(
             // Validate field names before calling the recipe. The complexity recipe
             // returns entropy=-0 for unknown fields, producing a misleading success
             // result. Reject early with the valid list. Mirrors Swift LensTools.
+            // ADR-017 §3 bridge consumer: "room" and "wing" are display-bridge
+            // metadata field names enumerated for the complexity lens.
             const VALID_COMPLEXITY_FIELDS: &[&str] =
                 &["addedBy", "embeddingModelID", "room", "wing"];
             if !VALID_COMPLEXITY_FIELDS.contains(&field_a) {
@@ -942,6 +995,32 @@ fn require_iso8601(args: &BTreeMap<String, JsonValue>, key: &str) -> Result<i64,
             format!("Argument {key} is not an ISO8601 instant: {raw}"),
         )
     })
+}
+
+/// Validate a `(start, end)` epoch-seconds pair before use as a query window.
+///
+/// Two guards are applied:
+///   1. `start <= end` — a reversed window is a client error. Rust `RangeInclusive`
+///      would silently produce an empty iterator on a reversed range, masking the
+///      bug; rejecting early surfaces a proper `invalidParams` instead.
+///   2. Max span cap — a window spanning decades can scan the entire corpus and
+///      exhaust memory. Cap is 3 years (≈ 94 608 000 s), generous for any
+///      legitimate analytical query. Matches the Swift `requireWindowRange` cap.
+fn require_window_range(start: i64, end: i64) -> Result<(i64, i64), JSONRPCError> {
+    if start > end {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("windowStart must be ≤ windowEnd; got start={start} end={end}"),
+        ));
+    }
+    const MAX_SECS: i64 = 3 * 36525 * 24 * 3600 / 100; // 3 * 365.25 days * 86400 ≈ 94_608_000
+    if end - start > MAX_SECS {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "window span must not exceed 3 years; reduce the range",
+        ));
+    }
+    Ok((start, end))
 }
 
 /// Minimal ISO8601 UTC parser — handles the subset the server accepts.

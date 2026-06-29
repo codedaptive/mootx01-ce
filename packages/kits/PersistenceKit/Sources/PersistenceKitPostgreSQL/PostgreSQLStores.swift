@@ -39,7 +39,41 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         return try await block(conn)
     }
 
+    /// Validate a caller-supplied SQL identifier (column or table name).
+    ///
+    /// Accepts only names matching `[A-Za-z_][A-Za-z0-9_]*`. Double-quoting
+    /// alone is insufficient protection: a name containing `"` can escape the
+    /// delimiter and alter a dynamically-constructed SQL string. Mirrors the
+    /// guard already in `SQLiteStorage.validateSQLIdentifier` and in the Rust
+    /// backend's `validate_sql_identifier` (SECFIX-WS2-PK F2 — CAND-047).
+    private func validatePSQLIdentifier(_ name: String) throws {
+        guard !name.isEmpty else {
+            throw StorageError.invalidIdentifier(name: name)
+        }
+        for (index, char) in name.unicodeScalars.enumerated() {
+            let valid: Bool
+            if index == 0 {
+                // First character: letter or underscore.
+                valid = (char >= "A" && char <= "Z")
+                    || (char >= "a" && char <= "z")
+                    || char == "_"
+            } else {
+                // Subsequent characters: letter, digit, or underscore.
+                valid = (char >= "A" && char <= "Z")
+                    || (char >= "a" && char <= "z")
+                    || (char >= "0" && char <= "9")
+                    || char == "_"
+            }
+            guard valid else {
+                throw StorageError.invalidIdentifier(name: name)
+            }
+        }
+    }
+
     func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        // Validate all caller-supplied column names before interpolating into SQL.
+        // Mirrors the SQLite backend's guard (SECFIX-WS2-PK F2 — CAND-047).
+        for name in values.keys { try validatePSQLIdentifier(name) }
         // At-rest encryption seam (Mode 2 / RowEncryption): encrypt the content
         // column and stamp the keyID before binding. No-op for plaintext. The
         // structural invariant then confirms a content row carries a keyID, so
@@ -65,6 +99,10 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func upsert(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
+        // Validate all caller-supplied column names before interpolating into SQL.
+        // Mirrors the SQLite backend's guard (SECFIX-WS2-PK F2 — CAND-047).
+        for name in values.keys { try validatePSQLIdentifier(name) }
+        for name in conflictColumns { try validatePSQLIdentifier(name) }
         // upsert is not wired to encrypt: in the LocusKit schema it is only
         // called for non-content tables. The structural invariant guards
         // against a future content-bearing upsert writing plaintext with a
@@ -97,6 +135,9 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func update(table: String, values: [String: TypedValue], where predicate: StoragePredicate) async throws -> Int {
+        // Validate all caller-supplied column names before interpolating into SQL.
+        // Mirrors the SQLite backend's guard (SECFIX-WS2-PK F2 — CAND-047).
+        for name in values.keys { try validatePSQLIdentifier(name) }
         // update does not run the encryption seam, so a content update on an
         // encrypting estate would write plaintext with a null keyID. Guard it
         // like the other write paths; all current callers update only

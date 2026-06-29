@@ -42,3 +42,15 @@ postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
 # aes-gcm could change AEAD behaviour and silently break cross-port
 # byte-identity of the ciphertext layout. Exact pinning prevents silent upgrades.
 aes-gcm = { version = "=0.10.3", features = ["aes"] }
+# PostgreSQL TLS transport (CAND-029 — SECFIX-WS2-PK F3). C-1 per-crate
+# exception recorded in DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md.
+# Wraps the platform TLS stack (Security.framework on macOS, SChannel on
+# Windows, OpenSSL on Linux) via the `native-tls` crate — zero bundled
+# cryptographic implementations. Achieves parity with the Swift NIOSSL
+# three-mode semantics (disable / prefer / require) in Pool::open_connection.
+postgres-native-tls = "0.5"
+# native-tls: direct dep required because postgres-native-tls does not
+# re-export `native_tls`; we construct TlsConnector::builder() directly
+# in build_tls_connector() in postgres.rs. Version constraint matches what
+# postgres-native-tls 0.5 pulls in (0.2.x).
+native-tls = "0.2"

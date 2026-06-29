@@ -23,8 +23,26 @@
 //! Determinism: no clock, no RNG. The daemon carries `cycle_count`; all
 //! time-derived inputs (ages, the audit verdict) arrive through the seam.
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use intellectus_lib::{report, StatSample};
+
 use crate::lattice_anchor::EnrichmentStatus;
 use crate::maintenance_decision::{self, AgedRow, AuditVerdict, Category, DriftRow};
+
+/// One drawer's node-tree data for ADR-017 invariant verification. The
+/// adapter populates these from the same active-drawer scan it uses for
+/// decay/forbidden checks; the daemon verifies I-NT-3 (non-empty
+/// parent_node_id) and sibling display-name consistency.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeInvariantRow {
+    pub drawer_id: String,
+    pub parent_node_id: String,
+    pub wing: String,
+    pub room: String,
+}
 
 /// A proposal the sink receives. No Rust `ProposeFrame` estate type exists
 /// (propose is Brain-layer); `kind` is the proposal-kind tag.
@@ -78,11 +96,16 @@ pub struct MaintenanceCycleReport {
     /// deterministic re-inference miss, which now terminates as `qid_proposed`.
     /// Emitted as `neuronkit.enrichment.qid_still_pending`.
     pub qid_still_pending: usize,
+    // ── ADR-017 node invariant verification telemetry ────────────────
+    /// Number of ADR-017 node-tree invariant violations detected this
+    /// cycle. Covers I-NT-3 (empty parent_node_id) and sibling display-name
+    /// consistency. Emitted as `neuronkit.node_invariant.violations`.
+    pub node_invariant_violations: usize,
 }
 
 /// Maintenance health-scan parameters the cycle reads, mirroring the Swift
 /// `MaintenancePolicy` fields the decision uses (NEURONKIT_SPEC § 3.2).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaintenancePolicy {
     /// Tick cadence in milliseconds (spec default 300_000 / 5 minutes).
     pub tick_interval_ms: i64,
@@ -132,6 +155,34 @@ pub trait MaintenancePolicyStore {
 
     /// Persist the policy. Subsequent `load_policy()` calls return it.
     fn save_policy(&mut self, policy: MaintenancePolicy);
+
+    /// Load the persisted daemon cycle state, or `None` if none has been saved.
+    /// Loaded once at governor construction so a restart continues from the prior
+    /// run's idempotency/cycle memory (F6 / ADR-020). Default: no state persisted.
+    /// Mirrors Swift `MaintenancePolicyStore.loadDaemonState`.
+    fn load_daemon_state(&self) -> Option<MaintenanceDaemonState> {
+        None
+    }
+
+    /// Persist the daemon cycle state. The governor calls this after each cycle.
+    /// Default: discard (in-memory only); the manifest-backed store overrides it.
+    /// Mirrors Swift `MaintenancePolicyStore.saveDaemonState`.
+    fn save_daemon_state(&mut self, _state: MaintenanceDaemonState) {}
+}
+
+/// The maintenance daemon's across-cycle state, captured for persistence so a
+/// restart continues instead of repeating suppressed proposals or resetting its
+/// counters (F6 / ADR-020). `proposed_keys` is a SORTED Vec so the serialized
+/// manifest value is byte-stable. Mirrors Swift `MaintenanceDaemonState`:
+/// `last_fire_epoch_secs` ≡ `lastTickAt` (scan-tick baseline) and
+/// `last_audit_check_epoch_secs` ≡ `lastAuditCheckAt` (audit-check cadence,
+/// tracked independently of the scan tick — § 3.5).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaintenanceDaemonState {
+    pub last_fire_epoch_secs: Option<f64>,
+    pub last_audit_check_epoch_secs: Option<f64>,
+    pub proposed_keys: Vec<String>,
+    pub cycle_count: i64,
 }
 
 /// In-memory `MaintenancePolicyStore` for tests and for hosts that do not
@@ -201,6 +252,9 @@ pub struct MaintenanceScan {
     /// The daemon retries each row via `infer_lattice_anchor`; on success the
     /// status is flipped to `qid_completed` via the sink.
     pub qid_pending_drawers: Vec<QidPendingRow>,
+    /// Active drawers' node-tree data for ADR-017 invariant verification
+    /// (I-NT-3 empty parent_node_id, sibling display-name consistency).
+    pub node_invariant_rows: Vec<NodeInvariantRow>,
 }
 
 /// Read seam: yields the gathered scan inputs for one cycle.
@@ -265,8 +319,14 @@ pub struct MaintenanceDaemon {
     cycle_count: i64,
     /// Epoch-seconds timestamp of the last `pump` fire, or `None` on first
     /// call. Used by `pump` for interval gating — the daemon never reads the
-    /// system clock; the caller injects `now`.
+    /// system clock; the caller injects `now`. Mirrors Swift `lastTickAt`.
     last_fire_epoch_secs: Option<f64>,
+    /// Epoch-seconds timestamp of the last audit-chain integrity check, or `None`
+    /// before the first check. The audit check runs on its own cadence
+    /// (`policy.audit_check_interval_ms`), tracked independently of the scan tick
+    /// so a slow full-chain verify need not run every cycle (§ 3.5). Mirrors
+    /// Swift `lastAuditCheckAt`.
+    last_audit_check_epoch_secs: Option<f64>,
 }
 
 impl MaintenanceDaemon {
@@ -276,7 +336,30 @@ impl MaintenanceDaemon {
             proposed_keys: std::collections::BTreeSet::new(),
             cycle_count: 0,
             last_fire_epoch_secs: None,
+            last_audit_check_epoch_secs: None,
         }
+    }
+
+    /// Export the daemon's across-cycle state for persistence (F6 / ADR-020).
+    /// `proposed_keys` is emitted sorted (BTreeSet iterates in order) so the
+    /// serialized value is byte-stable. Mirrors Swift `currentDaemonState()`.
+    pub fn daemon_state(&self) -> MaintenanceDaemonState {
+        MaintenanceDaemonState {
+            last_fire_epoch_secs: self.last_fire_epoch_secs,
+            last_audit_check_epoch_secs: self.last_audit_check_epoch_secs,
+            proposed_keys: self.proposed_keys.iter().cloned().collect(),
+            cycle_count: self.cycle_count,
+        }
+    }
+
+    /// Restore the daemon's across-cycle state from persistence (F6 / ADR-020).
+    /// Called once at governor construction so a restart resumes the prior run's
+    /// idempotency/cycle memory.
+    pub fn restore_state(&mut self, state: MaintenanceDaemonState) {
+        self.last_fire_epoch_secs = state.last_fire_epoch_secs;
+        self.last_audit_check_epoch_secs = state.last_audit_check_epoch_secs;
+        self.proposed_keys = state.proposed_keys.into_iter().collect();
+        self.cycle_count = state.cycle_count;
     }
 
     /// Interval-gated pump — the entry point for the resident loop.
@@ -303,16 +386,41 @@ impl MaintenanceDaemon {
         S: MaintenanceProposalSink,
     {
         // Gate: fire if this is the first call or the interval has elapsed.
+        // Guard: treat a future `last_fire_epoch_secs` (a persisted timestamp
+        // ahead of `now`) as "never fired" and fire immediately. A future epoch
+        // can arise from a system clock warp backward (NTP step, VM snapshot
+        // restore, test fixture injection). Without this guard, the gate would
+        // return `now - future < interval` (a large negative ≥ interval only
+        // after the clock catches up), permanently blocking the maintenance cycle.
+        // Mirrors Swift `MaintenanceDaemon.due(now:)` nil-guard discipline and
+        // aligns with the Rust `due()` guard below. (NK-16 planned hardening)
         let interval_secs = self.policy.tick_interval_ms as f64 / 1000.0;
         let should_fire = match self.last_fire_epoch_secs {
             None => true, // first call always fires
-            Some(last) => (now_epoch_secs - last) >= interval_secs,
+            Some(last) => last > now_epoch_secs || (now_epoch_secs - last) >= interval_secs,
         };
         if !should_fire {
             return None;
         }
         self.last_fire_epoch_secs = Some(now_epoch_secs);
         Some(self.run_cycle(now_epoch_secs, reader, sink))
+    }
+
+    /// Cheap predicate: would `pump(now)` fire at `now`? Lets the resident
+    /// governor SKIP building the EstateMaintenanceReader snapshot on ticks where
+    /// the interval has not elapsed (maintenance fires every 5 min by default but
+    /// the governor ticks sub-second). Mirrors the gate inside `pump`; does NOT
+    /// mutate state. Swift twin: `MaintenanceDaemon.due(now:)`.
+    ///
+    /// Guard: treat a future `last_fire_epoch_secs` as "never fired" and report
+    /// due = true. A future epoch can arise from a clock warp backward; the guard
+    /// here mirrors the `pump` guard above. (NK-16 planned hardening)
+    pub fn due(&self, now_epoch_secs: f64) -> bool {
+        let interval_secs = self.policy.tick_interval_ms as f64 / 1000.0;
+        match self.last_fire_epoch_secs {
+            None => true,
+            Some(last) => last > now_epoch_secs || (now_epoch_secs - last) >= interval_secs,
+        }
     }
 
     /// Run one maintenance cycle (steps 0-6) against the seams. Mirrors
@@ -332,11 +440,37 @@ impl MaintenanceDaemon {
         S: MaintenanceProposalSink,
     {
         let scan = reader.scan();
-        let audit_checked = scan.audit.is_some();
+
+        // ── Step 0: audit-chain integrity monitor cadence (§ 3.5) ──────────
+        // The audit verdict is consumed only when DUE, tracked independently of
+        // the scan tick via `last_audit_check_epoch_secs` so a slow full-chain
+        // verify need not run every cycle. First run always checks (None). Mirrors
+        // Swift `MaintenanceDaemon.runCycle` step 0 (`lastAuditCheckAt` /
+        // `auditCheckIntervalMs`). With the default config (audit interval == tick
+        // interval) the check runs every fired cycle, identical to the prior
+        // behavior; the cadence only diverges from the tick when an operator sets
+        // `audit_check_interval_ms` larger than `tick_interval_ms`.
+        //
+        // NOTE: the reader's `scan()` computes the verdict every call; gating it
+        // here matches Swift's OBSERVABLE behavior (verdict consumed / proposal
+        // emitted only on the audit cadence) and state shape. Avoiding the verify
+        // work entirely when not due would require splitting the reader seam — a
+        // performance refinement, not a parity concern (no proposal/state effect).
+        let audit_due = match self.last_audit_check_epoch_secs {
+            None => true,
+            Some(last) => {
+                (now_epoch_secs - last) * 1000.0 >= self.policy.audit_check_interval_ms as f64
+            }
+        };
+        let audit_input = if audit_due { scan.audit } else { None };
+        if audit_due {
+            self.last_audit_check_epoch_secs = Some(now_epoch_secs);
+        }
+        let audit_checked = audit_due;
 
         // Delegate every decision to the pure core (steps 0-5).
         let outcome = maintenance_decision::decide(&maintenance_decision::Inputs {
-            audit: scan.audit,
+            audit: audit_input,
             forbidden_drawer_ids: &scan.forbidden_drawer_ids,
             aged_active: &scan.aged_active,
             decay_window_seconds: self.policy.decay_window_seconds,
@@ -392,6 +526,17 @@ impl MaintenanceDaemon {
         // Determinism: `now_epoch_secs` is the caller's injected clock.
         let qid_batch = &scan.qid_pending_drawers;
         let qid_retried = qid_batch.len().min(QID_RETRY_SCAN_CAP);
+        // Emit qid_retry counter before processing (Swift parity).
+        {
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("cycle".to_string(), (self.cycle_count + 1).to_string());
+            report!(StatSample::metric(
+                "neuronkit.enrichment.qid_retry".to_string(),
+                qid_retried as f64,
+                tags,
+                now_epoch_secs,
+            ));
+        }
         let mut qid_resolved: usize = 0;
         let mut qid_proposed: usize = 0;
         // qid_still_pending is reserved for a real substrate-write failure. The
@@ -435,16 +580,99 @@ drawer {} (mdcc: {}); enrichment proposal filed for human/agent Q-ID assignment"
             }
         }
 
+        // Emit per-cycle QID outcome counters (Swift parity: qid_resolved,
+        // qid_proposed, qid_still_pending).
+        {
+            let cycle_tag = (self.cycle_count + 1).to_string();
+            let mut tags_resolved = std::collections::HashMap::new();
+            tags_resolved.insert("cycle".to_string(), cycle_tag.clone());
+            report!(StatSample::metric(
+                "neuronkit.enrichment.qid_resolved".to_string(),
+                qid_resolved as f64,
+                tags_resolved,
+                now_epoch_secs,
+            ));
+            let mut tags_proposed = std::collections::HashMap::new();
+            tags_proposed.insert("cycle".to_string(), cycle_tag.clone());
+            report!(StatSample::metric(
+                "neuronkit.enrichment.qid_proposed".to_string(),
+                qid_proposed as f64,
+                tags_proposed,
+                now_epoch_secs,
+            ));
+            let mut tags_pending = std::collections::HashMap::new();
+            tags_pending.insert("cycle".to_string(), cycle_tag);
+            report!(StatSample::metric(
+                "neuronkit.enrichment.qid_still_pending".to_string(),
+                qid_still_pending as f64,
+                tags_pending,
+                now_epoch_secs,
+            ));
+        }
+
+        // ── Step 5.9: ADR-017 node invariant verification ────────────
+        // Verify a subset of ADR-017 node-tree containment invariants from
+        // the drawer corpus already gathered by the adapter. Full invariant
+        // verification (I-NT-1 through I-NT-6) requires node-table access
+        // not yet exposed through the GLK public surface.
+        //
+        //   I-NT-3 (partial): every drawer must have a non-empty parent_node_id.
+        //   Consistency: drawers sharing a parent_node_id must have consistent
+        //   wing/room display names.
+        let mut node_invariant_violations: usize = 0;
+        for row in &scan.node_invariant_rows {
+            if row.parent_node_id.is_empty() {
+                node_invariant_violations += 1;
+                let mut tags = std::collections::HashMap::new();
+                tags.insert("drawer_id".to_string(), row.drawer_id.clone());
+                report!(StatSample::metric(
+                    "neuronkit.node_invariant.empty_parent".to_string(),
+                    1.0,
+                    tags,
+                    now_epoch_secs,
+                ));
+            }
+        }
+        let mut node_groups: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for row in &scan.node_invariant_rows {
+            if row.parent_node_id.is_empty() {
+                continue;
+            }
+            if let Some(existing) = node_groups.get(&row.parent_node_id) {
+                if existing.0 != row.wing || existing.1 != row.room {
+                    node_invariant_violations += 1;
+                }
+            } else {
+                node_groups.insert(
+                    row.parent_node_id.clone(),
+                    (row.wing.clone(), row.room.clone()),
+                );
+            }
+        }
+
+        // Per-cycle violation counter (Swift parity).
+        {
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("cycle".to_string(), (self.cycle_count + 1).to_string());
+            report!(StatSample::metric(
+                "neuronkit.node_invariant.violations".to_string(),
+                node_invariant_violations as f64,
+                tags,
+                now_epoch_secs,
+            ));
+        }
+
         // Step 6: exactly one diary entry; the summary is byte-identical to
-        // the Swift actor's (diary text includes QID telemetry per Board
-        // item 14).
+        // the Swift actor's (diary text includes QID and node-invariant
+        // telemetry).
         self.cycle_count += 1;
         let entry = MaintenanceDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
             entry: format!(
                 "maintenance cycle {}: audit-checked {}, forbidden {}, decay {}, \
 tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppressed {}, \
-qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}",
+qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}, \
+node-invariant-violations {}",
                 self.cycle_count,
                 audit_checked,
                 outcome.forbidden_combinations,
@@ -457,7 +685,8 @@ qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}",
                 qid_retried,
                 qid_resolved,
                 qid_proposed,
-                qid_still_pending
+                qid_still_pending,
+                node_invariant_violations
             ),
             topic: "maintenance-cycle".to_string(),
             wing: DIARY_WING.to_string(),
@@ -479,6 +708,7 @@ qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}",
             qid_resolved,
             qid_proposed,
             qid_still_pending,
+            node_invariant_violations,
         }
     }
 }
@@ -545,6 +775,7 @@ mod tests {
             fingerprint_drift: vec![drift("wing_a/room_b", 0.5)],
             reference_drift: vec![drift("ref-1", 0.5)],
             qid_pending_drawers: vec![],
+            node_invariant_rows: vec![],
         }
     }
 
@@ -577,12 +808,14 @@ mod tests {
             sink.diaries[0].entry,
             "maintenance cycle 1: audit-checked true, forbidden 1, decay 1, \
 tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0, \
-qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"
+qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0, \
+node-invariant-violations 0"
         );
         // No pending drawers were seeded — QID telemetry all zero.
         assert_eq!(report.qid_retried, 0);
         assert_eq!(report.qid_resolved, 0);
         assert_eq!(report.qid_still_pending, 0);
+        assert_eq!(report.node_invariant_violations, 0);
     }
 
     // MC-2: a tampered audit chain emits exactly the audit-integrity
@@ -623,7 +856,7 @@ qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"
         assert_eq!(second.decay_candidates, 1, "counts still report crossers");
         assert!(sink.diaries[1].entry.starts_with("maintenance cycle 2:"));
         assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 5"));
-        assert!(sink.diaries[1].entry.contains("qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"));
+        assert!(sink.diaries[1].entry.contains("qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0, node-invariant-violations 0"));
     }
 
     // MPS-1: InMemoryMaintenancePolicyStore starts empty; save then load
@@ -954,5 +1187,107 @@ qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"
             .filter(|f| f.kind == "enrichment")
             .count();
         assert_eq!(enrichment_proposals, report.qid_proposed);
+    }
+
+    // ─── ADR-017 node invariant verification ────────────────────────────
+
+    // NI-1: no invariant rows → zero violations.
+    #[test]
+    fn ni1_empty_invariant_rows_zero_violations() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+        assert_eq!(report.node_invariant_violations, 0);
+        assert!(report.diary_entry.entry.contains("node-invariant-violations 0"));
+    }
+
+    // NI-2: empty parent_node_id triggers I-NT-3 violation.
+    #[test]
+    fn ni2_empty_parent_node_id_violation() {
+        let scan = MaintenanceScan {
+            node_invariant_rows: vec![
+                NodeInvariantRow {
+                    drawer_id: "d-ok".into(),
+                    parent_node_id: "node-1".into(),
+                    wing: "study".into(),
+                    room: "desk".into(),
+                },
+                NodeInvariantRow {
+                    drawer_id: "d-orphan".into(),
+                    parent_node_id: "".into(),
+                    wing: "study".into(),
+                    room: "desk".into(),
+                },
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+        assert_eq!(report.node_invariant_violations, 1);
+        assert!(report.diary_entry.entry.contains("node-invariant-violations 1"));
+    }
+
+    // NI-3: sibling display-name inconsistency triggers a violation.
+    #[test]
+    fn ni3_inconsistent_display_names_violation() {
+        let scan = MaintenanceScan {
+            node_invariant_rows: vec![
+                NodeInvariantRow {
+                    drawer_id: "d-a".into(),
+                    parent_node_id: "node-1".into(),
+                    wing: "study".into(),
+                    room: "desk".into(),
+                },
+                NodeInvariantRow {
+                    drawer_id: "d-b".into(),
+                    parent_node_id: "node-1".into(),
+                    wing: "study".into(),
+                    room: "shelf".into(), // different room name for same node
+                },
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+        assert_eq!(report.node_invariant_violations, 1);
+    }
+
+    // NI-4: both violations co-occur (empty parent + inconsistent display).
+    #[test]
+    fn ni4_multiple_violation_types() {
+        let scan = MaintenanceScan {
+            node_invariant_rows: vec![
+                NodeInvariantRow {
+                    drawer_id: "d-orphan".into(),
+                    parent_node_id: "".into(),
+                    wing: "x".into(),
+                    room: "y".into(),
+                },
+                NodeInvariantRow {
+                    drawer_id: "d-a".into(),
+                    parent_node_id: "node-2".into(),
+                    wing: "wing-a".into(),
+                    room: "room-a".into(),
+                },
+                NodeInvariantRow {
+                    drawer_id: "d-b".into(),
+                    parent_node_id: "node-2".into(),
+                    wing: "wing-b".into(), // different wing for same node
+                    room: "room-a".into(),
+                },
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+        // 1 empty parent + 1 inconsistent display = 2 violations.
+        assert_eq!(report.node_invariant_violations, 2);
     }
 }

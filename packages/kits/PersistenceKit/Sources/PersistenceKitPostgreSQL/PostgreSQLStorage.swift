@@ -227,7 +227,8 @@ actor PostgreSQLBackend {
     /// SQL rationale per query:
     ///
     /// `pg_database_size`: returns the total on-disk size of the current
-    /// database in bytes. Includes all tables, indexes, TOAST, and WAL.
+    /// database in bytes. Includes all tables, indexes, and TOAST.
+    /// Does NOT include WAL (WAL lives in pg_wal/, outside the database directory).
     ///
     /// `pg_stat_database`: one row per database; `blks_hit` and `blks_read`
     /// are cumulative counters. The cache-hit ratio blks_hit/(blks_hit+blks_read)

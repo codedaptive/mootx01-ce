@@ -141,7 +141,8 @@ struct PersistenceTests {
             let drawer = try await kit.capture(handle, frame)
             // Verify the drawer was captured before teardown.
             #expect(drawer.content == capturedContent)
-            #expect(drawer.room == "persistence-tests")
+            let names = try await kit.resolveNodeNames(handle, parentNodeIds: [drawer.parentNodeId])
+            #expect(names[drawer.parentNodeId]?.room == "persistence-tests")
 
             // Close the estate through the kit; the storage backend is
             // dropped when `kit` and `handle` go out of scope at end of
@@ -170,7 +171,10 @@ struct PersistenceTests {
             // The captured drawer must survive across the lifecycle boundary.
             let found = drawers.first(where: { $0.content == capturedContent })
             #expect(found != nil, "drawer written in phase 1 not found after reopen")
-            #expect(found?.room == "persistence-tests")
+            if let found {
+                let names2 = try await kit2.resolveNodeNames(handle2, parentNodeIds: [found.parentNodeId])
+                #expect(names2[found.parentNodeId]?.room == "persistence-tests")
+            }
 
             try await kit2.close(handle2)
         }

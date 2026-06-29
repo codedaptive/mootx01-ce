@@ -30,6 +30,8 @@ happened unless you actually queried it.
 2. Recall:
    - `moot_memory_search` for broad recall.
    - `moot_recall_precise` for exact facts, paths, versions, names, numbers, and near-duplicates.
+   - `moot_recall_shaped` for associative, conceptual, or other fusion-steered recall.
+   - `moot_recall_distilled` for compact factoid answers from the distilled tier.
    - `moot_fact_search` for structured facts.
 
 3. Analyze:
@@ -45,7 +47,9 @@ happened unless you actually queried it.
    - `moot_write_journal` for session continuity.
 
 5. Dream:
+   - Run `moot_reindex` after batch import to populate semantic indexes.
    - Run `moot_dream` after bulk import, major filing, or substantial memory growth.
+   - Run `moot_consolidate` periodically to populate the distilled factoid tier.
 
 ## Answer Discipline
 

@@ -25,11 +25,18 @@ final class ObserverRegistry: @unchecked Sendable {
         let continuation: AsyncStream<BlobChange>.Continuation
     }
 
-    // `subs` and `blobSubs` are accessed exclusively under `lock`; that
-    // discipline is what makes the `@unchecked Sendable` conformance sound.
+    struct DirtyChainSubscription {
+        let id: UUID
+        let continuation: AsyncStream<DirtyChainEvent>.Continuation
+    }
+
+    // `subs`, `blobSubs`, and `dirtyChainSubs` are accessed exclusively
+    // under `lock`; that discipline is what makes the `@unchecked Sendable`
+    // conformance sound.
     private let lock = NSLock()
     private var subs: [UUID: Subscription] = [:]
     private var blobSubs: [UUID: BlobSubscription] = [:]
+    private var dirtyChainSubs: [UUID: DirtyChainSubscription] = [:]
 
     /// Record a row subscription and return its stream. Synchronous.
     func register(table: String, events: Set<StorageEvent>) -> AsyncStream<TableChange> {
@@ -106,6 +113,40 @@ final class ObserverRegistry: @unchecked Sendable {
             sub.continuation.yield(change)
         }
     }
+
+    // MARK: - Dirty-chain subscriptions
+
+    /// Record a dirty-chain subscription and return its stream. Synchronous.
+    func registerDirtyChain() -> AsyncStream<DirtyChainEvent> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<DirtyChainEvent>.makeStream(bufferingPolicy: .bufferingOldest(1024))
+        lock.lock()
+        dirtyChainSubs[id] = DirtyChainSubscription(id: id, continuation: continuation)
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in
+            self?.removeDirtyChainSub(id: id)
+        }
+        return stream
+    }
+
+    private func removeDirtyChainSub(id: UUID) {
+        lock.lock()
+        dirtyChainSubs.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    private func allDirtyChainSubscriptions() -> [DirtyChainSubscription] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(dirtyChainSubs.values)
+    }
+
+    /// Deliver `event` to every dirty-chain subscription.
+    func notifyDirtyChain(_ event: DirtyChainEvent) async {
+        for sub in allDirtyChainSubscriptions() {
+            sub.continuation.yield(event)
+        }
+    }
 }
 
 final class InMemoryObserver: StorageObserver, Sendable {
@@ -126,5 +167,9 @@ final class InMemoryObserver: StorageObserver, Sendable {
 
     func observeBlobs() -> AsyncStream<BlobChange> {
         registry.registerBlobs()
+    }
+
+    func observeDirtyChain() -> AsyncStream<DirtyChainEvent> {
+        registry.registerDirtyChain()
     }
 }

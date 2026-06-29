@@ -27,6 +27,7 @@ use crate::{
     SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate,
     StorageResult, StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
+use crate::error::validate_sql_identifier;
 
 // ─────────────────────────────────────────────────────────────────────
 // Value codec — TypedValue <-> SQLite. Mirrors SQLiteConnection.swift's
@@ -116,10 +117,102 @@ fn iso8601(secs: i64) -> String {
 /// Returns `None` only when the string is not a valid ISO-8601 timestamp at all.
 /// Callers that need fail-loud behaviour must convert `None` into a
 /// `StorageError::CorruptStoredValue`.
+///
+/// Hot-path note (cross-port): this parse runs on the Merkle-rollup read path,
+/// which re-decodes every drawer in a room on each insert — i.e. O(N²) times
+/// during a large import. `chrono`'s RFC-3339 parser is a fast compiled scan,
+/// so it is cheap here. The Swift port must NOT use `NSISO8601DateFormatter`
+/// for this: that API is ICU-backed and FAR TOO SLOW in this situation
+/// (≈80% of CPU in a sampled import); Swift hand-parses the canonical shape
+/// instead (see `ISO8601.fastParseCanonicalUTC`).
+///
+/// Granularity: returns whole epoch SECONDS — `TypedValue::Timestamp` and the
+/// substrate's drawer time fields (`filed_at`, `event_time`) are `i64` epoch
+/// seconds, so sub-second precision is dropped here by design. The Swift port
+/// retains sub-second precision in its `Date`. Reconciling the two ports to a
+/// shared sub-second ("super fine") representation is a substrate-wide
+/// time-granularity change, not a parser-local one, and is deferred to v1.1 by
+/// ruling (see the maintainer KNOWN_ISSUES log, KI-003). Do not partially migrate
+/// this to milliseconds in isolation — the unit must change everywhere at once.
 fn parse_iso8601(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.timestamp())
+}
+
+/// Serialize a `TypedValue` array into a JSON byte vector.
+///
+/// Matches the Swift `JSONTypedValue` Codable encoding: each element becomes
+/// `{"type":"<type_description>","value":"<string_form>"}`. The resulting
+/// bytes are stored as a BLOB in the `TypedValue::Array` column path.
+///
+/// Note: `ColumnType` has no `Array` variant — array storage is always via
+/// a `Blob`/`Json` column; this encoding is the write-side contract.
+/// Arrays round-trip write→read within Rust as `Blob` on read (the same
+/// behaviour as Swift, where `readColumn` has no `case .array` branch and
+/// returns `.blob` for an untyped BLOB column). This function does not need
+/// a dependency on serde_json — TypedValue values are always representable
+/// as flat strings.
+fn typed_value_array_to_json(values: &[TypedValue]) -> Vec<u8> {
+    let mut out = String::from("[");
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let (type_str, value_str) = typed_value_to_json_pair(v);
+        // Escape double-quotes inside the value string to keep JSON valid.
+        let escaped = value_str.replace('\\', "\\\\").replace('"', "\\\"");
+        out.push_str(&format!(r#"{{"type":"{}","value":"{}"}}"#, type_str, escaped));
+    }
+    out.push(']');
+    out.into_bytes()
+}
+
+/// Return the (type, value) string pair for one TypedValue, matching Swift's
+/// `JSONTypedValue.init(_:)` mapping (PERSISTENCEKIT_SPEC § value-codec).
+fn typed_value_to_json_pair(v: &TypedValue) -> (&'static str, String) {
+    match v {
+        TypedValue::Null => ("null", String::new()),
+        TypedValue::Bool(b) => ("bool", if *b { "true" } else { "false" }.to_string()),
+        TypedValue::Int(i) => ("int", i.to_string()),
+        TypedValue::Bitmap(i) => ("bitmap", i.to_string()),
+        TypedValue::Float(f) => ("float", f.to_string()),
+        TypedValue::Text(s) => ("text", s.clone()),
+        TypedValue::Blob(b) => ("blob", base64_encode(b)),
+        TypedValue::Uuid(u) => ("uuid", u.to_string().to_uppercase()),
+        TypedValue::Timestamp(secs) => ("timestamp", iso8601(*secs)),
+        TypedValue::Json(b) => ("json", String::from_utf8_lossy(b).into_owned()),
+        TypedValue::Hlc(h) => ("hlc", h.packed().to_string()),
+        TypedValue::Fingerprint(fp) => (
+            "fingerprint",
+            format!("{}:{}:{}:{}", fp.block0, fp.block1, fp.block2, fp.block3),
+        ),
+        TypedValue::Array(_) => ("array", "[nested]".to_string()),
+    }
+}
+
+/// Minimal base64 encoder (RFC 4648 § 4, no line breaks).
+///
+/// Used to encode raw `Blob` bytes inside the TypedValue array JSON,
+/// matching Swift's `Data.base64EncodedString()` output. PersistenceKit
+/// carries no base64 dependency; the encoder is small and standards-
+/// conformant. Only the encode direction is needed here — decoding array
+/// BLOBs is not required because there is no `ColumnType::Array` to hint
+/// the read side.
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        out.push(TABLE[(b0 >> 2) & 0x3F]);
+        out.push(TABLE[((b0 << 4) | (b1 >> 4)) & 0x3F]);
+        out.push(if chunk.len() > 1 { TABLE[((b1 << 2) | (b2 >> 6)) & 0x3F] } else { b'=' });
+        out.push(if chunk.len() > 2 { TABLE[b2 & 0x3F] } else { b'=' });
+    }
+    // SAFETY: TABLE contains only ASCII bytes; output is always valid UTF-8.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 fn to_sql(value: &TypedValue) -> SqlValue {
@@ -135,9 +228,22 @@ fn to_sql(value: &TypedValue) -> SqlValue {
         TypedValue::Uuid(u) => SqlValue::Text(u.to_string().to_uppercase()),
         TypedValue::Timestamp(secs) => SqlValue::Text(iso8601(*secs)),
         TypedValue::Hlc(h) => SqlValue::Integer(h.packed() as i64),
-        // Not exercised by Phase-1 conformance; bound as NULL until the
-        // fingerprint/array column paths are needed.
-        TypedValue::Fingerprint(_) | TypedValue::Array(_) => SqlValue::Null,
+        TypedValue::Fingerprint(fp) => {
+            // Store as 32-byte little-endian wire encoding matching Fingerprint256::wire_bytes.
+            // Block order: block0 first, each block in little-endian byte order.
+            // Fingerprint256::from_wire_bytes decodes this format on the read side.
+            // (Swift stores big-endian; the two ports have separate databases so
+            // byte order does not need to match across ports — only within-port
+            // round-trip is required.)
+            SqlValue::Blob(fp.wire_bytes().to_vec())
+        }
+        TypedValue::Array(values) => {
+            // Serialize as a JSON array of {type, value} objects.
+            // Format mirrors Swift's JSONTypedValue Codable encoding so the
+            // array representation is interoperable with the Swift port's
+            // documented schema if cross-port reads are ever introduced.
+            SqlValue::Blob(typed_value_array_to_json(values))
+        }
     }
 }
 
@@ -206,6 +312,18 @@ fn read_value(
         }
         ValueRef::Blob(b) => Ok(match kit {
             Some(ColumnType::Json) => TypedValue::Json(b.to_vec()),
+            Some(ColumnType::Fingerprint) if b.len() == 32 => {
+                // Decode the 32-byte little-endian wire encoding back to Fingerprint256.
+                // Matches the wire_bytes() encoding written by to_sql above.
+                // A 32-byte BLOB on a fingerprint column that fails from_wire_bytes
+                // is structurally impossible (wire_bytes always writes exactly 32 bytes
+                // of valid data), so unwrap_or_else falls back to Blob to surface
+                // the raw bytes rather than silently substituting a wrong fingerprint.
+                use substrate_types::fingerprint256::Fingerprint256;
+                Fingerprint256::from_wire_bytes(b)
+                    .map(TypedValue::Fingerprint)
+                    .unwrap_or_else(|_| TypedValue::Blob(b.to_vec()))
+            }
             _ => TypedValue::Blob(b.to_vec()),
         }),
     }
@@ -515,6 +633,59 @@ impl SqliteStorage {
                 })?;
             }
         }
+        // ─── CAND-052: Estate DB file symlink refusal + private-mode creation ───
+        //
+        // A symlink pre-planted at the DB path (e.g. pointing at /etc/passwd)
+        // would cause SQLite to open and write arbitrary files. Reject before
+        // opening when the path is a real filesystem location (skip for
+        // ":memory:" / empty paths which are in-process only).
+        //
+        // For EXISTING paths: `symlink_metadata` (lstat) resolves only one
+        // level — if the result is a symlink rather than a regular file, refuse.
+        //
+        // For NEW paths (no file at the DB path): `Connection::open` (via
+        // rusqlite's SQLITE_OPEN_CREATE) creates the file. After the open
+        // succeeds, `set_permissions(0o600)` locks it to owner-read/write only.
+        // This is best-effort: the open+permission window is not atomic (unlike
+        // the O_EXCL path for db.key), but the estate DB is typically created in
+        // a user-owned directory already inaccessible to other users, so the
+        // residual race is low-risk. The key invariant is: a database that
+        // already exists as a symlink is refused (the symlink-attack vector).
+        //
+        // On Windows, symlinks require elevated privileges and are uncommon;
+        // the check is skipped there (platform guard below), matching the
+        // db.key pattern.
+        let db_is_in_memory = path.is_empty() || path == ":memory:";
+        let db_existed_before_open = if !db_is_in_memory {
+            let p = std::path::Path::new(&path);
+            match p.symlink_metadata() {
+                Ok(meta) => {
+                    // Path exists — reject symlinks at the DB path before opening.
+                    // Using the symlink-following `is_file()` would silently accept
+                    // a symlink whose target is a regular file; `is_symlink()` is
+                    // the no-follow check (CAND-052 security boundary).
+                    if meta.file_type().is_symlink() {
+                        return Err(StorageError::BackendError {
+                            underlying: format!(
+                                "sqlite open: refusing to open {:?} — path is a symbolic \
+                                 link. Pre-planted symlinks are a security risk (CAND-052).",
+                                path
+                            ),
+                        });
+                    }
+                    true // regular file exists, normal open
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false, // new file
+                Err(e) => {
+                    return Err(StorageError::BackendError {
+                        underlying: format!("sqlite open: stat {path:?}: {e}"),
+                    });
+                }
+            }
+        } else {
+            true // in-memory: skip all file-mode logic
+        };
+
         // Adopt the shared whole-file key for estates that carry a sibling
         // db.key (written by the resident service at startup), unless the caller
         // already chose an explicit encryption mode. This is the single point
@@ -529,6 +700,25 @@ impl SqliteStorage {
         let conn = Connection::open(&path).map_err(|e| StorageError::BackendError {
             underlying: format!("sqlite open: {e}"),
         })?;
+
+        // After a successful open of a NEW database file, lock down permissions
+        // to owner-read/write (0600) so that other OS users cannot read the
+        // estate. WAL sidecar files (-wal, -shm) are created by SQLite after
+        // the first write; they inherit the directory's umask, not the DB file's
+        // mode. This call is best-effort (permissions may not be settable on all
+        // filesystems) — errors are logged but do not fail the open.
+        #[cfg(unix)]
+        if !db_is_in_memory && !db_existed_before_open {
+            use std::os::unix::fs::PermissionsExt as _;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(&path, perms) {
+                eprintln!(
+                    "[persistence_kit] WARNING: could not set 0600 on new database \
+                     file {:?}: {}. Estate may be readable by other OS users.",
+                    path, e
+                );
+            }
+        }
         // Whole-database at-rest encryption (Mode 3 / FullDatabase): supply the
         // estate key before any other access so SQLCipher can decrypt page 1
         // (the schema) and every content page. This MUST be the first statement
@@ -559,8 +749,46 @@ impl SqliteStorage {
 
 /// Apply the full schema (idempotent CREATE-IF-NOT-EXISTS) and record the
 /// version. Shared by `open` and `migrate`.
+///
+/// Schema merge semantics: `inner.schema` is a unified view of all tables
+/// ever applied to this storage instance, used by `table_column_type` to
+/// resolve SQLite column types (Timestamp, UUID, etc.) on read. When a
+/// second schema (e.g. GeniusLocusKitMatrix calling `migrate` on the open
+/// estate storage) arrives after `open` already set a primary schema, we
+/// merge its tables and indices into the existing accumulated schema instead
+/// of replacing it. Without this merge, a `migrate` call would overwrite the
+/// LocusKit drawer schema with the single-table matrix schema, causing
+/// `table_column_type` to return `None` for drawer columns and leaving
+/// `filedAt`/`eventTime`/`tombstonedAt` decoded as `Text` instead of
+/// `Timestamp`. This mirrors Swift's `applyMigrations` protective guard:
+///   `if schemaDeclaration == nil { schemaDeclaration = schema }`.
+/// Each kit's version is still recorded independently under its own `kit_id`.
 fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<()> {
-    inner.schema = Some(schema.clone());
+    match &mut inner.schema {
+        None => {
+            // First call (typically from `open`): set the primary schema.
+            inner.schema = Some(schema.clone());
+        }
+        Some(existing) => {
+            // Subsequent call (typically from `migrate` on the same storage):
+            // merge the incoming schema's tables and indices into the existing
+            // accumulated view. Tables are keyed by name; if a table with the
+            // same name already exists (e.g. a re-open over an existing schema),
+            // leave the existing declaration in place — CREATE TABLE IF NOT EXISTS
+            // below is idempotent at the DDL level, so the existing declaration
+            // is still correct and the new one would be redundant.
+            for table in &schema.tables {
+                if !existing.tables.iter().any(|t| t.name == table.name) {
+                    existing.tables.push(table.clone());
+                }
+            }
+            for index in &schema.indices {
+                if !existing.indices.iter().any(|i| i.name == index.name) {
+                    existing.indices.push(index.clone());
+                }
+            }
+        }
+    }
     let conn = &inner.conn;
     let exec = |sql: &str| {
         conn.execute_batch(sql)
@@ -653,6 +881,19 @@ impl Storage for SqliteStorage {
             .map_err(|e| StorageError::BackendError {
                 underlying: format!("schema version: {e}"),
             })?;
+        Ok(v as i32)
+    }
+
+    fn current_schema_version_for(&self, kit_id: &str) -> StorageResult<i32> {
+        let guard = self.inner.lock().unwrap();
+        let v: i64 = guard
+            .conn
+            .query_row(
+                r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = ?"#,
+                [kit_id],
+                |r| r.get::<_, Option<i64>>(0).map(|o| o.unwrap_or(0)),
+            )
+            .unwrap_or(0);
         Ok(v as i32)
     }
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
@@ -776,7 +1017,7 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
                         Some(0)
                     }
                 }
-                Err(_) => Some(0), // WAL file absent → no uncommitted frames.
+                Err(_) => Some(0), // WAL file absent → zero frames (no WAL transactions).
             }
         } else {
             None
@@ -1070,6 +1311,15 @@ impl RowStore for SqliteRowStore {
         // an encrypting estate must carry a keyID. Correct encrypting inserts
         // become .blob + keyID here; the guard fires only if the seam failed.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (CAND-047): column names from the
+        // caller-supplied `values` map reach the INSERT column list directly.
+        // A name containing `"` or `;` can escape double-quote delimiters and
+        // alter the query. The same `validate_sql_identifier` used by
+        // `query_projected` and the Postgres backend rejects any name outside
+        // `[A-Za-z_][A-Za-z0-9_]*` — one shared seam, no forked validator.
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
         let guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1108,6 +1358,16 @@ impl RowStore for SqliteRowStore {
         // net: a content-bearing upsert on an encrypting estate throws rather
         // than silently writing plaintext. Mirrors Swift `upsertRow` design.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (CAND-047): validate both the value-map
+        // column names and the conflict-column list before interpolating into the
+        // INSERT … ON CONFLICT … DO UPDATE SQL. Reuses the shared
+        // `validate_sql_identifier` seam — no forked validator.
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
+        for c in conflict_columns {
+            validate_sql_identifier(c)?;
+        }
         let guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1163,6 +1423,13 @@ impl RowStore for SqliteRowStore {
         // on an encrypting estate throws rather than silently writing plaintext.
         // Mirrors Swift `updateRows` design.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (CAND-047): column names from the
+        // caller-supplied `values` map reach the UPDATE SET clause directly.
+        // A name containing `"` or `;` can escape double-quote delimiters.
+        // Reuses the shared `validate_sql_identifier` seam — no forked validator.
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
         let guard = self.inner.lock().unwrap();
         // Pre-query row keys before mutating. The `values` map carries only
         // the SET columns (not the primary key). The Mutex serializes all
@@ -1296,10 +1563,17 @@ impl RowStore for SqliteRowStore {
         if columns.is_empty() {
             return self.query(table, predicate, order_by, limit, offset);
         }
+        // Validate all caller-supplied column names before embedding them in SQL
+        // (SECFIX-WS2-PK F1). Double-quoting is insufficient: a name containing
+        // `"` can escape the quoting and alter the query. Reject any name that
+        // is not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
+        for c in columns {
+            validate_sql_identifier(c)?;
+        }
         let guard = self.inner.lock().unwrap();
         // Build an explicit column list so the omitted columns (notably the
         // content blob) are never read off disk — this is the I/O win the
-        // no-blob recall path needs. Column names are quoted identifiers.
+        // no-blob recall path needs. Column names are validated and quoted identifiers.
         let select_list = columns
             .iter()
             .map(|c| format!("\"{c}\""))
@@ -1572,6 +1846,40 @@ impl RowStore for SqliteRowStore {
         }
 
         Ok((out, skipped))
+    }
+
+    // ----------------------------------------------------------------
+    // Explicit transaction boundary (GLK_BATCH1)
+    // ----------------------------------------------------------------
+
+    /// Open a serializable write transaction.
+    ///
+    /// Issues `BEGIN IMMEDIATE` so the write lock is acquired upfront,
+    /// preventing "cannot start a transaction within a transaction" under WAL
+    /// mode. The `inner` `Mutex` serializes concurrent calls.
+    fn begin_transaction(&self) -> StorageResult<()> {
+        let guard = self.inner.lock().unwrap();
+        guard
+            .conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| map_sql_err(e, "<transaction>"))
+    }
+
+    /// Commit the transaction opened by `begin_transaction`.
+    fn commit_transaction(&self) -> StorageResult<()> {
+        let guard = self.inner.lock().unwrap();
+        guard
+            .conn
+            .execute_batch("COMMIT")
+            .map_err(|e| map_sql_err(e, "<transaction>"))
+    }
+
+    /// Roll back the transaction opened by `begin_transaction`.
+    fn rollback_transaction(&self) -> StorageResult<()> {
+        let guard = self.inner.lock().unwrap();
+        // Use execute_batch; ignore the result (best-effort rollback).
+        let _ = guard.conn.execute_batch("ROLLBACK");
+        Ok(())
     }
 }
 
@@ -2061,6 +2369,206 @@ mod hlc_roundtrip_tests {
             }
             other => panic!("expected TypedValue::Hlc, got {:?}", other),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Fingerprint and Array round-trip tests (IMM-PK-001).
+//
+// Verifies:
+//   PK-FP-1: Fingerprint256 values write as a 32-byte BLOB (not NULL)
+//             and decode back to TypedValue::Fingerprint on a declared
+//             fingerprint column — proving no-NULL-write and round-trip.
+//   PK-FP-2: A known-value Fingerprint256 survives insert → query
+//             byte-identical.
+//   PK-FP-3: TypedValue::Array writes as a JSON BLOB (not NULL).
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod fingerprint_roundtrip_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+        Storage, StoragePredicate, TableDeclaration, TypedValue,
+    };
+    use substrate_types::fingerprint256::Fingerprint256;
+    use uuid::Uuid;
+
+    fn make_fp_storage() -> SqliteStorage {
+        let path = std::env::temp_dir()
+            .join(format!("fp_rt_{}.sqlite", Uuid::new_v4()));
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open sqlite");
+        // A table with a uuid PK and a fingerprint column (declared so
+        // read_value receives the ColumnType::Fingerprint hint).
+        let schema = SchemaDeclaration::new(
+            "fp-test",
+            1,
+            vec![TableDeclaration::new(
+                "fps",
+                vec![
+                    ColumnDeclaration::uuid("id"),
+                    ColumnDeclaration::fingerprint("fp"),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open schema");
+        storage
+    }
+
+    // PK-FP-1: inserting a Fingerprint256 does NOT write NULL — the row
+    // is readable and the column comes back as TypedValue::Fingerprint.
+    #[test]
+    fn pk_fp1_fingerprint_column_not_null() {
+        let storage = make_fp_storage();
+        let rs = Storage::row_store(&storage);
+
+        let row_id = Uuid::new_v4();
+        let fp = Fingerprint256::new(1, 2, 3, 4);
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("id".into(), TypedValue::Uuid(row_id));
+        row.insert("fp".into(), TypedValue::Fingerprint(fp));
+        rs.insert("fps", row).expect("insert");
+
+        let pred = StoragePredicate::Eq(
+            crate::Column::new("fps", "id"),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = rs.query("fps", Some(&pred), &[], None, None).expect("query");
+        assert_eq!(rows.len(), 1, "row must be present");
+
+        let col = rows[0].get("fp").expect("fp column must be present");
+        assert!(
+            matches!(col, TypedValue::Fingerprint(_)),
+            "fp column must decode to TypedValue::Fingerprint, not NULL or Blob; got {:?}", col
+        );
+    }
+
+    // PK-FP-2: a known-value Fingerprint256 survives insert → query byte-identical.
+    #[test]
+    fn pk_fp2_fingerprint_round_trips_byte_identical() {
+        let storage = make_fp_storage();
+        let rs = Storage::row_store(&storage);
+
+        let row_id = Uuid::new_v4();
+        // Use non-trivial block values to expose byte-order bugs.
+        let original = Fingerprint256::new(
+            0xDEAD_BEEF_0000_0001,
+            0x1234_5678_9ABC_DEF0,
+            0xFFFF_FFFF_0000_0000,
+            0x0000_0001_0000_0001,
+        );
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("id".into(), TypedValue::Uuid(row_id));
+        row.insert("fp".into(), TypedValue::Fingerprint(original));
+        rs.insert("fps", row).expect("insert");
+
+        let pred = StoragePredicate::Eq(
+            crate::Column::new("fps", "id"),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = rs.query("fps", Some(&pred), &[], None, None).expect("query");
+        assert_eq!(rows.len(), 1);
+
+        match rows[0].get("fp") {
+            Some(TypedValue::Fingerprint(read_back)) => {
+                assert_eq!(read_back.block0, original.block0, "block0 must round-trip");
+                assert_eq!(read_back.block1, original.block1, "block1 must round-trip");
+                assert_eq!(read_back.block2, original.block2, "block2 must round-trip");
+                assert_eq!(read_back.block3, original.block3, "block3 must round-trip");
+            }
+            other => panic!("expected TypedValue::Fingerprint, got {:?}", other),
+        }
+    }
+
+    // PK-FP-3: TypedValue::Array writes as a non-NULL JSON BLOB.
+    // (ColumnType has no Array case — the column is declared as Blob here
+    // so the read side returns TypedValue::Blob, which is the expected
+    // behaviour matching Swift's readColumn for array values.)
+    #[test]
+    fn pk_fp3_array_writes_as_non_null_json_blob() {
+        let path = std::env::temp_dir()
+            .join(format!("array_rt_{}.sqlite", Uuid::new_v4()));
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open sqlite");
+        let schema = SchemaDeclaration::new(
+            "arr-test",
+            1,
+            vec![TableDeclaration::new(
+                "arr",
+                vec![
+                    ColumnDeclaration::uuid("id"),
+                    ColumnDeclaration::blob("payload"), // no Array ColumnType; stored as blob
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open schema");
+
+        let rs = Storage::row_store(&storage);
+        let row_id = Uuid::new_v4();
+        let array_val = TypedValue::Array(vec![
+            TypedValue::Text("hello".into()),
+            TypedValue::Int(42),
+        ]);
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("id".into(), TypedValue::Uuid(row_id));
+        row.insert("payload".into(), array_val);
+        rs.insert("arr", row).expect("insert array value must not return NULL error");
+
+        let pred = StoragePredicate::Eq(
+            crate::Column::new("arr", "id"),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = rs.query("arr", Some(&pred), &[], None, None).expect("query");
+        assert_eq!(rows.len(), 1, "array row must be present (no NULL write)");
+
+        // The payload comes back as Blob (no ColumnType::Array hint).
+        let payload = rows[0].get("payload").expect("payload column must be present");
+        match payload {
+            TypedValue::Blob(bytes) => {
+                // Verify the stored bytes are valid UTF-8 JSON starting with '['.
+                let json = std::str::from_utf8(bytes).expect("array JSON must be valid UTF-8");
+                assert!(
+                    json.starts_with('['),
+                    "array must serialize as JSON array; got: {}", json
+                );
+                assert!(
+                    json.contains(r#""type""#),
+                    "JSON must contain type fields; got: {}", json
+                );
+            }
+            other => panic!("expected TypedValue::Blob (JSON array), got {:?}", other),
+        }
+    }
+
+    // PK-FP-4: typed_value_array_to_json / base64_encode unit coverage.
+    #[test]
+    fn pk_fp4_array_json_format_matches_swift_contract() {
+        // Verify the {type, value} JSON format matches Swift's JSONTypedValue encoding.
+        let values = vec![
+            TypedValue::Text("world".into()),
+            TypedValue::Int(-7),
+            TypedValue::Bool(true),
+        ];
+        let bytes = typed_value_array_to_json(&values);
+        let json = std::str::from_utf8(&bytes).expect("valid UTF-8");
+        assert!(json.contains(r#""type":"text","value":"world""#), "text element: {}", json);
+        assert!(json.contains(r#""type":"int","value":"-7""#), "int element: {}", json);
+        assert!(json.contains(r#""type":"bool","value":"true""#), "bool element: {}", json);
     }
 }
 
@@ -2665,7 +3173,7 @@ mod timestamp_clamp_and_skip_corrupt_tests {
     use super::*;
     use crate::{
         BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
-        Storage, StoragePredicate, TableDeclaration, TypedValue,
+        Storage, TableDeclaration, TypedValue,
     };
     use rusqlite::Connection;
     use uuid::Uuid;
@@ -2892,15 +3400,12 @@ mod timestamp_clamp_and_skip_corrupt_tests {
         storage.open(&schema).expect("apply schema");
 
         // Project only "id" and "name" — "ts" is still in the table but not in the
-        // SELECT list. However, the poison row should be skipped at the cursor level
-        // regardless (the corrupt column is included in the full row fetch even when
-        // projected away in a SELECT — but with query_projected_skip_corrupt we issue
-        // SELECT id, name and the ts column is never fetched, so we expect the row to
-        // appear cleanly since the corrupt column is not read).
+        // SELECT list. query_projected_skip_corrupt issues SELECT id, name so the
+        // corrupt ts column is never fetched; the row appears cleanly.
         //
-        // This test verifies the projection-without-ts-column path: when the poison
-        // column is not in the SELECT list, both rows are returned because the corrupt
-        // value is never fetched.
+        // This test verifies the projection-without-ts-column path: when the corrupt
+        // column is not projected, both rows are returned because the corrupt value
+        // is never read.
         let (rows, skipped) = Storage::row_store(&storage)
             .query_projected_skip_corrupt("items", &["id", "name"], None, &[], None, None)
             .expect("projected skip-corrupt must succeed");
@@ -2916,5 +3421,318 @@ mod timestamp_clamp_and_skip_corrupt_tests {
 
         assert_eq!(skipped_with_ts, 1, "poison row must be skipped when ts is projected");
         assert_eq!(rows_with_ts.len(), 1, "only clean row must be returned");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SQL-identifier injection regression tests — CAND-047
+//
+// Every write path (insert, upsert, update) and the projected-read path
+// must reject column names that could escape double-quote delimiters and
+// alter the SQL string. Valid identifiers must continue to work so the
+// guard does not regress normal writes.
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod sql_identifier_injection_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, ColumnType, Column, EstateConfiguration,
+        SchemaDeclaration, Storage, StoragePredicate, TableDeclaration, TypedValue,
+    };
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    /// Build a minimal in-memory SQLite estate with a single table `items`
+    /// (columns: `id` TEXT PK, `value` TEXT).
+    fn injection_test_storage() -> SqliteStorage {
+        let schema = SchemaDeclaration::new(
+            "injection_test",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Text),
+                    ColumnDeclaration::new("value", ColumnType::Text).nullable(),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: ":memory:".into(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open in-memory sqlite");
+        storage.open(&schema).expect("apply schema");
+        storage
+    }
+
+    // ── Helpers: produce a values map with an injected column name ────────
+
+    fn inject_map(key: &str) -> BTreeMap<String, TypedValue> {
+        let mut m = BTreeMap::new();
+        m.insert(key.to_string(), TypedValue::Text("v".into()));
+        m
+    }
+
+    // ── insert: injection attempts must be rejected ────────────────────────
+
+    /// A double-quote in a column name can escape the quoting delimiter and
+    /// alter the INSERT SQL. Must be rejected before the query is constructed.
+    #[test]
+    fn insert_rejects_column_name_with_double_quote() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let bad = inject_map("id\"; DROP TABLE items; --");
+        let err = rs.insert("items", bad).unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidIdentifier { .. }),
+            "expected InvalidIdentifier, got: {err:?}"
+        );
+    }
+
+    /// A semicolon in a column name allows statement stacking — classic
+    /// injection vector. Reject before the SQL string is built.
+    #[test]
+    fn insert_rejects_column_name_with_semicolon() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let bad = inject_map("id;DROP TABLE items");
+        let err = rs.insert("items", bad).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+
+    /// A column name starting with a digit is not a valid SQL identifier and
+    /// is rejected regardless of other characters.
+    #[test]
+    fn insert_rejects_column_name_starting_with_digit() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let bad = inject_map("1evil");
+        let err = rs.insert("items", bad).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+
+    /// A space in a column name breaks the token boundary in SQL and is rejected.
+    #[test]
+    fn insert_rejects_column_name_with_space() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let bad = inject_map("col name");
+        let err = rs.insert("items", bad).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+
+    /// Valid identifiers must still work — the guard must not break normal writes.
+    #[test]
+    fn insert_accepts_valid_identifier() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let mut good = BTreeMap::new();
+        good.insert("id".to_string(), TypedValue::Text("row1".into()));
+        good.insert("value".to_string(), TypedValue::Text("hello".into()));
+        rs.insert("items", good).expect("valid insert must succeed");
+    }
+
+    // ── upsert: value keys AND conflict columns must be validated ─────────
+
+    /// Injection attempt in the value-map key for an upsert.
+    #[test]
+    fn upsert_rejects_injected_value_column() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let bad = inject_map("id\"); DROP TABLE items; --");
+        let err = rs.upsert("items", bad, &["id".to_string()]).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+
+    /// Injection attempt in the conflict-column list for an upsert.
+    #[test]
+    fn upsert_rejects_injected_conflict_column() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("row2".into()));
+        values.insert("value".to_string(), TypedValue::Text("x".into()));
+        // The conflict column name contains an injection payload.
+        let bad_conflict = vec!["id\"); DROP TABLE items; --".to_string()];
+        let err = rs.upsert("items", values, &bad_conflict).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+
+    /// Valid upsert must still succeed.
+    #[test]
+    fn upsert_accepts_valid_identifiers() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("row3".into()));
+        values.insert("value".to_string(), TypedValue::Text("y".into()));
+        rs.upsert("items", values, &["id".to_string()])
+            .expect("valid upsert must succeed");
+    }
+
+    // ── update: SET column names must be validated ────────────────────────
+
+    /// Injection attempt in the column name for an update.
+    #[test]
+    fn update_rejects_injected_column() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let pred = StoragePredicate::Eq(
+            Column::new("items", "id"),
+            TypedValue::Text("row1".into()),
+        );
+        let bad = inject_map("value\"; DROP TABLE items; --");
+        let err = rs.update("items", bad, &pred).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+
+    /// Valid update must still succeed.
+    #[test]
+    fn update_accepts_valid_identifier() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        // Insert a row first.
+        let mut v = BTreeMap::new();
+        v.insert("id".to_string(), TypedValue::Text("upd1".into()));
+        v.insert("value".to_string(), TypedValue::Text("before".into()));
+        rs.insert("items", v).expect("insert for update test");
+        // Update the `value` column by row id.
+        let pred = StoragePredicate::Eq(
+            Column::new("items", "id"),
+            TypedValue::Text("upd1".into()),
+        );
+        let mut set = BTreeMap::new();
+        set.insert("value".to_string(), TypedValue::Text("after".into()));
+        let count = rs.update("items", set, &pred).expect("valid update must succeed");
+        assert_eq!(count, 1);
+    }
+
+    // ── query_projected: projected-read injection also rejected ───────────
+    // (Regression coverage — this path was already guarded; verify it stays.)
+
+    #[test]
+    fn query_projected_rejects_injected_column_name() {
+        let storage = injection_test_storage();
+        let rs = Storage::row_store(&storage);
+        let err = rs
+            .query_projected("items", &["id\"; DROP TABLE items; --"], None, &[], None, None)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidIdentifier { .. }));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CAND-052: SQLite DB file symlink refusal and private-mode tests
+//
+// A symlink pre-planted at the estate DB path must be refused before
+// `Connection::open` is called. A new DB file must be created with
+// owner-only permissions (0600) on Unix. These tests use the filesystem
+// so they require a real temp directory, not ":memory:".
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, unix))]
+mod sqlite_db_file_security_tests {
+    use super::*;
+    use crate::{BackendConfiguration, EstateConfiguration};
+    use std::os::unix::fs::symlink;
+    use uuid::Uuid;
+
+    /// Build a temporary directory path (not yet created) for a test DB.
+    fn temp_db_path(tag: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("persistence_kit_sectest_{tag}_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db_path = dir.join("estate.sqlite");
+        (dir, db_path.to_string_lossy().into_owned())
+    }
+
+    // ── Symlink refusal ───────────────────────────────────────────────────
+
+    /// A symlink pre-planted at the database path must be refused with a
+    /// BackendError before `Connection::open` is called. Allowing a symlink
+    /// would let an attacker redirect all SQLite writes to an arbitrary file.
+    #[test]
+    fn refuses_symlink_at_db_path() {
+        let (dir, db_path) = temp_db_path("symlink");
+        // Plant a symlink at the DB path pointing at an innocuous target.
+        let target = dir.join("decoy_target.txt");
+        std::fs::write(&target, b"decoy").expect("write decoy");
+        symlink(&target, &db_path).expect("plant symlink");
+
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: db_path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        match SqliteStorage::new(config) {
+            Ok(_) => panic!("SqliteStorage::new should fail on a symlink at the DB path"),
+            Err(StorageError::BackendError { ref underlying }) if underlying.contains("symbolic link") => {
+                // Correct — rejected with a clear security message.
+            }
+            Err(e) => panic!("expected BackendError about symbolic link, got: {}", e),
+        }
+    }
+
+    // ── 0600 mode on new DB file ──────────────────────────────────────────
+
+    /// A new estate database file must be created with owner-only permissions
+    /// (0600) so that other OS users cannot read or write the estate.
+    #[test]
+    fn new_db_file_has_0600_permissions() {
+        let (_dir, db_path) = temp_db_path("perms");
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: db_path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        SqliteStorage::new(config).expect("new sqlite storage must succeed");
+        // Verify the database file was created.
+        let p = std::path::Path::new(&db_path);
+        assert!(p.is_file(), "DB file must exist after SqliteStorage::new");
+        // Verify permissions are 0600 (owner r/w only).
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::metadata(&db_path).expect("stat db file");
+        let mode = meta.mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "new DB file must have 0600 permissions, got: {:o}",
+            mode
+        );
+    }
+
+    // ── Normal open of an existing regular file still works ───────────────
+
+    /// Opening an already-existing, regular (non-symlink) database file must
+    /// succeed. This regression confirms the guard does not block the normal
+    /// open-existing-DB path.
+    #[test]
+    fn opens_existing_regular_db_file() {
+        let (_dir, db_path) = temp_db_path("existing");
+        // First open creates the file.
+        let config1 = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: db_path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        SqliteStorage::new(config1).expect("first open must succeed");
+        // Second open of the same file must also succeed.
+        let config2 = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: db_path.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        SqliteStorage::new(config2).expect("reopen of existing regular file must succeed");
     }
 }

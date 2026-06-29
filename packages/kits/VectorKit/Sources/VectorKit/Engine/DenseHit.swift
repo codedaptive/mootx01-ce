@@ -2,16 +2,12 @@
 //
 // Result carriers for the dense and fusion lanes.
 //
-// Lane F foundation types. Three carriers are defined here:
+// Lane F foundation types defined here:
 //   DenseHit  — one result from a dense (binary or float) search.
-//   SparseHit — one result from the sparse lane (lives in CorpusKit).
-//   FusedHit  — one result from weighted fusion across N lanes.
+//   LaneTag   — identifies which retrieval lane produced a score.
 //
-// SparseHit and FusedHit are duplicated in CorpusKit/Engine/SparseTypes
-// as the canonical sparse-lane definitions. They are imported into
-// VectorKit only to make the fusion seam representable from a
-// VectorKit consumer's perspective. The canonical definitions live
-// in CorpusKit.
+// SparseHit and FusedHit live in CorpusKit/Engine/SparseTypes and are
+// NOT defined in this file.
 //
 // Additive-only rule (arch spec §2.4, Kong Cond-4):
 // Downstream lanes must NOT add stored properties to these types
@@ -37,9 +33,8 @@ import Foundation
 ///
 /// rawDistance is the raw score in the metric's natural units:
 /// - Hamming: integer in 0…256 (nearer = smaller).
-/// - Jaccard distance: Double in 0…1 (nearer = smaller; stored as
-///   the raw IEEE-754 bit pattern in a UInt64 for type uniformity,
-///   but exposed via the typed accessor below).
+/// - Jaccard: reserved; `BruteForceIndex` currently rejects `.binary(.jaccard)`.
+///   The `jaccardDistance` accessor is present for future use.
 /// - Cosine / L2 / dot: Float (sign depends on the specific metric).
 ///
 /// The engine returns [DenseHit] sorted by rawDistance ascending
@@ -61,9 +56,9 @@ public struct DenseHit: Sendable, Equatable {
     /// - Hamming: the integer distance cast to Int32 (range 0…256).
     ///   Stored as Int32 to match the Rust i32 wire type and to avoid
     ///   signed/unsigned confusion at call sites. Always non-negative.
-    /// - Jaccard: NOT this field (see jaccardDistance below). Stored
-    ///   as the Double bit pattern in an Int64 for type uniformity; use
-    ///   jaccardDistance to read the Double.
+    /// - Jaccard: reserved path. `jaccardDistance` reconstructs a Double
+    ///   from an Int32 rawDistance; `BruteForceIndex` currently rejects
+    ///   `.binary(.jaccard)` so this path is not exercised in production.
     /// - Float cosine / L2 / dot: the Float cast to a bit-identical Int32
     ///   representation. Use floatDistance to read it back.
     ///
@@ -122,9 +117,8 @@ public struct DenseHit: Sendable, Equatable {
     /// Float distance. Valid when metric is a float-lane metric.
     ///
     /// rawDistance stores the bit pattern of the Float. Returns nil
-    /// if the metric is not a float metric.
-    ///
-    /// Not yet used in Lane F; reserved for Lane C (FloatBruteForceIndex).
+    /// if the metric is not a float metric. Used by FloatBruteForceIndex
+    /// and VectorStore.findNearestFloat.
     public var floatDistance: Float? {
         guard case .float = metric else { return nil }
         return Float(bitPattern: UInt32(bitPattern: rawDistance))
@@ -133,10 +127,9 @@ public struct DenseHit: Sendable, Equatable {
 
 // MARK: - LaneTag
 
-/// Identifies which retrieval lane produced a score in FusedHit.perLane.
-///
-/// Lane F defines the three first-class lanes. Future lanes extend this
-/// enum via an FT-1 Lane F update.
+/// Identifies which retrieval lane produced a score. Used in fusion
+/// and late-interaction paths. Future lanes extend this enum via an
+/// FT-1 Lane F update.
 public enum LaneTag: String, Sendable, Equatable, Hashable, CaseIterable {
     /// Binary dense lane (Hamming, Jaccard; VectorKit binary engine).
     case binaryDense = "binary_dense"

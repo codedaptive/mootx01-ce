@@ -1,6 +1,6 @@
 // src/bin/validate_vectors.rs
 //
-// CLI: `cargo run --bin validate-vectors -- <path>`
+// CLI: `cargo run --bin validate-vectors -- <path> [--kernel <name>]`
 //
 // Mirrors the Swift validate-vectors binary.
 

@@ -174,6 +174,32 @@ impl MutationKind {
             MutationKind::CorrectTrust(_) => "correct_trust",
         }
     }
+
+    /// Decode from a stable tag string. Used when deserializing a
+    /// `SignalJobEnvelope` from the queue payload. Associated-value variants
+    /// (`CorrectSensitivity`, `CorrectTrust`) carry an empty string payload
+    /// on decode because the original value is not re-serialized; callers
+    /// that need the inner value should encode it separately in the envelope.
+    /// Unrecognised tags map to `Confirm` as a safe default (the drain loop
+    /// will route the emission and any downstream predicate can inspect the
+    /// kind column).
+    pub fn from_tag(s: &str) -> Self {
+        match s {
+            "confirm" => MutationKind::Confirm,
+            "reject" => MutationKind::Reject,
+            "contest" => MutationKind::Contest,
+            "resolve" => MutationKind::Resolve,
+            "supersede" => MutationKind::Supersede,
+            "revive" => MutationKind::Revive,
+            "accept" => MutationKind::Accept,
+            "correct_sensitivity" => MutationKind::CorrectSensitivity(String::new()),
+            "correct_trust" => MutationKind::CorrectTrust(String::new()),
+            // Unrecognised tag: default to Confirm so the emission is not
+            // silently dropped. The envelope's mutate_kind field carries the
+            // original string for diagnostics.
+            _ => MutationKind::Confirm,
+        }
+    }
 }
 
 /// Typed proposal vocabulary. Mirrors `ProposalKind.swift`.

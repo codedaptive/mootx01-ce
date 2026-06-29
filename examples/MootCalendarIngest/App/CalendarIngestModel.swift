@@ -128,7 +128,7 @@ final class CalendarIngestModel: ObservableObject {
         status = "Seeded sample memories. Grant calendar access to ingest real events."
     }
 
-    // MARK: EventKit — request access (Calendar is READ; never modified)
+    // MARK: EventKit — request access (full: reads real events + writes demo seed)
 
     /// Ask iOS for permission to read Calendar. EXPLAIN: merely having an
     /// EKEventStore grants nothing — this call is what triggers the system

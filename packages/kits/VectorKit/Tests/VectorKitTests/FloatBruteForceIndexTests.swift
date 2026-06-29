@@ -353,6 +353,24 @@ struct FloatBruteForceIndexTests {
         }
     }
 
+    // P1-secfix: a vector whose dimension differs from the established index
+    // stride must throw rather than corrupt the resident array's flat byte
+    // buffer and cause an out-of-bounds slice on the next search call.
+    @Test("add throws on mixed-dimension vector (stride mismatch)")
+    func addThrowsOnMixedDimensionVector() async throws {
+        let idx = FloatBruteForceIndex()
+        // First add: establishes stride = 8 bytes (2 floats × 4 bytes).
+        let first = VectorPayload(floats: [1.0, 0.0])
+        try await idx.add(key: key("first", model: "test"), vector: first)
+
+        // Second add: different dimension (3 floats × 4 bytes = 12 bytes).
+        // Must throw VectorKitError.invalidPayload, not crash.
+        let shortVector = VectorPayload(floats: [0.5, 0.5, 0.1])
+        await #expect(throws: VectorKitError.self) {
+            try await idx.add(key: key("second", model: "test"), vector: shortVector)
+        }
+    }
+
     // MARK: - DenseHit floatDistance accessor
 
     @Test("DenseHit.floatDistance round-trips the stored bit pattern")

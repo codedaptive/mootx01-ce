@@ -11,18 +11,15 @@
 //      and the dense-lane token reflects the actual lane state. The status is
 //      never blank, never missing.
 //
-//   B. DEGRADED STAGES ROUND-TRIP — when a recall result carries degraded
-//      stages (simulated via a post-result inspection path), the surfaced
-//      line includes the stage names, not "none".
-//
-//   C. DENSE LANE ACTIVE — when Lane D is live (deterministic provider, corpus
+//   B. DENSE LANE ACTIVE — when Lane D is live (deterministic provider, corpus
 //      ingested, float rows present), the status line carries "dense_lane:active".
 //
-//   D. DARK LANE EXPLICIT — when no corpus is registered (no vector/BM25 lane),
-//      a recall over a bare locus-only estate surfaces a status line that is
-//      present and not "dense_lane:active" — it carries the dark reason or
-//      "dense_lane:active" depending on which lane ran. The provenance line is
-//      ALWAYS present regardless of lane state.
+//   C. ZERO-RESULT PROVENANCE — a recall with no hits still surfaces a non-empty
+//      recall_provenance line. The line is ALWAYS present regardless of result count.
+//
+//   D. BARE-LOCUS PROVENANCE — when no corpus is registered (no vector/BM25 lane),
+//      a recall over a bare locus-only estate surfaces a provenance line that is
+//      present. Section E verifies the bare-locus (sparse-only) path explicitly.
 //
 // Rationale: the embedding ADR (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12)
 // requires the ARIA surface to let callers distinguish "real semantic space" from
@@ -128,13 +125,12 @@ struct RecallProvenanceSurfacingTests {
         )
     }
 
-    // MARK: - B. Non-semantic (deterministic) provider is explicitly NOT labelled as semantic
+    // MARK: - B. Deterministic provider — dense lane active, provenance never blank
 
-    /// Prove that when the deterministic provider (not a real embedding model) is
-    /// used, the recall_provenance line is present. The deterministic provider
-    /// DOES implement embedFloat, so Lane D is active — the status will be
-    /// "dense_lane:active". The critical invariant is that the field is never
-    /// blank or absent, letting callers always read lane status.
+    /// Prove that when the deterministic provider is used, the recall_provenance
+    /// line is present and non-empty with a dense_lane: and degraded_stages: token.
+    /// The deterministic provider implements embedFloat, so Lane D is active.
+    /// The critical invariant is that the field is never blank or absent.
     @Test func deterministicProviderProvenanceIsNeverBlank() async throws {
         let (dispatcher, kit, handle) = try await openInMemoryEstateWithSemanticRecall()
         defer { Task { try? await kit.close(handle) } }

@@ -98,6 +98,18 @@ extension NeuronKit {
         // Build the anchor-reduction tally. Each room vs the baseline:
         //   +1 pseudo-win each direction (the symmetric prior),
         //   +endorsements room-beats-baseline, +dismissals baseline-beats-room.
+        //
+        // Guard: clamp endorsements and dismissals to ≥ 0 before adding the +1
+        // prior. Curation counts are stored as Int and should always be
+        // non-negative, but corrupted records or misrouted callbacks could
+        // produce negative values. A negative + 1 still yields a negative
+        // PairwiseOutcome.count, which contributes no tally weight (per
+        // PairwiseOutcome spec) while still adding the competitor to the
+        // connected-graph check — silently defeating the neutral prior and
+        // potentially producing infinite or NaN Bradley-Terry scores. Clamping
+        // to max(0, x) ensures the minimum effective count is always 1 (the
+        // prior alone), so every room has at least one win and one loss against
+        // the baseline regardless of the incoming data quality.
         var outcomes: [PairwiseOutcome] = []
         for record in records {
             // A room named the baseline would pair with itself in the tally;
@@ -106,9 +118,9 @@ extension NeuronKit {
                 throw MOOTx01Error.selfPairing(competitor: baseline)
             }
             outcomes.append(PairwiseOutcome(winner: record.label, loser: baseline,
-                                            count: record.endorsements + 1))
+                                            count: max(0, record.endorsements) + 1))
             outcomes.append(PairwiseOutcome(winner: baseline, loser: record.label,
-                                            count: record.dismissals + 1))
+                                            count: max(0, record.dismissals) + 1))
         }
 
         // Surface the gated fitter (I-17): it does the MM iteration, gauge-fix,

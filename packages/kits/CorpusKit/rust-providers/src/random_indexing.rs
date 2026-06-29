@@ -105,6 +105,13 @@ pub const RI_PROJECTION_SEED: u64 = 0x5249_5F56_315F_4D58;
 /// Swift constant `RandomIndexingProvider.basisMagic`.
 pub const RI_BASIS_MAGIC: &[u8; 4] = b"RIB1";
 
+/// 4-byte magic identifying an RI COUNTS blob ("RICT"). RI's accumulated state —
+/// the per-term context vectors — IS its basis, so the counts blob carries the
+/// same `vocab` payload as the basis blob but under a distinct magic, keeping the
+/// two stores' contracts uniform across all four providers. Mirrors the Swift
+/// constant `RandomIndexingProvider.countsMagic`.
+pub const RI_COUNTS_MAGIC: &[u8; 4] = b"RICT";
+
 // MARK: - Index vector generation
 
 /// Generate the sparse ternary index vector for a single term.
@@ -206,20 +213,41 @@ impl RandomIndexingProvider {
     /// This is bit-identical to the Swift implementation's `lo/hi` logic.
     pub fn train(&mut self, terms: &[&str], window: usize) {
         let n = terms.len();
-        for (i, target) in terms.iter().enumerate() {
+        if n == 0 {
+            return;
+        }
+        // Precompute each position's index vector ONCE. The previous form called
+        // `ri_index_vector(terms[j])` for every (i, j) pair, recomputing each
+        // position's (deterministic) index vector ~2·window times. Same values,
+        // computed once — bit-identical.
+        let idx_vecs: Vec<Vec<f32>> = terms.iter().map(|t| ri_index_vector(t)).collect();
+        // Precompute the lowercased vocab keys ONCE. The previous form allocated a
+        // fresh `target.to_lowercase()` String (and re-hashed it) for every (i, j)
+        // pair; here it is one allocation per position. Terms arrive lowercased, so
+        // lowercasing is idempotent — same keys.
+        let keys: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+        for i in 0..n {
             // Context: every term within ±window positions, excluding self.
             let lo = i.saturating_sub(window);
             let hi = (i + window).min(n - 1);
+            // No neighbours (the window collapses to {i}) → create no entry, exactly
+            // as the per-neighbour form did (it only inserted on the first neighbour
+            // iteration). A neighbourless term must stay OOV.
+            if hi <= lo {
+                continue;
+            }
+            // Bind the target's context vector ONCE per position (was a String
+            // hash + entry probe per neighbour), accumulate every neighbour in
+            // ascending j order — the same order as before, so bit-identical.
+            let cv = self
+                .vocab
+                .entry(keys[i].clone())
+                .or_insert_with(|| vec![0.0f32; RI_DIMENSION]);
             for j in lo..=hi {
                 if j == i {
                     continue;
                 }
-                let neighbour_index = ri_index_vector(terms[j]);
-                // Accumulate into the target term's context vector.
-                let cv = self
-                    .vocab
-                    .entry(target.to_lowercase())
-                    .or_insert_with(|| vec![0.0f32; RI_DIMENSION]);
+                let neighbour_index = &idx_vecs[j];
                 for d in 0..RI_DIMENSION {
                     cv[d] += neighbour_index[d];
                 }
@@ -282,6 +310,36 @@ impl RandomIndexingProvider {
         );
         provider.vocab = vocab;
         Ok(provider)
+    }
+
+    // MARK: - Counts serialization (incremental-counts change set)
+
+    /// Serialize the maintained context vectors to a versioned counts blob. Same
+    /// `vocab` payload as `serialize_basis`, under the RICT counts magic.
+    /// Byte-identical to the Swift `RandomIndexingProvider.serializeCounts`.
+    pub fn serialize_counts(&self) -> Vec<u8> {
+        let mut w = BasisWriter::new();
+        w.write_magic(RI_COUNTS_MAGIC);
+        w.write_byte(BASIS_FORMAT_VERSION);
+        w.write_string(&self.model_id);
+        w.write_string(&self.model_version);
+        w.write_u64(self.projection_seed);
+        w.write_string_f32_vector_map(&self.vocab);
+        w.into_bytes()
+    }
+
+    /// Restore the accumulated context vectors in place from a counts blob, so
+    /// incremental maintenance resumes after a restart. Returns
+    /// `Err(BasisCodecError)` on a bad blob — never panics.
+    pub fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), BasisCodecError> {
+        let mut r = BasisReader::new(bytes);
+        r.expect_magic(RI_COUNTS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let _model_id = r.read_string()?;
+        let _model_version = r.read_string()?;
+        let _projection_seed = r.read_u64()?;
+        self.vocab = r.read_string_f32_vector_map()?;
+        Ok(())
     }
 
     // MARK: - Private helpers
@@ -388,6 +446,27 @@ impl EmbeddingProvider for RandomIndexingProvider {
             }
         }
     }
+
+    /// Produce the engram AND the normalised context vector from a SINGLE
+    /// context-vector computation.
+    ///
+    /// `embed` projects the context vector and `embed_float` returns it, so a
+    /// caller that needs both would otherwise run `context_vector` twice. This
+    /// override computes it ONCE and returns both outputs.
+    ///
+    /// Byte-identical to calling `embed` then `embed_float` separately: the
+    /// engram is `float_simhash::project` of the vector (or `Engram::ZERO` when
+    /// `context_vector` returns `None`), and `floats` reproduces `embed_float`'s
+    /// result with its vocab-miss error collapsed to `vec![]` (the `embed_pair`
+    /// opt-out contract). An empty vocab makes `context_vector` return `None`,
+    /// so the engram is `Engram::ZERO` and floats are empty — identical to the
+    /// separate calls.
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        match self.context_vector(text) {
+            None => Ok((Engram::ZERO, Vec::new())),
+            Some(v) => Ok((float_simhash::project(&v, self.projection_seed), v)),
+        }
+    }
 }
 
 // MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
@@ -438,6 +517,34 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
         let provider = RandomIndexingProvider::from_serialized_basis(basis)
             .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
         Ok(Box::new(provider))
+    }
+
+    /// Fold one chunk into the accumulated context vectors. RI's accumulation
+    /// consumes a term slice, so the text is tokenized with the canonical
+    /// `default_keyword_tokens` and folded at `RI_WINDOW` — the same per-document
+    /// step `train_on_corpus` runs (RI has no finalize).
+    fn add_to_counts(&mut self, text: &str) {
+        let terms = corpus_kit::default_keyword_tokens(text);
+        let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+        self.train(&term_refs, RI_WINDOW);
+    }
+
+    /// Serialize the maintained context vectors (RICT counts codec), surfaced
+    /// through the seam.
+    fn serialize_counts(&self) -> Vec<u8> {
+        RandomIndexingProvider::serialize_counts(self)
+    }
+
+    /// Restore the maintained context vectors; a codec error maps to
+    /// `CorpusKitError::DecodingFailure`.
+    fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError> {
+        RandomIndexingProvider::restore_counts(self, bytes)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))
+    }
+
+    /// Maintained vocabulary size for the growth trigger.
+    fn counts_vocabulary_size(&self) -> usize {
+        self.vocab.len()
     }
 }
 

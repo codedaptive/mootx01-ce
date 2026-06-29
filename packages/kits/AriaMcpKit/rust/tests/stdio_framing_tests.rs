@@ -93,6 +93,48 @@ fn parse_error_emits_null_id_response() {
     assert_eq!(error["code"], serde_json::json!(-32700_i64));
 }
 
+/// Verifies the frame size cap (CAND-051): a frame that exceeds `MAX_FRAME_BYTES`
+/// without a newline terminator causes `run_stdio_loop` to close the input
+/// cleanly rather than growing the buffer unboundedly. The writer gets no
+/// response — no frame was ever dispatched — and the call returns without panic.
+///
+/// Sends `MAX_FRAME_BYTES + 1` bytes with NO newline. The in-memory Cursor
+/// reader is used so the allocation is fast (zeroed pages). The test verifies:
+///   1. The call returns (loop exited cleanly rather than spinning forever).
+///   2. No response bytes were written (no frame was dispatched).
+#[test]
+fn oversized_frame_without_newline_produces_no_response() {
+    use aria_mcp::server::MAX_FRAME_BYTES;
+
+    // MAX_FRAME_BYTES + 1 bytes, NO newline — one byte over the cap.
+    // BufReader will accumulate until it detects the cap is exceeded, then
+    // read_line_capped returns None and the loop exits.
+    let mut payload = vec![b'A'; MAX_FRAME_BYTES + 1];
+    // Deliberately omit the 0x0A newline so the cap check is what terminates.
+    assert!(!payload.contains(&b'\n'), "test payload must not contain a newline");
+
+    let output = run_with(&payload);
+    assert!(
+        output.is_empty(),
+        "oversized frame with no newline must produce no response; got {} bytes",
+        output.len()
+    );
+
+    // Also verify: a VALID frame after the cap payload is NOT dispatched
+    // (the loop exited before reaching it, so no late response arrives).
+    let valid_frame = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
+    let mut combined = serde_json::to_vec(&valid_frame).unwrap();
+    combined.push(b'\n');
+    payload.extend_from_slice(&combined);
+
+    let output2 = run_with(&payload);
+    assert!(
+        output2.is_empty(),
+        "after cap exceeded, subsequent frames must not be dispatched; got {} bytes",
+        output2.len()
+    );
+}
+
 #[test]
 fn invalid_request_emits_null_id_response() {
     // Valid JSON but not a valid JSON-RPC envelope (wrong version).

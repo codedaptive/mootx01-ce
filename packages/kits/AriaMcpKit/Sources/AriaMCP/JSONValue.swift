@@ -13,9 +13,9 @@ import Foundation
 /// The enum carries the JSON model's six shapes: null, boolean,
 /// number (split into integer and double so integer tool arguments
 /// like `limit` survive a round-trip without becoming `1.0`), string,
-/// array, and object. The object case uses an ordered key array on
-/// the encode side via Foundation's default; consumers should not
-/// rely on object-key ordering.
+/// array, and object. The object case stores an unordered
+/// `[String: JSONValue]` map; `JSONSerialization` determines encode-side
+/// key ordering. Consumers should not rely on object-key ordering.
 public enum JSONValue: Sendable, Equatable {
     case null
     case bool(Bool)
@@ -139,7 +139,13 @@ extension JSONValue {
     public var integerValue: Int64? {
         switch self {
         case .integer(let i): return i
-        case .double(let d) where d.rounded() == d: return Int64(d)
+        case .double(let d):
+            // Use Int64(exactly:) so out-of-range doubles (e.g. 1e100) and
+            // non-whole doubles return nil instead of crashing (precondition
+            // failure) or silently truncating. Mirrors the "exactly" contract:
+            // nil if the conversion is lossy for any reason (out-of-range,
+            // fractional, NaN, ±inf).
+            return Int64(exactly: d)
         default: return nil
         }
     }

@@ -145,21 +145,33 @@ public actor AutonomicGovernor {
     /// Injected by the host (AriaResident) so NeuronKit never imports ObserverSink
     /// directly. This matches the design principle that keeps AriaMCP free of
     /// telemetry imports.
-    private let topologyHandler: (@Sendable (String, Date, Data) async -> Void)?
+    /// The fourth argument is the stable topology-inputs `fingerprint`, persisted
+    /// beside the snapshot (F5) so the next process start can skip the recompute
+    /// when the estate is unchanged.
+    private let topologyHandler: (@Sendable (String, Date, Data, String) async -> Void)?
+    /// Loads the persisted topology fingerprint for this estate on start, so the
+    /// first post-restart duty can compare against it and skip the `graphTopology`
+    /// recompute when nothing changed. Injected by the host (reads ObserverSink);
+    /// nil = no persistence (the first duty always recomputes). Symmetric to
+    /// `topologyHandler`.
+    private let topologyFingerprintLoader: (@Sendable () async -> String?)?
+    /// Whether the persisted fingerprint has been loaded into
+    /// `lastTopologyFingerprint` yet (one-shot, on the first topology duty).
+    private var topologyFingerprintLoaded = false
     /// Monitoring gate for the topology duty. Checked at each due cadence
     /// BEFORE any estate read or compute: false skips the entire duty for
     /// that interval ("off is free"). Nil = always run. Injected by the host
     /// from the stats store's live monitoring flag, so a moot-mgr on/off flip
     /// takes effect at the next cadence without restart.
     private let topologyGate: (@Sendable () async -> Bool)?
-    /// Process-local dirty token of the most recent COMPUTED topology snapshot
-    /// inputs. When the next due cadence yields the same token, the duty skips
-    /// the Louvain/centrality math, the encode, and the store write — the
-    /// stored snapshot is still current (generatedTs therefore means "when the
-    /// content last changed", not "when the duty last ran"). In-memory only:
-    /// reset to nil at every process start, never persisted, never compared
-    /// across processes.
-    private var lastTopologyInputsToken: TopologyInputsToken? = nil
+    /// Stable `fingerprint` of the most recent COMPUTED topology snapshot inputs.
+    /// When the next due cadence yields the same fingerprint, the duty skips the
+    /// Louvain/centrality math, the encode, and the store write — the stored
+    /// snapshot is still current (generatedTs therefore means "when the content
+    /// last changed", not "when the duty last ran"). Seeded on the first duty from
+    /// the persisted fingerprint (F5, via `topologyFingerprintLoader`) so the skip
+    /// holds across process restarts, then updated after every recompute.
+    private var lastTopologyFingerprint: String? = nil
     /// Minimum spacing between PoolReducer (novel-token merge-back) passes, in
     /// milliseconds. Default 0 — NEAR-REALTIME: considered every tick, gated by
     /// the reducer's own no-op-safe scan, then live-swaps the running tagger on a
@@ -179,6 +191,16 @@ public actor AutonomicGovernor {
     private let poolTableArtifactURL: URL?
     /// Injected for deterministic tests; production reads the wall clock.
     private let clock: @Sendable () -> Date
+    /// Minimum spacing between GC sweep passes, in milliseconds.
+    /// Default 30 000 (30 s = 2× the DrainLease TTL of 15 s). The sweep is a
+    /// cheap probe-only read; 30 s gives enough margin that a stale lease
+    /// (TTL-expired after 15 s without heartbeat) is detected in at most one
+    /// TTL interval after the drainer dies. Pass 0 in tests to fire every tick.
+    private let gcSweepIntervalMs: Int
+    /// Wall-clock instant of the most recent GC sweep. Nil on first tick so the
+    /// sweep fires immediately at startup (catches any orphaned cur rows from a
+    /// previous crashed session before the first drain fires).
+    private var lastGCSweepFired: Date? = nil
 
     public init(
         kit: GeniusLocusKit,
@@ -189,7 +211,8 @@ public actor AutonomicGovernor {
         preferenceIntervalMs: Int = 600_000,
         topologyCadenceMs: Int = autonomicGovernorDefaultTopologyCadenceMs(),
         poolReduceCadenceMs: Int = autonomicGovernorDefaultPoolReduceCadenceMs(),
-        topologyHandler: (@Sendable (String, Date, Data) async -> Void)? = nil,
+        topologyHandler: (@Sendable (String, Date, Data, String) async -> Void)? = nil,
+        topologyFingerprintLoader: (@Sendable () async -> String?)? = nil,
         topologyGate: (@Sendable () async -> Bool)? = nil,
         // Graph analytics handler: the host (AriaMcpKit) injects the
         // CognitionKit-based Keystones + Constellation scan. Nil = no graph
@@ -201,6 +224,9 @@ public actor AutonomicGovernor {
         // explicit temp paths (or nil to skip the reduce path entirely).
         poolDirectory: URL? = NovelPoolSubmitter.poolDirectory(),
         poolTableArtifactURL: URL? = NovelPoolSubmitter.tableArtifactURL(),
+        // GC sweep cadence: 30 s (2× DrainLease TTL = 15 s). Pass 0 in tests to
+        // fire every tick and verify the sweep runs without waiting 30 s.
+        gcSweepIntervalMs: Int = 30_000,
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.kit = kit
@@ -215,10 +241,16 @@ public actor AutonomicGovernor {
         self.poolDirectory = poolDirectory
         self.poolTableArtifactURL = poolTableArtifactURL
         self.topologyHandler = topologyHandler
+        self.topologyFingerprintLoader = topologyFingerprintLoader
         self.topologyGate = topologyGate
+        self.gcSweepIntervalMs = gcSweepIntervalMs
         self.clock = clock
         // Construct the daemons against the live estate via NeuronKit's seam
-        // adapters. In-memory policy stores for P2 (P3 → manifest store).
+        // adapters. Production persists policy, bandit, and daemon cycle state to
+        // the estate manifest (F6 / ADR-020) so a restart continues from the prior
+        // run's state instead of re-discovering and re-proposing — the store reads
+        // and writes THROUGH the public substrate interface (kit.estate(for:) →
+        // Estate.meta/setMeta), keeping NeuronKit's reach B-1-compliant.
         //
         // AUTO-REINDEX: wire an EstateCorpusGrowthProbe so distributional embedding
         // bases are retrained automatically when corpus growth crosses the threshold.
@@ -230,13 +262,13 @@ public actor AutonomicGovernor {
             reader: EstateDreamingReader(handle: handle, kit: kit),
             sink: EstateDreamingSink(handle: handle, kit: kit),
             rewardSource: RecallTraceRewardSource(),
-            policyStore: InMemoryDreamingPolicyStore(),
+            policyStore: EstateManifestDreamingPolicyStore(handle: handle, kit: kit),
             growthProbe: EstateCorpusGrowthProbe(handle: handle, kit: kit)
         )
         self.maintenance = MaintenanceDaemon(
             reader: EstateMaintenanceReader(handle: handle, kit: kit),
             sink: EstateMaintenanceSink(handle: handle, kit: kit),
-            policyStore: InMemoryMaintenancePolicyStore()
+            policyStore: EstateManifestMaintenancePolicyStore(handle: handle, kit: kit)
         )
     }
 
@@ -271,6 +303,11 @@ public actor AutonomicGovernor {
         /// The word-class table version after this tick. Bumped on every live
         /// swap; lets tests/telemetry observe in-session learning.
         public let tableVersion: UInt64
+        /// True when this tick dispatched a GC sweep Task via
+        /// `kit.sweepStaleInFlightJobs`. The sweep probes stream drain leases
+        /// and reclaims orphaned cur→new rows for stale streams (Mission #54).
+        /// False when the cadence has not yet elapsed (30 s default).
+        public let gcSweepFired: Bool
     }
 
     /// Run the governor loop until the task is cancelled (process shutdown).
@@ -306,11 +343,72 @@ public actor AutonomicGovernor {
         var maintenanceFired = false
         var signalsTicked = false
 
-        do { dreamingFired = try await dreaming.pump(now: now) != nil }
-        catch { logger.error("AutonomicGovernor: dreaming pump error: \(error)") }
+        // REM dispatch table (ADR-021 Phase 6, T11): iterate the shared table so
+        // all four cadences are driven uniformly by the governor. The table is
+        // defined in RemCycleTable.swift and consumed identically by the
+        // dream_runner, so the cycle roster is declared exactly once.
+        //
+        // ALPHA gate: timer-due AND queue non-empty (ADR-021 Phase 4 §12.2).
+        //   nil  = queue not yet mounted — skip (safe direction).
+        //   0    = queue mounted but empty — skip (idle ticks cost nothing).
+        //   n>0  = items waiting; proceed to pump + drain.
+        // THETA/BETA/OMEGA: purely cadence-gated (each carries its own last-run
+        //   timestamp in DreamingDaemonState, persisted via F6/ADR-020).
+        // The Swift reader seams are lazy (reads happen inside runCycle), so the
+        // timer-due fast-out for ALPHA keeps the tick symmetric with the Rust
+        // governor (whose EstateDreamingReader snapshots eagerly and MUST be gated
+        // before it is built).
+        for entry in remCycleTable {
+            switch entry.kind {
+            case .alpha:
+                // Read pending count once; it drives both the timer path and the event path.
+                // nil = queue not yet mounted (skip); 0 = empty (skip); n>0 = proceed.
+                let pending = await kit.dreamingQueuePendingCount(for: handle)
+                // Timer gate: drives the standard ALPHA cycle for .timer and .hybrid modes.
+                if await dreaming.timerDue(now: now) {
+                    if let count = pending, count > 0 {
+                        do { dreamingFired = try await dreaming.pump(now: now) != nil }
+                        catch { logger.error("AutonomicGovernor: \(entry.name) pump error: \(error)") }
+                    }
+                    // else: nil (not mounted) or 0 (empty) — no-op this tick.
+                }
+                // Event gate: drives pumpOnEvent for .event and .hybrid trigger modes on
+                // every tick, independent of the timer cadence. pumpOnEvent is self-gating —
+                // it is a no-op when the daemon's trigger mode is .timer, so timer-only
+                // estates pay nothing beyond the nil-check here. This wires near-realtime
+                // dreaming for event-driven estates so cycles fire as observations arrive
+                // rather than waiting for the next cadence tick. Mirrors Rust
+                // autonomic_governor::run_loop pump_on_event path. (NK-2/NK-6 planned hardening)
+                if let count = pending, count > 0 {
+                    do {
+                        if try await dreaming.pumpOnEvent(observationCount: count, now: now) != nil {
+                            dreamingFired = true
+                        }
+                    }
+                    catch { logger.error("AutonomicGovernor: \(entry.name) pumpOnEvent error: \(error)") }
+                }
+            case .theta:
+                if await dreaming.thetaDue(now: now) {
+                    do { _ = try await dreaming.runThetaCycle(now: now) }
+                    catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
+                }
+            case .beta:
+                if await dreaming.betaDue(now: now) {
+                    do { _ = try await dreaming.runBetaCycle(now: now) }
+                    catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
+                }
+            case .omega:
+                if await dreaming.omegaDue(now: now) {
+                    do { _ = try await dreaming.runOmegaCycle(now: now) }
+                    catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
+                }
+            }
+        }
 
-        do { maintenanceFired = try await maintenance.pump(now: now) != nil }
-        catch { logger.error("AutonomicGovernor: maintenance pump error: \(error)") }
+        if await maintenance.due(now: now) {
+            do { maintenanceFired = try await maintenance.pump(now: now) != nil }
+            catch { logger.error("AutonomicGovernor: maintenance pump error: \(error)") }
+        }
 
         // Standing signals: the resident daemon registers the default standing
         // signals once at bootstrap (AriaResident.runResidentDaemon, before this
@@ -416,18 +514,38 @@ public actor AutonomicGovernor {
             lastTopologySnapshotFired = now
             if let handler = topologyHandler {
                 // nonisolated static func — actor executor released at first await.
-                Task { [kit, handle, now, handler, topologyGate, lastTopologyInputsToken] in
+                Task { [kit, handle, now, handler, topologyGate] in
                     if let gate = topologyGate, !(await gate()) { return }
+                    // Seed the comparison fingerprint, loading the persisted one once
+                    // (F5) so the first post-restart duty skips the recompute when the
+                    // estate is unchanged.
+                    let previousFingerprint = await self.topologyFingerprintForDuty()
                     do {
                         let token = try await AutonomicGovernor.topologySnapshotDuty(
                             kit: kit, handle: handle, now: now,
-                            previous: lastTopologyInputsToken,
+                            previousFingerprint: previousFingerprint,
                             handler: handler)
                         await self.recordTopologyInputsToken(token)
                     } catch {
                         logger.error("AutonomicGovernor: topologySnapshotDuty error: \(error)")
                     }
                 }
+            }
+        }
+
+        // GC sweep: reclaim orphaned in-flight (cur) queue rows for streams
+        // whose drainer has died without the daemon restarting (mid-run worker
+        // death case, Mission #54). Fires at a 30 s cadence (2× DrainLease TTL);
+        // first tick fires immediately (lastGCSweepFired nil) to catch jobs left
+        // by a previous crashed session before the first drain attempts them.
+        // Runs in an unstructured Task so tick() returns without stalling.
+        let gcSweepElapsed = lastGCSweepFired.map {
+            now.timeIntervalSince($0) * 1000 >= Double(gcSweepIntervalMs)
+        } ?? true
+        if gcSweepElapsed {
+            lastGCSweepFired = now
+            Task { [kit, handle, now] in
+                await kit.sweepStaleInFlightJobs(for: handle, now: now)
             }
         }
 
@@ -461,28 +579,40 @@ public actor AutonomicGovernor {
         var poolReduceFired = false
         var tableSwapped = false
         if poolReduceElapsed, let poolDir = poolDirectory, let tableURL = poolTableArtifactURL {
-            lastPoolReduceFired = now
-            poolReduceFired = true
-            do {
-                let result = try PoolReducer.reduce(
-                    poolDirectory: poolDir,
-                    tableArtifactURL: tableURL,
-                    now: now)
-                if !result.isNoop {
-                    logger.info("AutonomicGovernor: pool reduce merged \(result.nounsAdded) nouns + \(result.verbsAdded) verbs (consumed \(result.consumed), quarantined \(result.quarantined))")
-                    // Live atomic swap at the safe point: adopt the just-merged
-                    // table in-session. Only on a non-noop reduce — a noop wrote
-                    // nothing new, so the running table is already current. Swap
-                    // from the SAME artifact path the reducer just wrote
-                    // (`tableURL`), so the running tagger learns the merged tokens.
-                    let newVersion = WordClassTableCache.reload(fromArtifact: tableURL)
-                    tableSwapped = true
-                    logger.info("AutonomicGovernor: live word-class table swap → version \(newVersion)")
+            // Planned hardening: if the pool directory already holds more files
+            // than poolReduceFileCap, the drainer is falling behind — skip this
+            // cycle to shed load. NOT advancing lastPoolReduceFired means the
+            // next tick retries immediately (near-realtime back-pressure; no file
+            // is dropped). Parity: mirrors POOL_REDUCE_FILE_CAP in autonomic_governor.rs.
+            let poolFileCount = (try? FileManager.default
+                .contentsOfDirectory(atPath: poolDir.path).count) ?? 0
+            if poolFileCount > AutonomicGovernor.poolReduceFileCap {
+                logger.warning(
+                    "AutonomicGovernor: pool has \(poolFileCount) files (cap \(AutonomicGovernor.poolReduceFileCap)); deferring reduce (planned hardening)")
+            } else {
+                lastPoolReduceFired = now
+                poolReduceFired = true
+                do {
+                    let result = try PoolReducer.reduce(
+                        poolDirectory: poolDir,
+                        tableArtifactURL: tableURL,
+                        now: now)
+                    if !result.isNoop {
+                        logger.info("AutonomicGovernor: pool reduce merged \(result.nounsAdded) nouns + \(result.verbsAdded) verbs (consumed \(result.consumed), quarantined \(result.quarantined))")
+                        // Live atomic swap at the safe point: adopt the just-merged
+                        // table in-session. Only on a non-noop reduce — a noop wrote
+                        // nothing new, so the running table is already current. Swap
+                        // from the SAME artifact path the reducer just wrote
+                        // (`tableURL`), so the running tagger learns the merged tokens.
+                        let newVersion = WordClassTableCache.reload(fromArtifact: tableURL)
+                        tableSwapped = true
+                        logger.info("AutonomicGovernor: live word-class table swap → version \(newVersion)")
+                    }
+                } catch {
+                    // A missing/unwritable table artifact is the expected state until
+                    // a writable table is provisioned; log once per fire, never crash.
+                    logger.error("AutonomicGovernor: pool reduce skipped (\(error))")
                 }
-            } catch {
-                // A missing/unwritable table artifact is the expected state until
-                // a writable table is provisioned; log once per fire, never crash.
-                logger.error("AutonomicGovernor: pool reduce skipped (\(error))")
             }
         }
 
@@ -496,7 +626,8 @@ public actor AutonomicGovernor {
             topologySnapshotFired: topologyElapsed,
             poolReduceFired: poolReduceFired,
             tableSwapped: tableSwapped,
-            tableVersion: WordClassTableCache.version
+            tableVersion: WordClassTableCache.version,
+            gcSweepFired: gcSweepElapsed
         )
     }
 
@@ -528,6 +659,28 @@ public actor AutonomicGovernor {
         // }
         // See AriaResident.runResidentDaemon for the wired implementation.
     }
+
+    // MARK: - Planned-hardening caps
+
+    /// Maximum number of live drawers scored per graph-centrality scan.
+    ///
+    /// Planned hardening: prevents per-tick O(n²) edge build on large estates.
+    /// Drawers beyond the cap score 0.0 per spec C-16 ("a drawer with no
+    /// structural edges has no centrality"). The cap is applied to the live
+    /// drawer set sorted ascending by id, so the capped subset is stable and
+    /// deterministic across ports. Parity: matches `GRAPH_CENTRALITY_SCAN_NODE_CAP`
+    /// in autonomic_governor.rs.
+    private static let graphCentralityScanNodeCap = 10_000
+
+    /// Maximum number of pending files in the pool directory before the
+    /// PoolReducer duty defers.
+    ///
+    /// Planned hardening: if the pool directory has more than this many files,
+    /// the drainer is falling behind. Deferring — without advancing
+    /// `lastPoolReduceFired` — lets the next tick retry immediately, providing
+    /// near-realtime back-pressure instead of running an unbounded reduce under
+    /// load. Parity: matches `POOL_REDUCE_FILE_CAP` in autonomic_governor.rs.
+    private static let poolReduceFileCap = 500
 
     // MARK: - Graph-centrality producer duty
 
@@ -564,9 +717,27 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         now: Date
     ) async throws {
-        let drawers = try await kit.allDrawers(in: handle)
+        let allDrawers = try await kit.allDrawers(in: handle)
         let tunnels = try await kit.allTunnels(in: handle)
         let facts = try await kit.recallKGFacts(handle)
+
+        // Planned hardening: cap the scan to graphCentralityScanNodeCap live
+        // drawers. Drawers beyond the cap score 0.0 — correct per spec C-16
+        // ("a drawer with no structural edges has no centrality"). The cap is
+        // applied to live (non-tombstoned) drawers sorted ascending by id,
+        // matching GraphCentralityAdjacency.build's own deterministic ordering,
+        // so both ports produce the same capped subset from the same estate state.
+        // Parity: mirrors GRAPH_CENTRALITY_SCAN_NODE_CAP in autonomic_governor.rs.
+        let liveDrawers = allDrawers.filter { $0.tombstonedAt == nil }
+            .sorted { $0.id < $1.id }
+        let drawers: [Drawer]
+        if liveDrawers.count > graphCentralityScanNodeCap {
+            logger.warning(
+                "AutonomicGovernor.graphCentralityScan: \(liveDrawers.count) live drawers exceeds cap \(graphCentralityScanNodeCap); scoring first \(graphCentralityScanNodeCap) (planned hardening)")
+            drawers = Array(liveDrawers.prefix(graphCentralityScanNodeCap))
+        } else {
+            drawers = liveDrawers
+        }
 
         let graph = GraphCentralityAdjacency.build(
             drawers: drawers, tunnels: tunnels, facts: facts)
@@ -652,13 +823,13 @@ public actor AutonomicGovernor {
     ///   - kit:     The live GeniusLocusKit actor.
     ///   - handle:  The estate to snapshot.
     ///   - now:     The generation instant (injected by the governor tick).
-    ///   - handler: Called once with (estateID, generatedAt, jsonBytes).
+    ///   - handler: Called once with (estateID, generatedAt, jsonBytes, fingerprint).
     public static func topologySnapshotDuty(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         now: Date,
-        previous: TopologyInputsToken? = nil,
-        handler: @Sendable (String, Date, Data) async -> Void
+        previousFingerprint: String? = nil,
+        handler: @Sendable (String, Date, Data, String) async -> Void
     ) async throws -> TopologyInputsToken {
         let locus = try await kit.estate(for: handle)
 
@@ -666,13 +837,14 @@ public actor AutonomicGovernor {
         let allTunnelRows = try await locus.allTunnels()
         let kgFacts = try await locus.allKGFacts()
 
-        // Dirty check: compute the process-local inputs token BEFORE the
-        // expensive work. An unchanged token means the stored snapshot is still
-        // current, so the duty returns without touching the store.
+        // Dirty check: compute the stable inputs fingerprint BEFORE the expensive
+        // work. An unchanged fingerprint means the stored snapshot is still current,
+        // so the duty returns without touching the store. The fingerprint is stable
+        // across process launches, so this skip holds across a restart too (F5).
         let token = TopologyInputsToken(drawers: allDrawerRows,
                                         tunnels: allTunnelRows,
                                         factCount: kgFacts.count)
-        if let previous, token == previous {
+        if let previousFingerprint, token.fingerprint == previousFingerprint {
             return token
         }
 
@@ -750,15 +922,41 @@ public actor AutonomicGovernor {
         encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(payload)
 
-        await handler(handle.estateUUID.uuidString, now, body)
+        await handler(handle.estateUUID.uuidString, now, body, token.fingerprint)
         return token
     }
 
-    /// Record the process-local inputs token of the last computed (or
+    /// Record the stable inputs fingerprint of the last computed (or
     /// confirmed-current) topology snapshot. Actor-isolated write-back from the
-    /// duty Task. In-memory governor state only — never persisted.
+    /// duty Task. The host persists the same fingerprint beside the snapshot via
+    /// the handler, so this in-memory value and the on-disk one stay in lockstep.
     private func recordTopologyInputsToken(_ token: TopologyInputsToken) {
-        lastTopologyInputsToken = token
+        lastTopologyFingerprint = token.fingerprint
+        topologyFingerprintLoaded = true
+    }
+
+    /// Return the fingerprint to compare this duty against, loading the persisted
+    /// one once (F5) so the first post-restart duty skips the `graphTopology`
+    /// recompute when the estate is unchanged. After the first load (or the first
+    /// recompute) this returns the in-memory value with no further I/O.
+    private func topologyFingerprintForDuty() async -> String? {
+        if !topologyFingerprintLoaded {
+            topologyFingerprintLoaded = true
+            if lastTopologyFingerprint == nil, let loader = topologyFingerprintLoader {
+                lastTopologyFingerprint = await loader()
+            }
+        }
+        return lastTopologyFingerprint
+    }
+
+    // MARK: - Test-facing accessors
+
+    /// The dreaming daemon's current trigger mode. Exposed for deterministic tests
+    /// that need to observe the bandit-selected mode after a cycle and conditionally
+    /// assert on dreaming behavior. (NK-2 planned hardening: pumpOnEvent is now
+    /// wired — tests that assumed only pump() fires need to account for the mode.)
+    public func dreamingTriggerMode() async -> DreamingTriggerMode {
+        await dreaming.currentTriggerMode()
     }
 
     /// Format a Date as ISO-8601 UTC with millisecond precision.
@@ -784,19 +982,17 @@ public actor AutonomicGovernor {
 // MARK: - Topology inputs dirty token
 
 /// A cheap, order-independent CHANGE-DETECTION token over the topology duty's
-/// INPUTS, which skips recomputation when the estate is unchanged between
-/// cadences. This is a PROCESS-LOCAL DIRTY TOKEN, not a stable fingerprint:
-/// it is in-memory governor state, NEVER persisted to storage, and NEVER
-/// compared across processes. It is built from Swift `hashValue` (process-
-/// local, salted per process launch), so two processes will produce different
-/// tokens for identical estates — that is correct and sufficient, because the
-/// only comparison ever made is `previous == current` WITHIN a single running
-/// governor.
+/// INPUTS, used to skip recomputation when the estate is unchanged between
+/// cadences. Its `fingerprint` is a STABLE, process-independent string: it is
+/// persisted beside the topology snapshot and loaded on the next process start,
+/// so an unchanged estate skips the expensive `graphTopology` recompute even
+/// across a restart (F5). The digest is FNV-1a over canonical bytes — NOT Swift
+/// `hashValue`, which is salted per launch and would not compare across processes.
 ///
-/// Built from already-fetched rows only — counts, maximum ingest/event
-/// instants, dead counts, and an order-independent inputs digest (overflow
-/// sum of per-drawer id+udcCode hashes, catching re-anchoring that changes
-/// neither counts nor timestamps).
+/// Built from already-fetched rows only — counts, maximum ingest/event instants,
+/// dead counts, and an order-independent inputs digest (overflow sum of per-drawer
+/// id+udcCode FNV hashes, catching re-anchoring that changes neither counts nor
+/// timestamps).
 public struct TopologyInputsToken: Sendable, Equatable {
     public let drawerCount: Int
     public let tunnelCount: Int
@@ -805,10 +1001,10 @@ public struct TopologyInputsToken: Sendable, Equatable {
     public let deadTunnelCount: Int
     public let maxFiledAt: Date?
     public let maxEventTime: Date?
-    /// Order-independent overflow sum of per-drawer id+udcCode `hashValue`s.
-    /// Process-local (Swift hashing is salted per launch) — only ever compared
-    /// to another token from the SAME process. Never persisted.
-    public let inputsDigest: Int
+    /// Order-independent overflow sum of per-drawer FNV-1a(id + udcCode) hashes.
+    /// STABLE across process launches (FNV, not Swift `hashValue`) so the
+    /// `fingerprint` persists and compares across restarts.
+    public let inputsDigest: UInt64
 
     // Package-internal initialiser — tests in the same module use this; cross-module
     // consumers receive tokens from the governor itself, never construct them directly.
@@ -823,10 +1019,34 @@ public struct TopologyInputsToken: Sendable, Equatable {
         let tunnelMaxFiled = tunnels.lazy.map(\.filedAt).max()
         self.maxFiledAt = [drawerMaxFiled, tunnelMaxFiled].compactMap { $0 }.max()
         self.maxEventTime = drawers.lazy.map(\.eventTime).max()
-        // Overflow-add keeps the digest order-independent across query order.
-        var digest = 0
-        for d in drawers { digest = digest &+ d.id.hashValue &+ d.udcCode.hashValue }
+        // Overflow-add of per-drawer STABLE hashes keeps the digest
+        // order-independent across query order AND identical across process runs.
+        var digest: UInt64 = 0
+        for d in drawers {
+            digest = digest &+ Self.fnv1a("\(d.id)\u{1}\(d.udcCode)")
+        }
         self.inputsDigest = digest
+    }
+
+    /// FNV-1a 64-bit over a string's UTF-8 — a small, stable, process-independent
+    /// hash (no external dependency, no Swift `hashValue` salt).
+    static func fnv1a(_ s: String) -> UInt64 {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in s.utf8 {
+            h ^= UInt64(byte)
+            h = h &* 0x0000_0100_0000_01b3
+        }
+        return h
+    }
+
+    /// Stable, persistable fingerprint of these inputs. Two tokens are equal iff
+    /// their fingerprints are equal, so the duty's dirty-check compares
+    /// fingerprints — and the same comparison holds across process restarts when
+    /// one side is loaded from disk.
+    public var fingerprint: String {
+        let filed = maxFiledAt.map { String($0.timeIntervalSince1970) } ?? "-"
+        let event = maxEventTime.map { String($0.timeIntervalSince1970) } ?? "-"
+        return "\(drawerCount):\(tunnelCount):\(factCount):\(deadDrawerCount):\(deadTunnelCount):\(filed):\(event):\(inputsDigest)"
     }
 }
 

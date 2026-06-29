@@ -13,9 +13,11 @@ import PersistenceKitInMemory
 /// `associate` round-trip through LocusKit's live verb surface.
 /// `mutate` is fully implemented for all MutationKind cases; this suite
 /// covers the `.confirm` confirmation round-trip and the state-axis
-/// round-trips (`.contest`, `.resolve`). `reanchor` routes to a LocusKit
-/// stub. `propose` and `associate` delegate to LocusKit; a missing
-/// target/endpoint produces `VerbError.underlyingEstateFailure(verb:)`.
+/// round-trips (`.contest`, `.resolve`). `reanchor` is live and covered by
+/// a real round-trip (`reanchorRoundTrip`): captures a drawer, reanchors it,
+/// recalls it, and verifies the updated lattice anchor. `propose` and
+/// `associate` delegate to LocusKit; a missing target/endpoint produces
+/// `VerbError.underlyingEstateFailure(verb:)`.
 /// In every case the verb call reaches the GLK boundary, resolves the
 /// handle through `estate(for:)`, and dispatches.
 @Suite("Verb surface round-trips")

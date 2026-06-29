@@ -126,8 +126,7 @@ struct RecallPaginationTests {
         #expect(rows.count == 1)
         // .structured = no blob reads: content is empty string (correct per § 7.3).
         #expect(rows[0].content == "", "structured recall must return content-stripped row")
-        // Structured fields (room, id, bitmaps) must be intact.
-        #expect(rows[0].room == "test-room")
+        // Structured fields (id, bitmaps) must be intact.
         #expect(rows[0].id == captured.id)
     }
 

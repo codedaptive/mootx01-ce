@@ -41,11 +41,11 @@ Use this skill for prompts containing or implying:
 1. Verify availability with `moot_estate_ping`.
 2. Orient with `moot_estate_status`.
 3. Recover continuity with `moot_read_journal`.
-4. Recall with `moot_memory_search`, `moot_recall_precise`, or `moot_fact_search`.
+4. Recall with `moot_memory_search`, `moot_recall_precise`, `moot_recall_shaped`, `moot_recall_distilled`, or `moot_fact_search`.
 5. Analyze with `moot_list_lenses`, relevant `moot_lens_*` tools, or `moot_synthesize`.
 6. Write durable results with `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal`.
 7. Correct stale knowledge with confirm/update/withdraw/retire tools.
-8. Run `moot_dream` after bulk import or major memory growth.
+8. Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
 ## Cost Rule
 

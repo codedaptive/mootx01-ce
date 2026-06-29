@@ -22,7 +22,14 @@ use std::collections::BTreeMap;
 
 /// Mirror of Swift `ScenarioProfile`. `tournament_report` is a
 /// runtime-only advisory field excluded from JSON (see module doc).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Custom `PartialEq` excludes `tournament_report`: the field is always
+/// `None` after deserialisation (see `#[serde(skip)]`), so two profiles
+/// that differ only in their advisory runtime report should compare equal
+/// when checking logical identity. Matching the Swift `Equatable`
+/// conformance which also excludes the CodingKeys-excluded field.
+/// (NK-5 planned hardening)
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScenarioProfile {
     /// Swift's property is `profileID` (capital ID) — rename_all would
@@ -48,6 +55,23 @@ pub struct ScenarioProfile {
     /// the moment of creation.
     #[serde(skip)]
     pub tournament_report: Option<TournamentReport>,
+}
+
+/// Custom `PartialEq` that excludes `tournament_report`. Two profiles with the
+/// same persisted fields are logically equal regardless of any runtime-only
+/// advisory report attached to one of them. Mirrors Swift's `Equatable`
+/// conformance which excludes the CodingKeys-excluded field. (NK-5 planned hardening)
+impl PartialEq for ScenarioProfile {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile_id == other.profile_id
+            && self.name == other.name
+            && self.framing_parameters == other.framing_parameters
+            && self.scoring_breakdown == other.scoring_breakdown
+            && self.preference_weights == other.preference_weights
+            && self.created_at == other.created_at
+            && self.training_eligible == other.training_eligible
+        // tournament_report intentionally excluded: runtime-only, not persisted.
+    }
 }
 
 impl ScenarioProfile {

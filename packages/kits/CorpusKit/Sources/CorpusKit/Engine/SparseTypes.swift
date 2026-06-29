@@ -41,7 +41,7 @@ public typealias LaneTag = VectorKit.LaneTag
 
 // MARK: - ImpactPosting
 
-/// One entry in an impact-ordered inverted index posting list.
+/// One entry in an inverted index posting list (item-id-ordered; impact is used for scoring and block-max accounting, not for list ordering).
 ///
 /// The `impact` field is an INTEGER (i32) — the result of quantising
 /// a float weight via round-half-to-even at QUANT_SCALE=100
@@ -125,9 +125,9 @@ public struct SparseHit: Sendable, Equatable {
 /// perLane carries the raw per-lane scores (Hamming distance / cosine /
 /// BM25 impact) for all lanes that produced a hit for this item. Lanes
 /// that did not produce a hit for this item are absent from perLane.
-/// The current VectorKit/CorpusKit HybridRecall discards per-lane
-/// scores; FusedHit preserves them so dense-first selection and recipe
-/// layers can read the precomputed dense signal without recomputing it.
+/// `HybridRecall` already reads `FusedHit.perLane` and forwards
+/// `.binaryDense`/`.sparse` raw scores into `ScoredChunk.vectorScore`
+/// and `keywordScore`.
 /// (arch spec §5.2, DENSE_FIRST_SELECTION_SCOPE_v0.1)
 ///
 /// Result order: (fusedScore DESC, itemID ASC) — total order via the

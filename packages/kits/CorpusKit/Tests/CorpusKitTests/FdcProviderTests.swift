@@ -50,7 +50,7 @@ import VectorKit
 // MARK: - Helpers
 
 /// FNV-1a 64-bit hash (mirrors the FDC node-vector seed derivation).
-/// Used in tests to verify the seed matches the expected value.
+/// Present for reference; no seed-value assertion currently uses this helper.
 private func fnv64(_ s: String) -> UInt64 {
     let offsetBasis: UInt64 = 14_695_981_039_346_656_037
     let prime: UInt64 = 1_099_511_628_211
@@ -331,15 +331,18 @@ private let fdcProbeCodes: [String] = [
 ]
 
 /// Probe texts for embedding conformance. MUST match Rust leg's `PROBE_TEXTS`.
+/// Texts must resolve to FDC codes under the current encoder (post tie-count
+/// guard). Generic cross-domain phrases (e.g. "computer science programming")
+/// are correctly UNRESOLVED and must not be used as resolving probes.
 private let fdcProbeTexts: [String] = [
     "",
-    "organic chemistry reactions molecules",
-    "computer science programming software",
-    "philosophy ethics",
-    "mathematics algebra calculus",
+    "mammal reptile amphibian vertebrate zoology",
+    "violin piano concert symphony orchestra",
+    "painting sculpture gallery museum art",
+    "algebra geometry proof theorem mathematical",
     "zxcvqwerty nonsense unresolvable",
-    "biology ecology environment",
-    "history civilization ancient",
+    "fossil dinosaur paleontology extinction",
+    "ocean marine coral reef fish aquatic",
 ]
 
 /// Build the canonical file from the live Swift providers.

@@ -334,8 +334,8 @@ struct TraceRewardTests {
             }
             return false
         })
-        _ = hasNonZero // suppress unused warning — the contains check above is the gate
-        // A simpler check: "trace_rows: 0" must NOT appear after the search.
+        _ = hasNonZero // hasNonZero is unused; the real assertion is the contains check below.
+        // Assert "trace_rows: 0" does NOT appear — the count must be non-zero after the search.
         #expect(!afterText.contains("trace_rows: 0"),
                 "estate_status must report non-zero trace_rows after external search; got: \(afterText)")
     }

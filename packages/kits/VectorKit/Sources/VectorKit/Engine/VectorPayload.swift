@@ -181,10 +181,9 @@ public struct VectorPayload: Sendable, Equatable {
 
     /// Re-constitute the Engram from a binary payload.
     ///
-    /// Returns nil if the payload is not binary or the byte count is
-    /// not exactly 32. In production these conditions should never
-    /// occur — a malformed payload is a storage bug. Use a safe
-    /// fallback rather than crashing to avoid losing a search session.
+    /// Throws `VectorKitError.invalidPayload` if the payload kind is not
+    /// binary, or an `Engram` decode error if the byte count is not
+    /// exactly 32. In production these conditions indicate a storage bug.
     public func asEngram() throws -> Engram {
         guard kind == .binary else {
             throw VectorKitError.invalidPayload(

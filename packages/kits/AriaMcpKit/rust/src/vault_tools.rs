@@ -54,6 +54,7 @@
 
 use crate::dispatch::{error_result, text_result};
 use crate::estate_registry::EstateRegistry;
+use genius_locus_kit::EncodeSpeed;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
@@ -74,14 +75,25 @@ pub struct ManifestEntry {
 /// The sidecar manifest `moot_vault_export` writes. Mirrors Swift `ExportManifest`.
 ///
 /// - `exported_at`: ISO8601 instant the export ran (display only, not used in diff).
-/// - `note_count`:  number of notes at export time (same as `files.len()`).
+///   Serializes as `exportedAt` (camelCase) to match Swift's manifest.json key.
+/// - `note_count`:  number of notes at export time — NOT written to manifest.json
+///   (`skip_serializing`) so diffs against Swift-written manifests stay clean.
+///   Read from `files.len()` on the deserialized struct instead.
 /// - `files`:       vault-relative path → SHA-256 stamp.
 ///
 /// `files` is keyed by forward-slash vault-relative path matching the keys
 /// `ObsidianAdapter::to_ir` produces, so re-hashing after a re-read aligns.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExportManifest {
+    // Serializes as "exportedAt" (camelCase) to match Swift's manifest.json key.
+    // The alias accepts "exported_at" (snake_case) so old Rust-written manifests
+    // still deserialize correctly on vault_status / reconcile reads.
+    #[serde(rename = "exportedAt", alias = "exported_at")]
     pub exported_at: String,
+    // note_count is a convenience field computed at build time — not written to
+    // manifest.json (skip_serializing) so the file matches Swift's key set.
+    // After deserialization, use files.len() instead of this field (it will be 0).
+    #[serde(skip_serializing, default)]
     pub note_count: usize,
     /// BTreeMap so JSON serialization is key-sorted and byte-stable.
     pub files: BTreeMap<String, ManifestEntry>,
@@ -301,7 +313,9 @@ pub fn dispatch_vault(
 /// 6. Assign a UUID job ID, record the completed job in `ledger`, and include
 ///    the `job_id` in the response so the caller can poll via `moot_vault_job`.
 ///
-/// `scope` controls which drawers are included (default `VaultExportScope::Believed`).
+/// `scope` controls which drawers are included (default `VaultExportScope::Exportable`,
+/// CAND-032 — a default disk export writes only exportable-marked rows; broader
+/// scopes like `Believed`/`BelievedIncludingPrivate` are explicit opt-ins).
 /// `now` is sampled at the handler boundary — this is a real wall-clock event
 /// (the export instant), matching the same precedent in Swift's handler.
 ///
@@ -310,6 +324,18 @@ pub fn dispatch_vault(
 /// summary so callers that assume async semantics (poll via `moot_vault_job`)
 /// work correctly — `moot_vault_job(id)` will immediately return the completed
 /// record. This is honest parity: the tool never says "running" for a finished job.
+/// Run a synchronous vault export and record the completed job in the ledger.
+///
+/// # Concurrent-job cap — Rust vs Swift
+///
+/// The Swift async backend has a 4-job concurrent cap that is enforced by an
+/// atomic actor method (`checkAndRegister`) to close a TOCTOU window. The Rust
+/// backend has no equivalent TOCTOU risk: the `Dispatcher` is wrapped in
+/// `Arc<Mutex<>>` (see `http_server.rs`), which serializes ALL dispatch calls
+/// including concurrent HTTP connections. The entire call from cap-check to
+/// ledger-record runs within that single critical section, so no two export calls
+/// can interleave. A concurrent job cap on the Rust side would therefore be
+/// enforced trivially — the Mutex already serializes access.
 fn run_export(
     args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
     registry: &EstateRegistry,
@@ -317,7 +343,7 @@ fn run_export(
     scope: VaultExportScope,
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    let open = registry.resolve(args, "estateID")?;
+    let open = registry.resolve_direct(args)?;
     // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake fix
     // — import routes through capture_with_mode which needs mutable coord access).
     // Export only reads the coordinator, but the bridge holds &mut for uniformity.
@@ -337,7 +363,7 @@ fn run_export(
     let now_ms = wall_now_ms();
     // VaultKitError implements Display with clean English messages — use it
     // so no internal Rust enum variant names leak to the agent boundary.
-    bridge.export(&open.handle, vault_path, now_ms, scope).map_err(|e| {
+    bridge.export(&open.handle, vault_path, now_ms, scope, None).map_err(|e| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
             format!("vault_export: bridge export failed: {e}"),
@@ -393,7 +419,8 @@ fn run_export(
 
 /// Parse the optional `scope` argument from the MCP tool input.
 ///
-/// - Absent or `null` → `VaultExportScope::Believed` (the default).
+/// - Absent or `null` → `VaultExportScope::default()` = `Exportable` (CAND-032 —
+///   a default disk export writes only exportable-marked rows).
 /// - Known string → the matching scope.
 /// - Unknown string → `JSONRPCError::invalidParams` with the list of valid values.
 ///
@@ -432,9 +459,22 @@ fn parse_scope(
 /// Callers that poll with `moot_vault_job` receive the completed record
 /// immediately — the tool never reports "running" for a job that is already done.
 ///
-/// `note_count` is computed BEFORE running the bridge (same as Swift's
-/// `hashAllNotes` synchronous pre-scan), so the count reflects the vault's
-/// pre-import state. This matches Swift exactly.
+/// `note_count` is computed as a synchronous pre-scan before running the bridge.
+/// The count reflects the vault's pre-import state and appears in the immediate
+/// response, mirroring Swift's `hashAllNotes` count in the job_id response.
+///
+/// Ordering note: in Swift (secfix/c-vault-cap), `checkAndRegister` now runs
+/// BEFORE `hashAllNotes` so the cap bounds the expensive preflight. In Rust,
+/// `hash_all_notes` still runs before the bridge because the `Dispatcher`
+/// `Arc<Mutex<>>` already serializes all dispatch calls — at most one import
+/// runs at any time, so no concurrent preflight fan-out is possible and no
+/// TOCTOU risk exists. Both ports report `note_count` in the immediate response
+/// before bridge completion.
+///
+/// Run a synchronous vault import and record the completed job in the ledger.
+///
+/// See `run_export` for a note on the concurrent-job cap and why no TOCTOU
+/// fix is required on the Rust side (the `Dispatcher` Mutex serializes calls).
 fn run_import(
     args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
     registry: &EstateRegistry,
@@ -446,9 +486,18 @@ fn run_import(
     // `hash_all_notes` is a pure filesystem enumeration with no I/O side-effects.
     // On error (e.g. vault path does not exist), default to 0 rather than failing —
     // the bridge import will surface the real error below.
+    //
+    // Slot-safety (secfix/c-vault-jobslot): the Rust backend has no "running"
+    // slot concept — `ledger.record()` is only called AFTER the bridge completes
+    // successfully (see lines below). A `hash_all_notes` failure is swallowed
+    // with `unwrap_or(0)` and the bridge call below handles the real error.
+    // `collect_and_hash` checks `file_type.is_file()` before reading, so a
+    // directory named `directory.md` is recursed (not hashed) and a broken
+    // symlink is silently skipped — neither causes a fatal throw.
+    // The `Dispatcher` `Arc<Mutex<>>` serializes all calls; no TOCTOU risk.
     let note_count = hash_all_notes(vault_path).map(|m| m.len()).unwrap_or(0);
 
-    let open = registry.resolve(args, "estateID")?;
+    let open = registry.resolve_direct(args)?;
     // mut: VaultBridge::new requires &mut EstateCoordinator (import routes through
     // capture_with_mode — dual-path intake fix, G7).
     let mut coord = open.coord.lock().map_err(|_| {
@@ -464,9 +513,23 @@ fn run_import(
         DrawerMapping::default(),
     );
 
+    // mode = encode SPEED (foreground default); the WRITE strategy (bulk vs
+    // per-item stream) is size-gated automatically (import_policy), not chosen
+    // here. Fail-closed on an unknown value.
+    let mode = match args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_lowercase()) {
+        None => EncodeSpeed::Foreground,
+        Some(ref s) if s == "foreground" => EncodeSpeed::Foreground,
+        Some(ref s) if s == "background" => EncodeSpeed::Background,
+        Some(_) => {
+            return Ok(error_result(
+                "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)",
+            ));
+        }
+    };
+
     let now_ms = wall_now_ms();
     let report: ImportReport = bridge
-        .import_vault(vault_path, &open.handle, now_ms)
+        .import_vault(vault_path, &open.handle, now_ms, None, mode)
         .map_err(|e| {
             // Use Display (not Debug) to avoid leaking internal Rust type paths
             // and enum variant names in the MCP error message. VaultKitError
@@ -523,7 +586,8 @@ fn run_status(vault_path: &Path) -> Result<serde_json::Value, JSONRPCError> {
         Ok(Some(m)) => Ok(text_result(&format!(
             "vault_status: manifest present\npath: {}\nnoteCount: {}\nlastExport: {}",
             vault_path.display(),
-            m.note_count,
+            // note_count is skip_serializing so deserialized manifests have 0; use files.len().
+            m.files.len(),
             m.exported_at,
         ))),
     }
@@ -556,7 +620,7 @@ fn run_reconcile(
     // entering runReconcile. Previously this was inside the `if apply {}`
     // block, so a bad estateID in dry-run was silently ignored and the default
     // estate used — diverging from Swift's behaviour (Defect B2-3 fix 1).
-    let open = registry.resolve(args, "estateID")?;
+    let open = registry.resolve_direct(args)?;
 
     let manifest = match read_manifest(vault_path) {
         Err(e) => {
@@ -648,7 +712,7 @@ fn run_reconcile(
         let now_ms = wall_now_ms();
         // VaultKitError has Display — use it so no internal type names leak.
         let report = bridge
-            .import_vault_filtered(vault_path, &candidate_paths, &open.handle, now_ms)
+            .import_vault_filtered(vault_path, &candidate_paths, &open.handle, now_ms, None, EncodeSpeed::Foreground)
             .map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::INTERNAL_ERROR,

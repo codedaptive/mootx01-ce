@@ -6,7 +6,9 @@
 //   (b) explicit .nlTagger opt-in is stored
 //   (c) explicit .hmm is stored
 //   (d) existing call sites (no taggerChoice arg) produce .hmm
-//   (e) invalidConfiguration error case documented in Swift
+//   (e) NovelTokenTaggerChoice enum cases are distinct
+//   (f) default static accessor (.default) agrees with default init (.hmm)
+//   (g) StorageError.invalidConfiguration error case carries a reason string
 
 import Foundation
 import Testing

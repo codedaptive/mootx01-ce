@@ -362,4 +362,12 @@ pub enum GrantError {
     GrantNotFound(Uuid),
     ScopeKeyUnavailable(Uuid),
     KeyDecayed,
+    /// A mode-3 grant was issued with degenerate Lagrange parameters:
+    /// `threshold` must be > 0, `total_shares` must be ≥ `threshold`,
+    /// and `total_shares` must not exceed `MAX_DECAY_SHARES` (255).
+    /// A zero threshold causes reconstruct to interpolate an empty point
+    /// set, producing the zero field element — a constant anyone can
+    /// precompute, breaking the custody model (planned security hardening
+    /// — B1, finding #2). Mirror of Swift `GrantError.invalidCustodyParameters`.
+    InvalidCustodyParameters,
 }

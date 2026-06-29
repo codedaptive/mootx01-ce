@@ -231,8 +231,8 @@ final class TodoModel {
     func seedSampleDataIfEmpty() async {
         guard let bridge else { return }
 
-        // Ask the MOOT if it already knows about any todos. We search the room
-        // marker so we only seed when the MOOT is genuinely fresh.
+        // Ask the MOOT if it already contains any "TODO" content. Seed guard
+        // is content-marker based ("TODO"), not room-marker based.
         let probe = await bridge.callTool("moot_memory_search", arguments: [
             "query": .string("TODO"),
             "limit": .integer(1),

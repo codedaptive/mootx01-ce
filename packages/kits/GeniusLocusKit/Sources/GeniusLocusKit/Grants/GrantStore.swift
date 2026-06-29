@@ -142,16 +142,24 @@ public actor GrantStore {
 
     /// Debit the inference budget for a grant by `amount`, clamping to zero.
     ///
-    /// Persists the updated budget to the `grants` table atomically with the
-    /// caller's read so no concurrent read can consume budget that was already
-    /// debited. The update is a plain column write; the grant's other fields
-    /// (scope, lifetime, custody mode, signature) are not touched.
+    /// Persists the updated budget to the `grants` table and returns the
+    /// BEFORE-debit value so the caller can determine whether this read was
+    /// permitted (preBudget > 0) or over-limit (preBudget <= 0).
     ///
-    /// Returns the budget value BEFORE the debit so the caller can determine
-    /// whether the read that triggered the debit was the last permitted one.
-    /// A pre-debit value of `0.0` (or below) means the caller should have
-    /// already refused; the debit is still written so the store stays
-    /// consistent even on a race-condition path.
+    /// Callers should debit BEFORE the access check (debit-before-check
+    /// posture, CAND-008): call `debitBudget`, then guard on the returned
+    /// `preBudget`. This eliminates the two-await window that existed when
+    /// callers called `get` (to check the budget) and `debitBudget` as two
+    /// separate awaits — collapsing to one await removes the actor-reentrancy
+    /// gap at the `federatedRecall` level.
+    ///
+    /// NOTE: The debit is not atomic at the storage layer under concurrent
+    /// callers that both hold a reference to the same GrantStore actor instance
+    /// — the read-modify-write across two `await` suspension points within this
+    /// method creates a pre-existing reentrancy window at the GrantStore level.
+    /// Resolving that window requires a row-locking UPDATE statement; that fix
+    /// is scoped to a future dedicated grant-atomicity mission and is tracked
+    /// as a known limitation in the BRR for c-brain-glk-b Part 4.
     ///
     /// The debit is a no-op if the grant is absent (the row was revoked and
     /// deleted, which cannot happen through the normal path — the grant table

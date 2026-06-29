@@ -34,18 +34,76 @@ use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, intake::WriteMode};
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
-    default_wings::CHARTER_ROOM,
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
     frames::{CaptureFrame, TunnelCaptureFrame},
     kg_fact::KGFact,
+    node_store::NodeStore,
     provenance::{Channel, SourceType},
     tunnel::Tunnel,
     tunnel_operational::{TunnelKind, TunnelOriginClass},
 };
+use std::sync::Arc;
 use uuid::Uuid;
+
+/// Resolve a batch of drawer parent_node_ids to (wing_name, room_name)
+/// pairs using the estate's NodeStore. ADR-017 removed wing/room from
+/// the Drawer struct; consumers obtain display names from the node tree.
+///
+/// Returns an empty map when the estate has no node store (legacy estates
+/// opened before ADR-017). Callers fall back to empty strings for
+/// unresolved IDs.
+pub fn resolve_drawer_node_names(
+    coordinator: &EstateCoordinator,
+    handle: &EstateHandle,
+    drawers: &[Drawer],
+) -> std::collections::HashMap<String, (String, String)> {
+    let estate = match coordinator.estate_for(handle) {
+        Ok(e) => e,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let ns = match estate.node_store() {
+        Some(ns) => ns,
+        None => return std::collections::HashMap::new(),
+    };
+    build_node_name_map(ns, drawers)
+}
+
+/// Build a lookup map from parent_node_id → (wing_name, room_name)
+/// for the given drawers. Each room node (depth 2) yields its
+/// display_name as the room name; its parent wing node (depth 1)
+/// yields the wing name.
+fn build_node_name_map(
+    ns: &Arc<NodeStore>,
+    drawers: &[Drawer],
+) -> std::collections::HashMap<String, (String, String)> {
+    let mut map = std::collections::HashMap::new();
+    for drawer in drawers {
+        if map.contains_key(&drawer.parent_node_id) || drawer.parent_node_id.is_empty() {
+            continue;
+        }
+        let room_uuid = match Uuid::parse_str(&drawer.parent_node_id) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let room_node = match ns.get_node(room_uuid) {
+            Ok(Some(n)) => n,
+            _ => continue,
+        };
+        let wing_name = if let Some(wing_uuid) = room_node.parent_id {
+            match ns.get_node(wing_uuid) {
+                Ok(Some(w)) => w.display_name,
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        map.insert(drawer.parent_node_id.clone(), (wing_name, room_node.display_name));
+    }
+    map
+}
 
 // MARK: - ExportProjection
 
@@ -87,6 +145,16 @@ pub enum ImportOutcome {
     /// in the estate. The tombstone is respected; the note is NOT resurrected.
     /// Fixes FINDING-1b. Mirrors Swift `.skippedTombstoned`.
     SkippedTombstoned,
+    /// A DisciplineViolation was raised AFTER the supersession cascade already
+    /// committed the successor drawer row (add_drawer_with_cascade Step 1:
+    /// gated_capture) but before the predecessor belief-state flip (Step 4:
+    /// mutate_state) completed. The estate contains an orphaned successor row
+    /// alongside the un-flipped predecessor. This is NOT a clean skip — unlike
+    /// `Skipped`, the write was partially applied. The count is surfaced in
+    /// `ImportReport.drawers_skipped_partial_write` (zero-loss invariant C-13).
+    /// Mirrors Swift `.skippedWithPartialWrite`. Only possible on the update
+    /// path (is_update == true, i.e. an existing lineage was targeted).
+    SkippedWithPartialWrite { reason: String },
 }
 
 // MARK: - DrawerMapping
@@ -102,11 +170,9 @@ pub struct DrawerMapping {
     /// Non-empty so I-5's `embedding_model_id` guard always holds.
     pub embedding_model_id: String,
 
-    /// When `true`, import attempts FDC classification; when `false` (or
-    /// when the lookup does not resolve), the note lands with the fallback
-    /// UDC and provenance intact. The Rust port does not link EideticLib
-    /// in V1, so this flag is honoured structurally but classification is
-    /// always skipped (equivalent to the feature-flag-off path in Swift).
+    /// Reserved for future FDC classification. Stored but not read by import
+    /// paths — notes always land with explicit frontmatter `udc` when present
+    /// or the `fallback_udc` sentinel otherwise.
     pub classify_on_import: bool,
 
     /// The deterministic fallback UDC used when no live FDC anchor and no
@@ -159,14 +225,8 @@ impl DrawerMapping {
         now: i64,
         scope: VaultExportScope,
     ) -> Result<ExportProjection, VaultKitError> {
-        // VK-EXPORT-FIX parity note: `limit: None` is correct here and does NOT
-        // apply a 50-cap in the Rust port. The coordinator's `recall` delegates to
-        // `estate.recall(frame, now).collect_all()`, which drains all pages
-        // regardless of `RecallStream::DEFAULT_PAGE_SIZE`. In the Swift port the
-        // GLK convenience overload `recall(_:_:RecallFrame)` defaults the
-        // `GLKRecallRequest.limit` to 50 when `frame.limit` is `None`; the Swift
-        // fix is to set `frame.limit = 10_000_000`. No such default exists in the
-        // Rust coordinator path, so `limit: None` is the correct unbounded form.
+        // Export uses an explicit full-scan limit (see comment below) — the
+        // earlier `limit: None` form was stale and has been superseded.
         let mut filter_chain = scope.filter_chain();
         filter_chain.push(Filter::SensitivityAtMost(AdjectiveSensitivity::Secret));
         // VK-EXPORT-FIX: pass an explicit limit so the recall scan is a full
@@ -248,16 +308,9 @@ impl DrawerMapping {
         let mut excluded_secret = 0usize;
         let mut excluded_private = 0usize;
         for drawer in recalled {
-            // Bug M fix: system charter drawers (room == CHARTER_ROOM == "_charter")
-            // are estate-structural — auto-seeded at provision time for every new
-            // estate. Exporting them and importing into a freshly-provisioned target
-            // estate duplicates all 7 charter drawers (target already has its own
-            // seeded set; the import mints new lineage IDs from the source moot_id).
-            // Charter drawers carry no user-authored content and are regenerated on
-            // provision. CHARTER_ROOM == "_charter" (locus_kit::default_wings constant).
-            if drawer.room == CHARTER_ROOM {
-                continue;
-            }
+            // Hint drawers (AI_Charter_Hint room) are normal drawers — no export
+            // exclusion. They carry user-visible memory content and are embedded
+            // and recalled like any other drawer. CHARTER_ADDED_BY guard removed.
             let tier = drawer.adjective_sensitivity();
             if tier.is_excluded_from_bulk() {
                 // Secret never rides bulk channels, under any scope.
@@ -270,41 +323,68 @@ impl DrawerMapping {
             }
         }
 
+        // Resolve display names (wing, room) for all filtered drawers in one
+        // batch. ADR-017 removed wing/room from the Drawer struct; consumers
+        // obtain them from the node tree via Estate.node_store().
+        let node_names = resolve_drawer_node_names(coordinator, handle, &drawers);
+
         // Fetch tunnels once per distinct source wing, not once per drawer.
-        let wings: std::collections::HashSet<&str> =
-            drawers.iter().map(|d| d.wing.as_str()).collect();
+        // Wing names are resolved from the node tree (ADR-017).
+        let wings: std::collections::HashSet<String> = drawers
+            .iter()
+            .filter_map(|d| node_names.get(&d.parent_node_id).map(|(w, _)| w.clone()))
+            .collect();
         let mut tunnels_by_wing: std::collections::HashMap<String, Vec<Tunnel>> =
             std::collections::HashMap::new();
-        for wing in wings {
+        for wing in &wings {
             let tunnels = coordinator
                 .recall_tunnels(handle, wing)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
-            tunnels_by_wing.insert(wing.to_owned(), tunnels);
+            tunnels_by_wing.insert(wing.clone(), tunnels);
         }
 
         // Query all KG facts once for the estate, then group by source_drawer_id
         // so each drawer's tags and kind can be reconstructed without an N-per-drawer
         // round-trip. Drawers with no KG facts get an empty slice.
         // Mirrors Swift DrawerMapping.export kgFactsByDrawerID grouping.
+        //
+        // CAND-050: only include KG facts anchored to a drawer in the
+        // scope-filtered `drawers` set. Facts anchored to excluded drawers (secret
+        // tier, out-of-scope, etc.) must not appear in the export — they could
+        // leak the existence of excluded content through the KG tag/kind surface.
+        // Build the included-drawer ID set before the fact loop so the guard is O(1).
+        let included_drawer_ids: std::collections::HashSet<&str> =
+            drawers.iter().map(|d| d.id.as_str()).collect();
         let all_kg_facts = coordinator
             .recall_kg_facts(handle)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         let mut kg_facts_by_drawer_id: std::collections::HashMap<String, Vec<&KGFact>> =
             std::collections::HashMap::new();
         for fact in &all_kg_facts {
-            if !fact.source_drawer_id.is_empty() {
-                kg_facts_by_drawer_id
-                    .entry(fact.source_drawer_id.clone())
-                    .or_default()
-                    .push(fact);
+            // Skip facts with no anchor (can't be attributed to any drawer).
+            // Skip facts anchored to drawers not in the current export scope
+            // (CAND-050: secret-tier or otherwise excluded drawer anchors must
+            // not bleed KG metadata into the export).
+            if fact.source_drawer_id.is_empty()
+                || !included_drawer_ids.contains(fact.source_drawer_id.as_str())
+            {
+                continue;
             }
+            kg_facts_by_drawer_id
+                .entry(fact.source_drawer_id.clone())
+                .or_default()
+                .push(fact);
         }
 
         let notes: Vec<NoteIR> = drawers
             .iter()
             .map(|drawer| {
+                let (wing, room) = node_names
+                    .get(&drawer.parent_node_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let refs: Vec<&Tunnel> = tunnels_by_wing
-                    .get(&drawer.wing)
+                    .get(&wing)
                     .map(|ts| {
                         ts.iter()
                             .filter(|t| {
@@ -318,7 +398,7 @@ impl DrawerMapping {
                     .get(&drawer.id)
                     .map(|fs| fs.iter().map(|f| (*f).clone()).collect())
                     .unwrap_or_default();
-                Self::note_ir_from(drawer, &refs, &drawer_facts)
+                Self::note_ir_from(drawer, &wing, &room, &refs, &drawer_facts)
             })
             .collect();
 
@@ -345,10 +425,9 @@ impl DrawerMapping {
     ///
     /// ADR-016 vault layout:
     ///   - stable_source_key: `"<wing>/<room>/<slug>"` — wing is the top-level
-    ///     vault folder (ADR-016 Consequences: "wing = top folder; each folder
-    ///     ships its own `_charter`"). This makes the vault tree wing-aware and
-    ///     wing-scopable. Charter drawers (`_charter` room) export as
-    ///     `<wing>/_charter/<slug>.md` so each wing folder ships its own charter.
+    ///     vault folder (ADR-016 Consequences: wing = top folder; all drawers
+    ///     including hint memories in AI_Charter_Hint room export normally).
+    ///     Layout is wing-aware and wing-scopable.
     ///   - frontmatter gains `moot_id`: the drawer's `lineage_id` UUID string
     ///     (the STABLE UUID, not `drawer.id` which the supersession cascade re-mints).
     ///   - original_path: the substrate room (not the vault path).
@@ -361,19 +440,25 @@ impl DrawerMapping {
     /// routes the drawer into the correct named wing. The round-trip is fully
     /// faithful: a drawer exported from "User Canon" re-imports into "User Canon",
     /// not into `DEFAULT_WING_NAME`.
-    pub fn note_ir_from(drawer: &Drawer, references: &[&Tunnel], kg_facts: &[KGFact]) -> NoteIR {
+    pub fn note_ir_from(drawer: &Drawer, wing: &str, room: &str, references: &[&Tunnel], kg_facts: &[KGFact]) -> NoteIR {
         // Human-readable slug from the drawer's content. Collision-safe via UUID suffix.
         let slug = Self::slug(&drawer.content, &drawer.id);
         // Path: <wing>/<room>/<slug> — wing is the top-level vault folder (ADR-016).
-        let stable_key = format!("{}/{}/{}", drawer.wing, drawer.room, slug);
+        // Wing and room are resolved from the node tree (ADR-017) and passed by the caller.
+        let stable_key = format!("{}/{}/{}", wing, room, slug);
 
         let mut frontmatter: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        frontmatter.insert("wing".to_owned(), drawer.wing.clone());
-        frontmatter.insert("room".to_owned(), drawer.room.clone());
+        frontmatter.insert("wing".to_owned(), wing.to_owned());
+        frontmatter.insert("room".to_owned(), room.to_owned());
         frontmatter.insert("udc".to_owned(), drawer.udc_code.clone());
         frontmatter.insert("addedBy".to_owned(), drawer.added_by.clone());
         frontmatter.insert("embeddingModelID".to_owned(), drawer.embedding_model_id.clone());
+        // Parity with Swift DrawerMapping.noteIRFrom: capture channel and content
+        // kind ride frontmatter as their integer raw values so a round-trip preserves
+        // the operational-bitmap axes.
+        frontmatter.insert("captureChannel".to_owned(), drawer.capture_channel().raw_value().to_string());
+        frontmatter.insert("contentKind".to_owned(), drawer.content_kind().raw_value().to_string());
         // moot_id: the STABLE lineage UUID. On re-import this wins over the FNV
         // hash of the stable_source_key as the lineage_id for the capture frame.
         // Using lineage_id (not drawer.id) ensures renames and re-exports don't
@@ -470,7 +555,7 @@ impl DrawerMapping {
             frontmatter,
             links,
             tags,
-            drawer.room.clone(), // original_path: room only — no wing prefix
+            room.to_owned(), // original_path: room only — no wing prefix (ADR-017: resolved from node tree)
             Some(OccurredAt::new(event_iso)),
             None,
             Some(drawer.lineage_id), // moot_id: the stable lineage UUID
@@ -535,17 +620,13 @@ impl DrawerMapping {
         }
         // Trim trailing `-`
         let trimmed = result.trim_end_matches('-');
-        // Truncate at word boundary up to 60 chars.
+        // Truncate to 60 characters with trailing-hyphen trim.
+        // Parity with Swift DrawerMapping.sanitizeSlug: `.prefix(60)`
+        // hard-cut (no word-boundary seek), then strip trailing hyphens.
         if trimmed.len() <= 60 {
             trimmed.to_owned()
         } else {
-            // Find the last `-` at or before char 60, or truncate hard.
-            let end = &trimmed[..60];
-            if let Some(pos) = end.rfind('-') {
-                end[..pos].to_owned()
-            } else {
-                end.to_owned()
-            }
+            trimmed[..60].trim_end_matches('-').to_owned()
         }
     }
 
@@ -588,6 +669,7 @@ impl DrawerMapping {
         existing_sensitivity_by_lineage: &std::collections::HashMap<Uuid, AdjectiveSensitivity>,
         tombstoned_lineage_ids: &std::collections::HashSet<Uuid>,
         existing_content_by_lineage: &std::collections::HashMap<Uuid, String>,
+        existing_stable_source_key_by_lineage: &std::collections::HashMap<Uuid, String>,
         existing_tunnel_signatures: &mut std::collections::HashSet<String>,
         now: i64,
     ) -> Result<ImportOutcome, VaultKitError> {
@@ -601,7 +683,41 @@ impl DrawerMapping {
         }
 
         let (mut frame, classified) = self.make_capture_frame(note, &content);
-        let lineage = frame.lineage_id.unwrap_or_else(|| Self::lineage_id(note.stable_source_key.as_str()));
+
+        // Security: moot_id lineage-hijack guard. Mirrors the path-identity
+        // discriminator in build_note_frame — see that function for the full
+        // rationale. Fires when (1) the claimed UUID targets an existing lineage,
+        // (2) the note's vault path is FOREIGN to the claimed lineage (path does
+        // not match the export path recorded for that lineage; FNV fallback when
+        // no export path is recorded), AND (3) the incoming body DIFFERS (trimmed)
+        // from what the estate has for that lineage. Condition 3 allows sensitivity-
+        // only upgrades on unchanged content while blocking content-replacement
+        // attacks via a spoofed moot_id. Content is compared after trimming because
+        // the file parser may produce trailing whitespace the capture path strips.
+        // Mirrors Swift DrawerMapping.importNote.
+        let fnv_lineage = Self::lineage_id(note.stable_source_key.as_str());
+        if let Some(claimed_id) = frame.lineage_id {
+            let content_differs = existing_content_by_lineage
+                .get(&claimed_id)
+                .map(|ec| ec.trim() != content.trim())
+                // No existing entry for this lineage → genuinely new lineage,
+                // not a content-replacement hijack: allow the claim.
+                .unwrap_or(false);
+            if existing_lineage_ids.contains(&claimed_id) && content_differs {
+                // Determine whether the note's vault path is foreign to the claimed
+                // lineage. Primary check: path-identity against the recorded export
+                // path. Fallback: FNV check when no export path is recorded.
+                let is_path_foreign = match existing_stable_source_key_by_lineage.get(&claimed_id) {
+                    Some(recorded_key) => recorded_key.as_str() != note.stable_source_key.as_str(),
+                    None => claimed_id != fnv_lineage,
+                };
+                if is_path_foreign {
+                    frame.lineage_id = Some(fnv_lineage);
+                }
+            }
+        }
+
+        let lineage = frame.lineage_id.unwrap_or(fnv_lineage);
 
         // TOMBSTONE-AWARE: if this lineage was previously erased (withdrawn),
         // do not resurrect it. The tombstone check runs BEFORE the active-lineage
@@ -673,9 +789,24 @@ impl DrawerMapping {
             Err(e) => {
                 let reason = format!("{e:?}");
                 if reason.contains("DisciplineViolation") {
+                    // Distinguish a clean rejection from a partial write. On the
+                    // UPDATE path (existing lineage) the supersession cascade can
+                    // commit the successor row before the predecessor belief-state
+                    // flip raises the violation — leaving an orphaned successor.
+                    // Surface that as SkippedWithPartialWrite so the import report
+                    // makes the gap visible; a fresh-lineage rejection is a clean
+                    // Skipped (no row was written). Mirrors Swift DrawerMapping.
+                    if is_update {
+                        return Ok(ImportOutcome::SkippedWithPartialWrite {
+                            reason: format!(
+                                "belief-state transition not permitted after successor write \
+                                 (predecessor in non-Active state, supersession cascade failed): {reason}"
+                            ),
+                        });
+                    }
                     return Ok(ImportOutcome::Skipped {
                         reason: format!(
-                            "belief-state transition not permitted (re-import of existing content): {reason}"
+                            "belief-state transition not permitted (capture rejected): {reason}"
                         ),
                     });
                 }
@@ -764,6 +895,26 @@ impl DrawerMapping {
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         let mut tunnels_created = 0;
 
+        // Resolve wing/room for tunnel endpoints from the node tree (ADR-017:
+        // Drawer no longer stores wing/room). Fall back to note frontmatter
+        // when node resolution fails (e.g. no NodeStore available).
+        let (drawer_wing, drawer_room) = if let Some(ns) = estate.node_store() {
+            let node_names = build_node_name_map(ns, &[drawer.clone()]);
+            if let Some((w, r)) = node_names.get(&drawer.parent_node_id) {
+                (w.clone(), r.clone())
+            } else {
+                (
+                    non_empty(note.frontmatter.get("wing")).unwrap_or_default(),
+                    non_empty(note.frontmatter.get("room")).unwrap_or_else(|| "imported".to_owned()),
+                )
+            }
+        } else {
+            (
+                non_empty(note.frontmatter.get("wing")).unwrap_or_default(),
+                non_empty(note.frontmatter.get("room")).unwrap_or_else(|| "imported".to_owned()),
+            )
+        };
+
         // Bug N fix — reconstruct _distilled_from provenance tunnels from frontmatter.
         // On export these tunnels were excluded from `note.links` (which rides into body
         // text) and encoded as "targetWing/targetRoom" pairs in the `distilled_from_sources`
@@ -787,8 +938,8 @@ impl DrawerMapping {
                         _ => continue,
                     };
                     let sig = Self::tunnel_signature(
-                        &drawer.wing,
-                        &drawer.room,
+                        &drawer_wing,
+                        &drawer_room,
                         &target_room,
                         "_distilled_from",
                         TunnelKind::References,
@@ -797,8 +948,8 @@ impl DrawerMapping {
                         continue;
                     }
                     let mut tunnel_frame = TunnelCaptureFrame::new(
-                        drawer.wing.clone(),
-                        drawer.room.clone(),
+                        drawer_wing.clone(),
+                        drawer_room.clone(),
                         target_wing,
                         target_room,
                         "_distilled_from".to_owned(),
@@ -825,8 +976,8 @@ impl DrawerMapping {
                 link.target.clone()
             };
             let sig = Self::tunnel_signature(
-                &drawer.wing,
-                &drawer.room,
+                &drawer_wing,
+                &drawer_room,
                 &target_room,
                 &link.raw,
                 TunnelKind::References,
@@ -837,9 +988,9 @@ impl DrawerMapping {
             let added_by_val = non_empty(note.frontmatter.get("addedBy"))
                 .unwrap_or_else(|| self.added_by.clone());
             let mut tunnel_frame = TunnelCaptureFrame::new(
-                drawer.wing.clone(),
-                drawer.room.clone(),
-                drawer.wing.clone(), // target wing = same estate wing
+                drawer_wing.clone(),
+                drawer_room.clone(),
+                drawer_wing.clone(), // target wing = same estate wing
                 target_room,
                 link.raw.clone(),
                 added_by_val,
@@ -1030,8 +1181,9 @@ impl DrawerMapping {
 
     // MARK: - FNV-1a 128-bit lineage_id — conformance anchor
 
-    /// Derive a deterministic `lineage_id` from a note's stable source key so a
-    /// re-import of the same note supersedes its drawer instead of duplicating it.
+    /// Derive a deterministic `lineage_id` from a note's stable source key.
+    /// FNV-1a is the fallback lineage algorithm; `moot_id` frontmatter takes
+    /// priority when present, and unchanged content skips supersession entirely.
     ///
     /// Implements FNV-1a (128-bit) over the key's UTF-8 bytes — the same
     /// algorithm as Swift `DrawerMapping.lineageID(forStableSourceKey:)`. The
@@ -1123,6 +1275,194 @@ impl DrawerMapping {
         }
     }
 
+    // MARK: - Batch helpers (GLK_BATCH1)
+
+    /// Apply import guards and build a `CaptureFrame` for `note` without
+    /// calling `capture`. Returns `None` (with `report` counters updated
+    /// for the skip) when any guard fires. The caller increments
+    /// `drawers_written`/`drawers_updated` on a non-`None` return.
+    ///
+    /// Mirrors Swift `DrawerMapping.buildNoteFrame(for:...)`.
+    pub fn build_note_frame(
+        &self,
+        note: &NoteIR,
+        existing_lineage_ids: &std::collections::HashSet<Uuid>,
+        existing_sensitivity_by_lineage: &std::collections::HashMap<Uuid, AdjectiveSensitivity>,
+        tombstoned_lineage_ids: &std::collections::HashSet<Uuid>,
+        existing_content_by_lineage: &std::collections::HashMap<Uuid, String>,
+        existing_stable_source_key_by_lineage: &std::collections::HashMap<Uuid, String>,
+        items_skipped: &mut usize,
+        drawers_skipped_unchanged: &mut usize,
+        drawers_skipped_tombstoned: &mut usize,
+    ) -> Option<(CaptureFrame, bool /* is_update */, bool /* classified */)> {
+        let content = note.flattened_body();
+        if content.is_empty() {
+            *items_skipped += 1;
+            return None;
+        }
+        let (mut frame, classified) = self.make_capture_frame(note, &content);
+
+        // Security: moot_id lineage-hijack guard. Uses the path-identity
+        // discriminator: fires when (1) the claimed UUID targets an existing
+        // lineage, (2) the note's vault path is FOREIGN to the claimed lineage
+        // (path does not match the recorded export path; FNV fallback when no
+        // export path is recorded), AND (3) the incoming body DIFFERS (trimmed)
+        // from the estate's content for that lineage. Condition 3 allows
+        // sensitivity-only upgrades on unchanged content while blocking
+        // body-replacement attacks. Mirrors Swift DrawerMapping.buildNoteFrame.
+        let fnv_lineage = Self::lineage_id(note.stable_source_key.as_str());
+        if let Some(claimed_id) = frame.lineage_id {
+            let content_differs = existing_content_by_lineage
+                .get(&claimed_id)
+                .map(|ec| ec.trim() != content.trim())
+                .unwrap_or(false); // new lineage (not in estate) → not a hijack
+            if existing_lineage_ids.contains(&claimed_id) && content_differs {
+                let is_path_foreign = match existing_stable_source_key_by_lineage.get(&claimed_id) {
+                    Some(recorded_key) => recorded_key.as_str() != note.stable_source_key.as_str(),
+                    None => claimed_id != fnv_lineage,
+                };
+                if is_path_foreign {
+                    frame.lineage_id = Some(fnv_lineage);
+                }
+            }
+        }
+
+        let lineage = frame.lineage_id.unwrap_or(fnv_lineage);
+
+        if tombstoned_lineage_ids.contains(&lineage) {
+            *drawers_skipped_tombstoned += 1;
+            return None;
+        }
+
+        let is_update = existing_lineage_ids.contains(&lineage);
+        let is_sensitivity_upgrade = existing_sensitivity_by_lineage
+            .get(&lineage)
+            .map(|existing_tier| frame.sensitivity.raw_value() > existing_tier.raw_value())
+            .unwrap_or(false);
+        if is_update && !is_sensitivity_upgrade {
+            if let Some(existing_content) = existing_content_by_lineage.get(&lineage) {
+                if existing_content.as_str() == content.as_str() {
+                    *drawers_skipped_unchanged += 1;
+                    return None;
+                }
+            }
+        }
+        if let Some(existing_tier) = existing_sensitivity_by_lineage.get(&lineage) {
+            if existing_tier.raw_value() > frame.sensitivity.raw_value() {
+                frame.sensitivity = *existing_tier;
+            }
+        }
+        Some((frame, is_update, classified))
+    }
+
+    /// Apply post-capture work (KG facts + tunnels) for a note whose drawer
+    /// was already inserted by `capture_batch`. Called per-note AFTER the
+    /// batch transaction commits so `drawer.id` is available.
+    ///
+    /// Returns the number of tunnels created.
+    /// Mirrors Swift `DrawerMapping.applyNotePostCapture(note:frame:drawer:...)`.
+    pub fn apply_note_post_capture(
+        &self,
+        note: &NoteIR,
+        frame: &CaptureFrame,
+        drawer: &locus_kit::drawer::Drawer,
+        coordinator: &mut EstateCoordinator,
+        handle: &EstateHandle,
+        existing_tunnel_signatures: &mut std::collections::HashSet<String>,
+        now: i64,
+    ) -> Result<usize, VaultKitError> {
+        // KG facts (facts, scope, tags, kind) — same logic as import_note.
+        for fact in &note.facts {
+            coordinator
+                .add_kg_fact(handle, &fact.subject, &fact.predicate, &fact.object, &drawer.id, now / 1000)
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+        for (key, value) in &note.scope {
+            coordinator
+                .add_kg_fact(handle, &format!("scope:{key}"), "has_value", value, &drawer.id, now / 1000)
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+        for tag in &note.tags {
+            coordinator
+                .add_kg_fact(handle, &format!("tag:{tag}"), "tagged", &drawer.id, &drawer.id, now / 1000)
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+        if note.kind != "note" {
+            coordinator
+                .add_kg_fact(handle, "record:kind", "is", &note.kind, &drawer.id, now / 1000)
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+
+        let estate = coordinator
+            .estate_for(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let mut tunnels_created = 0;
+
+        let (drawer_wing, drawer_room) = if let Some(ns) = estate.node_store() {
+            let node_names = build_node_name_map(ns, &[drawer.clone()]);
+            if let Some((w, r)) = node_names.get(&drawer.parent_node_id) {
+                (w.clone(), r.clone())
+            } else {
+                (
+                    non_empty(note.frontmatter.get("wing")).unwrap_or_default(),
+                    non_empty(note.frontmatter.get("room")).unwrap_or_else(|| "imported".to_owned()),
+                )
+            }
+        } else {
+            (
+                non_empty(note.frontmatter.get("wing")).unwrap_or_default(),
+                non_empty(note.frontmatter.get("room")).unwrap_or_else(|| "imported".to_owned()),
+            )
+        };
+
+        let added_by_val = non_empty(note.frontmatter.get("addedBy"))
+            .unwrap_or_else(|| frame.added_by.clone());
+
+        if let Some(sources_str) = note.frontmatter.get("distilled_from_sources") {
+            if !sources_str.is_empty() {
+                for source in sources_str.split(';') {
+                    let mut parts = source.splitn(2, '/');
+                    let target_wing = match parts.next() {
+                        Some(w) if !w.is_empty() => w.to_owned(),
+                        _ => continue,
+                    };
+                    let target_room = match parts.next() {
+                        Some(r) if !r.is_empty() => r.to_owned(),
+                        _ => continue,
+                    };
+                    let sig = Self::tunnel_signature(&drawer_wing, &drawer_room, &target_room, "_distilled_from", TunnelKind::References);
+                    if existing_tunnel_signatures.contains(&sig) { continue; }
+                    let mut tunnel_frame = TunnelCaptureFrame::new(
+                        drawer_wing.clone(), drawer_room.clone(), target_wing, target_room,
+                        "_distilled_from".to_owned(), added_by_val.clone(),
+                    );
+                    tunnel_frame.source_drawer_id = Some(drawer.id.clone());
+                    tunnel_frame.kind = TunnelKind::References;
+                    tunnel_frame.origin_class = TunnelOriginClass::Imported;
+                    estate.capture_tunnel(tunnel_frame, now).map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                    existing_tunnel_signatures.insert(sig);
+                    tunnels_created += 1;
+                }
+            }
+        }
+        for link in &note.links {
+            let target_room = if link.target.is_empty() { "unresolved".to_owned() } else { link.target.clone() };
+            let sig = Self::tunnel_signature(&drawer_wing, &drawer_room, &target_room, &link.raw, TunnelKind::References);
+            if existing_tunnel_signatures.contains(&sig) { continue; }
+            let mut tunnel_frame = TunnelCaptureFrame::new(
+                drawer_wing.clone(), drawer_room.clone(), drawer_wing.clone(), target_room,
+                link.raw.clone(), added_by_val.clone(),
+            );
+            tunnel_frame.source_drawer_id = Some(drawer.id.clone());
+            tunnel_frame.kind = TunnelKind::References;
+            tunnel_frame.origin_class = TunnelOriginClass::Imported;
+            estate.capture_tunnel(tunnel_frame, now).map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+            existing_tunnel_signatures.insert(sig);
+            tunnels_created += 1;
+        }
+        Ok(tunnels_created)
+    }
+
     /// Stable signature for tunnel de-duplication. Keyed on the endpoint
     /// wing/room, the target room, the raw label, and the kind — all stable
     /// across re-imports (unlike the source drawer id, which the supersession
@@ -1175,7 +1515,7 @@ pub(crate) fn secs_to_iso8601(secs: i64) -> String {
 
 /// Parse an ISO8601 string of the form `YYYY-MM-DDTHH:MM:SS[.mmm]Z` to
 /// milliseconds-since-epoch. Returns `None` on parse failure.
-fn iso8601_to_ms(s: &str) -> Option<i64> {
+pub(crate) fn iso8601_to_ms(s: &str) -> Option<i64> {
     // Minimal parser for the LocusKit LKISO8601 form.
     if s.len() < 20 {
         return None;

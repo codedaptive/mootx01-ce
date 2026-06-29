@@ -1,10 +1,10 @@
 // Swift bit-identity conformance for FloatSimHash.
 //
-// These constants are emitted by the Swift FloatSimHashConformance
-// test program. Any divergence in the Rust port produces different
-// output and fails the test; the algorithm must be bit-identical
-// to Swift's implementation for cross-platform engram storage to
-// round-trip correctly.
+// The expected Fingerprint256 values below are checked-in canonical
+// constants derived from the Swift implementation. Any divergence in
+// the Rust port produces different output and fails the test; the
+// algorithm must be bit-identical to Swift's for cross-platform
+// engram storage to round-trip correctly.
 
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_ml::float_simhash;

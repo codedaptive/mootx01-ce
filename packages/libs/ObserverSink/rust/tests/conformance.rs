@@ -64,8 +64,8 @@ fn make_store() -> Arc<StatsStore> {
 
 #[test]
 fn schema_version() {
-    // Schema version 2: topology_snapshots table added (v1→v2 migration).
-    assert_eq!(StatsStore::SCHEMA_VERSION, 2);
+    // Schema version 3: topology_snapshots.topology_fingerprint added (v2→v3).
+    assert_eq!(StatsStore::SCHEMA_VERSION, 3);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -481,7 +481,7 @@ fn topology_snapshot_round_trip() {
     let payload = r#"{"nodes":[],"edges":[],"communities":[],"structurePending":false,"generatedTs":"2023-11-14T22:13:20.000Z"}"#;
 
     store
-        .write_topology_snapshot(estate, generated_at_secs, payload)
+        .write_topology_snapshot(estate, generated_at_secs, payload, None)
         .expect("write_topology_snapshot must succeed");
 
     let result = store
@@ -491,6 +491,70 @@ fn topology_snapshot_round_trip() {
     assert_eq!(got, payload, "Stored payload must round-trip verbatim");
 }
 
+/// 13b. write_topology_snapshot persists the fingerprint; load_topology_fingerprint
+/// returns it (F5). Mirrors Swift `topologyFingerprintRoundTrip`.
+#[test]
+fn topology_fingerprint_round_trip() {
+    let store = make_store();
+    let estate = "estate-topology-fp-001";
+    let payload = r#"{"nodes":[],"structurePending":false}"#;
+    let fingerprint = "3:1:0:0:0:42:7:18446744073709551615";
+
+    // No fingerprint persisted yet → load returns None.
+    let before = store
+        .load_topology_fingerprint(estate)
+        .expect("load_topology_fingerprint must not error");
+    assert_eq!(before, None, "No fingerprint should exist before the first write");
+
+    store
+        .write_topology_snapshot(estate, 1_700_000_000.0, payload, Some(fingerprint))
+        .expect("write must succeed");
+
+    let after = store
+        .load_topology_fingerprint(estate)
+        .expect("load_topology_fingerprint must not error");
+    assert_eq!(after.as_deref(), Some(fingerprint), "Persisted fingerprint must round-trip verbatim");
+}
+
+/// 13c. write_topology_snapshot without a fingerprint leaves the column null (F5).
+/// Mirrors Swift `topologyFingerprintNullWhenOmitted`.
+#[test]
+fn topology_fingerprint_null_when_omitted() {
+    let store = make_store();
+    let estate = "estate-topology-fp-002";
+    let payload = r#"{"structurePending":false}"#;
+
+    store
+        .write_topology_snapshot(estate, 1_700_000_000.0, payload, None)
+        .expect("write must succeed");
+
+    let fp = store
+        .load_topology_fingerprint(estate)
+        .expect("load_topology_fingerprint must not error");
+    assert_eq!(fp, None, "Omitted fingerprint must read back as None (null column)");
+}
+
+/// 13d. A later write updates the persisted fingerprint (F5).
+/// Mirrors Swift `topologyFingerprintLatestWins`.
+#[test]
+fn topology_fingerprint_latest_wins() {
+    let store = make_store();
+    let estate = "estate-topology-fp-003";
+    let payload = r#"{"structurePending":false}"#;
+
+    store
+        .write_topology_snapshot(estate, 1_000_000.0, payload, Some("fp-old"))
+        .expect("first write must succeed");
+    store
+        .write_topology_snapshot(estate, 2_000_000.0, payload, Some("fp-new"))
+        .expect("second write must succeed");
+
+    let fp = store
+        .load_topology_fingerprint(estate)
+        .expect("load_topology_fingerprint must not error");
+    assert_eq!(fp.as_deref(), Some("fp-new"), "Latest write must supersede the previous fingerprint");
+}
+
 /// 14. write_topology_snapshot overwrites the previous snapshot for the same estate.
 #[test]
 fn topology_snapshot_latest_wins() {
@@ -498,10 +562,10 @@ fn topology_snapshot_latest_wins() {
     let estate = "estate-topology-002";
 
     store
-        .write_topology_snapshot(estate, 1_000_000.0, "first-payload")
+        .write_topology_snapshot(estate, 1_000_000.0, "first-payload", None)
         .expect("first write must succeed");
     store
-        .write_topology_snapshot(estate, 2_000_000.0, "second-payload")
+        .write_topology_snapshot(estate, 2_000_000.0, "second-payload", None)
         .expect("second write must succeed");
 
     let result = store
@@ -520,10 +584,10 @@ fn topology_snapshot_per_estate_isolation() {
     let estate_b = "estate-topology-B";
 
     store
-        .write_topology_snapshot(estate_a, 1_000_000.0, "payload-A")
+        .write_topology_snapshot(estate_a, 1_000_000.0, "payload-A", None)
         .expect("write estate A must succeed");
     store
-        .write_topology_snapshot(estate_b, 1_000_000.0, "payload-B")
+        .write_topology_snapshot(estate_b, 1_000_000.0, "payload-B", None)
         .expect("write estate B must succeed");
 
     let got_a = store
@@ -555,10 +619,10 @@ fn topology_snapshot_missing_returns_none() {
 fn topology_snapshot_none_estate_returns_newest() {
     let store = make_store();
     store
-        .write_topology_snapshot("estate-older", 1_000_000.0, "payload-older")
+        .write_topology_snapshot("estate-older", 1_000_000.0, "payload-older", None)
         .expect("write older must succeed");
     store
-        .write_topology_snapshot("estate-newer", 2_000_000.0, "payload-newer")
+        .write_topology_snapshot("estate-newer", 2_000_000.0, "payload-newer", None)
         .expect("write newer must succeed");
 
     let got = store
@@ -578,10 +642,10 @@ fn topology_snapshot_none_estate_returns_newest() {
 fn topology_snapshot_none_newest_wins_regardless_of_order() {
     let store = make_store();
     store
-        .write_topology_snapshot("estate-newer", 2_000_000.0, "payload-newer")
+        .write_topology_snapshot("estate-newer", 2_000_000.0, "payload-newer", None)
         .expect("write newer must succeed");
     store
-        .write_topology_snapshot("estate-older", 1_000_000.0, "payload-older")
+        .write_topology_snapshot("estate-older", 1_000_000.0, "payload-older", None)
         .expect("write older must succeed");
 
     let got = store

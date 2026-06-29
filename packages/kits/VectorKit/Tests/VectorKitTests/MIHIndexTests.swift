@@ -21,10 +21,10 @@
 //      This gates the exactness claim itself; the fixed vectors only pin
 //      corner cases (ties, radius expansion, deletes).
 //
-//   4. SQLite-backed persistence — build MIHIndex, persist state to a
-//      real on-disk SQLite file via ResidentArrayStore, reopen, rebuild
-//      MIHIndex from the loaded array, assert identical results. Tests run
-//      on a real .vec sidecar, NOT InMemory (mission requirement).
+//   4. Sidecar-backed resident-array persistence — build MIHIndex, persist
+//      state to a real on-disk .vec file via ResidentArrayStore, reopen,
+//      rebuild MIHIndex from the loaded array, assert identical results.
+//      Tests run on a real .vec sidecar, NOT InMemory.
 //
 // All tests use the canonical §0.3 itemID tie-break: smaller itemID wins.
 
@@ -1089,13 +1089,13 @@ struct MIHBruteForceBulkBuildConformanceTests {
     /// W8b-1: bulk-build from a 500-vector fuzz array, seed 0x1234ABCD.
     ///
     /// Builds both MIHIndex (m=16) and BruteForceIndex from the same
-    /// ResidentVectorArray via `build(from:)`. Runs 500 random probes
+    /// ResidentVectorArray via `build(from:)`. Runs 25 random probes
     /// (same seed, shifted). Asserts bit-for-bit identical output (same
     /// hits, same order, same distances, same itemIDs) on every probe.
     ///
-    /// The 500 × 500 cross-check runs at the same seed on both the fixed
-    /// corpus and varied probes, making the test deterministic and
-    /// reproducible across platforms.
+    /// The 500-vector corpus with 25 probes runs at the same seed on both
+    /// the fixed corpus and varied probes, making the test deterministic
+    /// and reproducible across platforms.
     @Test func bulkBuild_500vectors_500probes_mih16_equalsbruteforce() async throws {
         let n = 500
         let k = 10
@@ -1204,5 +1204,124 @@ struct MIHBruteForceBulkBuildConformanceTests {
                                     context: "W8b m=\(bandCount.rawValue) probe[\(i)]")
             }
         }
+    }
+}
+
+// MARK: - Finding 1: MIH itemID-collision fix
+
+/// Two binary vectors sharing the same itemID but different vectorIndex must
+/// BOTH survive in the MIH and be retrievable independently.
+///
+/// Before the fix, MIHIndex keyed its internals by itemID alone so the second
+/// `add(key:vector:)` silently overwrote the first. After the fix the key is
+/// the full VectorRecordKey and both coexist.
+@Suite("MIHIndex-same-itemID collision fix") struct MIHIndexSameItemIDTests {
+
+    @Test("add: two distinct vectorIndex entries under same itemID both survive")
+    func sameItemIDDistinctVectorIndexBothSurvive() async throws {
+        let mih = MIHIndex(bandCount: .m4)
+
+        let key0 = VectorRecordKey(itemID: "item-A", vectorIndex: 0,
+                                   modelID: "model-a", modelVersion: "1")
+        let key1 = VectorRecordKey(itemID: "item-A", vectorIndex: 1,
+                                   modelID: "model-a", modelVersion: "1")
+
+        // vec0 = all-zeros (Hamming dist 0 to zero probe)
+        // vec1 = 1 bit set  (Hamming dist 1 to zero probe)
+        try await mih.add(key: key0, vector: payload(b0: 0))
+        try await mih.add(key: key1, vector: payload(b0: 1))
+
+        let hits = try await mih.search(probe: zeroPayload, metric: .hamming, k: 4, filter: nil)
+
+        #expect(hits.count == 2,
+                "both same-itemID slots must survive in the index; got \(hits.count)")
+        #expect(hits[0].key == key0, "closest hit must be the zero-distance slot")
+        #expect(hits[0].hammingDistance == 0)
+        #expect(hits[1].key == key1, "second hit must be the one-bit-set slot")
+        #expect(hits[1].hammingDistance == 1)
+    }
+
+    @Test("add: two distinct modelID entries under same itemID both survive")
+    func sameItemIDDistinctModelIDBothSurvive() async throws {
+        let mih = MIHIndex(bandCount: .m4)
+
+        let keyA = VectorRecordKey(itemID: "item-X", vectorIndex: 0,
+                                   modelID: "model-a", modelVersion: "1")
+        let keyB = VectorRecordKey(itemID: "item-X", vectorIndex: 0,
+                                   modelID: "model-b", modelVersion: "1")
+
+        try await mih.add(key: keyA, vector: payload(b0: 0))
+        try await mih.add(key: keyB, vector: payload(b0: 3))
+
+        let hits = try await mih.search(probe: zeroPayload, metric: .hamming, k: 4, filter: nil)
+
+        #expect(hits.count == 2,
+                "distinct modelID entries under same itemID must coexist")
+        #expect(hits[0].key == keyA)
+        #expect(hits[0].hammingDistance == 0)
+        #expect(hits[1].key == keyB)
+        #expect(hits[1].hammingDistance == 2)
+    }
+
+    @Test("build: two entries sharing itemID via bulk path both survive")
+    func sameItemIDViaBuildBothSurvive() async throws {
+        let mih = MIHIndex(bandCount: .m4)
+        let bruteForce = BruteForceIndex()
+
+        let key0 = VectorRecordKey(itemID: "shared", vectorIndex: 0,
+                                   modelID: "model-a", modelVersion: "1")
+        let key1 = VectorRecordKey(itemID: "shared", vectorIndex: 1,
+                                   modelID: "model-a", modelVersion: "1")
+        let key2 = VectorRecordKey(itemID: "other",  vectorIndex: 0,
+                                   modelID: "model-a", modelVersion: "1")
+
+        let e0 = Engram(blocks: 0, 0, 0, 0)
+        let e1 = Engram(blocks: 3, 0, 0, 0)
+        let e2 = Engram(blocks: 0xFF, 0, 0, 0)
+        let rawBytes = e0.wireBytes + e1.wireBytes + e2.wireBytes
+        let tombstones = [UInt64](repeating: 0, count: 1)
+        let keys3 = [key0, key1, key2]
+        let partitions = BruteForceIndex.buildPartitions(keys: keys3, tombstones: tombstones)
+        let snapshot = ResidentVectorArray(
+            kind: .binary, stride: 32, count: 3,
+            storage: rawBytes, keys: keys3,
+            modelPartitions: partitions, tombstones: tombstones
+        )
+
+        await mih.build(from: snapshot)
+        await bruteForce.build(from: snapshot)
+
+        let probe = zeroPayload
+        let mihHits   = try await mih.search(probe: probe, metric: .hamming, k: 3, filter: nil)
+        let bruteHits = try await bruteForce.search(probe: probe, metric: .hamming, k: 3, filter: nil)
+
+        #expect(mihHits.count == 3,
+                "all three slots (two sharing itemID) must be present in MIH")
+        assertHitsIdentical(mihHits, bruteHits, context: "sameItemID-via-build")
+    }
+
+    @Test("upsert: same full VectorRecordKey replaces, co-item sibling does not")
+    func upsertSameFullKeyReplacesSibling() async throws {
+        let mih = MIHIndex(bandCount: .m4)
+
+        let key0 = VectorRecordKey(itemID: "item-A", vectorIndex: 0,
+                                   modelID: "model-a", modelVersion: "1")
+        let key1 = VectorRecordKey(itemID: "item-A", vectorIndex: 1,
+                                   modelID: "model-a", modelVersion: "1")
+
+        // Both start as all-zeros.
+        try await mih.add(key: key0, vector: payload(b0: 0))
+        try await mih.add(key: key1, vector: payload(b0: 0))
+
+        // Upsert key0 with a different vector (1 bit set).
+        try await mih.add(key: key0, vector: payload(b0: 1))
+
+        // Now key0 has dist=1 and key1 has dist=0.
+        let hits = try await mih.search(probe: zeroPayload, metric: .hamming, k: 4, filter: nil)
+        #expect(hits.count == 2, "there must be exactly two entries; got \(hits.count)")
+        #expect(hits[0].key == key1, "key1 (unchanged, dist=0) must rank first")
+        #expect(hits[0].hammingDistance == 0)
+        #expect(hits[1].key == key0, "key0 (upserted to dist=1) must rank second")
+        #expect(hits[1].hammingDistance == 1)
     }
 }

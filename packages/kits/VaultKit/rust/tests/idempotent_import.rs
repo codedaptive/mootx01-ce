@@ -24,10 +24,12 @@ use std::sync::Arc;
 
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
+    drawer_operational::CaptureChannel,
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
-    estate_types::OwnerCredentials,
+    estate_types::{LatticeAnchor, OwnerCredentials},
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
+    frames::CaptureFrame,
 };
 use vault_kit::{DrawerMapping, ObsidianAdapter, VaultBridge};
 
@@ -106,7 +108,7 @@ fn reimport_after_withdraw_does_not_resurrect() {
 
     // First import: note lands as a new drawer.
     let first = bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("first import");
     assert_eq!(first.drawers_written, 1, "first import must write the drawer");
     assert_eq!(first.drawers_updated, 0);
@@ -126,7 +128,7 @@ fn reimport_after_withdraw_does_not_resurrect() {
     // Re-import the SAME vault. The lineage is in the withdrawn (cluster B) set.
     // The import must NOT resurrect it.
     let second = bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("second import");
     assert_eq!(
         second.drawers_written, 0,
@@ -164,7 +166,7 @@ fn reimport_after_expunge_does_not_resurrect() {
 
     // First import: note lands as a new drawer.
     let first = bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("first import");
     assert_eq!(first.drawers_written, 1, "first import must write the drawer");
 
@@ -187,7 +189,7 @@ fn reimport_after_expunge_does_not_resurrect() {
     // Before the fix: drawers_written == 1 (resurrection bug).
     // After the fix:  drawers_written == 0, drawers_skipped_tombstoned == 1.
     let second = bridge(&mut coord)
-        .import_vault(&vault, &handle, NOW)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("second import");
     assert_eq!(
         second.drawers_written, 0,
@@ -204,6 +206,98 @@ fn reimport_after_expunge_does_not_resurrect() {
     assert!(
         after_reimport.is_empty(),
         "estate must remain empty after re-import of erased (expunged) lineage"
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+// MARK: - Finding 6 regression: moot_id hijack guard
+
+/// Regression for Security Finding 6: a vault file that claims an existing
+/// drawer's moot_id but carries DIFFERENT body content must NOT replace that
+/// drawer's body. The guard rejects the moot_id claim and files the import
+/// under the file's own FNV-derived lineage instead, leaving the victim's
+/// drawer untouched and isolating the attacker's content in a new drawer.
+///
+/// Mirrors Swift `mootIDHijackGuardBlocksBodyReplacement` in VaultBridgeTests.
+#[test]
+fn moot_id_hijack_guard_blocks_body_replacement() {
+    let (mut coord, handle) = open_one();
+
+    // 1. Capture the victim drawer through the normal path.
+    let victim_content = "original content that must not be replaced";
+    let victim_frame = CaptureFrame::new(
+        victim_content,
+        CaptureChannel::Typed,
+        "target",
+        LatticeAnchor::udc("000"),
+        "owner",
+        "test-v1",
+    );
+    let victim = coord.capture(&handle, victim_frame, NOW).expect("capture victim");
+
+    // 2. Craft a hostile vault file: same moot_id (victim's lineage UUID) but
+    //    attacker-supplied body. This simulates an attacker learning the UUID
+    //    from a prior export and building a file to overwrite the victim's body.
+    let vault = std::env::temp_dir()
+        .join(format!("vaultkit-hijack-f6-{}", uuid::Uuid::new_v4()));
+    write_note(
+        &vault,
+        "attack/hostile.md",
+        &format!(
+            "---\nroom: target\nmoot_id: {}\n---\nattacker-controlled replacement content\n",
+            victim.lineage_id
+        ),
+    );
+
+    // 3. Import the hostile vault file.
+    let report = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("import hostile vault");
+
+    // 4. The hostile file carries a different body, so the guard fires:
+    //    the moot_id claim is rejected and the file lands under its own FNV
+    //    lineage. One new drawer is written (the hostile file itself), not an
+    //    update to the victim.
+    assert_eq!(
+        report.drawers_written, 1,
+        "hostile file with different body must land as a new drawer, not an update"
+    );
+    assert_eq!(
+        report.drawers_updated, 0,
+        "hostile import must not update any existing drawer"
+    );
+
+    // 5. The victim's content is completely unchanged.
+    let all_frame = RecallFrame {
+        filter_chain: vec![
+            Filter::CurrentlyBelieve,
+            Filter::Any(vec![
+                Filter::UserConfirmed,
+                Filter::Unconfirmed,
+                Filter::AutomatedConfirmedOnly,
+            ]),
+            Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+        ],
+        hydration_level: HydrationLevel::Full,
+        limit: None,
+        ordering: Ordering::ByCaptureTimeDesc,
+        as_of: None,
+        trace_limit: None,
+    };
+    let all_drawers = coord.recall(&handle, all_frame, NOW).expect("recall all");
+    assert_eq!(
+        all_drawers.len(), 2,
+        "estate must have exactly the victim drawer + the isolated hostile drawer"
+    );
+
+    let victim_after = all_drawers
+        .iter()
+        .find(|d| d.lineage_id == victim.lineage_id)
+        .expect("victim lineage must still exist");
+    assert_eq!(
+        victim_after.content, victim_content,
+        "victim drawer content must be unchanged after hostile import"
     );
 
     let _ = std::fs::remove_dir_all(&vault);

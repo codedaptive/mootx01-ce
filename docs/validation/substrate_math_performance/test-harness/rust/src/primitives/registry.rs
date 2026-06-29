@@ -19,6 +19,7 @@ use crate::primitives::hlc::HLCPrimitive;
 use crate::primitives::info_theory::InfoTheoryPrimitive;
 use crate::primitives::lattice::LatticePrimitive;
 use crate::primitives::matrix_decay::MatrixDecayPrimitive;
+use crate::primitives::merkle_commitment::MerkleCommitmentPrimitive;
 use crate::primitives::eigenvalue_centrality::EigenvalueCentralityPrimitive;
 use crate::primitives::moment_summary::MomentSummaryPrimitive;
 use crate::primitives::field_presence_matrix_f::FieldPresenceMatrixFPrimitive;
@@ -84,6 +85,7 @@ pub fn all_primitives() -> Vec<PrimitiveDescriptor> {
         AuditLogFoldPrimitive::descriptor(),
         SamplingPrimitive::descriptor(),
         ShingleSimilarityPrimitive::descriptor(),
+        MerkleCommitmentPrimitive::descriptor(),
     ]
 }
 

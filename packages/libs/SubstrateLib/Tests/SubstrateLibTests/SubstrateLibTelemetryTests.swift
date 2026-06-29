@@ -16,11 +16,11 @@
 //
 // Isolation strategy — ts-filtered sink:
 //
-//   SubstrateLib has no per-estate UUID (unlike LocusKit). Instead, each
-//   telemetry test assigns a unique sentinel epoch-seconds value as its
-//   `ts` probe. `TsFilteredSink` records only samples whose `ts` field
-//   matches the test's sentinel. Other tests and parallel verb calls use
-//   `ts: 0.0` (the default) and are silently discarded by the filter.
+//   Emitted `StatSample` values carry no estate UUID field, so tests
+//   cannot filter by estate. Instead, each telemetry test assigns a
+//   unique sentinel epoch-seconds value as its `ts` probe.
+//   `TsFilteredSink` records only samples whose `ts` field matches the
+//   test's sentinel; 0.0 emissions from parallel code are discarded.
 //
 //   All tests are nested under a `.serialized` parent suite to prevent
 //   two telemetry tests from writing to the global singleton simultaneously.

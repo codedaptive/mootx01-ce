@@ -214,9 +214,8 @@ extension Fingerprint256 {
 
 // MARK: - Test vectors (cookbook conformance § 18.2)
 //
-// These are illustrative; the canonical Tier-2 test vectors will
-// live in glref-test-vectors-fingerprint.json once the matching
-// Rust harness lands.
+// Illustrative; the Rust conformance suite carries the canonical
+// Tier-2 test vectors (fingerprint256.rs #[cfg(test)] block).
 //
 // fingerprint(0, 0, 0, 0)            → wireBytes all zero
 // fingerprint(1, 0, 0, 0).bit(at: 0) → true

@@ -286,6 +286,153 @@ fn complete_job_not_found() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Single-pass claim + batch complete-by-session (the O(N²)→O(N) import fix).
+// Mirrors Swift PersistenceKitBackendTests single-pass-claim cases.
+// ---------------------------------------------------------------------------
+
+// Single-pass claim: every job claimed in one drain shares ONE batch session
+// (the bulk new→cur update tags them all), so the batch can be completed in one
+// session-scoped update.
+#[test]
+fn drain_single_pass_shares_one_session() {
+    let backend = make_backend();
+    for i in 0..5u64 {
+        backend.write(&test_job(i)).expect("write");
+    }
+    let drained = backend.drain_available().expect("drain");
+    assert_eq!(drained.len(), 5);
+    let s0 = &drained[0].1;
+    assert!(
+        drained.iter().all(|(_, s)| s == s0),
+        "single-pass claim must tag the whole batch with one session"
+    );
+    assert!(!s0.0.is_empty(), "session id must be set on claim");
+}
+
+// complete_session retires every still-"cur" job of a batch's session in one
+// pass: in_flight clears and all land in completed().
+#[test]
+fn complete_session_retires_whole_batch() {
+    let backend = make_backend();
+    for i in 0..4u64 {
+        backend.write(&test_job(i)).expect("write");
+    }
+    let drained = backend.drain_available().expect("drain");
+    let session = drained[0].1.clone();
+    assert_eq!(backend.in_flight().expect("in_flight").len(), 4);
+
+    let n = backend
+        .complete_session(&session, ObservationStatus::Done)
+        .expect("complete_session");
+    assert_eq!(n, 4, "complete_session must retire all 4 claimed jobs");
+    assert!(backend.in_flight().expect("in_flight").is_empty());
+    assert_eq!(backend.completed(None).expect("completed").len(), 4);
+}
+
+// complete_session is session-scoped: completing one batch's session leaves a
+// second batch (claimed under a different session) still in flight.
+#[test]
+fn complete_session_leaves_other_sessions() {
+    let backend = make_backend();
+    backend.write(&test_job(1)).expect("write");
+    let first = backend.drain_available().expect("first drain");
+    let session_a = first[0].1.clone();
+
+    // A second job enqueued and drained AFTER the first claim gets its own session.
+    backend.write(&test_job(2)).expect("write");
+    let second = backend.drain_available().expect("second drain");
+    let session_b = second[0].1.clone();
+    assert_ne!(session_a, session_b, "distinct drains → distinct sessions");
+
+    // Completing session A must not touch session B's in-flight job.
+    let n = backend
+        .complete_session(&session_a, ObservationStatus::Done)
+        .expect("complete_session");
+    assert_eq!(n, 1);
+    let in_flight = backend.in_flight().expect("in_flight");
+    assert_eq!(in_flight.len(), 1, "session B job must remain in flight");
+    assert_eq!(in_flight[0].id.0, "job-0002");
+}
+
+// Concurrent drainers never double-claim a job. Two threads drain the same
+// PersistenceKit-backed queue at once (the production shape: background worker +
+// await pump). The single-pass bulk update atomically flips new→cur, so a given
+// row is claimed by exactly one session; reading back by the call's own session
+// means the two drainers partition the frontier with zero overlap. This is the
+// PersistenceKit-backend twin of the FilesystemBackend area4 conformance test.
+#[test]
+fn concurrent_drainers_no_double_claim() {
+    use std::sync::Arc;
+    let backend = Arc::new(make_backend());
+    for i in 0..200u64 {
+        backend.write(&test_job(i)).expect("write");
+    }
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let b = Arc::clone(&backend);
+            std::thread::spawn(move || b.drain_available().expect("drain"))
+        })
+        .collect();
+    let claimed: Vec<_> =
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+
+    // Every job claimed exactly once — no double-claim.
+    let mut ids: Vec<String> = claimed.iter().map(|(j, _)| j.id.0.clone()).collect();
+    assert_eq!(ids.len(), 200, "every job must be claimed exactly once");
+    ids.sort();
+    let before = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), before, "duplicate claim detected across drainers");
+
+    // Each job carries exactly one session; a thread that claimed jobs gave them
+    // all the same session (a claim group).
+    use std::collections::HashMap;
+    let mut by_session: HashMap<String, usize> = HashMap::new();
+    for (_, s) in &claimed {
+        *by_session.entry(s.0.clone()).or_default() += 1;
+    }
+    assert_eq!(
+        by_session.values().sum::<usize>(),
+        200,
+        "claimed jobs partition cleanly across sessions"
+    );
+}
+
+// At volume, one drain pass claims the WHOLE frontier in a single batch session
+// (the O(N) single-pass property) and complete_session retires it in one update.
+#[test]
+fn single_pass_claim_and_complete_at_volume() {
+    let backend = make_backend();
+    for i in 0..1000u64 {
+        backend.write(&test_job(i)).expect("write");
+    }
+    let drained = backend.drain_available().expect("drain");
+    assert_eq!(drained.len(), 1000, "one pass claims the whole frontier");
+    let session = drained[0].1.clone();
+    assert!(drained.iter().all(|(_, s)| *s == session),
+        "the whole batch shares one session");
+    let n = backend
+        .complete_session(&session, ObservationStatus::Done)
+        .expect("complete_session");
+    assert_eq!(n, 1000, "one update retires the whole batch");
+    assert!(backend.in_flight().expect("in_flight").is_empty());
+}
+
+// complete_session rejects a non-terminal status (parity with complete()).
+#[test]
+fn complete_session_rejects_non_terminal_status() {
+    let backend = make_backend();
+    backend.write(&test_job(1)).expect("write");
+    let drained = backend.drain_available().expect("drain");
+    let session = drained[0].1.clone();
+    let result = backend.complete_session(&session, ObservationStatus::Running);
+    assert!(
+        matches!(result, Err(QueueError::InvalidTerminalStatus(_))),
+        "expected InvalidTerminalStatus, got {:?}", result
+    );
+}
+
 #[test]
 fn in_flight_returns_cur_jobs() {
     let backend = make_backend();
@@ -500,13 +647,13 @@ fn pk_watch_delivers_jobs_on_enqueue() {
     let b = Arc::clone(&backend);
 
     let watcher_thread = std::thread::spawn(move || {
-        b.watch(move |job, _session| {
+        b.watch(Box::new(move |job, _session| {
             let _ = tx.send(job.clone());
             // Signal handler break: return error after first delivery so
             // the watch loop exits cleanly. The watch() contract (per spec
             // §3) says the loop exits when handler returns an error.
             Err(queuekit::QueueError::WatcherFailed("test stop".to_string()))
-        })
+        }))
     });
 
     // Wait up to 5 seconds for the job to arrive via watch.
@@ -539,10 +686,10 @@ fn pk_watch_fires_on_post_attach_enqueue() {
     let b_watch = Arc::clone(&backend);
 
     let watcher_thread = std::thread::spawn(move || {
-        b_watch.watch(move |job, _session| {
+        b_watch.watch(Box::new(move |job, _session| {
             let _ = tx.send(job.clone());
             Err(queuekit::QueueError::WatcherFailed("test stop".to_string()))
-        })
+        }))
     });
 
     // Give the watcher a moment to subscribe before we write.

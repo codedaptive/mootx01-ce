@@ -27,10 +27,9 @@ import SubstrateLib
 /// substrate's only autonomous write surface per cookbook §10.7; this
 /// type is the durable record it produces.
 ///
-/// This mission ships only the value type, its operational accessors,
-/// the `proposals` table, and store persistence. No verb behaviour
-/// (propose / accept / reject / withdraw / expunge / recall) is
-/// implemented here — the verb missions target this substrate later.
+/// `EstateVerbs.propose` constructs `Proposal` rows and persists them
+/// via `DrawerStore.addProposal`. The recall, accept, and reject verb
+/// paths are also wired; withdraw and expunge are reserved.
 ///
 /// `Proposal` mirrors `KGFact` structurally: an identity, three Int64
 /// bitmap columns, and content fields, with one addition `KGFact`
@@ -68,9 +67,9 @@ import SubstrateLib
 /// proposal get the safe baseline (kind `.newTunnel`, target `.drawer`,
 /// confirmation `.human`, generated-by `.dreamingDaemon`, confidence
 /// `.null`; state `.active`) without threading every axis through the
-/// call site. The lifecycle `pending` state is applied by the propose
-/// verb in a later mission, not by this value type — mirroring how
-/// `KGFact` leaves its safe-baseline defaults at `0`.
+/// call site. `EstateVerbs.propose` stamps the `pending` lifecycle
+/// state before persisting; this value type itself carries `0` as
+/// the default.
 public struct Proposal: Equatable, Codable, Sendable {
 
     /// Stable identifier for this proposal. Defaults to a fresh UUID

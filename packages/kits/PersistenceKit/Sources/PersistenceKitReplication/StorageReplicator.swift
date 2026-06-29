@@ -76,8 +76,8 @@ public enum StorageReplicator {
     /// Always performs a full snapshot: every row in every schema-declared table,
     /// all audit events, and all blobs are copied atomically in a serializable
     /// transaction. The operation is idempotent — a second call with no source
-    /// changes writes zero new rows (upsert on primary key is a no-op for
-    /// identical values).
+    /// changes adds zero new rows (upsert with ON CONFLICT DO UPDATE runs on
+    /// existing rows but does not insert duplicates).
     ///
     /// - Parameters:
     ///   - source: The storage to read from (must be open).
@@ -212,6 +212,23 @@ public enum StorageReplicator {
             // overwrites in place, producing no duplicate keys.
             for blob in payload.blobs {
                 try await txn.blobStore.put(key: blob.key, bytes: blob.bytes)
+            }
+
+            // 3d. Blob delete propagation (SECFIX-WS2-PK F5): remove destination
+            // blobs that are absent from the source snapshot. An additive-only write
+            // (3c above) leaves orphaned blobs in the replica whenever source blobs
+            // are deleted. A full-snapshot replication must produce a destination
+            // that exactly mirrors the source — extra keys in the destination are
+            // divergence.
+            let sourceBlobKeySet = Set(payload.blobs.map { $0.key })
+            let destinationBlobKeys = try await txn.blobStore.listKeys()
+            var blobsDeleted = 0
+            for key in destinationBlobKeys where !sourceBlobKeySet.contains(key) {
+                try await txn.blobStore.delete(key: key)
+                blobsDeleted += 1
+            }
+            if blobsDeleted > 0 {
+                log.info("replicate: deleted \(blobsDeleted) orphaned blobs from destination")
             }
 
             return ReplicationResult(

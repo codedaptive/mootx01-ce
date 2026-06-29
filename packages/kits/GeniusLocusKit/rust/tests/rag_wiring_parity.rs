@@ -21,8 +21,10 @@ use genius_locus_kit::SchedulerSignalTrigger as SignalTrigger;
 
 use corpus_kit::{Corpus, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
-use vectorkit::VectorStore;
+use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
+use substrate_types::hlc::HLCGenerator;
 use substrate_types::Fingerprint256;
+use vectorkit::VectorStore;
 
 const T0_MILLIS: i64 = 1_700_000_000_000;
 const T0_NANOS: i64 = T0_MILLIS * 1_000_000;
@@ -37,6 +39,17 @@ fn make_vector_store() -> Arc<VectorStore> {
     Arc::new(VectorStore::open(make_storage()).expect("VectorStore::open"))
 }
 
+fn inmem_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, HLCGenerator) {
+    let store_id = uuid::Uuid::from_u128(0x5348_4544_5545_5245_0000_0000_0000_0003);
+    let storage = std::sync::Arc::new(InMemoryStorage::with_estate(store_id));
+    PersistenceKitBackend::open_schema(storage.as_ref())
+        .expect("InMemoryStorage open_schema cannot fail");
+    let backend = PersistenceKitBackend::new(storage);
+    let queue: QueueKit<Box<dyn QueueBackend>> =
+        QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+    (queue, HLCGenerator::new(1))
+}
+
 fn fire_spec(
     spec: genius_locus_kit::SchedulerSignalSpec,
 ) -> genius_locus_kit::SchedulerSignalReport {
@@ -44,8 +57,14 @@ fn fire_spec(
         SignalTrigger::Interval { seconds } => seconds.as_secs(),
         _ => panic!("expected interval trigger"),
     };
-    let mut scheduler =
-        SerialLaneScheduler::new("rag-test".to_string(), SchedulerNoopDispatcher);
+    let (queue, hlc) = inmem_signals_queue();
+    let mut scheduler = SerialLaneScheduler::new(
+        "rag-test".to_string(),
+        SchedulerNoopDispatcher,
+        queue,
+        None,
+        hlc,
+    );
     let id = scheduler.register(spec, T0_NANOS);
     scheduler.tick(T0_NANOS + (cadence as i64 + 1) * NANOS_PER_SEC);
     scheduler

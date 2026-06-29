@@ -7,10 +7,10 @@
 // CKRecord objects are constructed and read entirely in process, the
 // same way the existing CloudKit stub test instantiates CloudKit types.
 //
-// Note: CKRecordMapping.decode() reads CKRecord
-// values back as NS-bridged objects, so integers decode as `.int`, not
-// `.bitmap` — the `.bitmap` discriminator is not carried on the wire.
-// The round-trip asserts `.int`, matching that documented behavior.
+// Note: CKRecordMapping.decode() reads CKRecord values back as
+// NS-bridged objects, so integers decode as `.int`. This test covers
+// `.text` and `.int` only; there is no `.bitmap` value or assertion
+// in this file (the discriminator is not carried on the wire).
 //
 // LWW tests use @testable import to reach CloudKitStateActor.applyInbound
 // directly, exercising the HLC durability fix without a live CloudKit stack.
@@ -233,7 +233,7 @@ struct LWWDurableHLCTests {
         try await engine.applyInbound(first, syncedTable: syncedTable, storage: storage)
 
         // Second inbound at T=500 — older; must be rejected because the
-        // fix persists _syncHLC so the guard at line 359 can fire.
+        // fix persists _syncHLC so the HLC guard in applyInbound can fire.
         let stale = makeDecoded(id: rowID, note: "stale-at-T500", hlcTime: 500)
         try await engine.applyInbound(stale, syncedTable: syncedTable, storage: storage)
 

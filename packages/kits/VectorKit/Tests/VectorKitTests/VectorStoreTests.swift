@@ -118,8 +118,8 @@ struct VectorStoreTests {
     }
 
     /// Two models for the same item: each is independently
-    /// retrievable. Confirms `(item_id, model_id)` is the effective
-    /// lookup key and the two rows do not collide.
+    /// retrievable. Confirms `(item_id, vector_index, model_id)` is the
+    /// effective uniqueness key; this test uses vector_index=0 for both.
     @Test func testMultipleModelsStoredForSameItem() async throws {
         try await GlobalTestLock.shared.withLock {
             let store = try await makeStore()
@@ -174,8 +174,8 @@ struct VectorStoreTests {
         }
     }
 
-    /// `deleteVector` removes exactly the matching `(item_id,
-    /// model_id)` row; subsequent fetch returns nil.
+    /// `deleteVector` removes the matching `(itemID, vectorIndex: 0, modelID)`
+    /// row via the single-vector API; subsequent fetch returns nil.
     @Test func testDeleteVectorRemovesRow() async throws {
         try await GlobalTestLock.shared.withLock {
             let store = try await makeStore()

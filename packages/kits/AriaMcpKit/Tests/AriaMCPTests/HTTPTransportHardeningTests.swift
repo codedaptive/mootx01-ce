@@ -18,8 +18,8 @@ import Darwin
 ///
 /// Verifies:
 ///   1. ConcurrencyGate bounds: N+k parallel requests → ≤N in-flight, k queued or shed.
-///   2. Shed path: tryAcquire returns false when queue is full; the transport
-///      writes HTTP 503 + Retry-After header.
+///   2. Shed path: tryEnqueue returns false when the admission queue is full;
+///      the transport writes HTTP 503 + Retry-After header.
 ///   3. Latency counters: recordLatencyNs buckets requests correctly.
 ///   4. Inflight high-water mark: updateInflightHighWater tracks the peak.
 ///   5. Full round-trip: a request served through HTTPServer increments
@@ -93,20 +93,22 @@ struct HTTPTransportHardeningTests {
         return (status, Data(resp[sep.upperBound...]))
     }
 
-    /// Start an HTTPServer with a caller-supplied ConcurrencyGate. Returns
-    /// the bound port and a stop closure.
+    /// Start an HTTPServer with a caller-supplied ConcurrencyGate and an optional
+    /// SSE gate. Returns the bound port and a stop closure.
     ///
     /// Mirrors `HTTPServer.run()`'s two-phase gate protocol:
     ///   1. `tryEnqueue()` on the accept thread (non-blocking depth check).
     ///   2. `waitForSlot()` inside the spawned Task (blocking semaphore wait).
     private func startServing(
         _ dispatcher: ARIA_MCPDispatcher,
-        gate: ConcurrencyGate
+        gate: ConcurrencyGate,
+        sseGate: ConcurrencyGate = globalSSEConcurrencyGate
     ) throws -> (port: UInt16, stop: () -> Void) {
         let server = HTTPServer(
             dispatcher: dispatcher,
             port: 0,
-            concurrencyGate: gate
+            concurrencyGate: gate,
+            sseConcurrencyGate: sseGate
         )
         let (listenFD, port) = try server.bind()
         let thread = Thread {
@@ -123,7 +125,8 @@ struct HTTPTransportHardeningTests {
                             cfd,
                             dispatcher: dispatcher,
                             maxBodyBytes: 4 * 1024 * 1024,
-                            gate: gate
+                            gate: gate,
+                            sseGate: sseGate
                         )
                     }
                 }
@@ -136,20 +139,13 @@ struct HTTPTransportHardeningTests {
 
     // MARK: - ConcurrencyGate unit tests
 
-    /// tryAcquire returns false when (maxConcurrent + maxQueued) requests are
-    /// already in the gate. The gate depth is bounded.
+    /// Checks that a single tryAcquire followed by release leaves depth balanced.
+    /// (The gate depth accounting is the correctness property under test.)
     @Test("ConcurrencyGate: rejects when queue is full")
     func concurrencyGateRejectsWhenFull() {
         let gate = ConcurrencyGate(maxConcurrent: 2, maxQueued: 1)
-        // Acquire maxConcurrent + maxQueued slots without releasing: 3 total.
-        // The fourth tryAcquire must return false.
-        // We can't block on semaphore.wait() in a test, so instead test the
-        // depth accounting path directly via the queue-full branch:
-        // when activeCount > maxConcurrent + maxQueued, tryAcquire returns false.
-        // Inject the depth by releasing the semaphore first so wait() is
-        // non-blocking, then drain the free slots.
-        //
-        // Simpler approach: check that tryAcquire followed by release is balanced.
+        // Acquire once, release, and verify depth returns to zero — the gate's
+        // depth accounting is balanced.
         let acquired = gate.tryAcquire()
         #expect(acquired == true)
         gate.release()
@@ -271,7 +267,8 @@ struct HTTPTransportHardeningTests {
     // MARK: - Shed path integration test
 
     /// When the concurrency gate queue is full, the HTTP transport responds 503
-    /// with Retry-After and increments globalShedCounter.
+    /// with Retry-After. This test calls HTTPServer.sendShedResponse(serverFD)
+    /// directly and only loads globalShedCounter; it does not increment or assert it.
     @Test("HTTP 503 shed: blocked gate → 503 + Retry-After response")
     func httpShedReturns503() async throws {
         // Use a zero-queue, 1-slot gate so we can shed with just 2 connections.
@@ -452,9 +449,9 @@ struct HTTPTransportHardeningTests {
     ///
     ///   C (+1 overflow):
     ///     - Connects AFTER A is confirmed in-flight and B is confirmed queued.
-    ///     - tryEnqueue sees depth=2 ≥ maxConcurrent+maxQueued=2 → returns false
-    ///       immediately (no semaphore wait). The accept thread calls sendShedResponse
-    ///       inline and C's fd is closed.
+    ///     - tryEnqueue increments depth to 3, sees depth=3 > maxConcurrent+maxQueued=2
+    ///       → returns false immediately (no semaphore wait). The accept thread calls
+    ///       sendShedResponse inline and C's fd is closed.
     ///     - C reads 503 + Retry-After from the wire within 2 s.
     ///
     /// Wire-proof timing check: C's 503 is observed before A's body is released.
@@ -563,8 +560,8 @@ struct HTTPTransportHardeningTests {
         #expect(gate.currentDepth == 2, "gate depth must be 2 (A in-flight, B queued) before C connects")
 
         // ── C (+1 overflow) ───────────────────────────────────────────────────
-        // tryEnqueue sees depth=2 ≥ 1+1=2 → false immediately; sendShedResponse
-        // fires inline on the accept thread; C reads 503 on the wire.
+        // tryEnqueue increments depth to 3, sees depth=3 > 1+1=2 → false immediately;
+        // sendShedResponse fires inline on the accept thread; C reads 503 on the wire.
         let cFD = socket(AF_INET, SOCK_STREAM, 0)
         var cAddr = sockaddr_in()
         cAddr.sin_family = sa_family_t(AF_INET)
@@ -651,5 +648,108 @@ struct HTTPTransportHardeningTests {
         gate.release()
         gate.release()
         gate.release()
+    }
+
+    // MARK: - CAND-025: SSE gate isolation
+
+    /// Open a raw TCP connection to 127.0.0.1:port. Returns the open file
+    /// descriptor on success or -1 on failure. Caller owns the fd and must close it.
+    private func rawConnect(port: UInt16) -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return -1 }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = UInt32(0x7F00_0001).bigEndian
+        let ok = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard ok == 0 else { close(fd); return -1 }
+        return fd
+    }
+
+    /// Verifies that concurrent SSE connections do NOT consume slots from the
+    /// normal request/response gate (CAND-025). The test opens N SSE streams
+    /// that block holding their connections open, then verifies a normal POST
+    /// is still served without waiting for the SSE streams to close.
+    ///
+    /// Setup: normal gate maxConcurrent=1 (deliberately tight so any slot
+    /// leak is fatal); SSE gate maxConcurrent=4 (enough for the SSE clients).
+    /// If the SSE streams were consuming normal gate slots, the POST would stall
+    /// because the one normal slot would be held by an SSE client.
+    @Test("CAND-025: SSE streams do not consume normal concurrency gate slots")
+    func sseStreamsDoNotConsumeNormalGateSlots() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "hardening-sse-isolation")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let dispatcher = ARIA_MCPDispatcher(
+            info: .init(name: "ARIA_MCP", version: "test"),
+            tooling: ToolDispatcher(kit: kit, handle: handle)
+        )
+
+        // Tight normal gate: only 1 concurrent normal request.
+        // If SSE were stealing this slot, the POST below would block.
+        let normalGate = ConcurrencyGate(maxConcurrent: 1, maxQueued: 4)
+        // Generous SSE gate: 4 concurrent SSE streams — room for our test clients.
+        let sseTestGate = ConcurrencyGate(maxConcurrent: 4, maxQueued: 0)
+
+        let (port, stop) = try startServing(dispatcher, gate: normalGate, sseGate: sseTestGate)
+        defer { stop() }
+
+        // Connect 3 SSE clients and leave them open (holding SSE gate slots).
+        var sseFDs: [Int32] = []
+        for _ in 0..<3 {
+            let fd = rawConnect(port: port)
+            guard fd >= 0 else {
+                Issue.record("Failed to connect SSE client")
+                return
+            }
+            let req = "GET /api/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n"
+            _ = POSIXSocket.sendAll(fd, Data(req.utf8))
+            // Read just enough to confirm the SSE head arrived (server is live).
+            var tv = timeval(tv_sec: 2, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            _ = POSIXSocket.recv(fd, max: 256)
+            sseFDs.append(fd)
+        }
+        defer { sseFDs.forEach { close($0) } }
+
+        // Now issue a normal POST while the 3 SSE connections are still open.
+        // With the fix: SSE holds the sseGate, not the normalGate, so the one
+        // normalGate slot is available and the POST completes immediately.
+        // Without the fix: the normalGate slot would be consumed by the first SSE
+        // client and this POST would stall until an SSE client disconnects.
+        let postFD = rawConnect(port: port)
+        guard postFD >= 0 else {
+            Issue.record("Failed to connect for POST")
+            return
+        }
+        defer { close(postFD) }
+
+        let frame = #"{"jsonrpc":"2.0","id":99,"method":"ping"}"#
+        let body = Data(frame.utf8)
+        let http = "POST /mcp/v1/message HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nOrigin: http://127.0.0.1\r\n\r\n"
+        _ = POSIXSocket.sendAll(postFD, Data(http.utf8))
+        _ = POSIXSocket.sendAll(postFD, body)
+
+        // POST must receive a response within 3 seconds (not blocked by SSE clients).
+        var postTv = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(postFD, SOL_SOCKET, SO_RCVTIMEO, &postTv, socklen_t(MemoryLayout<timeval>.size))
+        var postResp = Data()
+        while let chunk = POSIXSocket.recv(postFD, max: 65536), !chunk.isEmpty {
+            postResp.append(chunk)
+        }
+        let respText = String(data: postResp, encoding: .utf8) ?? ""
+        let firstLine = respText.split(separator: "\r\n").first.map(String.init) ?? ""
+        let parts = firstLine.split(separator: " ")
+        let status = parts.count >= 2 ? (Int(parts[1]) ?? 0) : 0
+        #expect(status == 200, "POST must complete with 200 while SSE streams are open; got \(status)")
+        #expect(respText.contains("\"result\""), "POST response must contain JSON-RPC result; got: \(respText.prefix(300))")
     }
 }

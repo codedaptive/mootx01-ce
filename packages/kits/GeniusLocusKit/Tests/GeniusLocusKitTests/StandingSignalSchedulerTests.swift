@@ -199,11 +199,11 @@ struct StandingSignalSchedulerTests {
         let reports = try await kit.signalStatus(in: handle)
         let report = reports.first(where: { $0.signalID == id })!
         #expect(report.recentOutcomes.count == 1)
-        // The propose verb is now live. Scaffold targets (sentinel row IDs that
-        // don't exist in the test estate) produce `routeFailed` because the verb
-        // reaches LocusKit, looks up the missing drawer, and surfaces
-        // `underlyingEstateFailure`. All three forms — `routed`, `routedButVerbStubbed`,
-        // `routeFailed` — confirm the scheduler reached the verb boundary.
+        // The propose verb is live; scaffold targets produce `routeFailed` (expected:
+        // the verb reaches LocusKit, looks up the missing drawer, and surfaces
+        // `underlyingEstateFailure`). `routedButVerbStubbed` is tolerated as
+        // legacy/backward-compatible boundary-reach; `routed` means a live success.
+        // All three confirm the scheduler reached the verb boundary.
         switch report.recentOutcomes[0] {
         case .routed(let verb), .routedButVerbStubbed(let verb), .routeFailed(let verb, _):
             #expect(verb == "propose")
@@ -225,8 +225,9 @@ struct StandingSignalSchedulerTests {
         try await kit.signalTick(in: handle, now: t0.addingTimeInterval(5))
         let report = try await kit.signalStatus(in: handle).first(where: { $0.signalID == id })!
         #expect(report.recentOutcomes.count == 1)
-        // The associate verb is now live. Scaffold targets produce `routeFailed`;
-        // all three forms confirm the scheduler reached the verb boundary.
+        // The associate verb is live; scaffold targets produce `routeFailed` (expected).
+        // `routedButVerbStubbed` is tolerated as legacy/backward-compatible boundary-reach.
+        // All three forms confirm the scheduler reached the verb boundary.
         switch report.recentOutcomes[0] {
         case .routed(let verb), .routedButVerbStubbed(let verb), .routeFailed(let verb, _):
             #expect(verb == "associate")
@@ -249,8 +250,9 @@ struct StandingSignalSchedulerTests {
         let report = try await kit.signalStatus(in: handle).first(where: { $0.signalID == id })!
         // Architecture spec §11.1: mutate-candidate is "routed through
         // `propose` for confirmation." The recorded verb is propose, not mutate.
-        // Since propose is now live, scaffold targets produce `routeFailed`;
-        // all three forms confirm the propose verb was reached.
+        // Propose is live; scaffold targets produce `routeFailed` (expected).
+        // `routedButVerbStubbed` is tolerated as legacy boundary-reach.
+        // All three forms confirm the propose verb was reached.
         switch report.recentOutcomes[0] {
         case .routed(let verb), .routedButVerbStubbed(let verb), .routeFailed(let verb, _):
             #expect(verb == "propose")

@@ -3,7 +3,7 @@
 // Production DistillationPipeline.FeatureExtractor backed by the deterministic
 // HMM/Viterbi tagger from LatticeLib.
 //
-// Design home: Distillation.swift comment §1 ("Provide the EideticLib HMM tagger
+// Design home: Distillation.swift comment §1 ("Provide the LatticeLib HMM tagger
 // as the production FeatureExtractor"). Implemented here as a separate file so the
 // seam is visible and testable in isolation.
 //
@@ -12,8 +12,9 @@
 //   ENT (entity):    noun-tagged tokens from LatticeLib.wordClass(_:tagger:.hmm)
 //   REL (relation):  verb-tagged tokens
 //   NUM (numerical): tokens where every character is an ASCII digit
-//   TMP (temporal):  tokens matching a 4-digit year (YYYY) or ISO-8601 date
-//                    (YYYY-MM-DD), both determined by a pure character-class scan
+//   TMP (temporal):  4-digit year tokens (YYYY) — the UAX #29 tokenizer
+//                    splits "YYYY-MM-DD" on hyphens, so only the year component
+//                    reaches this check; detected by a pure character-class scan
 //
 // Rules are IDENTICAL in the Rust port (hmm_feature_extractor.rs). Both ports
 // use the HMM path so results are byte-identical (LatticeLib contract: the
@@ -81,8 +82,9 @@ extension NeuronKit {
     ///   `.entity`    — noun-tagged tokens (HMM says .noun)
     ///   `.relation`  — verb-tagged tokens (HMM says .verb)
     ///   `.numerical` — tokens whose every character is an ASCII decimal digit
-    ///   `.temporal`  — 4-digit year tokens OR ISO-8601 date tokens (YYYY-MM-DD),
-    ///                  detected by a pure character-class scan (no regex, no Date())
+    ///   `.temporal`  — 4-digit year tokens (YYYY); the UAX #29 tokenizer splits
+    ///                  "YYYY-MM-DD" on hyphens so only the year component is
+    ///                  classified TMP (pure character-class scan, no regex, no Date())
     ///
     /// The `.hmm` tagger choice is mandatory: it guarantees bit-identical output
     /// with the Rust port (`hmm_feature_extractor.rs`). The static word-class table

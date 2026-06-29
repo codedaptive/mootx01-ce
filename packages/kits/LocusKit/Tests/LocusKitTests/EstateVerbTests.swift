@@ -3,7 +3,7 @@ import SubstrateTypes
 import Foundation
 @testable import LocusKit
 
-@Suite("Estate verb tests — capture, withdraw, recall, stubs")
+@Suite("Estate verb tests — capture, withdraw, recall, mutate, learn")
 struct EstateVerbTests {
 
     /// Build a fresh estate on a unique temp path.
@@ -33,8 +33,6 @@ struct EstateVerbTests {
         )
         let drawer = try await estate.capture(frame)
         #expect(drawer.content == "Hello LocusKit")
-        #expect(!drawer.wing.isEmpty)
-        #expect(drawer.room == "test-room")
         #expect(drawer.udcCode == "004")
         #expect(drawer.adjectiveBitmap & 0x3F == 0)
         #expect(drawer.operationalBitmap & 0x3F == Int64(CaptureChannel.typed.rawValue))
@@ -189,7 +187,6 @@ struct EstateVerbTests {
         // preserved (room/state unchanged).
         let after = try #require(try await estate.store.getDrawer(id: drawer.id))
         #expect(after.confirmation == .userConfirmed)
-        #expect(after.room == "study")
         #expect(after.adjectiveBitmap & 0x3F == 0)  // state still active
     }
 

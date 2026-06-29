@@ -1,19 +1,20 @@
 //! Wing and room aggregate summary types. Ports `Summaries.swift`.
 //!
 //! `WingSummary` and `RoomSummary` are computed projections built by
-//! `SELECT ... GROUP BY` at query time, mirroring MemPalace's
-//! `tool_list_wings` behavior. Their counts therefore reflect whatever
-//! is currently in the store rather than a separately maintained
-//! registry. Wings and rooms are metadata-only strings on drawer rows,
-//! not first-class tables.
+//! counting drawers grouped by `parent_node_id` (ADR-017), mirroring
+//! MemPalace's `tool_list_wings` behavior. Their counts reflect
+//! whatever is in the store at query time. Wings and rooms are node
+//! rows in the `nodes` table; drawers reference their parent room via
+//! `parent_node_id`.
 
 // MARK: - WingSummary
 
 /// Aggregate count for a single wing — produced by `list_wings`.
 ///
-/// Wings are metadata-only strings on drawer rows; there is no
-/// separate `wings` table. This summary is a computed projection over
-/// drawer rows. Counts reflect non-tombstoned drawers only.
+/// Wings are node rows in the `nodes` table (ADR-017); drawers
+/// reference their room via `parent_node_id`. This summary is a
+/// computed projection over the node tree. Counts reflect
+/// non-tombstoned drawers only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WingSummary {
     /// The wing name, as it appears on drawer rows.

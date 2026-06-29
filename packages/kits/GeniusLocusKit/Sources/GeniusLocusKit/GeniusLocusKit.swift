@@ -174,9 +174,9 @@ public actor GeniusLocusKit {
     /// (existing behaviour, unchanged). Dropped when the estate is closed.
     ///
     /// Topology boundary invariant (G4): this registry stores ONLY the three-method
-    /// NodeTopologyProvider adapter — no content is accessible through it. Any
+    /// GLKNodeTopologyProvider adapter — no content is accessible through it. Any
     /// node-content need routes through CorpusKit.
-    internal var nodeTopologyProviders: [EstateHandle: any NodeTopologyProvider] = [:]
+    internal var nodeTopologyProviders: [EstateHandle: any GLKNodeTopologyProvider] = [:]
 
     /// Per-estate mount lifecycle states (GLK_PROVISION_001).
     ///
@@ -212,41 +212,32 @@ public actor GeniusLocusKit {
     /// Dropped in `close`.
     internal var matrixPersistenceBackends: [EstateHandle: MatrixPersistenceBackend] = [:]
 
-    /// Per-estate dedicated encode queue (Dual-Path Intake P3 / D-B).
+    /// Per-estate dreaming QueueKit handles (ADR-021 Phase 2b).
     ///
-    /// ONE QueueKit per estate, distinct from the Brain scheduler's queue, that
-    /// carries `EncodeJob` payloads from the regular capture path to the encode
-    /// drain worker. Mounted at provision (`mountEncodeQueue(for:)`), backed by a
-    /// transient in-memory PersistenceKitBackend (mirroring the scheduler's queue
-    /// substrate). Dropped in `close`. Absent for estates provisioned before the
-    /// intake wiring or for `.locusOnly` estates with no Corpus to feed.
-    internal var encodeQueues: [EstateHandle: QueueKit] = [:]
+    /// Lazy-mounted on the first external recall for each estate by
+    /// `ensureDreamingQueue(for:)`. The queue opens the same per-estate
+    /// queue.sqlite that the encode and signals streams use (one queue,
+    /// many streams — ADR-021 Decision 7), with stream_id = "dreaming".
+    /// SQLite estates → SQLiteStorage-backed QueueKit (crash-durable).
+    /// InMemory estates → transient PersistenceKitBackend (no disk needed).
+    /// Dropped in `close` so no handle outlives the estate.
+    internal var dreamingQueues: [EstateHandle: QueueKit] = [:]
 
-    /// Per-estate HLC generator for stamping `EncodeJob` queue submissions.
+    /// Per-estate HLC generators for the dreaming queue (ADR-021 Phase 2b).
     ///
-    /// One generator per estate so encode jobs order on a per-estate clock,
-    /// matching the scheduler's per-estate HLC discipline. Built alongside the
-    /// encode queue in `mountEncodeQueue(for:)`. `var` because `HLCGenerator.send`
-    /// is mutating. Dropped in `close`.
-    internal var encodeHLCs: [EstateHandle: HLCGenerator] = [:]
+    /// One HLC per estate, derived from the estate UUID the same way the signals
+    /// scheduler derives its HLC (first four UUID bytes big-endian → Int32 nodeID),
+    /// so each estate produces a distinguishable monotone HLC family. Minted
+    /// alongside the dreaming queue in `ensureDreamingQueue(for:)`.
+    /// Dropped in `close` alongside `dreamingQueues`.
+    internal var dreamingHLCs: [EstateHandle: HLCGenerator] = [:]
 
-    /// Per-estate background encode-drain worker task (P4).
-    ///
-    /// Spawned in `mountEncodeQueue(for:)`: a detached loop that drains the
-    /// encode queue, ingests each job into the estate's Corpus, and replies
-    /// terminal so `awaitDrain()` can observe completion. Cancelled and dropped
-    /// in `close` so a torn-down estate leaves no orphan worker.
-    internal var encodeDrainWorkers: [EstateHandle: Task<Void, Never>] = [:]
-
-    /// Test-only ingest-failure injector for the encode-drain at-least-once path.
-    ///
-    /// When set, `ingestAndReply` invokes this with the job's drawer id BEFORE
-    /// the real ingest on each attempt; a thrown error simulates a transient
-    /// ingest failure so the bounded-retry / at-least-once behaviour can be
-    /// force-tested deterministically. Nil in production (zero overhead); the
-    /// documented seam for `EncodeDrainAtLeastOnceTests`. Mirrors the Rust
-    /// `encode_ingest_failure_hook`.
-    internal var encodeIngestFailureHook: (@Sendable (String) throws -> Void)?
+    // The encode QUEUE + DRAIN worker + per-estate HLC + at-least-once ingest
+    // failure hook used to live here. They were relocated into CorpusKit: a
+    // Corpus now owns its ingest queue, drain worker pool, and retry (see
+    // CorpusKit's CorpusIngestQueue.swift). GLK reaches them through
+    // `corpusKits[handle]` and is pure orchestration — it enqueues work and,
+    // via the Corpus `onEncoded` callback, rolls up the touched LocusKit rooms.
 
     /// Per-estate active sync engine entry (ConvergenceKit backend + label).
     ///
@@ -319,16 +310,6 @@ public actor GeniusLocusKit {
     /// Intended for tests only. Never call in production code.
     func _inject(embedError error: Error) {
         _testForceEmbedError = error
-    }
-
-    /// Install the encode-drain ingest-failure hook (test seam).
-    ///
-    /// The hook runs on the actor before each encode-drain ingest attempt; a
-    /// thrown error simulates a transient ingest fault, exercising the
-    /// at-least-once bounded-retry path. Intended for tests only
-    /// (`@testable import`). Never call in production code.
-    func _setEncodeIngestFailureHook(_ hook: @escaping @Sendable (String) throws -> Void) {
-        encodeIngestFailureHook = hook
     }
 
     /// Inject a pool `getDrawers` error for the next `recallUnionBest` step 5.5 call.
@@ -540,7 +521,7 @@ public extension GeniusLocusKit {
 
 public extension GeniusLocusKit {
 
-    /// Register a `NodeTopologyProvider` for the given estate handle.
+    /// Register a `GLKNodeTopologyProvider` for the given estate handle.
     ///
     /// The provider gives GLK access to the host's parent-child node tree for the
     /// `.nodeTreeNative` recall mode and for the structural lens path. When a
@@ -568,7 +549,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - provider: The host-side topology adapter.
     ///   - handle:   The estate to associate this topology with. Must be open.
-    func registerNodeTopology(_ provider: any NodeTopologyProvider, for handle: EstateHandle) {
+    func registerNodeTopology(_ provider: any GLKNodeTopologyProvider, for handle: EstateHandle) {
         nodeTopologyProviders[handle] = provider
     }
 }

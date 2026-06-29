@@ -6,7 +6,8 @@
 // (schema version, kit ID, HLC). The receiver decodes, validates
 // schema and kit, and applies the change through its local
 // PersistenceKit. Schema or kit mismatch causes the record to be
-// rejected (queued for retry post-app-update).
+// rejected (SyncError.kitMismatch / .schemaMismatch); no retry queue
+// is present in this layer.
 
 import Foundation
 // ─────────────────────────────────────────────────────────────────
@@ -33,6 +34,12 @@ public struct SyncRecord: Sendable, Codable {
     public let hlc: PackedHLC
     public let schemaVersion: Int
     public let kitID: String
+
+    /// Explicit CodingKeys documenting the cross-port JSON contract.
+    /// Rust serde renames match these exact strings.
+    private enum CodingKeys: String, CodingKey {
+        case table, event, rowKey, values, hlc, schemaVersion, kitID
+    }
 
     public init(
         table: String,
@@ -76,12 +83,18 @@ public enum SyncEventKind: String, Sendable, Codable {
     }
 }
 
-/// Codable wrapper for SubstrateLib.HLC. The packed form is
+/// Codable wrapper for SubstrateTypes.HLC. The packed form is
 /// stable across encoders.
 public struct PackedHLC: Sendable, Codable, Hashable {
     public let physicalTime: Int64
     public let logicalCount: Int32
     public let nodeID: Int32
+
+    /// Explicit CodingKeys documenting the cross-port JSON contract.
+    /// Rust serde renames match these exact strings.
+    private enum CodingKeys: String, CodingKey {
+        case physicalTime, logicalCount, nodeID
+    }
 
     public init(_ hlc: HLC) {
         self.physicalTime = hlc.physicalTime
@@ -118,11 +131,22 @@ public struct SyncValueMap: Sendable, Codable {
 }
 
 /// One TypedValue case, encoded with a discriminator.
-public struct SyncValueBox: Sendable, Codable {
+///
+/// JSON contract: adjacently-tagged encoding matching Rust's
+/// `#[serde(tag = "kind", content = "payload")]`. The `kind` field
+/// carries the type discriminator; `payload` carries the raw value.
+/// For the `null` kind, `payload` is omitted (Rust serde omits
+/// content for unit variants).
+///
+/// Timestamp payload is epoch seconds (Int64), matching Rust's
+/// `TypedValue::Timestamp(i64)`. Binary data (blob, json) is
+/// encoded as a JSON array of UInt8, matching Rust's `Vec<u8>`
+/// serde default.
+public struct SyncValueBox: Sendable {
     public let kind: String
     public let payload: Payload
 
-    public enum Payload: Sendable, Codable {
+    public enum Payload: Sendable {
         case null
         case bool(Bool)
         case int(Int64)
@@ -135,6 +159,11 @@ public struct SyncValueBox: Sendable, Codable {
         case hlc(PackedHLC)
         case fingerprint(FingerprintWire)
         case array([SyncValueBox])
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case payload
     }
 
     public init(_ v: TypedValue) {
@@ -171,6 +200,96 @@ public struct SyncValueBox: Sendable, Codable {
         case .hlc(let h): return .hlc(h.asHLC)
         case .fingerprint(let f): return .fingerprint(f.asFingerprint)
         case .array(let arr): return .array(arr.map { $0.asTypedValue })
+        }
+    }
+}
+
+extension SyncValueBox: Codable {
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        switch payload {
+        case .null:
+            // Rust serde omits content for unit variants; we do the same.
+            break
+        case .bool(let v):
+            try container.encode(v, forKey: .payload)
+        case .int(let v), .bitmap(let v):
+            try container.encode(v, forKey: .payload)
+        case .float(let v):
+            try container.encode(v, forKey: .payload)
+        case .text(let v):
+            try container.encode(v, forKey: .payload)
+        case .bytes(let d):
+            // Encode as [UInt8] array matching Rust's Vec<u8> serde default.
+            try container.encode(Array(d), forKey: .payload)
+        case .uuid(let v):
+            try container.encode(v, forKey: .payload)
+        case .timestamp(let d):
+            // Epoch seconds as Int64, matching Rust's Timestamp(i64).
+            // Guard against non-finite or out-of-range intervals before the
+            // narrowing cast — Int64(_:) traps on NaN, ±infinity, or any
+            // Double whose magnitude exceeds Int64.max (~9.2e18 seconds,
+            // year 292 billion). Corrupt inbound sync data can produce such
+            // values; we surface a clear encode error rather than a crash.
+            let interval = d.timeIntervalSince1970
+            guard interval.isFinite,
+                  interval >= Double(Int64.min),
+                  interval <= Double(Int64.max) else {
+                throw EncodingError.invalidValue(
+                    interval,
+                    EncodingError.Context(
+                        codingPath: container.codingPath + [CodingKeys.payload],
+                        debugDescription:
+                            "timestamp interval \(interval) is non-finite or out of Int64 range"
+                    )
+                )
+            }
+            try container.encode(Int64(interval), forKey: .payload)
+        case .hlc(let v):
+            try container.encode(v, forKey: .payload)
+        case .fingerprint(let v):
+            try container.encode(v, forKey: .payload)
+        case .array(let v):
+            try container.encode(v, forKey: .payload)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "null":
+            payload = .null
+        case "bool":
+            payload = .bool(try container.decode(Bool.self, forKey: .payload))
+        case "int":
+            payload = .int(try container.decode(Int64.self, forKey: .payload))
+        case "bitmap":
+            payload = .bitmap(try container.decode(Int64.self, forKey: .payload))
+        case "float":
+            payload = .float(try container.decode(Double.self, forKey: .payload))
+        case "text":
+            payload = .text(try container.decode(String.self, forKey: .payload))
+        case "blob", "json":
+            let bytes = try container.decode([UInt8].self, forKey: .payload)
+            payload = .bytes(Data(bytes))
+        case "uuid":
+            payload = .uuid(try container.decode(UUID.self, forKey: .payload))
+        case "timestamp":
+            let secs = try container.decode(Int64.self, forKey: .payload)
+            payload = .timestamp(Date(timeIntervalSince1970: TimeInterval(secs)))
+        case "hlc":
+            payload = .hlc(try container.decode(PackedHLC.self, forKey: .payload))
+        case "fingerprint":
+            payload = .fingerprint(try container.decode(FingerprintWire.self, forKey: .payload))
+        case "array":
+            payload = .array(try container.decode([SyncValueBox].self, forKey: .payload))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container,
+                debugDescription: "unknown SyncValueBox kind: \(kind)"
+            )
         }
     }
 }

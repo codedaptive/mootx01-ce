@@ -1,8 +1,7 @@
 // verbs.rs
 //
-// The nine substrate verbs per cookbook § 10. Mirror of
-// glref-swift-Verbs.swift. See that file's header for the
-// dependency / composition story.
+// The nine substrate verbs per cookbook § 10. Rust mirror of
+// packages/libs/SubstrateLib/Sources/SubstrateLib/Verbs.swift.
 
 use std::collections::HashMap;
 
@@ -16,6 +15,7 @@ use crate::substrate_lib_telemetry::{
     emit_verb_reanchor_count,
 };
 use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::{MatrixF, MatrixO, MatrixT, RowBitmaps};
 // F11 consolidation (2026-05-27): the canonical RowState enum
 // (cookbook §2.3 scale-gapped raws) lives in row_state.rs. This
 // re-export keeps `crate::verbs::RowState` resolvable for any
@@ -75,8 +75,8 @@ impl std::error::Error for SubstrateError {}
 
 // Phase 6.6 (decision 2026-05-28 §6.6): AuditEvent moved to
 // substrate-types. Re-exported so `crate::verbs::AuditEvent` keeps
-// resolving. NB: glref-rust-sqlite_tail.rs has a DIFFERENT type
-// also named AuditEvent for the persistence tail; that one stays.
+// resolving. The canonical shared type is now in
+// packages/libs/SubstrateTypes/rust/src/audit_event.rs.
 pub use substrate_types::audit_event::AuditEvent;
 
 // ============================================================
@@ -187,6 +187,14 @@ pub struct Substrate {
     pub audit_events: Vec<AuditEvent>,
     pub hlc: HLC,
     pub row_count_active: i64,
+    /// Field-presence matrix (cookbook § 6.1). Mirrors Swift matrixF.
+    pub matrix_f: MatrixF,
+    /// Co-occurrence matrix (cookbook § 6.3). Mirrors Swift matrixO.
+    pub matrix_o: MatrixO,
+    /// Temporal-causality matrix (cookbook § 6.5). Declared but not
+    /// mutated by verbs — matches Swift, which also declares matrixT
+    /// without verb-level updates.
+    pub matrix_t: MatrixT,
     /// Counter for the reference's deterministic RowId allocator.
     /// Production uses UUIDv4. The reference uses a counter so
     /// generation is reproducible across languages with the same
@@ -202,6 +210,9 @@ impl Substrate {
             audit_events: Vec::new(),
             hlc,
             row_count_active: 0,
+            matrix_f: MatrixF::new(),
+            matrix_o: MatrixO::new(),
+            matrix_t: MatrixT::default(),
             next_row_seq: 0,
         }
     }
@@ -266,6 +277,14 @@ impl Substrate {
         if initial_state != RowState::Tombstoned {
             self.row_count_active = self.row_count_active.wrapping_add(1);
         }
+
+        // F-matrix increment: every (field, bit) the row has set
+        // contributes +1. Mirrors Swift capture matrix update.
+        let rb = RowBitmaps::new(adjective_bitmap, operational_bitmap, provenance_bitmap);
+        self.matrix_f.apply_row(1, |f, b| rb.bit(f, b));
+        // O-matrix increment: every ordered pair of (field, value)
+        // in the row contributes +1.
+        self.matrix_o.apply_row(1, &rb.field_values());
 
         self.append_audit(
             "capture", row_id, None,
@@ -369,6 +388,15 @@ impl Substrate {
             self.row_count_active = self.row_count_active.wrapping_add(1);
         }
 
+        // Matrix update: delta against old vs new bitmaps.
+        // Mirrors Swift mutate matrix update.
+        let before_rb = RowBitmaps::new(before.0, before.1, before.2);
+        self.matrix_f.apply_row(-1, |f, b| before_rb.bit(f, b));
+        let after_rb = RowBitmaps::new(after.0, after.1, after.2);
+        self.matrix_f.apply_row(1, |f, b| after_rb.bit(f, b));
+        self.matrix_o.apply_row(-1, &before_rb.field_values());
+        self.matrix_o.apply_row(1, &after_rb.field_values());
+
         let verb_full = format!("mutate.{}", verb);
         self.append_audit(&verb_full, row_id, Some(before), after,
                            Some(lattice_anchor), lattice_anchor, actor);
@@ -397,6 +425,18 @@ impl Substrate {
         row_mut.state = RowState::Withdrawn;
         row_mut.adjective_bitmap = new_adj;
         let after = (new_adj, before.1, before.2);
+
+        // Matrix update: delta against old vs new bitmaps. Withdraw changes
+        // the state field in the adjective bitmap, so both matrix_f (bit-slice)
+        // and matrix_o (field-value ordinal) must reflect the new state or
+        // downstream bitmap queries will produce stale bucket counts (WS2-F5).
+        let before_rb = RowBitmaps::new(before.0, before.1, before.2);
+        self.matrix_f.apply_row(-1, |f, b| before_rb.bit(f, b));
+        self.matrix_o.apply_row(-1, &before_rb.field_values());
+        let after_rb = RowBitmaps::new(after.0, after.1, after.2);
+        self.matrix_f.apply_row(1, |f, b| after_rb.bit(f, b));
+        self.matrix_o.apply_row(1, &after_rb.field_values());
+
         self.append_audit("withdraw", row_id, Some(before), after,
                            Some(lattice_anchor), lattice_anchor, actor);
 
@@ -442,6 +482,13 @@ impl Substrate {
         if was_active {
             self.row_count_active = self.row_count_active.wrapping_sub(1);
         }
+
+        // Matrix decrement: row no longer contributes.
+        // Mirrors Swift expunge matrix update.
+        let before_rb = RowBitmaps::new(before.0, before.1, before.2);
+        self.matrix_f.apply_row(-1, |f, b| before_rb.bit(f, b));
+        self.matrix_o.apply_row(-1, &before_rb.field_values());
+
         let actor_with_reason = format!("{}:{}", actor, reason);
         self.append_audit("expunge", row_id, Some(before), after,
                            Some(lattice_anchor), lattice_anchor, &actor_with_reason);
@@ -530,6 +577,15 @@ impl Substrate {
         actor: &str,
         ts: f64,
     ) -> Result<RowId, SubstrateError> {
+        // ADMIN — drop site for the association parameters. `_row_a`,
+        // `_row_b`, `_signal_sources_bitset`, and `_weight` are accepted
+        // and discarded: an Association is a noun-typed row and the
+        // reference persists no endpoint or weight columns (production
+        // adds the FK book-keeping). `_weight` arrives computed free from
+        // the similarity signal's proximity-gate Hamming distance and is
+        // VESTIGIAL past this gate; the parameter is retained on purpose
+        // for a pre-2.0 gauntlet experiment on whether weight improves
+        // recall. Mirrors Swift `Verbs.associate`.
         self.capture(
             NounType::Association,
             adjective_bitmap,
@@ -598,7 +654,8 @@ impl Substrate {
             before_lattice_anchor: before_anchor,
             after_lattice_anchor: after_anchor,
             actor: actor.to_string(),
-            // reason is not available at the verbs-test harness layer; None.
+            // `expunge` encodes reason into `actor_with_reason` in the
+            // actor field; the dedicated `reason` field is left None.
             reason: None,
         });
     }
@@ -612,8 +669,8 @@ fn is_legal_row_state(state: RowState, adjective: i64, operational: i64) -> Opti
     let trust = ((adjective >> 18) & 0x3F) as i32;
     let _ = operational;
 
-    // (1) tombstoned must have expunge_completed_flag bit set —
-    // not modeled in the reference; production enforces.
+    // (1) No expunge_completed_flag check — this invariant is not
+    // enforced in the scalar reference implementation.
 
     // (2) secret cannot be public.
     if sensitivity == 48 && exportability == 32 {
@@ -798,5 +855,113 @@ mod tests {
         let id1 = s1.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
         let id2 = s2.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
         assert_eq!(id1, id2);
+    }
+
+    // ============================================================
+    // Matrix parity tests — PAR-R2
+    // ============================================================
+
+    #[test]
+    fn capture_updates_matrix_f_and_o() {
+        let mut s = fresh_substrate();
+        // adj=0x07 sets bits 0,1,2 of field 0. op=0x01 sets bit 0
+        // of field 12. prov=0 contributes nothing.
+        s.capture(NounType::Drawer, 0x07, 0x01, 0, anchor(), dummy_fp(),
+                  None, None, "test", 0.0).unwrap();
+
+        // F-matrix: field 0 bits 0,1,2 each have count 1.
+        assert_eq!(s.matrix_f.get(0, 0), 1);
+        assert_eq!(s.matrix_f.get(0, 1), 1);
+        assert_eq!(s.matrix_f.get(0, 2), 1);
+        assert_eq!(s.matrix_f.get(0, 3), 0);
+        // Field 12 (operational column start) bit 0 has count 1.
+        assert_eq!(s.matrix_f.get(12, 0), 1);
+
+        // O-matrix: non-zero entry count > 0 after a capture with
+        // non-zero bitmaps.
+        assert!(s.matrix_o.entry_count() > 0);
+
+        // T-matrix: untouched by verbs.
+        assert_eq!(s.matrix_t, MatrixT::default());
+    }
+
+    #[test]
+    fn mutate_updates_matrix_f_delta() {
+        let mut s = fresh_substrate();
+        // Capture as Proposal (Pending state). adj=0x01 (state=Pending).
+        let id = s.capture(NounType::Proposal, 0x01, 0x01, 0, anchor(),
+                           dummy_fp(), None, None, "test", 0.0).unwrap();
+        // Field 0 bit 0 and field 12 bit 0 each have count 1.
+        assert_eq!(s.matrix_f.get(0, 0), 1);
+        assert_eq!(s.matrix_f.get(12, 0), 1);
+
+        // Confirm: Pending→Accepted (raw 3). Trust field (bits 18-23)
+        // must be non-zero for Accepted (forbidden-combo rule).
+        // adj = 0x03 | (1 << 18) = 0x40003. Op stays 0x01.
+        let new_adj: i64 = 0x03 | (1 << 18);
+        s.mutate(id, MutationKind::Confirm, new_adj, Some(0x01), None,
+                 "test", 0.0).unwrap();
+        // Adj field 0: bit 0 stays (set in both old and new).
+        // Bit 1 added by new adj (0x03 has bits 0,1).
+        assert_eq!(s.matrix_f.get(0, 0), 1);
+        assert_eq!(s.matrix_f.get(0, 1), 1);
+        // Trust field at field 3 (bits 18-23, field_idx = 18/6 = 3),
+        // bit 0 now set (was 0 before).
+        assert_eq!(s.matrix_f.get(3, 0), 1);
+        // Op field 12 bit 0 unchanged (still 0x01 before and after).
+        assert_eq!(s.matrix_f.get(12, 0), 1);
+    }
+
+    #[test]
+    fn expunge_decrements_matrix_f() {
+        let mut s = fresh_substrate();
+        let id = s.capture(NounType::Drawer, 0x01, 0, 0, anchor(),
+                           dummy_fp(), None, None, "test", 0.0).unwrap();
+        assert_eq!(s.matrix_f.get(0, 0), 1);
+
+        s.expunge(id, "test-reason", "test", 0.0).unwrap();
+        // F-matrix decremented back to zero for the captured bitmap.
+        assert_eq!(s.matrix_f.get(0, 0), 0);
+        assert_eq!(s.matrix_f.total_count(), 0);
+    }
+
+    #[test]
+    fn matrix_f_net_zero_after_capture_expunge_cycle() {
+        let mut s = fresh_substrate();
+        let id1 = s.capture(NounType::Drawer, 0x3F, 0x3F, 0x3F, anchor(),
+                            dummy_fp(), None, None, "a", 0.0).unwrap();
+        let id2 = s.capture(NounType::Drawer, 0x07, 0x01, 0, anchor(),
+                            dummy_fp(), None, None, "a", 0.0).unwrap();
+        s.expunge(id1, "r", "a", 0.0).unwrap();
+        s.expunge(id2, "r", "a", 0.0).unwrap();
+        // All rows removed → F-matrix should be back to all zeros.
+        assert_eq!(s.matrix_f.total_count(), 0);
+    }
+
+    // WS2-F5 regression: withdraw must update matrix_f and matrix_o.
+    // Previously withdraw mutated adjective_bitmap but skipped the matrix
+    // delta, leaving state-field bucket counts stale.
+    #[test]
+    fn withdraw_updates_matrix_f_and_o() {
+        let mut s = fresh_substrate();
+        let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(),
+                           dummy_fp(), None, None, "test", 0.0).unwrap();
+        let f_before = s.matrix_f.clone();
+        let o_before = s.matrix_o.clone();
+
+        s.withdraw(id, "user", 0.0).unwrap();
+
+        // Withdraw changes the state field in adjective bits 0-5 (from
+        // 0/active to 18/withdrawn), so matrix_f and matrix_o must differ
+        // from their pre-withdraw snapshots. A no-op delta (the pre-fix bug)
+        // would leave them identical.
+        assert_ne!(
+            s.matrix_f, f_before,
+            "WS2-F5: matrix_f must be updated by withdraw"
+        );
+        assert_ne!(
+            s.matrix_o, o_before,
+            "WS2-F5: matrix_o must be updated by withdraw"
+        );
     }
 }

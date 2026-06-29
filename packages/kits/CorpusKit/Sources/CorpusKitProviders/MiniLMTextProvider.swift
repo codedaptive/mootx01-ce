@@ -14,8 +14,8 @@
 // closure so the kit stays testable without a model bundle.
 //
 // Conforms to VectorKit.EmbeddingProvider (the canonical embedding-
-// provider abstraction). The tokenizer is held as a private impl
-// detail; tokenization stays out of VectorKit's contract per the
+// provider abstraction). The tokenizer property is public, exposed
+// for injection and testing; tokenization stays out of VectorKit's contract per the
 // kit-graph design (port-maintenance isolation: VectorKit is pure
 // compute, text/weights/tokenizer live outside it).
 
@@ -83,5 +83,21 @@ public struct MiniLMTextProvider: EmbeddingProvider {
         guard !text.isEmpty else { return [] }
         let tokens = tokenizer.tokenize(text)
         return try await inference(tokens)
+    }
+
+    /// Single-pass override: run model inference ONCE, then derive BOTH outputs
+    /// from the one pooled vector — the projected engram and the float-lane
+    /// vector. This replaces the two independent `inference(_:)` calls that
+    /// `embed` and `embedFloat` would each make (Corpus ingest needs both per
+    /// chunk; for a real NN model that is the most expensive double-pass).
+    /// Outputs are byte-identical to calling `embed` and `embedFloat`
+    /// separately: empty input short-circuits before the seam returning
+    /// `(.zero, [])`, the engram is `FloatSimHash.project(pooled)`, and the
+    /// float row is `pooled`.
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        guard !text.isEmpty else { return (.zero, []) }
+        let tokens = tokenizer.tokenize(text)
+        let pooled = try await inference(tokens)
+        return (FloatSimHash.project(vector: pooled, seed: projectionSeed), pooled)
     }
 }

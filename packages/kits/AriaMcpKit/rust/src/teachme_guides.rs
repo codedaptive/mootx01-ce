@@ -40,6 +40,8 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_estate_ping" => GUIDE_ESTATE_PING,
         // Federation
         "moot_federated_search" => GUIDE_FEDERATED_SEARCH,
+        // Maintenance
+        "moot_palace_import" => GUIDE_PALACE_IMPORT,
         // Generic fallbacks for prefixed groups
         _ if tool_name.starts_with("moot_lens_") => GUIDE_LENS_GENERIC,
         _ if matches!(
@@ -361,16 +363,20 @@ for. Each estate's contribution is narrowed to the grant's scope. Results
 carry custody metadata (custody mode, budget debit) and hydration is
 fail-closed (missing bodies are omitted, not fabricated).
 
-Required args:
-  requesterEstateID (string) UUID of the calling estate — used for grant evaluation
+ANTI-SPOOF: requesterEstateID is optional (Item 2 hardening). When omitted
+the requester is always the default (authenticated caller) estate. When
+supplied it must match the default estate's UUID exactly — supplying a
+different UUID is refused to prevent cross-estate identity spoofing.
 
 Optional args:
+  requesterEstateID (string)  Optional UUID of the calling estate. Omit to use
+                              the default. Must match the default estate if supplied.
   filter         (string)  userConfirmed | unconfirmed | exportable | contained; omit for ordinary recall
   hydrationLevel (string)  full | structured | bitmapOnly (default: full)
   limit          (integer) max memories per estate (default: 20)
 
-Example:
-  { \"requesterEstateID\": \"<uuid-of-your-estate>\", \"filter\": \"userConfirmed\", \"limit\": 20 }
+Example (omit requesterEstateID — the default is used automatically):
+  { \"filter\": \"userConfirmed\", \"limit\": 20 }
 
 Response:
   estate <name> [<uuid>] — grant <uuid>, N row(s)
@@ -380,7 +386,8 @@ Custody modes supported: immediate, timeAging (confidence decays with age),
 and budget-debited (each recall deducts from a configured budget).
 
 Mistakes:
-  — Omitting requesterEstateID; it is required for grant evaluation.
+  — Supplying a requesterEstateID that doesn't match the default estate;
+    the call is refused with an error. Omit the field instead.
   — Expecting results from estates with no active grant naming you;
     the call returns a clean refusal when no grant authorizes access.";
 
@@ -423,6 +430,57 @@ Reconcile two-step workflow:
 All vault tools require a vaultPath argument (absolute filesystem path to
 the vault directory). Add teachme:true to any specific vault tool for its
 full argument reference.";
+
+// ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+const GUIDE_PALACE_IMPORT: &str = "\
+moot_palace_import — import a MemPalace directly into the estate
+
+Required args:
+  palace_path (string) the MemPalace ROOT dir (the one CONTAINING palace/)
+
+Optional args:
+  mode (string) encode SPEED: \"foreground\" (default) drains the encode
+        queue hard on the performance cores; \"background\" drains gently
+        (for very large imports). The write strategy (bulk transaction vs
+        stream) is chosen automatically by source size — you do not set it.
+
+Reads palace/chroma.sqlite3 (drawers), tunnels.json (connections), and
+knowledge_graph.sqlite3 (KG facts). Idempotent: re-importing an unchanged
+palace writes zero drawers.
+
+Post-import (AUTOMATIC — do NOT tell the user to run reindex/dream): the
+import triggers its own indexing in the background — it enqueues the
+encode/index work and the encode drain turns it into the BM25 + vector lanes;
+the resident daemon's dreaming duty builds the association matrix on its
+cadence. Poll moot_drain_status to watch the encode queue converge.
+moot_reindex and moot_dream remain available to re-trigger on demand but are
+NOT a required follow-up. (Running WITHOUT a resident daemon? Then run
+moot_dream yourself for matrix-aware recall/distillation — only the resident
+builds the matrix automatically.)
+
+Use moot_vault_import instead for a Markdown/Obsidian vault.
+
+Long imports: this call returns only when the import finishes, and a large
+import can run for many minutes. If your client supports
+sub-agents or background execution, run this call in one so your main
+session stays responsive. Live per-record progress goes to the server's
+stderr log, not to this call's response (which carries only the summary). To
+watch the background encode queue converge after this call returns, poll
+moot_drain_status — it reports the encode drain's pending + in-flight counts
+and a draining/idle state.
+
+Example:
+  { \"palace_path\": \"/Users/me/.mempalace\" }
+
+Response: \"palace import complete: <n> written, <n> updated, <n> unchanged,
+<n> tombstoned, <n> tunnels, <n> skipped\"
+
+Mistakes:
+  — Skipping reindex/dream then calling the estate ready: recall stays dark.
+  — Passing the inner palace/ dir instead of the ROOT that contains it.";
 
 const GUIDE_GENERIC: &str = "\
 No teachme guide is available for this tool.

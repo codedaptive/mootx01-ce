@@ -34,9 +34,9 @@ import Foundation
 /// ## Confidence interval
 ///
 /// `confidenceLow` and `confidenceHigh` bracket `strength` at the 95%
-/// level: `strength ± 1.96 × SE`, where `SE` is the standard error of
-/// the MLE estimate derived from the Fisher information (the diagonal
-/// of the inverse negative-log-likelihood Hessian). The interval is on
+/// level: `strength ± 1.96 × SE`, where `SE = 1 / sqrt(I_ii)` and
+/// `I_ii` is the diagonal Fisher-information approximation (avoids full
+/// matrix inversion; see the fitter's CI block). The interval is on
 /// the same log scale as `strength`, so it is symmetric around it:
 /// `confidenceLow == strength - 1.96·SE` and
 /// `confidenceHigh == strength + 1.96·SE`. A wider interval means the

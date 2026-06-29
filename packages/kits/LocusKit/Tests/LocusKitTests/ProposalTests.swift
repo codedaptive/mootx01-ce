@@ -347,8 +347,7 @@ struct ProposalTests {
         let drawer = Drawer(
             id: TestStorage.tid("drawer-1"),
             content: "hello",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_000),
             embeddingModelID: "minilm-v6"

@@ -4,12 +4,11 @@ import Testing
 /// Tests for the five operator primitives defined in
 /// GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md § 7.7.
 ///
-/// The `0x3845` example bitmap exercises all four packed fields used
-/// throughout the LocusKit adjective schema:
-///   bits 0–3:  state         = 0x5 (withdrawn)
-///   bits 4–7:  accessTier    = 0x4 (elevated)
-///   bits 8–11: exportability = 0x8 (public/exportable)
-///   bits 12–15: trust         = 0x3 (canonical)
+/// `0x3845` is a sample bitmap used to exercise the primitive
+/// operations (andMask, thresholdCompare, shiftExtract, etc.) with
+/// concrete bit patterns. The current adjective schema uses 6-bit
+/// packed fields: state bits 0–5, sensitivity bits 6–11,
+/// exportability bits 12–17, trust bits 18–23.
 @Suite("BitmapOpsTests")
 struct BitmapOpsTests {
 

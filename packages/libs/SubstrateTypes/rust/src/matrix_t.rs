@@ -1,7 +1,7 @@
 // matrix_t.rs
 //
 // Temporal causality matrix T per cookbook § 6.4. Mirror of
-// glref-swift-MatrixT.swift.
+// Sources/SubstrateTypes/MatrixT.swift.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CausalityKey {

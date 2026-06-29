@@ -3,8 +3,7 @@
 // §10 incremental replication conformance suite.
 //
 // Tests exercise:
-//   §10.1  Only dirty rows replicated: start session, insert 100 rows (all dirtied),
-//          do a full-flush baseline, then update 3 rows, sync incremental → only 3 written
+//   §10.1  Only dirty rows replicated: insert rows, baseline flush, update 3 → only 3 written
 //   §10.2  Delete propagation: delete a row on source → deleted on destination
 //   §10.3  Restart-resume from watermark: new session uses saved cursor, only new audit events sent
 //   §10.4  Corrupt-value abort: corrupt a dirty row's non-PK column via raw SQL → sync throws,
@@ -13,6 +12,9 @@
 //   §10.6  Empty dirty-set returns fromCursor unchanged
 //   §10.7  Session observes multiple tables
 //   §10.8  Audit event delta: only new audit events after watermark replicated
+//   §10.9  Abort-then-retry: aborted session restores dirty keys so the next run re-syncs them
+//   §10.10 Keys dirtied during a failed run survive alongside restored keys from the abort
+//   §10.B  Blob propagation via incremental replication (including SQLite observer and abort-retry)
 
 import Testing
 import Foundation
@@ -355,9 +357,12 @@ struct IncrementalReplicationTests {
 
     /// §10.4 — Corrupt a dirty row's non-PK column via raw SQL → sync throws, no partial commit.
     ///
-    /// We corrupt the `adjective_bitmap` column (a non-PK Int column) to a non-integer
-    /// value. The row is found by PK, but decoding the corrupt column fires
-    /// StorageError.corruptStoredValue, which aborts the sync.
+    /// We corrupt the `tombstoned_at` column (a non-PK timestamp column) by writing
+    /// a non-ISO8601 string. The row is found by PK, but parsing the corrupt timestamp
+    /// fires StorageError.corruptStoredValue, which aborts the sync. (The
+    /// `adjective_bitmap` bitmap column is not used because the bitmap type tolerates
+    /// SQLITE_TEXT without throwing — only UUID and timestamp columns enforce the
+    /// parse-or-throw contract in readColumn.)
     ///
     /// The destination transaction rolls back, leaving it in its last clean state.
     @Test func corruptValueAbortsSyncWithNoPartialCommit() async throws {
@@ -728,9 +733,10 @@ struct IncrementalReplicationTests {
     ///
     /// Setup:
     ///   - Dirty rowA before the (failed) sync → it is drained and then restored.
-    ///   - Dirty rowB AFTER drain but BEFORE the error fires (we simulate this by
-    ///     accumulating rowB into the dirty-set via a synthetic change between the
-    ///     drain and the restore, which happens when the session sync call is inflight).
+    ///   - Dirty rowB to simulate a change that arrives during the failed run.
+    ///     In practice we inject rowB AFTER the first failed sync returns (not
+    ///     truly concurrent); the restore has union semantics so the injection
+    ///     order relative to the restore does not affect correctness.
     ///   - After the abort, both rowA and rowB must be in the dirty-set.
     ///
     /// Because the async observer tasks run concurrently, we simulate "dirtied during
@@ -1146,9 +1152,10 @@ struct IncrementalReplicationTests {
     }
 }
 
-// MARK: - SQLiteDirectWriter helper (for corruption test §10.4)
+// MARK: - SQLiteDirectWriter helper (corruption and retry tests)
 
-/// Minimal synchronous SQLite writer used only for the corruption test.
+/// Minimal synchronous SQLite writer used by the corruption and retry tests
+/// (§10.4, §10.9, §10.10, §10.B5, §10.B3).
 /// Opens the database file directly, executes a raw SQL statement, and closes.
 /// This bypasses the PersistenceKit layer intentionally — corruption is the point.
 private final class SQLiteDirectWriter {

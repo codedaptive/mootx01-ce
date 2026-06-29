@@ -4,10 +4,8 @@ import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit
-// @testable import LocusKit grants access to Estate.store (internal let),
-// needed to inject drawers with arbitrary wings for scope-filter tests.
-// CaptureFrame has no wing slot; the only way to create drawers in non-default
-// wings is to write directly to DrawerStore via the internal store property.
+// @testable import LocusKit grants access to Estate internals needed
+// for scope-filter tests (e.g. Estate.capture with wing targeting).
 @testable import LocusKit
 
 /// GLK-FED-01 — grant-gated cross-estate federated read.
@@ -315,13 +313,9 @@ struct CrossEstateFederationTests {
         )
     }
 
-    /// Inject a drawer with arbitrary wing, room, and udcCode into the estate
-    /// addressed by `handle`, bypassing `Estate.capture` (which always writes to
-    /// `defaultWing()`). Requires `@testable import LocusKit` for `Estate.store`
-    /// access. The recall path uses `store.allDrawers()` for the filter chains used
-    /// in scope tests (`.unconfirmed` is not a prunable filter per BitmapEvaluator
-    /// `chainHasPrunableFilter`), so drawers inserted this way are visible to recall
-    /// without needing the ContainerFingerprintStore to be updated.
+    /// Capture a drawer into a specific wing/room via the Estate.capture
+    /// verb, which resolves wing/room names to node IDs through
+    /// NodeStore's create-on-demand resolution (ADR-017 §7).
     private func captureWithAttributes(
         into handle: EstateHandle,
         wing: String,
@@ -331,19 +325,16 @@ struct CrossEstateFederationTests {
         kit: GeniusLocusKit
     ) async throws -> Drawer {
         let locusEstate = try await kit.estate(for: handle)
-        let store = await locusEstate.store
-        let now = Date()
-        let drawer = Drawer(
+        let frame = CaptureFrame(
             content: "content-\(tag)",
-            wing: wing,
+            channel: .typed,
             room: room,
+            latticeAnchor: .udc(udcCode),
             addedBy: "test",
-            filedAt: now,
             embeddingModelID: "model-v1",
-            udcCode: udcCode
+            wing: wing
         )
-        try await store.addDrawer(drawer, now: now)
-        return drawer
+        return try await locusEstate.capture(frame)
     }
 
     // MARK: - 7. contentLevel=0 excludes elevated-sensitivity drawers (GRANT_BOUNDARY_001)
@@ -777,5 +768,63 @@ struct CrossEstateFederationTests {
             "budget must not go below 0.0 after an over-debit; got \(budgetAfter)")
         #expect(budgetAfter == 0.0,
             "budget clamped at 0.0 after over-debit; got \(budgetAfter)")
+    }
+
+    // MARK: - 21. Debit-before-check refuses when budget is already zero at debit time
+
+    /// Verifies the CAND-008 debit-before-check posture in `federatedRecall`:
+    /// when the budget is exactly zero at the point the debit fires, the read
+    /// is refused with `.budgetExhausted` and the pre-debit balance (0.0) is
+    /// what the guard sees — NOT a post-debit balance that could be negative.
+    ///
+    /// This test covers the sequential boundary case for the fix introduced in
+    /// Part 4 of c-brain-glk-b. The old check-then-debit pattern had a
+    /// two-await reentrancy window at the `federatedRecall` level: a call that
+    /// observed budget > 0 at the `store.get` await could proceed to
+    /// `store.debitBudget` while a concurrent call slipped in between and
+    /// consumed the remaining budget. The fix collapses to a single `debitBudget`
+    /// await (returning preBudget) so the gate runs on a value that is
+    /// already debited — eliminating the `federatedRecall`-level window.
+    ///
+    /// NOTE: GrantStore.debitBudget itself has a pre-existing reentrancy window
+    /// (read-modify-write across two actor-suspension points). That storage-level
+    /// atomicity gap is a known limitation tracked in the c-brain-glk-b BRR and
+    /// scoped to a future grant-atomicity mission. This test covers the sequenced
+    /// boundary that is within mission scope: already-zero budget is always refused.
+    @Test
+    func debitBeforeCheckRefusesWhenBudgetAlreadyZero() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-debit-before-check")
+        let hA = try await openEstate(in: kit, owner: owner)
+        let hB = try await openEstate(in: kit, owner: owner)
+
+        _ = try await capture(into: hB, tag: "debit-before-check", kit: kit)
+
+        let issued = try await kit.issueGrant(hB, grantOptions(to: hA))
+
+        // Exhaust the budget fully so preBudget == 0.0 at the next debit.
+        let (store, _) = try await kit.ensureGrantSurface(for: hB)
+        try await store.debitBudget(id: issued.grant.id, amount: 1.0)
+
+        let budgetAfterExhaust = try await store.get(id: issued.grant.id)?
+            .grant.inferenceRemainingBudget ?? -1.0
+        #expect(budgetAfterExhaust == 0.0,
+            "setup: budget must be exactly 0.0 before the debit-before-check test; got \(budgetAfterExhaust)")
+
+        // With debit-before-check: debitBudget fires, returns preBudget = 0.0,
+        // and the guard refuses. With the old check-then-debit: store.get
+        // would have seen 0.0 first and refused before the debit — same outcome
+        // for the sequential case. The debit-before-check posture matters for
+        // the concurrent case where two callers both see budget > 0 before
+        // either debit lands; that storage-level gap is tracked separately.
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
+            try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
+        }
+        if case .crossEstateReadRefused(_, _, let reason)? = thrown {
+            #expect(reason == .budgetExhausted,
+                "zero-budget read must be refused with .budgetExhausted; got \(reason)")
+        } else {
+            Issue.record("expected .crossEstateReadRefused(.budgetExhausted), got: \(String(describing: thrown))")
+        }
     }
 }

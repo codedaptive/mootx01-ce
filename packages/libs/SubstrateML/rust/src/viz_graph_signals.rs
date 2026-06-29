@@ -50,7 +50,7 @@ pub mod VizGraphSignals {
     /// Value = abs(z-score). Tags: estate, method, window_size.
     pub const ANOMALY_FLAG: &str = "anomaly.flag";
 
-    /// Emitted when `MatrixDecay::apply` completes.
+    /// Emitted when `decay::apply` completes.
     /// Value = applied decay factor. Tags: estate, matrix_rows, matrix_cols, elapsed_seconds.
     pub const EDGE_DECAYED_WEIGHT: &str = "edge.decayed_weight";
 }

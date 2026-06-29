@@ -94,8 +94,9 @@ impl ResidentVectorArray {
     /// count — both represent the number of live records, so a match means
     /// the sidecar is up-to-date (C5 fix).
     ///
-    /// Also written to the sidecar header's `live_count` field so that
-    /// stale detection on load is O(1) (header read, no bitmap walk).
+    /// Also written to the sidecar header's `live_count` field on save;
+    /// on load the field is read and discarded — stale detection recomputes
+    /// live count from the tombstone bitmap.
     pub fn live_count(&self) -> usize {
         (0..self.count).filter(|&i| !self.is_tombstoned(i)).count()
     }

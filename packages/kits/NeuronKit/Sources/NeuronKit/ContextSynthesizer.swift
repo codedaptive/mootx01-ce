@@ -133,13 +133,12 @@ internal enum ContextSynthesisEngine {
     }
 
     /// Build a one-line summary that names the page row count, the
-    /// most frequent wing, and the dominant content-kind. Stable
+    /// most frequent parent node, and the dominant content-kind. Stable
     /// across runs — no clocks, no randomness.
     static func makeSummary(rows: [Drawer]) -> String {
         let count = rows.count
-        let topWing = mostFrequent(rows.map { $0.wing }) ?? "(no wing)"
-        let topRoom = mostFrequent(rows.map { $0.room }) ?? "(no room)"
-        return "\(count) drawers; dominant wing \(topWing); dominant room \(topRoom)."
+        let topNode = mostFrequent(rows.map { $0.parentNodeId }) ?? "(no node)"
+        return "\(count) drawers; dominant node \(topNode)."
     }
 
     /// Standard English stopwords excluded from pattern extraction. These high-

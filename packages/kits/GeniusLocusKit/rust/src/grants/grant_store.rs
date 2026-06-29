@@ -617,17 +617,41 @@ impl GrantStore {
             ReSharePermission::None
         };
 
+        // Decode the remaining persisted fields so decode_row faithfully
+        // reconstructs the stored grant. Hardcoding content_level=0 and
+        // inference_remaining_budget=0.0 caused callers that build rows by hand
+        // (integration tests, migration paths) to see effective content_level=0
+        // and zero budget regardless of what was persisted — a security-relevant
+        // omission that would silently block all federated access for any grant
+        // decoded through this path (finding GRT-decode).
+        let content_level: i64 = row
+            .get("content_level")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        let inference_remaining_budget: f64 = row
+            .get("inference_budget")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        // Signature is a BLOB; the text-dict path does not carry a real Ed25519
+        // signature (tests omit it). An empty signature is the correct posture
+        // here — the verify path checks `!signature.is_empty()` before doing
+        // curve arithmetic so an empty vec never passes verification silently.
+        // The production decode path (`decode_storage_row`) reads the real blob.
+        let signature: Vec<u8> = vec![];
+
         let grant = Grant {
             id,
             grantee_estate_id,
             scope,
-            content_level: 0,
+            content_level,
             lifetime,
             custody_mode,
             re_share_permission: reshare,
-            inference_remaining_budget: 0.0,
+            inference_remaining_budget,
             issued_at,
-            signature: vec![],
+            signature,
         };
         Ok(StoredGrant { grant, revoked_at })
     }

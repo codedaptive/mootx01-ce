@@ -13,9 +13,10 @@
 //!   for_current_platform() uses the intellectus_lib global singleton.
 //!   Rust integration tests run in parallel by default.
 //!   Tests that toggle the global enabled flag acquire GLOBAL_LOCK
-//!   for the duration, ensuring they are never interleaved. Tests
-//!   that only read math output (§4 disabled-path) do not need the
-//!   lock (they don't care about sink state).
+//!   for the duration, ensuring they are never interleaved. §4 tests
+//!   call `set_enabled(false)` directly without GLOBAL_LOCK; they
+//!   assert on math output only and tolerate concurrent enabled-flag
+//!   writes from other §4 tests (all write the same value).
 
 use std::sync::{Arc, Mutex, OnceLock};
 

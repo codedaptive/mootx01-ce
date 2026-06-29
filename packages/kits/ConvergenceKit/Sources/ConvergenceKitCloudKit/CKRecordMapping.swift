@@ -39,8 +39,8 @@ public enum CKRecordMapping {
     }
 
     /// Convert a row to a CKRecord. Reserved field names
-    /// (_syncHLC, _syncSchemaVersion) carry sync metadata so the
-    /// receiver can apply conflict policy and schema check.
+    /// (_syncHLC, _syncSchemaVersion, _syncKitID) carry sync metadata
+    /// so the receiver can apply conflict policy and schema check.
     public static func record(
         from values: [String: TypedValue],
         table: String,
@@ -122,7 +122,8 @@ public enum CKRecordMapping {
         case .timestamp(let d):
             record[key] = d as NSDate
         case .json(let d):
-            // Store as text so it's queryable; receiver re-parses.
+            // Store as text for queryability; decoder maps the CloudKit string
+            // back to .text, not .json — the .json discriminator is not carried.
             if let s = String(data: d, encoding: .utf8) {
                 record[key] = s as NSString
             } else {
@@ -139,7 +140,7 @@ public enum CKRecordMapping {
             withUnsafeBytes(of: fp.block3.littleEndian) { data.append(contentsOf: $0) }
             record[key] = data as NSData
         case .array:
-            // Arrays are encoded as JSON.
+            // Arrays are not supported in CKRecord encoding.
             throw SyncError.encodingFailure(detail: "array TypedValue not supported in CKRecord yet")
         }
     }

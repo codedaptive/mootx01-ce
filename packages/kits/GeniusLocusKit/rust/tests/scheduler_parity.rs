@@ -41,9 +41,29 @@ use genius_locus_kit::{
     SchedulerSignalSpec as SignalSpec, SchedulerSignalState as SignalState,
     SchedulerSignalTrigger as SignalTrigger, SerialLaneScheduler, EMISSION_CLASS_TAGS,
 };
+use persistence_kit::inmemory::InMemoryStorage;
+use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
+use substrate_types::hlc::HLCGenerator;
+
+/// Build a transient in-memory signals queue for tests that do not need crash
+/// durability. The fixed estate UUID keeps the engine deterministic (no random
+/// minting per test run). Mirrors the NeuronKit `build_inmemory_signals_queue`
+/// helper so test scaffolding matches the production degraded path.
+fn inmem_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, HLCGenerator) {
+    let store_id = uuid::Uuid::from_u128(0x5348_4544_5545_5245_0000_0000_0000_0001);
+    let storage = std::sync::Arc::new(InMemoryStorage::with_estate(store_id));
+    PersistenceKitBackend::open_schema(storage.as_ref())
+        .expect("InMemoryStorage open_schema cannot fail");
+    let backend = PersistenceKitBackend::new(storage);
+    let queue: QueueKit<Box<dyn QueueBackend>> =
+        QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+    let hlc = HLCGenerator::new(1);
+    (queue, hlc)
+}
 
 fn make_scheduler() -> SerialLaneScheduler<SchedulerNoopDispatcher> {
-    SerialLaneScheduler::new("estate-parity-test".to_string(), SchedulerNoopDispatcher)
+    let (queue, hlc) = inmem_signals_queue();
+    SerialLaneScheduler::new("estate-parity-test".to_string(), SchedulerNoopDispatcher, queue, None, hlc)
 }
 
 fn t0() -> i64 {

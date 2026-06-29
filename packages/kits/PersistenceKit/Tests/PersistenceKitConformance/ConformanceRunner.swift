@@ -119,6 +119,7 @@ public struct ConformanceRunner {
     public func runAll() async throws {
         try await schemaFixtures()
         try await multiKitSchemaFixtures()
+        try await freshOpenAddColumnIdempotentFixtures()
         try await rowFixtures()
         try await predicateFixtures()
         try await blobFixtures()
@@ -205,6 +206,41 @@ public struct ConformanceRunner {
         let global = try await storage.currentSchemaVersion()
         #expect(global >= vA, "\(backendName): global version ≥ Kit A version")
 
+        await storage.close()
+    }
+
+    // MARK: - Fresh-open addColumn idempotence
+
+    /// Opening a FRESH database directly at a schema whose latest table already
+    /// declares the column an addColumn migration adds must succeed on every
+    /// backend. The open path creates each table at the latest schema first, then
+    /// replays migrations from version 0 — so the addColumn targets a column that
+    /// already exists. The emitter must treat addColumn idempotently (ADD COLUMN
+    /// IF NOT EXISTS semantics), mirroring CREATE TABLE IF NOT EXISTS.
+    func freshOpenAddColumnIdempotentFixtures() async throws {
+        let storage = try await factory()
+        let schemaV2 = SchemaDeclaration(
+            kitID: "ConformanceFreshAddColumn",
+            version: 2,
+            tables: [
+                TableDeclaration(
+                    name: "fresh_items",
+                    // Latest schema already carries the column the migration adds.
+                    columns: [.uuid("id"), .text("name"), .text("note", nullable: true)],
+                    primaryKey: ["id"]
+                )
+            ],
+            migrations: [
+                Migration(fromVersion: 1, toVersion: 2, operations: [
+                    .addColumn(table: "fresh_items", column: .text("note", nullable: true))
+                ])
+            ]
+        )
+        // Direct open on a brand-new store — addColumn replays against a table
+        // that already has `note`. Must succeed, not throw "duplicate column".
+        try await storage.open(schema: schemaV2)
+        let version = try await storage.currentSchemaVersion(for: "ConformanceFreshAddColumn")
+        #expect(version == 2, "\(backendName): fresh open with addColumn migration reaches version 2")
         await storage.close()
     }
 

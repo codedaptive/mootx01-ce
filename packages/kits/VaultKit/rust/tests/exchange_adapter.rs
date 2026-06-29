@@ -266,3 +266,48 @@ fn projection_maps_notes_back_to_external_corpus_entries() {
         export.notes.iter().map(|n| n.stable_source_key.as_str()).collect();
     assert_eq!(projected_ids, note_keys);
 }
+
+/// CAND-014: from_ir must reject a pre-existing symlink at the output path.
+/// A symlink at the JSON destination could redirect the export write to an
+/// attacker-controlled location outside the vault root.
+#[test]
+fn cand014_from_ir_rejects_symlinked_output_path() {
+    use std::os::unix::fs::symlink;
+
+    let base = std::env::temp_dir().join(format!("vk-cand014-{}", uuid::Uuid::new_v4()));
+    let outside_target = base.join("outside.json");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(&outside_target, b"original-content").unwrap();
+
+    // Plant a symlink at the intended export path.
+    let export_path = base.join("estate.json");
+    symlink(&outside_target, &export_path).unwrap();
+
+    let adapter = ExchangeAdapter::new();
+    let note = NoteIR::new(
+        "test-note",
+        vec![Block::markdown("body content")],
+        std::collections::HashMap::new(),
+        Vec::new(),
+        Vec::new(),
+        "",
+        None,
+        None,
+    );
+    let result = adapter.from_ir(&[note], &export_path);
+
+    // from_ir must fail because the output path is a symlink.
+    assert!(
+        result.is_err(),
+        "CAND-014: from_ir must reject a pre-existing symlinked output path"
+    );
+    // The file outside the vault must be untouched — the write must not have
+    // followed the symlink to the target.
+    let content = std::fs::read(&outside_target).unwrap();
+    assert_eq!(
+        content, b"original-content",
+        "CAND-014: outside target must not be modified via symlink"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

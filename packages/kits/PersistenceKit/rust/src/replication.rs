@@ -3,10 +3,10 @@
 //! Mirrors the Swift `PersistenceKitReplication` module.
 //!
 //! CONTRACT:
-//!   - Schema gate: source and destination must be at the same schema version.
-//!     No auto-migration. The Rust Storage trait exposes only a global
-//!     `current_schema_version()` (no per-kit version); the gate checks the
-//!     global version against the schema's declared version for both sides.
+//!   - Schema gate: source and destination must be at the same per-kit schema
+//!     version. No auto-migration. The `current_schema_version_for(kit_id)`
+//!     method returns the version recorded for a specific kit, so a multi-kit
+//!     estate gates each kit independently.
 //!   - Atomicity: the entire destination write is wrapped in a serializable
 //!     transaction. A failure mid-flush leaves the destination at its prior
 //!     consistent state (the InMemory backend snapshot-restores on error;
@@ -102,8 +102,8 @@ impl From<StorageError> for ReplicationError {
 /// Always performs a full snapshot: every row in every schema-declared table,
 /// all audit events, and all blobs are copied atomically in a serializable
 /// transaction. The operation is idempotent — a second call with no source
-/// changes writes zero new rows (upsert on primary key is a no-op for
-/// identical values).
+/// changes runs the upsert (ON CONFLICT DO UPDATE) for each existing row but
+/// does not create duplicate rows in the destination.
 ///
 /// - `source`: Storage to read from (must be open).
 /// - `destination`: Storage to write to (must be open).
@@ -154,15 +154,15 @@ fn replicate_full(
 ) -> Result<ReplicationCursor, ReplicationError> {
 
     // ── Step 1: Schema gate ────────────────────────────────────────
-    // The Rust Storage trait exposes only a global `current_schema_version()`.
-    // We compare both backends against the schema's declared version. This is
-    // correct for the single-kit-per-storage case common in tests. Multi-kit
-    // storage would need per-kit gating (a future Storage trait extension).
+    // Both backends must be at the same per-kit schema version. We check
+    // per-kit versions (not the global maximum) so that a multi-kit estate
+    // gated on one kit's version does not accidentally clear when another
+    // kit's migrations advanced the global counter.
     let src_version = source
-        .current_schema_version()
+        .current_schema_version_for(&schema.kit_id)
         .map_err(ReplicationError::from)?;
     let dst_version = destination
-        .current_schema_version()
+        .current_schema_version_for(&schema.kit_id)
         .map_err(ReplicationError::from)?;
 
     if src_version != dst_version || src_version != schema.version {
@@ -244,9 +244,10 @@ fn replicate_full(
                 }
 
                 // 3c. Blob copy: write every blob from the snapshot into the
-                // destination. put() is idempotent on key — a repeated full
-                // flush with the same blobs writes zero new blobs (all keys
-                // already exist). Empty blobs (zero bytes) are written correctly.
+                // destination. put() overwrites any existing key with identical
+                // bytes; a repeated full flush does not create new blob keys but
+                // blobs_written increments for every put. Empty blobs (zero bytes)
+                // are written correctly.
                 for (key, bytes) in &payload_ref.blobs {
                     blob_store.put(key, bytes)?;
                     *blobs_written_ref += 1;
@@ -395,24 +396,28 @@ mod replication_tests {
                     column_type: ColumnType::Uuid,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
                 ColumnDeclaration {
                     name: "adjective_bitmap".into(),
                     column_type: ColumnType::Bitmap,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
                 ColumnDeclaration {
                     name: "payload".into(),
                     column_type: ColumnType::Blob,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
                 ColumnDeclaration {
                     name: "tombstoned_at".into(),
                     column_type: ColumnType::Timestamp,
                     nullable: true,
                     default_value: None,
+                    role: None,
                 },
             ],
             primary_key: vec!["id".into()],
@@ -429,6 +434,7 @@ mod replication_tests {
                 ),
             }],
             append_only: false,
+            hashable: false,
         };
 
         let events_table = TableDeclaration {
@@ -439,30 +445,35 @@ mod replication_tests {
                     column_type: ColumnType::Uuid,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
                 ColumnDeclaration {
                     name: "seq".into(),
                     column_type: ColumnType::Int,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
                 ColumnDeclaration {
                     name: "hlc_stamp".into(),
                     column_type: ColumnType::Hlc,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
                 ColumnDeclaration {
                     name: "content".into(),
                     column_type: ColumnType::Text,
                     nullable: false,
                     default_value: None,
+                    role: None,
                 },
             ],
             primary_key: vec!["topic_id".into(), "seq".into()],
             unique_constraints: vec![],
             generated_columns: vec![],
             append_only: true,
+            hashable: false,
         };
 
         SchemaDeclaration {

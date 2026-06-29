@@ -16,10 +16,10 @@
 // ceil(N_rows · 36 / 8) bytes.
 //
 // Scan operations: a query like "rows where field 12 has value
-// 5" decomposes into per-bit predicates (bit0=1, bit1=0, bit2=1)
-// that are computed in parallel via bitwise AND of the relevant
-// bit-slices. The whole scan is O(N_rows / 64) word operations
-// regardless of the value being matched.
+// 5" decomposes into per-bit predicates (bit0=1, bit1=0, bit2=1).
+// The current implementation loops row-by-row within each of the
+// six bit-slice passes; it is not yet vectorized to O(N_rows / 64)
+// word operations.
 //
 // Memory cost (1M rows × 36 fields × 6 bits): 27 MiB. Within the
 // LPDDR5 working-set budget of Apple silicon and well within
@@ -134,7 +134,9 @@ public struct ThreeDBitTensor: Sendable {
 
     // ---- Capacity management ----
 
-    /// Reserve additional row capacity. Existing data preserved.
+    /// Expand the tensor to `newRowCount` rows. Slice buffers are
+    /// extended with zero bytes and `rowCount` is updated. No-op if
+    /// `newRowCount` ≤ current `rowCount`. Existing data preserved.
     public mutating func reserveCapacity(_ newRowCount: Int) {
         guard newRowCount > rowCount else { return }
         let bitsPerSlice = newRowCount * Self.fieldCount

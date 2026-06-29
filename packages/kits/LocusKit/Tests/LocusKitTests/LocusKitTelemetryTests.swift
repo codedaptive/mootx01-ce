@@ -28,19 +28,14 @@
 // Layer 1 — intra-file: The outer LocusKitTelemetrySuite carries
 // `.serialized`, so no two tests in this file run at the same time.
 //
-// Layer 2 — cross-file: EVERY test function in this suite acquires the
-// process-wide intellectusTestMutex (actor-based cooperative mutex defined
-// in IntellectusTestLock.swift) for its full duration. Tests in other suites
-// (DrawerStoreTests, KGFactStoreTests, TunnelTests, etc.) that call
-// telemetry-emitting functions also acquire the same mutex, so they
-// cannot run while a telemetry test holds the singleton in a non-default
-// state. This directly mirrors the Rust solution: a `Mutex<()>` acquired
-// at the top of every test that touches the singleton or calls an
-// emitting function, including disabled-path tests (a lock-free disabled
-// test can interleave with a lock-held enabled test and corrupt it).
+// Layer 2 — cross-file isolation: each test creates a fresh estate with
+// a unique UUID and the capturing sink filters by estate tag. Concurrent
+// tests operating on different estates are invisible to each other's
+// assertions. A local `withIntellectusLock` block gates each test body
+// where the singleton enabled/sink state must be stable.
 //
 // All test functions are declared `async` to use withIntellectusLock
-// uniformly. The mutex uses cooperative async suspension (CheckedContinuation
+// uniformly. The lock uses cooperative async suspension (CheckedContinuation
 // actor queue) — no thread is blocked, so this is safe under Swift 6
 // strict concurrency and the cooperative thread pool.
 
@@ -159,8 +154,7 @@ private func sampleDrawer(id: String = "d1") -> Drawer {
     Drawer(
         id: TestStorage.tid(id),
         content: "telemetry test content \(id)",
-        wing: "wing-tel",
-        room: "room-tel",
+        parentNodeId: "test-parent",
         addedBy: "newton",
         filedAt: Date(timeIntervalSince1970: 1_000_000),
         embeddingModelID: "test-model-v1",
@@ -872,8 +866,7 @@ struct LocusKitTelemetrySuite {
                 let forbidden = Drawer(
                     id: TestStorage.tid("forbidden-gate-tel"),
                     content: "gate reject telemetry test",
-                    wing: "wing-tel",
-                    room: "room-tel",
+                    parentNodeId: "test-parent",
                     addedBy: "newton",
                     filedAt: Date(timeIntervalSince1970: 1_000_000),
                     embeddingModelID: "test-model-v1",

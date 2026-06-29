@@ -22,7 +22,7 @@
 // mapping path). The Rust parallel lives in `rust/` (crate `vault-kit`);
 // SwiftPM does not build it — `cargo test` in `rust/` is the Rust leg.
 //
-// Platforms: macOS 15 / iOS 18 (Apple Silicon), matching GeniusLocusKit.
+// Platforms: macOS 26 / iOS 26, matching GeniusLocusKit.
 //
 // Logging: Apple OSLog, subsystem "com.mootx01.kit", category
 // "VaultKit". Per CLAUDE.md.

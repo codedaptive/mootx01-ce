@@ -19,11 +19,12 @@ facts, write them back with the appropriate MOOTx01 tool.
 If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
 happened unless you actually queried it.
 
-Recall with `moot_memory_search`, `moot_recall_precise`, or
-`moot_fact_search`. Analyze with `moot_list_lenses`, `moot_lens_*`, and
+Recall with `moot_memory_search`, `moot_recall_precise`, `moot_recall_shaped`,
+`moot_recall_distilled`, or `moot_fact_search`. Analyze with `moot_list_lenses`, `moot_lens_*`, and
 `moot_synthesize`. Write durable knowledge with `moot_file_memory`,
 `moot_file_fact`, `moot_link_memories`, and `moot_write_journal`. Run
-`moot_dream` after bulk import or major memory growth.
+`moot_dream` after bulk import or major memory growth. Run `moot_reindex`
+before `moot_dream` after batch imports.
 
 Disclose unavailable or thin recall.
 

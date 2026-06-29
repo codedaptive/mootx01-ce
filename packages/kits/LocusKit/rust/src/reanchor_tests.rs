@@ -78,7 +78,10 @@ mod tests {
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(after.room, "room-new");
+        // ADR-017: room resolved from node tree via parent_node_id.
+        let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
+        let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
+        assert_eq!(room, "room-new");
         // Lattice anchor unchanged.
         assert_eq!(after.udc_code, "000.100");
     }
@@ -127,8 +130,8 @@ mod tests {
         assert_eq!(after.udc_facets.as_deref(), Some("030"));
         assert_eq!(after.wikidata_qid.as_deref(), Some("Q12345"));
         assert!(after.wikidata_qids_secondary.is_none());
-        // Room unchanged.
-        assert_eq!(after.room, d.room);
+        // Room unchanged — parent_node_id should be the same as before.
+        assert_eq!(after.parent_node_id, d.parent_node_id);
     }
 
     #[test]
@@ -228,7 +231,10 @@ mod tests {
         estate.reanchor(&d.id, Some("moved-room"), None, None).unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(after.room, "moved-room");
+        // ADR-017: room resolved from node tree via parent_node_id.
+        let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
+        let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
+        assert_eq!(room, "moved-room");
     }
 
     #[test]
@@ -285,24 +291,32 @@ mod tests {
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(after.room, "room-b");
+        // ADR-017: room resolved from node tree via parent_node_id.
+        let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
+        let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
+        assert_eq!(room, "room-b");
         assert_eq!(after.udc_code, "200");
     }
 
     #[test]
     fn estate_reanchor_to_wing_updates_wing() {
-        // Bug J regression: reanchor must update the wing column when to_wing is supplied.
+        // Bug J regression: reanchor must update the wing when to_wing is supplied.
+        // ADR-017: wing/room resolved from node tree via parent_node_id.
         let estate = make_estate();
         let d = basic_capture(&estate, "wing move via estate", "origin-room", "000");
-        let original_wing = d.wing.clone();
+        let original_names = estate.store.resolve_node_names(&[d.parent_node_id.clone()]).unwrap();
+        let (original_wing, _) = original_names.get(&d.parent_node_id).expect("must resolve");
+        let original_wing = original_wing.clone();
 
         estate
             .reanchor(&d.id, Some("target-room"), Some("TargetWing"), None)
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(after.wing, "TargetWing", "wing must be updated by reanchor");
-        assert_eq!(after.room, "target-room", "room must also be updated");
-        assert_ne!(after.wing, original_wing, "wing must differ from original");
+        let after_names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
+        let (wing, room) = after_names.get(&after.parent_node_id).expect("must resolve");
+        assert_eq!(wing, "TargetWing", "wing must be updated by reanchor");
+        assert_eq!(room, "target-room", "room must also be updated");
+        assert_ne!(wing, &original_wing, "wing must differ from original");
     }
 }

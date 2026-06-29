@@ -14,6 +14,7 @@ use intellectus_lib::Intellectus;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use substrate_types::merkle_root::MerkleRoot;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -76,7 +77,7 @@ fn insert_and_get_roundtrip() {
     let c = sample_chunk("src-A", 0, "hello world", 100);
     let target_id = c.id;
     store.insert(std::slice::from_ref(&c)).expect("insert");
-    let fetched = store.get(target_id).expect("get").expect("must exist");
+    let fetched = store.get(target_id, None).expect("get").expect("must exist");
     assert_eq!(fetched.id, target_id);
     assert_eq!(fetched.source_id, "src-A");
     assert_eq!(fetched.text, "hello world");
@@ -89,7 +90,7 @@ fn get_returns_none_for_unknown_id() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
     let store = make_store();
-    let result = store.get(Uuid::new_v4()).expect("get");
+    let result = store.get(Uuid::new_v4(), None).expect("get");
     assert!(result.is_none());
 }
 
@@ -102,7 +103,7 @@ fn chunks_for_source_orders_by_start_offset_ascending() {
     let c2 = sample_chunk("src-B", 0, "first", 100);
     let c3 = sample_chunk("src-B", 100, "middle", 150);
     store.insert(&[c1, c2, c3]).expect("insert");
-    let ordered = store.chunks_for_source("src-B").expect("query");
+    let ordered = store.chunks_for_source("src-B", None).expect("query");
     assert_eq!(ordered.len(), 3);
     assert_eq!(ordered[0].text, "first");
     assert_eq!(ordered[1].text, "middle");
@@ -119,7 +120,7 @@ fn get_many_returns_requested_chunks() {
     let c3 = sample_chunk("src-C", 20, "gamma", 3);
     let ids = vec![c1.id, c3.id];
     store.insert(&[c1, c2, c3]).expect("insert");
-    let fetched = store.get_many(&ids).expect("get_many");
+    let fetched = store.get_many(&ids, None).expect("get_many");
     assert_eq!(fetched.len(), 2);
     let texts: std::collections::HashSet<&str> = fetched.iter().map(|c| c.text.as_str()).collect();
     assert!(texts.contains("alpha"));
@@ -158,8 +159,8 @@ fn insert_idempotent_on_duplicate_id() {
         .insert(&[dup])
         .expect("second insert is a no-op, not an error");
 
-    assert_eq!(store.count().expect("count"), 1);
-    let fetched = store.get(id).expect("get").expect("must exist");
+    assert_eq!(store.count(None).expect("count"), 1);
+    let fetched = store.get(id, None).expect("get").expect("must exist");
     assert_eq!(fetched.text, "original");
 }
 
@@ -187,7 +188,7 @@ fn metadata_roundtrips_through_json() {
     );
     let id = c.id;
     store.insert(&[c]).expect("insert");
-    let fetched = store.get(id).expect("get").expect("must exist");
+    let fetched = store.get(id, None).expect("get").expect("must exist");
     assert_eq!(fetched.metadata, metadata);
 }
 
@@ -200,6 +201,69 @@ fn all_chunks_returns_all_inserted() {
     let c2 = sample_chunk("src-G", 0, "two", 2);
     let c3 = sample_chunk("src-H", 0, "three", 3);
     store.insert(&[c1, c2, c3]).expect("insert");
-    let all = store.all_chunks().expect("all");
+    let all = store.all_chunks(None).expect("all");
     assert_eq!(all.len(), 3);
+}
+
+#[test]
+fn corpus_merkle_root_empty_before_insert() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let store = make_store();
+    let root = store.corpus_merkle_root("nonexistent").expect("query");
+    assert_eq!(root, MerkleRoot::EMPTY);
+}
+
+#[test]
+fn corpus_merkle_root_updates_after_insert() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let store = make_store();
+    let c1 = sample_chunk("src-merkle", 0, "alpha", 1);
+    store.insert(&[c1]).expect("insert");
+    let root1 = store.corpus_merkle_root("src-merkle").expect("query");
+    // After inserting one chunk, the root is no longer empty.
+    assert_ne!(root1, MerkleRoot::EMPTY);
+
+    // Insert a second chunk into the same source — root changes.
+    let c2 = sample_chunk("src-merkle", 10, "beta", 2);
+    store.insert(&[c2]).expect("insert");
+    let root2 = store.corpus_merkle_root("src-merkle").expect("query");
+    assert_ne!(root2, MerkleRoot::EMPTY);
+    assert_ne!(root2, root1, "root must change when a chunk is added");
+}
+
+#[test]
+fn corpus_merkle_root_differs_per_source() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let store = make_store();
+    let c1 = sample_chunk("src-X", 0, "hello", 1);
+    let c2 = sample_chunk("src-Y", 0, "world", 2);
+    store.insert(&[c1, c2]).expect("insert");
+    let root_x = store.corpus_merkle_root("src-X").expect("query");
+    let root_y = store.corpus_merkle_root("src-Y").expect("query");
+    assert_ne!(root_x, MerkleRoot::EMPTY);
+    assert_ne!(root_y, MerkleRoot::EMPTY);
+    assert_ne!(root_x, root_y, "different corpora must have different roots");
+}
+
+#[test]
+fn global_corpus_merkle_root_reflects_all_corpora() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+    let store = make_store();
+    let empty_global = store.global_corpus_merkle_root().expect("global");
+    assert_eq!(empty_global, MerkleRoot::EMPTY);
+
+    let c1 = sample_chunk("src-G1", 0, "data", 1);
+    store.insert(&[c1]).expect("insert");
+    let global1 = store.global_corpus_merkle_root().expect("global");
+    assert_ne!(global1, MerkleRoot::EMPTY);
+
+    // Adding a chunk to a different source changes the global root.
+    let c2 = sample_chunk("src-G2", 0, "more", 2);
+    store.insert(&[c2]).expect("insert");
+    let global2 = store.global_corpus_merkle_root().expect("global");
+    assert_ne!(global2, global1, "global root must change when a new corpus is added");
 }

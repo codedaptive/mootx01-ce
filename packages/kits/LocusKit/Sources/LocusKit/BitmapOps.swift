@@ -42,15 +42,16 @@ import SubstrateLib
 // MARK: - AND-with-mask
 
 /// Test whether the field at `mask` equals `expected`.
-/// Compiles to: `(bitmap & mask) == expected`.
+/// Delegates to `BitField.maskedEquals(bitmap, mask:expected:)` —
+/// semantically `(bitmap & mask) == expected`.
 /// Per spec § 7.7: "field equality on contiguous fields, 1 instruction."
 ///
 /// - Parameters:
 ///   - bitmap: the full Int64 bitmap column value.
 ///   - mask: bitmask isolating the field (e.g. `0xF` for bits 0–3).
 ///   - expected: the field's expected value, already aligned to the
-///     field's position (i.e. NOT pre-shifted; the mask and expected
-///     share the same bit range).
+///     field's bit position (NOT pre-shifted; the mask and expected
+///     share the same bit range, as `BitField.maskedEquals` requires).
 @inlinable
 public func andMask(_ bitmap: Int64, mask: Int64, expected: Int64) -> Bool {
     // F18.2b atomic centralization: route through SubstrateLib's gated

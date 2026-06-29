@@ -15,8 +15,19 @@ use crate::error::VaultKitError;
 use crate::note_ir::NoteIR;
 use std::path::Path;
 
+/// Progress callback for vault import/export operations.
+///
+/// Called every 100 items and at the final item with `(processed, total)`.
+/// For operations with fewer than 100 notes, called once at completion.
+/// Must be `Send + Sync` so it can be passed across thread boundaries.
+pub type VaultProgress<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
+
 /// Vault format adapter: vault directory ⇄ `NoteIR` slice.
-pub trait VaultAdapter {
+///
+/// `Send + Sync` required so adapters can be stored in `Arc` and shared
+/// across thread boundaries (parity with Swift's `Sendable` conformance
+/// on `VaultAdapter`).
+pub trait VaultAdapter: Send + Sync {
     /// Read a vault directory into canonical notes.
     ///
     /// Returns one `NoteIR` per source note, in a deterministic order
@@ -31,4 +42,23 @@ pub trait VaultAdapter {
     /// The directory is created if absent. The adapter writes only inside
     /// `vault_path`.
     fn from_ir(&self, notes: &[NoteIR], vault_path: &Path) -> Result<(), VaultKitError>;
+
+    /// Write canonical notes with optional per-item progress reporting.
+    ///
+    /// This is a trait requirement (not merely a default-only method) so that
+    /// concrete adapters can override it for real per-item firing and the
+    /// override is reachable through a trait object. Adapters that do not
+    /// support per-item progress do NOT need to implement this method — the
+    /// default below delegates to `from_ir` and ignores the closure.
+    ///
+    /// Called every 100 items and at the final item with `(processed, total)`.
+    fn from_ir_with_progress(
+        &self,
+        notes: &[NoteIR],
+        vault_path: &Path,
+        progress: Option<&VaultProgress<'_>>,
+    ) -> Result<(), VaultKitError> {
+        let _ = progress;
+        self.from_ir(notes, vault_path)
+    }
 }

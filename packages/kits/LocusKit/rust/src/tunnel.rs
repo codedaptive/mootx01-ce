@@ -35,7 +35,12 @@ use crate::tunnel_operational::TunnelKind;
 /// (`adjective_bitmap`, `operational_bitmap`, `provenance_bitmap`)
 /// carry the typed-axis state defined in `adjectives.rs`,
 /// `tunnel_operational.rs`, and `provenance.rs` respectively.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `Eq` and `Hash` are implemented manually because `order_key: Option<f64>`
+/// does not auto-derive those traits. The manual impls use `f64::to_bits()`
+/// for bit-exact comparison and hashing, which is correct for storage
+/// round-trip equality (NaN-equality is acceptable here because the field
+/// never carries NaN in practice).
+#[derive(Debug, Clone)]
 pub struct Tunnel {
     /// Stable identifier. Conventionally the SHA-256 of the
     /// canonicalised endpoint pair so that A→B and B→A collapse to
@@ -100,6 +105,11 @@ pub struct Tunnel {
     /// Batch identifier used for receipt-based rollback of a
     /// tombstone. Reserved for the Rev 2.0 soft-delete workflow.
     pub removed_by_batch: Option<String>,
+
+    /// Fractional-index ordering key for `Parent` tunnels
+    /// (ADR-017 §11). Siblings under the same parent sort by
+    /// ascending `order_key`. `None` for non-parent tunnel kinds.
+    pub order_key: Option<f64>,
 }
 
 impl Tunnel {
@@ -139,7 +149,54 @@ impl Tunnel {
             filed_at,
             tombstoned_at: None,
             removed_by_batch: None,
+            order_key: None,
         }
+    }
+}
+
+impl PartialEq for Tunnel {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.source_wing == other.source_wing
+            && self.source_room == other.source_room
+            && self.source_drawer_id == other.source_drawer_id
+            && self.target_wing == other.target_wing
+            && self.target_room == other.target_room
+            && self.target_drawer_id == other.target_drawer_id
+            && self.label == other.label
+            && self.kind == other.kind
+            && self.adjective_bitmap == other.adjective_bitmap
+            && self.operational_bitmap == other.operational_bitmap
+            && self.provenance_bitmap == other.provenance_bitmap
+            && self.added_by == other.added_by
+            && self.filed_at == other.filed_at
+            && self.tombstoned_at == other.tombstoned_at
+            && self.removed_by_batch == other.removed_by_batch
+            && self.order_key.map(f64::to_bits) == other.order_key.map(f64::to_bits)
+    }
+}
+
+impl Eq for Tunnel {}
+
+impl std::hash::Hash for Tunnel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.source_wing.hash(state);
+        self.source_room.hash(state);
+        self.source_drawer_id.hash(state);
+        self.target_wing.hash(state);
+        self.target_room.hash(state);
+        self.target_drawer_id.hash(state);
+        self.label.hash(state);
+        self.kind.hash(state);
+        self.adjective_bitmap.hash(state);
+        self.operational_bitmap.hash(state);
+        self.provenance_bitmap.hash(state);
+        self.added_by.hash(state);
+        self.filed_at.hash(state);
+        self.tombstoned_at.hash(state);
+        self.removed_by_batch.hash(state);
+        self.order_key.map(f64::to_bits).hash(state);
     }
 }
 
@@ -171,6 +228,7 @@ mod tests {
         assert_eq!(t.target_drawer_id, None);
         assert_eq!(t.tombstoned_at, None);
         assert_eq!(t.removed_by_batch, None);
+        assert_eq!(t.order_key, None);
     }
 
     #[test]

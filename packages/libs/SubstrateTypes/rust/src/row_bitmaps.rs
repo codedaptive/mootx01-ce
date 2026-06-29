@@ -81,7 +81,15 @@ impl RowBitmaps {
         if shift >= 64 {
             return 0;
         }
-        ((bitmap >> shift) & Self::FIELD_VALUE_MASK) as u8
+        // Cast bitmap to u64 before right-shifting: `bitmap` is i64, and
+        // Rust arithmetic-shifts signed integers (fills with the sign bit).
+        // When bit 63 of an i64 is set, `bitmap >> shift` floods the result
+        // with 1-bits, making field(10) (shift=60) return 0x3F instead of 0.
+        // Bits 60-63 of all three bitmap columns are reserved (cookbook §2.3
+        // /§2.4/§2.5), so a conforming row always has them zero and would
+        // never have bit 63 set — but the guard is needed for defensive
+        // correctness against non-conforming inputs (e.g. from fuzz callers).
+        ((bitmap as u64 >> shift) & Self::FIELD_VALUE_MASK as u64) as u8
     }
 
     /// Returns true when bit `bit` of field `field_idx` is set.
@@ -326,5 +334,37 @@ mod tests {
     fn row_bitmaps_default_is_zero() {
         let rb: RowBitmaps = Default::default();
         assert_eq!(rb, RowBitmaps::ZERO);
+    }
+
+    #[test]
+    fn field_10_sign_extension_fix() {
+        // field(10) has local_field=10, shift=60. i64 arithmetic right-shift
+        // propagates the sign bit: if bit 63 is set, `i64::MIN >> 60 = -1 =
+        // 0xFF...FF`, and `& 0x3F = 0x3F (63)` — WRONG.
+        //
+        // Correct behavior: cast to u64 first so the shift is logical (zero-
+        // filling). For i64::MIN (= 0x8000000000000000):
+        //   `(0x8000000000000000u64) >> 60 = 0x8`, `& 0x3F = 8`.
+        // Bit 63 is bit 3 of field(10) (since shift=60 and 63-60=3); the
+        // correct extraction is 8, not 63.
+        let rb = RowBitmaps::new(i64::MIN, i64::MIN, i64::MIN);
+        // field(10) = u64-cast-corrected extraction = 8 (NOT 63 as arithmetic shift would give)
+        assert_eq!(rb.field(10), 8,
+            "field(10) with i64::MIN adjective: u64 logical shift gives 8, not 0x3F=63");
+        assert_eq!(rb.field(22), 8,
+            "field(22) with i64::MIN operational: u64 logical shift gives 8, not 0x3F=63");
+        assert_eq!(rb.field(34), 8,
+            "field(34) with i64::MIN provenance: u64 logical shift gives 8, not 0x3F=63");
+    }
+
+    #[test]
+    fn field_10_with_only_lower_bits_set_no_sign_bleed() {
+        // A value with bits 60-62 set (decimal 7 at bit 60), but bit 63 clear,
+        // must extract the 3-bit value 7 without contamination from sign extension.
+        // (Bit 63 is what triggers arithmetic-shift bleed; having it clear means
+        // BOTH the old and new paths agree — this is a sanity check.)
+        let adjective = 0b111i64 << 60; // bits 60, 61, 62 set; bit 63 clear
+        let rb = RowBitmaps::new(adjective, 0, 0);
+        assert_eq!(rb.field(10), 7, "bits 60-62 set, bit 63 clear → field(10) = 7");
     }
 }

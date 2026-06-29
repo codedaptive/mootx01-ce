@@ -1,8 +1,9 @@
 // Wire-format roundtrip tests for SyncRecord, SyncValueBox,
 // PackedHLC, FingerprintWire. Mirror of Swift's SyncRecord
-// codable tests; every TypedValue variant must round-trip
-// through SyncValueBox without loss so the wire format is
-// stable across the federation.
+// codable tests. Note: standalone bool, float, timestamp, and
+// json variants are not directly tested here (bool appears only
+// inside the array test); text, int, null, bitmap, and array
+// have dedicated round-trip cases.
 
 use std::collections::BTreeMap;
 use persistence_kit::TypedValue;

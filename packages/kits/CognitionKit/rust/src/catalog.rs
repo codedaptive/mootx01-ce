@@ -274,9 +274,7 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::ExploratoryRecall],
         },
-        // Distillation-family recipes (Dc1–Dc3, registered Dc4). Descriptor
-        // metadata registered here; full Rust implementations ship in a future
-        // mission. Description strings match Swift byte-for-byte.
+        // Distillation-family recipes. Descriptions match Swift byte-for-byte.
         RecipeDescriptor {
             name: "consolidate".into(),
             version: "1.0.0".into(),
@@ -292,21 +290,21 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
             name: "distilled_recall".into(),
             version: "1.0.0".into(),
             description:
-                "Dense recall: search the distilled memory tier and return factoid \
-                prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint \
-                Hamming NN \u{2014} no embedding model inference, no full corpus scan."
+                "Dense recall: search the distilled memory tier and return factoid prose \
+                (~10 tokens/hit) for AI reasoning. Uses structural fingerprint Hamming NN \
+                — no embedding model inference, no full corpus scan."
                     .into(),
             required_capabilities: vec![],
         },
         RecipeDescriptor {
-            name: "expand_memory".into(),
+            name: "recollect".into(),
             version: "1.0.0".into(),
             description:
-                "Expand a distilled factoid to its source memories: follows the \
-                _distilled_from tunnel graph and returns full episodic content \
-                from the M memories that produced the factoid. Use when the user \
-                needs the full explanation behind a dense factoid. The AI synthesises \
-                the sources into a user-facing narrative."
+                "Recollect: fan-out from a distilled factoid to its source memories. \
+                Follows the _distilled_from tunnel graph and returns full episodic content from the M \
+                memories that produced the factoid. Use when the user needs the full \
+                explanation behind a dense factoid. The AI synthesises the sources into a \
+                user-facing narrative."
                     .into(),
             required_capabilities: vec![],
         },
@@ -332,15 +330,16 @@ mod tests {
 
     #[test]
     fn catalog_lists_all_shipped_recipes() {
-        // Both versions of every recipe ship, so every recipe registers
+        // All 30 catalog entries register in both versions
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
-        // plus the 3 distillation-family recipes (Dc1–Dc3, registered Dc4)
-        // = 30 total.
+        // plus 3 distillation recipes (consolidate, distilled_recall, recollect)
+        // = 30 total. Note: `consolidate.rs` holds data types only;
+        // distilled_recall carries a descriptor but no full Rust body here.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -357,7 +356,6 @@ mod tests {
                 "distilled_recall",
                 "drift",
                 "estate_divergence",
-                "expand_memory",
                 "formal_concepts",
                 "free_association",
                 "grounded_synthesis",
@@ -371,6 +369,7 @@ mod tests {
                 "partial_cue_recall",
                 "precedence",
                 "recall_exploratory",
+                "recollect",
                 "rhythm",
                 "shaped_recall",
                 "theme_weather",
@@ -533,35 +532,4 @@ mod tests {
         assert!(d.required_capabilities.is_empty());
     }
 
-    #[test]
-    fn distilled_recall_descriptor_matches_swift() {
-        // Byte-for-byte parity anchor with Swift DistilledRecall recipe
-        // metadata (`DistilledRecall.swift`).
-        let d = recipe_descriptor("distilled_recall").unwrap();
-        assert_eq!(d.version, "1.0.0");
-        assert_eq!(
-            d.description,
-            "Dense recall: search the distilled memory tier and return factoid \
-            prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint \
-            Hamming NN \u{2014} no embedding model inference, no full corpus scan."
-        );
-        assert!(d.required_capabilities.is_empty());
-    }
-
-    #[test]
-    fn expand_memory_descriptor_matches_swift() {
-        // Byte-for-byte parity anchor with Swift ExpandMemory recipe
-        // metadata (`ExpandMemory.swift`).
-        let d = recipe_descriptor("expand_memory").unwrap();
-        assert_eq!(d.version, "1.0.0");
-        assert_eq!(
-            d.description,
-            "Expand a distilled factoid to its source memories: follows the \
-            _distilled_from tunnel graph and returns full episodic content \
-            from the M memories that produced the factoid. Use when the user \
-            needs the full explanation behind a dense factoid. The AI synthesises \
-            the sources into a user-facing narrative."
-        );
-        assert!(d.required_capabilities.is_empty());
-    }
 }

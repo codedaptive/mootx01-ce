@@ -43,6 +43,34 @@ struct NmfBasisFixture: Codable {
 @Suite("NmfBasisSerialization")
 struct NmfBasisSerializationTests {
 
+    // MARK: - Counts codec (incremental-counts change set)
+
+    @Test("counts round-trip preserves vocabulary size + document count")
+    func countsRoundTripPreservesAnchors() throws {
+        let original = buildTrainedNmfProvider()
+        let restored = NmfProvider(rank: 3, maxIterations: 100)
+        try restored.restoreCounts(from: original.serializeCounts())
+        #expect(restored.vocabularySize == original.vocabularySize)
+        #expect(restored.documentCount == original.documentCount)
+    }
+
+    @Test("counts blob begins with the NMFC magic and the v1 format byte")
+    func countsBlobHeaderIsVersioned() {
+        let bytes = [UInt8](buildTrainedNmfProvider().serializeCounts())
+        #expect(bytes.count >= 5)
+        #expect(Array(bytes[0..<4]) == Array("NMFC".utf8))
+        #expect(bytes[4] == basisFormatVersion)
+    }
+
+    @Test("truncated counts blob throws decodingFailure, never crashes")
+    func countsTruncatedBlobThrows() {
+        let blob = buildTrainedNmfProvider().serializeCounts()
+        let fresh = NmfProvider(rank: 3, maxIterations: 100)
+        #expect(throws: CorpusKitError.self) {
+            try fresh.restoreCounts(from: Data(blob.prefix(blob.count / 2)))
+        }
+    }
+
     @Test("train+finalize → serialize → deserialize → embed is bit-identical")
     func roundTripEmbeddingIdentity() async throws {
         let original = buildTrainedNmfProvider()

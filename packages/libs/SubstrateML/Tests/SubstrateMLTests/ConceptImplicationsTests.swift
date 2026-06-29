@@ -37,7 +37,7 @@ struct ConceptImplicationsTests {
     /// attributes in conclusion. Tested exhaustively on a context with
     /// multiple known implications.
     ///
-    /// Context: two rows {b,c} each and one row {a}.
+    /// Context: two rows — {a} (row 0) and {b,c} (row 1).
     ///   closure({b}) = {b,c}  → implication {b}→{c}
     ///   closure({c}) = {b,c}  → implication {c}→{b}
     @Test func soundnessHoldsForEveryRow() {
@@ -145,19 +145,9 @@ struct ConceptImplicationsTests {
         #expect(impl?.conclusion == Set([b]))
     }
 
-    /// Context where all sets are closed: no implications expected.
-    /// Row0:{a,b}, Row1:{c,d}. Attributes form two disjoint groups;
-    /// every attribute pair from different groups has an empty extent
-    /// (closure = all attributes), but their D-G pseudo-intenthood is
-    /// blocked by the fact that the conclusions don't fit in the premise.
-    ///
-    /// Actually for this context: closure({})={a,b}∩{c,d}={}. Closed.
-    /// {a}:rows 0→{a,b}. {b}:rows 0→{a,b}. {c}:rows 1→{c,d}. {d}:rows 1→{c,d}.
-    /// {a} is NOT pseudo-intent (closed, a=a,b closure is a,b ≠ a).
-    /// Wait: closure({a})=row0→{a,b}≠{a}. PSEUDO-INTENT. {} ⊊ {a}, {}''={}⊆{a}✓.
-    /// D-G pseudo-intent. Emit {a}→{b}.
-    ///
-    /// This verifies a cleaner case: two 2-attr rows produce 4 implications.
+    /// Context with two disjoint 2-attribute rows: Row0:{a,b}, Row1:{c,d}.
+    /// Each single attribute is a pseudo-intent (closure adds the partner),
+    /// yielding four implications: {a}→{b}, {b}→{a}, {c}→{d}, {d}→{c}.
     @Test func handVerifiedTwoDisjointPairs() {
         // Row0:{a,b}, Row1:{c,d}.
         let context = FormalContext(rows: [

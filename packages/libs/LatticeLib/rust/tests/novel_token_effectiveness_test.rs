@@ -5,9 +5,10 @@
 //
 // LOOP EDGES:
 //
-//   WRITE EDGE: tag/submit content with a novel token → accumulate to threshold
-//               → drain → pool JSON file on disk → pool_reduce seeds writable
-//               artifact + merges token → artifact updated.
+//   WRITE EDGE: pool submission JSON written directly via `write_pool_file`
+//               (these are force-tests; threshold accumulation via
+//               NovelTokenCache is exercised separately) → pool_reduce seeds
+//               writable artifact + merges token → artifact updated.
 //
 //   READ EDGE:  on the NEXT process load, `load_with_precedence` checks the
 //               writable artifact first → previously-novel token is table-resident

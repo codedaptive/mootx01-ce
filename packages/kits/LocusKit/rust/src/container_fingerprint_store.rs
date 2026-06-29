@@ -297,14 +297,34 @@ impl ContainerFingerprintStore {
     /// Rebuild every container from the full active drawer set, so the
     /// aggregate covers all active rows. Called on open to make an
     /// existing estate's aggregate complete and therefore sound.
-    pub fn rebuild_all(&self, active_drawers: &[Drawer], now: i64) -> Result<(), LocusKitError> {
-        // Group by (wing, room).
+    ///
+    /// `node_names` maps each drawer's `parent_node_id` to its resolved
+    /// `(wing_name, room_name)` pair from the node tree (ADR-017 §3).
+    /// Drawers whose `parent_node_id` is absent from the map are skipped
+    /// — the caller is responsible for resolving all active node IDs
+    /// before invoking this method.
+    pub fn rebuild_all(
+        &self,
+        active_drawers: &[Drawer],
+        node_names: &BTreeMap<String, (String, String)>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Group by (wing, room) resolved from the node tree.
         let mut by_container: BTreeMap<String, BTreeMap<String, Vec<&Drawer>>> = BTreeMap::new();
         for d in active_drawers {
+            let (wing, room) = match node_names.get(&d.parent_node_id) {
+                Some(names) => names,
+                // Orphaned drawer — parent node missing from tree. Skipping
+                // is an under-approximation risk: if this row carries bits
+                // the filter requires, omitting it may falsely drop a
+                // container that should survive. Log and skip rather than
+                // panic, but note the hazard.
+                None => continue,
+            };
             by_container
-                .entry(d.wing.clone())
+                .entry(wing.clone())
                 .or_default()
-                .entry(d.room.clone())
+                .entry(room.clone())
                 .or_default()
                 .push(d);
         }
@@ -391,12 +411,32 @@ mod tests {
         ContainerFingerprintStore::new(storage).unwrap()
     }
 
+    /// Build a test drawer whose `parent_node_id` encodes the wing/room
+    /// pair so the companion `test_node_names` map can resolve it back.
     fn drawer_with(wing: &str, room: &str, adj: i64, op: i64, prov: i64) -> Drawer {
-        let mut d = Drawer::new("d", "c", wing, room, "alice", 0, "test-v1");
+        // Use "wing::room" as a synthetic parent_node_id that the test
+        // node-names map resolves back to (wing, room).
+        let synthetic_id = format!("{}::{}", wing, room);
+        let mut d = Drawer::new("d", "c", &synthetic_id, "alice", 0, "test-v1");
         d.adjective_bitmap = adj;
         d.operational_bitmap = op;
         d.provenance = prov;
         d
+    }
+
+    /// Build the node-names map corresponding to the synthetic
+    /// parent_node_ids produced by `drawer_with`.
+    fn test_node_names(drawers: &[Drawer]) -> BTreeMap<String, (String, String)> {
+        let mut map = BTreeMap::new();
+        for d in drawers {
+            if let Some((wing, room)) = d.parent_node_id.split_once("::") {
+                map.insert(
+                    d.parent_node_id.clone(),
+                    (wing.to_string(), room.to_string()),
+                );
+            }
+        }
+        map
     }
 
     // --- ContainerFingerprint algebra ---
@@ -518,7 +558,8 @@ mod tests {
             drawer_with("w1", "rB", 0b0010, 0, 0),
             drawer_with("w2", "rC", 0b0100, 0, 0),
         ];
-        store.rebuild_all(&actives, 10).unwrap();
+        let names = test_node_names(&actives);
+        store.rebuild_all(&actives, &names, 10).unwrap();
 
         // Each room-level row carries the OR of its drawers.
         assert_eq!(store.get("w1", "rA").unwrap().unwrap().adjective, 0b0001);

@@ -174,36 +174,12 @@ public extension GeniusLocusKit {
         // This validates the manifest, issues the handle, and sets mount state to .mounted.
         let handle = try await open(storage: storage, owner: owner)
 
-        // Step 2b: Seed the seven default wings (ADR-016 §1 and §2).
-        // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
-        // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
-        // the serve open path calls the same method unconditionally so bare estates
-        // opened via `mootx01 serve` receive the same wings without re-stamping
-        // the manifest. The method skips wings whose `_charter` drawer already
-        // exists so calling it again on a pre-seeded estate is a safe no-op.
-        //
-        // Implementation note: `wireSubstores` (step 3) wires Corpus + VectorStore
-        // and mounts the encode queue AFTER this step. Charters captured here are
-        // therefore row-only on the first provision pass — the semantic encoding
-        // lane will pick them up on the next encode-drain cycle once the queue is
-        // mounted. This matches the LocusOnly baseline where row-only capture is
-        // fully supported.
-        //
-        // Failure policy: wing seeding is part of provision — if seeding fails
-        // the estate is considered partially provisioned. The estate is closed
-        // and an `underlyingEstateFailure` is thrown so the caller sees the error
-        // rather than silently receiving an un-seeded estate.
-        do {
-            try await seedDefaultWings(for: handle, now: Date())
-        } catch {
-            // Close the half-seeded estate to avoid a zombie in the registry.
-            try? await close(handle)
-            throw GeniusLocusKitError.underlyingEstateFailure(
-                reason: "default wing seeding failed: \(error)"
-            )
-        }
-
-        // Step 3: Wire sub-stores based on kind.
+        // Step 2b: Wire sub-stores based on kind — BEFORE seeding the wings.
+        // Wiring registers the Corpus (and mounts the encode queue), so the wing
+        // hints seeded in step 2c are stamped with the corpus's real model id, not
+        // a sentinel. This matches the serve open path, which also wires before it
+        // seeds. (Seeding does not depend on the wiring; the order is purely so the
+        // hint drawers carry the normal model id — ADR-016 §2.)
         let backingStorage = corpusStorage ?? storage
         do {
             // Wire via the shared seam (also called by the serve entry points so a
@@ -219,6 +195,36 @@ public extension GeniusLocusKit {
             try? await close(handle)
             throw GeniusLocusKitError.underlyingEstateFailure(
                 reason: "sub-store wiring failed for kind '\(params.kind.rawValue)': \(error)"
+            )
+        }
+
+        // Step 2c: Seed the seven default wings (ADR-016 §1 and §2).
+        // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
+        // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
+        // the serve open path calls the same method unconditionally so bare estates
+        // opened via `mootx01 serve` receive the same wings without re-stamping
+        // the manifest. The method skips wings whose `AI_Charter_Hint` drawer
+        // already exists so calling it again on a pre-seeded estate is a safe no-op.
+        //
+        // The Corpus is now wired (step 2b), so each hint drawer is stamped with the
+        // corpus's normal model id — NOT the old "estate-provision" sentinel. Hints
+        // are filed row-only (LocusKit `seedWing` does not enqueue): their semantic
+        // vectors are produced by the next full-corpus reindex, alongside user
+        // content, rather than training a basis on the 7 hints alone. This is the
+        // intended ADR-016 §2 behaviour — normal drawers, embedded under the normal
+        // model at reindex.
+        //
+        // Failure policy: wing seeding is part of provision — if seeding fails
+        // the estate is considered partially provisioned. The estate is closed
+        // and an `underlyingEstateFailure` is thrown so the caller sees the error
+        // rather than silently receiving an un-seeded estate.
+        do {
+            try await seedDefaultWings(for: handle, now: Date())
+        } catch {
+            // Close the half-seeded estate to avoid a zombie in the registry.
+            try? await close(handle)
+            throw GeniusLocusKitError.underlyingEstateFailure(
+                reason: "default wing seeding failed: \(error)"
             )
         }
 
@@ -247,10 +253,10 @@ public extension GeniusLocusKit {
     /// or by the older bare `Estate.create` + `open` path.
     ///
     /// **Idempotency contract:** for each wing, the method reads the estate's
-    /// existing `_charter` drawers once before the loop. Wings whose charter
+    /// existing `AI_Charter_Hint` drawers once before the loop. Wings whose hint
     /// drawer already exists are skipped silently. Calling this method multiple
     /// times on the same estate — even concurrently across process restarts — is
-    /// therefore safe: at most one charter drawer per wing will ever exist.
+    /// therefore safe: at most one hint drawer per wing will ever exist.
     ///
     /// The method delegates per-wing filing to `LocusKit.Estate.seedWing`, which
     /// inserts unconditionally (not idempotent by itself). The outer check here
@@ -258,7 +264,7 @@ public extension GeniusLocusKit {
     ///
     /// - Parameters:
     ///   - handle: An open estate handle in the coordinator's registry.
-    ///   - now: Write timestamp for any charters that are seeded. Pass `Date()`
+    ///   - now: Write timestamp for any hints that are seeded. Pass `Date()`
     ///     from the serve open path (an app entry point — calling `Date()` here
     ///     is acceptable). Pass a specific value in tests for determinism.
     /// - Throws: `GeniusLocusKitError.estateNotFound` if `handle` is stale;
@@ -266,17 +272,32 @@ public extension GeniusLocusKit {
     public func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
         let locusEstate = try estate(for: handle)
 
-        // Read the existing charter drawers once — `allDrawers()` is a full corpus
-        // scan but estates are typically small (7 charters + user content) and this
-        // is called once per open, not per request. Collect the set of wing names
-        // that already have a charter so the loop can skip them without a second
-        // query per wing.
+        // Read the existing drawers once — `allDrawers()` is a full corpus scan
+        // but estates are typically small (7 hints + user content) and this is
+        // called once per open, not per request. Already-seeded wings are
+        // identified by finding drawers in room hintRoom ("AI_Charter_Hint").
+        // Resolve parentNodeId → wing name from the node tree for each hint drawer.
         let existing = try await locusEstate.allDrawers()
+        let allNodeIds = Array(Set(existing.map(\.parentNodeId)))
+        let allNodeNames = try await locusEstate.resolveNodeNames(parentNodeIds: allNodeIds)
         let seededWings = Set(
             existing
-                .filter { $0.room == LocusKit.charterRoom }
-                .map(\.wing)
+                .filter { allNodeNames[$0.parentNodeId]?.room == LocusKit.hintRoom }
+                .compactMap { allNodeNames[$0.parentNodeId]?.wing }
         )
+
+        // The hint drawer is stamped with the corpus's primary model id when a
+        // corpus is registered — the normal case now that both provision and the
+        // serve open path wire the Corpus BEFORE calling this. The sentinel below
+        // is reached only for a corpus-less estate (a LocusOnly estate, which has
+        // no semantic lane, or a bare serve open before wiring); such a drawer is
+        // row-only and is re-stamped under the real model on the next reindex.
+        let embeddingModelID: String
+        if let corpus = corpusKits[handle] {
+            embeddingModelID = await corpus.modelID
+        } else {
+            embeddingModelID = "estate-provision"
+        }
 
         // Seed each wing that is not yet present. Missing wings emerge when an
         // estate was created via the bare `Estate.create` + `open` path that
@@ -286,8 +307,9 @@ public extension GeniusLocusKit {
         for wing in LocusKit.defaultWings where !seededWings.contains(wing.name) {
             try await locusEstate.seedWing(
                 wing.name,
-                charter: wing.charter,
-                addedBy: LocusKit.charterAddedBy,
+                hint: wing.hint,
+                addedBy: LocusKit.hintAddedBy,
+                embeddingModelID: embeddingModelID,
                 now: now
             )
             seededCount += 1
@@ -319,8 +341,8 @@ public extension GeniusLocusKit {
     /// distillation cluster lane is inert. This call closes that gap.
     ///
     /// Idempotent: `registerCorpus`/`registerVectorStore` replace any existing
-    /// entry and `mountEncodeQueue` is a no-op when already mounted, so calling
-    /// it again on a reopened estate is safe.
+    /// entry and `Corpus.mountIngestQueue` is a no-op when already mounted, so
+    /// calling it again on a reopened estate is safe.
     ///
     /// - Parameters:
     ///   - handle: The open estate handle to wire. Must already be in the registry.
@@ -354,16 +376,27 @@ public extension GeniusLocusKit {
             // BundleStore and VectorStore schema declarations to backingStorage.
             let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
             registerCorpus(corpus, for: handle)
-            // Wire a VectorStore pointing at the same backing storage so GLK's
-            // scored-recall vector lane can operate independently of Corpus's
-            // internal vector store.
-            let vectorStore = VectorStore(storage: backingStorage)
+            // BORROW Corpus's single dense VectorStore for GLK's scored-recall
+            // vector lane rather than constructing a second VectorStore over the
+            // same `vectors` table. The two instances built identical whole-table
+            // resident arrays (the binary fetch is filtered only by kind, not
+            // model), so a second store doubled the resident array + cold-start
+            // table scan AND made the on-disk sidecar churn (each store's writes
+            // invalidated the other's whole-table live-count). One shared store =
+            // one resident array, one sidecar kept in sync by every write (chunk
+            // vectors from encode + distilled vectors from the distillation cycle).
+            // CorpusKit owns the dense vector lane; GLK reaches it through Corpus's
+            // public accessor (no reaching around the kit).
+            let vectorStore = await corpus.sharedVectorStore
             registerVectorStore(vectorStore, for: handle)
-            // Dual-Path Intake D-B: mount the estate's dedicated encode queue
-            // and start its drain worker alongside the corpus/vector wiring.
-            // The regular capture path enqueues here; the worker ingests into
-            // the Corpus above, lighting the semantic recall lanes.
-            try await mountEncodeQueue(for: handle)
+            // CorpusKit owns the encode pipeline: mount the Corpus's own ingest
+            // queue + drain worker pool, and wire its onEncoded callback to roll
+            // up the touched LocusKit rooms for each encoded batch. GLK's only
+            // role is to coordinate the two kits — it never performs the encode.
+            // The regular capture path enqueues into the Corpus queue; the
+            // Corpus drain worker ingests, lighting the semantic recall lanes.
+            try await corpus.mountIngestQueue()
+            await wireCorpusRoomRollup(corpus, for: handle)
             Self.lifecycleLog.info(
                 "wired GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue)"
             )
@@ -372,8 +405,10 @@ public extension GeniusLocusKit {
             // LocusKit core + Corpus. No standalone VectorStore registration.
             let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
             registerCorpus(corpus, for: handle)
-            // D-B: a CorpusOnly estate also feeds its Corpus from capture.
-            try await mountEncodeQueue(for: handle)
+            // A CorpusOnly estate also feeds its Corpus from capture: mount the
+            // Corpus-owned ingest queue + drain worker and wire the room rollup.
+            try await corpus.mountIngestQueue()
+            await wireCorpusRoomRollup(corpus, for: handle)
             Self.lifecycleLog.info(
                 "wired CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue)"
             )
@@ -509,6 +544,14 @@ public extension GeniusLocusKit {
         // Transition to quiesced once the queue is empty.
         mountStates[handle] = .quiesced
         Self.lifecycleLog.info("drained estate \(handle.estateUUID, privacy: .public) → quiesced")
+
+        // In-flight encode work has settled — flush the dense vector store's
+        // resident-array sidecar so a graceful shutdown leaves it current (a cold
+        // restart loads it instead of rebuilding from a full table scan).
+        // Best-effort: the `vectors` table remains the source of truth.
+        if let vectorStore = vectorStores[handle] {
+            try? await vectorStore.flush()
+        }
 
         // Telemetry: emit mount-state transition to quiesced after drain (GLK_ROLLUPS_001).
         Intellectus.report(.metric(

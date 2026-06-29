@@ -404,10 +404,10 @@ fn find_nearest_survives_reopen_sqlite() {
 
 // ---------------------------------------------------------------------------
 // Cross-restart conformance WITH a .vec sidecar (A-11). The resident array is
-// persisted to the sidecar via flush() and reloaded on reopen WITHOUT a full
-// table rescan when the sidecar's live_count matches the table row count
-// (sidecar_rebuild_count stays 0). Either way the reopened find_nearest top-k
-// is identical to the pre-close result.
+// persisted to the sidecar via flush() and reloaded on reopen. No table rebuild
+// is required when the sidecar parses successfully and live_count (recomputed
+// from the tombstone bitmap) matches the table row count (sidecar_rebuild_count
+// stays 0). Either way, the reopened find_nearest top-k is identical.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -487,4 +487,32 @@ fn find_nearest_survives_reopen_sqlite_with_sidecar() {
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(&sidecar_path);
+}
+
+// F3: default_sidecar_path derives a `.vec` path beside the SQLite database, and
+// returns None for non-file (in-memory) backends. Mirrors the Swift
+// VectorStore.defaultSidecarURL assertions.
+#[test]
+fn default_sidecar_path_derives_vec_beside_sqlite_and_none_for_inmemory() {
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+    use std::path::PathBuf;
+
+    // SQLite backend → `<estate>.vectors.vec` beside the database file.
+    let db_path = std::env::temp_dir().join(format!("vk_sidecar_path_{}.sqlite", Uuid::new_v4()));
+    let cfg = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: db_path.to_string_lossy().to_string(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let sqlite: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg).expect("open SQLite"));
+    let derived = VectorStore::default_sidecar_path(&sqlite).expect("sqlite backend yields a sidecar path");
+    let expected: PathBuf = db_path.with_extension("vectors.vec");
+    assert_eq!(derived, expected);
+    assert_eq!(derived.extension().and_then(|e| e.to_str()), Some("vec"));
+
+    // In-memory backend → no local sidecar (rebuilds from table each open).
+    let mem: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    assert!(VectorStore::default_sidecar_path(&mem).is_none());
 }

@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.3.3
+version: 1.6.0
 status: active
-date: 2026-06-18
+date: 2026-06-28
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -257,6 +257,30 @@ The topology boundary (PersistenceKit upstream of LatticeLib) requires separate
 declarations; consumers bridge them with a trivial switch at the GLK/NeuronKit
 boundary when calling LatticeLib tagging APIs with the estate's choice.
 
+**I-21 (SQL-identifier validation on all write paths, CAND-047):** every
+caller-supplied column name that reaches a dynamically-constructed SQL string
+MUST be validated against the safe-identifier charset `[A-Za-z_][A-Za-z0-9_]*`
+before interpolation. This applies to INSERT column lists, UPDATE SET clauses,
+ON CONFLICT column lists, and projected-read column lists. A name outside
+this charset is rejected with `StorageError.invalidIdentifier` before any SQL
+is built. Double-quoting alone is insufficient protection — a name containing
+`"` can escape the delimiter and alter the query. This invariant holds for all
+three backends (SQLite, PostgreSQL, InMemory). The validation function is the
+single shared seam `validate_sql_identifier` (Rust) / `validateSQLIdentifier`
+(Swift); no per-backend fork is permitted (SECFIX-WS2-PK CAND-047,
+landed 2026-06-28).
+
+**I-22 (SQLite DB file symlink refusal, CAND-052):** the SQLite backend MUST
+refuse to open a database at a path that resolves to a symbolic link (checked
+via `lstat`/`symlink_metadata` before `sqlite3_open_v2`/`Connection::open`).
+A pre-planted symlink at the DB path can redirect all SQLite writes to an
+arbitrary file; the refusal closes this attack surface. New database files
+created by the backend MUST be written with owner-only permissions (0600 on
+Unix) so that other OS users cannot read the estate. Apple Data Protection
+(`.completeUntilFirstUserAuthentication`) is applied to the file post-open as
+an orthogonal at-rest encryption layer (SECFIX-WS2-PK CAND-052, landed
+2026-06-28).
+
 ## § 5 — Behavioral contracts
 
 **B-1 (auto-commit outside a transaction):** the sub-stores reached
@@ -352,6 +376,26 @@ alongside the synchronous write-path invalidation in B-13.
 for its entries and evicts least-recently-used entries when the total
 exceeds `EstateCacheConfig.ceilingBytes`. Evicted rows remain
 readable via the backing store on the next read.
+
+**B-16 (temporal cache key isolation):** present and as-of reads are
+keyed separately inside `CachingRowStore`. A `query` for the current
+row (`nil` / `AsOfCoordinate.present`) and a `query` for a snapshot
+timestamp (`AsOfCoordinate.asOf(hlc)`) produce distinct cache entries.
+On a write (insert, upsert, update, delete), only the `present` cache
+entry for the affected row is invalidated; historical snapshot entries
+are immutable and are never invalidated (GC-pin guarantees snapshot
+correctness). `TemporalCacheKey` is an internal implementation detail
+and is not part of the public surface.
+
+**B-17 (parent-chain invalidation):** `CachingRowStore` accepts an
+optional `ParentChainProvider` callback at construction time. When
+provided, any write or external `invalidate()` call also evicts every
+cache entry for the Merkle-aggregate parent chain of the affected row,
+as returned by the callback. When the callback is absent (the default),
+no chain invalidation fires and behaviour is identical to prior versions
+(backward-compatible). The callback is invoked with the table name and
+`RowKey`; it must return synchronously and must not call back into the
+same `CachingRowStore` (to prevent lock re-entry).
 
 **B-12 (encryption is transparent to consumers):** an estate's
 `EstateEncryptionConfig` selects mode 1 (plaintext), 2 (per-row content
@@ -455,6 +499,9 @@ Errors are surfaced as `StorageError` (Swift) / `StorageError` (Rust).
 | `invalidQuery` | malformed predicate/query for backend | abort; programmer error |
 | `appendOnlyViolation` | UPDATE/DELETE on append-only table | abort; programmer error (B-8) |
 | `backendError` | underlying driver error, wrapped | inspect `underlying`; backend-specific |
+| `corruptStoredValue` | stored text cannot be parsed to declared column type | log and skip (corpus scans) or abort (point lookups) |
+| `invalidConfiguration` | configuration invalid for current platform/runtime | abort; fix configuration |
+| `featureGated` | feature surface exists but is gated off pending prerequisites | caller checks feature availability; wait for gate lift |
 
 Concrete enum shapes (Swift cases, Rust variants) live in INTERFACE § 4.
 
@@ -649,6 +696,33 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.6.0 -- 2026-06-28
+SECFIX-WS2-PK: Added I-21 (SQL-identifier validation on all write paths,
+CAND-047) and I-22 (SQLite DB file symlink refusal + 0600 creation mode,
+CAND-052). I-21 extends the existing projected-read identifier gate to INSERT,
+upsert ON CONFLICT, and UPDATE SET column lists across all backends — one
+shared validator, no forked copies. I-22 hardens the SQLite open path to
+refuse a pre-planted symlink at the DB path and sets owner-only permissions
+(0600) on newly-created estate files.
+
+### 1.5.0 -- 2026-06-20
+NT-P4: Added B-16 (temporal cache key isolation) and B-17 (parent-chain
+invalidation). B-16 specifies that present and as-of reads key separately inside
+`CachingRowStore` and that snapshot entries are never evicted on writes. B-17
+specifies the optional `ParentChainProvider` callback contract: invoked on
+write-path and external `invalidate()` calls, must be synchronous, must not
+re-enter the cache. Both behaviours are backward-compatible: the callback defaults
+to absent, and `TemporalCacheKey` is internal.
+
+### 1.4.0 -- 2026-06-20
+NT-P1: Added `corruptStoredValue`, `invalidConfiguration`, and `featureGated`
+to the § 6 error table. The `featureGated` case gates the as-of temporal query
+surface (ADR-017 §17) until NT-L4 (lineage-wide expunge) and NT-P3 (erasure
+overlay) merge. `ColumnRole` metadata enables temporal validity column
+identification at schema declaration time; the as-of filter uses it to push
+`created_hlc <= T AND (tombstoned_hlc IS NULL OR tombstoned_hlc > T)` into the
+engine without knowing kit-specific column names.
 
 ### 1.3.3 -- 2026-06-18
 B-12 Activation: the Mode 3 whole-file key is per-estate on **both** ports (was

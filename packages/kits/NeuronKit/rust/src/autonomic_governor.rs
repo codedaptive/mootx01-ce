@@ -148,11 +148,18 @@ use genius_locus_kit::{
 use intellectus_lib::{report, EventKind, StatSample};
 use uuid::Uuid;
 use locus_kit::drawer_store::DrawerStore;
+use persistence_kit::inmemory::InMemoryStorage;
+use persistence_kit::sqlite::SqliteStorage;
+use persistence_kit::storage::BackendConfiguration;
+use queuekit::{DrainLease, PersistenceKitBackend, QueueBackend, QueueKit};
+use substrate_types::hlc::HLCGenerator;
 use crate::{
     DreamingDaemon, DreamingPolicy, DreamingPolicyStore, EstateDreamingReader,
-    EstateDreamingSink, EstateMaintenanceReader, EstateMaintenanceSink,
-    InMemoryDreamingPolicyStore, InMemoryMaintenancePolicyStore, MaintenanceDaemon,
-    MaintenancePolicy, MaintenancePolicyStore, RecallTraceRewardSource,
+    EstateDreamingSink, EstateMaintenanceReader, EstateMaintenanceSink, MaintenanceDaemon,
+    MaintenancePolicyStore, RecallTraceRewardSource,
+};
+use crate::estate_manifest_policy_store::{
+    EstateManifestDreamingPolicyStore, EstateManifestMaintenancePolicyStore,
 };
 use crate::governor_topology_sink::GovernorTopologySink;
 
@@ -186,6 +193,28 @@ const DEFAULT_PREFERENCE_CADENCE_MS: u64 = 600_000;
 /// determinism / load throttling). This supersedes the prior hourly cadence
 /// (cookbook §2.2 rewrite).
 const DEFAULT_POOL_REDUCE_CADENCE_MS: u64 = 0;
+
+// ── Planned-hardening caps ────────────────────────────────────────────────────
+
+/// Maximum number of live drawers scored per graph-centrality scan.
+///
+/// Planned hardening: prevents per-tick O(n²) edge build on large estates.
+/// Drawers beyond the cap score 0.0 (spec C-16 — correct, identical to
+/// "no cache registered"). Applied to live (non-tombstoned) drawers sorted
+/// ascending by id before building the centrality graph, so the capped subset
+/// is stable and deterministic. Parity: matches `graphCentralityScanNodeCap`
+/// in AutonomicGovernor.swift.
+pub const GRAPH_CENTRALITY_SCAN_NODE_CAP: usize = 10_000;
+
+/// Maximum number of pending files in the pool directory before the
+/// pool-reduce duty defers for this tick.
+///
+/// Planned hardening: if the pool directory already holds more files than this
+/// cap, the drainer is falling behind under load. Deferring — without advancing
+/// `last_pool_reduce_secs` — causes the next tick to retry immediately,
+/// providing near-realtime back-pressure without dropping any file. Parity:
+/// matches `poolReduceFileCap` in AutonomicGovernor.swift.
+pub const POOL_REDUCE_FILE_CAP: usize = 500;
 
 // ── ISO8601 helpers ───────────────────────────────────────────────────────────
 
@@ -221,6 +250,119 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+// ── Signals queue construction helper (T5, ADR-021 Decision 7) ───────────────
+
+/// Fixed estate identity for the transient in-memory signals-queue backend on
+/// non-SQLite estates. A constant avoids UUID nondeterminism in the engine.
+/// Matches the CorpusKit pattern for its in-memory ingest-queue store ID.
+fn signals_queue_inmemory_id() -> uuid::Uuid {
+    uuid::Uuid::from_u128(0x5169_5161_5561_7565_0000_0000_0000_0000)
+}
+
+/// Build the signals `QueueKit` facade and optional `DrainLease` for an estate.
+///
+/// Backend selection (mirrors Swift `SignalAPI.ensureScheduler`):
+///   - SQLite estate → shared encrypted `queue.sqlite` beside the estate, derived
+///     via `EstateConfiguration::queue_sibling("queue.sqlite")`. A `DrainLease`
+///     keyed on `"signals"` ensures exactly one drainer per (estate, stream) across
+///     processes (ADR-021 Decision 7). On open failure, falls back to in-memory
+///     (the signals lane degrades to transient rather than crashing the resident).
+///   - InMemory / no storage → transient PersistenceKitBackend + `None` lease.
+///
+/// Called once per estate at scheduler-mint time (inside `ensure_scheduler`).
+fn build_signals_queue(
+    store: &Arc<dyn DrawerStore>,
+    handle_id: &str,
+) -> (QueueKit<Box<dyn QueueBackend>>, Option<DrainLease>) {
+    // Retrieve the estate's Storage to inspect its backend configuration.
+    // `DrawerStore::storage()` returns `None` for the test-double/mock drawer
+    // stores that don't back a real Storage; those fall through to in-memory.
+    let storage = store.storage();
+
+    let backend_config = storage
+        .as_ref()
+        .map(|s| s.configuration().backend.clone());
+
+    match backend_config {
+        Some(BackendConfiguration::Sqlite { ref path, .. }) => {
+            // Derive the sibling config from the estate's configuration.
+            // `queue_sibling` is deterministic — same estate → same sibling UUID
+            // and path — so all processes that open the estate share one queue.sqlite.
+            let sibling_result = storage
+                .as_ref()
+                .expect("storage is Some when backend is Sqlite")
+                .configuration()
+                .queue_sibling("queue.sqlite");
+
+            let sibling_cfg = match sibling_result {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!(
+                        "AutonomicGovernor: queue_sibling failed for estate {handle_id}: {:?}. \
+                         Degrading signals lane to transient in-memory backend.",
+                        e
+                    );
+                    return build_inmemory_signals_queue();
+                }
+            };
+
+            let qs = match SqliteStorage::new(sibling_cfg) {
+                Ok(qs) => Arc::new(qs),
+                Err(e) => {
+                    eprintln!(
+                        "AutonomicGovernor: SqliteStorage::new for queue.sqlite failed \
+                         (estate {handle_id}): {:?}. Degrading to in-memory.",
+                        e
+                    );
+                    return build_inmemory_signals_queue();
+                }
+            };
+
+            if let Err(e) = PersistenceKitBackend::open_schema(qs.as_ref()) {
+                eprintln!(
+                    "AutonomicGovernor: open_schema for queue.sqlite failed \
+                     (estate {handle_id}): {:?}. Degrading to in-memory.",
+                    e
+                );
+                return build_inmemory_signals_queue();
+            }
+
+            let backend = PersistenceKitBackend::new(qs);
+            let queue: QueueKit<Box<dyn QueueBackend>> =
+                QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+
+            // Owner token: PID + handle_id string, so a reused PID after a crash
+            // cannot impersonate the prior holder (mirrors Swift's instanceToken).
+            let estate_dir = std::path::Path::new(path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let owner = format!("pid-{}-{}", std::process::id(), handle_id);
+            let lease = DrainLease::new(&estate_dir, "signals", owner);
+
+            (queue, Some(lease))
+        }
+        _ => {
+            // InMemory estate, Postgres estate, or no storage: all get the
+            // transient in-memory backend. Postgres deferred per ADR-021
+            // SQLite-first sequencing.
+            build_inmemory_signals_queue()
+        }
+    }
+}
+
+/// Build a transient in-memory signals queue with no drain lease. Used for
+/// in-memory estates and as the degraded fallback when SQLite open fails.
+fn build_inmemory_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, Option<DrainLease>) {
+    let storage = Arc::new(InMemoryStorage::with_estate(signals_queue_inmemory_id()));
+    PersistenceKitBackend::open_schema(storage.as_ref())
+        .expect("InMemoryStorage open_schema cannot fail");
+    let backend = PersistenceKitBackend::new(storage);
+    let queue: QueueKit<Box<dyn QueueBackend>> =
+        QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+    (queue, None)
 }
 
 // ── AutonomicGovernor ─────────────────────────────────────────────────────────
@@ -260,20 +402,6 @@ pub struct GovernorReport {
     /// regardless of whether `topology_sink` is Some — the field reflects the
     /// cadence gate only, not sink presence (matching Swift's contract).
     pub topology_snapshot_fired: bool,
-    /// Encode queue drain BACKSTOP fired this tick. True when
-    /// `drain_encode_queue_once` was called (regardless of jobs processed — an
-    /// empty-queue drain is still a valid pump tick). False only on a drain error
-    /// (logged to stderr; the loop continues). Called on EVERY tick because
-    /// `drain_encode_queue_once` is idempotent on an empty queue (`Ok(0)`,
-    /// zero-cost) — no cadence gating is needed.
-    ///
-    /// The PRIMARY drain is now the watch-driven background worker spawned at
-    /// `mount_encode_queue` (GLK intake): the storage observer wakes it the
-    /// instant an EncodeJob is committed, so a regular capture becomes
-    /// BM25/vector searchable in near-realtime — NOT bounded by this tick. This
-    /// tick-driven drain remains as an idempotent backstop (it cannot
-    /// double-process: the maildir claim transition serialises both paths).
-    pub encode_drain_fired: bool,
     /// Pool reducer ran this tick (novel-token merge-back). True when the
     /// near-realtime gate elapsed (default every tick) — true even on an
     /// empty-pool no-op (idempotent contract), false on a reduce error (logged;
@@ -288,6 +416,11 @@ pub struct GovernorReport {
     /// lets tests/telemetry observe in-session learning. Mirrors Swift
     /// `GovernorReport.tableVersion`.
     pub table_version: u64,
+    /// True when this tick dispatched a GC sweep: probed stream drain leases and
+    /// reclaimed orphaned cur→new rows for stale streams (Mission #54). False
+    /// when the cadence has not yet elapsed (30 s default). Mirrors Swift
+    /// `GovernorReport.gcSweepFired`.
+    pub gc_sweep_fired: bool,
 }
 
 /// The resident Autonomic Governor.
@@ -306,6 +439,12 @@ pub struct GovernorReport {
 pub struct AutonomicGovernor {
     dreaming: DreamingDaemon,
     maintenance: MaintenanceDaemon,
+    /// Manifest-backed policy stores (F6 / ADR-020). The governor saves each
+    /// daemon's cycle state through these after every fired cycle so a restart
+    /// resumes the prior run's idempotency/cycle memory. Held as boxed trait
+    /// objects so the in-memory store can still be swapped in by future callers.
+    dreaming_policy_store: Box<dyn DreamingPolicyStore + Send>,
+    maintenance_policy_store: Box<dyn MaintenancePolicyStore + Send>,
     /// Policy: tick_interval_ms for computing the dreaming reward window.
     dreaming_policy: DreamingPolicy,
     /// Shared coordinator — same Arc as the HTTP transport; Mutex serializes
@@ -355,12 +494,16 @@ pub struct AutonomicGovernor {
     /// startup rather than dark for one cadence). Mirrors Swift
     /// `lastPreferenceFired`.
     last_preference_secs: Option<f64>,
-    /// Process-local dirty token of the most recent COMPUTED topology snapshot
-    /// inputs. A matching token at the next due cadence skips the math/encode/
-    /// write — the stored snapshot is still current. In-memory only: None at
-    /// every process start, never persisted, never compared across processes.
-    /// Mirrors Swift `lastTopologyInputsToken`.
-    last_topology_inputs_token: Option<TopologyInputsToken>,
+    /// Stable fingerprint of the most recent COMPUTED (or confirmed-current)
+    /// topology snapshot inputs. A matching fingerprint at the next due cadence
+    /// skips the math/encode/write — the stored snapshot is still current.
+    /// Persisted beside the snapshot and loaded once on the first post-restart
+    /// duty (F5), so the skip holds across process restarts. Mirrors Swift
+    /// `lastTopologyFingerprint`.
+    last_topology_fingerprint: Option<String>,
+    /// True once the persisted fingerprint has been loaded (one-shot, on the
+    /// first topology duty). Mirrors Swift `topologyFingerprintLoaded`.
+    topology_fingerprint_loaded: bool,
     /// Pool-reduce cadence in milliseconds (default 3 600 000 = 1 hour).
     /// Overridden by `MOOTX01_POOL_REDUCE_CADENCE_SECONDS` at construction.
     /// Mirrors Swift `poolReduceCadenceMs`.
@@ -375,6 +518,15 @@ pub struct AutonomicGovernor {
     /// Writable WordClassTable artifact the reducer merges into (sibling of the
     /// pool directory). Resolved once at construction.
     pool_table_artifact: PathBuf,
+    /// GC sweep cadence in milliseconds. Default 30 000 (30 s = 2× DrainLease TTL).
+    /// When elapsed, `tick` probes the dreaming and signals stream drain leases and
+    /// reclaims orphaned cur rows for stale streams (Mission #54 crash recovery).
+    /// Pass 0 in tests to fire every tick. Mirrors Swift `gcSweepIntervalMs`.
+    gc_sweep_cadence_ms: u64,
+    /// Epoch-seconds of the last GC sweep. None = never fired (so the first tick
+    /// sweeps immediately, catching orphaned cur rows from a prior crash before the
+    /// first drain pass). Mirrors Swift `lastGCSweepFired`.
+    last_gc_sweep_secs: Option<f64>,
     /// Standing-signal scheduler for this estate. `None` until signals are
     /// registered via `register_default_standing_signals` (production bootstrap)
     /// or `register_standing_signal` (custom signals / tests). When `None`, the
@@ -554,20 +706,35 @@ impl AutonomicGovernor {
         pool_dir: PathBuf,
         pool_table_artifact: PathBuf,
     ) -> Self {
-        // In-memory policy stores (P2). P3 replaces with manifest-backed stores
-        // so operator policy survives restarts; the seam (DreamingPolicyStore /
-        // MaintenancePolicyStore traits) is unchanged.
+        // Manifest-backed policy stores (F6 / ADR-020): policy and daemon cycle
+        // state persist to the estate manifest through the substrate's public KV
+        // surface (DrawerStore::get_meta/set_meta), so a restart resumes the prior
+        // run's state instead of re-discovering and re-proposing. The seam
+        // (DreamingPolicyStore / MaintenancePolicyStore traits) is unchanged.
         let dreaming_policy_store =
-            InMemoryDreamingPolicyStore::new(Some(DreamingPolicy::default()));
+            EstateManifestDreamingPolicyStore::new(Arc::clone(&store));
         let maintenance_policy_store =
-            InMemoryMaintenancePolicyStore::new(Some(MaintenancePolicy::default()));
+            EstateManifestMaintenancePolicyStore::new(Arc::clone(&store));
         let dreaming_policy = dreaming_policy_store.load_policy().unwrap_or_default();
         let maintenance_policy = maintenance_policy_store.load_policy().unwrap_or_default();
-        let dreaming = DreamingDaemon::new(dreaming_policy.clone());
-        let maintenance = MaintenanceDaemon::new(maintenance_policy);
+        let mut dreaming = DreamingDaemon::new(dreaming_policy.clone());
+        // Restore the learned trigger-mode bandit and the daemon's idempotency/
+        // cycle memory if a prior run persisted them (NEURONKIT_SPEC § 3.4; F6).
+        if let Some(bandit) = dreaming_policy_store.load_bandit() {
+            dreaming.set_bandit(bandit);
+        }
+        if let Some(state) = dreaming_policy_store.load_daemon_state() {
+            dreaming.restore_state(state);
+        }
+        let mut maintenance = MaintenanceDaemon::new(maintenance_policy);
+        if let Some(state) = maintenance_policy_store.load_daemon_state() {
+            maintenance.restore_state(state);
+        }
         AutonomicGovernor {
             dreaming,
             maintenance,
+            dreaming_policy_store: Box::new(dreaming_policy_store),
+            maintenance_policy_store: Box::new(maintenance_policy_store),
             dreaming_policy,
             coord,
             handle,
@@ -577,7 +744,8 @@ impl AutonomicGovernor {
             topology_sink,
             topology_cadence_ms,
             last_topology_snapshot_secs: None,
-            last_topology_inputs_token: None,
+            last_topology_fingerprint: None,
+            topology_fingerprint_loaded: false,
             // Graph-centrality producer cadence — fixed at the Swift default
             // (600 s). Not env-tunable today (no Swift env knob either); the
             // cadence field exists so tests can drive it via the per-tick gate
@@ -594,6 +762,11 @@ impl AutonomicGovernor {
             last_pool_reduce_secs: None,
             pool_dir,
             pool_table_artifact,
+            // GC sweep: 30 s (2× DrainLease TTL). First fire is immediate (None).
+            // Probes dreaming + signals lease files and reclaims orphaned cur rows
+            // for stale streams (Mission #54 crash-recovery GC).
+            gc_sweep_cadence_ms: 30_000,
+            last_gc_sweep_secs: None,
             // No standing-signal scheduler until one is registered. The
             // production bootstrap (runtime.rs, resident HTTP path) calls
             // `register_default_standing_signals` after construction; tests
@@ -605,6 +778,15 @@ impl AutonomicGovernor {
     /// Stop the loop. Safe to call from any thread; idempotent.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Override the GC sweep cadence (milliseconds). Mirrors Swift `gcSweepIntervalMs`
+    /// init parameter; `0` fires the sweep on every tick. Test-only knob — production
+    /// uses the 30 s default. Resets the last-fired marker so the next tick fires
+    /// immediately under the new cadence.
+    pub fn set_gc_sweep_cadence_ms(&mut self, cadence_ms: u64) {
+        self.gc_sweep_cadence_ms = cadence_ms;
+        self.last_gc_sweep_secs = None;
     }
 
     /// Override the graph-centrality producer cadence (milliseconds). Mirrors
@@ -638,12 +820,56 @@ impl AutonomicGovernor {
     /// `associate` emissions hit the real estate (single ownership, no duplicate
     /// state). The scheduler's `EstateHandleID` is the estate UUID string, which
     /// `CoordinatorDispatcher` validates on every dispatch.
+    ///
+    /// # Backend selection (T5, ADR-021 Decision 7)
+    ///
+    /// Mirrors Swift `SignalAPI.ensureScheduler` backend selection:
+    ///   - SQLite estate → shared encrypted `queue.sqlite` beside the estate +
+    ///     `DrainLease::new(estate_dir, "signals", owner)` for single-drainer
+    ///     coordination across processes.
+    ///   - InMemory (or no storage) estate → transient in-memory
+    ///     PersistenceKitBackend + `None` lease (single-process only).
+    ///
+    /// On SQLite-open failure the governor degrades to the transient in-memory
+    /// backend so the signals lane is always available, even if not crash-durable.
+    /// The degradation is logged to stderr so the operator can diagnose the
+    /// failure without crashing the resident.
+    ///
+    /// # Why this wiring lives in the governor, not the coordinator
+    ///
+    /// The production dispatcher `CoordinatorDispatcher` holds an
+    /// `Arc<Mutex<EstateCoordinator>>`; a coordinator-owned scheduler would close
+    /// a reference cycle. The governor already holds `coord`, `handle`, and
+    /// `store` — the exact inputs needed — making it the natural owner.
     fn ensure_scheduler(&mut self) -> &mut SerialLaneScheduler<SchedulerCoordinatorDispatcher> {
         if self.scheduler.is_none() {
             let handle_id = Uuid::from_bytes(self.handle.estate_uuid).to_string();
             let dispatcher =
                 SchedulerCoordinatorDispatcher::new(Arc::clone(&self.coord), self.handle);
-            self.scheduler = Some(SerialLaneScheduler::new(handle_id, dispatcher));
+
+            // The HLC node ID is derived from the estate UUID so HLC stamps are
+            // deterministic per estate across process restarts — the same approach
+            // Swift uses for the per-estate HLCGenerator in ensureScheduler.
+            // Assemble the first four UUID bytes big-endian into a u32, then
+            // bit-cast to i32. Byte-identical to the Swift mirror
+            // `(UInt32(b0)<<24)|(UInt32(b1)<<16)|(UInt32(b2)<<8)|UInt32(b3)`.
+            let uuid_bytes = self.handle.estate_uuid;
+            let node_id = u32::from_be_bytes([
+                uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
+            ]) as i32;
+            let hlc = HLCGenerator::new(node_id);
+
+            // Backend selection: SQLite → shared queue.sqlite + DrainLease.
+            // InMemory / no storage → transient in-memory backend + None lease.
+            let (queue, drain_lease) = build_signals_queue(&self.store, &handle_id);
+
+            self.scheduler = Some(SerialLaneScheduler::new(
+                handle_id,
+                dispatcher,
+                queue,
+                drain_lease,
+                hlc,
+            ));
         }
         self.scheduler
             .as_mut()
@@ -783,6 +1009,15 @@ impl AutonomicGovernor {
     /// Accepting `SystemTime` rather than `f64` matches the Swift port's
     /// `pump(now: Date)` contract and is the prerequisite for the Rust
     /// resident daemon to host-pump the Brain (ARIA_MCP_SPEC_v0.2 §17.1).
+    /// Return the dreaming daemon's current trigger mode. Exposed for deterministic
+    /// tests that need to observe the bandit-selected mode after a cycle and
+    /// conditionally assert on dreaming behavior. (NK-2 planned hardening: pump_on_event
+    /// is now wired — tests that assumed only pump() fires need to account for the mode.)
+    /// Mirrors Swift `AutonomicGovernor.dreamingTriggerMode()`.
+    pub fn dreaming_trigger_mode(&self) -> crate::solver_bandit::DreamingTriggerMode {
+        self.dreaming.trigger_mode
+    }
+
     ///
     /// Per-tick flow:
     ///   1. Lock coordinator; snapshot dreaming + maintenance readers.
@@ -818,52 +1053,206 @@ impl AutonomicGovernor {
         // was to release the lock before pumping, but the readers are demand-read
         // adapters (they borrow the coordinator, not an owned snapshot), so the
         // lock must be held until the readers are no longer in scope.
-        let (dreaming_fired, maintenance_fired, encode_drain_fired) = {
-            let mut coord = self.coord.lock().expect("AutonomicGovernor: coordinator lock poisoned");
+        let (dreaming_fired, maintenance_fired) = {
+            let coord = self.coord.lock().expect("AutonomicGovernor: coordinator lock poisoned");
 
-            // ── Dreaming ───────────────────────────────────────────────────────
-            let dreaming_fired;
-            match EstateDreamingReader::new(&coord, &self.handle, &since_str, &now_str) {
-                Err(e) => {
-                    eprintln!("AutonomicGovernor: dreaming reader error: {e:?}");
-                    dreaming_fired = false;
-                }
-                Ok(reader) => {
-                    let mut sink =
-                        EstateDreamingSink::new(Arc::clone(&self.store), now_i64);
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        self.dreaming
-                            .pump(now_epoch_secs, &reader, &RecallTraceRewardSource, &mut sink)
-                    })) {
-                        Ok(result) => {
-                            dreaming_fired = result.is_some();
-                            // Emit one Think event per proposal. NounType::Proposal = 4
-                            // (wire-stable, matches SubstrateTypes/NounType.swift).
-                            // The estate UUID is derived from the EstateHandle's [u8;16]
-                            // byte array — the canonical form the dreaming sink also uses.
-                            if let Some(ref cycle_report) = result {
-                                let estate_str =
-                                    Uuid::from_bytes(self.handle.estate_uuid).to_string();
-                                for proposal in &cycle_report.proposals_emitted {
-                                    report!(StatSample::event(
-                                        EventKind::Think,
-                                        4i64,
-                                        proposal.target.clone(),
-                                        estate_str.clone(),
-                                        now_epoch_secs,
-                                    ));
+            // ── Dreaming — REM dispatch table (ADR-021 Phase 6, T11) ──────────
+            // Iterate the shared REM dispatch table so all four cadences are driven
+            // uniformly. Each entry's due-check self-gates; the governor builds the
+            // appropriate reader snapshot only when the cycle is actually due.
+            //
+            // ALPHA gate: timer-due AND queue non-empty (ADR-021 Phase 4 §12.2).
+            //   Building the EstateDreamingReader snapshot (recall traces, tunnels,
+            //   drain) is expensive — skip it on ticks where the interval has not
+            //   elapsed or the queue is empty. This is the Phase 4 goal: idle ticks
+            //   cost nothing.
+            // THETA gate: cadence-gated (24 h). Builds its own reader with the 24 h
+            //   window (since = now − 86400 s). Run after ALPHA so a fresh THETA
+            //   sees the updated co-recall counts ALPHA may have bumped this tick.
+            // BETA / OMEGA: cadence-gated seams. Inert run-fns; no reader needed
+            //   (the seam advances last-run and returns None). Skip reader build.
+            let mut dreaming_fired = false;
+
+            // REM-ALPHA: read pending count once; drives both the timer path and
+            // the event path. None = queue not mounted (skip); 0 = empty (skip).
+            let alpha_pending = coord.dreaming_queue_pending_count_for_gate(&self.handle);
+
+            // Snapshot trigger mode BEFORE calling pump(). The bandit re-selects
+            // trigger_mode at the end of every cycle (run_cycle step 8), so by the
+            // time the event gate runs, self.dreaming.trigger_mode reflects the
+            // POST-pump selection. The event gate must use the PRE-pump mode — the
+            // mode that was active when this tick started — so that a .timer estate
+            // does not accidentally fire pump_on_event after the bandit transitions
+            // it to .event or .hybrid mid-tick. (Lane C NK-2 regression; ag8 witness.)
+            let trigger_mode_at_tick_start = self.dreaming.trigger_mode;
+
+            // Timer gate: drives the standard ALPHA cycle for .timer and .hybrid modes.
+            if self.dreaming.timer_due(now_epoch_secs) {
+                if alpha_pending.map_or(false, |n| n > 0) {
+                    match EstateDreamingReader::new(&coord, &self.handle, &since_str, &now_str, now_epoch_secs) {
+                        Err(e) => {
+                            eprintln!("AutonomicGovernor: REM-ALPHA reader error: {e:?}");
+                        }
+                        Ok(reader) => {
+                            let mut sink = EstateDreamingSink::new(&coord, self.handle.clone(), now_i64);
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.dreaming.pump(now_epoch_secs, &reader, &RecallTraceRewardSource, &mut sink)
+                            })) {
+                                Ok(result) => {
+                                    if result.is_some() {
+                                        dreaming_fired = true;
+                                    }
+                                    if let Some(ref cycle_report) = result {
+                                        let estate_str = Uuid::from_bytes(self.handle.estate_uuid).to_string();
+                                        for proposal in &cycle_report.proposals_emitted {
+                                            report!(StatSample::event(
+                                                EventKind::Think,
+                                                4i64,
+                                                proposal.target.clone(),
+                                                estate_str.clone(),
+                                                now_epoch_secs,
+                                            ));
+                                        }
+                                    }
+                                    if !sink.write_errors.is_empty() {
+                                        eprintln!("AutonomicGovernor: REM-ALPHA sink errors: {:?}", sink.write_errors);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("AutonomicGovernor: REM-ALPHA pump panic: {:?}", e);
                                 }
                             }
-                            if !sink.write_errors.is_empty() {
-                                eprintln!(
-                                    "AutonomicGovernor: dreaming sink write errors: {:?}",
-                                    sink.write_errors
-                                );
+                        }
+                    }
+                }
+                // else: None (not mounted) or Some(0) (empty) — no-op; idle ticks cost nothing.
+            }
+
+            // Event gate: drives pump_on_event for .event and .hybrid trigger modes
+            // on every tick, independent of the timer cadence. pump_on_event also
+            // self-gates on .timer (returns None immediately), but we guard on the
+            // PRE-pump snapshot here to prevent a mode-transition race: if the timer
+            // gate ran pump() and the bandit re-selected a non-timer mode, using
+            // self.dreaming.trigger_mode (post-pump) would incorrectly fire the event
+            // path on a tick that started as .timer mode. The snapshot ensures the
+            // event path only activates when the mode was already .event or .hybrid
+            // at tick-start, matching the Swift AutonomicGovernor pumpOnEvent contract.
+            // (NK-2/NK-6 planned hardening; Lane C regression fix)
+            if trigger_mode_at_tick_start != crate::solver_bandit::DreamingTriggerMode::Timer
+                && alpha_pending.map_or(false, |n| n > 0)
+            {
+                if let Some(observation_count) = alpha_pending {
+                    match EstateDreamingReader::new(&coord, &self.handle, &since_str, &now_str, now_epoch_secs) {
+                        Err(e) => {
+                            eprintln!("AutonomicGovernor: REM-ALPHA event reader error: {e:?}");
+                        }
+                        Ok(reader) => {
+                            let mut sink = EstateDreamingSink::new(&coord, self.handle.clone(), now_i64);
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.dreaming.pump_on_event(observation_count as i64, now_epoch_secs, &reader, &RecallTraceRewardSource, &mut sink)
+                            })) {
+                                Ok(result) => {
+                                    if result.is_some() {
+                                        dreaming_fired = true;
+                                    }
+                                    if !sink.write_errors.is_empty() {
+                                        eprintln!("AutonomicGovernor: REM-ALPHA event sink errors: {:?}", sink.write_errors);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("AutonomicGovernor: REM-ALPHA pump_on_event panic: {:?}", e);
+                                }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("AutonomicGovernor: dreaming pump panic: {:?}", e);
-                            dreaming_fired = false;
+                    }
+                }
+            }
+
+            // REM-THETA: daily consolidation — cadence-gated, 24 h window.
+            if self.dreaming.theta_due(now_epoch_secs) {
+                // Build a fresh reader with the 24 h window (distinct from the 30 s
+                // ALPHA window). The `since_str` for THETA is now − 86400 s.
+                let theta_since_i64 = (now_i64 - DreamingDaemon::THETA_CADENCE_SECS as i64).max(0);
+                let theta_since_str = epoch_secs_to_iso8601(theta_since_i64);
+                match EstateDreamingReader::new(&coord, &self.handle, &theta_since_str, &now_str, now_epoch_secs) {
+                    Err(e) => {
+                        eprintln!("AutonomicGovernor: REM-THETA reader error: {e:?}");
+                    }
+                    Ok(reader) => {
+                        let mut sink = EstateDreamingSink::new(&coord, self.handle.clone(), now_i64);
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.dreaming.run_theta_cycle(now_epoch_secs, &reader, &mut sink)
+                        })) {
+                            Ok(result) => {
+                                if result.is_some() {
+                                    dreaming_fired = true;
+                                }
+                                if !sink.write_errors.is_empty() {
+                                    eprintln!("AutonomicGovernor: REM-THETA sink errors: {:?}", sink.write_errors);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("AutonomicGovernor: REM-THETA cycle panic: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // REM-BETA: weekly prune/GC — T12 seam (inert; no reader needed).
+            if self.dreaming.beta_due(now_epoch_secs) {
+                self.dreaming.run_beta_cycle(now_epoch_secs);
+            }
+
+            // REM-OMEGA: biweekly retire — T13 / ADR-021 Phase 7.
+            // Reader built with the full OMEGA window (14 days) so dreamed-active
+            // tunnels and recall-trace traces for reinforcement-checking are
+            // snapshotted at the correct window boundary. Pattern mirrors THETA.
+            if self.dreaming.omega_due(now_epoch_secs) {
+                let omega_since_i64 =
+                    (now_i64 - DreamingDaemon::OMEGA_CADENCE_SECS as i64).max(0);
+                let omega_since_str = epoch_secs_to_iso8601(omega_since_i64);
+                match EstateDreamingReader::new(
+                    &coord,
+                    &self.handle,
+                    &omega_since_str,
+                    &now_str,
+                    now_epoch_secs,
+                ) {
+                    Err(e) => {
+                        eprintln!(
+                            "AutonomicGovernor: REM-OMEGA reader error: {e:?}"
+                        );
+                    }
+                    Ok(reader) => {
+                        let mut sink =
+                            EstateDreamingSink::new(&coord, self.handle.clone(), now_i64);
+                        match std::panic::catch_unwind(
+                            std::panic::AssertUnwindSafe(|| {
+                                self.dreaming.run_omega_cycle(
+                                    now_epoch_secs,
+                                    &reader,
+                                    &mut sink,
+                                )
+                            }),
+                        ) {
+                            Ok(result) => {
+                                if result.is_some() {
+                                    dreaming_fired = true;
+                                }
+                                if !sink.write_errors.is_empty() {
+                                    eprintln!(
+                                        "AutonomicGovernor: REM-OMEGA sink errors: {:?}",
+                                        sink.write_errors
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "AutonomicGovernor: REM-OMEGA cycle panic: {:?}",
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -872,8 +1261,13 @@ impl AutonomicGovernor {
             // ── Maintenance ────────────────────────────────────────────────────
             // EstateMaintenanceReader::new returns Self directly (not Result) —
             // snapshot construction is infallible; all reads happen in scan().
+            // Built ONLY when its interval is due (same per-tick-snapshot waste as
+            // dreaming; maintenance fires every 5 min while the governor ticks
+            // sub-second).
             let maintenance_fired;
-            {
+            if !self.maintenance.due(now_epoch_secs) {
+                maintenance_fired = false;
+            } else {
                 let reader = EstateMaintenanceReader::new(&coord, &self.handle, now_i64);
                 let mut sink =
                     EstateMaintenanceSink::new(Arc::clone(&self.store), now_i64);
@@ -896,43 +1290,48 @@ impl AutonomicGovernor {
                 }
             }
 
-            // ── Encode queue drain (P4 parity) ────────────────────────────────
+            // The encode queue is drained by the Corpus's OWN background worker
+            // now (CorpusKit owns the ingest pipeline — corpus_ingest_queue.rs
+            // spawns a foreground poll worker at mount_ingest_queue). The governor
+            // no longer pumps the encode drain: it is autonomous and runs in
+            // near-realtime independent of this tick. This also restores parity
+            // with the Swift governor, whose tick reports only dreaming +
+            // maintenance (the Swift Corpus drain worker likewise runs on its own).
             //
-            // Drains the estate's encode queue once per tick, ingesting any
-            // pending EncodeJobs into the Corpus (BM25 + vector indexed). This
-            // closes the Rust production gap: `capture_with_mode(Regular)`
-            // enqueues a job, and the governor tick is the production consumer
-            // that drives `drain_encode_queue_once` to process it.
-            //
-            // Swift equivalent: the background drain Task spawned at
-            // `mountEncodeQueue` (EncodeIntake.swift P4, 15 ms poll cadence).
-            // The Rust port has no background thread so the governor tick is the
-            // correct pump site — the same Arc<Mutex<EstateCoordinator>> the HTTP
-            // transport uses, serialised by the Mutex already held here.
-            //
-            // Called on EVERY tick: `drain_encode_queue_once` is idempotent on an
-            // empty queue (returns `Ok(0)`, no allocation, no queue read if the
-            // queue is not mounted for this estate). No cadence gating needed.
-            //
-            // Error policy (mirrors Swift runEncodeDrainLoop): a drain error is
-            // logged to stderr and the loop continues — the governor must never
-            // crash the daemon. The failed job was already replied `Blocked` by
-            // `drain_encode_queue_once` so it cannot wedge the queue. The drawer
-            // row is already durably stored regardless.
-            let encode_drain_fired = match coord.drain_encode_queue_once(&self.handle) {
-                Ok(_count) => true,
-                Err(e) => {
-                    eprintln!(
-                        "AutonomicGovernor: encode drain error for estate {:?}: {e:?}",
-                        uuid::Uuid::from_bytes(self.handle.estate_uuid)
-                    );
-                    false
-                }
-            };
-
             // Coordinator lock released here (end of block).
-            (dreaming_fired, maintenance_fired, encode_drain_fired)
+            (dreaming_fired, maintenance_fired)
         };
+
+        // ── Persist daemon cycle state (F6 / ADR-020) ──────────────────────
+        // After the coordinator lock is released, persist each daemon's
+        // idempotency/cycle memory IF any dreaming cycle ran this tick, so a
+        // restart resumes from here. "Ran" includes ALPHA proposals emitted
+        // (dreaming_fired=true), THETA/BETA/OMEGA which mutate last-run timestamps
+        // even when returning None (no proposals). The manifest-backed store writes
+        // through the DrawerStore's own storage mutex (independent of the coord
+        // lock); the default in-memory store no-ops.
+        //
+        // `dreaming_any_ran` is true when ANY table entry ran this tick. This is
+        // broader than `dreaming_fired` (ALPHA-only) because THETA/BETA/OMEGA
+        // advance their last-run timestamps regardless of whether proposals were
+        // emitted — those timestamps must be persisted immediately so cadence gates
+        // are correct after a restart.
+        let dreaming_any_ran = dreaming_fired
+            || self.dreaming.last_run_epoch_secs("theta") == Some(now_epoch_secs)
+            || self.dreaming.last_run_epoch_secs("beta") == Some(now_epoch_secs)
+            || self.dreaming.last_run_epoch_secs("omega") == Some(now_epoch_secs);
+        if dreaming_any_ran {
+            // Persist the re-selected bandit posterior + cycle state (the cycle
+            // observed reward and re-selected the trigger mode; NEURONKIT_SPEC § 3.4).
+            self.dreaming_policy_store
+                .save_bandit(self.dreaming.current_bandit());
+            self.dreaming_policy_store
+                .save_daemon_state(self.dreaming.daemon_state());
+        }
+        if maintenance_fired {
+            self.maintenance_policy_store
+                .save_daemon_state(self.maintenance.daemon_state());
+        }
 
         // ── Standing signals ───────────────────────────────────────────────
         //
@@ -986,12 +1385,23 @@ impl AutonomicGovernor {
                 // transient error never silently freezes topology.
                 if sink.is_monitoring_enabled() {
                     let estate_id = Uuid::from_bytes(self.handle.estate_uuid).to_string();
-                    self.last_topology_inputs_token = topology_snapshot_duty(
+                    // F5: seed the comparison fingerprint, loading the persisted
+                    // one once so the first post-restart duty skips the recompute
+                    // when the estate is unchanged. Disjoint-field borrow: `sink`
+                    // borrows `self.topology_sink` while these mutate other fields.
+                    if !self.topology_fingerprint_loaded {
+                        self.topology_fingerprint_loaded = true;
+                        if self.last_topology_fingerprint.is_none() {
+                            self.last_topology_fingerprint =
+                                sink.load_topology_fingerprint(&estate_id);
+                        }
+                    }
+                    self.last_topology_fingerprint = topology_snapshot_duty(
                         &estate_id,
                         now_epoch_secs,
                         sink.as_ref(),
                         self.store.as_ref(),
-                        self.last_topology_inputs_token.take(),
+                        self.last_topology_fingerprint.take(),
                     );
                 }
             }
@@ -1109,41 +1519,91 @@ impl AutonomicGovernor {
         let pool_elapsed_ms = self.last_pool_reduce_secs.map(|last| {
             ((now_epoch_secs - last) * 1000.0) as u64
         });
-        let pool_reduce_fired = match pool_elapsed_ms {
-            None => true,                                       // never fired
-            Some(ms) => ms >= self.pool_reduce_cadence_ms,      // cadence elapsed
+        let pool_cadence_elapsed = match pool_elapsed_ms {
+            None => true,                                        // never fired
+            Some(ms) => ms >= self.pool_reduce_cadence_ms,       // cadence elapsed
         };
+        // pool_reduce_fired reflects actual firing (false if deferred by back-pressure).
+        // Mirrors Swift where poolReduceFired starts false and is set true only when
+        // the reduce proceeds.
+        let mut pool_reduce_fired = false;
         let mut table_swapped = false;
-        if pool_reduce_fired {
-            self.last_pool_reduce_secs = Some(now_epoch_secs);
-            // The reducer's `now` is the calendar date (YYYY-MM-DD) for the
-            // artifact's snapshot_date. Slice the date prefix off the full
-            // ISO8601 instant (`YYYY-MM-DDTHH:MM:SSZ`).
-            let now_date = &now_str[..now_str.len().min(10)];
-            match lattice_lib::pool_reduce(&self.pool_dir, &self.pool_table_artifact, now_date) {
-                Ok(result) => {
-                    if !result.is_noop() {
-                        eprintln!(
-                            "AutonomicGovernor: pool reduce merged {} nouns + {} verbs (consumed {}, quarantined {})",
-                            result.nouns_added, result.verbs_added, result.consumed, result.quarantined
-                        );
-                        // Live atomic swap at the safe point: adopt the
-                        // just-merged table in-session. Only on a non-noop reduce
-                        // — a noop wrote nothing new. Re-resolves writable-first
-                        // from the same artifact path the reducer wrote.
-                        if let Some(v) = lattice_lib::swap_global_table_from_precedence(
-                            &self.pool_table_artifact,
-                        ) {
-                            table_swapped = true;
-                            eprintln!("AutonomicGovernor: live word-class table swap → version {v}");
+        if pool_cadence_elapsed {
+            // Planned hardening: if the pool directory already holds more files
+            // than POOL_REDUCE_FILE_CAP, the drainer is falling behind — defer
+            // this tick to shed load. Not advancing last_pool_reduce_secs causes
+            // the next tick to retry immediately (near-realtime back-pressure;
+            // no file is dropped). Parity: mirrors poolReduceFileCap in
+            // AutonomicGovernor.swift.
+            let pool_file_count = std::fs::read_dir(&self.pool_dir)
+                .map(|rd| rd.count())
+                .unwrap_or(0);
+            if pool_file_count > POOL_REDUCE_FILE_CAP {
+                eprintln!(
+                    "AutonomicGovernor: pool has {} files (cap {}); deferring reduce (planned hardening)",
+                    pool_file_count, POOL_REDUCE_FILE_CAP
+                );
+                // Do NOT advance last_pool_reduce_secs — retry next tick.
+            } else {
+                self.last_pool_reduce_secs = Some(now_epoch_secs);
+                pool_reduce_fired = true;
+                // The reducer's `now` is the calendar date (YYYY-MM-DD) for the
+                // artifact's snapshot_date. Slice the date prefix off the full
+                // ISO8601 instant (`YYYY-MM-DDTHH:MM:SSZ`).
+                let now_date = &now_str[..now_str.len().min(10)];
+                match lattice_lib::pool_reduce(&self.pool_dir, &self.pool_table_artifact, now_date) {
+                    Ok(result) => {
+                        if !result.is_noop() {
+                            eprintln!(
+                                "AutonomicGovernor: pool reduce merged {} nouns + {} verbs (consumed {}, quarantined {})",
+                                result.nouns_added, result.verbs_added, result.consumed, result.quarantined
+                            );
+                            // Live atomic swap at the safe point: adopt the
+                            // just-merged table in-session. Only on a non-noop reduce
+                            // — a noop wrote nothing new. Re-resolves writable-first
+                            // from the same artifact path the reducer wrote.
+                            if let Some(v) = lattice_lib::swap_global_table_from_precedence(
+                                &self.pool_table_artifact,
+                            ) {
+                                table_swapped = true;
+                                eprintln!("AutonomicGovernor: live word-class table swap → version {v}");
+                            }
                         }
                     }
+                    Err(e) => {
+                        // A missing/unwritable table artifact is the expected state
+                        // until a writable table is provisioned; log, never crash.
+                        eprintln!("AutonomicGovernor: pool reduce skipped: {e:?}");
+                    }
                 }
-                Err(e) => {
-                    // A missing/unwritable table artifact is the expected state
-                    // until a writable table is provisioned; log, never crash.
-                    eprintln!("AutonomicGovernor: pool reduce skipped: {e:?}");
-                }
+            }
+        }
+
+        // GC sweep (Mission #54): reclaim orphaned in-flight ("cur") queue rows for
+        // streams whose drainer has died without the daemon restarting. Probes the
+        // dreaming DrainLease; if it is stale (no live holder), reclaims dreaming cur
+        // rows. Cadence: 30 s (2× DrainLease TTL = 15 s). First tick fires immediately
+        // (last_gc_sweep_secs None) to catch jobs left by a previous crashed session.
+        //
+        // The "encode" stream is NOT swept here — the encode drainer is a background
+        // thread in the same process (CorpusKit's run_ingest_drain_loop). When it dies,
+        // the process restarts entirely, triggering the on-mount reclaim there.
+        // The "dreaming" stream is swept here: `mootx01 dream` is a separate process.
+        //
+        // This is the Rust twin of Swift `AutonomicGovernor.sweepStaleInFlightJobs`
+        // (NeuronKit calls `kit.sweepStaleInFlightJobs` in Swift; here we call the
+        // coordinator directly since NeuronKit owns the coordinator reference).
+        let gc_elapsed_ms = self.last_gc_sweep_secs.map(|last| {
+            ((now_epoch_secs - last) * 1000.0) as u64
+        });
+        let gc_sweep_fired = match gc_elapsed_ms {
+            None => true,
+            Some(ms) => ms >= self.gc_sweep_cadence_ms,
+        };
+        if gc_sweep_fired {
+            self.last_gc_sweep_secs = Some(now_epoch_secs);
+            if let Ok(coord) = self.coord.lock() {
+                coord.sweep_stale_in_flight_jobs(&self.handle, now_epoch_secs);
             }
         }
 
@@ -1154,10 +1614,10 @@ impl AutonomicGovernor {
             graph_centrality_fired,
             preference_fired,
             topology_snapshot_fired,
-            encode_drain_fired,
             pool_reduce_fired,
             table_swapped,
             table_version: lattice_lib::table_version(),
+            gc_sweep_fired,
         }
     }
 }
@@ -1218,18 +1678,13 @@ fn graph_centrality_duty(
     // filter the Swift `recallKGFacts` applies, so both ports score the same
     // fact set).
     //
-    // Charter drawers (room == "_charter") are wing metadata seeded at
-    // provision time, not user content. Excluding them here keeps the
-    // centrality graph focused on user-content nodes and their edges —
-    // charter drawers are standalone with no tunnels and would inflate
-    // node count while adding no structural information. Mirrors the
-    // RECALL-HYGIENE charter exclusion in estate_verbs.rs liveRows().
-    let drawers = coord
+    // Hint drawers (AI_Charter_Hint room, added_by == "estate-provision") are
+    // now normal drawers. They are included in the centrality graph — they may
+    // have tunnels as any other drawer, and including them keeps the graph
+    // representative of the full estate content.
+    let all_drawers = coord
         .all_drawers(handle)
-        .map_err(|e| format!("all_drawers failed: {e:?}"))?
-        .into_iter()
-        .filter(|d| d.room != locus_kit::default_wings::CHARTER_ROOM)
-        .collect::<Vec<_>>();
+        .map_err(|e| format!("all_drawers failed: {e:?}"))?;
     let tunnels = coord
         .all_tunnels(handle)
         .map_err(|e| format!("all_tunnels failed: {e:?}"))?;
@@ -1237,7 +1692,30 @@ fn graph_centrality_duty(
         .recall_kg_facts(handle)
         .map_err(|e| format!("recall_kg_facts failed: {e:?}"))?;
 
-    let graph = build_centrality_graph(&drawers, &tunnels, &facts);
+    // Planned hardening: cap to GRAPH_CENTRALITY_SCAN_NODE_CAP live drawers.
+    // Drawers beyond the cap score 0.0 (spec C-16 — correct, identical to
+    // "no cache registered"). Sort by id for determinism, matching the Swift
+    // port's sorted() order so both ports cap the same subset from the same
+    // estate state. Parity: mirrors graphCentralityScanNodeCap in
+    // AutonomicGovernor.swift.
+    let mut live_drawers: Vec<_> = all_drawers
+        .iter()
+        .filter(|d| d.tombstoned_at.is_none())
+        .cloned()
+        .collect();
+    live_drawers.sort_by(|a, b| a.id.cmp(&b.id));
+    if live_drawers.len() > GRAPH_CENTRALITY_SCAN_NODE_CAP {
+        eprintln!(
+            "AutonomicGovernor: graph-centrality scan: {} live drawers exceeds cap {}; \
+             scoring first {} (planned hardening)",
+            live_drawers.len(),
+            GRAPH_CENTRALITY_SCAN_NODE_CAP,
+            GRAPH_CENTRALITY_SCAN_NODE_CAP
+        );
+        live_drawers.truncate(GRAPH_CENTRALITY_SCAN_NODE_CAP);
+    }
+
+    let graph = build_centrality_graph(&live_drawers, &tunnels, &facts);
     let scores = compute_centrality_scores(&graph);
 
     coord.register_graph_cache(handle, Arc::new(GraphCentralityCache::new(scores)));
@@ -1314,21 +1792,18 @@ fn preference_duty(
 
 /// A cheap, order-independent CHANGE-DETECTION token over the topology duty's
 /// INPUTS, which skips recomputation when the estate is unchanged between
-/// cadences. This is a PROCESS-LOCAL DIRTY TOKEN, not a stable fingerprint: it
-/// is in-memory governor state, NEVER persisted to storage, and NEVER compared
-/// across processes. It is built from `DefaultHasher` (process-local; the
-/// hasher's keys/output are not stable across builds or processes), so two
-/// processes will produce different tokens for identical estates — that is
-/// correct and sufficient, because the only comparison ever made is
-/// `previous == current` WITHIN a single running governor. Do NOT treat this as
-/// cross-process evidence and do NOT swap in a substrate Fingerprint256/SimHash
-/// primitive: that would over-engineer an in-memory change-detector whose
-/// entire lifetime is one process.
+/// cadences. The token reduces to a STABLE `fingerprint` (process-independent)
+/// that IS persisted beside the snapshot (F5) and compared across restarts: the
+/// duty's dirty-check compares the freshly-computed fingerprint against the one
+/// loaded from disk, so an unchanged estate skips the full topology read on the
+/// first post-restart duty.
 ///
 /// Built from already-fetched rows only — counts, maximum ingest/event
 /// instants, dead counts, and an order-independent inputs digest (wrapping sum
-/// of per-drawer id+udc hashes, catching re-anchoring that changes neither
-/// counts nor timestamps). Mirrors Swift `TopologyInputsToken`.
+/// of per-drawer FNV-1a(id+udc) hashes, catching re-anchoring that changes
+/// neither counts nor timestamps). FNV-1a (not `DefaultHasher`) keeps the digest
+/// identical across process runs so the fingerprint round-trips through disk.
+/// Mirrors Swift `TopologyInputsToken`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopologyInputsToken {
     drawer_count: usize,
@@ -1338,9 +1813,9 @@ pub struct TopologyInputsToken {
     dead_tunnel_count: usize,
     max_filed_at: Option<i64>,
     max_event_time: Option<i64>,
-    /// Order-independent wrapping sum of per-drawer id+udc `DefaultHasher`
-    /// outputs. Process-local — only ever compared to another token from the
-    /// SAME process. Never persisted.
+    /// Order-independent wrapping sum of per-drawer FNV-1a(id+udc) hashes.
+    /// STABLE across process launches (FNV, not `DefaultHasher`) so the
+    /// `fingerprint` persists and compares across restarts.
     inputs_digest: u64,
 }
 
@@ -1350,20 +1825,17 @@ impl TopologyInputsToken {
         tunnels: &[locus_kit::tunnel::Tunnel],
         fact_count: usize,
     ) -> Self {
-        use std::hash::{Hash, Hasher};
         let dead_drawer_count = drawers.iter().filter(|d| d.tombstoned_at.is_some()).count();
         let dead_tunnel_count = tunnels.iter().filter(|t| t.tombstoned_at.is_some()).count();
         let max_filed_at = drawers.iter().map(|d| d.filed_at)
             .chain(tunnels.iter().map(|t| t.filed_at))
             .max();
         let max_event_time = drawers.iter().map(|d| d.event_time).max();
-        // Wrapping add keeps the digest order-independent across query order.
+        // Overflow-add of per-drawer STABLE hashes keeps the digest
+        // order-independent across query order AND identical across process runs.
         let mut digest: u64 = 0;
         for d in drawers {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            d.id.hash(&mut h);
-            d.udc_code.hash(&mut h);
-            digest = digest.wrapping_add(h.finish());
+            digest = digest.wrapping_add(Self::fnv1a(&format!("{}\u{1}{}", d.id, d.udc_code)));
         }
         TopologyInputsToken {
             drawer_count: drawers.len(),
@@ -1376,6 +1848,38 @@ impl TopologyInputsToken {
             inputs_digest: digest,
         }
     }
+
+    /// FNV-1a 64-bit over a string's UTF-8 — a small, stable, process-independent
+    /// hash (no external dependency, no `DefaultHasher` salt). Mirrors Swift
+    /// `TopologyInputsToken.fnv1a`.
+    fn fnv1a(s: &str) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in s.bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// Stable, persistable fingerprint of these inputs. Two tokens are equal iff
+    /// their fingerprints are equal, so the duty's dirty-check compares
+    /// fingerprints — and the same comparison holds across process restarts when
+    /// one side is loaded from disk. Mirrors Swift `TopologyInputsToken.fingerprint`.
+    ///
+    /// `max_filed_at` / `max_event_time` are epoch instants. Swift formats the
+    /// missing case as "-" and present values via `String(Date.timeIntervalSince1970)`;
+    /// the Rust leg never cross-compares fingerprint strings with Swift (separate
+    /// estates), so the exact present-value formatting need only be stable within
+    /// this port.
+    pub fn fingerprint(&self) -> String {
+        let filed = self.max_filed_at.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+        let event = self.max_event_time.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}:{}",
+            self.drawer_count, self.tunnel_count, self.fact_count,
+            self.dead_drawer_count, self.dead_tunnel_count, filed, event, self.inputs_digest
+        )
+    }
 }
 
 /// Compute and write a topology snapshot to the stats store.
@@ -1384,13 +1888,14 @@ impl TopologyInputsToken {
 /// reads → descriptor mapping → `neuron_kit::topology_analysis::graph_topology`
 /// (Louvain + centrality, full analysis) → wire-shape JSON → snapshot write.
 ///
-/// Dirty check: the inputs are reduced to a process-local token BEFORE the
-/// math; an unchanged token returns without touching the store, so
-/// `generatedTs` keeps meaning "when the content last changed". Returns the
-/// token to hold as in-memory governor state (`previous` is passed back
-/// unchanged on read failure so a transient error does not force a spurious
-/// recompute next cadence). The token is NEVER written to the store — only the
-/// JSON snapshot payload is.
+/// Dirty check: the inputs are reduced to a STABLE fingerprint BEFORE the math;
+/// a fingerprint matching `previous_fingerprint` returns without touching the
+/// store, so `generatedTs` keeps meaning "when the content last changed". The
+/// fingerprint persists beside the snapshot (F5), so the skip also holds across
+/// a restart when `previous_fingerprint` was loaded from disk. Returns the
+/// fingerprint to hold as governor state (`previous_fingerprint` is passed back
+/// unchanged on read/write failure so a transient error does not force a
+/// spurious recompute next cadence).
 ///
 /// Errors are logged to stderr; the governor loop continues on failure.
 fn topology_snapshot_duty(
@@ -1398,8 +1903,8 @@ fn topology_snapshot_duty(
     now_epoch_secs: f64,
     sink: &dyn GovernorTopologySink,
     estate: &dyn DrawerStore,
-    previous: Option<TopologyInputsToken>,
-) -> Option<TopologyInputsToken> {
+    previous_fingerprint: Option<String>,
+) -> Option<String> {
     use crate::topology_analysis::{
         graph_topology, TopologyDrawerInput, TopologyFactInput, TopologyTunnelInput,
     };
@@ -1418,13 +1923,14 @@ fn topology_snapshot_duty(
                     eprintln!("AutonomicGovernor: topology {name} read failed for estate {estate_id}: {e}");
                 }
             }
-            return previous;
+            return previous_fingerprint;
         }
     };
 
     let token = TopologyInputsToken::new(&drawers, &tunnels, facts.len());
-    if previous.as_ref() == Some(&token) {
-        return previous;
+    let fingerprint = token.fingerprint();
+    if previous_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+        return previous_fingerprint;
     }
 
     // Descriptor mapping. The Rust store round-trips its tombstone stamp, so
@@ -1500,14 +2006,14 @@ fn topology_snapshot_duty(
         .unwrap_or_else(|_| format!(
             r#"{{"nodes":[],"edges":[],"structurePending":true,"communities":[],"generatedTs":"{generated_ts}"}}"#));
 
-    if let Err(e) = sink.write_topology_snapshot(estate_id, now_epoch_secs, &payload) {
+    if let Err(e) = sink.write_topology_snapshot(estate_id, now_epoch_secs, &payload, &fingerprint) {
         eprintln!(
             "AutonomicGovernor: topology snapshot write failed for estate {estate_id}: {e}"
         );
-        // Write failed: return `previous` so the next cadence recomputes.
-        return previous;
+        // Write failed: return the previous fingerprint so the next cadence recomputes.
+        return previous_fingerprint;
     }
-    Some(token)
+    Some(fingerprint)
 }
 
 // ── Env config ────────────────────────────────────────────────────────────────

@@ -182,17 +182,12 @@ the same MCP server as the Swift build on macOS (CI smoke-tests `mootx01 serve` 
 mirrors the macOS walkthrough above — only the install command, the binary set, and the
 background-service mechanism differ.
 
-**Install the binary.**
+**Install from source.**
 
-- *Linux:* `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh`
-  downloads the Linux `mootx01`, places it at `~/.mootx01/bin/mootx01`, and symlinks
-  `~/.local/bin/mootx01` — the same layout as macOS.
-- *Windows:* run the PowerShell installer:
-  `[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"`.
-  The `Tls12` prefix is required on Windows PowerShell 5.1 (the default shell), which otherwise
-  negotiates TLS 1.0/1.1 and is refused by GitHub's CDN.
-  `install.ps1` places `mootx01.exe` + `moot-mgr.exe` and adds them to your PATH — nothing more.
-  Client wiring is the `mootx01 install` step below, exactly as on macOS and Linux.
+- *Linux:* build the checked-out Rust source with `cd apps/aria-mcp-server/rust && cargo build --release`, then put the resulting `mootx01` binary on your PATH.
+- *Windows:* build from the checked-out Rust source, then put `mootx01.exe` and `moot-mgr.exe` on your PATH.
+
+Do not execute mutable remote install scripts with `sh`, `bash`, PowerShell `iex`, or equivalent shell-evaluation primitives. Use prebuilt binaries only when they are pinned to a release artifact and authenticated before any installer code runs. Client wiring is the `mootx01 install` step below, exactly as on macOS and Linux.
 
 **Wire your AI clients.** `mootx01 install` detects and wires your clients from one cross-platform
 roster — the Rust CLI writes the identical MCP entries on every platform — and registers the

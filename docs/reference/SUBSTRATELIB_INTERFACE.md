@@ -1,8 +1,8 @@
 ---
 title: SubstrateLib Interface
-version: 1.0.0
+version: 1.2.0
 status: active
-date: 2026-06-14
+date: 2026-06-28
 description: Public API surface for SubstrateLib in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -19,7 +19,7 @@ relates_to:
 
 **Swift:** `packages/libs/SubstrateLib/`
 
-- `Sources/SubstrateLib/` — 4 files:
+- `Sources/SubstrateLib/` — 7 files:
   - `Verbs.swift` — the stateful `Substrate` verb driver +
     `SubstrateError` + nested `MutationKind`. Verb methods carry
     `ts: Double = 0.0` for telemetry; default `0.0` preserves
@@ -31,6 +31,12 @@ relates_to:
     `VocabularyError`, `GateViolation`.
   - `SubstrateLibTelemetry.swift` — `SubstrateLibMetric` constants
     and `@inline(__always)` emit helpers.
+  - `MerkleHash.swift` — `MerkleHash` enum (leaf/interior/tombstone
+    hash pipeline), `MerkleVectorInput` struct. ADR-017 §16.
+  - `KeyedCommitment.swift` — `KeyedCommitment` enum (HMAC-SHA256
+    commitment), `KeyedCommitmentValue` struct. ADR-017 §17.
+  - `KeyedCommitmentAudit.swift` — `KeyedCommitmentAuditEntry`
+    struct, `CommitmentAuditLog` G-Set CRDT. ADR-017 §17.
 - `Tests/SubstrateLibTests/` — unit + conformance + telemetry tests
   (`SubstrateLibTelemetryTests.swift`).
 - `Tests/SubstrateLibConformanceTests/` — bilingual conformance gate.
@@ -50,6 +56,12 @@ relates_to:
   `Vocabulary`, `Column`, `GateViolation`, `freeze`.
 - `src/substrate_lib_telemetry.rs` — `metric` module (10 `&str`
   metric name constants) and `#[inline(always)]` emit helpers.
+- `src/merkle_hash.rs` — `MerkleVectorInput` struct, `leaf()`,
+  `interior()`, `tombstone()`, `canonical_leaf_bytes()` functions.
+  ADR-017 §16.
+- `src/keyed_commitment.rs` — `KeyedCommitmentValue` struct,
+  `commit()` function, `KeyedCommitmentAuditEntry` struct,
+  `CommitmentAuditLog` struct. ADR-017 §17.
 - `tests/` — conformance vectors + telemetry integration tests
   (`substrate_lib_telemetry_tests.rs`).
 - `Cargo.toml` — depends on `substrate-types`, `substrate-kernel`,
@@ -373,6 +385,136 @@ Off-path cost when monitoring disabled: one `Atomic<Bool>.load(.acquiring)` /
 `AtomicBool::load(Acquire)` + branch. No `StatSample` constructed, no lock,
 no allocation.
 
+### `MerkleHash`, `MerkleVectorInput` — Merkle content-integrity hash pipeline
+
+Domain-separated SHA-256 hash pipeline per ADR-017 §16.
+
+**Swift:**
+
+```swift
+public struct MerkleVectorInput: Sendable {
+    public let modelID: String
+    public let vectorIndex: UInt32
+    public let floats: [Float]
+    public init(modelID: String, vectorIndex: UInt32, floats: [Float])
+}
+
+public enum MerkleHash {
+    public static func leaf(drawerId: UUID, content: [UInt8],
+                            vectors: [MerkleVectorInput]) -> ContentHash
+    public static func interior(childHashes: [(UUID, ContentHash)]) -> MerkleRoot
+    public static func tombstone(drawerId: UUID) -> ContentHash
+}
+```
+
+**Rust** (`src/merkle_hash.rs`, module free functions):
+
+```rust
+pub struct MerkleVectorInput {
+    pub model_id: String,
+    pub vector_index: u32,
+    pub floats: Vec<f32>,
+}
+
+pub fn leaf(drawer_id: &[u8; 16], content: &[u8],
+            vectors: &[MerkleVectorInput]) -> ContentHash;
+pub fn interior(child_hashes: &[([u8; 16], ContentHash)]) -> MerkleRoot;
+pub fn tombstone(drawer_id: &[u8; 16]) -> ContentHash;
+pub(crate) fn canonical_leaf_bytes(drawer_id: &[u8; 16], content: &[u8],
+    vectors: &[MerkleVectorInput], domain: u8) -> Vec<u8>;
+```
+
+`MerkleVectorInput` is a lightweight carrier for embedding vectors
+at SubstrateLib's layer (SubstrateLib cannot import VectorKit — that
+would invert the dependency graph). `canonical_leaf_bytes` is
+`pub(crate)` / `internal` because `keyed_commitment` reuses it with
+a different domain tag. The v2 canonical leaf encoding writes vector
+identity (model_id + vector_index) into the preimage before the float
+payload — see ADR-017 §16 v2 for the complete per-vector byte layout.
+
+### `KeyedCommitment`, `KeyedCommitmentValue` — keyed-commitment API
+
+HMAC-SHA256 commitment over canonical leaf bytes per ADR-017 §17.
+
+**Swift:**
+
+```swift
+public struct KeyedCommitmentValue: Hashable, Sendable {
+    public let hmacBytes: [UInt8]   // 32-byte HMAC-SHA256 output
+    public let keyVersion: Int
+    public var hexString: String { get }
+    public init(hmacBytes: [UInt8], keyVersion: Int)
+}
+
+public enum KeyedCommitment {
+    public static func commit(key: [UInt8], keyVersion: Int,
+                              drawerId: UUID, content: [UInt8],
+                              vectors: [MerkleVectorInput]) -> KeyedCommitmentValue
+}
+```
+
+**Rust** (`src/keyed_commitment.rs`):
+
+```rust
+pub struct KeyedCommitmentValue {
+    pub hmac_bytes: [u8; 32],
+    pub key_version: i64,
+}
+
+pub fn commit(key: &[u8], key_version: i64, drawer_id: &[u8; 16],
+              content: &[u8], vectors: &[MerkleVectorInput]) -> KeyedCommitmentValue;
+```
+
+### `KeyedCommitmentAuditEntry`, `CommitmentAuditLog` — expunge provenance audit
+
+G-Set CRDT for keyed-commitment audit entries per ADR-017 §17.
+
+**Swift:**
+
+```swift
+public struct KeyedCommitmentAuditEntry: Hashable, Sendable {
+    public let id: [UInt8]          // 32-byte deterministic content hash
+    public let drawerId: UUID
+    public let commitment: KeyedCommitmentValue
+    public let tombstoneHLC: HLC
+    public let reason: String
+    public init(drawerId: UUID, commitment: KeyedCommitmentValue,
+                tombstoneHLC: HLC, reason: String)
+}
+
+public struct CommitmentAuditLog: Sendable {
+    public init()
+    public mutating func add(_ entry: KeyedCommitmentAuditEntry)
+    public mutating func merge(_ other: CommitmentAuditLog)
+    public var count: Int { get }
+    public var orderedEntries: [KeyedCommitmentAuditEntry] { get }
+    public func entries(forDrawer drawerId: UUID) -> [KeyedCommitmentAuditEntry]
+}
+```
+
+**Rust** (`src/keyed_commitment.rs`):
+
+```rust
+pub struct KeyedCommitmentAuditEntry {
+    pub id: [u8; 32],
+    pub drawer_id: [u8; 16],
+    pub commitment: KeyedCommitmentValue,
+    pub tombstone_hlc: HLC,
+    pub reason: String,
+}
+
+pub struct CommitmentAuditLog { /* HashMap<[u8;32], Entry> */ }
+impl CommitmentAuditLog {
+    pub fn new() -> Self;
+    pub fn add(&mut self, entry: KeyedCommitmentAuditEntry);
+    pub fn merge(&mut self, other: &CommitmentAuditLog);
+    pub fn count(&self) -> usize;
+    pub fn ordered_entries(&self) -> Vec<&KeyedCommitmentAuditEntry>;
+    pub fn entries_for_drawer(&self, drawer_id: &[u8; 16])
+        -> Vec<&KeyedCommitmentAuditEntry>;
+}
+```
+
 ## § 3 — Public functions
 
 All operations on this package are members of the four top-level
@@ -403,6 +545,10 @@ functions in `substrate_lib_telemetry`.
   - `VocabularyTests.swift`
   - `SubstrateLibTelemetryTests.swift` — telemetry on/off gate,
     per-verb emit, `TsFilteredSink` isolation pattern.
+  - `MerkleHashTests.swift` — leaf/interior/tombstone determinism,
+    domain separation, vector sort-order independence.
+  - `KeyedCommitmentTests.swift` — commitment determinism, domain
+    separation, audit entry round-trip/idempotent/merge/ordering.
 - **Swift conformance gate:** `Tests/SubstrateLibConformanceTests/`
   - `AuditGateConformanceTests.swift`
   - `RowStateAutomatonConformanceTests.swift`
@@ -463,6 +609,12 @@ consumes them by import/`pub use`, so they are not re-rowed here.
 | The write gate | `AuditGate` (caseless enum: `admit(...) -> Result<AuditEvent, GateViolation>`) — `Sources/SubstrateLib/AuditGate.swift:284` | `audit_gate::admit(...) -> Result<AuditEvent, GateViolation>` (free fn) — `rust/src/audit_gate.rs:191` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff); deterministic content-ID + canonical snapshot event both sides | `AuditGateTests.swift::testContentIDDeterministicAndStable` ↔ `rust/src/audit_gate.rs::tests` (content-id determinism) + `WireFormatConformanceTests.swift` ↔ `tests/wire_format_conformance.rs` (canonical event wire) | Confirmed |
 | Telemetry metric-name constants | `SubstrateLibMetric` (caseless enum, 10 `static let` strings) — `Sources/SubstrateLib/SubstrateLibTelemetry.swift` | `metric` submodule (10 `pub const &str` values) — `rust/src/substrate_lib_telemetry.rs` | public both | Swift enum-namespace / Rust `pub mod metric` (sanctioned namespacing diff); string values bit-identical across ports | `SubstrateLibTelemetryTests.swift::§7 metric name constants` ↔ `tests/substrate_lib_telemetry_tests.rs::metric_names_are_correct` | Confirmed |
 | Telemetry emit helpers | 10 `@inline(__always)` package-internal functions — `Sources/SubstrateLib/SubstrateLibTelemetry.swift` | 10 `#[inline(always)]` `pub fn` — `rust/src/substrate_lib_telemetry.rs` | internal both | identical tag keys and semantics; off-path cost one atomic load + branch when monitoring disabled | `SubstrateLibTelemetryTests.swift §1–§6` ↔ `tests/substrate_lib_telemetry_tests.rs §1–§6` | Confirmed |
+| Merkle hash pipeline | `MerkleHash` (caseless enum: `leaf`/`interior`/`tombstone`) — `Sources/SubstrateLib/MerkleHash.swift` | `merkle_hash` module free fns: `leaf`/`interior`/`tombstone` — `rust/src/merkle_hash.rs` | public both | Swift enum-namespace / Rust module free fns (sanctioned namespacing diff); domain-separated SHA-256 via MerkleDomain tags (0x00 leaf, 0x01 interior, 0x02 tombstone); canonical byte encoding bit-identical both ports | `MerkleHashTests.swift` (10 tests: determinism, domain separation, vector sort-order independence) ↔ `rust/src/merkle_hash.rs::tests` | Confirmed |
+| Merkle vector input | `MerkleVectorInput` (struct: modelID/vectorIndex/floats) — `Sources/SubstrateLib/MerkleHash.swift` | `MerkleVectorInput` (struct: model_id/vector_index/floats) — `rust/src/merkle_hash.rs` | public both | identical layout; Swift `UInt32` ↔ Rust `u32`, Swift `[Float]` ↔ Rust `Vec<f32>` | `MerkleHashTests.swift::leafWithVectors` ↔ `rust/src/merkle_hash.rs::tests::leaf_with_vectors` | Confirmed |
+| Keyed commitment value | `KeyedCommitmentValue` (struct: hmacBytes/keyVersion) — `Sources/SubstrateLib/KeyedCommitment.swift` | `KeyedCommitmentValue` (struct: hmac_bytes/key_version) — `rust/src/keyed_commitment.rs` | public both | identical; Swift `Int` keyVersion ↔ Rust `i64`; `hexString` property both sides | `KeyedCommitmentTests.swift::hexString` ↔ `rust/src/keyed_commitment.rs::tests` | Confirmed |
+| Keyed commitment API | `KeyedCommitment` (caseless enum: `commit`) — `Sources/SubstrateLib/KeyedCommitment.swift` | `keyed_commitment::commit` (free fn) — `rust/src/keyed_commitment.rs` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff); HMAC-SHA256 over canonical leaf bytes with COMMITMENT domain tag 0x03 | `KeyedCommitmentTests.swift` (6 tests: determinism, domain separation, key variation, vectors) ↔ `rust/src/keyed_commitment.rs::tests` (5 tests) | Confirmed |
+| Commitment audit entry | `KeyedCommitmentAuditEntry` (struct) — `Sources/SubstrateLib/KeyedCommitmentAudit.swift` | `KeyedCommitmentAuditEntry` (struct) — `rust/src/keyed_commitment.rs` | public both | identical fields; deterministic content-ID via SHA-256 over (drawerId + hmacBytes + keyVersion + tombstoneHLC.wireBytes + reason + NUL) | `KeyedCommitmentTests.swift::deterministicID` ↔ `rust/src/keyed_commitment.rs::tests::audit_entry_deterministic_id` | Confirmed |
+| Commitment audit log | `CommitmentAuditLog` (struct, G-Set CRDT) — `Sources/SubstrateLib/KeyedCommitmentAudit.swift` | `CommitmentAuditLog` (struct, HashMap-backed) — `rust/src/keyed_commitment.rs` | public both | identical semantics: add (idempotent), merge (set union), orderedEntries (tombstone-HLC sorted), entries(forDrawer:) | `KeyedCommitmentTests.swift` (round-trip, idempotent, merge, ordered) ↔ `rust/src/keyed_commitment.rs::tests` (same scenarios) | Confirmed |
 | `ts` parameter on verb methods | `ts: Double = 0.0` added to `capture`, `reanchor`, `mutate`, `withdraw`, `expunge`, `recall` — `Sources/SubstrateLib/Verbs.swift` | `ts: f64` (required, no default) added to same methods — `rust/src/verbs.rs` | public both | Swift default `0.0` preserves existing callers; Rust callers explicit (idiomatic). Both: caller-supplied epoch seconds, SubstrateLib never reads a clock | `SubstrateLibTelemetryTests.swift::§2 enabled gate` ↔ `tests/substrate_lib_telemetry_tests.rs::enabled_gate_capture_emits_one_sample` | Confirmed |
 
 ### Read-anchored notes
@@ -564,6 +716,19 @@ let capture_event = audit_gate::admit(
 ```
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-28
+Security fix: corrected vectorIndex/vector_index type from Int32/i32 to
+UInt32/u32 in MerkleVectorInput interface docs and parity table. Updated
+v2 canonical leaf encoding note: model_id and vector_index are now written
+into the preimage before the float payload (WS2-F4). Cross-port pin added
+to canonical_leaf_bytes description. Parity table vector-input row updated.
+
+### 1.1.0 -- 2026-06-20
+Added six new public types for ADR-017 §16-17: MerkleHash, MerkleVectorInput,
+KeyedCommitment, KeyedCommitmentValue, KeyedCommitmentAuditEntry,
+CommitmentAuditLog. Updated §1 layout (4→7 files), §2 type docs,
+concordance table (6 new rows), and §5 test entry points.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -8,10 +8,11 @@
 //! or automated threshold) later accepts or rejects. The propose path
 //! is the substrate's only autonomous write surface per cookbook §10.7.
 //!
-//! This mission ships only the value type, its operational accessors,
-//! the `proposals` table, and store persistence. No verb behaviour
-//! (propose / accept / reject / withdraw / expunge / recall) is
-//! implemented here.
+//! This file ships the value type, its operational accessors,
+//! the `proposals` table, and store persistence. The `propose` verb
+//! is implemented in `estate_verbs.rs::Estate::propose`; other verb
+//! paths (accept / reject / withdraw / expunge / recall on proposals)
+//! route through the standard DrawerStore mutation surface.
 //!
 //! `Proposal` mirrors `KGFact` structurally — an identity, three i64
 //! bitmap columns, and content fields — with one addition `KGFact`

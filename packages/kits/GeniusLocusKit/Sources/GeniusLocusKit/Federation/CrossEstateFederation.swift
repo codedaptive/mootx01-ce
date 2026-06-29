@@ -272,41 +272,36 @@ public extension GeniusLocusKit {
             }
         }
 
-        // 6. Inference budget gate and debit.
+        // 6. Inference budget gate and debit — debit-before-check (CAND-008 posture).
         //
-        // Re-read the stored budget for the authorizing grant to capture any
-        // concurrent debits that occurred since step 3 loaded the grant. This
-        // prevents a race where two concurrent reads both see budget > 0 and
-        // both proceed, double-spending from the same remaining allotment.
-        // Within the actor (GeniusLocusKit is an actor), concurrent reads are
-        // serialized by the actor model, so this re-read is an additional
-        // safety net for any future caller that bypasses the actor isolation.
+        // IMPORTANT: The old check-then-debit pattern (store.get → guard → debitBudget)
+        // had an actor reentrancy gap. Swift actors serialize at `await` suspension
+        // points, but yield between them: a second concurrent call can enter and
+        // pass the guard check while the first call is suspended awaiting `store.get`,
+        // before the first call's debit has landed. Both calls then debit, admitting
+        // two reads against a budget that had only one read remaining — over-admission.
+        //
+        // Fix: debit first, check the pre-debit balance that `debitBudget` returns.
+        // The guard now runs AFTER the debit, so there is no window where a concurrent
+        // call can see an un-debited positive balance and proceed. If preBudget was 0
+        // (or the grant is absent), `debitBudget` stores max(0, 0 - amount) = 0 and
+        // returns 0; we refuse and no content is returned. If preBudget was > 0 and we
+        // now hold the debit, content is returned.
         //
         // Debit quantum (spec §6 is silent; fail-closed chosen rule):
         //   GeniusLocusKit.budgetDebitPerRead = 0.01 per read.
         //   A fresh grant (budget = 1.0) supports ~100 reads before exhaustion.
-        //   Budget <= 0 refuses the read before any content is returned.
-        //
-        // The debit is written to the persistence layer (GrantStore.debitBudget)
-        // atomically with the read proceeding, so the budget row is updated
-        // before the drawers are assembled. If persistence fails, the error
-        // propagates and no content is returned — budget exhaustion is never
-        // silently bypassed.
-        let currentStored = try await store.get(id: authorizingGrant.id)
-        let currentBudget = currentStored?.grant.inferenceRemainingBudget ?? 0.0
-        guard currentBudget > 0.0 else {
+        let preBudget = try await store.debitBudget(
+            id: authorizingGrant.id,
+            amount: GeniusLocusKit.budgetDebitPerRead
+        )
+        guard preBudget > 0.0 else {
             throw GeniusLocusKitError.crossEstateReadRefused(
                 source: source.estateUUID,
                 requester: requester.estateUUID,
                 reason: .budgetExhausted
             )
         }
-        // Debit persisted before the read returns content so no read can
-        // succeed without consuming from the budget.
-        try await store.debitBudget(
-            id: authorizingGrant.id,
-            amount: GeniusLocusKit.budgetDebitPerRead
-        )
 
         // 7. Valid grant in hand: read the source estate. Drain the
         // RecallStream fully, the same way CrossEstateRead.fanOutRecall
@@ -351,13 +346,21 @@ public extension GeniusLocusKit {
         // "no anchor declared" sentinel (I-5) — hasPrefix returns false for
         // a non-empty prefix against an empty string, correctly excluding
         // anchor-less drawers from any lattice subtree grant.
+        //
+        // Wing/room scope: Drawer no longer carries wing/room stored
+        // properties (node-tree migration). Resolve parentNodeId → (wing,
+        // room) display names from the node tree for scope matching.
         switch authorizingGrant.scope {
         case .wholeEstate:
             break
         case .wing(let name):
-            drawers = drawers.filter { $0.wing == name }
+            let nodeIds = Array(Set(drawers.map(\.parentNodeId)))
+            let nodeNames = try await sourceEstate.resolveNodeNames(parentNodeIds: nodeIds)
+            drawers = drawers.filter { nodeNames[$0.parentNodeId]?.wing == name }
         case .room(let name):
-            drawers = drawers.filter { $0.room == name }
+            let nodeIds = Array(Set(drawers.map(\.parentNodeId)))
+            let nodeNames = try await sourceEstate.resolveNodeNames(parentNodeIds: nodeIds)
+            drawers = drawers.filter { nodeNames[$0.parentNodeId]?.room == name }
         case .latticeSubtree(let udcCode):
             // Dot-boundary guard: "500" must match "500" and "500.1" but NOT
             // "5001". Bare hasPrefix("500") would admit "5001" because "5001"

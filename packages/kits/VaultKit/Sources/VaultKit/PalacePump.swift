@@ -38,13 +38,14 @@ import SubstrateTypes
 // for `secret` are surfaced in the result for transparency but do not gate the
 // run beyond what the substrate itself withholds.
 
-/// The outcome of one note's pump: the source key, the MemPalace drawer id it
+/// The outcome of one note's pump: the source key, the assigned noun id it
 /// landed in, and whether it verified by round-trip fetch.
 public struct PalacePumpItemResult: Sendable, Equatable {
     /// The note's `stableSourceKey` (its origin identity).
     public let sourceKey: String
-    /// The drawer id MemPalace assigned (or echoed, for a duplicate). nil only
-    /// when the write itself failed.
+    /// The assigned noun id from MemPalace (drawer id, tunnel id, triple id,
+    /// or entry id, depending on the noun written). nil only when the write
+    /// itself failed.
     public let drawerID: String?
     /// True when a `get_drawer` fetch of `drawerID` returned the content the
     /// pump wrote.
@@ -299,9 +300,32 @@ public struct PalacePump: Sendable {
     }
 
     /// Write one four-noun job's call and verify it by the noun's read tool.
+    ///
+    /// Security: the tool name is re-validated against the write-tool allowlist
+    /// before every invocation. A persisted payload whose `call.tool` names any
+    /// tool outside the four write tools is rejected with a logged error and
+    /// counted as a failure — it is never forwarded to the MCP server. This
+    /// prevents a tampered queue job from invoking arbitrary MemPalace tools
+    /// (e.g. erase or admin tools) during drain.
     private func processItemJob(_ job: Job) async throws -> PalacePumpItemResult {
         let decoded = try JSONDecoder().decode(PalaceItemJobPayload.self, from: job.payload)
         let call = decoded.call
+
+        // Allowlist check: only the four canonical write tools are permitted.
+        // The tool name was embedded in the payload when the job was enqueued;
+        // it could have been tampered with on disk between enqueue and drain.
+        let allowedWriteTools: Set<String> = [
+            PalacePumpMapping.addDrawerTool,
+            PalacePumpMapping.createTunnelTool,
+            PalacePumpMapping.kgAddTool,
+            PalacePumpMapping.diaryWriteTool,
+        ]
+        guard allowedWriteTools.contains(call.tool) else {
+            Self.log.error(
+                "refusing persisted tool '\(call.tool, privacy: .public)' for '\(decoded.sourceID, privacy: .public)' — not in write allowlist")
+            return PalacePumpItemResult(sourceKey: decoded.sourceID, drawerID: nil, verified: false)
+        }
+
         let args = call.arguments.mapValues(\.foundationValue)
         let writeResult: MCPCallResult
         do {

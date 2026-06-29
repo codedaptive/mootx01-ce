@@ -168,6 +168,49 @@ struct DistillationCycleTests {
         #expect(factoidID == nil, "a zero fingerprint (empty F*) must not produce a factoid")
     }
 
+    // MARK: - T12 (secfix/punt-g2): factoid inherits source drawer sensitivity
+
+    /// T12: A factoid produced from a secret-sensitivity source drawer must itself
+    /// carry secret sensitivity. Pre-fix, `captureFactoid` always used
+    /// `CaptureFrame`'s default `.normal` sensitivity regardless of the source.
+    @Test("distillItem: factoid inherits source drawer sensitivity (secret → secret)")
+    func distillItemFactoidInheritsSourceSensitivity() async throws {
+        let (kit, handle, _) = try await openEstate()
+        // Capture a drawer at .secret sensitivity.
+        let estate = try await kit.estate(for: handle)
+        let secretFrame = CaptureFrame(
+            content: threeSentenceBody,
+            channel: .typed,
+            room: "inbox",
+            latticeAnchor: .udc("000"),
+            addedBy: "test-secfix",
+            embeddingModelID: modelID,
+            sensitivity: .secret
+        )
+        let sourceDrawer = try await estate.capture(secretFrame)
+        #expect(sourceDrawer.adjectiveSensitivity == .secret, "source drawer must be secret")
+
+        // Distill it. The sensitivity floor must propagate to the factoid.
+        let factoidID = try await kit.distillItem(
+            handle: handle,
+            drawerID: sourceDrawer.id,
+            content: threeSentenceBody,
+            distillFn: intraItemFn(fingerprint: nonZeroFingerprint256),
+            now: t0
+        )
+        let fid = try #require(factoidID, "non-zero fingerprint from secret source must produce a factoid")
+
+        // Read back the factoid drawer and verify its sensitivity.
+        let ids = [fid]
+        let frame = RecallFrame(filterChain: [.unconfirmed, .sensitivityAtMost(.secret)])
+        let hydrated = try await estate.getDrawers(ids: ids, matchingFrame: frame, hydrationLevel: .full)
+        let factoid = try #require(hydrated.admissible.first, "factoid must be readable at secret level")
+        #expect(
+            factoid.adjectiveSensitivity == .secret,
+            "factoid sensitivity must be .secret (inherited from source), got \(factoid.adjectiveSensitivity)"
+        )
+    }
+
     // MARK: - T11: distillItemsSweep is idempotent
 
     @Test("distillItemsSweep distills each eligible item once and is idempotent on re-run")

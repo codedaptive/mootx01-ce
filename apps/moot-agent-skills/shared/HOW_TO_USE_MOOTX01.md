@@ -58,6 +58,18 @@ Good queries are short and specific.
 Use `moot_recall_precise` when exactness matters: dates, paths, numbers, names,
 versions, identifiers, and near-duplicates.
 
+Use `moot_recall_shaped` when the recall mode matters: associative for loose
+connections, conceptual for distributional similarity, lexical for keyword-only,
+temporal for time-weighted results, or structural for filing-structure-led
+ranking. Pick a preset from the roster (balanced, precise, conceptual, broad,
+lexical, associative, consensus, temporal, structural, anti_redundant, and
+others).
+
+Use `moot_recall_distilled` when compact factoid answers are sufficient. The
+distilled tier contains dense factoids produced by `moot_consolidate`. Use
+`moot_recollect` to follow a factoid back to its full source memories when
+the user needs episodic detail.
+
 Use recall before reasoning. Do not load unnecessary memories into context and
 ask yourself to sort them if MOOTx01 can rank them first.
 
@@ -111,7 +123,8 @@ Use `moot_read_journal` at the start of work or when resuming a thread.
 Use `moot_link_memories` to connect related memories.
 
 Relationship kinds include `supports`, `contradicts`, `refines`, `extends`,
-`precedes`, `exemplifies`, and `relates`.
+`precedes`, `exemplifies`, `supersedes`, `references`, `blocks`, `validates`,
+`derivesFrom`, `covers`, `elaborates`, `respondsTo`, and `relates`.
 
 A wiki forces the LLM to infer structure by rereading. MOOTx01 lets you store
 structure directly.
@@ -178,6 +191,28 @@ Dreaming rebuilds MOOTx01's association layer, including co-occurrence and
 temporal matrix signals. It can also mine latent alignments into proposed links
 and write a cycle diary.
 
+## Distillation
+
+Use `moot_consolidate` to run one distillation sweep. This produces compact
+factoids from eligible memories and stores them in the distilled tier. Run
+periodically or after significant memory growth.
+
+Use `moot_recall_distilled` to search the distilled tier. Use
+`moot_recollect` to follow a factoid back to its source memories.
+
+## Reindexing
+
+`moot_reindex` backfills BM25 and vector indexes for memories not yet encoded.
+Use it only to recover if semantic recall appears dark, or for content captured
+before encode-on-capture. You do NOT need it after a normal import — imports
+trigger their own indexing in the background (poll `moot_drain_status` to watch
+it converge).
+
+## Moving Memories
+
+Use `moot_move_memory` to reanchor a memory to a different location or wing.
+This supports cross-wing moves via the optional `wing` argument.
+
 This is one of the main ways MOOTx01 beats a wiki.
 
 A wiki waits for the LLM to reread and reconnect ideas every time. MOOTx01 can
@@ -195,6 +230,15 @@ Use vault tools for bulk source import/export and reconciliation.
 - `moot_vault_status` checks vault state.
 - `moot_vault_reconcile` detects drift.
 - `moot_vault_job` polls long-running import/export jobs.
+
+Use `moot_palace_import` to import a MemPalace directly into an estate. It
+imports drawers, tunnels, and KG triples — the write strategy (one transaction
+vs streaming) is chosen automatically by source size — and then TRIGGERS its own
+background indexing. You do NOT need to run `moot_reindex` or `moot_dream`
+afterward: the encode drain builds the BM25 + vector lanes and the resident
+daemon's dreaming builds the association matrix on their own. Poll
+`moot_drain_status` to watch the encode queue converge. (Without a resident
+daemon, run `moot_dream` yourself when you want matrix-aware recall.)
 
 Raw source material remains authoritative. MOOTx01 can project, index,
 classify, and connect it, but do not confuse a generated synthesis with the

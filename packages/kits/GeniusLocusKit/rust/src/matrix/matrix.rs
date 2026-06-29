@@ -23,7 +23,9 @@ use substrate_ml::temporal_causality_fold::{
 };
 use substrate_types::hlc::HLC;
 
-use crate::audit::{AuditTier, EntryUUID, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
+use crate::audit::{
+    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
+};
 
 // MARK: - Coordinate types
 
@@ -265,61 +267,108 @@ impl MatrixTier {
     /// together.
     pub fn rebuild(log: &UnifiedAuditLog) -> Self {
         let mut tier = MatrixTier::new();
-        let entries = log.ordered_entries();
+        Self::apply_capture_entries(&mut tier, log.ordered_entries());
+        tier
+    }
 
+    /// Apply capture/expunge/withdraw entries to `tier`'s F/O/C state in strict
+    /// HLC order, IN PLACE on the passed tier. Mirrors Swift
+    /// `MatrixTier.applyCaptureEntries(into:entries:)`.
+    ///
+    /// Shared by `rebuild` (fresh tier, all entries) and `incremental_update`
+    /// (loaded snapshot, only entries past the cursor). Operating in place is the
+    /// load-bearing correctness point for incremental: an expunge/withdraw of a
+    /// row captured BEFORE the snapshot lands its `-1` on the existing `+1`.
+    ///
+    /// Applying ALL events in strict HLC order (rather than the prior design,
+    /// which decremented withdraws during the parse loop before any capture was
+    /// applied) is the correctness fix that makes live_row_count right and makes
+    /// incremental hydration equal a full rebuild: a row is always captured before
+    /// it is expunged/withdrawn, so in HLC order the running count never goes
+    /// negative and the defensive clamp in `apply_capture` never fires. F/O are
+    /// additive so their counts are order-independent; only the count and the
+    /// clamp depend on order. At equal HLC, capture/expunge bundles apply before
+    /// withdraws (the natural capture→withdraw order, and deterministic).
+    fn apply_capture_entries<I>(tier: &mut MatrixTier, entries: I)
+    where
+        I: IntoIterator<Item = UnifiedAuditEntry>,
+    {
         // (tier, row, hlc) bundle key.
         type RowKey = (AuditTier, EntryUUID, HLC);
         let mut bundle: HashMap<RowKey, Vec<(String, u64)>> = HashMap::new();
         let mut value_bundle: HashMap<RowKey, Vec<MatrixValueCoord>> = HashMap::new();
         let mut bundle_sign: HashMap<RowKey, i64> = HashMap::new();
         let mut bundle_order: Vec<RowKey> = Vec::new();
+        let mut withdraw_hlcs: Vec<HLC> = Vec::new();
 
         for entry in entries {
-            let key: RowKey = (entry.tier, entry.row_id, entry.hlc);
-
-            let sign: Option<i64> = match entry.verb {
-                UnifiedAuditVerb::Capture => Some(1),
-                UnifiedAuditVerb::Expunge => Some(-1),
+            match entry.verb {
+                UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge => {
+                    let key: RowKey = (entry.tier, entry.row_id, entry.hlc);
+                    if !bundle_sign.contains_key(&key) {
+                        bundle_order.push(key);
+                    }
+                    let s = if entry.verb == UnifiedAuditVerb::Capture { 1 } else { -1 };
+                    bundle_sign.insert(key, s);
+                    match entry.after_value {
+                        UnifiedAuditValue::Bitmap(v) => {
+                            bundle
+                                .entry(key)
+                                .or_default()
+                                .push((entry.field_path.clone(), v));
+                        }
+                        other => {
+                            value_bundle
+                                .entry(key)
+                                .or_default()
+                                .push(MatrixValueCoord::new(entry.field_path.clone(), other));
+                        }
+                    }
+                }
                 UnifiedAuditVerb::Withdraw => {
+                    // Soft tombstone: decrements live_row_count without touching
+                    // F/O. Collected here and applied in HLC order below — it MUST
+                    // run AFTER the captures it follows, and it advances last_hlc.
+                    withdraw_hlcs.push(entry.hlc);
+                }
+                _ => continue,
+            }
+        }
+
+        // Apply ALL events in strict (hlc, tie) order. Bundles tie before
+        // withdraws at equal HLC (tie = first-seen index; withdraw ties offset
+        // past every bundle).
+        enum Event {
+            Bundle(RowKey),
+            Withdraw(HLC),
+        }
+        let mut events: Vec<(HLC, usize, Event)> =
+            Vec::with_capacity(bundle_order.len() + withdraw_hlcs.len());
+        for (i, key) in bundle_order.iter().enumerate() {
+            events.push((key.2, i, Event::Bundle(*key)));
+        }
+        let withdraw_tie_base = bundle_order.len();
+        for (j, h) in withdraw_hlcs.iter().enumerate() {
+            events.push((*h, withdraw_tie_base + j, Event::Withdraw(*h)));
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        for (_, _, ev) in events {
+            match ev {
+                Event::Bundle(key) => {
+                    let sign = *bundle_sign.get(&key).unwrap_or(&1);
+                    let bm = bundle.remove(&key).unwrap_or_default();
+                    let vs = value_bundle.remove(&key).unwrap_or_default();
+                    tier.apply_capture(&bm, &vs, key.2, sign);
+                }
+                Event::Withdraw(h) => {
                     tier.live_row_count = (tier.live_row_count - 1).max(0);
-                    None
-                }
-                _ => None,
-            };
-            let Some(s) = sign else { continue };
-
-            if !bundle_sign.contains_key(&key) {
-                bundle_order.push(key);
-            }
-            bundle_sign.insert(key, s);
-
-            match &entry.after_value {
-                UnifiedAuditValue::Bitmap(v) => {
-                    bundle
-                        .entry(key)
-                        .or_default()
-                        .push((entry.field_path.clone(), *v));
-                }
-                _ => {
-                    value_bundle
-                        .entry(key)
-                        .or_default()
-                        .push(MatrixValueCoord::new(
-                            entry.field_path.clone(),
-                            entry.after_value.clone(),
-                        ));
+                    if h > tier.last_hlc {
+                        tier.last_hlc = h;
+                    }
                 }
             }
         }
-
-        for key in bundle_order {
-            let sign = *bundle_sign.get(&key).unwrap();
-            let bm = bundle.remove(&key).unwrap_or_default();
-            let vs = value_bundle.remove(&key).unwrap_or_default();
-            tier.apply_capture(&bm, &vs, key.2, sign);
-        }
-
-        tier
     }
 
     /// Rebuild the T (temporal causality) matrix from the unified audit log.
@@ -353,6 +402,16 @@ impl MatrixTier {
     /// from a fresh MatrixTier produces a cell-equal result because T counts
     /// pairs and the fold is deterministic.
     pub fn rebuild_temporal(log: &UnifiedAuditLog) -> Self {
+        Self::rebuild_temporal_from(log, HLC::ZERO)
+    }
+
+    /// Rebuild T starting from a given watermark. Mirrors Swift
+    /// `rebuildTemporal(from:startWatermark:)`. A full rebuild passes
+    /// `HLC::ZERO` (process every entry as new); incremental hydration passes the
+    /// persisted `temporal_watermark_hlc` so the fold emits only the new
+    /// cross-pairs — including window-boundary pairs against pre-watermark
+    /// entries — which merge additively onto the loaded T.
+    pub fn rebuild_temporal_from(log: &UnifiedAuditLog, start_watermark: HLC) -> Self {
         let mut tier = MatrixTier::new();
 
         // Convert UnifiedAuditEntry to TemporalAuditEntry at the GeniusLocusKit
@@ -392,12 +451,13 @@ impl MatrixTier {
             })
             .collect();
 
-        // Full rebuild: start watermark at ZERO so the fold processes every
-        // entry as "new". Mirrors Swift: `startWatermark: .zero`.
+        // Fold from the supplied watermark: ZERO for a full rebuild (every entry
+        // is "new"), or the persisted temporal_watermark_hlc for incremental
+        // hydration (only new cross-pairs emitted).
         let result = tcf_fold(
             &temporal_entries,
             Self::TEMPORAL_WINDOW_MINUTES as i32,
-            HLC::ZERO,
+            start_watermark,
         );
 
         for (fold_key, delta) in result.deltas {
@@ -452,6 +512,44 @@ impl MatrixTier {
         tier.temporal_causality = t_tier.temporal_causality;
         tier.temporal_watermark_hlc = t_tier.temporal_watermark_hlc;
         tier
+    }
+
+    /// Fold this (already-loaded snapshot) tier FORWARD over `log`, applying only
+    /// the entries past the persisted cursors — the load-and-incremental-fold path
+    /// that replaces a full rebuild on hydration so the matrix tier is read from
+    /// its on-disk snapshot, never recomputed from the whole audit log on launch.
+    /// Mirrors Swift `MatrixTier.incrementalUpdate(from:)`.
+    ///
+    /// F/O/C: replays capture/expunge/withdraw entries with `hlc > last_hlc`
+    /// directly onto this tier via the shared `apply_capture_entries` (a row's
+    /// fields share one HLC, so the cursor splits cleanly on row boundaries, and a
+    /// post-snapshot expunge of a pre-snapshot row lands its `-1` on the existing
+    /// count). T: re-folds the full log from `temporal_watermark_hlc`, so only the
+    /// new cross-pairs — including window-boundary pairs against pre-watermark
+    /// entries — are emitted and merged additively.
+    ///
+    /// Invariant (conformance-tested): for any whole-HLC split point, a snapshot
+    /// `full_rebuild(prefix)` then `incremental_update(full_log)` equals
+    /// `full_rebuild(full_log)` cell-for-cell.
+    pub fn incremental_update(&mut self, log: &UnifiedAuditLog) {
+        // F/O/C — replay rows past the field cursor directly onto self.
+        let fo_cursor = self.last_hlc;
+        let new_entries: Vec<UnifiedAuditEntry> = log
+            .ordered_entries()
+            .into_iter()
+            .filter(|e| e.hlc > fo_cursor)
+            .collect();
+        Self::apply_capture_entries(self, new_entries);
+
+        // T — fold the full log from the persisted temporal watermark; the fold
+        // emits only new cross-pairs, which merge additively onto the loaded T.
+        let t_delta = MatrixTier::rebuild_temporal_from(log, self.temporal_watermark_hlc);
+        for (key, count) in t_delta.temporal_causality {
+            add_signed(&mut self.temporal_causality, key, count);
+        }
+        if t_delta.temporal_watermark_hlc > self.temporal_watermark_hlc {
+            self.temporal_watermark_hlc = t_delta.temporal_watermark_hlc;
+        }
     }
 }
 

@@ -1,6 +1,8 @@
 //! commands/db.rs — §4.4: named estate lifecycle.
 //!
-//! Output strings match the Swift DbCommand verbatim (§7 conformance).
+//! Estate lifecycle commands follow the same structure as Swift DbCommand.
+//! Note: flag names differ in places (e.g. `--force` here vs Swift's `--yes`
+//! for delete confirmation), and exit codes on abort also differ.
 //! Estates are directories under `<data>/databases/<name>/`; the SQLite file
 //! is created on first `serve`, so `create` makes the directory only.
 
@@ -83,6 +85,13 @@ pub fn list_estates(data: &std::path::Path) -> Vec<String> {
 }
 
 fn open(data: &std::path::Path, name: &str) -> ExitCode {
+    // Validate before computing the estate dir — estate_dir calls path::join
+    // on the name; an unvalidated traversal like "../evil" would join outside
+    // the databases/ subtree and allow arbitrary directory reads.
+    if !valid_name(name) {
+        eprintln!("Estate name '{name}' is not valid (no path separators).");
+        return ExitCode::from(exit::FAILURE);
+    }
     if !estate_dir(data, name).exists() {
         println!("Estate '{name}' not found. Run `mootx01 db list` to see available estates.");
         return ExitCode::from(exit::FAILURE);
@@ -96,6 +105,13 @@ fn open(data: &std::path::Path, name: &str) -> ExitCode {
 }
 
 fn delete(data: &std::path::Path, name: &str, force: bool) -> ExitCode {
+    // Validate before computing the estate dir — an unvalidated traversal like
+    // "../databases" or "../../../etc" would allow deleting arbitrary directories
+    // outside the databases/ subtree.
+    if !valid_name(name) {
+        eprintln!("Estate name '{name}' is not valid (no path separators).");
+        return ExitCode::from(exit::FAILURE);
+    }
     if name == "default" {
         eprintln!("Cannot delete 'default' (use uninstall --purge).");
         return ExitCode::from(exit::FAILURE);
@@ -158,6 +174,28 @@ mod tests {
         assert!(!valid_name("a/b"));
         assert!(!valid_name(""));
         assert!(valid_name("work"));
+    }
+
+    #[test]
+    fn open_rejects_traversal_name() {
+        let data = tmp_data("open-traversal");
+        std::fs::create_dir_all(data.join("databases")).unwrap();
+        // "../work" would join outside databases/; open must reject it before
+        // touching the filesystem so no speculative probe leaks path info.
+        let code = open(&data, "../work");
+        assert_ne!(code, ExitCode::from(exit::OK), "open should reject traversal names");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn delete_rejects_traversal_name() {
+        let data = tmp_data("delete-traversal");
+        std::fs::create_dir_all(data.join("databases")).unwrap();
+        // An attacker supplying "../databases" as the name would attempt to
+        // delete the whole databases/ directory; the validation gate stops it.
+        let code = delete(&data, "../databases", true);
+        assert_ne!(code, ExitCode::from(exit::OK), "delete should reject traversal names");
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// Deleting an estate removes the whole directory — including the encryption

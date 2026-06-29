@@ -51,6 +51,11 @@ let package = Package(
     dependencies: [
         .package(path: "../../libs/SubstrateTypes"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
+        // swift-nio-ssl: provides NIOSSLContext for PostgreSQL TLS (SECFIX-WS2-PK F3).
+        // Already a transitive dep (postgres-nio requires it); made explicit here
+        // so SPM 6 strict mode allows the PersistenceKitPostgreSQL target to import NIOSSL.
+        // No new external package is added to the resolved graph.
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.25.0"),
         // IntellectusLib: zero-dep telemetry floor. PersistenceKit emits DB-layer
         // health metrics (size, WAL, cache, tx stats) via Intellectus.report(_:),
         // which is a no-op when monitoring is disabled (the default). Off-path
@@ -119,6 +124,13 @@ let package = Package(
                 "PersistenceKit",
                 "SubstrateTypes",
                 .product(name: "PostgresNIO", package: "postgres-nio"),
+                // NIOSSL: explicit dep to enable TLS context construction in
+                // PostgreSQLPool.makeTLSContext(). swift-nio-ssl is already a
+                // transitive dependency (PostgresNIO depends on it), so this adds
+                // no new external package to the resolved graph — it only makes
+                // the existing dep explicit as required by SPM 6 strict mode.
+                // (SECFIX-WS2-PK F3 — PostgreSQL TLS planned hardening).
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
             ],
             path: "Sources/PersistenceKitPostgreSQL"
         ),

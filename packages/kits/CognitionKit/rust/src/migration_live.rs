@@ -16,8 +16,8 @@
 //!     Swift recipe (channel .typed, room, `LatticeAnchor::udc(latticeCode)`,
 //!     `addedBy = "migration-{plan}"`, embedding model, sensitivity)
 //!   - benchmark     → `neuron_kit::benchmark_branch` over the id-correlated
-//!     corpus (one unconfirmed-recall query per entry; the set metrics use
-//!     the union, the scoring math itself is gated in neuron_kit).
+//!     corpus (one content-matched recall frame per entry, parity of Swift's
+//!     `asRecallFrames()`; the scoring math itself is gated in neuron_kit).
 //!
 //! The `RecipeSubstrate` seam is fallible: each op returns
 //! `Result<_, SubstrateError>`, so this adapter maps the underlying GLK /
@@ -88,8 +88,17 @@ impl<'a> LiveRecipeSubstrate<'a> {
         }
     }
 
-    fn one_query() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+    /// Build a content-matched recall frame for a single corpus entry.
+    /// Parity of Swift `ExternalCorpus.asRecallFrames()`: each frame carries
+    /// `[.unconfirmed, .contentMatches(entry.content)]` so the benchmark query
+    /// for entry `i` targets that entry's text specifically. Without the
+    /// content filter every query returns the full unconfirmed set and MRR
+    /// degrades to a random-rank average rather than 1.0 for a clean migration.
+    fn content_query(content: &str) -> RecallFrame {
+        let mut f = RecallFrame::new(vec![
+            Filter::Unconfirmed,
+            Filter::ContentMatches(content.to_string()),
+        ]);
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
@@ -156,10 +165,12 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
             .branch_handle_for(bid)
             .ok_or_else(|| SubstrateError::new("benchmark", "branch not in registry"))?;
         let expected_ids: Vec<String> = corpus.iter().map(|c| c.id.clone()).collect();
-        // One unconfirmed-recall query per corpus entry — the set metrics use
-        // the union of all queries' results (matching the Swift default path's
-        // 1:1 frame-per-entry shape). `benchmark_branch` is itself infallible.
-        let queries: Vec<RecallFrame> = corpus.iter().map(|_| Self::one_query()).collect();
+        // One content-matched recall frame per corpus entry — parity of Swift's
+        // `ExternalCorpus.asRecallFrames()`. Frame `i` targets entry `i`'s text
+        // so `benchmark_branch` pairs expected_ids[i] with found_per_query[i]
+        // correctly for MRR: each entry's concept is found at rank 1 when the
+        // migration is clean, yielding MRR = 1.0 (not a random-rank average).
+        let queries: Vec<RecallFrame> = corpus.iter().map(|e| Self::content_query(&e.content)).collect();
         let report = neuron_kit::benchmark_branch(branch, &expected_ids, queries, self.now);
         Ok(BenchmarkOutcome {
             recall_overlap: report.recall_overlap,
@@ -307,7 +318,8 @@ pub fn confirm_migration_promotion(
 // ---------------------------------------------------------------------------
 
 /// Open a WAL-mode SQLite estate at `db_path` and run the migration-benchmark
-/// recipe against it, returning the assembled `CoreReport`.
+/// recipe against it, returning `(CoreReport, EstateCoordinator, EstateHandle)`
+/// so the caller can continue into the human-gated confirmation step.
 ///
 /// This is the production entry point that wires a SQLite-backed
 /// `EstateCoordinator` into `run_migration_benchmark`, closing the gap the
@@ -319,7 +331,9 @@ pub fn confirm_migration_promotion(
 /// - `owner_id`  — owner identifier forwarded to `OwnerCredentials::new`,
 ///                 matching the Swift `OwnerCredentials(ownerIdentifier:)` call.
 /// - `now`       — deterministic timestamp (Unix seconds, i64). Passed into
-///                 every operation so no clock is read inside the function.
+///                 substrate operations. Note: `run_migration_benchmark` also
+///                 captures `SystemTime::now()` for telemetry after validation,
+///                 so the call path reads the wall clock regardless of `now`.
 ///                 Mirrors Swift's `Date()` capture at recipe entry.
 /// - `plans`     — candidate migration plans (`PlanInput` slice); parity of
 ///                 `MigrationBenchmark.Input.plans`.
@@ -331,8 +345,9 @@ pub fn confirm_migration_promotion(
 /// `LiveRecipeSubstrate::new` → `run_migration_benchmark`. Errors from any
 /// step propagate as `RecipeRunError`.
 ///
-/// `confirm_migration_promotion` / `confirm_migration_promotion_by_id` accept
-/// the same `coord` and `report` to execute the human-gated second step (B-3).
+/// `confirm_migration_promotion` accepts `coord` and `report` for the human-
+/// gated second step (B-3). `confirm_migration_promotion_by_id` accepts `coord`
+/// plus winner/discard/disqualified branch ID slices directly (no `report`).
 pub fn run_migration_benchmark_sqlite(
     db_path: &str,
     owner_id: &str,
@@ -431,6 +446,10 @@ mod tests {
         let pr = &report.plan_results[0];
         assert!(pr.lost.is_empty(), "no concept lost");
         assert_eq!(pr.recall_overlap, 1.0, "every migrated concept recalled");
+        assert_eq!(
+            pr.mean_reciprocal_rank, 1.0,
+            "content-matched queries must place each concept at rank 1 (MRR=1.0)"
+        );
     }
 
     // CK-LIVE-2: an origin entry with empty content is never captured
@@ -807,6 +826,10 @@ mod tests {
             pr.recall_overlap, 1.0,
             "every migrated concept is recalled on SQLite"
         );
+        assert_eq!(
+            pr.mean_reciprocal_rank, 1.0,
+            "content-matched queries must place each concept at rank 1 on SQLite (MRR=1.0)"
+        );
     }
 
     // CK-SQLITE-2: SQLite primitive-decode reopen round-trip.
@@ -945,6 +968,55 @@ mod tests {
                 .contains(&"e3".to_string()),
             "e3 (empty content) must appear in lost_concepts: {:?}",
             report.disqualified[0].lost_concepts
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Regression guard — PAR-MCP-6 scoring divergence
+    // -------------------------------------------------------------------------
+    // CK-REGRESS-1: multi-entry corpus, content-matched benchmark, MRR = 1.0.
+    //
+    // Guards the fix for PAR-MCP-6: before the fix, `LiveRecipeSubstrate::benchmark`
+    // issued N identical `Filter::Unconfirmed` queries (one per entry). On a
+    // multi-entry branch the expected id `i` lands at a random position in query
+    // `i`'s result set, not rank 1, so MRR degrades below 1.0. Overlap also
+    // degrades when the branch holds extra unconfirmed drawers not in the corpus.
+    //
+    // After the fix, frame `i` carries `[Unconfirmed, ContentMatches(entry_i.content)]`,
+    // matching Swift's `asRecallFrames()`. Each query finds exactly the target
+    // concept at rank 1 → MRR = 1.0 on a clean migration.
+    //
+    // Five entries are used so the test is meaningful: with the old code and 5+
+    // entries all sharing the same generic recall frame, the probability of every
+    // entry landing at rank 1 is negligible.
+    #[test]
+    fn ck_regress1_mrr_is_1_on_five_entry_clean_migration() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[
+            ("r1", "the quick brown fox"),
+            ("r2", "jumped over the lazy dog"),
+            ("r3", "sphinx of black quartz"),
+            ("r4", "pack my box with five"),
+            ("r5", "dozen liquor jugs"),
+        ]);
+
+        let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+        let report = run_migration_benchmark(&mut sub, &plans, &origin).expect("run");
+
+        assert_eq!(report.winner.as_deref(), Some("flat"), "clean 5-entry plan wins");
+        assert!(report.disqualified.is_empty(), "no concepts lost");
+        let pr = &report.plan_results[0];
+        assert!(pr.lost.is_empty(), "lost set must be empty");
+        // Both metrics must be exactly 1.0: content-matched queries place each
+        // concept at rank 1 in its own query's result list.
+        assert_eq!(
+            pr.recall_overlap, 1.0,
+            "overlap must be 1.0 on a clean 5-entry migration"
+        );
+        assert_eq!(
+            pr.mean_reciprocal_rank, 1.0,
+            "MRR must be 1.0: regression guard for PAR-MCP-6 (content-matched queries)"
         );
     }
 }

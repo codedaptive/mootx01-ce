@@ -52,7 +52,7 @@ pub struct BiasReport {
 fn room_counts(drawers: &[Drawer]) -> Vec<(String, f64)> {
     let mut m: BTreeMap<String, f64> = BTreeMap::new();
     for d in drawers {
-        *m.entry(d.room.clone()).or_insert(0.0) += 1.0;
+        *m.entry(d.parent_node_id.clone()).or_insert(0.0) += 1.0;
     }
     m.into_iter().collect()
 }
@@ -169,7 +169,7 @@ mod tests {
         (coord, h)
     }
 
-    fn capture(coord: &EstateCoordinator, h: &EstateHandle, room: &str) -> String {
+    fn capture(coord: &EstateCoordinator, h: &EstateHandle, room: &str) -> Drawer {
         let frame = CaptureFrame::new(
             "content",
             CaptureChannel::Typed,
@@ -178,7 +178,7 @@ mod tests {
             "alice",
             "test-v1",
         );
-        coord.capture(h, frame, NOW).unwrap().id
+        coord.capture(h, frame, NOW).unwrap()
     }
 
     fn reference(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
@@ -191,23 +191,36 @@ mod tests {
     #[test]
     fn ck_bi1_for_and_against_representation() {
         let (coord, h) = coord_with_parent();
+        let mut philosophy_node = String::new();
         for _ in 0..4 {
-            capture(&coord, &h, "philosophy");
+            let d = capture(&coord, &h, "philosophy");
+            philosophy_node = d.parent_node_id;
         }
-        capture(&coord, &h, "cooking");
-        let reference = reference(&[("philosophy", 1.0), ("cooking", 1.0), ("finance", 1.0)]);
+        let cooking_d = capture(&coord, &h, "cooking");
+        let cooking_node = cooking_d.parent_node_id;
+        // "never-captured-node" has no matching parentNodeId — appears as bias-against.
+        let reference = vec![
+            (philosophy_node.clone(), 1.0),
+            (cooking_node, 1.0),
+            ("never-captured-node".to_string(), 1.0),
+        ];
 
         let report = run_bias(&coord, &h, &reference, NOW).expect("bias");
         assert!(
-            report.biased_for.iter().any(|b| b.label == "philosophy"),
+            report.biased_for.iter().any(|b| b.label == philosophy_node),
             "over-weighted → for"
         );
         assert!(
-            report.biased_against.iter().any(|b| b.label == "finance"),
+            report
+                .biased_against
+                .iter()
+                .any(|b| b.label == "never-captured-node"),
             "never-captured → against"
         );
-        // finance is the most-avoided (last by bias).
-        assert_eq!(report.biased_against.last().unwrap().label, "finance");
+        assert_eq!(
+            report.biased_against.last().unwrap().label,
+            "never-captured-node"
+        );
     }
 
     // CK-BI-2: withdrawing memories from a room registers a dismissal rate —
@@ -215,16 +228,20 @@ mod tests {
     #[test]
     fn ck_bi2_withdrawal_is_dismissal() {
         let (coord, h) = coord_with_parent();
-        let r1 = capture(&coord, &h, "doubts");
-        let _r2 = capture(&coord, &h, "doubts");
+        let d1 = capture(&coord, &h, "doubts");
+        let doubts_node = d1.parent_node_id.clone();
+        let _d2 = capture(&coord, &h, "doubts");
         capture(&coord, &h, "doubts");
-        // Withdraw one of the "doubts" memories.
         coord
-            .withdraw(&h, &r1, Some("reconsidered"), NOW)
+            .withdraw(&h, &d1.id, Some("reconsidered"), NOW)
             .expect("withdraw");
 
-        let report = run_bias(&coord, &h, &reference(&[("doubts", 1.0)]), NOW).expect("bias");
-        let doubts = report.dismissal.iter().find(|(room, _)| room == "doubts");
+        let ref_vec = vec![(doubts_node.clone(), 1.0)];
+        let report = run_bias(&coord, &h, &ref_vec, NOW).expect("bias");
+        let doubts = report
+            .dismissal
+            .iter()
+            .find(|(room, _)| room == &doubts_node);
         assert!(doubts.is_some(), "the withdrawn room shows dismissal");
         assert!(
             doubts.unwrap().1 > 0.0,
@@ -241,37 +258,49 @@ mod tests {
     fn ck_bi3_confirm_and_withdraw_drive_learned_preference() {
         let (coord, h) = coord_with_parent();
         // "kept": captured then confirmed (endorsed).
+        let mut kept_node = String::new();
         for _ in 0..3 {
-            let id = capture(&coord, &h, "kept");
+            let d = capture(&coord, &h, "kept");
+            kept_node = d.parent_node_id;
             coord
-                .mutate(&h, &id, MutationKind::Confirm, None)
+                .mutate(&h, &d.id, MutationKind::Confirm, None)
                 .expect("confirm");
         }
         // "dropped": captured then withdrawn (dismissed).
+        let mut dropped_node = String::new();
         for _ in 0..3 {
-            let id = capture(&coord, &h, "dropped");
+            let d = capture(&coord, &h, "dropped");
+            dropped_node = d.parent_node_id;
             coord
-                .withdraw(&h, &id, Some("reconsidered"), NOW)
+                .withdraw(&h, &d.id, Some("reconsidered"), NOW)
                 .expect("withdraw");
         }
         // "untouched": captured and left alone (no curation signal).
-        capture(&coord, &h, "untouched");
+        let untouched_d = capture(&coord, &h, "untouched");
+        let untouched_node = untouched_d.parent_node_id;
         capture(&coord, &h, "untouched");
 
-        let report = run_bias(&coord, &h, &reference(&[("kept", 1.0)]), NOW).expect("bias");
+        let ref_vec = vec![(kept_node.clone(), 1.0)];
+        let report = run_bias(&coord, &h, &ref_vec, NOW).expect("bias");
         let learned = &report.learned;
 
         // Endorsed leads, dismissed trails, neutral sits between.
         let order: Vec<&str> = learned.iter().map(|p| p.label.as_str()).collect();
         assert_eq!(
             order,
-            vec!["kept", "untouched", "dropped"],
+            vec![kept_node.as_str(), untouched_node.as_str(), dropped_node.as_str()],
             "curation orders preference"
         );
 
-        let kept = learned.iter().find(|p| p.label == "kept").unwrap();
-        let dropped = learned.iter().find(|p| p.label == "dropped").unwrap();
-        let untouched = learned.iter().find(|p| p.label == "untouched").unwrap();
+        let kept = learned.iter().find(|p| p.label == kept_node).unwrap();
+        let dropped = learned
+            .iter()
+            .find(|p| p.label == dropped_node)
+            .unwrap();
+        let untouched = learned
+            .iter()
+            .find(|p| p.label == untouched_node)
+            .unwrap();
         assert!(
             kept.strength > 0.0,
             "confirmed room preferred: {}",

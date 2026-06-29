@@ -5,7 +5,7 @@
 //!
 //! Five typed axes describe a tunnel's relationship semantics and
 //! operational state. `TunnelKind` is the relationship vocabulary
-//! (9 cases) stored in a dedicated `kind_id` column. The remaining
+//! (10 cases) stored in a dedicated `kind_id` column. The remaining
 //! four axes — `TunnelDirection`, `TunnelLifecycle`, `TunnelOriginClass`,
 //! `TunnelStrength` — pack into the per-row `operational_bitmap` Int64
 //! column.
@@ -18,7 +18,15 @@
 //! bits 6–8   TunnelOriginClass  (3 bits, contiguous, 5 cases)
 //! bits 9–11  TunnelStrength     (3 bits, scale-gapped, raws 0/2/4/6)
 //! bit  12    has_inverse        (1 bit, exclusive)
-//! bits 13–63 reserved
+//! bit  13    is_retired         (1 bit, T13 / ADR-021 Phase 7)
+//! bits 14–63 reserved
+//! ```
+//!
+//! ## Tunnel provenance layout (low-to-high)
+//!
+//! ```text
+//! bit  0     is_dreamed         (1 bit, T13 / ADR-021 Phase 7)
+//! bits 1–63  reserved
 //! ```
 //!
 //! Pattern mirrors `drawer_operational.rs`: named-enum accessors decode
@@ -61,6 +69,12 @@ pub enum TunnelKind {
     Covers = 6,
     Elaborates = 7,
     RespondsTo = 8,
+    /// Outline containment edge (ADR-017 §11). Source is the child,
+    /// target is the parent. One parent per child enforced in
+    /// `add_tunnel` (kit-level constraint, not a DB-level partial
+    /// unique index). The companion `order_key` on the Tunnel
+    /// struct provides fractional-index sibling ordering.
+    Parent = 9,
 }
 
 impl TunnelKind {
@@ -84,6 +98,7 @@ impl TunnelKind {
             6 => TunnelKind::Covers,
             7 => TunnelKind::Elaborates,
             8 => TunnelKind::RespondsTo,
+            9 => TunnelKind::Parent,
             _ => TunnelKind::References,
         }
     }
@@ -263,6 +278,91 @@ impl Tunnel {
     pub fn has_inverse(&self) -> bool {
         bit_field::extract_flag(self.operational_bitmap, 12)
     }
+
+    // ─── Retirement accessors (T13 / ADR-021 Phase 7) ───────────────
+
+    /// Bit 13 of `operational_bitmap` — retirement flag (T13 / ADR-021 Phase 7).
+    ///
+    /// Set to 1 when OMEGA retires an unreinforced dreamed tunnel. Cleared
+    /// to 0 by `unretire_tunnel` when a subsequent co-recall re-forms the
+    /// tunnel. A retired tunnel is excluded from active reads (`all_active_tunnels`,
+    /// the dreaming suppression set) but preserved in full audit history —
+    /// no hard delete. Reversible by design (§ 12.8).
+    ///
+    /// Mirrors Swift `Tunnel.isRetiredBit` (bit 13).
+    pub const IS_RETIRED_BIT: i64 = 1 << 13;
+
+    /// True when this tunnel is retired (bit 13 of `operational_bitmap` is set).
+    ///
+    /// Retired tunnels are excluded from active tunnel reads. They remain in
+    /// the database for audit continuity and may be un-retired when subsequent
+    /// co-recall reinforces their endpoints again.
+    pub fn is_retired(&self) -> bool {
+        self.operational_bitmap & Self::IS_RETIRED_BIT != 0
+    }
+
+    /// Return a copy of this tunnel with bit 13 set (retired state).
+    ///
+    /// Used by `DrawerStore::retire_tunnel`. The caller is responsible for
+    /// persisting the updated bitmap to the database and recording an audit
+    /// diary entry (B-1: NeuronKit reaches this via the GLK seam, never
+    /// directly).
+    pub fn with_retired(&self) -> Tunnel {
+        let mut copy = self.clone();
+        copy.operational_bitmap |= Self::IS_RETIRED_BIT;
+        copy
+    }
+
+    /// Return a copy of this tunnel with bit 13 cleared (active state).
+    ///
+    /// Used by `DrawerStore::unretire_tunnel` when a later co-recall
+    /// re-reinforces a previously-retired dreamed tunnel.
+    pub fn with_unretired(&self) -> Tunnel {
+        let mut copy = self.clone();
+        copy.operational_bitmap &= !Self::IS_RETIRED_BIT;
+        copy
+    }
+}
+
+// MARK: - Tunnel provenance accessors
+
+// Tunnel `provenance_bitmap` layout (T13 / ADR-021 Phase 7, low-to-high):
+//   bit  0   is_dreamed   (1 bit) — set by dreaming pipeline when the
+//            tunnel was proposed by REM-ALPHA or REM-THETA (emergent channel).
+//            Cleared for declared tunnels (palace tunnels.json, vault wikilinks,
+//            user-explicit `capture` tunnel frames). OMEGA retires only tunnels
+//            where is_dreamed = 1 (§ 12.8 "provenance = dreamed AND not
+//            reinforced by recall"). Declared tunnels (is_dreamed = 0) are
+//            NEVER retired by OMEGA regardless of recall activity.
+//   bits 1–63 reserved for future provenance axes.
+impl Tunnel {
+    // ─── Provenance accessors (T13 / ADR-021 Phase 7) ───────────────
+
+    /// Bit 0 of `provenance_bitmap` — dreamed-provenance flag (T13 / ADR-021 Phase 7).
+    ///
+    /// Set to 1 when this tunnel entered the substrate through the dreaming
+    /// pipeline (REM-ALPHA or REM-THETA co-recall proposal, subsequently accepted).
+    /// Set to 0 for all declared tunnels. OMEGA's retire predicate requires
+    /// `is_dreamed == true` — declared tunnels are never retired (§ 12.8).
+    ///
+    /// Mirrors Swift `Tunnel.isDreamedBit` (bit 0).
+    pub const IS_DREAMED_BIT: i64 = 1 << 0;
+
+    /// True when this tunnel has dreamed provenance (emerged from REM-ALPHA
+    /// or REM-THETA co-recall). False for all declared tunnels.
+    pub fn is_dreamed(&self) -> bool {
+        self.provenance_bitmap & Self::IS_DREAMED_BIT != 0
+    }
+
+    /// Return a copy of this tunnel with `is_dreamed` stamped (bit 0 set).
+    ///
+    /// Used when the dreaming pipeline forms a real Tunnel from an accepted
+    /// proposal. Declared tunnels never call this method.
+    pub fn with_dreamed_provenance(&self) -> Tunnel {
+        let mut copy = self.clone();
+        copy.provenance_bitmap |= Self::IS_DREAMED_BIT;
+        copy
+    }
 }
 
 #[cfg(test)]
@@ -296,13 +396,15 @@ mod tests {
         assert_eq!(TunnelKind::Covers.raw_value(), 6);
         assert_eq!(TunnelKind::Elaborates.raw_value(), 7);
         assert_eq!(TunnelKind::RespondsTo.raw_value(), 8);
+        assert_eq!(TunnelKind::Parent.raw_value(), 9);
     }
 
     #[test]
     fn tunnel_kind_from_raw_falls_back_to_references() {
         assert_eq!(TunnelKind::from_raw(0), TunnelKind::Supersedes);
         assert_eq!(TunnelKind::from_raw(8), TunnelKind::RespondsTo);
-        assert_eq!(TunnelKind::from_raw(9), TunnelKind::References);
+        assert_eq!(TunnelKind::from_raw(9), TunnelKind::Parent);
+        assert_eq!(TunnelKind::from_raw(10), TunnelKind::References);
         assert_eq!(TunnelKind::from_raw(-1), TunnelKind::References);
     }
 
@@ -380,5 +482,116 @@ mod tests {
         assert_eq!(t.origin_class(), TunnelOriginClass::UserExplicit);
         assert_eq!(t.strength(), TunnelStrength::Weak);
         assert!(!t.has_inverse());
+    }
+
+    // ─── Retirement accessor tests (T13 / ADR-021 Phase 7) ──────────
+
+    #[test]
+    fn is_retired_is_bit_thirteen() {
+        let t = t_with(0);
+        assert!(!t.is_retired(), "fresh tunnel should not be retired");
+        let retired = t.with_retired();
+        assert!(retired.is_retired(), "with_retired should set bit 13");
+        // verify bit 13 specifically: 1 << 13 = 8192
+        assert_eq!(retired.operational_bitmap & (1 << 13), 1 << 13);
+    }
+
+    #[test]
+    fn with_retired_does_not_disturb_other_operational_bits() {
+        // Set bits 0, 3, 12 (direction=bidirectional, lifecycle=proposed, has_inverse)
+        let bits: i64 = 1 | (1 << 3) | (1 << 12);
+        let t = t_with(bits);
+        let retired = t.with_retired();
+        assert!(retired.is_retired());
+        // other bits must be preserved
+        assert_eq!(retired.direction(), TunnelDirection::Bidirectional);
+        assert_eq!(retired.lifecycle(), TunnelLifecycle::Proposed);
+        assert!(retired.has_inverse());
+    }
+
+    #[test]
+    fn with_unretired_clears_retirement_flag() {
+        let t = t_with(1 << 13); // start retired
+        assert!(t.is_retired());
+        let active = t.with_unretired();
+        assert!(!active.is_retired(), "with_unretired should clear bit 13");
+    }
+
+    #[test]
+    fn retire_then_unretire_round_trips() {
+        let original = t_with(0b101); // some bits set
+        let retired = original.with_retired();
+        let restored = retired.with_unretired();
+        assert_eq!(
+            original.operational_bitmap,
+            restored.operational_bitmap,
+            "bitmap must be identical after retire→unretire"
+        );
+    }
+
+    #[test]
+    fn is_retired_bit_matches_swift_constant() {
+        // Swift: isRetiredBit = 1 << 13 = 8192. Rust must agree.
+        assert_eq!(Tunnel::IS_RETIRED_BIT, 8192);
+    }
+
+    // ─── Provenance accessor tests (T13 / ADR-021 Phase 7) ──────────
+
+    fn p_with(prov_bits: i64) -> Tunnel {
+        let mut t = Tunnel::new(
+            "p".to_string(),
+            "w".to_string(),
+            "r".to_string(),
+            "w".to_string(),
+            "r".to_string(),
+            "label".to_string(),
+            "u".to_string(),
+            0,
+        );
+        t.provenance_bitmap = prov_bits;
+        t
+    }
+
+    #[test]
+    fn is_dreamed_is_bit_zero_of_provenance_bitmap() {
+        let t = p_with(0);
+        assert!(!t.is_dreamed(), "default provenance is declared (not dreamed)");
+        let dreamed = t.with_dreamed_provenance();
+        assert!(dreamed.is_dreamed(), "with_dreamed_provenance must set bit 0");
+        assert_eq!(dreamed.provenance_bitmap & 1, 1);
+    }
+
+    #[test]
+    fn with_dreamed_provenance_does_not_disturb_operational_bitmap() {
+        let mut t = p_with(0);
+        t.operational_bitmap = 0b111; // direction=Hub and some other bits
+        let dreamed = t.with_dreamed_provenance();
+        assert_eq!(
+            dreamed.operational_bitmap,
+            0b111,
+            "operational_bitmap must be unchanged by provenance stamp"
+        );
+    }
+
+    #[test]
+    fn declared_tunnel_never_dreamed_by_default() {
+        let t = Tunnel::new(
+            "d".to_string(),
+            "w".to_string(),
+            "r".to_string(),
+            "w".to_string(),
+            "r".to_string(),
+            "label".to_string(),
+            "u".to_string(),
+            0,
+        );
+        assert!(!t.is_dreamed());
+        assert!(!t.is_retired());
+    }
+
+    #[test]
+    fn is_dreamed_bit_matches_swift_constant() {
+        // Swift: isDreamedBit = 1 << 0 = 1. Rust must agree.
+        assert_eq!(Tunnel::IS_DREAMED_BIT, 1);
     }
 }

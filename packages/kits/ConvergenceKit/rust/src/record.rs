@@ -3,8 +3,8 @@
 //! SyncRecord wraps a PersistenceKit TableChange with sync metadata
 //! (schema version, kit id, HLC). The receiver decodes, validates
 //! schema and kit, and applies the change through its local
-//! PersistenceKit. Schema or kit mismatch causes the record to be
-//! rejected (queued for retry post-app-update).
+//! PersistenceKit. Schema or kit mismatch is counted as a conflict
+//! and the record is skipped; no retry queue is present.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -56,10 +56,14 @@ impl From<SyncEventKind> for StorageEvent {
 }
 
 /// Codable wrapper for HLC. Stable across encoders.
+/// JSON contract: camelCase field names matching Swift's property names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PackedHLC {
     pub physical_time: i64,
     pub logical_count: i32,
+    /// Serializes as "nodeID" to match Swift's property name (not "nodeId").
+    #[serde(rename = "nodeID")]
     pub node_id: i32,
 }
 
@@ -195,7 +199,9 @@ impl SyncValueMap {
 }
 
 /// One sync record, the unit of replication.
+/// JSON contract: camelCase field names matching Swift's property names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncRecord {
     pub table: String,
     pub event: SyncEventKind,
@@ -203,6 +209,8 @@ pub struct SyncRecord {
     pub values: Option<SyncValueMap>,
     pub hlc: PackedHLC,
     pub schema_version: i32,
+    /// Serializes as "kitID" to match Swift's property name (not "kitId").
+    #[serde(rename = "kitID")]
     pub kit_id: String,
 }
 

@@ -234,9 +234,26 @@ pub fn ensure_install_key(estates_dir: &Path) -> StorageResult<Vec<u8>> {
     load_or_create_install_key(&estates_dir.join(INSTALL_KEY_FILE))
 }
 
-/// Read the key file, creating it with fresh random bytes (0600 on unix) if
-/// absent. A key file of the wrong length is a tampered/corrupt key: fail loud
-/// rather than silently regenerate (which would orphan every existing estate).
+/// Read the key file, creating it with fresh random bytes if absent.
+///
+/// # Security properties (SECFIX-WS2-PK F-key)
+///
+/// The key file is created ATOMICALLY with owner-only permissions (0o600) at
+/// open time. There is no window where the file exists world/group-readable:
+///
+/// * On Unix: `OpenOptions::create_new(true).mode(0o600)` translates to
+///   `open(O_CREAT | O_EXCL | O_WRONLY, 0600)`. `O_EXCL` means the kernel
+///   sets the mode in the inode before the directory entry is visible — no
+///   intermediate readable state. `O_EXCL` also refuses to follow a symlink
+///   at the target path, blocking a pre-planted symlink attack.
+/// * On Windows: `create_new(true)` provides O_EXCL semantics. The file
+///   inherits the per-user profile ACL of its LOCALAPPDATA location; tighter
+///   ACL control (explicit DACL) is a follow-on hardening task.
+///
+/// A key file of the wrong length is treated as tampered/corrupt: we fail
+/// loud rather than silently regenerate (regeneration would orphan every
+/// existing encrypted estate by rendering their ciphertexts permanently
+/// undecryptable).
 fn load_or_create_install_key(key_path: &Path) -> StorageResult<Vec<u8>> {
     if let Ok(bytes) = std::fs::read(key_path) {
         if bytes.len() == INSTALL_KEY_LEN {
@@ -257,22 +274,48 @@ fn load_or_create_install_key(key_path: &Path) -> StorageResult<Vec<u8>> {
         }
     }
     let key = Aes256Gcm::generate_key(OsRng).to_vec();
-    std::fs::write(key_path, &key).map_err(|e| StorageError::BackendError {
-        underlying: format!("install key: write {key_path:?}: {e}"),
-    })?;
-    // Restrict to owner read/write so a non-owner cannot read the key. On
-    // Windows the file inherits the per-user profile ACL of its LOCALAPPDATA
-    // location; tightening beyond that needs a platform ACL call (follow-on).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |e| StorageError::BackendError {
-                underlying: format!("install key: chmod {key_path:?}: {e}"),
-            },
-        )?;
-    }
+    // Atomic create: O_CREAT | O_EXCL with mode 0600 on Unix — permissions
+    // are set at inode creation, before the directory entry is visible. This
+    // closes the race window where std::fs::write followed by set_permissions
+    // left the file group/world-readable for a brief interval, and prevents
+    // following a pre-planted symlink at the key path.
+    create_key_file_atomic(key_path, &key)?;
     Ok(key)
+}
+
+/// Write `data` to `path` using O_CREAT|O_EXCL (create-new, no-follow) with
+/// mode 0600 on Unix. Fails if a file or symlink already exists at `path`.
+///
+/// This is split from `load_or_create_install_key` so it can be called and
+/// verified independently in tests.
+fn create_key_file_atomic(path: &Path, data: &[u8]) -> StorageResult<()> {
+    use std::io::Write as _;
+
+    // Build an OpenOptions that sets mode 0600 atomically on Unix.
+    // create_new(true) provides O_CREAT|O_EXCL on all platforms.
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            // Mode is applied at open time via the kernel's open(2) mode
+            // argument — the inode gets 0600 before any data is written.
+            .mode(0o600)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+
+    let mut file = file.map_err(|e| StorageError::BackendError {
+        underlying: format!("install key: atomic create {path:?}: {e}"),
+    })?;
+    file.write_all(data).map_err(|e| StorageError::BackendError {
+        underlying: format!("install key: write {path:?}: {e}"),
+    })
 }
 
 /// Resolve the whole-file encryption config for an estate file at `db_path`,

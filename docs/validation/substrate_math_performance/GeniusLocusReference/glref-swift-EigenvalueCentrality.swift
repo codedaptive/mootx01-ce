@@ -25,14 +25,14 @@
 // Used by:
 //   - CognitionKit § 11.11 (recall_keystone) via cached
 //     `row_keystone_score` (Float32) column on every row.
-//   - The dreaming daemon's Rule 10 (daily refresh of keystone
+//   - The dreaming daemon's Rule 2 (weekly refresh of keystone
 //     scores).
 //
 // Cookbook references:
 //   § 7.1   Estate graph definition
 //   § 7.2   Eigenvalue centrality
 //   § 11.11 recall_keystone primitive
-//   § 15.1  Dreaming daemon Rule 10
+//   § 15.1  Dreaming daemon Rule 2
 
 import Foundation
 

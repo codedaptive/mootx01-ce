@@ -331,6 +331,20 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         return nmfVector(for: text) ?? []
     }
 
+    /// Single-pass override: compute the NMF fold-in vector ONCE and return both
+    /// the projected Engram and the float vector, deduping the double pass that
+    /// `embed(_:)` + `embedFloat(_:)` would otherwise run. `nmfVector(for:)` is
+    /// deterministic; a non-nil vector v projects to the same Engram and is
+    /// returned as the float lane; a nil result (no basis, empty/non-tokenisable
+    /// input, all-OOV, or a degenerate all-zero fold-in) yields `(.zero, [])`.
+    /// This override calls `nmfVector(for:)` directly and never invokes the
+    /// default `embedPair` — the all-OOV `embedFloatVocabMiss` path is bypassed
+    /// here, not by the default `try?` collapse.
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        guard let v = nmfVector(for: text), !v.isEmpty else { return (.zero, []) }
+        return (FloatSimHash.project(vector: v, seed: projectionSeed), v)
+    }
+
     // MARK: Private helpers
 
     /// Compute the NMF embedding vector for `text` using the fold-in formula.
@@ -515,6 +529,50 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
             return FloatVecOps.l2Normalize(col)
         }
     }
+
+    // MARK: Counts serialization (incremental-counts change set)
+
+    /// 4-byte magic identifying an NMF COUNTS blob ("NMFC"). Distinct from the
+    /// basis magic: the counts blob persists only the lightweight trigger
+    /// anchors (vocabulary + document count), NOT the derived W/H factors. NMF's
+    /// heavy factorization input (the per-document TF rows) is re-derived by
+    /// re-tokenizing the corpus at refactor, so it is not persisted here.
+    static let countsMagic: [UInt8] = Array("NMFC".utf8)
+
+    /// Serialize the maintained trigger anchors (vocabulary + document count).
+    /// Byte-identical to the Rust `serialize_counts` (UTF-8-byte-sorted vocab
+    /// map, fixed field order).
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | projectionSeed (u64)
+    ///   | documentCount (u32) | vocab (String→u32 map, byte-sorted keys)
+    public func serializeCounts() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(NmfProvider.countsMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU64(projectionSeed)
+        w.writeU32(UInt32(counts.documentCount))
+        w.writeStringU32Map(counts.vocab)
+        return w.data
+    }
+
+    /// Restore the maintained vocabulary + document count from a counts blob
+    /// into this provider. Does not touch the W/H factors (derived at refactor).
+    /// Throws `CorpusKitError.decodingFailure` on a truncated/unknown/mismatched
+    /// blob — never crashes.
+    public func restoreCounts(from data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(NmfProvider.countsMagic)
+        try r.expectVersion(basisFormatVersion)
+        _ = try r.readString()  // modelID — header for validation; row is keyed by it
+        _ = try r.readString()  // modelVersion
+        _ = try r.readU64()     // projectionSeed
+        let documentCount = Int(try r.readU32())
+        let vocab = try r.readStringU32Map()
+        self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
+    }
 }
 
 // MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
@@ -544,4 +602,20 @@ extension NmfProvider: TrainableEmbeddingBasis {
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try NmfProvider(deserializing: basis)
     }
+
+    // MARK: Maintained counts (incremental-counts change set, P3)
+
+    /// Fold one chunk's text into the maintained vocabulary + document count.
+    /// NMF's accumulation consumes a raw document (`train(document:)` tokenizes
+    /// internally via `TermDocumentCounts`), so the text is folded unchanged —
+    /// the same per-document step `trainOnCorpus` runs, minus the finalize/NMF.
+    /// Per-document TF rows are re-derived by re-tokenizing at refactor (Bob's
+    /// re-tokenize-at-refactor decision); the table keeps the vocab + doc-count
+    /// growth anchor current.
+    public func addToCounts(text: String) {
+        counts.addDocumentForCountsAnchor(text)
+    }
+
+    /// Maintained vocabulary size for the growth trigger.
+    public var countsVocabularySize: Int { counts.vocabularySize }
 }

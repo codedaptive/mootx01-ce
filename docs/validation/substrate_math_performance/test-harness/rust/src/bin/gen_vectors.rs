@@ -1,6 +1,6 @@
 // src/bin/gen_vectors.rs
 //
-// CLI: `cargo run --bin gen-vectors -- --primitive <name> --seed <0xhex> [--out <path>]`
+// CLI: `cargo run --bin gen-vectors -- --primitive <name> --seed <0xhex> [--out <path>] [--kernel <name>]`
 //
 // Mirrors the Swift gen-vectors binary.
 

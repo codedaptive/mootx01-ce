@@ -17,10 +17,19 @@ import VectorKit
 /// `AssociationFrame` values with weight = 1 − (distance / 256).
 ///
 /// Routing: every emission goes through the `associate` verb at the
-/// GLK-02 boundary. The verb adds the weight delta to the association
-/// edge and records the provenance bit `vector_similarity` per
-/// architecture spec §2.5 / cookbook §2.5 (provenance bitmap
+/// GLK-02 boundary, which records the provenance bit `vector_similarity`
+/// per architecture spec §2.5 / cookbook §2.5 (provenance bitmap
 /// amendments — bit 3 vector_similarity).
+///
+/// ADMIN — weight is the entrance gate. It is derived FREE from the
+/// already-computed proximity-gate Hamming distance (no extra origin-side
+/// work to obtain it), and carried on the `AssociationFrame`. But it is
+/// VESTIGIAL past the `associate` verb: the association row has no weight
+/// column, so the verb accepts and discards it (see `Verbs.associate`,
+/// the drop site). The value is computed and plumbed on purpose — a
+/// pre-2.0 gauntlet experiment will test whether feeding weight into
+/// recall improves results; until that runs, it is honestly carried and
+/// dropped, never persisted and never silently fabricated.
 ///
 /// Cadence: every five minutes — matches the cookbook §15.2 bucket-
 /// boundary work that the dreaming daemon's hot-path Rule 4 runs at,

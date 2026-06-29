@@ -11,12 +11,15 @@
 // is fixed at nine and the adjective category count at four (spec
 // invariants I-7, I-8).
 
+use serde::{Deserialize, Serialize};
+
 /// The grammar, stated. The contract every consumer composes.
 pub const GRAMMAR: &str =
     "Every call is one verb applied to a noun, optionally constrained by adjectives.";
 
 /// A storage shape's relationship to the drawer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum NounRole {
     /// The drawer itself, the noun of the language.
     Primary,
@@ -31,7 +34,8 @@ pub enum NounRole {
 /// A storage shape the substrate persists. The Drawer is the noun of
 /// the language; the rest are its rungs, structure about it, or the
 /// products of verbs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Noun {
     Drawer,
     Tunnel,
@@ -84,7 +88,8 @@ impl Noun {
 }
 
 /// Who initiates a verb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Flow {
     CallerDriven,
     SubstrateDriven,
@@ -92,7 +97,8 @@ pub enum Flow {
 }
 
 /// One of the nine actions the substrate supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Verb {
     Capture,
     Reanchor,
@@ -146,7 +152,8 @@ impl Verb {
 /// each category are a bitmap-layout concern (spec section 5.5),
 /// reified in LocusKit; the lexicon names the categories, not the
 /// values, so the two do not fork.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Adjective {
     State,
     Trust,
@@ -305,6 +312,53 @@ mod tests {
         assert!(GRAMMAR.contains("one verb applied to a noun"));
     }
 
+    #[test]
+    fn serde_noun_wire_strings_match_as_str() {
+        // serde encoding must produce the same string as as_str() for
+        // cross-language wire compatibility with Swift Codable.
+        for noun in Noun::ALL {
+            let json = serde_json::to_string(&noun).expect("serialize");
+            let expected = format!("\"{}\"", noun.as_str());
+            assert_eq!(json, expected, "Noun::{:?} serde mismatch", noun);
+        }
+    }
+
+    #[test]
+    fn serde_verb_wire_strings_match_as_str() {
+        for verb in Verb::ALL {
+            let json = serde_json::to_string(&verb).expect("serialize");
+            let expected = format!("\"{}\"", verb.as_str());
+            assert_eq!(json, expected, "Verb::{:?} serde mismatch", verb);
+        }
+    }
+
+    #[test]
+    fn serde_adjective_wire_strings_match_as_str() {
+        for adj in Adjective::ALL {
+            let json = serde_json::to_string(&adj).expect("serialize");
+            let expected = format!("\"{}\"", adj.as_str());
+            assert_eq!(json, expected, "Adjective::{:?} serde mismatch", adj);
+        }
+    }
+
+    #[test]
+    fn serde_noun_roundtrip() {
+        for noun in Noun::ALL {
+            let json = serde_json::to_string(&noun).expect("serialize");
+            let decoded: Noun = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, noun);
+        }
+    }
+
+    #[test]
+    fn serde_verb_roundtrip() {
+        for verb in Verb::ALL {
+            let json = serde_json::to_string(&verb).expect("serialize");
+            let decoded: Verb = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, verb);
+        }
+    }
+
     // Conformance gate: `as_str()` on every variant must match the Swift rawValue
     // wire strings exactly. These are foundational — a mismatch silently mis-labels
     // every noun/verb/adjective in the JSON lexicon served to the dashboard.
@@ -356,5 +410,24 @@ mod tests {
         let all_strs: Vec<&str> = Adjective::ALL.iter().map(|a| a.as_str()).collect();
         let expected = ["state", "trust", "sensitivity", "exportability"];
         assert_eq!(all_strs, expected);
+    }
+
+    #[test]
+    fn serde_flow_wire_strings() {
+        assert_eq!(serde_json::to_string(&Flow::CallerDriven).unwrap(), "\"callerDriven\"");
+        assert_eq!(serde_json::to_string(&Flow::SubstrateDriven).unwrap(), "\"substrateDriven\"");
+        assert_eq!(serde_json::to_string(&Flow::GroundingDriven).unwrap(), "\"groundingDriven\"");
+        let rt: Flow = serde_json::from_str("\"callerDriven\"").unwrap();
+        assert_eq!(rt, Flow::CallerDriven);
+    }
+
+    #[test]
+    fn serde_noun_role_wire_strings() {
+        assert_eq!(serde_json::to_string(&NounRole::Primary).unwrap(), "\"primary\"");
+        assert_eq!(serde_json::to_string(&NounRole::Rung).unwrap(), "\"rung\"");
+        assert_eq!(serde_json::to_string(&NounRole::Structure).unwrap(), "\"structure\"");
+        assert_eq!(serde_json::to_string(&NounRole::Product).unwrap(), "\"product\"");
+        let rt: NounRole = serde_json::from_str("\"rung\"").unwrap();
+        assert_eq!(rt, NounRole::Rung);
     }
 }

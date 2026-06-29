@@ -1,8 +1,8 @@
 ---
 title: SubstrateLib Specification
-version: 1.0.0
+version: 1.2.0
 status: active
-date: 2026-06-14
+date: 2026-06-28
 description: "Behavioral specification for SubstrateLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -68,6 +68,13 @@ This specification defines:
   4. Read-modify-writes the FieldWrites into the prior bitmaps.
   5. Computes the content-ID hash.
   6. Emits one canonical `AuditEvent`.
+
+- The Merkle content-integrity hash pipeline (`MerkleHash`) per
+  ADR-017 §16: domain-separated SHA-256 hashing for leaf content,
+  interior tree nodes, and tombstones.
+- The keyed-commitment API (`KeyedCommitment`) per ADR-017 §17:
+  HMAC-SHA256 commitment for expunge provenance, plus the
+  `CommitmentAuditLog` G-Set CRDT for audit trail.
 
 This specification does NOT define:
 
@@ -239,6 +246,71 @@ encodes a legal substrate state. Consumers that *only* mutate
 through `AuditGate.admit` cannot produce a corrupt substrate row
 no matter what they do.
 
+### § 5.4 MerkleHash pipeline (ADR-017 §16)
+
+`MerkleHash` computes domain-separated SHA-256 hashes for the Merkle
+content-integrity tree. Three functions:
+
+- **`leaf`**: hashes a drawer's content and embedding vectors with domain
+  tag 0x00 (LEAF). The canonical byte encoding (v2) is: domain tag (1 byte) +
+  drawer UUID (16 bytes big-endian) + content length (8 bytes u64 BE) +
+  content bytes + vector count (4 bytes u32 BE) + sorted vectors. Vectors
+  are sorted by (modelID, vectorIndex) ascending; each vector is encoded as:
+  model_id UTF-8 length (4 bytes u32 BE) + model_id bytes +
+  vector_index (4 bytes u32 BE) + float count (4 bytes u32 BE) +
+  IEEE-754 LE floats. The v2 encoding writes vector identity (model_id +
+  vector_index) into the preimage before the float payload so that
+  substituting a vector from a different model or slot changes the leaf hash.
+  Cross-port conformance pin (SHA-256, drawer=12345678-1234-1234-1234-123456789abc,
+  content="hello", one vector model-a/idx=0/[1.0f,2.0f]):
+  cb18e8a5dcff4eb955f731bf75c078b9390a175ff225cc67a1ff0f1d3fa192dc.
+- **`interior`**: hashes a set of child (UUID, ContentHash) pairs with
+  domain tag 0x01 (INTERIOR). Children are sorted by UUID big-endian
+  bytes before hashing, making the result order-independent. An empty
+  child set returns `MerkleRoot.empty`.
+- **`tombstone`**: hashes a drawer UUID with domain tag 0x02 (TOMBSTONE).
+
+Invariants:
+- **Deterministic**: same inputs produce the same hash across calls and
+  across Swift/Rust ports (bit-identical).
+- **Domain-separated**: leaf, interior, and tombstone hashes for the same
+  UUID are always distinct due to the domain tag prefix.
+- **Vector order-independent**: the hash is invariant to the input order
+  of vectors (canonical sort before hashing).
+- **Vector identity-bound (v2)**: replacing a vector's model_id or
+  vector_index while keeping the same floats always changes the leaf hash.
+  This binding closes the vector substitution gap in keyed commitments.
+
+The `canonicalLeafBytes` helper is shared with `KeyedCommitment` (§5.5)
+— one encoding, two uses.
+
+### § 5.5 KeyedCommitment API (ADR-017 §17)
+
+`KeyedCommitment.commit` computes an HMAC-SHA256 over the canonical leaf
+bytes (the same encoding `MerkleHash.leaf` uses) but with the COMMITMENT
+domain tag 0x03 instead of LEAF 0x00. The HMAC key is an estate-held
+secret; the key version is preserved alongside the HMAC output in
+`KeyedCommitmentValue`.
+
+Invariants:
+- **Deterministic**: same key + key version + drawer + content + vectors
+  produce the same HMAC across calls and across ports.
+- **Domain-separated from leaf hash**: a commitment is always distinct
+  from the corresponding leaf hash (different domain tag + HMAC vs SHA-256).
+- **Key-dependent**: different keys produce different commitments.
+- **Key version preserved**: the `keyVersion` field is carried through
+  unchanged, enabling key rotation without commitment recomputation.
+
+`KeyedCommitmentAuditEntry` is an immutable audit record carrying the
+drawer ID, the commitment value, the tombstone HLC, and a reason string.
+Its `id` field is a deterministic 32-byte SHA-256 over the entry's
+identifying fields, ensuring two replicas producing the same logical
+entry produce identical IDs.
+
+`CommitmentAuditLog` is a grow-only set (G-Set CRDT) keyed by content
+hash. Add is idempotent; merge is set union. Two replicas converge
+regardless of message order.
+
 ## § 6 — Error model (conceptual)
 
 The package raises:
@@ -275,6 +347,17 @@ this package ships conformance vectors:
   is accepted; this matches across ports.
 - **Verb vectors:** each of the nine verbs, given a fixture audit
   event sequence, produces an identical event across ports.
+
+- **MerkleHash vectors:** leaf, interior, and tombstone hashes are
+  deterministic and bit-identical across Swift and Rust ports for the
+  same inputs. Vector sort-order independence is verified by passing
+  the same vectors in different orders and asserting identical hashes.
+- **KeyedCommitment vectors:** HMAC commitments are deterministic
+  and bit-identical across ports. Domain separation from leaf hash
+  is verified (different domain tag + HMAC vs SHA-256).
+- **CommitmentAuditLog vectors:** deterministic content-ID for
+  identical entry fields across ports. Idempotent add, set-union
+  merge, tombstone-HLC ordering all verified.
 
 The vectors live in `tests/` directories of both legs.
 
@@ -321,6 +404,19 @@ sentinel. Non-telemetry calls use `ts: 0.0`, which every
 timestamp-filtered sink discards.
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-28
+Security fix: §5.4 leaf encoding upgraded to v2. vector_index type corrected
+to u32 BE (was incorrectly specified as i32 BE). v2 per-vector layout binds
+model_id and vector_index into the preimage before the float payload, closing
+the vector substitution gap in keyed commitments (WS2-F4). Cross-port
+conformance pin added. New invariant: vector identity-bound. Added withdraw
+verb matrix update to §2 invariants (WS2-F5).
+
+### 1.1.0 -- 2026-06-20
+Added §5.4 MerkleHash pipeline (ADR-017 §16) and §5.5 KeyedCommitment API
+(ADR-017 §17) behavioral contracts. Extended §2 scope and §7 conformance
+requirements to cover MerkleHash, KeyedCommitment, and CommitmentAuditLog.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

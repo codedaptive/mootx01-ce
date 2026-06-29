@@ -82,11 +82,21 @@ fn parse_port_file_contents(raw: &str) -> Option<u16> {
     raw.trim().parse::<u16>().ok().filter(|&p| p != 0)
 }
 
+/// Hard cap on the daemon proxy response body. The proxy endpoints (/api/lattice,
+/// /api/admin/estates) return metadata-only payloads — a few KB at most in
+/// practice. 10 MiB is a generous ceiling; beyond this the response is treated
+/// as a degraded state (None) rather than allocating unbounded memory. This
+/// bounds the local DoS surface on the unauthenticated proxy path: even a
+/// compromised or misbehaving daemon cannot allocate unbounded heap in moot-mgr.
+const MAX_PROXY_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Issue a raw HTTP/1.0 GET for the given path against `host:port`.
 ///
 /// Returns `Some(body_bytes)` on a `200 OK` response, `None` on any
-/// connect / timeout / non-200 / read failure. `Connection: close` lets us
-/// read the body to EOF without needing a Content-Length parser.
+/// connect / timeout / non-200 / read failure / oversized response.
+/// `Connection: close` lets us read the body to EOF without needing a
+/// Content-Length parser. The read is capped at `MAX_PROXY_RESPONSE_BYTES`
+/// to prevent a misbehaving upstream from exhausting moot-mgr's heap.
 ///
 /// Callers use `None` as the signal to fall back to the honest degraded state;
 /// they do not distinguish between "daemon down" and "bad response".
@@ -107,8 +117,17 @@ pub fn get(host: &str, port: u16, path: &str) -> Option<Vec<u8>> {
     stream.write_all(request.as_bytes()).ok()?;
     stream.flush().ok()?;
 
+    // Cap the read at MAX_PROXY_RESPONSE_BYTES to prevent unbounded heap
+    // allocation. If the response hits the cap, treat it as degraded (None)
+    // because a truncated JSON body is useless and a legitimate daemon never
+    // sends anywhere near 10 MiB for these metadata endpoints.
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).ok()?;
+    let mut limited = stream.take(MAX_PROXY_RESPONSE_BYTES);
+    limited.read_to_end(&mut raw).ok()?;
+    // If we hit the cap exactly, the upstream response was oversized — degrade.
+    if raw.len() as u64 >= MAX_PROXY_RESPONSE_BYTES {
+        return None;
+    }
 
     // Split headers / body at the blank line.
     let split = raw

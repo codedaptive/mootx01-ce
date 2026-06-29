@@ -5,9 +5,9 @@ import Foundation
 /// Tests for `KGFact` value type and its operational accessors per
 /// `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` § 4.1 and § 5.6.
 ///
-/// Persistence ships in LOCI_V035_06B; this suite verifies the value
-/// type, the four operational enums, and the bitmap accessor
-/// round-trips only.
+/// Covers KGFact value/accessor behavior: the four operational enums
+/// and bitmap accessor round-trips. Persistence coverage lives in
+/// `KGFactStoreTests.swift`.
 @Suite("KGFactTests")
 struct KGFactTests {
 

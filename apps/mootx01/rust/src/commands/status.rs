@@ -1,14 +1,14 @@
 //! commands/status.rs — §4.5: server state, active estate, wired clients.
 //!
-//! Output shape matches the Swift StatusCommand verbatim (§7). Liveness is
-//! determined by the daemon's port file plus a loopback TCP probe — the
-//! resident daemon writes `daemon.port` and `mootx01.pid` (serve, §3); a
-//! probe of the recorded port is portable across Unix and Windows where a
-//! kill(pid, 0) check is not. Stale pid/port files are cleaned here, same as
-//! the Swift side cleans a stale pid file.
+//! Liveness is determined by the daemon's port file plus a loopback TCP probe —
+//! the resident daemon writes `daemon.port` and `mootx01.pid` (serve, §3); a
+//! TCP probe of the recorded port is portable across Unix and Windows where a
+//! kill(pid, 0) check is not. Stale pid/port files are cleaned here. Swift
+//! StatusCommand uses kill(pid, 0) on the PID file and cleans only the PID
+//! file; both produce equivalent liveness results for normal daemon states.
 //!
-//! Wired-client detection is format-aware (JSON / TOML / YAML) — the Swift
-//! status only checks JSON today (spec §8 conformance note).
+//! Wired-client detection is format-aware (JSON / TOML / YAML), matching the
+//! Swift StatusCommand which also delegates to format-aware wired detection.
 
 use std::net::TcpStream;
 use std::process::ExitCode;

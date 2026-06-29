@@ -205,6 +205,90 @@ struct GRT01_GrantTests {
         }
     }
 
+    // MARK: - Degenerate mode-3 custody parameters (Finding #2 regression)
+
+    /// Mode 3 with `threshold = 0` must be rejected even when IP clearance is
+    /// confirmed.  A zero threshold causes Lagrange reconstruction to interpolate
+    /// an empty share set → `DecayFieldElement.zero` — a constant anyone can
+    /// precompute, breaking the custody model (planned security hardening — B1
+    /// finding #2).
+    @Test("Mode-3 grant with threshold=0 is rejected (degenerate key guard)")
+    func decayDerivedRejectsZeroThreshold() async throws {
+        let (kit, handle, _) = try await openOneEstate()
+
+        let mode3 = CustodyMode.decayDerived(
+            threshold: 0, totalShares: 3, driftRatePerDay: .slow,
+            experimentalIPClearanceConfirmed: true
+        )
+        do {
+            _ = try await kit.issueGrant(handle, options(mode3))
+            Issue.record("threshold=0 must throw invalidCustodyParameters")
+        } catch let error as GrantError {
+            guard case .invalidCustodyParameters = error else {
+                Issue.record("expected invalidCustodyParameters, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// Mode 3 where `totalShares < threshold` must be rejected — you cannot
+    /// reconstruct a secret from fewer shares than the threshold requires.
+    @Test("Mode-3 grant with totalShares < threshold is rejected (degenerate key guard)")
+    func decayDerivedRejectsTotalSharesBelowThreshold() async throws {
+        let (kit, handle, _) = try await openOneEstate()
+
+        let mode3 = CustodyMode.decayDerived(
+            threshold: 5, totalShares: 3, driftRatePerDay: .slow,
+            experimentalIPClearanceConfirmed: true
+        )
+        do {
+            _ = try await kit.issueGrant(handle, options(mode3))
+            Issue.record("totalShares < threshold must throw invalidCustodyParameters")
+        } catch let error as GrantError {
+            guard case .invalidCustodyParameters = error else {
+                Issue.record("expected invalidCustodyParameters, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// Mode 3 where `totalShares > 255` must be rejected — the implementation
+    /// cap (`maxDecayShares = 255`) guards against pathological share counts
+    /// that would stress Lagrange interpolation.
+    @Test("Mode-3 grant with totalShares > 255 is rejected (degenerate key guard)")
+    func decayDerivedRejectsTotalSharesAboveCap() async throws {
+        let (kit, handle, _) = try await openOneEstate()
+
+        let mode3 = CustodyMode.decayDerived(
+            threshold: 2, totalShares: 256, driftRatePerDay: .slow,
+            experimentalIPClearanceConfirmed: true
+        )
+        do {
+            _ = try await kit.issueGrant(handle, options(mode3))
+            Issue.record("totalShares > 255 must throw invalidCustodyParameters")
+        } catch let error as GrantError {
+            guard case .invalidCustodyParameters = error else {
+                Issue.record("expected invalidCustodyParameters, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// Valid mode-3 parameters (threshold > 0, totalShares ≥ threshold, ≤ 255,
+    /// clearance confirmed) must succeed.  This verifies the guard is not a
+    /// spurious barrier on the happy path.
+    @Test("Mode-3 grant with valid parameters is accepted (gate not a spurious barrier)")
+    func decayDerivedAcceptsValidParameters() async throws {
+        let (kit, handle, _) = try await openOneEstate()
+
+        let mode3 = CustodyMode.decayDerived(
+            threshold: 2, totalShares: 3, driftRatePerDay: .slow,
+            experimentalIPClearanceConfirmed: true
+        )
+        // Must not throw.
+        _ = try await kit.issueGrant(handle, options(mode3))
+    }
+
     // MARK: - 8. Manifest Ed25519 keypair present and stable
 
     @Test

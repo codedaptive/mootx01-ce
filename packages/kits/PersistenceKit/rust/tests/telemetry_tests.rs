@@ -7,7 +7,7 @@
 //   §1 Disabled gate: with monitoring OFF, report_storage_stats emits nothing.
 //   §2 Enabled gate: with monitoring ON, the correct persistence.db.* metrics arrive.
 //   §3 Metric shapes: names, tags, and values conform to the namespace spec.
-//   §4 Conformance: StorageStats is byte-identical with monitoring ON or OFF.
+//   §4 Conformance: StorageStats fields are structurally identical with monitoring ON or OFF.
 //
 // CRITICAL — Global singleton isolation:
 //   Intellectus is a process-wide singleton (enabled flag + installed sink).

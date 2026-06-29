@@ -145,9 +145,8 @@ impl GeneratedExpression {
 }
 
 /// Extract an integer from an integer-family TypedValue. Other
-/// variants (and absent columns) read as 0, matching the SQL
-/// behavior where a generated column over a NULL integer column is
-/// coalesced to 0 by the surrounding bit operations.
+/// variants and absent columns return 0 — the sentinel for a missing
+/// or non-integer value in the InMemory evaluator.
 pub fn integer_value(value: Option<&TypedValue>) -> i64 {
     match value {
         Some(TypedValue::Int(i)) | Some(TypedValue::Bitmap(i)) => *i,

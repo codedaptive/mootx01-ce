@@ -194,43 +194,43 @@ public struct ReferenceRuleExecutor: DreamingRuleExecutor {
             // (≈ 30-day half-life on weekly schedule)
 
         case .keystoneRefresh:
-            // Recompute eigenvalue centrality and store keystone
-            // scores back into the working set's keystone-score
-            // cache. See glref-swift-EigenvalueCentrality.
-            _ = hlc      // placeholder for centrality dispatch
+            // STUB — pre-v1.1: centrality dispatch not yet implemented in this
+            // reference. See glref-swift-EigenvalueCentrality for the
+            // algorithm; hlc is discarded until the dispatch is wired.
+            _ = hlc
 
         case .louvainRefresh:
             // DEFERRED to v0.37 phase-2 of CommunityDetection.
             return
 
         case .nmfRerun:
-            // Run NMFAlternatingLeastSquares against F matrix,
+            // STUB — pre-v1.1: Run NMFAlternatingLeastSquares against F matrix,
             // persist W and H to the cognition bundle.
             _ = hlc
 
         case .calibrationRefresh:
-            // Already decayed above on the decay tick; recompute
-            // ECE and Brier into the bundle.
+            // Already decayed above on the decay tick; recompute ECE and Brier
+            // (results discarded here — STUB: bundle persistence not yet implemented).
             _ = context.calibration.expectedCalibrationError()
             _ = context.calibration.brierScore()
 
         case .temporalCompression:
-            // Roll hour-windows up into day, week, month windows
+            // STUB — pre-v1.1: Roll hour-windows up into day, week, month windows
             // via TemporalCompression.cascadeRollup.
             _ = hlc
 
         case .anomalyScan:
-            // Scan recent ambient streams against rolling baselines.
+            // STUB — pre-v1.1: Scan recent ambient streams against rolling baselines.
             // Hit rows get the anomalous bit set in the bitmap tier.
             _ = hlc
 
         case .auditLogCompaction:
-            // Compact the SQLite tail: drop obsolete tombstone-
+            // STUB — pre-v1.1: Compact the SQLite tail: drop obsolete tombstone-
             // chain entries, vacuum, checkpoint WAL.
             _ = hlc
 
         case .federationSync:
-            // Build tier contributions, exchange with paired peers,
+            // STUB — pre-v1.1: Build tier contributions, exchange with paired peers,
             // apply DP at the aggregator, consume privacy budget.
             _ = hlc
 
@@ -238,19 +238,19 @@ public struct ReferenceRuleExecutor: DreamingRuleExecutor {
             context.privacyLedger.dailyReset()
 
         case .bradleyTerryUpdate:
-            // Pairwise update on RecallTrace ingestion. The trace
+            // STUB — pre-v1.1: Pairwise update on RecallTrace ingestion. The trace
             // surface lives outside this file.
             _ = hlc
 
         case .actionOutcomeUpdate:
-            // ActionOutcomeMatrix.observe was already called by
-            // ActuatorKit on completion; this rule's job is to
-            // propagate the update through any dependent learned
-            // weights (e.g., outcome-aware Proposal ranking).
+            // STUB — pre-v1.1: ActionOutcomeMatrix.observe was already called by
+            // ActuatorKit on completion; this rule's job is to propagate the
+            // update through any dependent learned weights (e.g., outcome-aware
+            // Proposal ranking).
             _ = hlc
 
         case .cognitionBundleExport:
-            // Build a PortableCognitionBundle and write to the
+            // STUB — pre-v1.1: Build a PortableCognitionBundle and write to the
             // estate's designated export path.
             _ = hlc
         }

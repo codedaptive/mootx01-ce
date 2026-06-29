@@ -19,7 +19,7 @@ struct ProvenanceBitmapConformanceTests {
 
     private func makeDrawer(provenance: Int64) -> Drawer {
         Drawer(
-            content: "c", wing: "w", room: "r", addedBy: "test",
+            content: "c", parentNodeId: "test-parent", addedBy: "test",
             filedAt: Date(timeIntervalSince1970: 0),
             embeddingModelID: "minilm-v6",
             provenance: provenance

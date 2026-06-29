@@ -196,8 +196,8 @@ struct FixtureGenerator {
         ]
     }
 
-    /// Sanity check: the in-memory fixtures encode to the same bytes
-    /// as the committed fixture files.
+    /// Sanity check: the `job_001_file.json` in-memory fixture encodes
+    /// to the same bytes as the committed fixture file.
     @Test func fixturesByteIdenticalToCommitted() throws {
         let bundle = Bundle.module
         guard let url = bundle.url(

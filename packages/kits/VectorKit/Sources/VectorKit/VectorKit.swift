@@ -1,9 +1,14 @@
 // VectorKit.swift
 //
-// Module doc. VectorKit provides on-device embedding generation and
-// model-tagged vector storage. The kit's foundational abstraction is
-// the `EmbeddingProvider` protocol (this scaffold, VEC-01); concrete
-// adapters (MiniLM in VEC-03 and future models) conform to it.
+// VectorKit provides on-device embedding generation and model-tagged
+// vector storage. Its public surface includes:
+//   - `EmbeddingProvider` protocol — the embedding seam (any provider
+//     conforms to it; FloatSimHashEmbeddingProvider ships in this kit)
+//   - `VectorStore` — typed payload storage backed by ResidentArrayStore
+//     with sidecar-backed resident-array persistence (.vec files)
+//   - `BruteForceIndex` / `MIHIndex` — exact nearest-neighbour search
+//     over the resident array
+//   - `ResidentArrayStore` — sidecar-backed mmap array for the index
 //
 // Per spec I-4, every stored vector is tagged with the model ID and
 // version that produced it — cross-model comparisons are forbidden

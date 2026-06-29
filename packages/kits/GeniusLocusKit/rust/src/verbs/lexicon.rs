@@ -2,7 +2,7 @@
 // verb error taxonomy.
 //
 // Source of truth for the vocabulary is the AriaLexicon Swift module
-// at `AriaLexicon/Sources/AriaLexicon/`. The Rust port duplicates the
+// at `packages/libs/AriaLexiconLib/Sources/AriaLexiconLib/`. The Rust port duplicates the
 // names and the §7.2 acceptance matrix as data so the parity test in
 // `tests/verb_parity.rs` can assert agreement across ports.
 // `AriaLexiconLib/rust/` is a fully implemented Rust crate; GLK
@@ -60,7 +60,9 @@ pub enum VerbError {
     /// checks; today only the matrix data lookup raises this.
     RejectedByLexicon { verb: String, noun: String },
 
-    /// A reanchor frame supplied neither `to_room` nor `to_lattice`.
+    /// A reanchor frame supplied none of `to_room` or `to_lattice`
+    /// (the only two targets supported at this Rust boundary; wing
+    /// moves are not yet wired here).
     EmptyReanchor { row_id: RowId },
 
     /// An expunge frame had `confirmation = false`.
@@ -247,8 +249,8 @@ impl Acceptance {
             Noun::KgFact => &[Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall],
             Noun::Vector => &[],
             Noun::DiaryEntry => &[Verb::Recall],
-            Noun::Proposal => &[Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall],
-            Noun::Association => &[Verb::Mutate, Verb::Expunge, Verb::Recall],
+            Noun::Proposal => &[Verb::Propose, Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall],
+            Noun::Association => &[Verb::Associate, Verb::Mutate, Verb::Expunge, Verb::Recall],
             Noun::LearnedReference => &[
                 Verb::Learn,
                 Verb::Mutate,

@@ -50,8 +50,7 @@ struct TemporalReadsTests {
         Drawer(
             id: TestStorage.tid(id),
             content: content,
-            wing: "temporal-wing",
-            room: "temporal-room",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(0),
             eventTime: eventTime,

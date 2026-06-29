@@ -157,10 +157,10 @@ struct RecipeRunErrorTests {
     }
 
     // MARK: - Case name parity (structural)
-    // The compiler enforces exhaustiveness. If the Rust port adds or removes
-    // a variant, the mirror type here must match or this test file won't
-    // compile. The switch below covers EVERY case of both enums and will
-    // produce a compile error if a case is missing — that IS the parity gate.
+    // The compiler enforces Swift exhaustiveness. If a Swift variant is added
+    // or removed, this switch will fail to compile. This protects the Swift
+    // enum, but does not automatically detect Rust enum changes; a Rust-side
+    // change also requires updating the Swift mirror type and this switch.
 
     @Test("RecipeRunError switch is exhaustive over both arms")
     func exhaustiveSwitch() {

@@ -14,14 +14,32 @@ use genius_locus_kit::{
     SchedulerSignalSpec as SignalSpec, SchedulerSignalTrigger as SignalTrigger,
     SerialLaneScheduler,
 };
+use persistence_kit::inmemory::InMemoryStorage;
+use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
+use substrate_types::hlc::HLCGenerator;
 
 const T0_NANOS: i64 = 1_700_000_000_000_000_000;
 const NANOS_PER_SEC: i64 = 1_000_000_000;
 
+fn inmem_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, HLCGenerator) {
+    let store_id = uuid::Uuid::from_u128(0x5348_4544_5545_5245_0000_0000_0000_0004);
+    let storage = std::sync::Arc::new(InMemoryStorage::with_estate(store_id));
+    PersistenceKitBackend::open_schema(storage.as_ref())
+        .expect("InMemoryStorage open_schema cannot fail");
+    let backend = PersistenceKitBackend::new(storage);
+    let queue: QueueKit<Box<dyn QueueBackend>> =
+        QueueKit::new(Box::new(backend) as Box<dyn QueueBackend>);
+    (queue, HLCGenerator::new(1))
+}
+
 fn make_scheduler() -> SerialLaneScheduler<SchedulerNoopDispatcher> {
+    let (queue, hlc) = inmem_signals_queue();
     SerialLaneScheduler::new(
         "estate-distillation-tests".to_string(),
         SchedulerNoopDispatcher,
+        queue,
+        None,
+        hlc,
     )
 }
 

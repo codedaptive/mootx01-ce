@@ -77,6 +77,25 @@ pub trait EmbeddingProvider: Send + Sync {
         )))
     }
 
+    /// Generate the binary engram AND the dense float vector for `text` from a
+    /// SINGLE inference pass.
+    ///
+    /// `embed` already computes the pooled float vector on its way to the
+    /// SimHash projection, and `embed_float` computes that same vector — a caller
+    /// that needs both (the Corpus ingest float lane) would otherwise run
+    /// inference twice per chunk. Providers that compute-then-project SHOULD
+    /// override this to run the inference ONCE and return both outputs.
+    ///
+    /// Returns `(engram, floats)`; `floats` is `vec![]` when `embed_float`
+    /// returns any error — including structural opt-out, vocab miss, or
+    /// provider inference failure. The Swift `EmbeddingProvider` protocol
+    /// carries the identical `embedPair` rule.
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        let engram = self.embed(text)?;
+        let floats = self.embed_float(text).unwrap_or_default();
+        Ok((engram, floats))
+    }
+
     /// Batched embedding. Default sequential implementation;
     /// providers with batched inference (e.g. ONNX graphs with a
     /// batch dimension) can override for throughput. Order of

@@ -20,7 +20,7 @@
 //!   SimHash projection) with a stable per-provider seed. Mirrors
 //!   Swift's MiniLM / mpnet / EmbeddingGemma providers in CorpusKit.
 //! - FTS5 removed; `find_by_keyword` is a substring LIKE on
-//!   `drawer_id` (full BM25 lives in CorpusKit).
+//!   `item_id` (full BM25 lives in CorpusKit).
 //!
 //! The earlier `MockEmbeddingProvider` and `ScalarEmbeddingProvider`
 //! were FNV-folded fingerprint generators that bypassed the

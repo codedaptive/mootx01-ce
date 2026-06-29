@@ -28,11 +28,11 @@ import SubstrateML
 import SubstrateKernel
 import SubstrateTypes
 
-@Suite("SubstrateLib bit-identity conformance gate (I-19)")
+@Suite("SubstrateLib bit-identity smoke (I-19 staging)")
 struct SubstrateLibConformanceTests {
 
-    /// The same input bytes under the same hyperplane family
-    /// MUST produce the same fingerprint.
+    /// Identical Fingerprint256 values (same four block words)
+    /// MUST compare equal — verifying value-type equality semantics.
     @Test func testFingerprintDeterminism() throws {
         let a = Fingerprint256(block0: 0xDEADBEEF, block1: 0xCAFEBABE,
                                block2: 0xFEEDFACE, block3: 0xBAADF00D)

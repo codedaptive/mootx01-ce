@@ -152,9 +152,10 @@ public actor DirtySet {
 
     /// Record a change for replication. Called from the observer consumer task.
     ///
-    /// Inserts and updates both dirty the row. Deletes are recorded as a
-    /// tombstone sentinel (pkValues with no extra columns) — the sync path
-    /// issues a delete on the destination for the given PK.
+    /// Inserts, updates, and deletes all add the same DirtyKey (table + PK
+    /// values). At sync time the re-scan determines intent: if the row is
+    /// absent in the source, the sync path issues a delete on the destination;
+    /// if present, it issues an upsert.
     ///
     /// If the TableChange's values dict does not contain all primary-key
     /// columns for the table, the change is logged and skipped. This protects

@@ -28,8 +28,10 @@ use crate::sample::StatSample;
 pub trait StatsSink: Send + Sync {
     /// Deliver one telemetry sample to this sink.
     ///
-    /// Called only when monitoring is enabled. The [`report!`] macro
-    /// short-circuits before this is reached when disabled.
+    /// Callers routed through [`report!`] or [`Intellectus::report_sample`]
+    /// only reach this method when monitoring is enabled — that macro/facade
+    /// owns the short-circuit gate. The trait method is public; concrete
+    /// implementations may also be called directly.
     fn receive(&self, sample: StatSample);
 }
 

@@ -20,15 +20,15 @@ import SubstrateLib
 
 /// Bitmap audit coverage — schema shape, round-trip for `mutateAdjective`
 /// and `mutateOperational`, atomic rollback on missing drawer, optional
-/// reason behavior, and cross-column isolation in `bitmap_audit`. Mirrors
-/// `ProvenanceTests`'s structure: each test stands up a fresh
+/// reason behavior, and cross-column isolation in the audit-event log.
+/// Mirrors `ProvenanceTests`'s structure: each test stands up a fresh
 /// temp-directory database so the suite runs in parallel without
 /// cross-contamination.
 ///
-/// Per spec I-2 and § 8.4, `bitmap_audit` is the append-only,
-/// cross-noun, cross-column audit trail for every Int64 bitmap mutation
-/// in the LocusKit schema. The drawer-scoped methods exercised here are
-/// the first wired-in callers; other nouns land in LOCI_V035_08B.
+/// Per spec I-2 and § 8.4, the audit-event log is the append-only,
+/// cross-noun, cross-column record of every Int64 bitmap mutation
+/// in the LocusKit schema. Each AuditEvent captures the genesis or
+/// mutation event for the changed column.
 @Suite("BitmapAuditTests")
 struct BitmapAuditTests {
 
@@ -58,8 +58,7 @@ struct BitmapAuditTests {
         Drawer(
             id: id,
             content: "content-\(id)",
-            wing: "wing-a",
-            room: "room-a",
+            parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_700_000_000),
             embeddingModelID: "minilm-v6",

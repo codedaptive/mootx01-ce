@@ -75,7 +75,11 @@ pub(crate) fn expand(prk: &[u8; 32], info: &[u8], length: usize) -> Vec<u8> {
 /// HMAC(key, data) = SHA256((key ^ opad) || SHA256((key ^ ipad) || data))
 /// where ipad = 0x36 × 64, opad = 0x5C × 64. Keys longer than the block size
 /// (64 bytes) are pre-hashed per RFC 2104 §2.
-pub(crate) fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
+///
+/// Public so substrate-lib's KeyedCommitment API can compute HMAC-SHA256
+/// over canonical leaf payload bytes without reimplementing the
+/// construction.
+pub fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
     const BLOCK_SIZE: usize = 64;
     // Normalise the key to exactly BLOCK_SIZE bytes.
     let mut k = [0u8; BLOCK_SIZE];

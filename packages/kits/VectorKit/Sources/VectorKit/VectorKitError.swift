@@ -16,9 +16,8 @@ public enum VectorKitError: Error, Sendable, Equatable {
     /// describes the SQLite or filesystem failure.
     case storeUnavailable(String)
 
-    /// No result found for the given query. Used by VEC-02 storage
-    /// reads; included here so the error surface is complete from the
-    /// scaffold.
+    /// No result found for the given query. Reserved for future storage
+    /// read paths; current APIs return optionals rather than throwing this.
     case notFound
 
     /// A VectorPayload is structurally invalid — wrong kind, wrong byte

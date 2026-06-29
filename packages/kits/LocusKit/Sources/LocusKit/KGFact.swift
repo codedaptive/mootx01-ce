@@ -24,9 +24,8 @@ import SubstrateLib
 /// retaining a backreference to the source drawer so the fact's
 /// provenance is always recoverable.
 ///
-/// This mission ships only the value type and its operational
-/// accessors. The `kg_facts` table and CRUD path land in
-/// LOCI_V035_06B; nothing in this file touches persistence.
+/// The `kg_facts` table and CRUD path are implemented in `DrawerStore`
+/// (`addKGFact`, `getKGFact`, `getKGFacts`, `allKGFacts`).
 ///
 /// Three Int64 bitmap columns carry the operational axes:
 ///
@@ -42,9 +41,8 @@ import SubstrateLib
 /// - `provenanceBitmap` — source type, confirmation, confidence,
 ///   channel, sensitivity per `Q1_DECISION_PROVENANCE_BITMAP.md`.
 ///   Carried verbatim from the source drawer's provenance at
-///   extraction time; the v1 accessors live on `Drawer` and are
-///   re-exposed for `KGFact` in a later mission once the persistence
-///   path requires them.
+///   extraction time. Provenance accessors shared with `Drawer`
+///   live in `Provenance.swift`.
 ///
 /// All three bitmaps default to `0` so callers extracting facts
 /// without operational metadata get the safe baseline (extractor

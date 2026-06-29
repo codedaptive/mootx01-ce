@@ -32,8 +32,9 @@
 //   5. Cross-port canonical vectors:
 //      - Fixed mini-corpus, fixed parameters, expected PPMI co-occurrence
 //        counts, weights, term vectors, document embeddings.
-//      - The Rust test reads the SAME expectations and asserts bit-for-bit
-//        equality.  This is the primary conformance gate.
+//      - The Swift test emits the JSON when PPMI_CONFORMANCE_EMIT is set
+//        and performs local behavior/stability assertions; no committed
+//        fixture is loaded or asserted inline in this file.
 
 import Testing
 import Foundation
@@ -408,5 +409,22 @@ struct PpmiTests {
         let e2 = try await provider.embed("car engine")
         #expect(e1 == e2, "canonical embedding must be deterministic")
         #expect(e1 != Engram.zero, "trained provider must return non-zero engram for in-vocabulary text")
+    }
+
+    // P2-secfix: a negative window value makes lo > hi (e.g. window=-5, i=3
+    // → lo=8, hi=-2). Without the guard the closed range lo...hi traps at
+    // runtime. The fix adds `if hi < lo { continue }` mirroring
+    // RandomIndexingProvider. A negative window produces no co-occurrence
+    // counts but must never crash.
+    @Test("train with negative window does not crash")
+    func trainWithNegativeWindowDoesNotCrash() {
+        let provider = PpmiProvider()
+        // window = -1: lo = max(0, i+1), hi = min(n-1, i-1) → lo > hi for all i.
+        // No crash, no co-occurrence counts, totalPairs stays 0.
+        provider.train(terms: ["alpha", "beta", "gamma"], window: -1)
+        provider.finalize()
+        // The provider must reach finalize() without trapping. A second
+        // finalize() call is safe (idempotent) and confirms no corrupt state.
+        provider.finalize()
     }
 }

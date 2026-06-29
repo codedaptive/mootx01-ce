@@ -18,9 +18,8 @@ pub enum VectorKitError {
     /// the SQLite or filesystem failure.
     StoreUnavailable(String),
 
-    /// No result found for the given query. Used by VEC-02 storage
-    /// reads; included here so the error surface is complete from the
-    /// scaffold.
+    /// No result found for the given query. Reserved for future storage
+    /// read paths; current read APIs return `Option` rather than this variant.
     NotFound,
 
     /// A `VectorPayload` was constructed with an inconsistent or

@@ -47,14 +47,25 @@ struct LatticeDistanceTests {
         #expect(abs(d - 3.0 / 6.0) < tol)
     }
 
-    @Test("no common prefix: 004 vs 37 = 5/3")
+    @Test("no common prefix: 004 vs 37 clamped to 1.0")
     func udcNoCommonPrefix() {
-        // lcp = "", raw = 3 + 2 = 5, divisor = max(3,2) = 3. d = 5/3.
-        // The glref oracle uses max(len_a, len_b) as divisor, which can
-        // exceed 1.0 when strings have no common prefix and differ in length.
-        // This matches the canonical lattice.json vectors (cookbook § 8.3).
+        // lcp = "", raw = 3 + 2 = 5, divisor = max(3,2) = 3.
+        // The raw formula gives 5/3 ≈ 1.667, but UDCTreeDistance clamps to
+        // [0, 1] before returning because CompositeDistance.distance requires
+        // latticeDistance ∈ [0, 1] (enforced via precondition at line 57-60
+        // of CompositeDistance.swift). After the clamp, the result is 1.0.
         let d = UDCTreeDistance.distance("004", "37")
-        #expect(abs(d - 5.0 / 3.0) < tol)
+        #expect(d == 1.0, "clamped to [0,1]: raw 5/3 ≈ 1.667 → 1.0")
+    }
+
+    @Test("no common prefix equal length: 'abc' vs 'xyz' clamped to 1.0")
+    func udcNoCommonPrefixEqualLengthClamped() {
+        // Two strings with no common prefix and equal length produce raw = 2.0
+        // (the maximum of the unnormalized formula: (n-0)+(n-0)/n = 2).
+        // After clamping, must return 1.0, not 2.0. Feeding 2.0 into
+        // CompositeDistance would trip its precondition(latticeDistance <= 1.0).
+        let d = UDCTreeDistance.distance("abc", "xyz")
+        #expect(d == 1.0, "no-common-prefix equal-length must clamp to 1.0, not 2.0")
     }
 
     @Test("UDC distance is bounded to [0, 1] for pairs with shared prefix")

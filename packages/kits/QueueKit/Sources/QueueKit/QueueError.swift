@@ -21,4 +21,9 @@ public enum QueueError: Error, Sendable {
     /// points at a stalled drain worker; a non-zero `pending` at a worker
     /// that never claimed).
     case drainTimeout(pending: Int, inFlight: Int)
+    /// A stream_id, job id, or other caller-supplied identifier contains
+    /// a path separator (`/`, `\`), equals `.` or `..`, or contains an
+    /// ASCII control character. Such identifiers can escape the queue root
+    /// when used as filename components. Planned security hardening.
+    case invalidIdentifier(id: String, reason: String)
 }

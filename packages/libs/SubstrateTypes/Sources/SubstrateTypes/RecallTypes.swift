@@ -40,17 +40,12 @@
 // and CognitionKit (upstream) both consume these types from this
 // single source.
 //
-// SWIFT/RUST ASYMMETRY (intentional — do not "fix" by extracting a
-// Rust recall_types module). These four types are Swift-only. The Rust
-// port does not mirror them in substrate-types; instead the federation
-// query path materializes only the lean shapes it needs as
-// RecallScoreLite / RecallResultLite inside
-// SubstrateML/rust/src/tier_query.rs, kept beside the TierAscendingQuery
-// that uses them. DistanceBreakdown and RowProjection have no Rust
-// equivalent — they are Swift-side conveniences for "why this matched"
-// surfacing and RRF ranking input, not part of the conformance-gated
-// wire path. Rust carries the minimum the query needs; Swift carries the
-// full consumer vocabulary.
+// SWIFT/RUST: packages/libs/SubstrateTypes/rust/src/recall_types.rs
+// now mirrors these four types. RecallScoreLite / RecallResultLite
+// in SubstrateML/rust/src/tier_query.rs are the lean federation
+// shapes; recall_types.rs carries the full vocabulary including
+// DistanceBreakdown and RowProjection that Swift surfaces for
+// "why this matched" and RRF ranking input.
 
 import Foundation
 

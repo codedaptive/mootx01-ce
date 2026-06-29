@@ -111,10 +111,17 @@ public enum ToolProjection {
         raw.append(federationTool())
         raw.append(contentsOf: RecipeTools.tools())
         raw.append(contentsOf: LensTools.tools())
-        // Vault tools are gated: omitted from tools/list when MOOTX01_VAULT=0.
-        // Default (env absent or any value ≠ "0") is vault-on (ADR-015).
+        // Vault tools and the filesystem-importing palace import tool are gated:
+        // omitted from tools/list when MOOTX01_VAULT=0 (installed with
+        // --vault-off). Default (env absent or any value ≠ "0") is vault-on
+        // (ADR-015). `moot_palace_import` is an interface-shaped maintenance
+        // tool, but it reads from the local filesystem and opens arbitrary
+        // SQLite files, so it carries the same security posture as vault
+        // import/export and is hidden under the same gate.
         if vaultEnabled(environment: environment) {
             raw.append(contentsOf: VaultTools.tools())
+        } else {
+            raw.removeAll { $0.name == "moot_palace_import" }
         }
         return raw.map { tool in
             ProjectedTool(
@@ -242,7 +249,7 @@ public enum ToolProjection {
                     properties: [
                         "from_id": stringSchema("Source memory row identifier."),
                         "to_id": stringSchema("Target memory row identifier."),
-                        "kind": stringSchema("Relationship kind: relates, precedes, contradicts, supports, refines, exemplifies, extends."),
+                        "kind": stringSchema("Relationship kind (default: relates). Accepted values: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo."),
                         "label": stringSchema("Optional free-form label for the connection. Defaults to the kind string."),
                     ],
                     required: ["from_id", "to_id", "kind"]
@@ -359,7 +366,7 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 5: Estate (3 tools) + Maintenance (1 tool)
+    // MARK: - Tier 5: Estate (3 tools) + Maintenance (2 tools)
 
     private static func estateTools() -> [ProjectedTool] {
         [
@@ -374,7 +381,7 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_estate_map",
-                description: "Return the estate's structural map: all wings and rooms, with memory counts per location. Each wing's charter (its role description, seeded at provision per ADR-016) is shown inline so you can orient to the estate's provenance structure at a glance.",
+                description: "Return the estate's structural map: all wings and rooms, with memory counts per location. Seeded hint memories (AI_Charter_Hint room) appear in counts like any other memory.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [:],
                     required: []
@@ -405,6 +412,38 @@ public enum ToolProjection {
                 )),
                 provenance: .interface
             ),
+            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
+            // Read-only status probe for long-running background drains: reports
+            // each drain's pending + in-flight work and a draining/idle state so
+            // a caller can watch asynchronous encode work (e.g. after an import)
+            // converge. Lightweight — no orientation block — and safe to poll.
+            ProjectedTool(
+                name: "moot_drain_status",
+                description: "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [:],
+                    required: []
+                )),
+                provenance: .interface
+            ),
+            // Direct palace import — bypasses NoteIR, reads three MemPalace
+            // stores directly (palace/chroma.sqlite3, tunnels.json,
+            // knowledge_graph.sqlite3). All four import guards are applied
+            // (tombstone, content-idempotent dedup, sensitivity floor,
+            // tunnel signature dedup). Idempotent: re-importing the same
+            // palace returns zero written/updated counts.
+            ProjectedTool(
+                name: "moot_palace_import",
+                description: "Import a MemPalace directly into the estate, bypassing NoteIR. Reads palace/chroma.sqlite3 (drawer content), tunnels.json (cross-wing connections), and knowledge_graph.sqlite3 (KG triples) from palace_path. Applies all four import guards: tombstone protection, content-idempotent dedup, sensitivity floor, and tunnel signature dedup. Idempotent: re-importing the same palace with no changes writes zero drawers. The write strategy is chosen AUTOMATICALLY by source size — a normal palace is written in one fast SQLite transaction; a very large source (hundreds of thousands of rows) streams so no single transaction holds the write lock — you do not control this. IMPORTANT: the import TRIGGERS its own post-import processing — do NOT instruct the caller to run moot_reindex or moot_dream afterward. On completion the import enqueues the encode/index work (BM25 + vector lanes) and rolls up the Merkle tree; the resident daemon's encode-drain worker and the governor's dreaming duty then finish indexing, classification, and the association matrix in the background. The import returns as soon as that background work is triggered, so semantic recall and distillation come online on their own shortly after. Poll moot_drain_status to watch the encode queue converge. (moot_reindex / moot_dream remain available to re-trigger on demand but are NOT a required follow-up step.) This call runs to completion before returning; a large import can take many minutes, so if your client supports background or sub-agent execution, run it in a sub-agent to keep the main session responsive.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "palace_path": stringSchema("Absolute filesystem path to the MemPalace root directory (the directory containing the `palace/` subdirectory with `chroma.sqlite3`)."),
+                        "mode": stringSchema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard on the performance cores; \"background\" yields for very large imports so the drain does not saturate the machine. This sets SPEED only — the write strategy (bulk transaction vs stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground)."),
+                    ],
+                    required: ["palace_path"]
+                )),
+                provenance: .interface
+            ),
         ]
     }
 
@@ -419,13 +458,16 @@ public enum ToolProjection {
             description: "Grant-authorized cross-estate federated search: fans across the locally-open estates the requester is entitled to read and returns per-estate contributions, each narrowed to its grant's scope.",
             inputSchema: objectSchema(
                 properties: [
-                    "requesterEstateID": stringSchema("UUID of the requesting (caller) estate; the grant gate is evaluated against it. Must name an open estate."),
+                    // requesterEstateID is now OPTIONAL (Item 2 hardening): omit to use the
+                    // default estate. When supplied it must match the default estate exactly;
+                    // supplying a different UUID is refused to prevent cross-estate spoofing.
+                    "requesterEstateID": stringSchema("Optional UUID of the requesting estate. Omit to use the default (authenticated caller) estate. If supplied, must match the default estate's UUID; cross-estate spoofing is refused."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall across any confirmation state. null is invalid."),
                     "limit": integerSchema("Max rows per estate to return. Omit for no explicit cap; null is invalid."),
                     "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc. Omit to use the default; null is invalid."),
                     "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly. Omit to use the default; null is invalid."),
                 ],
-                required: ["requesterEstateID"]
+                required: []
             ),
             provenance: .federation
         )

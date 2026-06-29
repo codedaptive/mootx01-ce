@@ -201,3 +201,75 @@ private func fullNote() -> NoteIR {
     #expect(tools[0].name == "mempalace_add_drawer")
     #expect(tools[0].requiredArgs.contains("wing"))
 }
+
+// MARK: - Security: tool-name allowlist (Finding 3)
+
+/// Regression: the four noun write tools are the only tools `PalacePump.processItemJob`
+/// may invoke from a persisted payload. This test verifies the allowlist constants match
+/// the expected set exactly — a change to any constant or an addition/removal of a tool
+/// from `PalacePumpMapping` would cause this test to fail, prompting an explicit review.
+@Test func pumpToolAllowlistContainsExactlyTheFourWriteTools() {
+    // The allowlist in processItemJob is derived from these constants. If the
+    // constants change or new tools are added, this test fails and the security
+    // reviewer must explicitly approve the change.
+    let expectedWriteTools: Set<String> = [
+        "mempalace_add_drawer",
+        "mempalace_create_tunnel",
+        "mempalace_kg_add",
+        "mempalace_diary_write",
+    ]
+    let actualWriteTools: Set<String> = [
+        PalacePumpMapping.addDrawerTool,
+        PalacePumpMapping.createTunnelTool,
+        PalacePumpMapping.kgAddTool,
+        PalacePumpMapping.diaryWriteTool,
+    ]
+    #expect(actualWriteTools == expectedWriteTools,
+            "Write-tool allowlist changed — review security/F3 before shipping")
+}
+
+/// Regression: PalacePumpMapping.call(for:) only produces tool names from the
+/// write allowlist. Verify for each noun. Uses minimal nativeFields that satisfy
+/// each noun's mapper without triggering an error.
+@Test func mappingCallProducesAllowlistedToolsOnly() throws {
+    let allowlisted: Set<String> = [
+        PalacePumpMapping.addDrawerTool,
+        PalacePumpMapping.createTunnelTool,
+        PalacePumpMapping.kgAddTool,
+        PalacePumpMapping.diaryWriteTool,
+    ]
+    // Drawer — nativeFields just needs "wing" and "room"; mapper has defaults.
+    let drawer = PalaceItem(
+        noun: .drawer, sourceID: "d1", body: "body",
+        nativeFields: ["wing": .string("w"), "room": .string("r")],
+        envelopeFields: [:])
+    // Tunnel — nativeFields needs endpoint keys; mapper omits missing keys.
+    let tunnel = PalaceItem(
+        noun: .tunnel, sourceID: "t1", body: "",
+        nativeFields: [
+            "source_wing": .string("sw"), "source_room": .string("sr"),
+            "target_wing": .string("tw"), "target_room": .string("tr"),
+            "label": .string("lbl"),
+        ],
+        envelopeFields: [:])
+    // KGFact — subject/predicate/object required by mapper.
+    let kgFact = PalaceItem(
+        noun: .kgFact, sourceID: "k1", body: "",
+        nativeFields: [
+            "subject": .string("S"), "predicate": .string("P"),
+            "object": .string("O"), "valid_from": .string("2026-06-28T00:00:00Z"),
+        ],
+        envelopeFields: [:])
+    // DiaryEntry — agent_name and topic.
+    let diaryEntry = PalaceItem(
+        noun: .diaryEntry, sourceID: "e1", body: "entry text",
+        nativeFields: ["agent_name": .string("test"), "topic": .string("misc")],
+        envelopeFields: [:])
+
+    for item in [drawer, tunnel, kgFact, diaryEntry] {
+        let call = try PalacePumpMapping.call(for: item)
+        let noun = item.noun.rawValue
+        #expect(allowlisted.contains(call.tool),
+                "noun \(noun) produced unlisted tool \(call.tool)")
+    }
+}

@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.1.0
+version: 1.5.0
 status: active
-date: 2026-06-19
+date: 2026-06-26
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -17,6 +17,8 @@ relates_to:
   - docs/reference/ENGRAMLIB_SPEC.md
   - docs/reference/LOCUSKIT_SPEC.md
   - docs/reference/COGNITIONKIT_SPEC.md
+  - docs/decisions/ADR-021-recall-driven-dreaming-queue.md
+  - docs/reference/QUEUEKIT_SPEC.md
 purpose: |
   NeuronKit is the subconscious mind of the MOOTx01 substrate: the
   algorithms layer that hosts the autonomic daemons (dreaming,
@@ -540,10 +542,14 @@ importing new math into NeuronKit.
 
 ## § 9 — Conformance requirements
 
-**C-1 (dreaming cadence):** the dreaming daemon fires a cycle once its
-configured `tickIntervalMs` has elapsed since the last tick (the spec's
-±10% jitter tolerance is satisfied exactly: the scheduler fires as soon
-as the full interval elapses). The first `pump` always fires.
+**C-1 (dreaming cadence — v2 model, ADR-021):** dreaming runs on the
+shared REM dispatch table at four cadences. REM-ALPHA (30 s) is gated on
+`pending_count(stream:"dreaming") > 0` — the daemon fires only when the
+dreaming queue has items, driven by the resident governor (`.timer`) or a
+forked `mootx01 dream` process (`.event`). REM-THETA (24 h), REM-BETA
+(7 days), and REM-OMEGA (14 days) are gated on persisted last-run
+timestamps; they run whenever their cadence is due, regardless of queue
+depth. § 12 is the normative v2 specification; § 9 C-1 is a summary.
 
 **C-6 (fitter error-name drift, sanctioned):** the Bradley-Terry fitter's
 two error cases are `MOOTx01Error.selfPairing` /
@@ -792,9 +798,210 @@ is the designated successor and is specified in its own mission.
 
 ---
 
+## § 12 — Recall-driven dreaming (v2)
+
+> **Status: ratified target (ADR-021), Phase 0.** This section is the
+> normative form of ADR-021. It supersedes the v1 dreaming model (the blind
+> `tickIntervalMs` cadence in § 9 C-1 and the co-location candidate model) on
+> Phase-3 landing. Until then the shipped behavior is v1; this section is the
+> contract the implementation builds to. The contrastive-confidence and EWC++
+> *math* (§ 12.5) is unchanged from v1 — only the candidate **source**,
+> **trigger**, and **schedule** change.
+
+### § 12.1 — Two association channels
+
+Tunnels enter the estate by two channels that meet only in the tunnel store,
+distinguished by `tunnels.provenanceBitmap`:
+
+- **Declared** — palace `tunnels.json` and vault wikilinks, imported directly
+  via VaultKit PalaceBridge. Not inferred. Provenance = declared.
+- **Emergent** — proposed by dreaming from recall evidence. Provenance =
+  dreamed.
+
+Dreaming reads declared tunnels only as `existingTunnelKeys` (suppression
+input); it never re-proposes or (per § 12.8) retires them.
+
+### § 12.2 — The dreaming queue
+
+Dreaming is recall-sourced. The recall verbs, after writing `recall_trace`,
+enqueue a **dreaming item** onto the **one per-estate queue** under
+`stream_id="dreaming"` (one queue per estate, many streams by type; backend by
+the estate's storage class — an encrypted SQLite queue DB for SQLite estates,
+Postgres for Postgres, InMemory for ephemeral; never a plaintext maildir for a
+private estate — see QUEUEKIT_SPEC § 3 and ADR-021 Decision 7). The item is the
+HLC-stamped set of drawer ids **used** in that recall (the reward targets);
+items with fewer than two used drawers are not enqueued (no pair possible).
+Enqueue is batched (one commit per batch). "Dreaming fires" = a **stream-scoped
+drain** of the `"dreaming"` stream; `pending_count(stream:"dreaming") == 0` is
+the cheap trigger (empty ⇒ no work, no scan). `recall_trace` stays the durable
+record consumed by the longer-window REM cycles (§ 12.6 THETA) and crash
+recovery — it is not the live ALPHA feed (the queue item carries the per-event
+co-recall grouping directly).
+
+### § 12.3 — Co-recall pairing (candidate generation)
+
+A candidate pair `(a, b)` is generated when `a` and `b` appear in the **same
+drained recall item** (recalled together), `a < b` by id (canonical order).
+There is **no co-location/room enumeration** — the v1 O(room²) all-pairs
+builder is removed. Candidates may span rooms (cross-room association is
+intended). A drain unions the items in its claim window and emits the distinct
+co-recall pairs over that union.
+
+### § 12.4 — `attempts` = co-recall count
+
+`minAttempts` (3) gates on how many distinct recall events have paired
+`(a, b)` — the **co-recall count**, maintained in a persistent per-pair store
+updated per drained window. (v1 used room size; v2 uses co-recall frequency, a
+strictly stronger "seen together ≥ N times" signal.)
+
+### § 12.5 — Decide math (unchanged from v1)
+
+Per candidate, in canonical order: contrastive confidence, then EWC++ blend,
+then gate. Reward is per-target (`used → 1`, else `0`), meaned over the pair's
+two endpoints.
+
+- `contrastiveConfidence(mean) = exp(mean/τ) / (exp(mean/τ) + exp(baseline/τ))`
+  with `τ = temperature = 0.2`, `baseline = minSuccessRate = 0.6`. Empty
+  evidence ⇒ 0. Computed in f64, returned as f32.
+- `effective = max(raw, consolidated[key] · ewcRetention)`, `ewcRetention = 0.9`.
+- emit iff `effective ≥ minConfidence (0.7)` AND `coRecallCount ≥ minAttempts (3)`
+  AND not an existing tunnel / prior proposal / this-cycle duplicate.
+
+### § 12.6 — The REM schedule
+
+Dreaming is one engine parameterized by `(window, decay, breadth, prune,
+retire)` at four cadences:
+
+| Cycle | Cadence (default) | Job | Scope | Tunnel writes |
+|---|---|---|---|---|
+| **REM-ALPHA** | 30 s | drain the queue → form fresh co-recall tunnels | just-recalled set | propose |
+| **REM-THETA** | daily | consolidate cross-event links; EWC decay; bump `attempts` | last day of `recall_trace` | propose + adjust |
+| **REM-BETA** | weekly | prune/GC the consolidated + co-recall-counts stores (memory-only) | internal stores | none |
+| **REM-OMEGA** | biweekly | retire dreamed tunnels no longer reinforced by recall | shipped dreamed tunnels | retire |
+
+All four are bounded by recall activity (recalled-set²), never by estate shape.
+
+### § 12.7 — Trigger modes and the forked dreamer
+
+The trigger mode selects **who drives** dreaming, decoupled from § 12.6:
+
+- **`.timer`** — a resident scheduler (the governor) ticks and runs due cycles
+  in-process; no fork. Default for `serve --http`.
+- **`.event`** — no loop; dreaming runs in a short-lived detached
+  `mootx01 dream` process spawned by stdio lifecycle hooks. Default for stdio.
+- **`.hybrid`** — resident loop plus event pokes (low-latency ALPHA on a large
+  recall). Optional.
+
+`mootx01 dream` (sibling of `mootx01 drain`): detached, takes the dreaming
+drain-lease (heartbeat-TTL; at most one dreamer per estate), computes due-ness
+itself (ALPHA if queue non-empty; THETA/BETA/OMEGA if their persisted last-run
+is overdue), runs the due cycles, exits. Stdio structural triggers — fork only
+if the lease is free and work exists: **post-recall**, **on-exit**,
+**on-startup/first-query**.
+
+### § 12.8 — OMEGA provenance rule
+
+OMEGA's retire predicate is `provenance = dreamed AND not reinforced by recall`.
+It MUST NOT retire a declared tunnel (§ 12.1). Retirement is reversible: a
+retired tunnel is flipped via an `operationalBitmap` bit (no Bool stored field)
+and audited, so a later co-recall re-forms it. No hard delete.
+
+### § 12.9 — Bulk-import intersection
+
+A massive import (palace corpus, vault) has ≈ zero intersection with
+recall-driven dreaming: import feeds the encode pipeline, writes no
+`recall_trace`, enqueues no dreaming items, so all four REM cycles stay idle.
+Imported content is dream-eligible only once it is later co-recalled. Declared
+tunnels (§ 12.1) arrive at import time through the declared channel, not
+dreaming.
+
+### § 12.10 — Conformance vectors (v2)
+
+Canonical input → output, asserted bit-identically in both ports. Float values
+are the f32 narrowing of the f64 computation.
+
+**CV-D1 — contrastive confidence** (`τ = 0.2`, `baseline = 0.6`):
+
+| endpoints rewarded | mean | confidence (f32) |
+|---|---|---|
+| neither | 0.0 | `0.0474258736` |
+| one | 0.5 | `0.3775406778` |
+| both | 1.0 | `0.8807970881` |
+
+**CV-D2 — EWC++ blend** (`effective = max(raw, consolidated · 0.9)`):
+
+| raw | consolidated | retained | effective |
+|---|---|---|---|
+| 0.8807971 | 0.0 | 0.0 | 0.8807971 |
+| 0.0474259 | 0.95 | 0.855 | 0.855 |
+| 0.3775407 | 0.90 | 0.810 | 0.810 |
+
+**CV-D3 — co-recall pairing.** A recall item with used set `{A, B, C}`
+(`A < B < C`) generates exactly the pairs `(A,B), (A,C), (B,C)` in canonical
+order; a used set of size < 2 generates none and is not enqueued.
+
+**CV-D4 — gate + `attempts` (the v2 contract).** Pair `(A,B)`, both endpoints
+rewarded (raw = 0.8807971 ≥ 0.7, confidence PASS), no prior consolidation:
+
+| co-recall # | coRecallCount (attempts) | emits? | why |
+|---|---|---|---|
+| 1 | 1 | no | attempts < 3 |
+| 2 | 2 | no | attempts < 3 |
+| 3 | 3 | **yes** | confidence ≥ 0.7 AND attempts ≥ 3 |
+
+**CV-D5 — never-emittable.** A pair whose endpoints are not both rewarded has
+confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
+(the basis for the recall-gated candidate reduction).
+
+---
+
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.4.1 -- 2026-06-25
+Corrected § 12.2 to ADR-021 Decision 7: the dreaming work is a
+`stream_id="dreaming"` stream in the **one per-estate queue** (backend by
+estate storage class — encrypted SQLite queue DB / Postgres / InMemory, never a
+plaintext maildir for a private estate), drained by a **stream-scoped drain** —
+not a separate dreaming maildir. `recall_trace` stays the durable record (the
+queue item carries the per-event co-recall grouping). Doc only.
+
+### 1.4.0 -- 2026-06-25
+Recall-driven dreaming v2 (ADR-021, Phase 0 — spec + conformance vectors only;
+no code yet). Added § 12 as the normative form of ADR-021: dreaming is sourced
+from a recall-driven QueueKit stream (co-recall pairing, § 12.2–12.3),
+`attempts` becomes the co-recall count (§ 12.4), the decide math is unchanged
+(§ 12.5), and the daemon runs the four-cycle REM schedule (REM-ALPHA/THETA/
+BETA/OMEGA, § 12.6) under redefined trigger modes with a forked `mootx01 dream`
+process for stdio (§ 12.7). OMEGA retires only dreamed, recall-unreinforced
+tunnels and never declared ones (§ 12.8); bulk import has ≈ zero dreaming
+intersection (§ 12.9). § 12.10 fixes the canonical conformance vectors
+(CV-D1..D5). § 12 supersedes the v1 blind-timer / co-location model (§ 9 C-1)
+on Phase-3 landing; until then v1 is the shipped behavior.
+
+### 1.3.0 -- 2026-06-25
+Rust Brain-algorithm parity. The Rust dreaming daemon now runs the
+Thompson-Sampling bandit (observe reward + re-select trigger mode each cycle,
+§ 3.4) and persists it via the policy store's `load_bandit`/`save_bandit` seam;
+the Rust maintenance daemon now owns the audit-check cadence (independent of the
+scan tick, § 3.5), matching the Swift `lastAuditCheckAt` model. Both ports now
+run identical dreaming/maintenance algorithms with the same persisted state shape
+(this makes the 1.2.0 "Both ports … bandit" clause fully true on the Rust side).
+
+### 1.2.0 -- 2026-06-25
+F6 / ADR-020 — daemon state is substrate-resident in the manifest. The dreaming
+and maintenance policy-store seams gain `loadDaemonState`/`saveDaemonState`
+(default no-op), and production wires manifest-backed stores
+(`EstateManifestDreamingPolicyStore` / `EstateManifestMaintenancePolicyStore`)
+that persist policy, bandit (dreaming), and the daemons' idempotency/cycle memory
+(proposed keys, consolidated EWC++ confidence, cycle count, timer baselines) to
+the estate manifest THROUGH the public substrate KV surface (Estate.meta/setMeta
+// DrawerStore::get_meta/set_meta). The governor loads state on start and saves
+after each fired cycle, so a restart resumes prior state instead of re-proposing,
+re-consolidating, or repeating suppressed maintenance proposals — resolving the
+B-1 "no manifest accessor" blocker. Both ports; in-memory stores (tests) are
+unaffected by the default no-op seams. See NEURONKIT_INTERFACE.md 1.3.0.
 
 ### 1.1.0 -- 2026-06-19
 Added: `NeuronKit.hmmFeatureExtractor` is now the production
@@ -807,3 +1014,13 @@ year. See NEURONKIT_INTERFACE.md § Distillation lens.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.5.0 -- 2026-06-26
+ADR-021 v2 reconciliation (T14). § 9 C-1 updated from the v1 blind-timer model
+(`tickIntervalMs` fires a cycle once elapsed) to the v2 REM dispatch table model:
+four cadences (ALPHA 30 s / THETA 24 h / BETA 7 d / OMEGA 14 d), ALPHA gated on
+`pending_count(stream:"dreaming") > 0`, THETA/BETA/OMEGA gated on persisted
+last-run timestamps; driven by resident governor (`.timer`) or forked `mootx01
+dream` (`.event`). § 12 (ratified target, Phase 0) is the normative v2 contract
+and is unchanged; § 9 C-1 previously contradicted it. The v2 build (T1–T14) is
+shipped; ADR-021 status updated to decided.

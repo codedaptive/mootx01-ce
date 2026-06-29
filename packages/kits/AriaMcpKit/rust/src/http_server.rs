@@ -217,14 +217,21 @@ impl ConcurrencyGate {
         // Slot granted — hold the count at current level until release().
     }
 
-    /// Release a previously acquired slot. Decrements active and wakes one
-    /// waiting worker thread (mirrors Swift `ConcurrencyGate.release()`).
+    /// Release a previously acquired slot. Decrements active and wakes ALL
+    /// waiting worker threads so each can re-check the `count > max_concurrent`
+    /// condition. `notify_one()` would only wake a single waiter per release —
+    /// when multiple slots become available simultaneously (e.g. a burst of
+    /// completions), one `notify_one` per completion would stall throughput
+    /// because only one worker wakes per release event instead of all eligible
+    /// workers. `notify_all()` is correct here: spurious wakes are harmless
+    /// (the `while count > max_concurrent` loop re-checks and re-waits) and the
+    /// lock scope is tiny.
     pub fn release(&self) {
         let mut count = self.active.lock().unwrap();
         if *count > 0 {
             *count -= 1;
         }
-        self.cvar.notify_one();
+        self.cvar.notify_all();
     }
 
     /// Current gate depth (enqueued + actively serving). Informational.
@@ -267,11 +274,26 @@ pub fn send_shed_response(stream: &mut TcpStream) {
 // MARK: - run_http_loop (hardened, multi-threaded)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Maximum concurrent SSE connections (CAND-025 hardening).
+///
+/// SSE streams hold a connection open for their entire lifetime (minutes to
+/// hours). Allowing them to consume slots from the normal request gate (default
+/// 64) would starve POST/JSON-RPC traffic. The fix: SSE connections are
+/// counted against a SEPARATE smaller gate. This constant is the default cap;
+/// overrideable via `MOOTX01_HTTP_MAX_SSE`.
+const MAX_SSE_CONNECTIONS: usize = 16;
+
 /// Run the resident loopback HTTP MCP transport on `127.0.0.1:port` until the
 /// process is terminated. Returns only if the bind fails.
 ///
 /// Spawns one thread per accepted connection (bounded by `ConcurrencyGate`).
 /// Connections beyond `max_concurrent + max_queued` receive HTTP 503 immediately.
+///
+/// SSE isolation (CAND-025): SSE streams (`GET /api/events`) use a SEPARATE
+/// SSE gate (default `MAX_SSE_CONNECTIONS` concurrent, maxQueued=0). The
+/// normal gate slot is released as soon as SSE intent is detected; the SSE gate
+/// slot is then acquired and held for the full stream lifetime. Normal POST /
+/// JSON-RPC traffic is never blocked by idle SSE clients.
 ///
 /// `stats_store`: optional stats store for topology snapshot reads.
 pub fn run_http_loop(
@@ -291,8 +313,17 @@ pub fn run_http_loop(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(256)
         .clamp(0, 4096);
+    // SSE gate: separate pool so SSE clients never starve normal requests.
+    // maxQueued=0: shed immediately when the cap is hit (SSE clients reconnect
+    // via EventSource retry, so queuing adds no value).
+    let max_sse = std::env::var("MOOTX01_HTTP_MAX_SSE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(MAX_SSE_CONNECTIONS)
+        .clamp(1, 256);
 
     let gate = ConcurrencyGate::new(max_concurrent, max_queued);
+    let sse_gate = Arc::new(ConcurrencyGate::new(max_sse, 0));
 
     // Dispatcher is shared across connection threads via Arc<Mutex<>>.
     // The Mutex serializes tool dispatch; for I/O-bound MCP calls this is
@@ -310,7 +341,7 @@ pub fn run_http_loop(
 
     let listener = bind_loopback(port)?;
     let bound = listener.local_addr()?.port();
-    eprintln!("aria-mcp: HTTP listening on 127.0.0.1:{bound} (max body {max_body_bytes} bytes, max_concurrent={max_concurrent}, max_queued={max_queued})");
+    eprintln!("aria-mcp: HTTP listening on 127.0.0.1:{bound} (max body {max_body_bytes} bytes, max_concurrent={max_concurrent}, max_queued={max_queued}, max_sse={max_sse})");
 
     loop {
         let (mut stream, _) = match listener.accept() {
@@ -331,6 +362,7 @@ pub fn run_http_loop(
         }
 
         let gate_clone = Arc::clone(&gate);
+        let sse_gate_clone = Arc::clone(&sse_gate);
         let dispatcher_clone = Arc::clone(&dispatcher);
         let stats_store_clone = stats_store.clone();
 
@@ -343,20 +375,72 @@ pub fn run_http_loop(
             let in_flight = GLOBAL_INFLIGHT_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             update_inflight_hwm(in_flight);
             let start = Instant::now();
-            defer_on_drop(|| {
+
+            // Read the request bytes BEFORE locking the dispatcher and BEFORE
+            // the SSE check. A slow client holds the TCP socket open while
+            // writing its request; reading here — outside the Mutex — means a
+            // slow sender cannot block other connections from being dispatched.
+            let request = read_request(&mut stream, max_body_bytes);
+
+            // SSE two-gate protocol (CAND-025):
+            // Detect SSE intent after reading the request headers. If this is
+            // an SSE connection, release the normal gate slot immediately so
+            // normal POST / JSON-RPC traffic is never blocked by idle SSE
+            // clients. Then acquire the SSE-specific gate slot and hold it
+            // for the full stream lifetime.
+            if let Some(ref req) = request {
+                if req.method == "GET" && req.path == "/api/events" && req.wants_event_stream() {
+                    // Release normal gate early — before driving the long-lived stream.
+                    GLOBAL_INFLIGHT_COUNTER.fetch_sub(1, Ordering::Relaxed);
+                    gate_clone.release();
+                    let elapsed_ns = start.elapsed().as_nanos() as u64;
+                    record_latency_ns(elapsed_ns);
+
+                    // CSRF/origin guard mirrors Swift HTTPServer.serve() SSE branch.
+                    if !is_origin_allowed(req.origin.as_deref()) {
+                        let body = br#"{"error":"forbidden_origin"}"#;
+                        let head = format!(
+                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(body);
+                        return;
+                    }
+
+                    // Acquire SSE gate slot. try_enqueue (non-blocking depth check)
+                    // then wait_for_slot (Condvar wait) — same two-phase protocol
+                    // as the normal gate. For the SSE gate maxQueued=0, so
+                    // try_enqueue rejects immediately when the SSE cap is hit.
+                    if !sse_gate_clone.try_enqueue() {
+                        let body = br#"{"error":"sse_capacity_exceeded"}"#;
+                        let head = format!(
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(body);
+                        return;
+                    }
+                    sse_gate_clone.wait_for_slot();
+                    // MUST be bound to a named variable so the guard lives until
+                    // the SSE stream exits. An unbound call would release immediately.
+                    let _sse_guard = defer_on_drop(move || { sse_gate_clone.release(); });
+
+                    drive_sse_stream(&mut stream, SSE_HEARTBEAT_INTERVAL_MS);
+                    return;
+                }
+            }
+
+            // Normal request/response path. The gate guard holds the normal
+            // slot for the duration of the dispatch and write; released on drop.
+            // MUST be bound to a named variable (see above).
+            let _gate_guard = defer_on_drop(|| {
                 GLOBAL_INFLIGHT_COUNTER.fetch_sub(1, Ordering::Relaxed);
                 gate_clone.release();
                 let elapsed_ns = start.elapsed().as_nanos() as u64;
                 record_latency_ns(elapsed_ns);
             });
-
-            // Read the request bytes BEFORE locking the dispatcher (fix #26).
-            // A slow client holds the TCP socket open while writing its
-            // request; reading here — outside the Mutex — means a slow
-            // sender cannot block other connections from being dispatched.
-            // The dispatcher lock scope is now limited to the actual dispatch
-            // call (route), which is the known Arc<Mutex<>> dispatch ceiling.
-            let request = read_request(&mut stream, max_body_bytes);
 
             let dispatch = dispatcher_clone.lock().unwrap();
             if let Some(req) = request {
@@ -384,9 +468,10 @@ pub fn run_http_loop(
     }
 }
 
-/// A trivial RAII guard that runs a closure on drop. Used in `run_http_loop`
-/// thread bodies to ensure gate release + latency recording even when
-/// `serve_stream` returns early.
+/// A trivial RAII guard that runs a closure on drop. The guard MUST be bound to
+/// a named `let` variable (e.g. `let _guard = defer_on_drop(...)`) to defer
+/// until the enclosing block exits. An unbound call (`defer_on_drop(...);`)
+/// drops the guard immediately at the end of the statement.
 struct OnDrop<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Drop for OnDrop<F> {
     fn drop(&mut self) { if let Some(f) = self.0.take() { f(); } }
@@ -409,11 +494,14 @@ pub fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
 /// behavior without the process-lifetime loop.
 ///
 /// Gate is provided by the caller so tests can configure capacity precisely.
+/// `sse_gate` is provided separately (CAND-025) so SSE isolation tests can
+/// verify that SSE clients do not consume slots from the normal gate.
 #[doc(hidden)]
 pub fn run_http_loop_for_test(
     listener: TcpListener,
     dispatcher: Arc<Mutex<Dispatcher>>,
     gate: Arc<ConcurrencyGate>,
+    sse_gate: Arc<ConcurrencyGate>,
     connection_count: usize,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -431,19 +519,56 @@ pub fn run_http_loop_for_test(
                 continue;
             }
             let gate_c = Arc::clone(&gate);
+            let sse_gate_c = Arc::clone(&sse_gate);
             let disp_c = Arc::clone(&dispatcher);
             std::thread::spawn(move || {
                 // Phase 2: blocking Condvar wait on the worker thread.
                 gate_c.wait_for_slot();
 
                 let start = Instant::now();
+
+                // Read request BEFORE locking the dispatcher (fix #26).
+                let request = read_request(&mut stream, 4 * 1024 * 1024);
+
+                // SSE two-gate protocol (CAND-025): same as run_http_loop.
+                if let Some(ref req) = request {
+                    if req.method == "GET" && req.path == "/api/events" && req.wants_event_stream() {
+                        // Release normal gate early before entering long-lived stream.
+                        gate_c.release();
+                        let _ = start.elapsed();
+
+                        if !is_origin_allowed(req.origin.as_deref()) {
+                            let body = br#"{"error":"forbidden_origin"}"#;
+                            let head = format!(
+                                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(head.as_bytes());
+                            let _ = stream.write_all(body);
+                            return;
+                        }
+                        if !sse_gate_c.try_enqueue() {
+                            let body = br#"{"error":"sse_capacity_exceeded"}"#;
+                            let head = format!(
+                                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(head.as_bytes());
+                            let _ = stream.write_all(body);
+                            return;
+                        }
+                        sse_gate_c.wait_for_slot();
+                        let _sse_guard = defer_on_drop(move || { sse_gate_c.release(); });
+                        drive_sse_stream(&mut stream, SSE_HEARTBEAT_INTERVAL_MS);
+                        return;
+                    }
+                }
+
                 let _guard = defer_on_drop(|| {
                     gate_c.release();
                     let _ = start.elapsed(); // latency recording omitted in test helper
                 });
 
-                // Read request BEFORE locking the dispatcher (fix #26).
-                let request = read_request(&mut stream, 4 * 1024 * 1024);
                 let lock = disp_c.lock().unwrap();
                 if let Some(req) = request {
                     let (status, body) = route(&req, &lock, None);
@@ -510,15 +635,16 @@ impl HttpRequest {
 }
 
 /// Serve one connection: read the request, route it, write the response.
-/// Updates the 4xx, 5xx, and rpc counters for every call (serve_once path
-/// uses this too; the gate and latency counters are managed by the caller
-/// in run_http_loop's thread body).
+/// Updates the 4xx, 5xx, and rpc counters for normal (non-SSE) calls.
+/// Gate and latency counters are managed by the caller in run_http_loop's
+/// thread body.
 ///
 /// SSE fast path: `GET /api/events` with `Accept: text/event-stream` (or
 /// `?stream=1`) is intercepted here, before `route()`, and handed to
-/// `drive_sse_stream()`. The CSRF/origin guard runs first. The SSE stream
-/// is NOT counted as an RPC call but does hold the concurrency-gate slot
-/// for its lifetime, mirroring the Swift `serve()` SSE branch.
+/// `drive_sse_stream()`. The CSRF/origin guard runs first; a forbidden-origin
+/// SSE request returns 403 before the counter block, so it is not counted as
+/// a 4xx response. The SSE stream does hold the concurrency-gate slot for its
+/// lifetime, mirroring the Swift `serve()` SSE branch.
 fn serve_stream(stream: &mut TcpStream, dispatcher: &Dispatcher, max_body_bytes: usize, stats_store: Option<&StatsStore>) {
     let request = match read_request(stream, max_body_bytes) {
         Some(r) => r,
@@ -778,24 +904,46 @@ fn write_http_response(stream: &mut TcpStream, status: u16, body: &[u8]) {
     let _ = stream.write_all(body);
 }
 
-/// True if the Origin is acceptable: absent (native MCP clients send none) or a
-/// loopback origin. Any other origin is a cross-origin browser request (the
-/// DNS-rebinding vector) and is rejected. Mirrors the Swift
+/// True if the Origin is acceptable: absent (native MCP clients send none) or
+/// an exact loopback origin. Any other origin is rejected to block cross-origin
+/// browser requests (the DNS-rebinding / CSRF vector). Mirrors the Swift
 /// `HTTPServer.isOriginAllowed`.
+///
+/// The check parses the scheme prefix and then validates the suffix after the
+/// loopback host is empty or a port (`:<digits>`). Prefix-only comparison would
+/// accept attacker-owned names like `localhost.evil` or `127.0.0.1.evil`.
 fn is_origin_allowed(origin: Option<&str>) -> bool {
-    match origin {
-        None => true,
-        Some(o) if o.is_empty() => true,
-        Some(o) => {
-            let l = o.to_ascii_lowercase();
-            l.starts_with("http://127.0.0.1")
-                || l.starts_with("http://localhost")
-                || l.starts_with("https://127.0.0.1")
-                || l.starts_with("https://localhost")
-                || l.starts_with("http://[::1]")
-                || l.starts_with("https://[::1]")
-        }
+    match origin.map(str::trim) {
+        None | Some("") => true,
+        Some(o) => is_loopback_origin(o),
     }
+}
+
+/// True if `origin` is an exact loopback origin: scheme is http/https, host is
+/// `localhost`, `127.0.0.1`, or `[::1]`, and the only suffix after the host is
+/// an optional port (`:` followed by ASCII digits only).
+fn is_loopback_origin(origin: &str) -> bool {
+    let lo = origin.to_ascii_lowercase();
+    [
+        "http://127.0.0.1",
+        "http://localhost",
+        "https://127.0.0.1",
+        "https://localhost",
+        "http://[::1]",
+        "https://[::1]",
+    ]
+    .iter()
+    .any(|prefix| lo.strip_prefix(prefix).is_some_and(is_valid_origin_suffix))
+}
+
+/// True if `suffix` is the remainder of an origin after the loopback host:
+/// either empty (bare host) or `:` followed by one or more ASCII digits (port).
+/// Rejects `.evil`, `@user`, path components, and any other trailing content.
+fn is_valid_origin_suffix(suffix: &str) -> bool {
+    suffix.is_empty()
+        || suffix.strip_prefix(':').is_some_and(|port| {
+            !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 /// Find the first index of `needle` in `haystack`.
@@ -860,8 +1008,8 @@ fn get_lattice_snapshot(registry: &crate::estate_registry::EstateRegistry) -> (u
 /// returns None (governor has not fired yet), responds with `structurePending: true`.
 ///
 /// Estate ID is the default estate's UUID string. The `?estate=` query param is
-/// not parsed in this Rust leg (single-estate daemon); all reads use the registry
-/// default. This matches the current Rust registry scope (one estate per process).
+/// not parsed; this endpoint always reads the registry default estate. The registry
+/// supports additional estates, but this endpoint does not resolve them.
 fn get_graph_snapshot(
     registry: &crate::estate_registry::EstateRegistry,
     stats_store: Option<&StatsStore>,
@@ -886,11 +1034,11 @@ fn get_graph_snapshot(
 }
 
 /// GET /api/admin/estates — list all estates in the registry.
+///
 /// Backend is inferred from env vars (ARIA_MCP_POSTGRES_URL / ARIA_MCP_SQLITE_PATH),
-/// same as Swift. Mount state is always "mounted" (no mount-state enum in Rust
-/// registry). estateName uses the estate UUID as a proxy — the Rust EstateRegistry
-/// stores no separate human-readable name (Swift derives it via GeniusLocusKit).
-/// Mirrors Swift HTTPServer.adminEstatesSnapshot(dispatcher:).
+/// same as Swift. Estate name and mount state are read from the registry entry
+/// (defaulting to UUID-as-name and "mounted" when not set). Mirrors Swift
+/// HTTPServer.adminEstatesSnapshot(dispatcher:).
 fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry) -> (u16, Vec<u8>) {
     // Backend inferred from env vars — same selection logic as ServerConfig::from_env.
     let backend = if std::env::var("ARIA_MCP_POSTGRES_URL").is_ok() {
@@ -905,7 +1053,7 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
     let default_uuid = registry.default.estate_id.to_string();
     estates.push(serde_json::json!({
         "estateUUID": default_uuid,
-        "estateName": default_uuid,
+        "estateName": registry.default.estate_name,
         "kind": "GLK",
         "backend": backend,
         "mountState": "mounted"
@@ -916,9 +1064,13 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
         .map(|u| u.to_string())
         .collect();
     extra_uuids.sort();
-    for uuid in &extra_uuids {
+    for uuid_str in &extra_uuids {
+        let uuid_parsed = uuid::Uuid::parse_str(uuid_str).unwrap_or_default();
+        let name = registry.extras.get(&uuid_parsed)
+            .map(|e| e.estate_name.as_str())
+            .unwrap_or(uuid_str.as_str());
         estates.push(serde_json::json!({
-            "estateUUID": uuid, "estateName": uuid,
+            "estateUUID": uuid_str, "estateName": name,
             "kind": "GLK", "backend": backend, "mountState": "mounted"
         }));
     }

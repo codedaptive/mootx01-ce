@@ -80,9 +80,13 @@ public actor BruteForceIndex: DenseIndex {
 
     /// k-nearest binary vectors by Hamming distance (exact linear scan).
     ///
-    /// Returns up to k DenseHit values sorted by `(rawDistance ASC,
-    /// key.itemID ASC)`. The tie-break on itemID is the universal
-    /// rule from retrieval algorithms reference §0.3.
+    /// Returns up to k DenseHit values sorted by `(rawDistance ASC, key ASC)`
+    /// where the key comparison is the full VectorRecordKey order
+    /// (itemID, vectorIndex, modelID, modelVersion). The primary tie-break
+    /// is itemID per §0.3; secondary breaks on vectorIndex and modelID
+    /// produce a strict total order so that two records sharing the same
+    /// itemID but differing in vectorIndex or modelID are both returned
+    /// in deterministic order.
     ///
     /// - Parameters:
     ///   - probe: must be `.binary` kind with exactly 32 bytes.
@@ -183,17 +187,23 @@ public actor BruteForceIndex: DenseIndex {
             return DenseHit(key: array.keys[slotIdx], hammingDistance: distances[i])
         }
 
-        // --- Sort to enforce total order: (distance ASC, itemID ASC) ---
-        // This is the oracle order (retrieval algorithms ref §0.3).
-        // The sort is over all candidates, then we truncate to k.
-        // Sorting first guarantees that among candidates tied at the
-        // k-th boundary distance, the ones with smaller itemIDs are
-        // kept — not the ones that happen to be first in the array.
+        // --- Sort to enforce total order: (distance ASC, key ASC) ---
+        // The primary order is distance ASC (§0.3). The tie-break uses the
+        // full VectorRecordKey comparison — (itemID, vectorIndex, modelID,
+        // modelVersion) — which is a strict total order. Using the full key
+        // (rather than just itemID) ensures deterministic results when two
+        // distinct records share the same itemID but differ in vectorIndex
+        // or modelID (the VectorStore UNIQUE constraint is
+        // (item_id, vector_index, model_id), so both records are valid and
+        // must each be returned). Sorting first guarantees that among
+        // candidates tied at the k-th boundary distance, the ones with
+        // smaller keys are kept — not the ones that happen to be first in
+        // the array.
         allHits.sort { lhs, rhs in
             if lhs.rawDistance != rhs.rawDistance {
                 return lhs.rawDistance < rhs.rawDistance
             }
-            return lhs.key.itemID < rhs.key.itemID
+            return lhs.key < rhs.key
         }
 
         // Truncate to k after sorting.

@@ -16,6 +16,15 @@
 // only for the value types (ProposeFrame, RecallTraceItem, DiaryEntry,
 // Tunnel) — never for a write path (B-1). The clock is injected by
 // passing `now` into every cycle/pump; there are no wall-clock sleeps.
+//
+// ── Drain model (v2) ─────────────────────────────────────────────────
+// FakeReader's drainDreamingWindow() is a queue of window batches: each
+// call pops the next batch. Once the queue is empty it returns [] —
+// simulating the dreaming queue's drain-once semantics (jobs don't
+// reappear after being replied Done). Tests that need N co-recall events
+// for pair (a,b) seed windowBatches with N windows each containing [a,b].
+// Reward targets are drawer IDs, matching the v2 evidenceTargets=[a,b]
+// convention where the co-recalled drawers are their own evidence.
 
 import Testing
 import Foundation
@@ -39,29 +48,58 @@ private actor RecordingSink: DreamingProposalSink {
     func diaryCount() -> Int { diaryEntries.count }
 }
 
-/// Returns whatever substrate state the test configures. Mutable so the
-/// EWC++ test can change the evidence between cycles.
+/// Drain-queue fake for DreamingSubstrateReader. Each call to
+/// drainDreamingWindow() pops the next pre-seeded window batch from the
+/// queue. When the queue is exhausted, returns [] — matching the real
+/// dreaming-queue drain semantics (consumed jobs do not reappear).
+///
+/// Tests that need N co-recall events for pair (a, b) seed windowBatches
+/// with N inner arrays each containing the string IDs of that pair.
+///
+/// Two separate tunnel lists separate the two suppression sources:
+///   - `tunnels` — returned by existingTunnels(); used when the test
+///     exercises the full existing-tunnel protocol (not ALPHA duplicate
+///     suppression, which uses dreamedActiveTunnels()).
+///   - `dreamedTunnels` — returned by dreamedActiveTunnels(); used by
+///     ALPHA's retired-tunnel fix (Part 5). Represents non-tombstoned
+///     dreamed tunnels. Defaults to [] so all existing tests continue
+///     to see an empty dreamed-tunnel set.
 private actor FakeReader: DreamingSubstrateReader {
     var traces: [RecallTraceItem]
-    var observations: [CoOccurrenceObservation]
+    /// Each element is one call's complete return value. Drained FIFO.
+    private var windowBatches: [[[String]]]
     var tunnels: [Tunnel]
+    /// Non-tombstoned dreamed tunnels for ALPHA duplicate suppression.
+    var dreamedTunnels: [Tunnel]
 
     init(
         traces: [RecallTraceItem] = [],
-        observations: [CoOccurrenceObservation] = [],
-        tunnels: [Tunnel] = []
+        windowBatches: [[[String]]] = [],
+        tunnels: [Tunnel] = [],
+        dreamedTunnels: [Tunnel] = []
     ) {
         self.traces = traces
-        self.observations = observations
+        self.windowBatches = windowBatches
         self.tunnels = tunnels
+        self.dreamedTunnels = dreamedTunnels
     }
 
     func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem] { traces }
-    func coOccurrenceObservations() async throws -> [CoOccurrenceObservation] { observations }
+
+    func drainDreamingWindow() async throws -> [[String]] {
+        guard !windowBatches.isEmpty else { return [] }
+        return windowBatches.removeFirst()
+    }
+
     func existingTunnels() async throws -> [Tunnel] { tunnels }
 
+    // Returns only non-tombstoned dreamed tunnels, matching the real
+    // substrate's dreamedActiveTunnels() semantics. ALPHA uses this
+    // for duplicate suppression so that retired (tombstoned) tunnels
+    // do NOT block re-formation of the same pair.
+    func dreamedActiveTunnels() async throws -> [Tunnel] { dreamedTunnels }
+
     func setTraces(_ t: [RecallTraceItem]) { traces = t }
-    func setObservations(_ o: [CoOccurrenceObservation]) { observations = o }
 }
 
 // MARK: - Builders
@@ -69,6 +107,9 @@ private actor FakeReader: DreamingSubstrateReader {
 private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 
 /// A recall-trace row with `used` set or clear (bit 0 of the bitmap).
+/// In v2, `target` is the drawer ID — the same string used as the window
+/// endpoint — so the reward map is keyed by drawer ID, matching
+/// evidenceTargets = [endpointA, endpointB].
 private func trace(_ target: String, used: Bool) -> RecallTraceItem {
     RecallTraceItem(
         target: target,
@@ -130,20 +171,28 @@ struct DreamingDaemonTests {
 
     // MARK: - C-2: confidence (and attempts) gate
 
+    // In v2 the FakeReader seeds three classes of drain window, one per pair:
+    //   Strong (a, b):      3 windows; traces a+b used → attempts=3, confidence≈0.88
+    //   LowConf (c, d):     5 windows; traces c+d unused → attempts=5, confidence≈0.05
+    //   FewAttempts (e, f): 1 window;  traces e+f used → attempts=1 < minAttempts(3)
+    // Only the strong candidate clears both gates (confidence ≥ 0.7 AND attempts ≥ 3).
     @Test("C-2: proposes only above confidence and attempts")
     func c2ProposesOnlyAboveConfidenceAndAttempts() async throws {
         try await withIntellectusLock {
-            // Strong: used evidence (reward 1.0) → confidence ≈ 0.88; 3 attempts.
-            // LowConf: unused evidence (reward 0.0) → confidence ≈ 0.05.
-            // FewAttempts: used evidence but only 1 attempt (< minAttempts 3).
             let reader = FakeReader(
-                traces: [trace("r1", used: true), trace("r2", used: true),
-                         trace("r3", used: false), trace("r4", used: true)],
-                observations: [
-                    CoOccurrenceObservation(endpointA: "a", endpointB: "b", attempts: 3, evidenceTargets: ["r1", "r2"]),
-                    CoOccurrenceObservation(endpointA: "c", endpointB: "d", attempts: 5, evidenceTargets: ["r3"]),
-                    CoOccurrenceObservation(endpointA: "e", endpointB: "f", attempts: 1, evidenceTargets: ["r4"]),
-                ]
+                traces: [
+                    trace("a", used: true),  trace("b", used: true),
+                    trace("c", used: false), trace("d", used: false),
+                    trace("e", used: true),  trace("f", used: true),
+                ],
+                windowBatches: [[
+                    // Strong: 3 co-recall events for (a, b).
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                    // LowConf: 5 co-recall events for (c, d).
+                    ["c", "d"], ["c", "d"], ["c", "d"], ["c", "d"], ["c", "d"],
+                    // FewAttempts: 1 co-recall event for (e, f).
+                    ["e", "f"],
+                ]]
             )
             let sink = RecordingSink()
             let d = daemon(reader: reader, sink: sink)
@@ -204,13 +253,21 @@ struct DreamingDaemonTests {
 
     // MARK: - B-4: idempotency
 
-    @Test("B-4: second cycle over unchanged state proposes nothing new")
-    func b4SecondCycleOverUnchangedStateProposesNothingNew() async throws {
+    // Cycle 1: 3 windows for (a, b) → propose. Cycle 2: 3 more windows for the
+    // SAME pair → daemon has already proposed it → suppressedDuplicates ≥ 1.
+    // The proposedKeys set is the structural idempotency guard (B-4): the same
+    // candidate key is never proposed twice, even when the drain supplies new
+    // evidence for an already-proposed pair.
+    @Test("B-4: second cycle over same pair proposes nothing new")
+    func b4SecondCycleOverSamePairProposesNothingNew() async throws {
         try await withIntellectusLock {
             let reader = FakeReader(
-                traces: [trace("r1", used: true), trace("r2", used: true)],
-                observations: [
-                    CoOccurrenceObservation(endpointA: "a", endpointB: "b", attempts: 3, evidenceTargets: ["r1", "r2"]),
+                traces: [trace("a", used: true), trace("b", used: true)],
+                windowBatches: [
+                    // Cycle 1: 3 windows — pair clears both gates → propose.
+                    [["a", "b"], ["a", "b"], ["a", "b"]],
+                    // Cycle 2: 3 more windows — same pair, already proposed → suppress.
+                    [["a", "b"], ["a", "b"], ["a", "b"]],
                 ]
             )
             let sink = RecordingSink()
@@ -234,11 +291,10 @@ struct DreamingDaemonTests {
     @Test("invariant: never creates a Tunnel, only proposes")
     func invariantNeverCreatesTunnelOnlyProposes() async throws {
         try await withIntellectusLock {
+            // 3 windows for (a, b); traces a+b used → 3 attempts, high confidence.
             let reader = FakeReader(
-                traces: [trace("r1", used: true), trace("r2", used: true)],
-                observations: [
-                    CoOccurrenceObservation(endpointA: "a", endpointB: "b", attempts: 4, evidenceTargets: ["r1", "r2"]),
-                ]
+                traces: [trace("a", used: true), trace("b", used: true)],
+                windowBatches: [[["a", "b"], ["a", "b"], ["a", "b"]]]
             )
             let sink = RecordingSink()
             let d = daemon(reader: reader, sink: sink)
@@ -257,10 +313,14 @@ struct DreamingDaemonTests {
         }
     }
 
-    // MARK: - Step 5: existing Tunnel suppresses a duplicate candidate
+    // MARK: - Step 5: active dreamed Tunnel suppresses a duplicate candidate
 
-    @Test("duplicate of an existing Tunnel is suppressed")
-    func duplicateOfExistingTunnelIsSuppressed() async throws {
+    // ALPHA uses dreamedActiveTunnels() (not existingTunnels()) so that
+    // only non-tombstoned dreamed tunnels participate in duplicate suppression.
+    // An active dreamed tunnel for pair (a, b) must block a new proposal for
+    // the same pair.
+    @Test("duplicate of an active dreamed Tunnel is suppressed")
+    func duplicateOfActiveDreamedTunnelIsSuppressed() async throws {
         try await withIntellectusLock {
             let existing = Tunnel(
                 id: "tun-1",
@@ -268,31 +328,78 @@ struct DreamingDaemonTests {
                 targetWing: "w", targetRoom: "r", targetDrawerId: "b",
                 label: "related", addedBy: "user", filedAt: t0
             )
+            // 9 windows → high attempts; traces a+b used → high confidence.
+            // But the pair duplicates the active dreamed Tunnel → suppressed.
+            // dreamedTunnels feeds dreamedActiveTunnels() — the ALPHA dedup path.
             let reader = FakeReader(
-                traces: [trace("r1", used: true), trace("r2", used: true)],
-                observations: [
-                    CoOccurrenceObservation(endpointA: "a", endpointB: "b", attempts: 9, evidenceTargets: ["r1", "r2"]),
-                ],
-                tunnels: [existing]
+                traces: [trace("a", used: true), trace("b", used: true)],
+                windowBatches: [[
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                ]],
+                dreamedTunnels: [existing]
             )
             let sink = RecordingSink()
             let d = daemon(reader: reader, sink: sink)
 
             let report = try await d.triggerDreamingCycle(now: t0)
-            #expect(report.proposalsEmitted.count == 0, "candidate duplicates an existing Tunnel")
+            #expect(report.proposalsEmitted.count == 0, "candidate duplicates an active dreamed Tunnel")
             #expect(report.suppressedDuplicates >= 1)
+        }
+    }
+
+    // MARK: - Step 5 (Part 5 fix): retired Tunnel does NOT suppress re-formation
+
+    // A tunnel that has been retired (tombstoned by OMEGA) must NOT appear in
+    // dreamedActiveTunnels(), so ALPHA must not suppress a new proposal for the
+    // same pair. This test verifies the fix: with dreamedTunnels=[] (simulating
+    // a tombstoned tunnel absent from the active set), the pair re-forms.
+    @Test("retired (tombstoned) Tunnel does not block re-formation of same pair")
+    func retiredTunnelDoesNotSuppressReformation() async throws {
+        try await withIntellectusLock {
+            // 9 windows → high attempts; traces used → high confidence.
+            // dreamedTunnels is empty, simulating: the tunnel for (a, b) was
+            // retired by OMEGA so it is no longer in dreamedActiveTunnels().
+            // existingTunnels() is also empty — this test focuses purely on
+            // the dreamed-active suppression path used by ALPHA.
+            let reader = FakeReader(
+                traces: [trace("a", used: true), trace("b", used: true)],
+                windowBatches: [[
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                    ["a", "b"], ["a", "b"], ["a", "b"],
+                ]],
+                dreamedTunnels: []
+            )
+            let sink = RecordingSink()
+            let d = daemon(reader: reader, sink: sink)
+
+            let report = try await d.triggerDreamingCycle(now: t0)
+            // Retired tunnel absent from active set → pair is NOT suppressed → 1 proposal.
+            #expect(report.proposalsEmitted.count == 1,
+                "retired tunnel must not suppress re-formation of the same pair")
+            #expect(report.proposalsEmitted.first?.target == "a")
         }
     }
 
     // MARK: - Step 4: EWC++ does not catastrophically overwrite priors
 
+    // Cycle 1: 3 windows for (a, b); traces a+b used → confidence≈0.88,
+    // consolidated[a|b] ≈ 0.88. Cycle 2: 3 more windows for same pair;
+    // traces a+b now unused → fresh score≈0.05. EWC++ retention:
+    // max(0.05, 0.88 × 0.9) = 0.792 ≥ 0.7 — prior association preserved.
     @Test("EWC++: prior association not catastrophically overwritten")
     func ewcPriorAssociationNotCatastrophicallyOverwritten() async throws {
         try await withIntellectusLock {
             let reader = FakeReader(
-                traces: [trace("r1", used: true), trace("r2", used: true)],
-                observations: [
-                    CoOccurrenceObservation(endpointA: "a", endpointB: "b", attempts: 3, evidenceTargets: ["r1", "r2"]),
+                traces: [trace("a", used: true), trace("b", used: true)],
+                windowBatches: [
+                    // Cycle 1: used traces → high confidence, consolidates.
+                    [["a", "b"], ["a", "b"], ["a", "b"]],
+                    // Cycle 2: same pair, but traces flipped to unused — fresh
+                    // score collapses. EWC++ retention must preserve the prior.
+                    [["a", "b"], ["a", "b"], ["a", "b"]],
                 ]
             )
             let sink = RecordingSink()
@@ -307,13 +414,13 @@ struct DreamingDaemonTests {
             // Cycle 2: the SAME candidate now has only unused evidence — its
             // fresh contrastive score collapses toward 0. EWC++ retention must
             // keep the consolidated confidence from being wiped out.
-            await reader.setTraces([trace("r1", used: false), trace("r2", used: false)])
+            await reader.setTraces([trace("a", used: false), trace("b", used: false)])
             let second = try await d.triggerDreamingCycle(now: t0.addingTimeInterval(60))
             let secondScore = try #require(second.candidateScores[key])
 
             let freshRaw = DreamingDaemon.contrastiveConfidence(
-                evidenceTargets: ["r1", "r2"],
-                rewardByTarget: ["r1": 0.0, "r2": 0.0],
+                evidenceTargets: ["a", "b"],
+                rewardByTarget: ["a": 0.0, "b": 0.0],
                 baseline: 0.6
             )
             #expect(freshRaw < 0.1, "fresh score collapsed without retention")

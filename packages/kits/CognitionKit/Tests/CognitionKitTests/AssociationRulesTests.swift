@@ -104,7 +104,7 @@ struct AssociationRulesTests {
     @Test("high support threshold removes low-support rules")
     func highThresholdFilters() async throws {
         let (kit, handle) = try await openEstate()
-        // 2 drawers: one with room "rare", one without.
+        // 4 drawers: one with room "rare" and three with room "common".
         try await capture(kit, handle, room: "rare", kind: .prose, channel: .typed)
         try await capture(kit, handle, room: "common", kind: .prose, channel: .typed)
         try await capture(kit, handle, room: "common", kind: .prose, channel: .typed)

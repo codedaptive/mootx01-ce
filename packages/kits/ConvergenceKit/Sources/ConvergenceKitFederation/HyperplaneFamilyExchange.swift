@@ -1,11 +1,13 @@
 // HyperplaneFamilyExchange.swift
 //
-// Pairing handshake per paper section 9.2. Two estates negotiate
-// a shared hyperplane family so their 256-bit fingerprints are
-// directly comparable across the federation.
+// Codable value types for the pairing handshake (paper section 9.2).
+// Two estates share a hyperplane family so their 256-bit fingerprints
+// are directly comparable across the federation.
 //
-// For v1.0 the handshake exchanges the family parameters
-// (seed + dimension) signed by each peer's Ed25519 key.
+// This file defines the proposal/acceptance types only. The current
+// FederationSyncEngine.pair path receives a HyperplaneFamilySpec from
+// the caller and stores it in memory; it does not sign or negotiate
+// these proposal/acceptance structs.
 
 import Foundation
 import SubstrateTypes

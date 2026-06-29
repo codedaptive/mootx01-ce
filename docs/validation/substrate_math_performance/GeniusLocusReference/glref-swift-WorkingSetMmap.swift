@@ -17,8 +17,11 @@
 //   header   (page 0, 4 KiB):
 //       magic 8B, version 4B, page_size 4B,
 //       row_count 8B, field_count 8B, bits_per_field 8B,
-//       slice_byte_size 8B, last_hlc 16B,
-//       crc32 of header 4B, padding to 4096
+//       slice_byte_size 8B, last_hlc 8B (packed HLC),
+//       padding to 4096
+//
+//   Note: CRC32 is not written or validated in this reference;
+//   `flush(at:)` writes the 8-byte packed HLC at offset 48.
 //
 //   slice 0  (pages 1..): bit-sliced tensor slice for bit 0
 //   slice 1  (pages ...): bit-sliced tensor slice for bit 1

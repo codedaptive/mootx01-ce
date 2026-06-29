@@ -47,7 +47,7 @@ struct FormalConceptsTests {
         sensitivity: AdjectiveSensitivity = .normal,
         udc: String = "000",
         qid: String? = nil
-    ) async throws -> String {
+    ) async throws -> Drawer {
         let frame = CaptureFrame(
             content: "test content",
             channel: channel,
@@ -57,7 +57,7 @@ struct FormalConceptsTests {
             embeddingModelID: "test-v1",
             sensitivity: sensitivity,
             kind: kind)
-        return try await kit.capture(handle, frame).id
+        return try await kit.capture(handle, frame)
     }
 
     // MARK: - Tests
@@ -179,17 +179,18 @@ struct FormalConceptsTests {
     // (lattice) and provenance (trust), not from where the drawers were
     // filed. (Trust is the capture-time default `verbatim`; the full trust
     // vocabulary, including non-default values, is asserted directly in
-    // CK-FA-7 — the in-memory estate does not yet wire the `correctTrust`
-    // mutation.)
+    // CK-FA-7 directly validates non-default trust vocabulary via the builder.)
     @Test("two differently-filed drawers sharing trust + lattice land in one concept")
     func discoveryGroupsByTrustAndLattice() async throws {
         let (kit, handle) = try await openEstate()
-        let id1 = try await capture(
+        let d1 = try await capture(
             kit, handle, room: "study", kind: .prose, channel: .typed,
             udc: "530", qid: "Q11397")
-        let id2 = try await capture(
+        let id1 = d1.id
+        let d2 = try await capture(
             kit, handle, room: "work", kind: .code, channel: .voiced,
             udc: "530", qid: "Q11397")
+        let id2 = d2.id
 
         let input = FormalConcepts.Input(
             frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
@@ -204,9 +205,11 @@ struct FormalConceptsTests {
         #expect(concept.intent.contains("locus.udc=530"))
         #expect(concept.intent.contains("locus.qid=Q11397"))
         // Grouping is by the spine, not filing: facets the two drawers
-        // disagree on cannot appear in the shared intent.
-        #expect(!concept.intent.contains("locus.room=study"))
-        #expect(!concept.intent.contains("locus.room=work"))
+        // disagree on cannot appear in the shared intent. The room
+        // attribute carries parentNodeId (ADR-017), so check no
+        // locus.room= entry appears at all (the two drawers have
+        // different parentNodeIds).
+        #expect(!concept.intent.contains { $0.hasPrefix("locus.room=") })
         #expect(!concept.intent.contains("locus.kind=prose"))
         #expect(!concept.intent.contains("locus.kind=code"))
     }
@@ -223,7 +226,8 @@ struct FormalConceptsTests {
 
         // Unanchored: empty udc, nil qid, default (verbatim) trust.
         let unanchored = Drawer(
-            content: "x", wing: "w", room: "void", addedBy: "t", filedAt: now,
+            content: "x", parentNodeId: "node-void",
+            addedBy: "t", filedAt: now,
             embeddingModelID: "v1", udcCode: "", wikidataQID: nil)
         let bare = formalAttributesForDrawer(unanchored)
         #expect(!bare.contains { $0.key == "udc" }, "empty udcCode emits no udc attribute")
@@ -232,7 +236,8 @@ struct FormalConceptsTests {
 
         // Anchored + non-default trust (canonical = raw 3 at adjective bits 18–23).
         let anchored = Drawer(
-            content: "y", wing: "w", room: "lab", addedBy: "t", filedAt: now,
+            content: "y", parentNodeId: "node-lab",
+            addedBy: "t", filedAt: now,
             embeddingModelID: "v1",
             adjectiveBitmap: Int64(Trust.canonical.rawValue) << 18,
             udcCode: "530", wikidataQID: "Q11397")
@@ -277,7 +282,8 @@ struct FormalConceptsTests {
     @Test("filing facets (kind/channel/room) still appear as attributes")
     func filingFacetsRetained() async throws {
         let (kit, handle) = try await openEstate()
-        try await capture(kit, handle, room: "study", kind: .code, channel: .voiced, udc: "600")
+        let studyDrawer = try await capture(
+            kit, handle, room: "study", kind: .code, channel: .voiced, udc: "600")
 
         let input = FormalConcepts.Input(
             frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
@@ -287,7 +293,7 @@ struct FormalConceptsTests {
         let allAttrs = Set(out.concepts.flatMap { $0.intent })
         #expect(allAttrs.contains("locus.kind=code"))
         #expect(allAttrs.contains("locus.channel=voiced"))
-        #expect(allAttrs.contains("locus.room=study"))
+        #expect(allAttrs.contains("locus.room=\(studyDrawer.parentNodeId)"))
     }
 
     // CK-FA-10 — COVER DELTAS: the output carries a cover-delta set (structural
@@ -382,5 +388,45 @@ struct FormalConceptsTests {
         #expect(multiOut.concepts.allSatisfy { $0.support >= 2 })
         // Multi-seed result count is at least as large as single-seed.
         #expect(multiOut.concepts.count >= singleOut.concepts.count)
+    }
+
+    // CK-5: implication engine concept cap — even when a large number of
+    // concepts are mined, the cover-delta and implication steps must complete
+    // in bounded time. This fixture mines with a generous maxConcepts ceiling;
+    // the recipe must cap the concept feed to both engines at the documented
+    // constants. We verify the run completes and the caps are respected at the
+    // output boundary (implications.implications.count ≤ maxImplications).
+    @Test("CK-5/CK-6: cover-delta and implication caps respected")
+    func ck5Ck6ConceptCapsRespected() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Populate a diverse fixture: 8 distinct UDC codes × varying trust levels.
+        // BoundedConceptMiner(maxConcepts: 500) lets the miner run wide so the
+        // recipe's internal caps are what bound the engines, not the miner cap.
+        let udcCodes = ["000", "100", "200", "300", "400", "500", "600", "700"]
+        for udc in udcCodes {
+            for _ in 0..<3 {
+                try await capture(kit, handle, room: "r1", udc: udc)
+            }
+        }
+
+        let input = FormalConcepts.Input(
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            miner: BoundedConceptMiner(
+                minSupport: 1, maxIntentSize: 8, maxConcepts: 500),
+            maxImplications: 50,
+            maxPremiseSize: 4)
+
+        let out = try await FormalConcepts().run(
+            input: input, estate: handle, kit: kit)
+
+        // The recipe must complete (no infinite loop or OOM).
+        // CK-5: implications count is bounded by the caller's maxImplications cap.
+        #expect(out.implications.implications.count <= 50,
+                "implication count must not exceed maxImplications=50")
+        // CK-6: cover-delta step produces a result (not stuck in O(N²) enumeration).
+        // We cannot assert an exact count — just that the recipe returned.
+        #expect(out.drawerCount > 0,
+                "drawerCount must be non-zero: estate was populated")
     }
 }

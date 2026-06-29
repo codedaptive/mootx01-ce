@@ -11,13 +11,14 @@
 //     = alpha_udc * udc_tree_distance(a.udc, b.udc)
 //     + alpha_qid * wikidata_graph_distance(a.qid, b.qid)
 //
-// Both component distances are normalized to [0, 1]; the weighted
-// sum is therefore in [0, 1] when alpha_udc + alpha_qid = 1.
+// UDC component: [0, 2] in general. The divisor max(lenA, lenB) does
+// not bound the numerator to [0, max], so UDC distance can exceed 1.0
+// when both strings share no common prefix.
 //
 // UDC tree distance uses longest common prefix (in characters):
 //   d_udc(a, b) = (len(a) - len(lcp))
 //               + (len(b) - len(lcp))
-//   normalized = d_udc / max(len(a), len(b))   ∈ [0, 1]
+//   normalized = d_udc / max(len(a), len(b))
 //
 // Divisor is max(len(a), len(b)) per glref oracle (cookbook § 8.3).
 // Guard: when both strings are empty (maxLen = 0) return 0.0.
@@ -73,6 +74,12 @@ public enum UDCTreeDistance {
     /// Formula: raw = (lenA - lcp) + (lenB - lcp), divisor = max(lenA, lenB).
     /// Guard: both-empty strings are equal (caught by the identity check);
     /// when maxLen = 0, return 0.0.
+    ///
+    /// The raw metric's codomain is [0, 2] (e.g. two non-empty strings with
+    /// no common prefix and equal length yield raw = 2 * len / len = 2.0).
+    /// CompositeDistance requires a normalized [0, 1] component and asserts
+    /// this invariant via precondition. Clamp before returning to satisfy
+    /// that invariant at the source.
     public static func distance(_ a: String, _ b: String) -> Double {
         if a == b { return 0.0 }
         let lenA = a.count
@@ -83,7 +90,9 @@ public enum UDCTreeDistance {
         if maxLen == 0 { return 0.0 }
         let lcp = longestCommonPrefixLength(a, b)
         let raw = Double((lenA - lcp) + (lenB - lcp))
-        return raw / Double(maxLen)
+        // Clamp to [0, 1] — the raw metric's codomain is [0, 2] but
+        // CompositeDistance.distance(latticeDistance:...) requires [0, 1].
+        return min(1.0, max(0.0, raw / Double(maxLen)))
     }
 }
 
@@ -191,10 +200,9 @@ public enum LatticeDistance {
 //
 //   reflexive:    distance(a, a) = 0 always (lcp = len(a)).
 //   symmetric:    distance(a, b) = distance(b, a) for UDC by
-//                 construction; symmetric for Wikidata when the
-//                 adjacency is symmetric (subclass_of is not, but
-//                 BFS treats edges as undirected for the distance
-//                 metric per the cookbook).
+//                 construction. Wikidata symmetry depends on the
+//                 WikidataAdjacencyProvider — this BFS implementation
+//                 does not add reverse edges.
 //   bounded:      with alpha_udc + alpha_qid = 1, distance ∈ [0, 1].
 //   null-qid:     when either anchor has qid = 0, qid_distance = 1
 //                 (no info ⇒ maximally far on that axis).

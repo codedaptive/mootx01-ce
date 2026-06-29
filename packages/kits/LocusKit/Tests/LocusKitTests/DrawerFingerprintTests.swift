@@ -41,7 +41,7 @@ struct DrawerFingerprintTests {
         qid: String? = "Q42",
         filedAt: Date = Date(timeIntervalSince1970: 1_700_000_000)
     ) -> Drawer {
-        Drawer(content: content, wing: "w", room: "r", addedBy: "test",
+        Drawer(content: content, parentNodeId: "test-parent", addedBy: "test",
                filedAt: filedAt, embeddingModelID: "m",
                provenance: provenance, adjectiveBitmap: adjective,
                operationalBitmap: operational, lineageID: lineageID,

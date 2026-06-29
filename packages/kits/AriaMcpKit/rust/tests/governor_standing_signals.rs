@@ -16,7 +16,7 @@
 //! # Why the scheduler lives in the governor
 //!
 //! The Rust standing-signal scheduler ENGINE (`SerialLaneScheduler`,
-//! `CoordinatorDispatcher`, the six v1 signals) already exists in GLK Rust with
+//! `CoordinatorDispatcher`, nine signals per `default_standing_signal_names()`) already exists in GLK Rust with
 //! its own parity gate (`genius_locus_kit/tests/scheduler_parity.rs`). This
 //! suite covers the HARNESS Track 1 added: the governor OWNING a scheduler,
 //! REGISTERING signals into it, and TICKING it on the governor cadence — the

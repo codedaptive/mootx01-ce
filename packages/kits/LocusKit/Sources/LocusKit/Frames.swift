@@ -25,7 +25,7 @@ import SubstrateTypes
 public struct CaptureFrame: Sendable {
     /// Verbatim content to store (rung 1 — exact bytes preserved).
     public var content: String
-    /// How this content was captured. Lives in bits 0–3 of the
+    /// How this content was captured. Lives in bits 0–5 of the
     /// resulting drawer's `operationalBitmap`.
     public var channel: CaptureChannel
     /// Adjective sensitivity tier. Defaults to `.normal`.
@@ -75,7 +75,7 @@ public struct CaptureFrame: Sendable {
     /// Lattice anchor — `udcCode` required per invariant I-5.
     public var latticeAnchor: LatticeAnchor
     /// Actor identifier written into the drawer's `addedBy` field
-    /// and into any bitmap-audit row this capture produces.
+    /// and into any `AuditEvent` rows this capture produces in `audit_log`.
     public var addedBy: String
     /// Embedding model ID for the modelID-tagging contract (I-4).
     /// Required even before vectors are generated so a future
@@ -169,12 +169,14 @@ public struct CaptureFrame: Sendable {
 /// There are deliberately no content, lattice-anchor, or embedding slots:
 /// a tunnel row stores no content blob, the `tunnels` table has no
 /// lattice-anchor columns (the endpoint drawers carry the anchors), and a
-/// tunnel has no embedding. The three operational / adjective / provenance
-/// bitmaps are likewise not exposed — standalone capture initialises them
-/// to 0, byte-identical to the tunnel the supersession cascade writes in
-/// `DrawerStore.addDrawerWithCascade` (which constructs a `Tunnel` with the
-/// same all-zero bitmap defaults). One tunnel shape, two entry points
-/// (mission VERB-CAP-01).
+/// tunnel has no embedding. The adjective and provenance bitmaps are not
+/// exposed; standalone capture initialises them to 0. The operational
+/// bitmap exposes `originClass` (bits 6–8), written by
+/// `EstateVerbs.capture(TunnelCaptureFrame)` via `BitField.writeField`.
+/// Defaults to `.userExplicit` (raw 0) so all existing callers produce
+/// a zero operational bitmap byte-identically. One tunnel shape, two
+/// entry points (standalone capture and the supersession cascade in
+/// `DrawerStore.addDrawerWithCascade`).
 public struct TunnelCaptureFrame: Sendable {
     /// Wing of the source endpoint.
     public var sourceWing: String
@@ -237,8 +239,9 @@ public struct TunnelCaptureFrame: Sendable {
 public struct RecallFrame: Sendable {
     /// Filter chain interpreted as implicit conjunction
     /// (equivalent to `Filter.all(filterChain)`). Per spec § 7.9.1.
-    /// Must contain at least one filter; an empty chain is an
-    /// invalid recall and the evaluator (LOCI_V035_16) throws.
+    /// An empty chain is accepted: `BitmapEvaluator.insertDefaults`
+    /// prepends default state, trust, and sensitivity filters before
+    /// evaluation, so an empty chain recalls currently-believed content.
     public var filterChain: [Filter]
     /// How much of each row to hydrate. Per spec § 7.3.
     public var hydrationLevel: HydrationLevel

@@ -49,6 +49,27 @@ final class SQLiteRowStore: RowStore, Sendable {
         try await backend.countRows(table: table, where: predicate)
     }
 
+    // MARK: - Transaction boundary (GLK_BATCH1)
+
+    /// Open a write transaction on the SQLite backend.
+    ///
+    /// Delegates to `SQLiteBackend.beginTransactionDirect()`, which issues
+    /// `BEGIN IMMEDIATE` and sets `inTransaction`. Errors if a transaction is
+    /// already open (nested transactions are not supported).
+    func beginTransaction() async throws {
+        try await backend.beginTransactionDirect()
+    }
+
+    /// Commit the current transaction.
+    func commitTransaction() async throws {
+        try await backend.commitTransactionDirect()
+    }
+
+    /// Roll back the current transaction, discarding all uncommitted writes.
+    func rollbackTransaction() async throws {
+        try await backend.rollbackTransactionDirect()
+    }
+
     /// SQLite cursor-level skip-corrupt: overrides the `RowStore` default so
     /// individual corrupt rows (e.g. a `+58432-...` poison timestamp) are
     /// skipped and logged rather than aborting the entire corpus scan.

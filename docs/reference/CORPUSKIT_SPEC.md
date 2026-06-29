@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.4.0
+version: 1.12.0
 status: active
-date: 2026-06-17
+date: 2026-06-25
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -16,6 +16,7 @@ relates_to:
   - docs/reference/INTELLECTUSLIB_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
+  - docs/decisions/ADR-019-apple-nl-embedding-providers.md
 ---
 
 # CorpusKit Specification
@@ -91,10 +92,13 @@ PersistenceKit ── CorpusKit ── VectorKit ── ConvergenceKit
 **Depends on:** SubstrateLib (HLC, `FloatSimHash` projection),
 EngramLib (the `Engram` type), EideticLib (sentence segmentation via
 `EideticLib.sentences`), PersistenceKit (the `Storage`
-backend and schema declaration), ConvergenceKit (the `SyncManifest`
-type), VectorKit (`VectorStore` for the kNN pass). The
-`CorpusKitProviders` target additionally depends on the core `CorpusKit`
-target.
+backend and schema declaration; the in-memory backend backs the ingest
+queue), ConvergenceKit (the `SyncManifest` type), VectorKit
+(`VectorStore` for the kNN pass), and **QueueKit** (the per-corpus ingest
+queue — see § 11). The `CorpusKitProviders` target additionally depends on
+the core `CorpusKit` target. QueueKit is a low-level primitive
+(SubstrateTypes + PersistenceKit); CorpusKit → QueueKit is
+downstream→upstream, no inversion.
 
 **Consumed by:** the composition layer (GeniusLocusKit) and the
 reasoning layer (NeuronKit), which build higher-level recall pipelines
@@ -158,11 +162,53 @@ discipline as I-2's chunk decode).
 
 **I-10 (`ext` forward-compat slot, ADR-012):** both persistent entity tables
 carry one nullable `.json` column named `ext` — `chunks` at BundleStore schema
-v2 and `corpus_provider_basis` at BasisStore ("CorpusKitBasis") schema v2. On
+v3 and `corpus_provider_basis` at BasisStore ("CorpusKitBasis") schema v2. On
 `chunks` it is distinct from the existing per-chunk `metadata` column. In 1.0
 `ext` is inert — written NULL / omitted on insert/upsert and never read; it
 carries no behavior. Provisioned during the 1.0.0 free-migration window. See
 ADR-012.
+
+**I-11 (hash-on-write, ADR-017 §19):** every chunk insert computes a
+`content_hash` via `MerkleHash.leaf` (SubstrateLib) and stores it in the
+nullable `content_hash` BLOB column added in schema v3. The hash is computed
+by the `HashingRowStore` decorator wrapping the `RowStore` and fed by a
+`ContentHashProvider` callback specific to CorpusKit (text content hashed).
+The `content_hash` column is nullable to tolerate rows written before v3;
+new inserts always populate it.
+
+**I-12 (as-of temporal reads, ADR-017 §19):** all six `BundleStore` query
+methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`, and
+the internal `affectedSourceIDs`) accept an `AsOfCoordinate` parameter
+(`.present` or `.asOf(HLC)`). In the current implementation, only methods
+backed by `RowStore.query` forward the coordinate; `count` accepts the
+parameter for API parity but does not filter temporally (PersistenceKit's
+`RowStore.count` has no as-of variant).
+
+**I-13 (per-corpus Merkle root):** the `corpus_metadata` table (added in
+BundleStore schema v3) stores one row per source_id with its Merkle root.
+After each insert batch, `BundleStore` recomputes the Merkle root for each
+affected source by hashing all chunk `content_hash` values for that source
+via `MerkleHash.interior`. The `corpusMerkleRoot(for:)` query returns the
+per-corpus root (or `MerkleRoot.empty` if no chunks exist for that source).
+The `globalCorpusMerkleRoot()` query computes the interior hash over all
+per-corpus roots, enabling an estate-level integrity check across all
+corpora.
+
+**I-14 (Apple NL providers are Swift-only, opt-in, absent-lane safe, ADR-019):**
+`CorpusKitProviders` ships two Apple NaturalLanguage embedding providers —
+`NLEmbeddingProvider` (sentence-level, always-available) and
+`NLContextualEmbeddingProvider` (transformer, requires a downloadable per-language
+asset). Both are gated `#if canImport(NaturalLanguage)` and are absent from the
+Rust port (sanctioned divergence — same class as the `.nlTagger` word-class path).
+They are item-local (stateless, compute-once-on-write; no `TrainableEmbeddingBasis`
+conformance). They are OPT-IN: neither joins `CorpusEnsemble.defaultEnsemble()`.
+When the OS model or language asset is unavailable, `embedFloat` returns `[]`
+(standard absent-lane opt-out — `FloatLaneOutcome.unavailableProviderOptOut`) and
+`embed` returns `.zero`. The provider NEVER blocks on a download and NEVER throws
+for an absent asset. Projection seeds are `nlEmbeddingProjectionSeed` ("APNLEMB1",
+`0x4150_4E4C_454D_4231`) and `nlContextualEmbeddingProjectionSeed` ("APNLCTX1",
+`0x4150_4E4C_4354_5831`) — distinct from each other and from all other providers,
+so NL vectors key to their own `model_id` storage partitions (I-4).
 
 ## § 5 — Behavioral contracts
 
@@ -402,14 +448,36 @@ provider (RI/PPMI/LSA/NMF):
   the full corpus (reconstructed from the empty-basis blob, because
   `trainOnCorpus` is additive), UPSERTs it (I-9), and re-embeds every
   chunk (binary v0 + float v1) replacing stale vectors with no duplicate
-  rows. A non-trainable provider — or a reopened-from-basis corpus — makes
-  `reindex` a vector refresh with no basis row written.
+  rows. The empty-basis factory is retained for EVERY trainable slot —
+  including a reopened-from-basis corpus — so `reindex` retrains after a
+  restart (the frozen-after-restart fix); a non-trainable provider makes
+  `reindex` a vector refresh with no basis row written. (Rust retains the
+  trainable capability across reopen via `reconstruct_trainable_basis`,
+  since it cannot cross-cast a boxed provider the way Swift's `as?` does.)
 - *Lifecycle:* `destroyRecallIndex` additionally deletes all basis rows
-  (no orphans). All paths are deterministic — `now` is the only clock
-  source; the engine never reads the wall clock. Swift and Rust produce
-  the byte-identical basis blob and embedding for a shared corpus (I-7):
-  the ingest → reindex → reopen → embed path reproduces the canonical RI
-  basis blob and embedding bit patterns byte-for-byte on both ports.
+  AND all counts rows (no orphans). All paths are deterministic — `now` is
+  the only clock source; the engine never reads the wall clock. Swift and
+  Rust produce the byte-identical basis blob and embedding for a shared
+  corpus (I-7): the ingest → reindex → reopen → embed path reproduces the
+  canonical RI basis blob and embedding bit patterns byte-for-byte on both ports.
+
+**B-14 (incremental maintained counts):** each trainable provider's raw
+additive statistics are maintained in the `corpus_provider_counts` table
+(`CorpusProviderCountsStore`) so a retrain reads the maintained table instead
+of rebuilding from scratch. The accumulator (held SEPARATELY from the serving
+provider, so growing the maintained vocabulary never desyncs an LSA/NMF serving
+basis) is restored on open, folded once per written chunk (`addToCounts`), and
+persisted at BATCH boundaries (end of `ingest` / `ingestBatch` / `reindex`) —
+never per chunk (O(N·vocab) would re-introduce the import wall). LSA/NMF persist
+only the lightweight vocab + document-count anchor (TF re-derived by
+re-tokenizing at refactor — the re-tokenize-at-refactor decision); RI/PPMI
+persist their full additive state. `Corpus.maintainedVocabAnchor()` exposes the
+maximum maintained vocabulary across trainable slots. The autonomic governor's
+auto-reindex trigger (NeuronKit) fires on VOCABULARY growth —
+`max(floor, ceil(fraction × lastReindexVocab))`, defaults floor 25 / fraction
+0.10 — reading that anchor, replacing the prior +25-chunk gate. The counts codec
+is byte-identical across ports (the provider owns it via the
+`TrainableEmbeddingBasis` counts seam).
 
 ### 9.4 Conformance
 
@@ -445,6 +513,8 @@ Corpus's active recall capability without deleting verbatim content:
 - All vector rows in the internal VectorStore (via `destroyAllVectors`)
 - All persisted basis rows in `corpus_provider_basis` (via `BasisStore.deleteAll`)
   — no orphaned basis survives a destroyed corpus (I-9, B-13)
+- All persisted counts rows in `corpus_provider_counts` (via
+  `CorpusProviderCountsStore.deleteAll`) — no orphaned counts survive (B-14)
 
 **What is preserved:**
 - BundleStore `chunks` rows — the append-only invariant holds. Verbatim
@@ -460,7 +530,128 @@ _standalone_ VectorStore registered for the estate (which uses separate storage
 from the Corpus's internal VectorStore in the `.glk` / separate-corpusStorage
 case).
 
+## § 11 — Ingest pipeline (queue + drain + worker pool)
+
+CorpusKit is a standalone database substrate: a `Corpus` owns its own encode
+pipeline and drains itself with **no orchestrator**. This relocated from
+GeniusLocusKit (the encode queue formerly lived in GLK's `EncodeIntake`); it
+belongs here so every SDK consumer — CorpusKit-direct, no GLK — gets multi-core
+encode, and so GeniusLocusKit is pure orchestration.
+
+**Mechanism.** A Corpus mounts the **shared per-estate encrypted queue** as its
+encode lane (T4 / ADR-021 Decision 7): a PersistenceKit backend over
+`queue.sqlite` beside the estate — derived via
+`EstateConfiguration.queueSibling("queue.sqlite")`, carrying the estate's
+encryption key — for a SQLite estate; an in-memory PersistenceKit backend for an
+ephemeral estate. (The previous plaintext `corpus_ingest_queue/` maildir is
+gone — it spilled verbatim content to disk beside an encrypted estate.) Captures
+are enqueued under **`stream_id = "encode"`** (`enqueueIngest`); the foreground
+drain worker pulls every currently-available **`encode`-stream** job each pass
+(stream-scoped drain, so a future dreaming drainer sharing the same `queue.sqlite`
+is never disturbed) and ingests the whole batch via `ingestBatch` —
+**cross-document parallel embed compute, serial batched writes** (the bounded
+worker pool). The bulk enqueue is wrapped in one transaction and batch completion
+uses the single-pass session update, so the batched-throughput wins hold on the
+DB backend. The drain is a ~15 ms poll loop on both ports; the parallelism is
+cross-document, so a reindex/burst encodes multi-core.
+
+**Contracts (I-series numbering continues in INTERFACE § for the API):**
+- **Idempotent at-least-once.** A job is replied terminal only after its ingest
+  succeeds; a transient failure is retried in place (bounded, 8 attempts) —
+  `ingest` is idempotent (content-addressed chunk ids), so retry never
+  duplicates. A permanently-failing or undecodable job is replied `.blocked` so
+  the queue never wedges.
+- **Output identity.** `ingestBatch([items])` produces byte-identical chunks,
+  vectors, and BM25 postings to calling `ingest` once per item — deterministic
+  regardless of task/thread completion order (rows keyed by chunk id; written in
+  item order on both ports).
+- **First-ingest training stays serial.** When a trainable provider slot still
+  lacks a persisted basis, the batch falls back to serial `ingest` per item
+  (training is a mutating, corpus-wide re-embed that cannot parallelize); every
+  subsequent batch (basis frozen) takes the parallel fold-in path.
+- **`onEncoded` coordination callback.** After each drained batch ingests, the
+  Corpus fires an optional `onEncoded(sourceIDs)` callback. `nil` when standalone;
+  an orchestrator (GeniusLocusKit) sets it to roll up the touched LocusKit rooms
+  for the encoded drawers. CorpusKit never reaches into LocusKit itself —
+  coordination is the orchestrator's job.
+- **Determinism.** No `Date()`/wall-clock read inside the engine — the capture
+  instant rides the job payload (`IngestJob`, ISO8601 with fractional seconds,
+  byte-identical serde keys across ports).
+
+**1.0 vs 1.1.** The 1.0 worker pool is per-corpus. The process-global
+cross-estate CPU cap is the 1.1 central drain master
+(`DECISION_CENTRAL_DRAIN_MASTER_2026-06-23`); ~70% of this (the `ingestBatch`
+concurrent compute) carries forward unchanged — only the pool's location moves.
+
 ## Changelog
+
+### 1.12.0 -- 2026-06-25
+T4 (ADR-021 Decision 7): the encode queue moved off its own plaintext
+`corpus_ingest_queue/` maildir onto the **shared per-estate encrypted queue** —
+a PersistenceKit backend over `queue.sqlite` beside the estate (via
+`EstateConfiguration.queueSibling`, same encryption key) for SQLite estates,
+InMemory for ephemeral. Encode jobs are streamed under `stream_id="encode"` and
+drained stream-scoped, so a future dreaming drainer shares the same queue.sqlite
+without collision; the drain lease is now QueueKit's stream-keyed `DrainLease`
+(keyed `"encode"`), replacing CorpusKit's private lease (deleted). Security: the
+plaintext content spill beside an encrypted estate is closed. Perf parity: bulk
+enqueue is wrapped in one transaction (`PersistenceKitBackend.writeBatch`, both
+ports) and batch completion uses the single-pass session update, so the batched
+throughput holds on the DB backend.
+
+### 1.11.0 -- 2026-06-25
+T3 (single-drainer lease): the encode drain now holds a heartbeat-TTL lease
+(`corpus_ingest_queue/drain.lease`) before draining. New behavioral invariant: at
+most one process drains a durable estate's ingest queue at a time — every process
+still mounts a drain worker, but a worker drains only while it holds the lease;
+others stand by and take over within one TTL (15 s) if the holder dies. Internal
+mechanism (no public API): heartbeat-TTL, not PID-liveness, so it is portable
+(Windows/Linux) and dep/FFI-free. In-memory estates (single-process) take no
+lease. Safety net: a rare brief two-drainer overlap during takeover is harmless
+because ingest is idempotent (content-addressed chunk ids). Wall-clock here is
+infrastructure (same exception as the drain telemetry clock).
+
+### 1.10.0 -- 2026-06-25
+T1 (encode QoS throttle): the embed fan-out is now bounded by an `EncodeSpeed`
+(`foreground` = all logical cores; `background` = `cores / 4`, floor 1) set via
+`Corpus.setEncodeSpeed`. New invariant: the embed throttle changes ONLY
+scheduling/concurrency — stored chunks and vectors remain byte-identical to the
+prior unbounded fan-out (rows are reassembled in input order). The cap is uniform
+across platforms (`available_parallelism`/`activeProcessorCount`) and identical
+Swift↔Rust (chunked-batch fan-out). Write strategy remains size-gated, separate
+from speed.
+
+### 1.9.0 -- 2026-06-25
+Additive (T6 — drain status): exposed `Corpus.ingestQueueDepth` — a read-only
+`(pending, inFlight)` probe of the ingest drain's frontiers. OBSERVES only;
+never claims or drains, so it adds no invariant and does not alter the drain
+contract or byte-identity. Returns `(0, 0)` when no queue is mounted.
+
+### 1.8.0 -- 2026-06-24
+Added B-14 (incremental maintained counts): the `corpus_provider_counts` table
+(`CorpusProviderCountsStore`) keeps each trainable provider's raw additive
+statistics current — restored on open, folded per written chunk (`addToCounts`),
+persisted at batch boundaries (never per chunk). LSA/NMF persist the lightweight
+vocab+doc anchor (TF re-tokenized at refactor); RI/PPMI persist full state. The
+`TrainableEmbeddingBasis` counts seam (`addToCounts` / `serializeCounts` /
+`restoreCounts` / `countsVocabularySize`) is the byte-identical cross-port codec.
+Updated B-13: the empty-basis factory is now retained for every trainable slot,
+so `reindex` retrains after restart (frozen-after-restart fix; Rust uses
+`reconstruct_trainable_basis`). The autonomic governor's auto-reindex trigger
+(NeuronKit) moved from a +25-chunk delta to a vocab-growth trigger
+(`max(floor 25, ceil(0.10 × lastReindexVocab))`) reading
+`Corpus.maintainedVocabAnchor()`. `destroyRecallIndex` now also deletes counts
+rows. ADDITIVE — no existing surface changed.
+
+### 1.6.0 -- 2026-06-23
+Added § 11 — the Corpus-owned ingest pipeline (queue + drain + bounded worker
+pool + `onEncoded` callback + `ingestBatch` parallel compute), relocated from
+GeniusLocusKit's `EncodeIntake`. Added QueueKit to the § 3 dependency list
+(downstream→upstream, no inversion; the in-memory PersistenceKit backend backs
+the queue). No change to the existing recall / embedding / lifecycle contracts.
+
+### 1.5.0 -- 2026-06-21
+BundleStore schema v2 → v3 (NT-C1, ADR-017 §19): added nullable `content_hash` BLOB column to `chunks` table (hash-on-write via `HashingRowStore`); added `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable) for per-corpus Merkle roots; added `AsOfCoordinate` parameter to all six BundleStore query methods for temporal reads. New invariants: I-11 (hash-on-write), I-12 (as-of temporal reads), I-13 (per-corpus Merkle root). Updated I-10 reference from v2 to v3.
 
 ### 1.4.0 -- 2026-06-17
 Added invariant I-10 (the `ext` forward-compat slot, ADR-012): `chunks` (BundleStore v2) and `corpus_provider_basis` (BasisStore v2) each carry a nullable `.json` `ext` column, inert in 1.0; on `chunks` it is distinct from `metadata`. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
@@ -501,6 +692,14 @@ Lane D became per-modelID so float rows of differing dimension across models are
 queried in isolation. The production default stays SINGLE provider; the
 default-flip to all-five is a later mission (6a-iii-wire). No existing contract
 changed.
+
+### 1.7.0 -- 2026-06-24
+Added invariant I-14 (Apple NL embedding providers — ADR-019): `NLEmbeddingProvider`
+and `NLContextualEmbeddingProvider` are Swift-only, opt-in, item-local providers
+gated `#if canImport(NaturalLanguage)`. No Rust counterpart (sanctioned divergence).
+Absent asset → `[]` / `.zero` (graceful opt-out; never crash, never throw). Projection
+seeds "APNLEMB1" and "APNLCTX1" isolate their `model_id` partitions. Neither joins the
+default ensemble. Updated `relates_to` to include ADR-019.
 
 ### 1.1.0 -- 2026-06-17
 Added the basis-persistence + training lifecycle contract (mission 6a-ii-β,

@@ -203,8 +203,9 @@ impl DenseIndex for FloatBruteForceIndex {
 
     /// (Re-)build the index from a resident array.
     ///
-    /// For FloatBruteForceIndex the array IS the index. O(1) — the scan
-    /// happens at search time.
+    /// Validates every float payload, copies vector bytes into resident
+    /// storage, clones keys, and rebuilds model partitions — O(n).
+    /// Query performs an exact linear scan over the materialized array.
     fn build(
         &mut self,
         vectors: &[VectorPayload],
@@ -263,8 +264,14 @@ impl DenseIndex for FloatBruteForceIndex {
     /// Add a single float32 vector record to the index.
     ///
     /// Appends to the existing resident array. The slot is immediately
-    /// searchable without a rebuild() call (unlike the binary BruteForceIndex
-    /// which may require a build from the ResidentArrayStore).
+    /// searchable on the next `search` call.
+    ///
+    /// Returns `VectorKitError::InvalidPayload` if `vector.kind` is not
+    /// `Float32` or if `vector.bytes.len()` does not match the index's
+    /// established stride. A mismatched vector would corrupt the resident
+    /// array's flat byte buffer (storage.len() == count * stride) and cause
+    /// an out-of-bounds slice on the next search call — the guard surfaces
+    /// that as a returned error instead of undefined behaviour.
     fn add(
         &mut self,
         key: VectorRecordKey,
@@ -276,10 +283,23 @@ impl DenseIndex for FloatBruteForceIndex {
                 vector.kind
             )));
         }
-        let stride = vector.bytes.len();
+        // First add: establishes the index stride. All subsequent adds must
+        // supply a vector whose byte count equals this stride.
+        let new_stride = vector.bytes.len();
         let arr = self.array.get_or_insert_with(|| {
-            ResidentVectorArray::empty(VectorKind::Float32, stride)
+            ResidentVectorArray::empty(VectorKind::Float32, new_stride)
         });
+
+        // Dimension guard: a vector whose byte count differs from the
+        // established stride would silently corrupt the flat storage buffer.
+        if vector.bytes.len() != arr.stride {
+            return Err(VectorKitError::InvalidPayload(format!(
+                "FloatBruteForceIndex.add: vector has {} bytes but index \
+                 stride={}; all vectors in one index must share the same dimension",
+                vector.bytes.len(),
+                arr.stride
+            )));
+        }
 
         arr.storage.extend_from_slice(&vector.bytes);
         arr.keys.push(key);
@@ -588,6 +608,30 @@ mod tests {
             scale: None,
         };
         assert!(idx.add(key("x"), binary_payload).is_err());
+    }
+
+    // P1-secfix: a second add whose byte count differs from the established
+    // stride must return Err rather than silently corrupting the flat storage
+    // buffer and causing an out-of-bounds slice on the next search.
+    #[test]
+    fn add_rejects_mixed_dimension_vector() {
+        let mut idx = FloatBruteForceIndex::new();
+        // First add: establishes stride = 8 bytes (2 floats × 4).
+        idx.add(key("first"), fp(&[1.0_f32, 0.0])).unwrap();
+        // Second add with wrong dimension: 3 floats × 4 = 12 bytes.
+        let wrong_dim = VectorPayload {
+            kind: VectorKind::Float32,
+            dim: 3,
+            bytes: vec![0u8; 12],
+            scale: None,
+        };
+        let result = idx.add(key("second"), wrong_dim);
+        assert!(result.is_err(), "expected Err for mixed-dimension add, got Ok");
+        // The error must be InvalidPayload (not some other variant).
+        assert!(
+            matches!(result.unwrap_err(), VectorKitError::InvalidPayload(_)),
+            "expected InvalidPayload error variant"
+        );
     }
 
     // MARK: - Tie-break

@@ -1,7 +1,7 @@
 // DenseIndex.swift
 //
-// The engine seam: one protocol, two implementations (Lane A
-// BruteForceIndex, Lane B MIHIndex).
+// The engine seam: one protocol, three implementations (Lane A
+// BruteForceIndex, Lane B MIHIndex, Lane C FloatBruteForceIndex).
 //
 // Lane F foundation type. Defining the protocol here before any
 // implementation means all lanes depend on the seam interface — not

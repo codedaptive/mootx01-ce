@@ -119,6 +119,16 @@ pub fn learned_preference(
     // Build the anchor-reduction tally. Each room vs the baseline:
     //   +1 pseudo-win each direction, +endorsements room-beats-baseline,
     //   +dismissals baseline-beats-room.
+    //
+    // Guard: clamp endorsements and dismissals to ≥ 0 before adding the +1
+    // prior. Curation counts are stored as i64 and should always be
+    // non-negative, but corrupted records could produce negative values. A
+    // negative + 1 still yields a negative PairwiseOutcome count (contributing
+    // no tally weight per the tournament spec), silently defeating the neutral
+    // prior and potentially producing NaN/Inf BT scores. Clamping to
+    // max(0, x) + 1 ensures the minimum effective count is always 1 (the
+    // prior alone), so every room has at least one win and one loss against
+    // the baseline regardless of data quality. Mirrors the Swift fix.
     let mut outcomes: Vec<PairwiseOutcome> = Vec::with_capacity(records.len() * 2);
     for (label, endorsements, dismissals) in records {
         if label == PREFERENCE_BASELINE {
@@ -129,12 +139,12 @@ pub fn learned_preference(
         outcomes.push(PairwiseOutcome::new(
             label,
             PREFERENCE_BASELINE,
-            endorsements + 1,
+            (*endorsements).max(0) + 1,
         ));
         outcomes.push(PairwiseOutcome::new(
             PREFERENCE_BASELINE,
             label,
-            dismissals + 1,
+            (*dismissals).max(0) + 1,
         ));
     }
 
@@ -288,5 +298,38 @@ mod tests {
                 PREFERENCE_BASELINE.to_string()
             ))
         );
+    }
+
+    // Part 7 overflow guard: negative endorsements / dismissals must not
+    // produce a non-positive PairwiseOutcome count, which would defeat the
+    // neutral prior and could drive BT scores to NaN/Inf.
+    // The fix: max(0, x) + 1 ensures count ≥ 1 even for corrupted records.
+    // Mirrors the Swift test.
+    #[test]
+    fn negative_counts_clamped_to_zero_before_adding_prior() {
+        // Without the guard: endorsements + 1 = -5 + 1 = -4 (non-positive,
+        // no tally weight); dismissals + 1 = -10 + 1 = -9 (same). The
+        // corrupted room would have zero effective observations and could
+        // produce NaN/Inf strength.
+        let r = records(&[("corrupted", -5, -10), ("normal", 3, 1)]);
+        let prefs = learned_preference(&r).expect("should not error with negative counts");
+        assert_eq!(prefs.len(), 2, "both rooms must appear in result");
+        for p in &prefs {
+            assert!(
+                p.strength.is_finite(),
+                "strength must be finite even with negative counts (label: {})",
+                p.label
+            );
+            assert!(
+                !p.strength.is_nan(),
+                "strength must not be NaN for corrupted negative counts (label: {})",
+                p.label
+            );
+        }
+        // Raw counts are preserved in PreferenceStrength as-is (clamping is
+        // internal to tally construction only).
+        let corrupted = prefs.iter().find(|p| p.label == "corrupted").unwrap();
+        assert_eq!(corrupted.endorsements, -5, "raw endorsement count preserved");
+        assert_eq!(corrupted.dismissals, -10, "raw dismissal count preserved");
     }
 }

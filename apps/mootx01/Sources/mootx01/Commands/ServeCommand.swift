@@ -51,7 +51,13 @@ struct ServeCommand: AsyncParsableCommand {
             estateName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
         }
 
-        let estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
+        let estateURL: URL
+        if let envPath = environment["ARIA_MCP_SQLITE_PATH"], !envPath.isEmpty {
+            estateURL = URL(fileURLWithPath: envPath)
+            Logging.stderr.log("estate path override via ARIA_MCP_SQLITE_PATH: \(envPath)")
+        } else {
+            estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
+        }
 
         // Resident HTTP transport when a port is configured (--http flag or
         // MOOTX01_HTTP_PORT); otherwise stdio (the default — existing client
@@ -59,14 +65,42 @@ struct ServeCommand: AsyncParsableCommand {
         let residentPort = Self.resolveResidentPort(flag: http, environment: environment)
         Logging.stderr.log("mootx01 serve starting (estate: \(estateName), data dir: \(dataDir.path), transport: \(residentPort.map { "HTTP :\($0)" } ?? "stdio"))")
 
-        // PID file written at start, removed on exit so status/query can detect us.
+        // PID + served-estate markers (resident-only, written below).
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
+        let estateMarkerURL = dataDir.appendingPathComponent("mootx01.estate", isDirectory: false)
+
+        // T4 — forward, don't collide. If a LIVE resident already serves THIS
+        // estate, an stdio `serve` must not open the same estate as a second
+        // direct writer (that would desync the resident's in-RAM derived state).
+        // Instead it forwards its stdin JSON-RPC to the resident over loopback
+        // HTTP — the same bridge `mootx01 proxy` uses — so all traffic funnels
+        // through the one resident writer. "Same estate" = the resident's recorded
+        // estate path matches ours; liveness = its PID file is alive. If no live
+        // resident serves this estate, fall through and open it directly (joining
+        // the WAL pool; the drain lease (T3) keeps multiple direct stdio writers
+        // from double-draining).
+        #if os(macOS)
+        if residentPort == nil,
+           Self.residentServesEstate(estateURL, markerURL: estateMarkerURL) {
+            let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+            if await Self.residentReachable(port: port) {
+                Logging.stderr.log("mootx01 serve: a live resident already serves this estate — forwarding stdio to the daemon on 127.0.0.1:\(port) instead of opening a second writer (T4)")
+                var proxy = ProxyCommand()
+                proxy.http = "http://127.0.0.1:\(port)"
+                try await proxy.run()
+                return
+            }
+            // Marker present but nothing is answering on the port: the resident
+            // exited uncleanly and left a stale marker. Open the estate directly.
+            Logging.stderr.log("mootx01 serve: estate marker present but no resident reachable on 127.0.0.1:\(port) (stale marker) — opening the estate directly")
+        }
+        #endif
         // Single-writer guard (resident only): the estate has exactly one writer —
         // the resident AutonomicGovernor (see ADR-LOOPBACKHTTP-001). Refuse to start the resident
         // daemon if another LIVE process already holds this estate's PID file.
-        // stdio is ephemeral and does not pump, so it is not guarded here; a
-        // different binary (e.g. the aria-mcp dev build) pointed at the same estate
-        // is also not caught by this PID file — documented limitation.
+        // stdio is not guarded here: when a resident is live it FORWARDS to it
+        // (T4, above) rather than opening a second writer, and when none is live it
+        // opens the estate directly and the drain lease (T3) prevents double-drain.
         if residentPort != nil,
            let existing = try? String(contentsOf: pidURL, encoding: .utf8),
            let existingPID = Int32(existing.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -75,10 +109,21 @@ struct ServeCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 serve fatal: estate '\(estateName)' is already served by a live process (PID \(existingPID)). One resident writer per estate — stop it first.")
             throw ExitCode.failure
         }
-        try? String(ProcessInfo.processInfo.processIdentifier).write(
-            to: pidURL, atomically: true, encoding: .utf8
-        )
-        defer { try? FileManager.default.removeItem(at: pidURL) }
+        // PID + served-estate markers are RESIDENT-only: together they are the
+        // signal a stdio `serve` reads (T4) to decide it should forward to the
+        // live resident for THIS estate instead of opening a second writer. stdio
+        // writes neither — it is either forwarding or an ephemeral direct opener.
+        if residentPort != nil {
+            try? String(ProcessInfo.processInfo.processIdentifier).write(
+                to: pidURL, atomically: true, encoding: .utf8)
+            try? estateURL.path.write(to: estateMarkerURL, atomically: true, encoding: .utf8)
+        }
+        defer {
+            if residentPort != nil {
+                try? FileManager.default.removeItem(at: pidURL)
+                try? FileManager.default.removeItem(at: estateMarkerURL)
+            }
+        }
 
         // The SQLite backend creates parent dirs and the file on first open;
         // check pre-existence to decide whether to call create (first-run only).
@@ -129,13 +174,33 @@ struct ServeCommand: AsyncParsableCommand {
                 // open of an existing estate is not.)
                 Logging.stderr.log("mootx01 serve warning: default wing seeding failed: \(error) — continuing")
             }
-            // Rebuild the in-memory derived accelerators (matrix tier) from the
-            // durable audit log so co-occurrence/temporal matrix recall is live
-            // from the first query on a reopened estate — a fresh process starts
-            // with matrixTiers[handle] = nil, so without this matrix score columns
-            // read 0.0 until the next in-process dreaming cycle. Deterministic
-            // rebuild from the same log; the dreaming cycle refreshes it later.
-            try await kit.rebuildDerivedAccelerators(for: handle)
+            // Load the derived accelerators (matrix tier) in the background so the
+            // server starts accepting MCP calls immediately. Matrix recall returns
+            // zeros until the load finishes — correct degradation. The dreaming
+            // cycle refreshes and re-persists it later.
+            //
+            // rebuildDerivedAccelerators LOADS the persisted on-disk matrix snapshot
+            // (MatrixSnapshotStore) and folds only the audit tail past its watermark
+            // forward — it does NOT recompute the whole matrix from the audit log on
+            // every launch. The first launch on a fresh estate full-rebuilds once and
+            // persists; every launch after that is a cheap load + tail fold.
+            //
+            // RESIDENT ONLY: the matrix tier is a long-lived brain-layer structure
+            // that only the resident daemon's recall scoring + dreaming consume. A
+            // one-shot stdio `query` subprocess does NOT need it, so skip it in stdio
+            // mode — stdio recall runs with degraded (zero) matrix scoring, which is
+            // correct one-shot behaviour, and a one-shot must not pay even the load
+            // cost or write a snapshot it will never reuse.
+            if residentPort != nil {
+                Task {
+                    do {
+                        try await kit.rebuildDerivedAccelerators(for: handle)
+                        Logging.stderr.log("derived accelerators rebuilt (background)")
+                    } catch {
+                        Logging.stderr.log("warning: derived accelerator rebuild failed: \(error)")
+                    }
+                }
+            }
         } catch {
             Logging.stderr.log("mootx01 serve fatal: estate open/wiring failed: \(error)")
             throw ExitCode.failure
@@ -174,12 +239,177 @@ struct ServeCommand: AsyncParsableCommand {
             }
             Logging.stderr.log("mootx01 serve exiting (HTTP transport stopped)")
         } else {
+            // T10 — on-startup dreaming trigger (ADR-021 Phase 5): if the
+            // dreaming queue already has pending items from a prior session
+            // (jobs in queue.sqlite that were not processed before the last
+            // serve exited), fork a detached dreamer immediately so they are
+            // not left stale until the next autonomic governor cycle.
+            // This is stdio-only: the resident daemon's autonomic governor
+            // handles this path for HTTP serves via its timer-gated pump.
+            //
+            // `mountDreamingQueue` force-mounts the queue from queue.sqlite so
+            // `dreamingQueuePendingCount` reflects the persisted backlog rather
+            // than the in-session state (which is zero at startup). Idempotent.
+            await kit.mountDreamingQueue(for: handle)
+            if let startupPending = await kit.dreamingQueuePendingCount(for: handle),
+               startupPending > 0 {
+                Logging.stderr.log(
+                    "mootx01 serve: \(startupPending) dreaming job(s) pending from prior session — " +
+                    "spawning a detached dreamer (T10 on-startup trigger)"
+                )
+                Self.spawnDetachedDream(estateName: estateName, environment: environment)
+            }
+
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, stdio)")
             await server.run()
+
+            // T5 — this is a DIRECT-open stdio serve (the forward path returned
+            // earlier). The client may SIGKILL us the moment stdin closes, which
+            // would kill the in-process encode drain mid-flight. If encode work is
+            // still pending, hand it to a detached `drain` finisher that outlives
+            // us (it takes the T3 lease and drains to empty, or stands by if a
+            // resident has since taken over). Skip when nothing is pending.
+            let remaining = (try? await kit.drainStatuses(handle)) ?? []
+            if remaining.contains(where: { $0.isDraining }) {
+                Logging.stderr.log("mootx01 serve: encode work still pending at stdio exit — spawning a detached drainer to finish (T5)")
+                Self.spawnDetachedDrain(estateName: estateName, environment: environment)
+            }
+
+            // T10 — on-exit dreaming trigger (ADR-021 Phase 5): if the dreaming
+            // queue has pending items at stdio exit (from recall events during this
+            // session, or from a prior session not yet processed), fork a detached
+            // dreamer to run one REM-ALPHA cycle before the estate closes. Mirrors
+            // the T5 encode on-exit pattern.
+            //
+            // Post-recall corollary: if any recall verb during this session
+            // co-recalled ≥ 2 drawers and enqueued a dreaming item, that item is
+            // now in the dreaming queue. The on-exit check catches it here — we
+            // do not need a per-request hook in the stdio dispatcher because all
+            // in-session dreaming jobs are collected and handed off on exit.
+            //
+            // Note: `dreamingQueuePendingCount` returns nil when the dreaming queue
+            // was never mounted (no qualifying recall in this session AND no prior
+            // session backlog). In that case, no dreamer is spawned.
+            if let exitPending = await kit.dreamingQueuePendingCount(for: handle),
+               exitPending > 0 {
+                Logging.stderr.log(
+                    "mootx01 serve: \(exitPending) dreaming job(s) pending at stdio exit — " +
+                    "spawning a detached dreamer to finish (T10 on-exit trigger)"
+                )
+                Self.spawnDetachedDream(estateName: estateName, environment: environment)
+            }
+
             Logging.stderr.log("mootx01 serve exiting (stdin closed)")
         }
     }
+
+    /// Launch a detached `mootx01 drain` to finish the encode queue after a
+    /// direct-open stdio serve exits (T5). The child `setsid`s itself into its own
+    /// session so a process-group kill aimed at this serve does not reach it; we
+    /// do not wait on it. The estate is passed via `--db` and the inherited
+    /// environment (so an `ARIA_MCP_SQLITE_PATH` override targets the same file).
+    static func spawnDetachedDrain(estateName: String, environment: [String: String]) {
+        guard let executableURL = resolvedCurrentExecutableURL() else {
+            Logging.stderr.log("mootx01 serve: failed to spawn detached drainer: could not resolve current executable path")
+            return
+        }
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["drain", "--db", estateName]
+        process.environment = environment
+        // Detach the child's stdio from our pipes.
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()  // fire-and-forget — never `waitUntilExit`
+        } catch {
+            Logging.stderr.log("mootx01 serve: failed to spawn detached drainer: \(error)")
+        }
+    }
+
+    /// Launch a detached `mootx01 dream` to run one REM-ALPHA dreaming cycle
+    /// after a direct-open stdio serve exits or starts with pending dreaming
+    /// queue items (T10, ADR-021 Phase 5). The child `setsid`s itself into its
+    /// own session so a process-group kill aimed at this serve does not reach it;
+    /// we do not wait on it. The estate is passed via `--db` and the inherited
+    /// environment (so an `ARIA_MCP_SQLITE_PATH` override targets the same file).
+    ///
+    /// The dreamer acquires its own `"dreaming"` DrainLease — independent of the
+    /// encode drain's `"encode.drain.lease"` — so both can run concurrently
+    /// without blocking each other (ADR-021 Decision 7).
+    static func spawnDetachedDream(estateName: String, environment: [String: String]) {
+        guard let executableURL = resolvedCurrentExecutableURL() else {
+            Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: could not resolve current executable path")
+            return
+        }
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["dream", "--db", estateName]
+        process.environment = environment
+        // Detach the child's stdio from our pipes.
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()  // fire-and-forget — never `waitUntilExit`
+        } catch {
+            Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: \(error)")
+        }
+    }
+
+    /// Resolve this process's executable from kernel/bundle metadata instead of
+    /// trusting `argv[0]`, which may be a relative command name from PATH and
+    /// therefore attacker-controlled via the current working directory.
+    static func resolvedCurrentExecutableURL() -> URL? {
+        if let bundleURL = Bundle.main.executableURL,
+           bundleURL.isFileURL,
+           bundleURL.path.first == "/" {
+            return bundleURL
+        }
+
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        guard size > 0 else { return nil }
+
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        let result = buffer.withUnsafeMutableBufferPointer { pointer in
+            _NSGetExecutablePath(pointer.baseAddress, &size)
+        }
+        guard result == 0 else { return nil }
+
+        let path = String(cString: buffer)
+        guard path.first == "/" else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// True when the live resident's recorded estate path matches the estate this
+    /// stdio `serve` would open (T4). Guards against forwarding to a resident that
+    /// serves a DIFFERENT estate (e.g. under an `ARIA_MCP_SQLITE_PATH` override).
+    /// macOS only (stdio→resident forwarding is a desktop concern; iOS has no
+    /// resident daemon).
+    #if os(macOS)
+    static func residentServesEstate(_ estateURL: URL, markerURL: URL) -> Bool {
+        guard let served = try? String(contentsOf: markerURL, encoding: .utf8) else { return false }
+        return served.trimmingCharacters(in: .whitespacesAndNewlines) == estateURL.path
+    }
+
+    /// True when a resident is actually answering on the loopback port — one quick
+    /// JSON-RPC POST with a short timeout (T4 liveness). A port probe, not a PID
+    /// check: it confirms the daemon is genuinely serving and is uniform with the
+    /// Rust port (which cannot do dep-free PID-liveness). Used to fall back to a
+    /// direct open when the estate marker is stale.
+    static func residentReachable(port: Int) async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:\(port)") else { return false }
+        var request = URLRequest(url: url, timeoutInterval: 1.5)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        let session = URLSession(configuration: .ephemeral)
+        return (try? await session.data(for: request)) != nil
+    }
+    #endif
 
     /// Resolve the resident HTTP port: the `--http` flag wins, else
     /// `MOOTX01_HTTP_PORT` from the environment (the launchd plist sets it). nil →

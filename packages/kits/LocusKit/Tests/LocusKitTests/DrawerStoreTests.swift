@@ -33,8 +33,6 @@ struct DrawerStoreTests {
 
     private func sampleDrawer(
         id: String = "d1",
-        wing: String = "wing-a",
-        room: String = "room-a",
         sourceFile: String? = nil,
         chunkIndex: Int? = nil,
         filedAt: Date? = nil
@@ -42,8 +40,7 @@ struct DrawerStoreTests {
         Drawer(
             id: TestStorage.tid(id),
             content: "content-\(id)",
-            wing: wing,
-            room: room,
+            parentNodeId: "test-parent",
             sourceFile: sourceFile,
             chunkIndex: chunkIndex,
             addedBy: "bilby",
@@ -138,7 +135,7 @@ struct DrawerStoreTests {
         // SELECT, not a post-load strip.
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
-        let a = sampleDrawer(id: "a", room: "room-x")
+        let a = sampleDrawer(id: "a")
         try await store.addDrawer(a)
 
         let structured = try await store.getDrawers(
@@ -149,8 +146,6 @@ struct DrawerStoreTests {
         #expect(s?.content == "")
         // The dense/structured signal is intact at .structured.
         #expect(s?.id == a.id)
-        #expect(s?.wing == a.wing)
-        #expect(s?.room == a.room)
         #expect(s?.adjectiveBitmap == a.adjectiveBitmap)
         #expect(s?.operationalBitmap == a.operationalBitmap)
         #expect(s?.udcCode == a.udcCode)
@@ -206,22 +201,76 @@ struct DrawerStoreTests {
 
     @Test("drawersIn(wing:) returns only matching wing, ordered by filedAt")
     func drawersInWing() async throws {
-        let (store, url) = try await makeStore()
+        // drawersIn(wing:) resolves drawers via the node tree: it finds
+        // the wing node by lookup_name, then all room nodes under it, then
+        // queries drawers by parent_node_id. Open one storage backend shared
+        // by both DrawerStore and NodeStore so the node tree is visible to
+        // the drawer query.
+        let url = makeTempURL()
         defer { cleanup(url) }
-        try await store.addDrawer(sampleDrawer(id: TestStorage.tid("a"), wing: "wing-a", filedAt: t(2)))
-        try await store.addDrawer(sampleDrawer(id: TestStorage.tid("b"), wing: "wing-a", filedAt: t(1)))
-        try await store.addDrawer(sampleDrawer(id: TestStorage.tid("c"), wing: "wing-b", filedAt: t(3)))
+        let storage = TestStorage.sqlite(url)
+        // DrawerStore.init opens the full LocusKit schema (nodes table included).
+        let store = try await DrawerStore(storage: storage)
+        let nodeStore = NodeStore(storage: storage)
+        let root = try await nodeStore.createRoot(displayName: "Estate", now: t(0))
+        let wingA = try await nodeStore.createNode(displayName: "wing-a", parentId: root.id, now: t(1))
+        let wingB = try await nodeStore.createNode(displayName: "wing-b", parentId: root.id, now: t(2))
+        let roomUnderA = try await nodeStore.createNode(displayName: "room-a", parentId: wingA.id, now: t(3))
+        let roomUnderB = try await nodeStore.createNode(displayName: "room-b", parentId: wingB.id, now: t(4))
+
+        // Construct drawers whose parentNodeId is the room node's UUID string.
+        let dA = Drawer(
+            id: TestStorage.tid("a"), content: "content-a",
+            parentNodeId: roomUnderA.id.uuidString,
+            addedBy: "bilby", filedAt: t(2), embeddingModelID: "minilm-v6")
+        let dB = Drawer(
+            id: TestStorage.tid("b"), content: "content-b",
+            parentNodeId: roomUnderA.id.uuidString,
+            addedBy: "bilby", filedAt: t(1), embeddingModelID: "minilm-v6")
+        let dC = Drawer(
+            id: TestStorage.tid("c"), content: "content-c",
+            parentNodeId: roomUnderB.id.uuidString,
+            addedBy: "bilby", filedAt: t(3), embeddingModelID: "minilm-v6")
+        try await store.addDrawer(dA)
+        try await store.addDrawer(dB)
+        try await store.addDrawer(dC)
+
+        // drawers in wing-a should be dB (filedAt t(1)) then dA (filedAt t(2)).
         let result = try await store.drawersIn(wing: "wing-a")
         #expect(result.map(\.id) == [TestStorage.tid("b"), TestStorage.tid("a")])
     }
 
     @Test("drawersIn(wing:room:) returns only matching pair")
     func drawersInWingRoom() async throws {
-        let (store, url) = try await makeStore()
+        // drawersIn(wing:room:) resolves via the node tree: finds the room
+        // node under the named wing, then queries drawers by parent_node_id.
+        let url = makeTempURL()
         defer { cleanup(url) }
-        try await store.addDrawer(sampleDrawer(id: TestStorage.tid("a"), wing: "w", room: "r1"))
-        try await store.addDrawer(sampleDrawer(id: TestStorage.tid("b"), wing: "w", room: "r2"))
-        try await store.addDrawer(sampleDrawer(id: TestStorage.tid("c"), wing: "w", room: "r1"))
+        let storage = TestStorage.sqlite(url)
+        let store = try await DrawerStore(storage: storage)
+        let nodeStore = NodeStore(storage: storage)
+        let root = try await nodeStore.createRoot(displayName: "Estate", now: t(0))
+        let wingNode = try await nodeStore.createNode(displayName: "w", parentId: root.id, now: t(1))
+        let roomR1 = try await nodeStore.createNode(displayName: "r1", parentId: wingNode.id, now: t(2))
+        let roomR2 = try await nodeStore.createNode(displayName: "r2", parentId: wingNode.id, now: t(3))
+
+        let dA = Drawer(
+            id: TestStorage.tid("a"), content: "content-a",
+            parentNodeId: roomR1.id.uuidString,
+            addedBy: "bilby", filedAt: t(1), embeddingModelID: "minilm-v6")
+        let dB = Drawer(
+            id: TestStorage.tid("b"), content: "content-b",
+            parentNodeId: roomR2.id.uuidString,
+            addedBy: "bilby", filedAt: t(2), embeddingModelID: "minilm-v6")
+        let dC = Drawer(
+            id: TestStorage.tid("c"), content: "content-c",
+            parentNodeId: roomR1.id.uuidString,
+            addedBy: "bilby", filedAt: t(3), embeddingModelID: "minilm-v6")
+        try await store.addDrawer(dA)
+        try await store.addDrawer(dB)
+        try await store.addDrawer(dC)
+
+        // Only drawers in wing "w" / room "r1": dA and dC.
         let result = try await store.drawersIn(wing: "w", room: "r1")
         #expect(Set(result.map(\.id)) == [TestStorage.tid("a"), TestStorage.tid("c")])
     }
@@ -248,31 +297,17 @@ struct DrawerStoreTests {
         #expect(result.map(\.id) == [TestStorage.tid("b"), TestStorage.tid("c"), TestStorage.tid("a")])
     }
 
-    @Test("addDrawer rejects empty wing with invalidContent")
-    func emptyWingRejected() async throws {
+    @Test("addDrawer rejects empty parentNodeId with invalidContent")
+    func emptyParentNodeIdRejected() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
-        let d = Drawer(id: TestStorage.tid("d"), content: "c", wing: "", room: "r",
+        let d = Drawer(id: TestStorage.tid("d"), content: "c", parentNodeId: "",
                        addedBy: "b", filedAt: t(1), embeddingModelID: "m")
         do {
             try await store.addDrawer(d)
-            Issue.record("expected invalidContent for empty wing")
+            Issue.record("expected invalidContent for empty parentNodeId")
         } catch let LocusKitError.invalidContent(message) {
-            #expect(message == "wing must not be empty")
-        }
-    }
-
-    @Test("addDrawer rejects empty room with invalidContent")
-    func emptyRoomRejected() async throws {
-        let (store, url) = try await makeStore()
-        defer { cleanup(url) }
-        let d = Drawer(id: TestStorage.tid("d"), content: "c", wing: "w", room: "",
-                       addedBy: "b", filedAt: t(1), embeddingModelID: "m")
-        do {
-            try await store.addDrawer(d)
-            Issue.record("expected invalidContent for empty room")
-        } catch let LocusKitError.invalidContent(message) {
-            #expect(message == "room must not be empty")
+            #expect(message == "parentNodeId must not be empty")
         }
     }
 
@@ -280,7 +315,7 @@ struct DrawerStoreTests {
     func emptyContentRejected() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
-        let d = Drawer(id: TestStorage.tid("d"), content: "", wing: "w", room: "r",
+        let d = Drawer(id: TestStorage.tid("d"), content: "", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: t(1), embeddingModelID: "m")
         do {
             try await store.addDrawer(d)
@@ -487,20 +522,17 @@ struct DrawerStoreTests {
     // MARK: - Adjective bitmap persistence (LOCI_V035_01B)
 
     /// Round-trip a non-trivial adjective bitmap value through insert
-    /// and fetch. `0x1042` is the canonical mission test bitmap from
-    /// `AdjectiveBitmapTests` — state=`.contested`, sensitivity=
-    /// `.elevated`, exportability=`.private_`, trust=`.observed`.
+    /// and fetch. `0x40400` is the canonical mission test bitmap:
+    /// state=active(0) | sensitivity=elevated(16<<6) | trust=observed(1<<18).
+    /// Capture's initial state must be active or pending (DECISION_CLOCK_TRIANGLE:
+    /// genesis can't start contested — that arises via the contest verb).
     @Test("addDrawer persists adjectiveBitmap and fetch returns it byte-for-byte")
     func adjectiveBitmapRoundTrip() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
         let d = Drawer(
-            id: TestStorage.tid("ab-1"), content: "c", wing: "w", room: "r",
+            id: TestStorage.tid("ab-1"), content: "c", parentNodeId: "test-parent",
             addedBy: "b", filedAt: t(1), embeddingModelID: "m",
-            // v0.6 capture-legal: state=active(0) | sensitivity=elevated(16<<6)
-            // | trust=observed(1<<18) = 0x40400. Capture's initial state
-            // must be active or pending (DECISION_CLOCK_TRIANGLE: genesis
-            // can't start contested — that arises via the contest verb).
             adjectiveBitmap: 0x40400
         )
         try await store.addDrawer(d)
@@ -522,19 +554,16 @@ struct DrawerStoreTests {
     // MARK: - Operational bitmap persistence (LOCI_V035_02B)
 
     /// Round-trip a non-trivial operational bitmap value through insert
-    /// and fetch. `0x1412` is the canonical mission test bitmap from
-    /// `DrawerOperationalTests` — captureChannel=`.ocr` (raw 2),
-    /// contentKind=`.code` (raw 1), featureFlags=`[.hasImage,
-    /// .isPinned]` (bits 10 and 12).
+    /// and fetch. `0x42` is the canonical mission test bitmap:
+    /// captureChannel=ocr(2) | contentKind=code(1<<6) = 0x42.
+    /// (The earlier 0x1412 set capture_channel to 18 — illegal: legal [0..5].)
     @Test("addDrawer persists operationalBitmap and fetch returns it byte-for-byte")
     func operationalBitmapRoundTrip() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
         let d = Drawer(
-            id: TestStorage.tid("ob-1"), content: "c", wing: "w", room: "r",
+            id: TestStorage.tid("ob-1"), content: "c", parentNodeId: "test-parent",
             addedBy: "b", filedAt: t(1), embeddingModelID: "m",
-            // v0.6 gate-legal: captureChannel=ocr(2) | contentKind=code(1<<6) = 0x42.
-            // The earlier 0x1412 set capture_channel to 18 (illegal: legal [0..5]).
             operationalBitmap: 0x42
         )
         try await store.addDrawer(d)

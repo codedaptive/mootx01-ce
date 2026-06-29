@@ -18,10 +18,10 @@
 //! of UUID.uuidString (uppercase, but both are lexicographic on hex digits).
 //! The ordering is consistent within each port.
 //!
-//! Interior-mutability design: the lazy-built index cache lives in a
-//! `Mutex<Option<...>>` so `top_k` and `tokenize_query` can accept `&self`
-//! instead of `&mut self`, matching the callers in `corpus.rs` and
-//! `hybrid_recall.rs` that hold the index behind their own `Mutex`.
+//! Interior-mutability note: `cached` is wrapped in `Mutex<Option<...>>`
+//! to let `top_k` take `&self`, but `top_k` builds a fresh `InvertedIndex`
+//! on every call rather than reading from `cached`; the field is populated
+//! and invalidated by writes but not consumed by queries.
 
 use crate::engine::bm25_weighting::{BM25Weighting, TermFreqTable};
 use crate::engine::inverted_index::Algorithm;

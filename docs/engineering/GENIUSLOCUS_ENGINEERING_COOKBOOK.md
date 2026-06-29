@@ -1,10 +1,10 @@
 ---
 title: GeniusLocus Engineering Specification Cookbook
-version: 1.0.0
+version: 1.1.0
 status: implementation-grade specification
 description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (23 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
 author: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-06-21
 relates_to:
   - docs/engineering/HARNESS_REFERENCE.md (the 23 conformance-gated primitives, agentic discovery index)
   - docs/decisions/DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md (HLC maker, integrity triangle, custody mode, three-time model)
@@ -1693,6 +1693,41 @@ federation or audit-verification sandbox.
 
 Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §8.
 
+## §5.12. Merkle attestation composition (ADR-017, v1.0)
+
+Snapshot attestations compose across kits. A snapshot is an atomic
+point-in-time record with one or more `SnapshotAttestation` rows,
+each binding a subject (wing, corpus source, estate root) to a
+Merkle root hash.
+
+**LocusKit** provides the base attestations:
+- Per-wing attestation: Merkle root over the wing's node-tree
+  containment hierarchy.
+- Estate-root attestation: interior hash over all per-wing roots.
+
+**CorpusKit** provides content attestations:
+- Per-corpus attestation: Merkle root over a single source
+  document's chunk hashes (via `BundleStore.corpusMerkleRoot`).
+- Global-corpus attestation: interior hash over all per-corpus
+  roots (via `BundleStore.globalCorpusMerkleRoot`).
+
+**GeniusLocusKit** composes both sets via
+`createComposedSnapshot(for:label:now:)`. Both kit roots land in
+one atomic `snapshot_attestations` table write. When no Corpus is
+registered, falls back to LocusKit-only attestations.
+
+The composition is additive: `Estate.createSnapshot` accepts an
+`additionalAttestations` parameter that appends caller-supplied
+attestations alongside the LocusKit-generated ones. The
+`snapshotId` on additional attestations is a placeholder; the
+estate assigns the real snapshot ID atomically.
+
+**Verification.** Replay the Merkle root computations from current
+data and compare to the stored attestation roots. A mismatch
+indicates tampering or silent corruption. The per-kit roots are
+independently verifiable: LocusKit's root can be recomputed from
+the node tree alone, CorpusKit's from the chunk store alone.
+
 ---
 
 ## §6. The matrix tier
@@ -2727,6 +2762,18 @@ expunge(row_id: RowId, reason: String) -> Result<(), SubstrateError>
   roll-ups, tier summaries — "little-big data") NOT touched — they
   remain valid statistical summaries; per §9.5.1.
 - Audit row tombstoned (per v0.35 I-6); fact-of-expunge preserved.
+- **Keyed-commitment provenance (ADR-017).** After content-zero
+  and RAG-vector deletion, the snapshot attestation for the
+  affected wing (or corpus source) is invalidated. A new snapshot
+  with recomputed Merkle roots must be taken to re-establish
+  integrity — the old root covered the now-zeroed content. This is
+  a natural consequence of the Merkle composition (§5.12): the
+  per-wing and per-corpus roots are content-dependent, so expunge
+  necessarily invalidates them. The fact-of-expunge (audit trail)
+  plus the old/new snapshot pair constitutes the keyed-commitment
+  provenance chain: "content existed (old root covers it), was
+  expunged (audit event), and the tree now reflects its absence
+  (new root excludes it)."
 
 ### §10.6. recall
 
@@ -4306,6 +4353,14 @@ Sections trace back to designer artifacts as follows:
 | §19 (out of scope) | First and final math passes §5 | Roadmap |
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-21
+- §5.12: Merkle attestation composition (ADR-017). Documents how LocusKit
+  and CorpusKit Merkle roots compose into unified snapshot attestations
+  via GeniusLocusKit.createComposedSnapshot.
+- §10.5 expunge: keyed-commitment provenance. Documents that expunge
+  invalidates Merkle attestation roots and the provenance chain
+  (old-root → audit-event → new-root) that proves erasure.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

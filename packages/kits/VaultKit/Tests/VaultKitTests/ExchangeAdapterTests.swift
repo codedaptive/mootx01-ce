@@ -47,8 +47,9 @@ struct ExchangeAdapterTests {
         return (kit, handle)
     }
 
-    /// Currently-believed drawers, hydrated in full so provenance and
-    /// channel fields are readable.
+    /// Unconfirmed capture-inbox drawers, hydrated in full so provenance and
+    /// channel fields are readable. Uses `filterChain: [.unconfirmed]`, so
+    /// only the unconfirmed subset is returned, not all drawers.
     private func currentDrawers(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> [Drawer] {
         try await kit.recall(handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full))
     }
@@ -346,7 +347,9 @@ struct ExchangeAdapterTests {
         defer { try? FileManager.default.removeItem(at: out.deletingLastPathComponent()) }
 
         let bridge = VaultBridge(kit: kit, adapter: ExchangeAdapter())
-        let report = try await bridge.export(estate: handle, to: out, now: Self.fixedNow)
+        // CAND-032: default scope is now `.exportable`; this test validates the
+        // believed-tier write path, so it passes `.believed` explicitly.
+        let report = try await bridge.export(estate: handle, to: out, scope: .believed, now: Self.fixedNow)
 
         // Tier partition (0125) flowed through unchanged.
         #expect(report.notesExported == 2)
@@ -434,5 +437,104 @@ struct ExchangeAdapterTests {
                 "kind lands as KG fact (hard-close #29-B) — must not be tracked as dropped")
         #expect(report.fieldsDropped.isEmpty,
                 "all structured fields land — fieldsDropped must be empty for a fully-structured fixture")
+    }
+
+    // MARK: - Vault containment (pathComponents validation — VK-SEC-02)
+
+    /// Builds a minimal JSON payload whose single entry has the given
+    /// pathComponents array. Used to test the ExchangeAdapter decode gate.
+    private func jsonWithPathComponents(_ components: [String]) -> Data {
+        // Escape both backslashes and double-quotes so the produced JSON is
+        // valid and the decoded string retains the original character.
+        let encoded = components
+            .map { component -> String in
+                let escaped = component
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                return "\"\(escaped)\""
+            }
+            .joined(separator: ",")
+        let raw = #"{"name":"n","entries":[{"id":"a","content":"c","pathComponents":[\#(encoded)]}]}"#
+        return Data(raw.utf8)
+    }
+
+    @Test("decode rejects '..' traversal in pathComponents")
+    func decodeRejectsDotDotInPathComponents() {
+        // A '..' component is the classic directory traversal attack.
+        #expect(throws: VaultKitError.self) {
+            _ = try ExchangeAdapter().decode(jsonWithPathComponents([".."])
+            )
+        }
+    }
+
+    @Test("decode rejects embedded '/' separator in a pathComponents entry")
+    func decodeRejectsSlashInPathComponents() {
+        // 'a/b' as a single component is path injection: it would open a
+        // sub-directory the label string should not be allowed to name.
+        #expect(throws: VaultKitError.self) {
+            _ = try ExchangeAdapter().decode(jsonWithPathComponents(["a/b"]))
+        }
+    }
+
+    @Test("decode rejects embedded '\\' in a pathComponents entry")
+    func decodeRejectsBackslashInPathComponents() {
+        #expect(throws: VaultKitError.self) {
+            _ = try ExchangeAdapter().decode(jsonWithPathComponents(["a\\b"]))
+        }
+    }
+
+    @Test("decode rejects '.' (current-directory reference) in pathComponents")
+    func decodeRejectsDotInPathComponents() {
+        #expect(throws: VaultKitError.self) {
+            _ = try ExchangeAdapter().decode(jsonWithPathComponents(["."])
+            )
+        }
+    }
+
+    @Test("decode rejects empty string component in pathComponents")
+    func decodeRejectsEmptyComponentInPathComponents() {
+        #expect(throws: VaultKitError.self) {
+            _ = try ExchangeAdapter().decode(jsonWithPathComponents([""])
+            )
+        }
+    }
+
+    @Test("decode accepts legitimate multi-level pathComponents")
+    func decodeAcceptsLegitimatePathComponents() throws {
+        let export = try ExchangeAdapter().decode(
+            jsonWithPathComponents(["projects", "alpha"]))
+        #expect(export.notes[0].pathComponents == ["projects", "alpha"])
+    }
+
+    // MARK: - CAND-014: symlink guard on exchange-adapter export output
+
+    @Test("CAND-014: fromIR refuses to write to a destination that is a pre-existing symlink")
+    func cand014FromIRRejectsSymlinkedOutputPath() throws {
+        // Set up a temp directory with a symlink at the JSON output path.
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cand014-\(UUID().uuidString)")
+        let actualFile = tmpDir.appendingPathComponent("original.json")
+        let symlinkTarget = tmpDir.appendingPathComponent("estate.json")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        try FileManager.default.createDirectory(
+            at: tmpDir, withIntermediateDirectories: true)
+        // Write a real file at the symlink's destination so the link is valid.
+        try "{}".write(to: actualFile, atomically: true, encoding: .utf8)
+        // Plant a symlink at the intended export path pointing to the real file.
+        // A naive write would follow this link and overwrite actualFile.
+        try FileManager.default.createSymbolicLink(at: symlinkTarget, withDestinationURL: actualFile)
+
+        let note = NoteIR(
+            stableSourceKey: "test-note",
+            body: [.init(kind: "markdown", text: "body")]
+        )
+        // fromIR must throw because the destination is a symlink (CAND-014 guard).
+        #expect(throws: VaultKitError.self) {
+            try ExchangeAdapter().fromIR([note], to: symlinkTarget)
+        }
+        // The file behind the symlink must not have been modified.
+        let content = try String(contentsOf: actualFile, encoding: .utf8)
+        #expect(content == "{}", "original file behind symlink must be untouched")
     }
 }

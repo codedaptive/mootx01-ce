@@ -44,10 +44,10 @@ public struct PairwiseOutcome: Sendable, Equatable, Codable {
     /// Number of times this exact `winner`-beats-`loser` outcome
     /// occurred. Defaults to 1 so a single comparison reads naturally.
     /// Lets callers pass aggregated tallies instead of repeated
-    /// records. A non-positive `count` contributes nothing to the fit
-    /// (it adds zero wins and zero comparisons); the fitter does not
-    /// reject it, because an empty tally is a meaningful "no data for
-    /// this pair" statement, not an error.
+    /// records. A non-positive `count` contributes no tally weight to
+    /// the fit, but the winner and loser IDs are still added to the
+    /// competitor set — a zero-count record can influence the
+    /// disconnected-graph check even with no win/loss contribution.
     public let count: Int
 
     /// Creates a pairwise outcome. `winner` and `loser` are competitor

@@ -296,6 +296,21 @@ impl EmbeddingProvider for FDCProvider {
         }
         Ok(fdc_embedding_vector(text).unwrap_or_default())
     }
+
+    /// Single-pass override: compute the FDC relatedness vector ONCE, then derive
+    /// BOTH outputs from it — the projected engram and the float-lane vector.
+    /// Replaces the two independent `fdc_embedding_vector` calls that `embed` and
+    /// `embed_float` would each make (Corpus ingest needs both per chunk).
+    /// Outputs are byte-identical to calling `embed` and `embed_float` separately.
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        if text.is_empty() {
+            return Ok((Engram::ZERO, Vec::new()));
+        }
+        match fdc_embedding_vector(text) {
+            Some(v) if !v.is_empty() => Ok((float_simhash::project(&v, self.projection_seed), v)),
+            _ => Ok((Engram::ZERO, Vec::new())),
+        }
+    }
 }
 
 // MARK: - Unit tests

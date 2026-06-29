@@ -259,8 +259,13 @@ private struct LensVectors: Codable {
             let wing: String
             let room: String
             let adjectiveBitmap: Int64    // bits 0-5 = State; believed = (raw >> 4) & 0x3 == 0 (cluster A)
+            // Parent node id — the node-tree anchor the summary names ("dominant
+            // node {id}"). Optional for back-compat decode of pre-node fixtures;
+            // the builder normalises a nil to the canonical test node so the
+            // emitted fixture always carries it (and the Rust leg can read it).
+            var parentNodeId: String?
         }
-        let rows: [RowInput]
+        var rows: [RowInput]
         var summary: String
         var patterns: [String]
         var keyInsights: [String]
@@ -565,7 +570,7 @@ struct LensVectorConformanceTests {
             let drawers: [Drawer] = c.candidates.map { cand in
                 Drawer(
                     id: cand.id, content: "",
-                    wing: "test-wing", room: "test-room",
+                    parentNodeId: "test-room-node",
                     sourceFile: nil, chunkIndex: nil,
                     addedBy: "test",
                     filedAt: Date(timeIntervalSince1970: 0),
@@ -629,7 +634,7 @@ struct LensVectorConformanceTests {
                 let drawers: [Drawer] = rc.drawers.map { di in
                     Drawer(
                         id: di.id, content: di.content,
-                        wing: "test-wing", room: "test-room",
+                        parentNodeId: "test-room-node",
                         sourceFile: nil, chunkIndex: nil,
                         addedBy: "test",
                         filedAt: Date(timeIntervalSince1970: 0),
@@ -650,7 +655,7 @@ struct LensVectorConformanceTests {
                 let drawers: [Drawer] = pc.rows.map { di in
                     Drawer(
                         id: di.id, content: di.content,
-                        wing: "test-wing", room: "test-room",
+                        parentNodeId: "test-room-node",
                         sourceFile: nil, chunkIndex: nil,
                         addedBy: "test",
                         filedAt: Date(timeIntervalSince1970: 0),
@@ -758,12 +763,18 @@ struct LensVectorConformanceTests {
         // synthesize via ContextSynthesisEngine, record deterministic outputs.
         v.contextSynthesizer = vectors.contextSynthesizer.map { c in
             var c = c
+            // Normalise each row's parentNodeId (nil → canonical test node) so the
+            // emitted fixture carries it and the summary names the node.
+            c.rows = c.rows.map { ri in
+                var ri = ri
+                ri.parentNodeId = ri.parentNodeId ?? "test-room-node"
+                return ri
+            }
             let rows: [Drawer] = c.rows.map { ri in
                 Drawer(
                     id: UUID().uuidString,
                     content: ri.content,
-                    wing: ri.wing,
-                    room: ri.room,
+                    parentNodeId: ri.parentNodeId ?? "test-room-node",
                     sourceFile: nil, chunkIndex: nil,
                     addedBy: "test",
                     filedAt: Date(timeIntervalSince1970: 0),

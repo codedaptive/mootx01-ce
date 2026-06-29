@@ -31,8 +31,8 @@
 // TOP-K: this kernel computes distances only. Top-K selection
 // runs as a second kernel (or on the CPU after readback) — for
 // K << N the CPU pass over the result buffer is faster than a
-// GPU reduction. See `top_k_reduce` at the bottom for the
-// reduction kernel when K is large enough to warrant it.
+// GPU reduction. See `top_k_partial_kernel` at the bottom for
+// the partial reduction kernel when K is large enough to warrant it.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -152,10 +152,10 @@ kernel void hamming_distance_kernel(
 //
 // When K is large enough to warrant GPU-side reduction (cookbook
 // § 4.4 sets the threshold at K ≥ 256 on M-series), the
-// distances buffer is reduced to the top-K (smallest) on-GPU via
-// a tournament: each threadgroup loads a chunk of distances,
-// sorts in shared memory, and writes its top-K back. A second
-// pass merges threadgroup outputs.
+// distances buffer is partially reduced to the top-K (smallest)
+// per threadgroup via a tournament. Note: this file only contains
+// the per-threadgroup partial kernel (`top_k_partial_kernel`);
+// a second-pass merge kernel is not implemented here.
 //
 // For typical CognitionKit queries (K = 10 to 100), CPU readback
 // of the full distance buffer and a single-threaded scan is
@@ -256,6 +256,7 @@ kernel void top_k_partial_kernel(
 // - Cooperative loading: have each thread load 4 candidates and
 //   compute 4 distances, reducing dispatch overhead by 4x for
 //   small candidate counts.
-// - Block-restricted distance with predicated popcount: when
-//   only one block contributes, skip the other six popcounts.
-//   Marginal gain (~15%) at the cost of code complexity.
+// - Block-restricted distance with predicated popcount: already
+//   implemented via `block_mask` parameter — `hamming_distance`
+//   only calls `hamming_block` for selected blocks when the mask
+//   is not `kAllBlocks`. Marginal gain (~15%) for single-block queries.

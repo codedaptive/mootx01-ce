@@ -42,6 +42,7 @@
 // All modes produce a GLKRecallResult. The scoring strategy (.raw / .rrf /
 // .matrixAware) changes the final score math, producing ranked ≠ substring results.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -61,11 +62,14 @@ use convergence_kit::types::SyncState;
 use crate::telemetry::metric_names;
 use crate::glk_emit;
 
-use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
+use corpus_kit::corpus::{Corpus, EmbeddingModelConfig, EncodeSpeed};
 use engram_lib::Engram;
 use vectorkit::vector_store::{VectorMatch, VectorStore};
-use persistence_kit::storage::Storage;
+use persistence_kit::storage::{Storage, BackendConfiguration};
 use persistence_kit::inmemory::InMemoryStorage;
+use persistence_kit::sqlite::SqliteStorage;
+use queuekit::{DrainLease, PersistenceKitBackend};
+use std::path::Path;
 use locus_kit::default_wings::DEFAULT_WINGS;
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
@@ -77,6 +81,11 @@ use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::RecallFrame;
 use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame, TunnelCaptureFrame};
+// GLK-level LearnFrame — the public verb boundary type that callers supply.
+// Mapped to LocusLearnFrame at the dispatch boundary (same pattern as
+// ProposeFrame → LocusProposeFrame). Imported here for the `learn` method
+// signature and the test helper below.
+use crate::verbs::frames::LearnFrame as GlkLearnFrame;
 use locus_kit::tunnel::Tunnel;
 
 use crate::grants::{
@@ -89,6 +98,42 @@ use crate::recall::{
     RecallShape, RecallUnionProfile, RecallWeights,
 };
 use crate::verbs::lexicon::VerbError;
+
+/// Build a lookup map from parent_node_id to (wing_name, room_name)
+/// for all drawers. Uses the coordinator's `node_stores` registry
+/// (ADR-017 §3) — `estate.node_store` is `pub(crate)` in LocusKit
+/// and not accessible from GeniusLocusKit.
+fn build_node_name_map(
+    ns: Option<&Arc<locus_kit::node_store::NodeStore>>,
+    drawers: &[Drawer],
+) -> std::collections::HashMap<String, (String, String)> {
+    let mut map = std::collections::HashMap::new();
+    let ns = match ns {
+        Some(ns) => ns,
+        None => return map,
+    };
+    for drawer in drawers {
+        if map.contains_key(&drawer.parent_node_id) {
+            continue;
+        }
+        let room_uuid = match Uuid::parse_str(&drawer.parent_node_id) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let room_node = match ns.get_node(room_uuid) {
+            Ok(Some(n)) => n,
+            _ => continue,
+        };
+        let room_name = room_node.display_name.clone();
+        let wing_name = room_node
+            .parent_id
+            .and_then(|pid| ns.get_node(pid).ok().flatten())
+            .map(|n| n.display_name)
+            .unwrap_or_default();
+        map.insert(drawer.parent_node_id.clone(), (wing_name, room_name));
+    }
+    map
+}
 
 /// Errors raised by the GeniusLocusKit composition surface on the Rust
 /// side. Mirrors the Swift `GeniusLocusKitError`; cases carry the same
@@ -306,6 +351,15 @@ pub enum VerbDispatchError {
     /// The addressed estate was not open (parity of the Swift
     /// `GeniusLocusKitError.estateNotOpen` a verb propagates).
     EstateNotOpen { estate_uuid: EstateUuid },
+    /// The addressed estate is quiesced or draining and not accepting new work
+    /// (parity of Swift `GeniusLocusKitError.estateQuiesced`). Raised by the
+    /// `estate_for_verb` gate before any registry or row lookup.
+    EstateQuiesced { estate_uuid: EstateUuid },
+    /// The recall mode requested a lane (corpus/vector) that is not registered
+    /// for this estate AND the fallback policy is `FailClosed`. Raised instead
+    /// of silently degrading to locus-only hits the caller did not request.
+    /// Parity of Swift `RecallDirectorError.corpusUnavailable`.
+    RecallLaneUnavailable { reason: String },
     /// A verb-surface failure (boundary guard, underlying estate failure,
     /// or not-supported), parity of the Swift `VerbError`.
     Verb(VerbError),
@@ -459,10 +513,16 @@ pub fn format_sync_state_token(state: &SyncState, backend_name: &str) -> String 
             }
         }
         SyncState::Syncing { direction } => {
-            format!("{backend_name} (syncing, direction: {direction:?})")
+            // Display (not Debug) so direction emits camelCase rawValue parity
+            // with Swift SyncDirection.rawValue: "bidirectional", "pushOnly",
+            // "pullOnly". Debug would give PascalCase ("Bidirectional" etc.)
+            // which diverges from the canonical vocabulary in the parity contract.
+            format!("{backend_name} (syncing, direction: {direction})")
         }
         SyncState::Errored { error, .. } => {
-            format!("{backend_name} (error: {error:?})")
+            // Display (not Debug) so the error string is human-readable and
+            // matches the Swift \(err) interpolation format via SyncError.Display.
+            format!("{backend_name} (error: {error})")
         }
     }
 }
@@ -490,6 +550,29 @@ pub fn format_sync_state_token(state: &SyncState, backend_name: &str) -> String 
 /// cause Hybrid/CorpusOnly/UnionBest to fall back to locus-only ranked
 /// scoring — the same behavior as before CorpusKit/VectorKit were wired.
 /// Mirroring the Swift actor's `corpusKits` and `vectorStores` dictionaries.
+
+/// The dreaming-queue job payload (ADR-021 Phase 2b).
+///
+/// Encoded as JSON in `Job.payload`. Field names use snake_case to match the
+/// Swift `DreamingItem` CodingKeys exactly (`recall_event_id`, `drawer_ids`)
+/// so payloads are cross-port legible and the drainer (T9) can deserialise
+/// either port's output without a schema adapter.
+///
+/// `recall_event_id` — 32-hex UUID (no hyphens), one per recall event, used
+/// by the drainer to group co-recalled drawers in a single dreaming session.
+/// `drawer_ids` — surfaced drawer ids in result order. Always ≥ 2 entries
+/// (guard is applied by `enqueue_dreaming_item` before this struct is built).
+/// `pub` rather than `pub(crate)` so the T9 drainer (a downstream crate) and
+/// integration tests can decode the payload and verify the schema.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct DreamingItem {
+    /// A fresh id generated per recall event (32-hex UUID, no hyphens).
+    /// Matches the JobId shape convention from the signals lane.
+    pub recall_event_id: String,
+    /// Surfaced drawer ids in result order. Always ≥ 2 entries per spec §12.2.
+    pub drawer_ids: Vec<String>,
+}
+
 pub struct EstateCoordinator {
     registry: HashMap<EstateHandle, Estate>,
     pub(crate) branches: HashMap<crate::branches::BranchId, crate::branches::EstateBranch>,
@@ -508,12 +591,12 @@ pub struct EstateCoordinator {
     /// Per-estate mount state. Set to `Mounted` on open, updated by quiesce/drain,
     /// removed on close. Mirrors Swift actor's `mountStates: [EstateHandle: EstateMountState]`.
     mount_states: HashMap<EstateHandle, EstateMountState>,
-    /// Per-estate dedicated encode queue (Dual-Path Intake D-B). Mounted at
-    /// provision for estates with a Corpus; carries the EncodeJob queue, its HLC,
-    /// and the encode stream id. Mirrors Swift actor's `encodeQueues` /
-    /// `encodeHLCs`. There is no parallel drain-worker map: the synchronous Rust
-    /// port has no background worker (the drain is pump-driven — see intake.rs).
-    pub(crate) encode_queues: HashMap<EstateHandle, crate::intake::EncodeQueue>,
+    // The per-estate encode QUEUE + DRAIN + per-estate HLC used to live here.
+    // They were relocated into CorpusKit: a Corpus now owns its ingest queue,
+    // drain worker pool, and retry (see corpus_kit::corpus_ingest_queue). The
+    // coordinator reaches them through `corpus_kits[handle]` and is pure
+    // orchestration — it enqueues work and, via the Corpus `on_encoded`
+    // callback wired at provision, rolls up the touched LocusKit rooms.
     /// Per-estate unified audit-log G-Set. Minted empty on `open`, fed from
     /// the estate's LocusKit audit trail by `feed_audit_log`, and read back by
     /// `current_audit_log` for the maintenance reader's audit-integrity input.
@@ -556,6 +639,26 @@ pub struct EstateCoordinator {
     /// Mirrors Swift actor's `nodeTopologyProviders: [EstateHandle: any NodeTopologyProvider]`.
     node_topology_providers: HashMap<EstateHandle, Arc<dyn crate::node_topology::NodeTopologyProvider>>,
 
+    /// Per-estate NodeStore references for resolving drawer parent_node_id
+    /// to human-readable (wing, room) display names (ADR-017 §3). Populated
+    /// alongside the topology provider during `open`. The NodeStore is the
+    /// same Arc that backs the SubstrateNodeTopologyProvider, so no extra
+    /// database connection is created. Used by `resolve_drawer_node_names`.
+    node_stores: HashMap<EstateHandle, Arc<locus_kit::node_store::NodeStore>>,
+
+    /// Per-estate `Storage` references retained for storage-keyed accelerators:
+    /// the explicit transaction boundary (GLK_BATCH1) and the matrix snapshot
+    /// store (which loads/persists the matrix tier on disk). Populated during
+    /// `open` from `DrawerStore::storage()`, and during hydration by
+    /// `open_estate_directly`. Every production drawer store — InMemory, SQLite,
+    /// and Postgres — overrides `storage()` to return `Some`, so real estates
+    /// always populate this field; only a test/mock store that leaves the trait's
+    /// `None` default in place (no backing `Storage`) is absent here, and such a
+    /// store correctly gets the no-persistence fallback.
+    ///
+    /// Mirrors Swift actor's `storages: [EstateHandle: any Storage]`.
+    pub(crate) storages: HashMap<EstateHandle, Arc<dyn Storage>>,
+
     /// Per-estate active sync engine entry (ConvergenceKit backend + label).
     ///
     /// Registered via `register_sync_engine`. When present, `sync_state_token`
@@ -569,6 +672,36 @@ pub struct EstateCoordinator {
     ///
     /// Mirrors Swift actor's `syncEngines: [EstateHandle: SyncEngineEntry]`.
     sync_engines: HashMap<EstateHandle, SyncEngineEntry>,
+
+    /// Per-estate dreaming queue handles (ADR-021 Phase 2b).
+    ///
+    /// Lazy-mounted in `ensure_dreaming_queue` on the first external-origin scored
+    /// recall (`recall_scored` with `request.origin == RecallOrigin::External`) for
+    /// each estate. The queue opens the same per-estate `queue.sqlite` that the
+    /// encode and signals streams use — one queue, three streams (ADR-021 Decision 7),
+    /// isolated by `stream_id = "dreaming"`. Backend selection mirrors the signals
+    /// lane in `build_signals_queue` (NeuronKit): SQLite estate → encrypted
+    /// `queue.sqlite` sibling; InMemory / absent → transient in-memory backend.
+    ///
+    /// The `HLCGenerator` is paired with the queue so dreaming jobs carry a
+    /// monotone HLC stamp. nodeID derivation: first four estate UUID bytes
+    /// big-endian → u32 → cast to i32 (byte-identical to Swift's formula in
+    /// `ensureDreamingQueue` and `ensureScheduler`).
+    ///
+    /// `RefCell` provides interior mutability so `ensure_dreaming_queue` and
+    /// `enqueue_dreaming_item` can operate on `&self` — matching `recall_scored`'s
+    /// `&self` signature (which has many callers and must not become `&mut self`).
+    /// The coordinator is not `Sync`-shared across threads for per-estate mutable
+    /// state — it is accessed under the transport's lock — so `RefCell` is sound
+    /// here (no concurrent mutable borrows). Mirrors the `RefCell<Option<String>>`
+    /// pattern the `test_force_*` seams already use in this coordinator.
+    ///
+    /// No `DrainLease` is held — T6 is enqueue-only; the lease is a T9 drainer
+    /// concern. Dropped in `close` alongside all other per-estate registries.
+    ///
+    /// Mirrors Swift actor's `dreamingQueues: [EstateHandle: QueueKit]` and
+    /// `dreamingHLCs: [EstateHandle: HLCGenerator]`.
+    dreaming_queues: RefCell<HashMap<EstateHandle, (queuekit::QueueKit<Box<dyn queuekit::QueueBackend>>, substrate_types::hlc::HLCGenerator)>>,
 
     // ── Recall degradation test seams (P1 fail-loud contract) ──
     //
@@ -591,20 +724,48 @@ pub struct EstateCoordinator {
     #[cfg(any(test, feature = "test-seams"))]
     pub(crate) test_force_embed_error: std::cell::RefCell<Option<String>>,
 
-    /// Test-only: simulate a TRANSIENT encode-ingest failure. When set, each
-    /// drawer's FIRST encode-drain ingest attempt (`drain_encode_queue_once`)
-    /// fails once; subsequent attempts for the same drawer succeed — a transient
-    /// fault that clears, so the at-least-once bounded-retry path can be
-    /// force-tested deterministically. The set records drawers already failed.
-    /// `RefCell` lets the pump consume it without `&mut`. Mirrors the Swift
-    /// `encodeIngestFailureHook` + `FirstAttemptFailureSet`.
-    #[cfg(any(test, feature = "test-seams"))]
-    pub(crate) test_force_encode_ingest_transient: std::cell::RefCell<Option<std::collections::HashSet<String>>>,
+    // The transient encode-ingest failure seam relocated into CorpusKit with the
+    // drain: it is now `Corpus::arm_ingest_failure_hook` (see
+    // corpus_kit::corpus_ingest_queue). Tests arm it on the estate's Corpus,
+    // reached via `corpus_for(handle)`.
 }
 
 impl Default for EstateCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A read-only status snapshot of one long-running background drain.
+///
+/// Today the substrate runs exactly ONE drain: the corpus encode/ingest drain
+/// (the `corpus_ingest_queue` worker, which encodes captured/imported text into
+/// the BM25 + vector lanes asynchronously). `EstateCoordinator::drain_statuses`
+/// returns a `Vec<DrainStatus>` so that when additional drains are added later,
+/// each appends its own entry and the report surfaces all of them with no wire
+/// reshape. There is no speculative drain machinery here — the list is built
+/// from the drains that actually exist, which today is one. Mirrors Swift
+/// `DrainStatus`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrainStatus {
+    /// Stable identifier for the drain (e.g. `"corpus_encode"`). Lets a status
+    /// reader tell drains apart when more than one exists.
+    pub name: String,
+    /// Jobs submitted to the drain but not yet claimed for processing.
+    pub pending: usize,
+    /// Jobs claimed and currently being processed.
+    pub in_flight: usize,
+    /// Optional drain-specific context, human-readable (e.g. the corpus drain
+    /// reports `"encoded_chunks: 7218"` so forward progress is visible). `None`
+    /// when a drain has no extra detail to report.
+    pub detail: Option<String>,
+}
+
+impl DrainStatus {
+    /// True while the drain has outstanding work on either frontier. False
+    /// means idle: everything submitted has been processed.
+    pub fn is_draining(&self) -> bool {
+        self.pending + self.in_flight > 0
     }
 }
 
@@ -620,34 +781,46 @@ impl EstateCoordinator {
             corpus_kits: HashMap::new(),
             vector_stores: HashMap::new(),
             mount_states: HashMap::new(),
-            encode_queues: HashMap::new(),
             audit_logs: HashMap::new(),
             matrix_tiers: HashMap::new(),
             graph_caches: HashMap::new(),
             preference_stores: HashMap::new(),
             node_topology_providers: HashMap::new(),
+            node_stores: HashMap::new(),
+            storages: HashMap::new(),
             sync_engines: HashMap::new(),
+            dreaming_queues: RefCell::new(HashMap::new()),
             // Test seams start clear; only `inject_*` methods set them.
             #[cfg(any(test, feature = "test-seams"))]
             test_force_vector_hamming_error: std::cell::RefCell::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             test_force_embed_error: std::cell::RefCell::new(None),
-            #[cfg(any(test, feature = "test-seams"))]
-            test_force_encode_ingest_transient: std::cell::RefCell::new(None),
         }
     }
 
-    /// Arm a transient encode-ingest failure injector (test seam).
-    ///
-    /// Once armed, each drawer's FIRST encode-drain ingest attempt fails once
-    /// (a transient fault); the retry then succeeds. Exercises the at-least-once
-    /// bounded-retry path. Available when `test` or `feature = "test-seams"` is
-    /// active. Mirrors the Swift `_setEncodeIngestFailureHook` +
-    /// `FirstAttemptFailureSet`.
+    /// Arm a transient encode-ingest failure injector on the estate's Corpus
+    /// (test seam). Each source's FIRST ingest attempt fails once; the retry
+    /// then succeeds — a transient fault that clears, exercising the at-least-
+    /// once bounded-retry path now owned by CorpusKit. The encode pipeline was
+    /// relocated into the Corpus, so this forwards to `Corpus::arm_ingest_
+    /// failure_hook`. Mirrors the Swift test arming `corpus._armIngestFailureHook`.
+    /// No-op when no Corpus is registered for the handle.
     #[cfg(any(test, feature = "test-seams"))]
-    pub fn arm_transient_encode_ingest_failures(&self) {
-        *self.test_force_encode_ingest_transient.borrow_mut() =
-            Some(std::collections::HashSet::new());
+    pub fn arm_transient_encode_ingest_failures(&self, handle: &EstateHandle) {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+        if let Some(corpus) = self.corpus_for(handle) {
+            let failed: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+            corpus.arm_ingest_failure_hook(Some(Box::new(move |source_id: &str| {
+                let mut set = failed.lock().expect("transient-failure set lock");
+                // insert() returns true the FIRST time this source is seen.
+                if set.insert(source_id.to_string()) {
+                    Err(()) // simulate a transient fault on the first attempt
+                } else {
+                    Ok(())
+                }
+            })));
+        }
     }
 
     // ── Test seam injection helpers (P1 fail-loud contract) ──
@@ -686,6 +859,253 @@ impl EstateCoordinator {
         *self.test_force_embed_error.borrow_mut() = Some(msg.into());
     }
 
+    // ── Dreaming queue inspection seams (test-only) ──────────────────────────
+    //
+    // Integration tests verify that `recall_scored` with `External` origin
+    // mounts and populates the dreaming queue. The queue itself is private
+    // state managed by `ensure_dreaming_queue` and `enqueue_dreaming_item`;
+    // these accessors expose only the observable properties tests need.
+    // They follow the same `#[cfg(any(test, ...))]` pattern as the
+    // `inject_*` seams above (ADR-021 §4).
+
+    /// Returns `true` if a dreaming queue has been mounted for `handle`.
+    ///
+    /// Tests use this to confirm that `recall_scored` with an `Internal` origin
+    /// (or `recall_external`) does NOT mount the queue (B-10a guard).
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn dreaming_queue_is_mounted(&self, handle: &EstateHandle) -> bool {
+        self.dreaming_queues.borrow().contains_key(handle)
+    }
+
+    /// Returns the number of jobs pending on the `"dreaming"` stream for
+    /// `handle`, or `None` if the queue is not yet mounted.
+    ///
+    /// Tests use this to assert that exactly one dreaming job is enqueued per
+    /// qualifying `recall_scored` call.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn dreaming_queue_pending_count(&self, handle: &EstateHandle) -> Option<usize> {
+        let map = self.dreaming_queues.borrow();
+        let (queue, _) = map.get(handle)?;
+        let stream = queuekit::StreamId("dreaming".to_string());
+        queue.pending_count_for_stream(&stream).ok()
+    }
+
+    /// Production dreaming-queue pending-count probe (ADR-021 Phase 4, §12.2).
+    ///
+    /// Returns the number of jobs pending on the `"dreaming"` stream for
+    /// `handle`, or `None` if the queue is not yet mounted for this estate
+    /// (no external-origin recall has fired yet).
+    ///
+    /// This is the cheap trigger used by the autonomic governor before
+    /// building an `EstateDreamingReader` snapshot: `None` or `Some(0)` ⇒
+    /// skip the dreaming cycle entirely — no reader, no scan, no drain.
+    /// Only `Some(n)` where `n > 0` proceeds to the full cycle.
+    ///
+    /// Non-claiming: does NOT drain or acknowledge any jobs. The probe is a
+    /// lightweight `borrow()` + `pending_count_for_stream` call — no lock
+    /// contention beyond the RefCell borrow itself, and no queue-state change.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.dreamingQueuePendingCount(for:)`.
+    pub fn dreaming_queue_pending_count_for_gate(&self, handle: &EstateHandle) -> Option<usize> {
+        let map = self.dreaming_queues.borrow();
+        let (queue, _) = map.get(handle)?;
+        let stream = queuekit::StreamId("dreaming".to_string());
+        queue.pending_count_for_stream(&stream).ok()
+    }
+
+    /// Force-mount the dreaming queue for `handle` so that
+    /// `dreaming_queue_pending_count_for_gate` returns a real count rather than
+    /// `None` on a fresh open.
+    ///
+    /// The dreaming queue is normally lazy-mounted on the first external-origin
+    /// recall event via `enqueue_dreaming_item`. This method mounts it eagerly so
+    /// the `mootx01 dream` command can probe the persistent `queue.sqlite` backlog
+    /// immediately after opening the estate — before any recall has fired in this
+    /// session. Idempotent: a second call returns immediately when the queue is
+    /// already mounted.
+    ///
+    /// On mount failure (e.g. `queue.sqlite` cannot be opened), falls back to a
+    /// transient in-memory backend — the same degradation path as `enqueue_dreaming_item`.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.mountDreamingQueue(for:)` (ADR-021 Phase 5).
+    pub fn mount_dreaming_queue(&self, handle: &EstateHandle) {
+        self.ensure_dreaming_queue(handle);
+    }
+
+    /// Reclaim stale in-flight ("cur") dreaming jobs after acquiring the dreaming
+    /// DrainLease. Called by the `mootx01 dream` command immediately after a
+    /// successful `try_acquire`.
+    ///
+    /// A successful `try_acquire` means the prior holder is dead (lease absent or
+    /// stale > TTL = 15 s), so every "dreaming" cur row in `queue.sqlite` is an
+    /// orphan from a crashed prior dreamer. This resets them to "new" so the
+    /// REM-ALPHA cycle below re-processes them.
+    ///
+    /// Non-fatal: a reclaim failure is logged and does not abort the dreaming cycle.
+    /// Idempotent: content-addressed ingest makes re-processing harmless.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.reclaimStaleDreamingJobs(for:)`.
+    pub fn reclaim_stale_dreaming_jobs(&self, handle: &EstateHandle) {
+        let map = self.dreaming_queues.borrow();
+        let (queue, _) = match map.get(handle) {
+            Some(entry) => entry,
+            None => return,
+        };
+        let stream = queuekit::StreamId("dreaming".to_string());
+        match queue.reclaim_in_flight_for_stream(&stream) {
+            Ok(n) if n > 0 => {
+                eprintln!(
+                    "mootx01 dream: reclaimed {} orphaned dreaming job(s) — prior dreamer died mid-cycle",
+                    n
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "mootx01 dream: reclaim_in_flight_for_stream failed: {:?}",
+                    e
+                );
+            }
+        }
+    }
+
+    /// Periodic GC sweep: reclaim stale in-flight jobs for streams whose drainer
+    /// has died without the daemon restarting (mid-run worker death case).
+    ///
+    /// For each swept stream, creates a read-only probe `DrainLease` and checks
+    /// `is_held_by_other(now)`. If false — no live holder — and cur rows exist for
+    /// that stream, reset them to "new" so the next drain pass re-processes them.
+    ///
+    /// Covered streams:
+    ///   - "dreaming": `mootx01 dream` is a separate process; a killed dream
+    ///     process leaves its lease stale after TTL = 15 s.
+    ///
+    /// The "encode" stream is NOT swept here — the encode drainer is a background
+    /// thread in the same resident process. When it dies, the process restarts
+    /// entirely, triggering the on-mount reclaim in `run_ingest_drain_loop`.
+    ///
+    /// Only applies to SQLite estates — in-memory estates are single-process and
+    /// never have stale cross-process leases.
+    ///
+    /// Non-fatal: sweep errors are logged and never propagate.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.sweepStaleInFlightJobs(for:now:)`.
+    pub fn sweep_stale_in_flight_jobs(&self, handle: &EstateHandle, now_epoch_secs: f64) {
+        // Derive the estate directory for probe lease files. Only applicable to
+        // SQLite-backed estates — in-memory estates need no cross-process GC.
+        let storage = self.storages.get(handle);
+        let sqlite_path = match storage.as_ref().map(|s| s.configuration().backend.clone()) {
+            Some(BackendConfiguration::Sqlite { path, .. }) => path,
+            _ => return,
+        };
+        let estate_dir = match Path::new(&sqlite_path).parent() {
+            Some(d) => d.to_path_buf(),
+            None => return,
+        };
+
+        // Stable probe owner: never heartbeats, so a deterministic name per estate
+        // is fine. Using the estate UUID keeps it stable across ticks.
+        let uuid_hex = handle.estate_uuid.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let probe_owner = format!("gc-probe-{uuid_hex}");
+
+        // ── "dreaming" stream ──────────────────────────────────────────────────
+        // `mootx01 dream` is a separate process; a killed dream process leaves its
+        // "dreaming" lease stale after TTL. Probe and reclaim if stale.
+        {
+            let map = self.dreaming_queues.borrow();
+            if let Some((dream_queue, _)) = map.get(handle) {
+                let dream_probe = DrainLease::new(&estate_dir, "dreaming", probe_owner.clone());
+                if !dream_probe.is_held_by_other(now_epoch_secs) {
+                    let stream = queuekit::StreamId("dreaming".to_string());
+                    match dream_queue.reclaim_in_flight_for_stream(&stream) {
+                        Ok(n) if n > 0 => {
+                            eprintln!(
+                                "AutonomicGovernor GC sweep: reclaimed {} orphaned dreaming job(s) — prior dreamer lease stale",
+                                n
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "AutonomicGovernor GC sweep: dreaming reclaim failed: {:?}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Production dreaming-queue drain: returns one Vec of drawer IDs per
+    /// drained `DreamingItem`, consuming the jobs (replies Done to each).
+    ///
+    /// Mirrors Swift `GeniusLocusKit.drainDreamingItems(for:)`. Called by the
+    /// Rust `EstateDreamingReader.drain_dreaming_window` adapter (T8 v2).
+    ///
+    /// Returns an empty Vec when the queue is not mounted for `handle` (no
+    /// recall has fired yet) or when there are no pending jobs. Corrupt
+    /// payloads are silently skipped and replied Blocked — non-fatal.
+    ///
+    /// `now_epoch_secs` is the caller-injected drain timestamp (determinism
+    /// rule — no SystemTime reads inside this method). Used for drain telemetry.
+    pub fn drain_dreaming_items(
+        &self,
+        handle: &EstateHandle,
+        now_epoch_secs: f64,
+    ) -> Result<Vec<Vec<String>>, ()> {
+        // If the queue is not mounted, there are no items to drain.
+        let map = self.dreaming_queues.borrow();
+        let (queue, _) = match map.get(handle) {
+            Some(entry) => entry,
+            None => return Ok(vec![]),
+        };
+
+        let stream = queuekit::StreamId("dreaming".to_string());
+        let leases = match queue.drain_for_stream(&stream, now_epoch_secs) {
+            Ok(l) => l,
+            Err(_) => return Ok(vec![]),
+        };
+
+        if leases.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut windows: Vec<Vec<String>> = Vec::with_capacity(leases.len());
+        for (job, _session_id) in &leases {
+            match serde_json::from_slice::<DreamingItem>(&job.payload) {
+                Ok(item) => windows.push(item.drawer_ids),
+                Err(_) => {
+                    // Corrupt payload: reply Blocked (does not disappear) and skip.
+                    // Non-fatal: same error handling as the Swift drain path.
+                    let _ = queue.reply(&job.id, queuekit::ObservationStatus::Blocked, vec![]);
+                    continue;
+                }
+            }
+            // Reply Done to consume the job — drain-once semantics.
+            let _ = queue.reply(&job.id, queuekit::ObservationStatus::Done, vec![]);
+        }
+
+        Ok(windows)
+    }
+
+    /// Drains the `"dreaming"` stream for `handle` and returns the leases, or
+    /// `None` if the queue is not mounted.
+    ///
+    /// Tests use this to inspect the `DreamingItem` payload that
+    /// `enqueue_dreaming_item` serialised.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn dreaming_queue_drain(
+        &self,
+        handle: &EstateHandle,
+        now_epoch_secs: f64,
+    ) -> Option<Vec<(queuekit::Job, queuekit::SessionId)>> {
+        let map = self.dreaming_queues.borrow();
+        let (queue, _) = map.get(handle)?;
+        let stream = queuekit::StreamId("dreaming".to_string());
+        queue.drain_for_stream(&stream, now_epoch_secs).ok()
+    }
+
     /// Number of estates currently open.
     pub fn open_estate_count(&self) -> usize {
         self.registry.len()
@@ -713,6 +1133,10 @@ impl EstateCoordinator {
         zoom_window_low: i64,
         zoom_window_high: i64,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
+        // Capture the underlying Storage before Estate::open moves the
+        // DrawerStore Arc. Used below for auto-registering the substrate
+        // topology provider (ADR-017 §10, NT-G1).
+        let topology_storage = store.storage();
         let estate =
             Estate::open(store, owner).map_err(|e| GeniusLocusKitError::EstateOpenFailed {
                 detail: format!("{e:?}"),
@@ -738,6 +1162,21 @@ impl EstateCoordinator {
         self.scope_vaults.insert(handle, ScopeKeyVault::new());
         // Mark the estate mounted (GLK_PROVISION_001).
         self.mount_states.insert(handle, EstateMountState::Mounted);
+        // Auto-register substrate-native topology provider (ADR-017 §10,
+        // NT-G1). Wraps the estate's NodeStore so NodeTreeNative recall
+        // works without a host-supplied provider.
+        if let Some(storage) = topology_storage {
+            // Retain the Storage arc for the explicit transaction boundary
+            // (GLK_BATCH1 `capture_batch`). Stored alongside the topology
+            // provider so both can share the same Arc without a second clone.
+            self.storages.insert(handle, Arc::clone(&storage));
+            let ns = Arc::new(locus_kit::node_store::NodeStore::new(storage, None));
+            self.node_stores.insert(handle, Arc::clone(&ns));
+            let adapter = Arc::new(
+                crate::substrate_node_topology_provider::SubstrateNodeTopologyProvider::new(ns),
+            );
+            self.node_topology_providers.insert(handle, adapter);
+        }
         // Mint an empty unified audit log for the estate (GLK-03 parity). The
         // log starts empty so a verify pass before any feed reports a clean,
         // zero-entry chain; `feed_audit_log` populates it from the LocusKit
@@ -780,12 +1219,15 @@ impl EstateCoordinator {
         }
         self.grant_stores.remove(handle);
         self.scope_vaults.remove(handle);
+        // CorpusKit owns the encode pipeline: cancel the Corpus's ingest drain
+        // worker and drop its queue BEFORE releasing the corpus registration, so
+        // no orphan worker outlives the estate. (Was a GLK-side encode_queues
+        // entry; relocated into the Corpus — see corpus_kit::corpus_ingest_queue.)
+        if let Some(corpus) = self.corpus_kits.get(handle) {
+            corpus.drop_ingest_queue();
+        }
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
-        // Drop the dedicated encode queue (Dual-Path Intake D-B). Mirrors Swift
-        // `dropEncodeQueue(for:)` in `close`. No worker to cancel in the
-        // synchronous Rust port — just drop the queue registry entry.
-        self.encode_queues.remove(handle);
         // Drop the audit log and matrix tier with the estate — a closed handle
         // must not resolve to a live log or a stale recall tier (GLK-03 parity).
         self.audit_logs.remove(handle);
@@ -799,9 +1241,20 @@ impl EstateCoordinator {
         // must not resolve to a stale provider; parity of Swift `close` which
         // drops `nodeTopologyProviders[handle]`.
         self.node_topology_providers.remove(handle);
+        // Drop the node store (ADR-017 §3 name resolution). Mirrors the
+        // topology provider cleanup above.
+        self.node_stores.remove(handle);
+        // Drop the retained Storage arc (GLK_BATCH1 `capture_batch`). Mirrors
+        // Swift `close` which drops `storages[handle]`.
+        self.storages.remove(handle);
         // Drop the sync engine so no engine reference outlives the estate.
         // Parity of Swift `close` which drops `syncEngines[handle]`.
         self.sync_engines.remove(handle);
+        // Drop the dreaming queue + HLC (ADR-021 Phase 2b). No drain worker to
+        // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
+        // Mirrors Swift `close` which nils `dreamingQueues[handle]` and
+        // `dreamingHLCs[handle]`.
+        self.dreaming_queues.borrow_mut().remove(handle);
         // Drop mount state (GLK_PROVISION_001).
         self.mount_states.remove(handle);
 
@@ -832,7 +1285,8 @@ impl EstateCoordinator {
     /// hydrated estate is registered identically to one opened via `open`.
     pub(crate) fn register_estate(&mut self, handle: EstateHandle, estate: Estate) {
         self.registry.insert(handle, estate);
-        // Grant store backed by in-memory storage — hydration restores drawers, not grants.
+        // Default in-memory grant store; hydration replaces this with a GrantStore
+        // backed by the hydrated storage so replicated authorization rows are live.
         let grant_storage: Arc<dyn Storage> = Arc::new(
             InMemoryStorage::with_estate(Uuid::from_bytes(handle.estate_uuid))
         );
@@ -845,6 +1299,14 @@ impl EstateCoordinator {
         // Mint an empty audit log; the hydration path installs the rebuilt log
         // via `set_audit_log` after replaying the durable audit trail.
         self.audit_logs.insert(handle, crate::audit::UnifiedAuditLog::new());
+    }
+
+    /// Replace the grant store for an already-registered estate.
+    ///
+    /// Hydration uses this to bind authorization checks to the hydrated
+    /// backing storage that now contains replicated grant rows.
+    pub(crate) fn set_grant_store(&mut self, handle: EstateHandle, grant_store: GrantStore) {
+        self.grant_stores.insert(handle, grant_store);
     }
 
     /// Wire a `Corpus` into the scored-recall BM25 lane for `handle`.
@@ -1030,15 +1492,172 @@ impl EstateCoordinator {
             })
     }
 
+    /// Status of every long-running drain the estate addressed by `handle`
+    /// currently runs, for AI/operator monitoring (the `moot_drain_status`
+    /// tool and the `mootx01 query drain_status` CLI surface).
+    ///
+    /// Today the only drain is the corpus encode/ingest drain: it reports the
+    /// queue depth (pending + in-flight encode jobs) and, as detail, the live
+    /// encoded-chunk count so forward progress is visible while the queue
+    /// drains. A bare estate with no Corpus registered runs no encode drain,
+    /// so its list is empty.
+    ///
+    /// Read-only: assembles the report by OBSERVING each drain's frontiers; it
+    /// never claims, drains, or mutates, so it is safe to poll while drains run.
+    /// Returns `Err(EstateNotOpen)` if the handle is stale. Mirrors Swift
+    /// `GeniusLocusKit.drainStatuses(_:)`.
+    pub fn drain_statuses(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<DrainStatus>, GeniusLocusKitError> {
+        // Validate the handle up front so a stale handle surfaces EstateNotOpen
+        // rather than silently returning an empty list — an empty list means
+        // "this estate runs no drains", which must not be confused with a dead
+        // handle.
+        self.estate_for(handle)?;
+
+        let mut statuses: Vec<DrainStatus> = Vec::new();
+
+        // Drain 1 of N: the corpus encode/ingest drain. Present only when a
+        // Corpus is registered for this estate (a provisioned/wired estate).
+        // Future drains append their own entries below this one.
+        if let Some(corpus) = self.corpus_kits.get(handle) {
+            let (pending, in_flight) = corpus.ingest_queue_depth().map_err(|e| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("corpus ingest depth: {e:?}"),
+                }
+            })?;
+            let encoded_chunks = corpus.count().map_err(|e| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("corpus chunk count: {e:?}"),
+                }
+            })?;
+            statuses.push(DrainStatus {
+                name: "corpus_encode".to_string(),
+                pending,
+                in_flight,
+                detail: Some(format!("encoded_chunks: {encoded_chunks}")),
+            });
+        }
+
+        Ok(statuses)
+    }
+
+    /// Set the encode SPEED (drain QoS) for the estate's corpus drain, mapping
+    /// the `mode` arg of an import (`foreground` / `background`) onto the Corpus's
+    /// encode speed. No-op when no Corpus is registered (a bare estate has no
+    /// encode drain). Affects embed fan-outs sized after this call. Mirrors Swift
+    /// `GeniusLocusKit.setEncodeSpeed(_:for:)`.
+    pub fn set_encode_speed(&self, handle: &EstateHandle, speed: EncodeSpeed) {
+        if let Some(corpus) = self.corpus_kits.get(handle) {
+            corpus.set_encode_speed(speed);
+        }
+    }
+
     // Internal: resolve to an estate, mapping the not-open case into the
     // verb-dispatch error domain (parity of `estate(for:)` propagating
     // `estateNotOpen` out of a verb).
+    //
+    // Quiesce gate (secfix-glk-aria): quiesced and draining estates reject all
+    // verb calls so the admin-plane quiesce→drain→close sequence is enforced at
+    // the substrate boundary. VerbDispatchError::EstateQuiesced is the fail-closed
+    // response. This mirrors the Swift requireMounted(_:verb:) gate in VerbSurface.swift.
+    //
+    // A handle absent from mount_states (estate opened before this gate, or a
+    // handle that slipped through) is treated as Mounted so existing callers are
+    // not broken by a missing-map entry. The not-open check runs after the quiesce
+    // gate so a quiesced estate produces EstateQuiesced, not EstateNotOpen.
     fn estate_for_verb(&self, handle: &EstateHandle) -> Result<&Estate, VerbDispatchError> {
+        match self.mount_states.get(handle) {
+            Some(EstateMountState::Quiesced) | Some(EstateMountState::Draining) => {
+                return Err(VerbDispatchError::EstateQuiesced {
+                    estate_uuid: handle.estate_uuid,
+                });
+            }
+            Some(EstateMountState::Mounted)
+            | Some(EstateMountState::Unmounted)
+            | None => {
+                // Mounted is the expected fast path.
+                // Unmounted and None: let the registry check below surface
+                // EstateNotOpen if the handle is truly stale.
+            }
+        }
         self.registry
             .get(handle)
             .ok_or(VerbDispatchError::EstateNotOpen {
                 estate_uuid: handle.estate_uuid,
             })
+    }
+
+    // MARK: - Merkle composition
+
+    /// Create a snapshot with composed Merkle attestations from both
+    /// LocusKit (node-tree integrity) and CorpusKit (content-hash
+    /// integrity). All attestations land in one atomic snapshot row.
+    ///
+    /// When no Corpus is registered for the handle, falls back to
+    /// LocusKit-only attestations.
+    pub fn create_composed_snapshot(
+        &self,
+        handle: &EstateHandle,
+        label: Option<&str>,
+        now: i64,
+    ) -> Result<locus_kit::merkle_rollup::SnapshotRecord, GeniusLocusKitError> {
+        let estate = self.estate_for(handle)?;
+        let mut corpus_attestations: Vec<locus_kit::merkle_rollup::SnapshotAttestation> = Vec::new();
+
+        if let Some(corpus) = self.corpus_kits.get(handle) {
+            // Per-corpus attestations: one per source document.
+            // Propagate errors rather than silencing them — a snapshot that
+            // silently omits corpus attestations on a CorpusKit read failure
+            // misrepresents the estate's integrity state (secfix/ws2-coredelete
+            // §Cluster E, "fail-open on CorpusKit errors" finding).
+            let source_ids = corpus
+                .indexed_source_ids()
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("create_composed_snapshot: indexed_source_ids failed: {:?}", e),
+                })?;
+            let mut sorted: Vec<_> = source_ids.into_iter().collect();
+            sorted.sort();
+            for source_id in &sorted {
+                let root = corpus
+                    .corpus_merkle_root(source_id)
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!(
+                            "create_composed_snapshot: corpus_merkle_root failed for {}: {:?}",
+                            source_id, e
+                        ),
+                    })?;
+                corpus_attestations.push(locus_kit::merkle_rollup::SnapshotAttestation {
+                    snapshot_id: locus_kit::merkle_rollup::SnapshotId::new(""),
+                    subject_kind: "corpus".to_string(),
+                    subject_id: source_id.clone(),
+                    merkle_root: root.hex_string(),
+                    key_version: None,
+                });
+            }
+
+            // Global corpus attestation.
+            let global_root = corpus
+                .global_corpus_merkle_root()
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!(
+                        "create_composed_snapshot: global_corpus_merkle_root failed: {:?}",
+                        e
+                    ),
+                })?;
+            corpus_attestations.push(locus_kit::merkle_rollup::SnapshotAttestation {
+                snapshot_id: locus_kit::merkle_rollup::SnapshotId::new(""),
+                subject_kind: "corpus_global".to_string(),
+                subject_id: Uuid::from_bytes(handle.estate_uuid).to_string(),
+                merkle_root: global_root.hex_string(),
+                key_version: None,
+            });
+        }
+
+        estate
+            .create_snapshot(label, now, &corpus_attestations)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure { reason: e.to_string() })
     }
 
     // MARK: - capture
@@ -1058,6 +1677,106 @@ impl EstateCoordinator {
             .map_err(|e| remap("capture", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
+    // MARK: - capture_batch
+
+    /// Bulk-capture `frames` into the estate in a single SQLite transaction.
+    ///
+    /// All frames are FDC-classified upfront (same one-door classification as
+    /// `capture_with_mode`). A single `BEGIN IMMEDIATE` wraps all inserts;
+    /// on success the transaction commits and all drawers are returned. On any
+    /// failure the transaction is rolled back and the error propagates — no
+    /// partial import is left in the database.
+    ///
+    /// The encode queue is intentionally skipped: bulk import paths (`moot_palace_import`,
+    /// `moot_vault_import`) follow batch capture with `moot_reindex` + `moot_dream`,
+    /// which hydrate the BM25 and vector lanes in bulk. Enqueueing N encode jobs
+    /// during import would merely duplicate that work.
+    ///
+    /// An empty `frames` slice is a no-op that returns an empty Vec without
+    /// touching the database.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.captureBatch(_:_:)` in `EncodeIntake.swift`.
+    pub fn capture_batch(
+        &mut self,
+        handle: &EstateHandle,
+        frames: Vec<CaptureFrame>,
+        now: i64,
+    ) -> Result<Vec<Drawer>, VerbDispatchError> {
+        if frames.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Validate the handle before touching the transaction.
+        let storage = self.storages.get(handle).cloned().ok_or_else(|| {
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            }
+        })?;
+        // Batch capture must preserve the same lattice anchoring guarantee as
+        // the normal capture path: classifiable sentinel frames are anchored
+        // before storage so latticeSubtree grants never authorize them under
+        // the wrong UDC scope. Explicit non-sentinel anchors are preserved.
+        let classified: Vec<CaptureFrame> = frames
+            .into_iter()
+            .map(|frame| {
+                if frame.lattice_anchor.udc_code == crate::intake::UNCLASSIFIED_SENTINEL
+                    && !frame.content.is_empty()
+                {
+                    let (code_opt, qid_opt) =
+                        lattice_lib::fdc_runtime::Fdc::encode_anchor(&frame.content);
+                    match code_opt {
+                        Some(code) if !code.is_empty() => {
+                            let mut f = frame;
+                            f.lattice_anchor = LatticeAnchor {
+                                udc_code: code,
+                                udc_facets: None,
+                                wikidata_qid: qid_opt,
+                                wikidata_qids_secondary: None,
+                            };
+                            f
+                        }
+                        _ => frame,
+                    }
+                } else {
+                    frame
+                }
+            })
+            .collect();
+
+        // Quiesce check BEFORE opening the transaction. `estate_for_verb`
+        // returns `EstateQuiesced` when the mount state is Quiesced or
+        // Draining. Placing this check after `begin_transaction` would hold
+        // the WAL write lock open indefinitely when the estate is quiesced,
+        // blocking all subsequent writes (planned security hardening — B1).
+        let estate = self.estate_for_verb(handle)?;
+        let row_store = storage.row_store();
+        row_store.begin_transaction()
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "captureBatch".to_string(),
+                reason: format!("begin_transaction: {e:?}"),
+            }))?;
+        // Delegate to estate-level capture_batch which omits per-drawer
+        // rollup_merkle_roots (NT_R1 deferral). Single-item self.capture()
+        // would fire rollup on every frame — O(N²) on 37K drawers.
+        let result = estate.capture_batch(classified, now);
+        match result {
+            Ok(drawers) => {
+                row_store.commit_transaction()
+                    .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                        verb: "captureBatch".to_string(),
+                        reason: format!("commit_transaction: {e:?}"),
+                    }))?;
+                Ok(drawers)
+            }
+            Err(e) => {
+                let _ = row_store.rollback_transaction();
+                Err(VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                    verb: "captureBatch".to_string(),
+                    reason: format!("{e:?}"),
+                }))
+            }
+        }
+    }
+
     // MARK: - recall
 
     /// Recall rows from the estate addressed by `handle`, draining the
@@ -1072,6 +1791,13 @@ impl EstateCoordinator {
     /// This plain `recall` variant is used by internal callers and the legacy
     /// compatibility path; it leaves `trace_limit` None so no trace rows are
     /// written (B-10a compliant).
+    ///
+    /// Frame-size cap: mirrors Swift `VerbSurface.recall(_:_:)` which passes
+    /// `GLKRecallRequest(limit: frame.limit ?? 50)` through the RecallDirector.
+    /// When no explicit limit is set, results are capped at 50, matching the
+    /// Swift default so all lens and recipe outputs compare cross-port. Callers
+    /// that need the full estate (e.g. VaultBridge) must set an explicit
+    /// `frame.limit` before calling.
     pub fn recall(
         &self,
         handle: &EstateHandle,
@@ -1079,8 +1805,11 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<Vec<Drawer>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        // trace_limit intentionally None here — internal caller, no trace rows (B-10a).
-        Ok(estate.recall(frame, now).collect_all())
+        // trace_limit intentionally None — internal caller, no trace rows (B-10a).
+        // Cap mirrors Swift VerbSurface.recall (frame.limit ?? 50).
+        let cap = frame.limit.unwrap_or(50);
+        let all = estate.recall(frame, now).collect_all();
+        Ok(all.into_iter().take(cap).collect())
     }
 
     /// External-facing recall used by the ARIA boundary: sets `trace_limit`
@@ -1088,6 +1817,19 @@ impl EstateCoordinator {
     ///
     /// Only call this from the ARIA_MCP boundary. All internal callers
     /// (dreaming, lenses, recipes, migration) must use `recall` above (B-10a).
+    ///
+    /// Unlike `recall`, this variant does NOT apply the default-50 cap —
+    /// external callers receive exactly what `frame.limit` requests (or the
+    /// engine's `RECALL_CANDIDATE_CAP` ceiling when no limit is set). The
+    /// caller-facing limit is the explicit `frame.limit` from the MCP
+    /// request, not a cross-port analytics default.
+    ///
+    /// Note: dreaming-item enqueue is NOT performed here. The dreaming enqueue
+    /// lives in `recall_scored` (guarded by `request.origin == RecallOrigin::External`)
+    /// — the production ARIA boundary uses `recall_scored` for all three external
+    /// recall tools (moot_memory_search, moot_recall_precise, moot_recall_shaped).
+    /// This method provides the trace-limit wiring for the legacy flat-array
+    /// surface; it is not the dreaming enqueue site (ADR-021 Phase 2b, B-10a).
     pub fn recall_external(
         &self,
         handle: &EstateHandle,
@@ -1098,6 +1840,236 @@ impl EstateCoordinator {
         // B-10a: only external requests write trace rows.
         frame.trace_limit = Some(frame.limit.unwrap_or(50));
         Ok(estate.recall(frame, now).collect_all())
+    }
+
+    // MARK: - dreaming queue (ADR-021 Phase 2b)
+
+    /// Lazy-mount the per-estate dreaming queue and its HLC generator.
+    ///
+    /// Called by `enqueue_dreaming_item` on the first external-origin scored recall
+    /// (`recall_scored` with `request.origin == RecallOrigin::External`) for an estate.
+    /// Subsequent calls are no-ops when the entry is already present in the map.
+    ///
+    /// Takes `&self` via `RefCell` interior mutability so callers from `recall_scored`
+    /// (which is `&self` and has many callers) do not need to become `&mut self`.
+    ///
+    /// Backend selection mirrors `build_signals_queue` in NeuronKit:
+    ///   - SQLite estate → `queue_sibling("queue.sqlite")` → `SqliteStorage` →
+    ///     `PersistenceKitBackend`. Same encrypted sibling the encode and signals
+    ///     streams already share (one queue, three streams — ADR-021 Decision 7).
+    ///   - InMemory / absent → transient `InMemoryStorage`-backed backend.
+    ///     No `DrainLease` is acquired — T6 is enqueue-only; the lease is a T9
+    ///     drainer concern.
+    ///
+    /// HLC nodeID derivation (byte-identical to Swift `ensureDreamingQueue` and
+    /// `ensureScheduler`): first four estate UUID bytes big-endian → u32 → i32
+    /// bit-cast. Each estate produces a distinguishable HLC family.
+    ///
+    /// On SQLite open failure: falls back to a transient in-memory backend and
+    /// logs to stderr. The dreaming lane degrades silently; recall is unaffected.
+    fn ensure_dreaming_queue(&self, handle: &EstateHandle) {
+        // Fast path: entry already present — skip all construction work.
+        if self.dreaming_queues.borrow().contains_key(handle) {
+            return;
+        }
+
+        // Derive HLC nodeID from the estate UUID (byte-identical to Swift formula and
+        // NeuronKit's build_signals_queue). `estate_uuid` is `[u8; 16]` so indexing
+        // directly gives the raw UUID bytes in memory order.
+        let uuid_bytes = handle.estate_uuid;
+        let node_id_u32 = u32::from_be_bytes([
+            uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
+        ]);
+        let node_id = node_id_u32 as i32;
+        let hlc = substrate_types::hlc::HLCGenerator::new(node_id);
+
+        let storage = self.storages.get(handle);
+        let backend_config = storage.as_ref().map(|s| s.configuration().backend.clone());
+
+        let queue: queuekit::QueueKit<Box<dyn queuekit::QueueBackend>> =
+            match backend_config {
+                Some(BackendConfiguration::Sqlite { .. }) => {
+                    // Persistent estate: open the shared queue.sqlite sibling
+                    // (same file encode and signals use). Encrypted at rest.
+                    let sibling_result = storage
+                        .as_ref()
+                        .expect("storage is Some when backend is Sqlite")
+                        .configuration()
+                        .queue_sibling("queue.sqlite");
+                    let sibling_cfg = match sibling_result {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            eprintln!(
+                                "DreamingQueue: queue_sibling failed for estate {:?}: {:?}. \
+                                 Degrading dreaming lane to transient backend.",
+                                handle.estate_uuid, e
+                            );
+                            let (q, _) = Self::build_inmemory_dreaming_queue(handle);
+                            self.dreaming_queues.borrow_mut().insert(handle.clone(), (q, hlc));
+                            return;
+                        }
+                    };
+                    let qs = match SqliteStorage::new(sibling_cfg) {
+                        Ok(qs) => Arc::new(qs),
+                        Err(e) => {
+                            eprintln!(
+                                "DreamingQueue: SqliteStorage::new failed (estate {:?}): {:?}. \
+                                 Degrading to transient backend.",
+                                handle.estate_uuid, e
+                            );
+                            let (q, _) = Self::build_inmemory_dreaming_queue(handle);
+                            self.dreaming_queues.borrow_mut().insert(handle.clone(), (q, hlc));
+                            return;
+                        }
+                    };
+                    if let Err(e) = PersistenceKitBackend::open_schema(qs.as_ref()) {
+                        eprintln!(
+                            "DreamingQueue: open_schema failed (estate {:?}): {:?}. \
+                             Degrading to transient backend.",
+                            handle.estate_uuid, e
+                        );
+                        let (q, _) = Self::build_inmemory_dreaming_queue(handle);
+                        self.dreaming_queues.borrow_mut().insert(handle.clone(), (q, hlc));
+                        return;
+                    }
+                    let backend = PersistenceKitBackend::new(qs);
+                    queuekit::QueueKit::new(Box::new(backend) as Box<dyn queuekit::QueueBackend>)
+                }
+                _ => {
+                    // InMemory estate, Postgres estate (deferred per ADR-021), or no
+                    // storage: all get a transient in-memory backend. No crash recovery
+                    // needed for ephemeral estates.
+                    let (q, _) = Self::build_inmemory_dreaming_queue(handle);
+                    self.dreaming_queues.borrow_mut().insert(handle.clone(), (q, hlc));
+                    return;
+                }
+            };
+        self.dreaming_queues.borrow_mut().insert(handle.clone(), (queue, hlc));
+    }
+
+    /// Build a transient in-memory dreaming queue. Used for in-memory estates
+    /// and as the degraded fallback when SQLite open fails.
+    fn build_inmemory_dreaming_queue(
+        handle: &EstateHandle,
+    ) -> (queuekit::QueueKit<Box<dyn queuekit::QueueBackend>>, ()) {
+        // Use the estate UUID as the InMemory store ID for diagnostic correlation.
+        // `estate_uuid` is `[u8; 16]` — convert to `uuid::Uuid` for `with_estate`.
+        let estate_uuid = Uuid::from_bytes(handle.estate_uuid);
+        let storage = Arc::new(InMemoryStorage::with_estate(estate_uuid));
+        PersistenceKitBackend::open_schema(storage.as_ref())
+            .expect("InMemoryStorage open_schema cannot fail");
+        let backend = PersistenceKitBackend::new(storage);
+        let queue: queuekit::QueueKit<Box<dyn queuekit::QueueBackend>> =
+            queuekit::QueueKit::new(Box::new(backend) as Box<dyn queuekit::QueueBackend>);
+        (queue, ())
+    }
+
+    /// Enqueue a dreaming item for the surfaced drawer set, if the set qualifies.
+    ///
+    /// Guard (spec §12.2): enqueue only when the deduplicated drawer id set has
+    /// ≥ 2 distinct ids. Fewer than 2 → no-op.
+    ///
+    /// Payload: `DreamingItem` encoded as JSON — `recall_event_id` (fresh UUID,
+    /// 32-hex) and `drawer_ids` (surfaced ids in result order). Stamped with a
+    /// monotone HLC derived from `now`. Submitted as `stream_id = "dreaming"` with
+    /// priority 50.
+    ///
+    /// `now` is epoch-SECONDS — the same unit `recall_scored` receives from
+    /// `wall_now()` in the dispatch layer. Internally this function converts to
+    /// epoch-milliseconds before calling `hlc.send` (the HLC substrate convention).
+    /// Tests may pass either unit: epoch-ms values (e.g. `NOW_MS = 1_720_000_000_000`)
+    /// still produce valid strictly-increasing HLC stamps because the ms conversion
+    /// multiplies by 1000, keeping ordering intact.
+    ///
+    /// Takes `&self` via `RefCell` interior mutability on `dreaming_queues` so it
+    /// can be called from `recall_scored` (which is `&self`). The `RefCell` borrow
+    /// is held only for the duration of the `send` call; no other code path holds a
+    /// simultaneous borrow (the coordinator is accessed under the transport lock).
+    ///
+    /// Failures are non-fatal: logged to stderr, recall result unaffected. Mirrors
+    /// the signal lane's `fire_signal` error handling in `serial_lane.rs`.
+    fn enqueue_dreaming_item(
+        &self,
+        handle: &EstateHandle,
+        drawers: &[Drawer],
+        now: i64,
+    ) {
+        // Deduplicate ids while preserving result order (first occurrence wins).
+        let mut seen = std::collections::HashSet::new();
+        let distinct_ids: Vec<String> = drawers
+            .iter()
+            .filter(|d| seen.insert(d.id.clone()))
+            .map(|d| d.id.clone())
+            .collect();
+
+        // Guard: fewer than 2 distinct ids → no pair possible, skip enqueue.
+        if distinct_ids.len() < 2 {
+            return;
+        }
+
+        let item = DreamingItem {
+            // 32-hex UUID (no hyphens), matching the JobId shape convention used
+            // by the signal lane (uuid::Uuid::new_v4().simple().to_string()).
+            recall_event_id: uuid::Uuid::new_v4().simple().to_string(),
+            drawer_ids: distinct_ids,
+        };
+        let payload = match serde_json::to_vec(&item) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "DreamingQueue: DreamingItem serialization failed (estate {:?}): {:?}",
+                    handle.estate_uuid, e
+                );
+                return;
+            }
+        };
+
+        // Lazy-mount the dreaming queue for this estate. Returns immediately if
+        // already mounted; idempotent. Uses RefCell interior mutability so this
+        // call site can remain &self (matching recall_scored's &self signature).
+        self.ensure_dreaming_queue(handle);
+
+        // Borrow the map mutably for the HLC send + queue send. The borrow
+        // is scoped to this block and released before we return. No other
+        // code path holds a simultaneous mutable borrow — the coordinator is
+        // single-threaded under the transport lock.
+        let mut map = self.dreaming_queues.borrow_mut();
+        let (queue, hlc) = match map.get_mut(handle) {
+            Some(entry) => entry,
+            None => {
+                // ensure_dreaming_queue always inserts an entry (SQLite or InMemory).
+                // A missing entry here is a contract violation — log and bail.
+                eprintln!(
+                    "DreamingQueue: queue entry missing after ensure_dreaming_queue (estate {:?})",
+                    handle.estate_uuid
+                );
+                return;
+            }
+        };
+
+        // HLC stamp: physical time is epoch-ms (HLC substrate convention). The `now`
+        // parameter throughout recall_scored is epoch-seconds (wall_now() from dispatch).
+        // Convert at the HLC boundary so the rest of the recall path retains its
+        // epoch-seconds contract. Without this conversion the HLC would see a
+        // physical time ~1000x too small, producing timestamps far in the past and
+        // breaking any ordering assertion downstream.
+        let now_ms = now.saturating_mul(1_000);
+        let submitted_at = hlc.send(now_ms);
+        let job = queuekit::Job {
+            id: queuekit::JobId(uuid::Uuid::new_v4().simple().to_string()),
+            stream_id: queuekit::StreamId("dreaming".to_string()),
+            submitted_at,
+            priority: 50,
+            payload,
+            extensions: serde_json::Map::new(),
+        };
+
+        if let Err(e) = queue.send(&job) {
+            eprintln!(
+                "DreamingQueue: dreaming enqueue failed (estate {:?}): {:?}",
+                handle.estate_uuid, e
+            );
+        }
     }
 
     // MARK: - recall_tunnels
@@ -1295,12 +2267,21 @@ impl EstateCoordinator {
         let all_drawers: Vec<locus_kit::drawer::Drawer> =
             estate.all_drawers().map_err(|e| remap("distill_items_sweep", "", e))?;
 
+        // Build a node-name lookup so we can resolve each drawer's room
+        // display name from its parent_node_id (Drawer no longer stores
+        // wing/room strings directly — ADR-017 node tree migration).
+        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
+
         // Build the set of source drawer UUIDs that already have a factoid:
         // a factoid's lineage_id equals its source item's UUID (see captureFactoid
         // in DistillationCycle.swift). Skip any candidate whose UUID is in this set.
         let already_distilled: std::collections::HashSet<String> = all_drawers
             .iter()
-            .filter(|d| d.room == DISTILLED_ROOM)
+            .filter(|d| {
+                node_names.get(&d.parent_node_id)
+                    .map(|(_, room)| room.as_str() == DISTILLED_ROOM)
+                    .unwrap_or(false)
+            })
             .map(|d| d.lineage_id.to_string())
             .collect();
 
@@ -1322,7 +2303,10 @@ impl EstateCoordinator {
             // Skip tombstoned, empty, or already-distilled-source drawers.
             if drawer.tombstoned_at.is_some() { continue; }
             if drawer.content.is_empty() { continue; }
-            if drawer.room == DISTILLED_ROOM { continue; }
+            let drawer_room = node_names.get(&drawer.parent_node_id)
+                .map(|(_, r)| r.as_str())
+                .unwrap_or("");
+            if drawer_room == DISTILLED_ROOM { continue; }
             if already_distilled.contains(&drawer.id) { continue; }
 
             // Sentence segmentation via the canonical cross-leg delimiter
@@ -1373,6 +2357,17 @@ impl EstateCoordinator {
             factoid_frame.source_type = SourceType::Derived;
             factoid_frame.lineage_id = Some(lineage_id);
             factoid_frame.wing = Some(factoid_wing.to_string());
+            // Sensitivity floor: a factoid must not be captured at a lower
+            // sensitivity tier than its source drawer. Intra-item distillation
+            // has exactly one source — `drawer`. If the source is above Normal,
+            // the factoid inherits that tier so secret/restricted memories cannot
+            // be downgraded into normal-tier recall. (secfix/punt-g2)
+            let source_sensitivity = drawer.adjective_sensitivity();
+            if source_sensitivity.raw_value()
+                > locus_kit::adjectives::AdjectiveSensitivity::Normal.raw_value()
+            {
+                factoid_frame.sensitivity = source_sensitivity;
+            }
 
             // estate is the &Estate held from estate_for_verb above. Capture via
             // the estate directly — all borrows here are shared (&self), so no
@@ -1397,11 +2392,16 @@ impl EstateCoordinator {
             }
 
             // Write one _distilled_from tunnel: factoid → source drawer.
+            // Resolve source drawer's wing/room names from the node tree
+            // (Drawer no longer stores wing/room directly — ADR-017).
+            let (src_wing, src_room) = node_names.get(&drawer.parent_node_id)
+                .cloned()
+                .unwrap_or_default();
             let mut tunnel_frame = TunnelCaptureFrame::new(
                 factoid_wing,
                 DISTILLED_ROOM,
-                &drawer.wing,
-                &drawer.room,
+                &src_wing,
+                &src_room,
                 DISTILLED_FROM_LABEL,
                 DISTILLATION_DAEMON_ACTOR,
             );
@@ -1705,12 +2705,24 @@ impl EstateCoordinator {
 
             // Re-attempt the cross-kit vector+corpus delete (step 2 of the
             // original §B-2a expunge). Same logic as the normal expunge step 2:
-            // corpus.remove clears BM25+vector index entries; VectorStore.
-            // delete_all_vectors clears the resident in-memory bitmap.
+            // corpus.expunge scrubs chunk text + clears BM25+vector index entries;
+            // VectorStore.delete_all_vectors clears the resident in-memory bitmap.
+            //
+            // When neither corpus nor vectorStore is registered (locusOnly estate),
+            // no cross-kit cleanup is needed — the audit gap is closed below
+            // without attempting a delete (mirrors Swift runExpungeIntegritySweep
+            // locusOnly branch, secfix/ws2-coredelete §Cluster D).
             let delete_result: Result<(), String> = (|| {
+                if corpus.is_none() && vector_store.is_none() {
+                    // locusOnly estate — no cross-kit stores registered.
+                    // Log at info; the audit gap is closed below as remediated.
+                    return Ok(());
+                }
                 if let Some(ref c) = corpus {
-                    c.remove(row_id)
-                        .map_err(|e| format!("corpus.remove failed: {:?}", e))?;
+                    // expunge scrubs chunk text (UPDATE content='') before removing
+                    // BM25 index entries — true erasure, not just recall suppression.
+                    c.expunge(row_id)
+                        .map_err(|e| format!("corpus.expunge failed: {:?}", e))?;
                 }
                 if let Some(ref vs) = vector_store {
                     if let Some(ref c) = corpus {
@@ -1818,11 +2830,20 @@ impl EstateCoordinator {
     pub fn learn(
         &self,
         handle: &EstateHandle,
-        frame: LocusLearnFrame,
+        frame: GlkLearnFrame,
         now: i64,
     ) -> Result<locus_kit::learned_reference::LearnedReference, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.learn(frame, now).map_err(|e| remap("learn", &uuid_to_str(&handle.estate_uuid), e).into())
+        // Map GLK-level LearnFrame to the LocusKit-internal LearnFrame at the
+        // dispatch boundary — same pattern as ProposeFrame → LocusProposeFrame.
+        // Field layout is identical; translation is a field-level destructure.
+        let locus_frame = LocusLearnFrame {
+            source: frame.source,
+            handle: frame.handle,
+            mode: frame.mode,
+            refresh_policy: frame.refresh_policy,
+        };
+        estate.learn(locus_frame, now).map_err(|e| remap("learn", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - propose
@@ -2193,6 +3214,69 @@ impl EstateCoordinator {
             .map_err(|e| remap("all_drawers_bounded", "", e).into())
     }
 
+    // MARK: - resolve_drawer_node_names
+
+    /// Resolve `parent_node_id` values to human-readable `(wing, room)`
+    /// display-name pairs using the estate's node tree (ADR-017 §3).
+    ///
+    /// For each unique `parent_node_id` in `node_ids`, looks up the room
+    /// node (depth 2) via the estate's `NodeStore`, then its parent wing
+    /// node (depth 1). Returns a map keyed by `parent_node_id` whose
+    /// values are `(wing_display_name, room_display_name)`. Missing or
+    /// malformed IDs are silently omitted — callers should `unwrap_or_default`
+    /// on lookup.
+    ///
+    /// Cost: one `get_node` per unique room + one per unique wing. The
+    /// estate's fixed-depth tree (max depth 2) keeps the total bounded.
+    ///
+    /// Mirrors Swift `EstateCoordinator.resolveDrawerNodeNames(in:nodeIds:)`.
+    pub fn resolve_drawer_node_names(
+        &self,
+        handle: &EstateHandle,
+        node_ids: &[String],
+    ) -> HashMap<String, (String, String)> {
+        let ns = match self.node_stores.get(handle) {
+            Some(ns) => ns,
+            None => return HashMap::new(),
+        };
+        let mut result = HashMap::new();
+        // Deduplicate input to avoid redundant lookups.
+        let unique: std::collections::HashSet<&str> =
+            node_ids.iter().map(|s| s.as_str()).collect();
+        // Cache wing lookups — many rooms share a wing.
+        let mut wing_cache: HashMap<String, String> = HashMap::new();
+        for room_id_str in unique {
+            let room_uuid = match uuid::Uuid::parse_str(room_id_str) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let room_node = match ns.get_node(room_uuid) {
+                Ok(Some(n)) => n,
+                _ => continue,
+            };
+            let wing_name = if let Some(wing_uuid) = room_node.parent_id {
+                let wing_id_str = wing_uuid.to_string();
+                wing_cache
+                    .entry(wing_id_str.clone())
+                    .or_insert_with(|| {
+                        ns.get_node(wing_uuid)
+                            .ok()
+                            .flatten()
+                            .map(|n| n.display_name)
+                            .unwrap_or_default()
+                    })
+                    .clone()
+            } else {
+                String::new()
+            };
+            result.insert(
+                room_id_str.to_string(),
+                (wing_name, room_node.display_name.clone()),
+            );
+        }
+        result
+    }
+
     // MARK: - glk_fingerprints_captured
 
     /// Fingerprints of every non-tombstoned drawer captured in the closed
@@ -2216,6 +3300,34 @@ impl EstateCoordinator {
         estate
             .fingerprints_captured_in(start_epoch, end_epoch)
             .map_err(|e| remap("glk_fingerprints_captured", "", e).into())
+    }
+
+    // MARK: - fingerprint_bit_series
+
+    /// Time-bucketed fingerprint bit-activity series for `bit` over the most
+    /// recent `bucket_count` buckets of width `bucket_seconds`, ending at
+    /// `ending_at` (epoch seconds — deterministic clock, never read system time).
+    ///
+    /// Top-level GLK surface for the Rhythm recipe. Delegates to
+    /// `Estate::fingerprint_bit_series`, which passes through to
+    /// `DrawerStore::fingerprint_bit_series`. Mirrors Swift
+    /// `GeniusLocusKit.glkFingerprintBitSeries(in:bit:bucketSeconds:bucketCount:endingAt:)`
+    /// (B-1 compliance — CognitionKit and NeuronKit call this, never the store directly).
+    ///
+    /// Returns `Err(VerbDispatchError)` for stale handles, `bit > 255`,
+    /// or `bucket_seconds < 1`. Returns an empty `Vec` when `bucket_count == 0`.
+    pub fn fingerprint_bit_series(
+        &self,
+        handle: &EstateHandle,
+        bit: usize,
+        bucket_seconds: i64,
+        bucket_count: usize,
+        ending_at: i64,
+    ) -> Result<Vec<bool>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .fingerprint_bit_series(bit, bucket_seconds, bucket_count, ending_at)
+            .map_err(|e| remap("fingerprint_bit_series", "", e).into())
     }
 
     // MARK: - room_level_fingerprints
@@ -2422,19 +3534,93 @@ impl EstateCoordinator {
     /// `moot_dream` calls this so the `matrixAware` recall lane is live after a
     /// dreaming cycle rather than reading a stale (or absent) tier.
     ///
-    /// Idempotent: feeding the same events is a G-Set no-op, and rebuilding
-    /// from the same log produces the same tier.
+    /// Idempotent: feeding the same events is a G-Set no-op, and the
+    /// loaded-then-folded tier equals a from-scratch rebuild (conformance-tested).
+    ///
+    /// PERSISTENCE: the matrix tier is read from its on-disk SQLite snapshot
+    /// (`MatrixSnapshotStore`) and folded FORWARD over only the audit tail past
+    /// the snapshot watermark — it is NOT recomputed from the whole audit log on
+    /// every launch. A full rebuild runs only on cold start (no snapshot) or a
+    /// stale format. After computing, the fresh tier is persisted so the next
+    /// launch loads it. In-memory estates (where `storages` holds no backing
+    /// storage) cannot persist, so they full-rebuild every time — the parity of
+    /// Swift's `.inMemory` no-op mode. Mirrors Swift
+    /// `GeniusLocusKit.rebuildDerivedAccelerators(for:now:)`.
     pub fn rebuild_derived_accelerators(
         &mut self,
         handle: &EstateHandle,
+        now: i64,
     ) -> Result<(), VerbDispatchError> {
         // Step 1 — feed the unified audit log (MatrixTier consumes the CRDT,
         // not raw storage events).
         self.feed_audit_log(handle)?;
-        // Steps 2 + 3 — full rebuild (F/O/C then T) and install.
         let log = self.audit_log(handle)?;
-        let tier = crate::matrix::MatrixTier::full_rebuild(&log);
-        self.register_matrix_tier(handle, tier);
+
+        // The matrix snapshot store needs a durable backing storage. In-memory
+        // estates don't retain one (storages holds only DrawerStore-backed
+        // storages); they full-rebuild without persistence, as in Swift's
+        // .inMemory mode.
+        let Some(storage) = self.storages.get(handle).cloned() else {
+            let tier = crate::matrix::MatrixTier::full_rebuild(&log);
+            self.register_matrix_tier(handle, tier);
+            return Ok(());
+        };
+
+        let map_err = |e: persistence_kit::StorageError| -> VerbDispatchError {
+            VerbError::UnderlyingEstateFailure {
+                verb: "rebuild_derived_accelerators".to_string(),
+                reason: e.to_string(),
+            }
+            .into()
+        };
+
+        // Ensure the table exists (idempotent CREATE TABLE IF NOT EXISTS under the
+        // store's own kitID) and build the store.
+        storage
+            .migrate(&crate::matrix::MatrixSnapshotStore::schema_declaration())
+            .map_err(map_err)?;
+        let store = crate::matrix::MatrixSnapshotStore::new(Arc::clone(&storage));
+        let estate_id = uuid_to_str(&handle.estate_uuid);
+
+        // Step 2 — LOAD from disk + fold the tail forward, else cold-start rebuild.
+        // load() is fail-soft (decode/version mismatch → None → full rebuild).
+        let tier = match store.load(&estate_id).map_err(map_err)? {
+            Some(snapshot) => {
+                // incremental_update is conformance-proven equal to full_rebuild,
+                // including cross-cursor expunge/withdraw and temporal
+                // window-boundary pairs — exact, not an approximation.
+                let mut loaded = snapshot.tier;
+                loaded.incremental_update(&log);
+                loaded
+            }
+            None => crate::matrix::MatrixTier::full_rebuild(&log),
+        };
+
+        // Step 3 — install so the matrixAware recall lane is live.
+        self.register_matrix_tier(handle, tier.clone());
+
+        // Step 4 — persist the fresh tier so the NEXT launch loads it. Watermark
+        // is the F/O/C cursor. Calibration is not tracked per-estate on the
+        // coordinator (Rust does not mirror Swift's calibrationRegistries map), so
+        // an empty registry is persisted alongside the tier; the matrix F/O/C/T
+        // state is what the launch path loads and folds forward.
+        let watermark = tier.last_hlc;
+        let snapshot = crate::matrix::MatrixSnapshot::new(
+            tier,
+            crate::matrix::MatrixCalibrationRegistry::default(),
+            watermark,
+        );
+        store.upsert(&estate_id, &snapshot, now).map_err(map_err)?;
+
+        // Flush the dense vector store's resident-array sidecar alongside the
+        // matrix snapshot — both are derived accelerators that must live on disk so
+        // a cold restart loads them instead of rebuilding from a full table scan.
+        // The sidecar is write-behind; this is the periodic flush point (runs on
+        // launch and on every dreaming cycle). Best-effort: the `vectors` table
+        // remains the source of truth, and a no-op when no sidecar is configured.
+        if let Some(vs) = self.vector_stores.get(handle) {
+            let _ = vs.flush();
+        }
         Ok(())
     }
 
@@ -2452,6 +3638,47 @@ impl EstateCoordinator {
     ) -> Result<Vec<locus_kit::tunnel::Tunnel>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         estate.all_tunnels().map_err(|e| remap("all_tunnels", "", e).into())
+    }
+
+    /// All non-tombstoned, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    ///
+    /// OMEGA uses this to enumerate the active dreamed-tunnel population before
+    /// applying its retire predicate (`isDreamed AND not reinforced`). Retired
+    /// tunnels are excluded so a re-proposed tunnel previously retired does not
+    /// appear in the active set until a new `associate` verb promotes it.
+    /// Delegates to `Estate::all_active_tunnels()`, which filters on bit 13 in-memory
+    /// (the StoragePredicate DSL cannot express bitmap comparisons).
+    ///
+    /// Mirrors `GeniusLocusKit.allActiveTunnels(in:)` (Swift).
+    pub fn all_active_tunnels(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::tunnel::Tunnel>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.all_active_tunnels().map_err(|e| remap("all_active_tunnels", "", e).into())
+    }
+
+    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap` (T13 / ADR-021 Phase 7).
+    ///
+    /// Called by OMEGA through the GLK seam (B-1: NeuronKit reaches the substrate
+    /// only through GLK verb surface, never directly). Delegates to
+    /// `Estate::retire_tunnel(tunnel_id, changed_by, now)`.
+    ///
+    /// Mirrors `GeniusLocusKit.retireTunnel(in:id:changedBy:now:)` (Swift).
+    ///
+    /// - Returns: `Err(VerbDispatchError::TunnelNotFound)` if no non-tombstoned tunnel
+    ///   with `tunnel_id` exists.
+    pub fn retire_tunnel(
+        &self,
+        handle: &EstateHandle,
+        tunnel_id: &str,
+        changed_by: &str,
+        now_epoch_secs: i64,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .retire_tunnel(tunnel_id, changed_by, now_epoch_secs)
+            .map_err(|e| remap("retire_tunnel", tunnel_id, e).into())
     }
 
     // MARK: - mine_apriori_rules
@@ -2682,10 +3909,25 @@ impl EstateCoordinator {
         now: f64,
     ) -> Result<IssueGrantResult, GrantError> {
         // Validate the custody mode before touching storage.
-        if let CustodyMode::DecayDerived { experimental_ip_clearance_confirmed: false, .. }
-            = &options.custody_mode
+        // Mode-3 requires both IP clearance and valid Lagrange parameters.
+        // `threshold=0` or `total_shares < threshold` causes reconstruct()
+        // to interpolate an empty point set, producing the zero field element
+        // — a constant anyone can precompute, breaking the custody model
+        // (planned security hardening — B1, finding #2).
+        const MAX_DECAY_SHARES: usize = 255;
+        if let CustodyMode::DecayDerived {
+            experimental_ip_clearance_confirmed,
+            threshold,
+            total_shares,
+            ..
+        } = &options.custody_mode
         {
-            return Err(GrantError::ExperimentalModeNotActivated);
+            if !experimental_ip_clearance_confirmed {
+                return Err(GrantError::ExperimentalModeNotActivated);
+            }
+            if *threshold == 0 || *total_shares < *threshold || *total_shares > MAX_DECAY_SHARES {
+                return Err(GrantError::InvalidCustodyParameters);
+            }
         }
 
         // Construct the Grant row.
@@ -2982,12 +4224,19 @@ impl EstateCoordinator {
             }
             // Debit persisted before the read returns content. Atomic within
             // the per-storage write lock (InMemoryStorage: Mutex; SQLite: WAL
-            // write serialisation). Storage failure is ignored here — if the
-            // debit write fails the read still returns content (the budget re-check
-            // on the next call catches it). This mirrors Swift's behaviour where
-            // a storage write failure on debit is propagated but does not block
-            // the current read that already passed the budget gate.
-            let _ = store.debit_budget(authorizing_grant.id, Self::BUDGET_DEBIT_PER_READ);
+            // write serialisation).
+            //
+            // Fail-closed: if the debit write fails, refuse the read. A storage
+            // error on debit means we cannot guarantee the budget decrement was
+            // recorded — returning content on a failed debit would allow unbounded
+            // reads against a grant whose budget can no longer be decremented
+            // (secfix/punt-g2). Mirrors Swift CrossEstateFederation, where a
+            // debit write failure propagates as a thrown error and the read
+            // returns no content.
+            store.debit_budget(authorizing_grant.id, Self::BUDGET_DEBIT_PER_READ)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("budget debit write failed — read refused (fail-closed): {e:?}"),
+                })?;
         }
 
         // 7. Read the source estate using the provided recall frame.
@@ -3015,13 +4264,24 @@ impl EstateCoordinator {
         // WholeEstate is a pass-through; the other four cases narrow.
         // Dot-boundary guard for LatticeSubtree: "500" must match "500"
         // and "500.1" but NOT "5001" — same guard as Swift and ARIA secondary.
+        // Resolve node names for Wing/Room scope matching (Drawer stores
+        // parent_node_id, not wing/room strings — ADR-017).
+        let node_names = build_node_name_map(self.node_stores.get(source), &drawers);
         let drawers: Vec<_> = match &authorizing_grant.scope {
             crate::grants::GrantScope::WholeEstate => drawers,
             crate::grants::GrantScope::Wing(name) => {
-                drawers.into_iter().filter(|d| &d.wing == name).collect()
+                drawers.into_iter().filter(|d| {
+                    node_names.get(&d.parent_node_id)
+                        .map(|(w, _)| w == name)
+                        .unwrap_or(false)
+                }).collect()
             }
             crate::grants::GrantScope::Room(name) => {
-                drawers.into_iter().filter(|d| &d.room == name).collect()
+                drawers.into_iter().filter(|d| {
+                    node_names.get(&d.parent_node_id)
+                        .map(|(_, r)| r == name)
+                        .unwrap_or(false)
+                }).collect()
             }
             crate::grants::GrantScope::LatticeSubtree { udc_code } => {
                 let prefix = format!("{udc_code}.");
@@ -3063,16 +4323,16 @@ impl EstateCoordinator {
     /// re-open of an existing estate) call this method so every served estate
     /// always has its wings, regardless of how it was originally created.
     ///
-    /// **Idempotency:** reads all existing `_charter` drawers from the estate
-    /// once. Wings whose charter drawer already exists are skipped. Wings that
-    /// are absent are seeded with their canonical charter text via `seed_wing`.
+    /// **Idempotency:** reads all existing `AI_Charter_Hint` drawers from the
+    /// estate once. Wings whose hint drawer already exists are skipped. Wings that
+    /// are absent are seeded with their canonical hint text via `seed_wing`.
     /// Calling this multiple times on the same estate is a safe no-op once all
     /// seven wings are present.
     ///
     /// Mirrors Swift `GeniusLocusKit.seedDefaultWings(for:now:)`.
     ///
     /// - `handle`: An open estate handle in the coordinator's registry.
-    /// - `now`:    Write timestamp (epoch seconds) for any charters seeded.
+    /// - `now`:    Write timestamp (epoch seconds) for any hints seeded.
     ///             Pass `SystemTime::now()` from serve entry points (acceptable
     ///             at an app boundary). Pass a fixed value in tests for determinism.
     /// - Returns: `Ok(())` on success, or a `GeniusLocusKitError` if the estate
@@ -3088,21 +4348,43 @@ impl EstateCoordinator {
                 reason: format!("seed_default_wings: estate_for failed: {:?}", e),
             })?;
 
-        // Read existing charter drawers to compute which wings are already present.
+        // Read existing drawers to compute which wings are already present.
         // `all_drawers()` is a full corpus scan; estates are small at this stage
-        // (7 charters + user content) and this is called once per open, not per request.
+        // (7 hints + user content) and this is called once per open, not per request.
         let existing_drawers = estate
             .all_drawers()
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("seed_default_wings: all_drawers failed: {:?}", e),
             })?;
+        // Identify already-seeded wings by finding drawers in room HINT_ROOM
+        // ("AI_Charter_Hint") and resolving their wing names from the node tree
+        // (Drawer no longer stores wing/room — ADR-017).
+        let node_names = build_node_name_map(self.node_stores.get(handle), &existing_drawers);
         let seeded_wings: std::collections::HashSet<String> = existing_drawers
             .into_iter()
-            .filter(|d| d.room == locus_kit::default_wings::CHARTER_ROOM)
-            .map(|d| d.wing)
+            .filter(|d| {
+                node_names.get(&d.parent_node_id)
+                    .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
+                    .unwrap_or(false)
+            })
+            .filter_map(|d| {
+                node_names.get(&d.parent_node_id)
+                    .map(|(wing, _)| wing.clone())
+            })
             .collect();
 
-        // Seed each wing whose charter drawer does not yet exist.
+        // The hint drawer is stamped with the corpus's primary model id when a
+        // corpus is registered — the normal case now that both provision and the
+        // serve open path wire the Corpus BEFORE calling this. The sentinel below
+        // is reached only for a corpus-less estate (LocusOnly, no semantic lane,
+        // or a bare serve open before wiring); such a drawer is row-only and is
+        // re-stamped under the real model on the next reindex.
+        let embedding_model_id = self
+            .corpus_for(handle)
+            .map(|c| c.model_id().to_string())
+            .unwrap_or_else(|| "estate-provision".to_string());
+
+        // Seed each wing whose hint drawer does not yet exist.
         // For estates already provisioned via `provision`, this loop is a no-op.
         let mut seeded_count = 0usize;
         for wing in DEFAULT_WINGS {
@@ -3110,7 +4392,7 @@ impl EstateCoordinator {
                 continue;
             }
             estate
-                .seed_wing(wing.name, wing.charter, now)
+                .seed_wing(wing.name, wing.hint, &embedding_model_id, now)
                 .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!(
                         "seed_default_wings: seed_wing failed for '{}': {:?}",
@@ -3259,6 +4541,8 @@ impl EstateCoordinator {
             tiny_model_id: None,
             tiny_model_training_corpus_size: None,
             operational_bitmap_layouts: None,
+            ed25519_public_key: None,
+            ed25519_private_key_wrapped: None,
         };
         Estate::create(store.clone(), owner.clone(), Some(&initial_values))
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -3274,29 +4558,10 @@ impl EstateCoordinator {
             params.zoom_window_high,
         )?;
 
-        // Step 2b: Seed the seven default wings (ADR-016 §1 and §2).
-        // Delegates to `seed_default_wings` — the single seam that owns the
-        // idempotent seeding loop. The serve open path also calls this method
-        // unconditionally so bare estates opened via `mootx01 serve` receive
-        // the same wings without re-stamping the manifest.
-        // Seeding failure closes the estate (no half-provisioned zombie estates).
-        {
-            // Provision-time wall clock (epoch seconds). Charter drawers are
-            // structural metadata; calling the system clock at the provision
-            // boundary mirrors Swift's `let provisionNow = Date()` at the same
-            // boundary. The engine interior never calls the clock (determinism
-            // rule); provision is the app boundary where Date() is acceptable.
-            let seed_now: i64 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if let Err(e) = self.seed_default_wings(&handle, seed_now) {
-                let _ = self.close(&handle);
-                return Err(e);
-            }
-        }
-
-        // Step 3: Wire sub-stores by kind — same logic as Swift EstateLifecycle.swift §provision.
+        // Step 2b: Wire sub-stores by kind — same logic as Swift EstateLifecycle.swift §provision.
+        // Wiring runs BEFORE seeding the wings (step 2c) so the hint drawers carry
+        // the corpus's real model id, not a sentinel — matching the serve open path
+        // and the Swift provision order.
         // backing_storage is the persistence_kit Storage used for Corpus + VectorStore;
         // falls back to the primary `storage` when no separate corpus_storage is supplied.
         let backing_storage = corpus_storage.unwrap_or(storage);
@@ -3313,15 +4578,18 @@ impl EstateCoordinator {
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                         reason: format!("Corpus::open_many failed for GLK estate: {:?}", e),
                     })
-                    .and_then(|corpus| {
-                        // Wire a VectorStore pointing at the same backing storage so GLK's
-                        // scored-recall vector lane operates independently of Corpus's
-                        // internal vector store — mirrors Swift's explicit VectorStore wiring.
-                        VectorStore::open(Arc::clone(&backing_storage))
-                            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                                reason: format!("VectorStore::open failed for GLK estate: {:?}", e),
-                            })
-                            .map(|vs| (Some(corpus), Some(vs)))
+                    .map(|corpus| {
+                        // BORROW Corpus's single dense VectorStore for GLK's scored-
+                        // recall lane rather than constructing a second VectorStore over
+                        // the same `vectors` table. Both built identical whole-table
+                        // resident arrays (the binary fetch is filtered only by kind, not
+                        // model), so a second store doubled the resident array + cold-start
+                        // scan and made the on-disk sidecar churn. One shared store, one
+                        // resident array, one sidecar kept in sync by every write. Corpus
+                        // owns the dense lane; GLK reaches it through the public accessor.
+                        let corpus = Arc::new(corpus);
+                        let vs = corpus.shared_vector_store();
+                        (Some(corpus), Some(vs))
                     })
             }
             EstateKind::CorpusOnly => {
@@ -3330,7 +4598,7 @@ impl EstateCoordinator {
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                         reason: format!("Corpus::open_many failed for CorpusOnly estate: {:?}", e),
                     })
-                    .map(|corpus| (Some(corpus), None))
+                    .map(|corpus| (Some(Arc::new(corpus)), None))
             }
             EstateKind::LocusOnly => {
                 // LocusKit only — no sub-store wiring needed.
@@ -3343,10 +4611,10 @@ impl EstateCoordinator {
                 // Register the wired sub-stores. Arc<Corpus> and Arc<VectorStore> are
                 // what the registry holds (matching Swift's corpusKits / vectorStores dicts).
                 if let Some(corpus) = corpus_opt {
-                    self.corpus_kits.insert(handle, Arc::new(corpus));
+                    self.corpus_kits.insert(handle, corpus);
                 }
                 if let Some(vs) = vs_opt {
-                    self.vector_stores.insert(handle, Arc::new(vs));
+                    self.vector_stores.insert(handle, vs);
                 }
                 // GLK estate: apply the composite GLK schema so all component kit
                 // tables (LocusKit, VectorKit, CorpusKit) are registered under the
@@ -3369,22 +4637,55 @@ impl EstateCoordinator {
                             reason: format!("GLK composite schema open failed: {e:?}"),
                         })?;
                 }
-                // Dual-Path Intake D-B: mount the dedicated encode queue for
-                // estates that have a Corpus to feed (Glk / CorpusOnly). Mirrors
-                // Swift `EstateLifecycle.swift` mounting the encode queue at
-                // provision. LocusOnly estates register no corpus, so they get
-                // no encode queue (a regular write degrades to row-only).
-                if self.corpus_kits.contains_key(&handle) {
-                    self.mount_encode_queue(&handle).map_err(|e| {
+                // CorpusKit owns the encode pipeline: mount the Corpus's own
+                // ingest queue + drain worker pool for estates with a Corpus to
+                // feed (Glk / CorpusOnly), and wire its on_encoded callback to
+                // roll up the touched LocusKit rooms for each encoded batch. GLK
+                // only coordinates the two kits — it never performs the encode.
+                // LocusOnly estates register no corpus, so they get no queue (a
+                // regular write degrades to row-only). Mirrors Swift
+                // `EstateLifecycle.swift` wireSubstores.
+                if let Some(corpus) = self.corpus_kits.get(&handle).cloned() {
+                    corpus.mount_ingest_queue().map_err(|e| {
                         GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("mount_encode_queue failed: {e:?}"),
+                            reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
                         }
                     })?;
+                    // Capture a cheap clone of the estate (Arc-backed, Send+Sync)
+                    // so the Corpus drain worker's callback can roll up rooms
+                    // without reaching back into the coordinator. Best-effort: a
+                    // rollup failure is non-fatal — the next reindex full-tree
+                    // pass reconciles the Merkle tree. Mirrors Swift's
+                    // wireCorpusRoomRollup setting corpus.onEncoded.
+                    if let Some(estate) = self.registry.get(&handle).cloned() {
+                        corpus.set_on_encoded(move |drawer_ids| {
+                            let _ = estate.rollup_rooms_for_drawers(drawer_ids);
+                        });
+                    }
                 }
             }
             Err(e) => {
                 // Sub-store wiring failed. Close the estate to avoid a half-wired zombie
                 // in the registry, mirroring Swift's `try? await close(handle)` rollback.
+                let _ = self.close(&handle);
+                return Err(e);
+            }
+        }
+
+        // Step 2c: Seed the seven default wings (ADR-016 §1 and §2) — AFTER wiring,
+        // so each hint drawer is stamped with the corpus's normal model id rather
+        // than the "estate-provision" sentinel (matches the serve open path and the
+        // Swift provision order). Hints are filed row-only (seed_wing does not
+        // enqueue); their vectors are produced by the next full-corpus reindex,
+        // not by training a basis on the 7 hints alone. Seeding failure closes the
+        // estate (no half-provisioned zombie). Provision-time wall clock (epoch
+        // seconds) at the app boundary — the engine interior never reads the clock.
+        {
+            let seed_now: i64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if let Err(e) = self.seed_default_wings(&handle, seed_now) {
                 let _ = self.close(&handle);
                 return Err(e);
             }
@@ -3460,6 +4761,13 @@ impl EstateCoordinator {
         // point by definition. Transition directly to Quiesced.
         self.mount_states.insert(*handle, EstateMountState::Quiesced);
 
+        // In-flight work has settled — flush the dense vector store's resident-array
+        // sidecar so a graceful shutdown leaves it current (a cold restart loads it
+        // instead of rebuilding from a full table scan). Best-effort.
+        if let Some(vs) = self.vector_stores.get(handle) {
+            let _ = vs.flush();
+        }
+
         // Telemetry: emit mount-state transition to quiesced after drain (GLK_ROLLUPS_001).
         glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, {
             let mut tags = HashMap::new();
@@ -3487,27 +4795,49 @@ impl EstateCoordinator {
     ///
     /// Mirrors Swift `GeniusLocusKit.destroy(storage:corpusStorage:handle:)`.
     pub fn destroy(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
-        // Capture references to registered sub-stores BEFORE close() drops them.
+        // Capture references to registered sub-stores and the LocusKit estate
+        // BEFORE close() drops them from the registry.
         let corpus = self.corpus_kits.get(handle).cloned();
         let vector_store = self.vector_stores.get(handle).cloned();
+        let estate = self.estate_for(handle).ok().cloned();
 
-        // Step 1: Close the estate (drops registry, grant store, corpus/vector refs).
-        if self.registry.contains_key(handle) {
-            self.close(handle)?;
-        }
-
-        // Step 2: Destroy Corpus recall index (BM25 + internal vectors).
+        // Step 1: Destroy Corpus recall index (BM25 + internal vectors) BEFORE
+        // close(). close() drops self.storages[handle], which releases the GLK
+        // Arc to the shared storage. Sub-store teardown must complete while the
+        // storage connection is still open so corpus/vector SQL writes succeed.
+        // Order matches the Swift GeniusLocusKit.destroy implementation:
+        //   sub-store teardown → wipe LocusKit content → close() → file deletion
+        // (file deletion is done at the application layer, moot-mgr Cluster F).
         if let Some(c) = corpus {
             c.destroy_recall_index().map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("Corpus destroy failed: {:?}", e),
             })?;
         }
 
-        // Step 3: Destroy standalone VectorStore vectors.
+        // Step 2: Destroy standalone VectorStore vectors.
         if let Some(vs) = vector_store {
             vs.destroy_all_vectors().map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("VectorStore destroy failed: {:?}", e),
             })?;
+        }
+
+        // Step 3: Wipe LocusKit drawer content blobs from SQLite (destruction
+        // contract — secfix/ws2-coredelete §Cluster E). Runs before close() so
+        // the storage connection is still valid. Zeros the `content` column for
+        // every row in the drawers table; the SQLite file itself is deleted by
+        // the application layer (moot-mgr) after this method returns.
+        if let Some(est) = estate {
+            est.wipe_all_content()
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("LocusKit wipe_all_content failed on destroy: {:?}", e),
+                })?;
+        }
+
+        // Step 4: Close the estate (drops registry, grant store, corpus/vector
+        // refs, and storage Arc). Sub-store teardown (steps 1–3) must complete
+        // before this call, matching the Swift ordering.
+        if self.registry.contains_key(handle) {
+            self.close(handle)?;
         }
 
         Ok(())
@@ -3589,9 +4919,9 @@ impl EstateCoordinator {
         #[cfg(not(any(test, feature = "test-seams")))]
         let forced_embed_error: Option<String> = None;
 
-        match request.mode {
+        let result = match request.mode {
             GLKRecallMode::LocusOnly => {
-                Self::recall_scored_locus_only(estate, request, plan, now)
+                Self::recall_scored_locus_only(estate, request.clone(), plan, now)
             }
             GLKRecallMode::Hybrid
             | GLKRecallMode::CorpusOnly
@@ -3615,7 +4945,7 @@ impl EstateCoordinator {
                 let graph_cache = self.graph_caches.get(handle).cloned();
                 let preference_store = self.preference_stores.get(handle).cloned();
                 Self::recall_scored_multi_lane(
-                    estate, request, plan, now, corpus, vector, handle,
+                    estate, request.clone(), plan, now, corpus, vector, handle,
                     matrix_tier, graph_cache, preference_store,
                     forced_vector_hamming_error, forced_embed_error,
                 )
@@ -3626,9 +4956,33 @@ impl EstateCoordinator {
                 // not via the scored drawer-recall path. For drawer retrieval,
                 // delegate to the locusOnly bitmap lane so all estate drawers
                 // are reachable through the normal bitmap filter.
-                Self::recall_scored_locus_only(estate, request, plan, now)
+                Self::recall_scored_locus_only(estate, request.clone(), plan, now)
             }
+        }?;
+
+        // ADR-021 Phase 2b: enqueue a dreaming item for external-origin scored recalls.
+        //
+        // Guard (spec §12.2 + B-10a):
+        //   - origin must be External — only ARIA boundary recalls are dreaming
+        //     candidates; internal reads (dreaming daemon, standing signals, recipes,
+        //     migration, benchmarks) must NEVER enqueue (they would feed back into
+        //     the dreaming pipeline, creating a self-referential loop).
+        //   - result must have ≥ 2 distinct surfaced drawer ids — a single drawer
+        //     makes no co-recall pair for the REM-ALPHA drainer. The guard is
+        //     enforced inside `enqueue_dreaming_item`; zero cost if < 2.
+        //
+        // The enqueue is non-fatal: `enqueue_dreaming_item` catches and logs all
+        // failures. `now` here is epoch-seconds (same unit as the rest of recall_scored).
+        // enqueue_dreaming_item converts to epoch-ms at the HLC boundary internally.
+        // No SystemTime::now() inside this engine — determinism rule.
+        if request.origin == RecallOrigin::External {
+            let drawers: Vec<Drawer> = result.hits.iter()
+                .filter_map(|h| h.drawer.clone())
+                .collect();
+            self.enqueue_dreaming_item(handle, &drawers, now);
         }
+
+        Ok(result)
     }
 
     /// LocusOnly lane: drain bitmap-index, wrap each drawer as a RecallHit with
@@ -3896,15 +5250,32 @@ impl EstateCoordinator {
         let has_corpus = corpus.is_some();
         let has_vector = vector.is_some();
 
-        // When no corpus or vector store is registered, fall back to
-        // rank-normalised locus-only scoring for Hybrid/CorpusOnly/UnionBest+Rrf/Raw.
-        // Exception: UnionBest + MatrixAware proceeds to the full pipeline even without
-        // corpus/vector — the matrix scoring pass is locus-based and does not require
-        // corpus/vector. Mirrors Swift recallUnionBest which always runs the locus lane
-        // and the matrix scoring block regardless of corpus/vector registration.
+        // When no corpus or vector store is registered, the multi-lane path has
+        // no corpus/vector signal. Handle the two distinct cases:
+        //
+        //   CorpusOnly + FailClosed — the request explicitly asked for a corpus/vector
+        //   lane and forbade degraded fallback. Return an error rather than silently
+        //   leaking locus hits that the caller did not request and may not be authorised
+        //   to see through this path. Mirrors Swift RecallDirector.recallCorpusOnly which
+        //   propagates RecallDirectorError.corpusUnavailable when FailClosed is set.
+        //
+        //   All other cases — fall back to rank-normalised locus-only scoring for
+        //   Hybrid/UnionBest+Rrf/Raw. Exception: UnionBest + MatrixAware proceeds to
+        //   the full pipeline even without corpus/vector — the matrix scoring pass is
+        //   locus-based and does not require corpus/vector.
         let is_matrix_aware_union = request.mode == GLKRecallMode::UnionBest
             && request.scoring == GLKRecallScoring::MatrixAware;
         if !has_corpus && !has_vector && !is_matrix_aware_union {
+            use crate::recall::RecallFallbackPolicy;
+            if request.mode == GLKRecallMode::CorpusOnly
+                && request.fallback == RecallFallbackPolicy::FailClosed
+            {
+                return Err(VerbDispatchError::RecallLaneUnavailable {
+                    reason: "CorpusOnly recall requested with failClosed policy but \
+                             no Corpus or VectorStore is registered for this estate; \
+                             open the estate with a corpus backend or use AllowDegraded".into(),
+                });
+            }
             return Self::recall_scored_locus_ranked(estate, request, plan, now);
         }
 
@@ -5071,13 +6442,25 @@ impl EstateCoordinator {
             })
             .collect();
 
+        // Rank-normalised locus-only fallback: neither corpus nor vector is
+        // registered, so the dense float lane was never attempted. For UnionBest
+        // — the only mode that runs the dense lane — this is the dark:noCorpus
+        // state (Wave B Part 2): an explicit tag so callers distinguish "no
+        // corpus" from "lane ran and produced hits" (None). Other modes never
+        // attempt the dense lane, so they carry None. Mirrors Swift
+        // RecallDirector's `else if corpusKits[handle] == nil` → "dark:noCorpus".
+        // (The main multi-lane path sets this in the dense block; this fallback
+        // return is the no-corpus short-circuit and must carry the same tag.)
+        let fallback_dense_lane_status = if matches!(request.mode, GLKRecallMode::UnionBest) {
+            Some("dark:noCorpus".to_string())
+        } else {
+            None
+        };
         Ok(GLKRecallResult {
             request,
             plan,
             union_profile,
-            // Rank-normalised locus-only fallback: no corpus registered, dense lane
-            // never attempted — None per contract (lane was not attempted).
-            dense_lane_status: None,
+            dense_lane_status: fallback_dense_lane_status,
             // Only a scoring-fallback stage can be recorded here (set above);
             // there is no throwing stage on the locus-ranked path.
             degraded_stages,
@@ -5329,7 +6712,7 @@ mod tests {
     // CO-16: stale handle always surfaces EstateNotOpen before verb dispatch.
     // -----------------------------------------------------------------
 
-    fn sample_learn_frame(handle: &str) -> LocusLearnFrame {
+    fn sample_learn_frame(handle: &str) -> GlkLearnFrame {
         let source = locus_kit::source_catalog_entry::SourceCatalogEntry::new(
             "src-1",
             locus_kit::source_catalog_entry::SourceKind::User,
@@ -5338,7 +6721,7 @@ mod tests {
             NOW,
             "cataloger",
         );
-        LocusLearnFrame::new(source, handle)
+        GlkLearnFrame::new(source, handle)
     }
 
     // CO-10: learn succeeds end-to-end — it derives the reference's genuine
@@ -5520,6 +6903,27 @@ mod tests {
 
         assert_eq!(coord.open_estate_count(), 1);
         assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Mounted));
+    }
+
+    // F3: provision(.glk) registers Corpus's SINGLE shared VectorStore for the
+    // scored-recall lane — not a second VectorStore over the same vectors table.
+    #[test]
+    fn pr_provision_glk_unifies_vector_store_with_corpus() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = glk_params("UnifyTest");
+
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
+            .expect("provision should succeed");
+
+        let registered = coord.vector_store_for(&handle).expect("vector store registered");
+        let corpus = coord.corpus_for(&handle).expect("corpus registered");
+        let shared = corpus.shared_vector_store();
+        assert!(
+            Arc::ptr_eq(&registered, &shared),
+            "GLK scored-recall VectorStore must be Corpus's shared instance, not a duplicate"
+        );
     }
 
     // PR-2: provision stores the kind-prefixed framework_profile in the manifest.
@@ -5935,7 +7339,7 @@ mod tests {
         let (mut coord, h) = open_one();
         coord.capture(&h, cap_frame("alpha"), NOW).expect("capture");
         assert!(coord.matrix_tier(&h).is_none(), "no tier before rebuild");
-        coord.rebuild_derived_accelerators(&h).expect("rebuild");
+        coord.rebuild_derived_accelerators(&h, NOW).expect("rebuild");
         assert!(coord.matrix_tier(&h).is_some(), "tier present after rebuild");
         // The audit log was fed as part of the rebuild.
         assert!(!coord.audit_log(&h).expect("log").is_empty());

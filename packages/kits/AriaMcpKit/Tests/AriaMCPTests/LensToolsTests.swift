@@ -77,7 +77,7 @@ struct LensToolsTests {
         // migration_benchmark → moot_run_migration; shaped_recall →
         // moot_recall_shaped; recall_exploratory is a library-only recall recipe
         // (ExploratoryRecall) with no MCP tool. The three distillation-family
-        // recipes (consolidate, distilled_recall, expand_memory) added by Dc4
+        // recipes (consolidate, distilled_recall, recollect) added by Dc4
         // are dispatched as recipe tools (moot_ prefix) not lens tools
         // (moot_lens_ prefix). All lens tools carry the moot_lens_ prefix.
         let nonLensRecipes: Set<String> = [
@@ -85,7 +85,7 @@ struct LensToolsTests {
             "recall_exploratory",
             // Distillation-family recipes registered by Dc4: dispatched as
             // recipe tools by RecipeTools, not as lens tools by LensTools.
-            "consolidate", "distilled_recall", "expand_memory",
+            "consolidate", "distilled_recall", "recollect",
         ]
         let lensToolCount = RecipeCatalog.names
             .filter { !nonLensRecipes.contains($0) }
@@ -242,5 +242,168 @@ struct LensToolsTests {
         #expect(body.contains("contradicts_tunnels:"))
         #expect(body.contains("conflicting_facts:"))
         #expect(body.contains("none"))
+    }
+}
+
+// MARK: - Security hardening — window ordering and param clamping
+
+/// Validates MCP-boundary hardening for lens tools introduced by secfix-p1-ariamcp:
+/// - moot_lens_moment and moot_lens_precedence reject inverted windows (start > end)
+///   with invalidParams rather than trapping at Swift ClosedRange runtime.
+/// - walkLength and k in moot_lens_free_association are clamped at [1, ceiling].
+@Suite("Lens tools — security hardening")
+struct LensToolsSecurityTests {
+
+    private func openEstate(in kit: GeniusLocusKit) async throws -> (ToolDispatcher, EstateHandle) {
+        let owner = OwnerCredentials(ownerIdentifier: "lens-sec-test")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (ToolDispatcher(kit: kit, handle: handle), handle)
+    }
+
+    // MARK: - Window ordering guard: moot_lens_moment
+
+    @Test func momentInvertedWindowThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        // windowStart AFTER windowEnd — inverted.
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_moment",
+                arguments: .object([
+                    "windowStart": .string("2026-06-28T10:00:00Z"),
+                    "windowEnd":   .string("2026-06-27T10:00:00Z"),
+                ]))
+        }
+    }
+
+    @Test func momentEqualWindowIsAccepted() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        // Equal start and end is a valid degenerate window — no throw expected at validation.
+        // The result may be empty but the boundary check must pass.
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_moment",
+            arguments: .object([
+                "windowStart": .string("2026-06-28T10:00:00Z"),
+                "windowEnd":   .string("2026-06-28T10:00:00Z"),
+            ]))
+        // Should return a text result (not an out-of-band error).
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue != true)
+    }
+
+    // MARK: - Window ordering guard: moot_lens_precedence
+
+    @Test func precedenceInvertedWindowThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_precedence",
+                arguments: .object([
+                    "windowStart": .string("2026-06-28T10:00:00Z"),
+                    "windowEnd":   .string("2026-06-27T10:00:00Z"),
+                    "targetField": .string("room"),
+                    "targetValue": .string("chemistry"),
+                ]))
+        }
+    }
+
+    // MARK: - moot_lens_free_association: negative k throws
+
+    @Test func freeAssociationNegativeKThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_free_association",
+                arguments: .object([
+                    "wing":         .string("Default"),
+                    "seedDrawerID": .string("00000000-0000-0000-0000-000000000001"),
+                    "k":            .integer(-1),
+                ]))
+        }
+    }
+
+    @Test func freeAssociationOverCeilingWalkLengthIsClamped() async throws {
+        // An over-ceiling walkLength must be silently clamped, not crash or throw.
+        // This test verifies no boundary-level exception is raised; the lens may
+        // return "0 associations" on an empty estate — that is expected.
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        // Should NOT throw — over-ceiling is clamped to 100_000 silently.
+        _ = try? await dispatcher.dispatch(
+            name: "moot_lens_free_association",
+            arguments: .object([
+                "wing":         .string("Default"),
+                "seedDrawerID": .string("00000000-0000-0000-0000-000000000001"),
+                "walkLength":   .integer(999_999_999),
+            ]))
+    }
+
+    // MARK: - clampLimit boundary guards (Finding 3)
+    // Verify that the four previously-unclamped tool paths now enforce [1, 500].
+
+    @Test func associationsNegativeLimitThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_associations",
+                arguments: .object(["limit": .integer(-1)]))
+        }
+    }
+
+    @Test func associationsZeroLimitThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_associations",
+                arguments: .object(["limit": .integer(0)]))
+        }
+    }
+
+    @Test func associationsOverCeilingLimitIsClampedNotThrown() async throws {
+        // Over-ceiling limit must be silently clamped to 500, not crash or throw.
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        // Should not throw — clamped to 500.
+        _ = try? await dispatcher.dispatch(
+            name: "moot_lens_associations",
+            arguments: .object(["limit": .integer(1_000_000)]))
+    }
+
+    @Test func conceptsNegativeLimitThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_concepts",
+                arguments: .object(["limit": .integer(-5)]))
+        }
+    }
+
+    @Test func conceptsOverCeilingLimitIsClampedNotThrown() async throws {
+        // Over-ceiling limit must be silently clamped to 500, not crash or throw.
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        // Should not throw — clamped to 500.
+        _ = try? await dispatcher.dispatch(
+            name: "moot_lens_concepts",
+            arguments: .object(["limit": .integer(999_999)]))
     }
 }

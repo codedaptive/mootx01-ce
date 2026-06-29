@@ -10,8 +10,8 @@ import AriaMCP       // JSONValue — every tool argument is a JSONValue.
 //   source, you cannot add a MOOT to it, and you would never want to fork it.
 //   But it holds valuable data: your events. This app shows how to give that
 //   legacy app a MEMORY without touching it at all — we READ its events with
-//   EventKit and WRITE them into the MOOT through the MootGateway SDK. Calendar
-//   is never modified. Not one byte. We are a polite reader, nothing more.
+//   EventKit and WRITE them into the MOOT through the MootGateway SDK. Real user
+//   events are never altered; the demo seed path writes sample events only.
 //
 // THE WIRING (this file's job):
 //

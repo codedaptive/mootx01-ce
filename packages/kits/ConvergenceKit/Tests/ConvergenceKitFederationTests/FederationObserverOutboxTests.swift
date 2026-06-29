@@ -17,9 +17,9 @@
 // auto-population and lifecycle behavior asserted here is identical on both
 // ports.
 //
-// The observer maps each storage write to a SyncRecord on a background Task,
-// so a short yield precedes each push — the same shape as the Rust test's
-// bounded poll.
+// The observer maps each storage write to a SyncRecord on a background Task.
+// A bounded retry loop calls push() and yields until the outbox is populated;
+// the same pattern as the Rust test's bounded poll.
 
 import Testing
 import Foundation

@@ -18,6 +18,8 @@ contradiction checks, or durable writeback.
 Recall first:
 - `moot_memory_search` for broad recall.
 - `moot_recall_precise` for exact details and near-duplicates.
+- `moot_recall_shaped` for associative or conceptual recall modes.
+- `moot_recall_distilled` for compact factoid answers.
 - `moot_fact_search` for structured facts.
 
 Analyze before context stuffing:
@@ -32,7 +34,7 @@ Write back what matters:
 - `moot_write_journal`
 - confirm/update/withdraw/retire tools for correction
 
-Run `moot_dream` after bulk import or major memory growth.
+Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
 If MOOTx01 is unavailable, say so plainly and answer only from current context.
 

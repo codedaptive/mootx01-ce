@@ -20,7 +20,8 @@
 //   §3 conformance    : 300_001.0
 //   §4 recall         : 400_001.0, 400_002.0
 //   §5 mutating verbs : 500_001.0 – 500_004.0
-//   §6 audit/write-gate: 600_001.0 – 600_005.0
+// (§6 audit/write-gate metric-name constants are defined but no
+//  §6 telemetry tests exist yet; the helpers have no production callers)
 //
 // ## Determinism
 //

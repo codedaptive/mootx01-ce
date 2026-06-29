@@ -32,15 +32,15 @@ public enum ThemeWeather {
         var weighted: [String: Double] = [:]
         for drawer in drawers {
             let elapsed = max(now.timeIntervalSince(drawer.filedAt), 0)
-            raw[drawer.room, default: 0] += 1
-            weighted[drawer.room, default: 0] += NeuronKit.recencyWeight(
+            raw[drawer.parentNodeId, default: 0] += 1
+            weighted[drawer.parentNodeId, default: 0] += NeuronKit.recencyWeight(
                 elapsedSeconds: elapsed, halfLifeSeconds: halfLifeSeconds)
         }
 
-        // Sorted room keys ⇒ a deterministic category order into the
-        // lens (same discipline as the Rust version's BTreeMap walk).
-        let categories = raw.keys.sorted().map { room in
-            (category: room, rawCount: raw[room]!, weightedMass: weighted[room] ?? 0)
+        // Sorted parentNodeId keys ⇒ a deterministic category order
+        // into the lens (same discipline as the Rust BTreeMap walk).
+        let categories = raw.keys.sorted().map { nodeId in
+            (category: nodeId, rawCount: raw[nodeId]!, weightedMass: weighted[nodeId] ?? 0)
         }
         return NeuronKit.themeWeather(categories: categories)
     }

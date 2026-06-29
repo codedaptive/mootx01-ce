@@ -5,11 +5,14 @@
 // metrics) hold GLOBAL_LOCK for their entire duration. The manifest test
 // does not touch emit-capable functions and does not need the lock.
 
-use corpus_kit::{recall, BM25Index, BundleStore, Chunk, CorpusKitSync, HybridRecallConfiguration};
-use corpus_kit_providers::DeterministicTokenizer;
+use corpus_kit::{
+    recall, default_keyword_tokens, BundleStore, Chunk, CorpusKitSync,
+    HybridRecallConfiguration, InvertedIndexStore,
+};
 use engram_lib::Engram;
 use intellectus_lib::Intellectus;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
+use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 // ─────────────────────────────────────────────────────────────────
@@ -93,10 +96,14 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
     }
     bundle_store.insert(&chunks).expect("insert chunks");
 
-    // Index BM25 over the chunks.
-    let tokenizer = Arc::new(DeterministicTokenizer::new());
-    let mut bm25 = BM25Index::new(tokenizer);
-    bm25.index_documents(chunks.iter().map(|c| (c.id, c.text.as_str())));
+    // Index keyword lane (InvertedIndexStore, SQLite-backed) over the chunks.
+    // InMemory storage → in-memory SQLite connection for the sidecar.
+    let inverted_index = InvertedIndexStore::open(Connection::open_in_memory().expect("conn"))
+        .expect("open inverted index");
+    for chunk in &chunks {
+        let tokens = default_keyword_tokens(chunk.text.as_str());
+        inverted_index.index(&chunk.id.to_string(), &tokens, "").expect("index chunk");
+    }
 
     // Seed VectorStore with engrams whose Hamming distance to the
     // probe corresponds to chunk index: chunk 0 closest, chunk 2
@@ -120,7 +127,7 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
         "test-model",
         3,
         &vector_store,
-        &bm25,
+        &inverted_index,
         &bundle_store,
         HybridRecallConfiguration::default(),
     )
@@ -131,8 +138,8 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
     // The chunk containing "alpha" should rank first (keyword match
     // plus the closest vector distance both point at chunk 0).
     assert_eq!(results[0].chunk.text, "alpha document");
-    // Each result should expose both subscores when both passes
-    // contribute (for chunk 0 they do).
+    // chunk 0 contributes a vector hit; only vector_score is asserted.
+    // The keyword subscore is not asserted in this test.
     assert!(results[0].vector_score.is_some());
 }
 
@@ -143,7 +150,9 @@ fn hybrid_recall_with_limit_zero_returns_empty() {
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
     let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let bundle_store = BundleStore::open(bundle_storage).expect("bundle store");
-    let bm25 = BM25Index::new(Arc::new(DeterministicTokenizer::new()));
+    // Empty inverted index (limit==0 returns before the keyword lane is consulted).
+    let inverted_index = InvertedIndexStore::open(Connection::open_in_memory().expect("conn"))
+        .expect("open inverted index");
     let probe = Engram::new(0, 0, 0, 0);
     let results = recall(
         &probe,
@@ -151,7 +160,7 @@ fn hybrid_recall_with_limit_zero_returns_empty() {
         "test-model",
         0,
         &vector_store,
-        &bm25,
+        &inverted_index,
         &bundle_store,
         HybridRecallConfiguration::default(),
     )
@@ -167,7 +176,9 @@ fn hybrid_recall_empty_corpus_returns_empty() {
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
     let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let bundle_store = BundleStore::open(bundle_storage).expect("bundle store");
-    let bm25 = BM25Index::new(Arc::new(DeterministicTokenizer::new()));
+    // Empty inverted index — no chunks ingested, corpus is empty.
+    let inverted_index = InvertedIndexStore::open(Connection::open_in_memory().expect("conn"))
+        .expect("open inverted index");
     let probe = Engram::new(0xFF, 0, 0, 0);
     let results = recall(
         &probe,
@@ -175,10 +186,50 @@ fn hybrid_recall_empty_corpus_returns_empty() {
         "test-model",
         5,
         &vector_store,
-        &bm25,
+        &inverted_index,
         &bundle_store,
         HybridRecallConfiguration::default(),
     )
     .expect("recall");
     assert!(results.is_empty());
+}
+
+// P3-secfix: UUID canonicalization fusion contract.
+//
+// HybridRecall::recall() processes vector hits (item_id: String, may be
+// uppercase from Apple-side exports) and keyword hits (Uuid-typed, always
+// lowercase via Uuid::to_string()). The P3 fix normalizes both through
+// Uuid::parse_str → to_string() so they share the same lowercase-hyphenated
+// key and fuse correctly. We verify the contract against fuse() directly:
+// the same UUID expressed in different cases must produce ONE FusedHit.
+#[test]
+fn uuid_case_mismatch_fuses_to_single_entry() {
+    use corpus_kit::{fuse, LaneTag};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    let id = Uuid::new_v4();
+    // Rust canonical = lowercase hyphenated (Uuid::to_string()).
+    let lower_id = id.to_string();
+    // Simulate a vector hit with an uppercase UUID string (e.g. from Apple).
+    let upper_id = lower_id.to_ascii_uppercase();
+
+    // Confirm that both parse to the same UUID and re-emit the same canonical
+    // lowercase form — that is what hybrid_recall.rs now does after P3-secfix.
+    let canonical_vec = Uuid::parse_str(&upper_id).unwrap().to_string();
+    let canonical_kw  = Uuid::parse_str(&lower_id).unwrap().to_string();
+    assert_eq!(canonical_vec, canonical_kw,
+        "UUID parse+to_string must yield the same lowercase key regardless of input case");
+
+    // Feed both through fuse() using their canonical keys.
+    // A single item seen in BOTH lanes must produce ONE FusedHit.
+    let mut ranked_lists = HashMap::new();
+    ranked_lists.insert(LaneTag::BinaryDense, vec![(canonical_vec.clone(), 1usize)]);
+    ranked_lists.insert(LaneTag::Sparse, vec![(canonical_kw.clone(), 1usize)]);
+    let weights = [(LaneTag::BinaryDense, 0.6f32), (LaneTag::Sparse, 0.4f32)]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let fused = fuse(&ranked_lists, None, &weights, 60.0);
+    assert_eq!(fused.len(), 1,
+        "same UUID in both lanes must fuse to exactly one FusedHit; got {:?}", fused);
 }

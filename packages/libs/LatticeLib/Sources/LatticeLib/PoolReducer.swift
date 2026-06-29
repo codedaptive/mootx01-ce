@@ -52,9 +52,9 @@
 //
 //   PoolReducer.reduce(poolDirectory:tableArtifactURL:now:) throws -> PoolReduceResult
 //
-// Recommended trigger host: the autonomic governor (GeniusLocusKit's scheduling
-// layer) should invoke this after a configurable idle window (e.g. 1 hour of
-// no new submissions). An operator CLI in ARIA_MCP or ARIA_MacOS can also call
+// Current trigger host: `NeuronKit.AutonomicGovernor` invokes this after
+// a configurable idle window, passing the novel-pool directory and table-
+// artifact URL. An operator CLI in ARIA_MCP or ARIA_MacOS can also call
 // it on demand. Do NOT wire this directly into the hot wordClass path —
 // reduction is a batch operation, not a per-token side effect.
 

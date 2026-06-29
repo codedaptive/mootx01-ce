@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.5.0
+version: 1.7.0
 status: active
-date: 2026-06-17
+date: 2026-06-25
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -72,6 +72,11 @@ This specification defines:
   reconstruction (`auditTrail`, `bitmapState`).
 - The `Manifest`/`ManifestValues` key-value contract and the
   `LocusKitSchema` registration handed to PersistenceKit.
+- The `Estate` consumer metadata surface (`meta`/`setMeta`) — the public,
+  durable, lowest-level key-value primitive over the manifest table that upper
+  layers persist their own state through (ADR-020). Consumers MUST namespace
+  keys to avoid collision with the typed v1 `ManifestKey` set; values survive
+  restarts (the manifest table is durable).
 - The Swift ⇄ Rust conformance obligation and the documented port gap.
 
 This specification does NOT define:
@@ -202,6 +207,18 @@ band records `confirmation` / `confidence` at birth rather than via a later
 `confirm` mutation or enrichment pass. The capture-time write windows match the
 drawer's `confirmation` / `confidence` read accessors exactly (round-trip +
 default-byte-identity conformance-gated in both ports).
+
+**B-1a (batch capture — single transaction):** `captureBatch` applies the same
+frame-validation rules as `capture` to every frame, then writes all fresh drawers
+(those whose `lineageID` has no active predecessor) inside a single
+`storage.transaction(isolation: .serializable)` via `DrawerStore.insertFreshBatch`.
+Frames whose `lineageID` matches an active predecessor are written per-item via
+`addDrawerCovered` (see B-2). Post-insert, `captureBatch` OR-folds coverage and
+updates Merkle roots for each fresh-batch drawer, identical to the per-item
+`capture` path. HLC timestamps are stamped before entering the transaction closure
+to comply with actor-isolation rules. Callers must invoke `moot_reindex` /
+`moot_dream` to rebuild BM25/vector lanes; batch import intentionally skips the
+encode queue.
 
 **B-2 (supersession cascade):** when `CaptureFrame.lineageID` matches an
 active predecessor, capture fires the cascade atomically inside one
@@ -859,6 +876,24 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.7.0 -- 2026-06-25
+Documented the `Estate` consumer metadata surface (`meta`/`setMeta`): the public,
+durable, lowest-level key-value primitive over the manifest table that upper
+layers (e.g. NeuronKit's dreaming/maintenance daemons) persist their own state
+through, rather than reaching around the substrate to a host-owned store
+(Interface Rules; resolves the "future verb surface" the manifest accessor
+anticipated). See ADR-020 and `LOCUSKIT_INTERFACE.md` 1.11.0. Additive, both ports.
+
+### 1.6.0 -- 2026-06-22
+GLK_BATCH1: Added `B-1a (batch capture — single transaction)` behavioral clause.
+`Estate.captureBatch(_:)` writes all fresh-lineage drawers in a single
+`storage.transaction(isolation: .serializable)` via `DrawerStore.insertFreshBatch`,
+avoiding the nested-transaction conflict (`StorageError.transactionConflict`) that
+arises when per-row `capture()` is called inside a `rowStore.beginTransaction()`
+block on a SQLite backend. Frames with an active predecessor fall back to per-item
+`addDrawerCovered`. Post-insert coverage and Merkle root rollup match the
+single-item `capture` path.
 
 ### 1.5.0 -- 2026-06-17
 Expanded contract B-1: `capture` now assembles the provenance bitmap (cookbook

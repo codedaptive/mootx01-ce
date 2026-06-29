@@ -126,8 +126,7 @@ private func drawer(
     return Drawer(
         id: id,
         content: "content",
-        wing: "w",
-        room: "r",
+        parentNodeId: "test-room-node",
         addedBy: "test",
         filedAt: filedAt,
         embeddingModelID: "",
@@ -205,7 +204,7 @@ struct MaintenanceDaemonTests {
             active: [forbidden, decayed],
             tombstoned: [tomb],
             references: [LearnedReferenceObservation(referenceRowID: "ref-1", sourceDriftFraction: 0.5)],
-            fingerprints: [FingerprintDriftObservation(scopeKey: "wing_a/room_b", driftFraction: 0.5)],
+            fingerprints: [FingerprintDriftObservation(scopeKey: "node-room-1", nodeId: "node-room-1", driftFraction: 0.5)],
             auditLog: cleanAuditLog()
         )
         let sink = RecordingSink()
@@ -323,7 +322,7 @@ struct MaintenanceDaemonTests {
             active: [forbidden, decayed],
             tombstoned: [tomb],
             references: [LearnedReferenceObservation(referenceRowID: "ref-1", sourceDriftFraction: 0.5)],
-            fingerprints: [FingerprintDriftObservation(scopeKey: "wing_a/room_b", driftFraction: 0.5)],
+            fingerprints: [FingerprintDriftObservation(scopeKey: "node-room-1", nodeId: "node-room-1", driftFraction: 0.5)],
             auditLog: cleanAuditLog()
         )
         let sink = RecordingSink()
@@ -417,7 +416,8 @@ struct MaintenanceDaemonTests {
         let pendingA = Drawer(
             id: "qid-pending-a",
             content: "",
-            wing: "w", room: "r", addedBy: "test",
+            parentNodeId: "test-room-node",
+            addedBy: "test",
             filedAt: t0,
             embeddingModelID: "",
             tombstonedAt: nil,
@@ -427,7 +427,8 @@ struct MaintenanceDaemonTests {
         let pendingB = Drawer(
             id: "qid-pending-b",
             content: "",
-            wing: "w", room: "r", addedBy: "test",
+            parentNodeId: "test-room-node",
+            addedBy: "test",
             filedAt: t0,
             embeddingModelID: "",
             tombstonedAt: nil,
@@ -473,7 +474,8 @@ struct MaintenanceDaemonTests {
             Drawer(
                 id: "qid-drawer-\(i)",
                 content: "drawer content \(i)",
-                wing: "w", room: "r", addedBy: "test",
+                parentNodeId: "test-room-node",
+                addedBy: "test",
                 filedAt: t0,
                 embeddingModelID: "",
                 tombstonedAt: nil,
@@ -523,7 +525,8 @@ struct MaintenanceDaemonTests {
         let pendingDrawer = Drawer(
             id: "qid-resolve-test",
             content: "mathematics",
-            wing: "w", room: "r", addedBy: "test",
+            parentNodeId: "test-room-node",
+            addedBy: "test",
             filedAt: t0,
             embeddingModelID: "",
             tombstonedAt: nil,
@@ -571,7 +574,8 @@ struct MaintenanceDaemonTests {
             Drawer(
                 id: "qid-cap-test-\(i)",
                 content: "",
-                wing: "w", room: "r", addedBy: "test",
+                parentNodeId: "test-room-node",
+                addedBy: "test",
                 filedAt: t0,
                 embeddingModelID: "",
                 tombstonedAt: nil,
@@ -602,7 +606,8 @@ struct MaintenanceDaemonTests {
         let pendingDrawer = Drawer(
             id: "qid-diary-test",
             content: "",
-            wing: "w", room: "r", addedBy: "test",
+            parentNodeId: "test-room-node",
+            addedBy: "test",
             filedAt: t0,
             embeddingModelID: "",
             tombstonedAt: nil,
@@ -643,4 +648,44 @@ struct MaintenanceDaemonTests {
         let second = try await d.pump(now: t0.addingTimeInterval(300))
         #expect(second != nil, "tick fires once the interval has elapsed")
     }
+
+    // MARK: - ADR-017 node invariant verification
+
+    @Test("node invariant: consistent drawers produce zero violations")
+    func nodeInvariantConsistentDrawersZeroViolations() async throws {
+        let reader = FakeReader(active: [
+            drawer(id: "d-1", filedAt: t0),
+            drawer(id: "d-2", filedAt: t0),
+        ])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+        try await d.registerMaintenancePolicy(decayWindowSeconds: 999_999)
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+        #expect(report.nodeInvariantViolations == 0)
+        #expect(report.diaryEntry.entry.contains("node-invariant-violations 0"))
+    }
+
+    @Test("node invariant: empty parentNodeId triggers I-NT-3 violation")
+    func nodeInvariantEmptyParentNodeId() async throws {
+        let orphan = Drawer(
+            id: "d-orphan",
+            content: "orphan",
+            parentNodeId: "",
+            addedBy: "test",
+            filedAt: t0,
+            embeddingModelID: "",
+            tombstonedAt: nil,
+            adjectiveBitmap: 0
+        )
+        let reader = FakeReader(active: [
+            drawer(id: "d-ok", filedAt: t0),
+            orphan,
+        ])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+        try await d.registerMaintenancePolicy(decayWindowSeconds: 999_999)
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+        #expect(report.nodeInvariantViolations >= 1)
+    }
+
 }

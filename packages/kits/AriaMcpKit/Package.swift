@@ -99,6 +99,12 @@ let package = Package(
         // dep here. App → kit layering (downstream→upstream), no inversion.
         // Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
         .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
+        // QueueKit: DreamRunnerTests import DrainLease directly to test the stampede-
+        // prevention lease predicate (test 4). QueueKit is a transitive dep via
+        // GeniusLocusKit, but SPM requires explicit product declarations for test
+        // targets that import a product directly. Test-only dep; no layering inversion.
+        // Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        .package(name: "QueueKit", path: "../QueueKit"),
     ],
     targets: [
         .target(
@@ -181,6 +187,10 @@ let package = Package(
                 // RowState.cluster classifier (the substrate primitive the
                 // runner now derives the active/retired partition from).
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                // QueueKit: DreamRunnerTests import DrainLease to test the stampede-
+                // prevention predicate (test 4 — second dreamer must stand down while
+                // first holds a fresh lease). T10 / ADR-021 Phase 5 dream path.
+                .product(name: "QueueKit", package: "QueueKit"),
             ],
             path: "Tests/AriaMCPTests"
         ),

@@ -152,9 +152,10 @@ impl DirtySet {
 
     /// Record a change for replication.
     ///
-    /// Inserts and updates both dirty the row. Deletes are recorded as a
-    /// tombstone sentinel (same DirtyKey) — the sync path issues a delete
-    /// on the destination for the given PK when the re-scan finds no row.
+    /// Inserts, updates, and deletes all add the same DirtyKey — there is no
+    /// tombstone sentinel type. At sync time the re-scan determines intent:
+    /// if the source row is absent, the sync path issues a delete on the
+    /// destination for the given PK.
     ///
     /// If the TableChange's values dict does not contain all PK columns,
     /// the change is silently skipped (defensive; a conforming backend always
@@ -434,12 +435,12 @@ impl IncrementalReplicationSession {
         destination: &dyn Storage,
         from_cursor: ReplicationCursor,
     ) -> Result<ReplicationCursor, ReplicationError> {
-        // Schema gate: both backends must be at the same schema version.
+        // Schema gate: both backends must be at the same per-kit schema version.
         let src_version = source
-            .current_schema_version()
+            .current_schema_version_for(&self.schema.kit_id)
             .map_err(ReplicationError::from)?;
         let dst_version = destination
-            .current_schema_version()
+            .current_schema_version_for(&self.schema.kit_id)
             .map_err(ReplicationError::from)?;
         if src_version != dst_version || src_version != self.schema.version {
             return Err(ReplicationError::SchemaMismatch {
@@ -725,10 +726,10 @@ mod incremental_replication_tests {
         let items_table = TableDeclaration {
             name: "items".into(),
             columns: vec![
-                ColumnDeclaration { name: "id".into(), column_type: ColumnType::Uuid, nullable: false, default_value: None },
-                ColumnDeclaration { name: "adjective_bitmap".into(), column_type: ColumnType::Bitmap, nullable: false, default_value: None },
-                ColumnDeclaration { name: "payload".into(), column_type: ColumnType::Blob, nullable: false, default_value: None },
-                ColumnDeclaration { name: "tombstoned_at".into(), column_type: ColumnType::Timestamp, nullable: true, default_value: None },
+                ColumnDeclaration { name: "id".into(), column_type: ColumnType::Uuid, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "adjective_bitmap".into(), column_type: ColumnType::Bitmap, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "payload".into(), column_type: ColumnType::Blob, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "tombstoned_at".into(), column_type: ColumnType::Timestamp, nullable: true, default_value: None, role: None },
             ],
             primary_key: vec!["id".into()],
             unique_constraints: vec![],
@@ -741,20 +742,22 @@ mod incremental_replication_tests {
                 ),
             }],
             append_only: false,
+            hashable: false,
         };
 
         let events_table = TableDeclaration {
             name: "events".into(),
             columns: vec![
-                ColumnDeclaration { name: "topic_id".into(), column_type: ColumnType::Uuid, nullable: false, default_value: None },
-                ColumnDeclaration { name: "seq".into(), column_type: ColumnType::Int, nullable: false, default_value: None },
-                ColumnDeclaration { name: "hlc_stamp".into(), column_type: ColumnType::Hlc, nullable: false, default_value: None },
-                ColumnDeclaration { name: "content".into(), column_type: ColumnType::Text, nullable: false, default_value: None },
+                ColumnDeclaration { name: "topic_id".into(), column_type: ColumnType::Uuid, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "seq".into(), column_type: ColumnType::Int, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "hlc_stamp".into(), column_type: ColumnType::Hlc, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "content".into(), column_type: ColumnType::Text, nullable: false, default_value: None, role: None },
             ],
             primary_key: vec!["topic_id".into(), "seq".into()],
             unique_constraints: vec![],
             generated_columns: vec![],
             append_only: true,
+            hashable: false,
         };
 
         SchemaDeclaration {

@@ -80,10 +80,9 @@ struct AprioriMiningTests {
 
     @Test("lift threshold filters anti-correlated rules")
     func liftThreshold() {
-        // Three items each appearing in 1/3 of rows but never together:
-        // lift = (1/3) / (1/3 * 1/3) = 3 > 1... actually if they appear
-        // in the same rows, lift varies. Use independent items:
-        // A in rows 0,1; B in rows 2,3; no co-occurrence → no 2-itemsets.
+        // Two items, each appearing in 2/4 rows but never together:
+        // A (item 0,1) in rows 0,1; B (item 0,2) in rows 2,3.
+        // No co-occurrence → no 2-itemsets → no rules.
         let rows = [
             row((0, 1)),
             row((0, 1)),
@@ -229,7 +228,8 @@ struct AprioriMiningTests {
         )
         let rules = AprioriMining.mine(rows: rows, thresholds: thresholds)
 
-        // All 2-item and 3-item antecedent rules should appear.
+        // Only 2-item antecedent rules can appear (a 3-item antecedent
+        // would require a 4-itemset, which this fixture doesn't have).
         // 2-item antecedent rules (from 3-itemset {A,B,C}):
         //   {A,B}→C, {A,C}→B, {B,C}→A
         let twoAntecedentRules = rules.filter { $0.antecedent.count == 2 }

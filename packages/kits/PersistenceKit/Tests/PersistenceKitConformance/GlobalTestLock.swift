@@ -19,7 +19,7 @@
 //
 //   An actor's withLock pattern would NOT work here because Swift actors
 //   use cooperative multitasking — a suspension point inside the actor
-//   releases its isolation, allowing re-entry. This class uses a FIFO
+//   releases its isolation, allowing re-entry. This actor uses a FIFO
 //   continuation-queue mutex: the lock is encoded in `isHeld`/`waiters`
 //   state, not in actor isolation.
 //

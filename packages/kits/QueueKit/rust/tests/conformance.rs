@@ -186,3 +186,53 @@ fn area4_concurrent_claim_filesystem() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// -------------------------------------------------------------
+// File-mode verification: queue files must be 0600.
+//
+// Queue files carry encoded job payloads that may include sensitive
+// content from the estate. World-readable (0644) permissions are a
+// defense-in-depth failure. This test writes one job and verifies
+// that the file in the `new/` maildir slot has exactly mode 0o600.
+// Compiled only on Unix targets; Windows has no equivalent octal
+// permission model.
+// -------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn queue_files_created_with_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir()
+        .join(format!("queuekit-mode-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).unwrap();
+
+    let backend = FilesystemBackend::new(&dir, 1).unwrap();
+    let job = Job {
+        id: JobId("mode-check-job".to_string()),
+        stream_id: StreamId("mode-check".to_string()),
+        submitted_at: HLC { physical_time: 1_700_000_000_000, logical_count: 0, node_id: 1 },
+        priority: 50,
+        payload: b"mode-test".to_vec(),
+        extensions: Map::new(),
+    };
+    backend.write(&job).unwrap();
+
+    // Exactly one file should be in new/ after a single write.
+    let new_dir = dir.join("new");
+    let entries: Vec<_> = fs::read_dir(&new_dir).unwrap().collect();
+    assert_eq!(entries.len(), 1, "Expected exactly one file in new/ after write");
+
+    let entry = entries.into_iter().next().unwrap().unwrap();
+    let meta = fs::metadata(entry.path()).unwrap();
+    // Mode 0o100600: regular file (0o100000) + owner r/w (0o600).
+    // Mask off the file-type bits — keep only the 12 permission bits.
+    let mode = meta.permissions().mode() & 0o7777;
+    assert_eq!(
+        mode, 0o600,
+        "Queue file mode was 0o{:o} — expected 0o600 (owner r/w only)",
+        mode
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

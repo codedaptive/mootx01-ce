@@ -261,7 +261,7 @@ struct SolverBanditDaemonWiringTests {
 
     private actor FakeReader: DreamingSubstrateReader {
         func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem] { [] }
-        func coOccurrenceObservations() async throws -> [CoOccurrenceObservation] { [] }
+        func drainDreamingWindow() async throws -> [[String]] { [] }
         func existingTunnels() async throws -> [Tunnel] { [] }
     }
 

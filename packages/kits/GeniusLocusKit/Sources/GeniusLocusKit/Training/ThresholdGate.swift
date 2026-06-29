@@ -16,12 +16,14 @@
 // Transition counting. "Transitions" are state-changing audit verbs
 // in the unified audit log: `capture`, `mutate`, `withdraw`, `expunge`,
 // `reanchor`. Pure-read verbs (`recall`, `propose`, `associate`,
-// `learn`, `dreamCompact`, `migrate`) are intentionally excluded —
-// they do not advance the substrate's row state, so they should not
-// move the daemon toward activation. This is the same partition the
-// matrix tier uses in `MatrixTier.rebuild` to decide which entries
-// feed F / O updates, kept consistent here so a calibrated threshold
-// against the audit log matches the cells the matrices will see.
+// `learn`, `dreamCompact`, `migrate`) and federation/key-custody verbs
+// (`grantIssued`, `grantRevoked`, `keyDecayed`, `physicalKeyDecayed`)
+// are intentionally excluded — they do not advance the substrate's row
+// state, so they should not move the daemon toward activation. This is
+// the same partition the matrix tier uses in `MatrixTier.rebuild` to
+// decide which entries feed F / O updates, kept consistent here so a
+// calibrated threshold against the audit log matches the cells the
+// matrices will see.
 //
 // Wall-clock age is **not** part of the gate. The decision record
 // explicitly downgrades age and row count to secondary signals; this

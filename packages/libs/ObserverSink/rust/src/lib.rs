@@ -11,10 +11,11 @@
 //!
 //! ## Schema (mirrors Swift port exactly)
 //!
-//! Three tables:
-//! - `metric_samples`: metric observations (name, value, tags-JSON, ts TEXT, dropbox_id)
-//! - `event_samples`:  topology events (kind, noun_type, estate_row_id, estate, ts TEXT, dropbox_id)
-//! - `control`:        global monitoring flag + retention metadata (key-value TEXT pairs)
+//! Four tables (v2):
+//! - `metric_samples`:       metric observations (name, value, tags-JSON, ts TEXT, dropbox_id)
+//! - `event_samples`:        topology events (kind, noun_type, estate_row_id, estate, ts TEXT, dropbox_id)
+//! - `control`:              global monitoring flag + retention metadata (key-value TEXT pairs)
+//! - `topology_snapshots`:   one row per estate, latest-wins upsert (estate PK, generated_at TEXT, payload TEXT)
 //!
 //! All timestamps are TEXT (ISO-8601 UTC). The `ts: f64` (epoch seconds) from
 //! `StatSample` is converted at the store boundary. No REAL timestamp columns exist.

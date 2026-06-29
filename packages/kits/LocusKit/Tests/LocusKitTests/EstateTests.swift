@@ -159,6 +159,36 @@ struct EstateTests {
         #expect(manifest.bitmapLayoutVersion == "v1.0")
     }
 
+    /// The public consumer key-value surface (`setMeta`/`meta`) round-trips a
+    /// namespaced value, and it survives close + reopen (the manifest table is
+    /// durable). This is the substrate-owned persistence primitive upper layers
+    /// (e.g. NeuronKit's daemons) use instead of a host-owned store.
+    @Test("Estate.setMeta/meta round-trips a namespaced value across reopen")
+    func metaRoundTripsAcrossReopen() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+
+        let key = "neuronkit.dreaming.policy"
+        let value = #"{"minConfidence":0.7}"#
+
+        do {
+            let estate = try await Estate.create(storage: TestStorage.sqlite(url), owner: testOwner)
+            // Absent before first write.
+            let before = try await estate.meta(key: key)
+            #expect(before == nil)
+            try await estate.setMeta(key: key, value: value)
+            let after = try await estate.meta(key: key)
+            #expect(after == value)
+            try? await estate.close()
+        }
+
+        // Reopen the same database — the value persisted.
+        let reopened = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        defer { Task { try? await reopened.close() } }
+        let restored = try await reopened.meta(key: key)
+        #expect(restored == value, "Consumer manifest value must survive a restart")
+    }
+
     /// A database whose manifest was hand-seeded with an
     /// unrecognised `bitmap_layout_version` must refuse to open.
     /// Estate's open validates the layout compatibility and throws

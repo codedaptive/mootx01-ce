@@ -58,8 +58,7 @@ private func sampleDrawer(id: String) -> Drawer {
     Drawer(
         id: TestStorage.tid(id),
         content: "manifest-uuid test content",
-        wing: "w",
-        room: "r",
+        parentNodeId: "test-parent",
         addedBy: "test",
         filedAt: t(1_700_000_000),
         embeddingModelID: "test-v1",

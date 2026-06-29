@@ -3,13 +3,13 @@ import GeniusLocusKit
 import LocusKit
 import NeuronKit
 
-/// One room's dismissal rate — withdrawn / (active + withdrawn), the
-/// enacted "bias against."
+/// One parentNodeId's dismissal rate — withdrawn / (active + withdrawn),
+/// the enacted "bias against."
 public struct DismissalRate: Sendable, Equatable, Codable {
-    public let room: String
+    public let nodeId: String
     public let rate: Double
-    public init(room: String, rate: Double) {
-        self.room = room
+    public init(nodeId: String, rate: Double) {
+        self.nodeId = nodeId
         self.rate = rate
     }
 }
@@ -20,9 +20,10 @@ public struct BiasReport: Sendable {
     public let biasedFor: [CategoryBias]
     /// Under-represented / avoided rooms (bias < 0), most-avoided last.
     public let biasedAgainst: [CategoryBias]
-    /// Per-room withdrawal rate, most-dismissed first (ties by room).
+    /// Per-parentNodeId withdrawal rate, most-dismissed first (ties by
+    /// ascending nodeId).
     public let dismissal: [DismissalRate]
-    /// Learned preference per room (Bradley-Terry over confirmations as
+    /// Learned preference per parentNodeId (Bradley-Terry over confirmations as
     /// endorsements and withdrawals as dismissals), re-centered on
     /// neutral — strongest first. `strength > 0` = preferred by
     /// curation, `< 0` = disfavored, `≈ 0` = no curation signal yet.
@@ -75,10 +76,10 @@ public enum Bias {
         LocusKit.RecallFrame(filterChain: [.userConfirmed, .state(.active)])
     }
 
-    /// Room → drawer count over a recalled set.
+    /// ParentNodeId → drawer count over a recalled set.
     private static func roomCounts(_ drawers: [Drawer]) -> [String: Double] {
         drawers.reduce(into: [:]) { counts, drawer in
-            counts[drawer.room, default: 0] += 1
+            counts[drawer.parentNodeId, default: 0] += 1
         }
     }
 
@@ -96,25 +97,25 @@ public enum Bias {
         let withdrawn = try await kit.recall(handle, frame(for: .withdrawn))
 
         let activeByRoom = roomCounts(active)
-        // Sorted room keys ⇒ a deterministic category order (same
-        // discipline as the Rust BTree walk).
+        // Sorted parentNodeId keys ⇒ a deterministic category order
+        // (same discipline as the Rust BTree walk).
         let activeCounts = activeByRoom.keys.sorted().map { (label: $0, mass: activeByRoom[$0]!) }
         let biases = NeuronKit.representationBias(estate: activeCounts, reference: reference)
         let biasedFor = biases.filter { $0.bias > 0 }
         let biasedAgainst = biases.filter { $0.bias < 0 }
 
-        // Dismissal: withdrawn / (active + withdrawn) per room —
-        // most-dismissed first, ties by ascending room.
+        // Dismissal: withdrawn / (active + withdrawn) per parentNodeId
+        // — most-dismissed first, ties by ascending nodeId.
         let withdrawnByRoom = roomCounts(withdrawn)
         let dismissal = withdrawnByRoom
-            .map { room, withdrawnCount in
+            .map { nodeId, withdrawnCount in
                 DismissalRate(
-                    room: room,
-                    rate: withdrawnCount / ((activeByRoom[room] ?? 0) + withdrawnCount))
+                    nodeId: nodeId,
+                    rate: withdrawnCount / ((activeByRoom[nodeId] ?? 0) + withdrawnCount))
             }
             .sorted { a, b in
                 if a.rate != b.rate { return a.rate > b.rate }
-                return a.room < b.room
+                return a.nodeId < b.nodeId
             }
 
         // Learned preference: per-room curation record (confirmations as

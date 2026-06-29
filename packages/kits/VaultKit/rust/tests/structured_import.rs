@@ -11,11 +11,8 @@
 //!     not just the leaf.
 //!
 //! Corrupt/unmappable structure must error loudly; the note must NOT be
-//! silently dropped (fail-loud discipline). Existing VaultKit Rust suite
-//! must stay at baseline (84 tests) plus these new ones.
-//!
-//! Shared fixture semantics: same note shape as
-//! Swift `VaultBridgeTests.structuredNote`.
+//! silently dropped (fail-loud discipline). Mirrors the fail-loud structured
+//! import behavior of Swift `VaultBridgeTests.structuredNote`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -28,6 +25,7 @@ use locus_kit::{
     estate_types::OwnerCredentials,
 };
 use vault_kit::{Block, DrawerMapping, FactIR, NoteIR};
+use vault_kit::drawer_mapping::resolve_drawer_node_names;
 
 /// Fixed operation instant so tests are deterministic.
 const NOW: i64 = 1_765_000_000_000; // ms-since-epoch
@@ -51,7 +49,7 @@ fn open_one() -> (EstateCoordinator, EstateHandle) {
 ///   - pathComponents = ["projects", "alpha"] (2 levels)
 ///   - kind = "note"
 fn structured_note() -> NoteIR {
-    let mut frontmatter = HashMap::new();
+    let frontmatter = HashMap::new();
     // No explicit room key — forces path_components resolution.
 
     let facts = vec![
@@ -102,6 +100,10 @@ fn import_structured(
     // Empty content map: no prior content to compare against (first import).
     let existing_content_by_lineage: std::collections::HashMap<uuid::Uuid, String> =
         std::collections::HashMap::new();
+    // Empty stableSourceKey map: first import, no prior export paths recorded.
+    // Guard cannot fire when existing_lineage_ids is empty.
+    let existing_stable_source_key_by_lineage: std::collections::HashMap<uuid::Uuid, String> =
+        std::collections::HashMap::new();
     let mut existing_tunnel_sigs: HashSet<String> = HashSet::new();
     mapping
         .import_note(
@@ -112,6 +114,7 @@ fn import_structured(
             &existing_sensitivity,
             &tombstoned_lineage_ids,
             &existing_content_by_lineage,
+            &existing_stable_source_key_by_lineage,
             &mut existing_tunnel_sigs,
             NOW,
         )
@@ -216,8 +219,10 @@ fn structured_import_hierarchy_as_full_room_path() {
         .expect("recall");
     assert_eq!(drawers.len(), 1, "exactly one drawer must be created");
     let drawer = &drawers[0];
+    let node_names = resolve_drawer_node_names(&coord, &handle, &drawers);
+    let (_, room) = node_names.get(&drawer.parent_node_id).cloned().unwrap_or_default();
     assert_eq!(
-        drawer.room, "projects/alpha",
+        room, "projects/alpha",
         "multi-level path_components must produce full room path, not just the leaf 'alpha'"
     );
 }
@@ -271,8 +276,6 @@ fn import_filed_at_is_epoch_seconds_not_millis() {
 /// ExchangeAdapterTests.droppedFieldsAreRecorded.
 #[test]
 fn structured_import_facts_and_scope_not_in_fields_dropped() {
-    use vault_kit::{ObsidianAdapter, VaultAdapter, VaultBridge};
-
     let (mut coord, handle) = open_one();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
 
@@ -322,8 +325,10 @@ fn frontmatter_room_wins_over_path_components() {
         )
         .expect("recall");
     assert_eq!(drawers.len(), 1);
+    let node_names = resolve_drawer_node_names(&coord, &handle, &drawers);
+    let (_, room) = node_names.get(&drawers[0].parent_node_id).cloned().unwrap_or_default();
     assert_eq!(
-        drawers[0].room, "explicit-room",
+        room, "explicit-room",
         "frontmatter room must override path_components"
     );
 }
@@ -354,8 +359,10 @@ fn single_component_path_uses_leaf_as_room() {
         )
         .expect("recall");
     assert_eq!(drawers.len(), 1);
+    let node_names = resolve_drawer_node_names(&coord, &handle, &drawers);
+    let (_, room) = node_names.get(&drawers[0].parent_node_id).cloned().unwrap_or_default();
     assert_eq!(
-        drawers[0].room, "inbox",
+        room, "inbox",
         "single-component path_components must use that component as room"
     );
 }
@@ -530,7 +537,7 @@ fn kind_note_produces_no_kg_fact() {
 /// Mirrors Swift `VaultBridgeTests.fieldsDroppedEmptyForFullyStructuredNote`.
 #[test]
 fn fields_dropped_empty_for_fully_structured_note() {
-    use vault_kit::{ExchangeAdapter, VaultAdapter, VaultBridge};
+    use vault_kit::{ExchangeAdapter, VaultBridge};
 
     // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake
     // fix — import_notes routes through capture_with_mode, G7).
@@ -543,7 +550,7 @@ fn fields_dropped_empty_for_fully_structured_note() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../Tests/VaultKitTests/Fixtures/exchange_export_golden.json");
     let report = bridge
-        .import_vault(&fixture_path, &handle, NOW)
+        .import_vault(&fixture_path, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
         .expect("import must succeed");
     assert!(
         report.fields_dropped.is_empty(),

@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-20
 description: "Behavioral specification for SubstrateTypes: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -88,6 +88,21 @@ This specification defines:
   `Hamming`, `SimHash`, `ORReduce`, `BitwiseArithmetic`, `FNV`. These
   carry the scalar arithmetic; the hardware-dispatched fast paths
   live in SubstrateKernel.
+- The content hash (`ContentHash`) — a typed 32-byte SHA-256 digest
+  of a leaf payload, semantically distinct from `MerkleRoot`.
+  ADR-017 §16.
+- The Merkle root (`MerkleRoot`) — a typed 32-byte hash of an
+  interior node's children, semantically distinct from `ContentHash`.
+  ADR-017 §16.
+- The snapshot identifier (`SnapshotId`) — a typed UUID wrapper for
+  the snapshot registry. ADR-017 §15.
+- The temporal query coordinate (`AsOfCoordinate`) — a discriminated
+  `.present` / `.asOf(HLC)` value that prevents zero-HLC ambiguity
+  in as-of reads. ADR-017 §15–§17.
+- The Merkle domain-separation tags (`MerkleDomain`) — four frozen
+  one-byte constants (`LEAF`, `INTERIOR`, `TOMBSTONE`, `COMMITMENT`)
+  prepended before hashing to prevent cross-domain collisions.
+  ADR-017 §16.
 
 This specification does NOT define:
 
@@ -260,6 +275,51 @@ every input.
 The reference implementations are bit-identical across ports per
 I-7 and gated by conformance vectors (cookbook §17.6, M8).
 
+### § 5.8 ContentHash
+
+`ContentHash` is a typed 32-byte SHA-256 digest of a leaf payload
+(drawer content + vectors). It is semantically distinct from
+`MerkleRoot` — the type system prevents mixing them.
+
+The `tombstone` sentinel is the SHA-256 of the bare TOMBSTONE domain
+tag byte (0x02). Per the I-25 layering constraint it is stored as a
+byte literal in SubstrateTypes; a SubstrateKernel bridge test verifies
+the literal matches the runtime computation. The sentinel is
+byte-identical across Swift and Rust.
+
+### § 5.9 MerkleRoot
+
+`MerkleRoot` is a typed 32-byte hash of an interior node's children.
+It summarizes a subtree (room, wing, or estate), not a single
+payload.
+
+The `empty` sentinel is the SHA-256 of the bare INTERIOR domain tag
+byte (0x01) — a node with zero live children. Per the I-25 layering
+constraint it is stored as a byte literal. The sentinel is
+byte-identical across Swift and Rust.
+
+### § 5.10 SnapshotId
+
+`SnapshotId` is a UUID wrapper for the snapshot registry. It prevents
+accidental substitution of drawer, node, or estate identifiers at
+the type level.
+
+### § 5.11 AsOfCoordinate
+
+`AsOfCoordinate` is a discriminated value for temporal reads:
+`.present` means the live state; `.asOf(hlc)` means the state at
+that HLC. The discriminant prevents the class of bug where a zero HLC
+is passed meaning "present" and the temporal filter interprets it as
+the epoch. `.present` and `.asOf(HLC.zero)` are always distinct.
+
+### § 5.12 MerkleDomain
+
+`MerkleDomain` carries the four frozen domain-separation tag
+constants: `LEAF` (0x00), `INTERIOR` (0x01), `TOMBSTONE` (0x02),
+`COMMITMENT` (0x03). These are one-byte prefixes prepended before
+hashing to prevent cross-domain collisions. Values are conformance-
+frozen by the NT-P0 bakeoff and must be byte-identical across ports.
+
 ## § 6 — Error model (conceptual)
 
 Errors raised by SubstrateTypes are limited to:
@@ -272,6 +332,9 @@ Errors raised by SubstrateTypes are limited to:
   carries no separate overflow error.
 - `RowStateError`: re-raised by `RowStateAutomaton` in SubstrateLib;
   the enumeration lives here.
+- `ContentHashError`: invalid hex length or character on decode.
+- `MerkleRootError`: invalid hex length or character on decode.
+- `SnapshotIdError`: invalid UUID string on decode.
 
 No I/O errors, no allocation errors beyond what the standard library
 raises, no concurrency errors (the package has no concurrent state).
@@ -300,6 +363,9 @@ Rust output for the same input, or between either port and the
 shared expectation — fails the conformance gate.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-20
+Added five new types for ADR-017 content-integrity and snapshots: ContentHash (§5.8), MerkleRoot (§5.9), SnapshotId (§5.10), AsOfCoordinate (§5.11), MerkleDomain (§5.12). Added three new error types to §6: ContentHashError, MerkleRootError, SnapshotIdError.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

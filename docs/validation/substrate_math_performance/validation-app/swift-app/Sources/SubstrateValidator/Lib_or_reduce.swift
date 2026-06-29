@@ -2,10 +2,8 @@
 //
 // Lib-side conformance CRC for the `or_reduce` primitive (cookbook
 // §8.5). Computes the canonical CRC by calling the SHIPPING libs —
-// SubstrateTypes.ORReduce for the pair-at-a-time cases and the
-// SubstrateKernel PortableKernel's orReduceBatch for the batched
-// cases — not the glref reference, so the validator can report
-// lib-vs-glref drift on OR-reduction.
+// Uses `ORReduce.reduce` per batch — no kernel instance needed for the
+// lib-side CRC because cross-kernel agreement is handled by subsystem 2.
 //
 // Byte mechanism mirrors Harness ORReducePrimitive.validateCase
 // exactly. The vector file mixes two case shapes; we dispatch on the

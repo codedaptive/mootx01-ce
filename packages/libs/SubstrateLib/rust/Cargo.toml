@@ -45,7 +45,7 @@ simd-nightly = ["substrate-kernel/simd-nightly"]
 # field mappings; F16.B (AuditValue / AuditEntry / GSetAuditLog)
 # is deferred pending a wire-format design decision for enums
 # with associated values.
-serde-support = ["dep:serde", "dep:serde_repr", "dep:serde-big-array"]
+serde-support = ["dep:serde", "dep:serde_repr", "dep:serde-big-array", "substrate-types/serde-support"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }

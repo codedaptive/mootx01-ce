@@ -28,11 +28,12 @@ struct LatentThemesTests {
         return (kit, handle)
     }
 
+    @discardableResult
     private func capture(
         _ kit: GeniusLocusKit, _ handle: EstateHandle,
         room: String, kind: ContentKind, channel: CaptureChannel,
         sensitivity: AdjectiveSensitivity
-    ) async throws {
+    ) async throws -> Drawer {
         var frame = CaptureFrame(
             content: "content",
             channel: channel,
@@ -42,7 +43,7 @@ struct LatentThemesTests {
             embeddingModelID: "test-v1")
         frame.kind = kind
         frame.sensitivity = sensitivity
-        _ = try await kit.capture(handle, frame)
+        return try await kit.capture(handle, frame)
     }
 
     /// Admit elevated rows too — recall defaults to a normal sensitivity
@@ -66,13 +67,17 @@ struct LatentThemesTests {
     @Test("two disjoint filing regimes separate into two themes")
     func twoRegimesSeparateIntoThemes() async throws {
         let (kit, handle) = try await openEstate()
+        var studyNodeId = ""
         for _ in 0..<3 {
-            try await capture(kit, handle, room: "study",
+            let d = try await capture(kit, handle, room: "study",
                               kind: .prose, channel: .typed, sensitivity: .normal)
+            studyNodeId = d.parentNodeId
         }
+        var workNodeId = ""
         for _ in 0..<3 {
-            try await capture(kit, handle, room: "work",
+            let d = try await capture(kit, handle, room: "work",
                               kind: .code, channel: .voiced, sensitivity: .elevated)
+            workNodeId = d.parentNodeId
         }
 
         let themes = try await LatentThemesLens.run(
@@ -80,9 +85,9 @@ struct LatentThemesTests {
 
         #expect(themes.k == 2)
         // The study/prose field-values cluster together, distinct from work/code.
-        let study = try dominant(themes, "room:study")
+        let study = try dominant(themes, "room:\(studyNodeId)")
         #expect(try dominant(themes, "kind:prose") == study, "study & prose share a theme")
-        let work = try dominant(themes, "room:work")
+        let work = try dominant(themes, "room:\(workNodeId)")
         #expect(try dominant(themes, "kind:code") == work, "work & code share a theme")
         #expect(study != work, "the two filing regimes are different latent themes")
     }

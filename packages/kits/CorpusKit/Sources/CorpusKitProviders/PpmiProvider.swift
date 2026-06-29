@@ -227,6 +227,12 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         for (i, target) in terms.enumerated() {
             let lo = max(0, i - window)
             let hi = min(terms.count - 1, i + window)
+            // Guard: a negative `window` makes lo > hi (e.g. window = -5,
+            // i = 3 → lo = 8, hi = -2). The closed range lo...hi traps when
+            // lo > hi. Skip the context loop entirely — a negative window
+            // means "no context", producing no co-occurrence counts but not
+            // crashing. Mirrors the identical guard in RandomIndexingProvider.
+            if hi < lo { continue }
             for j in lo...hi where j != i {
                 let context = terms[j]
                 // Increment co-occurrence count.
@@ -373,6 +379,27 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         return await ppmiContextVector(for: text)
     }
 
+    /// Produce the engram AND the normalised PPMI context vector from a SINGLE
+    /// context-vector computation.
+    ///
+    /// `embed` projects the PPMI context vector and `embedFloat` returns it, so
+    /// a caller that needs both would otherwise run `ppmiContextVector(for:)`
+    /// twice. This override computes it ONCE and returns both outputs.
+    ///
+    /// Single-pass equivalent for the common case: the engram is
+    /// `FloatSimHash.project` of the vector (or `.zero` when the
+    /// vector is empty), and `floats` reproduces `embedFloat`'s result
+    /// with its vocab-miss throw collapsed to `[]`. Note: for trained
+    /// providers with a non-empty all-OOV query, `embedFloat` throws
+    /// `embedFloatVocabMiss` but this override returns `(.zero, [])`;
+    /// outputs match for all other inputs. An untrained basis (empty
+    /// `ppmiVectors`) yields an empty vector: engram `.zero`, floats `[]`.
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
+        let v = await ppmiContextVector(for: text)
+        guard !v.isEmpty else { return (.zero, []) }
+        return (FloatSimHash.project(vector: v, seed: projectionSeed), v)
+    }
+
     // MARK: Private helpers
 
     /// Compute the L2-normalised PPMI context vector for `text`.
@@ -465,6 +492,83 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         self.init(modelID: modelID, modelVersion: modelVersion, projectionSeed: projectionSeed)
         self.ppmiVectors = ppmiVectors
     }
+
+    // MARK: Counts serialization (incremental-counts change set)
+
+    /// 4-byte magic identifying a PPMI COUNTS blob ("PPMC"). Distinct from the
+    /// basis magic ("PPB1"): the counts blob persists the RAW additive
+    /// co-occurrence state (the maintained statistics table), not the derived
+    /// `ppmiVectors` basis. The two are stored separately — the counts in
+    /// `corpus_provider_counts`, the basis in `corpus_provider_basis`.
+    static let countsMagic: [UInt8] = Array("PPMC".utf8)
+
+    /// Serialize the raw accumulated co-occurrence counts to a versioned,
+    /// little-endian blob, so they can be persisted and incrementally extended
+    /// rather than rebuilt from scratch on every reindex. Unlike the basis blob
+    /// (which holds only the derived `ppmiVectors`), this is the additive state
+    /// `finalize()` consumes — persisting it lets a refactor re-derive
+    /// `ppmiVectors` WITHOUT re-tokenizing the corpus.
+    ///
+    /// Blob layout (after MAGIC + version):
+    ///   modelID (string) | modelVersion (string) | projectionSeed (u64)
+    ///   | totalPairs (u64) | totalTerms (u64)
+    ///   | termCount (String→u32 map, byte-sorted keys)
+    ///   | coCount: u32 outer-count, then per byte-sorted outer key:
+    ///       outer key (string) | inner (String→u32 map, byte-sorted keys)
+    ///
+    /// Byte-identical to the Rust `serialize_counts` (cross-port gate): the map
+    /// writers sort keys by raw UTF-8 bytes (matching Rust `Ord for str`), and
+    /// the outer keys are sorted the same way here.
+    public func serializeCounts() -> Data {
+        var w = BasisWriter()
+        w.writeMagic(PpmiProvider.countsMagic)
+        w.writeByte(basisFormatVersion)
+        w.writeString(modelID)
+        w.writeString(modelVersion)
+        w.writeU64(projectionSeed)
+        w.writeU64(UInt64(totalPairs))
+        w.writeU64(UInt64(totalTerms))
+        w.writeStringU32Map(termCount)
+        // coCount is a nested map; serialize the outer level inline (the codec
+        // has no nested-map primitive) with outer keys sorted by UTF-8 bytes so
+        // the order matches Rust's BTreeMap iteration.
+        let outerKeys = coCount.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        w.writeU32(UInt32(outerKeys.count))
+        for key in outerKeys {
+            w.writeString(key)
+            w.writeStringU32Map(coCount[key]!)
+        }
+        return w.data
+    }
+
+    /// Reconstruct a provider from a serialized PPMI counts blob, restoring the
+    /// raw co-occurrence state ready for incremental extension + `finalize()`.
+    /// `ppmiVectors` is left empty (call `finalize()` to derive it). Throws
+    /// `CorpusKitError.decodingFailure` on a truncated blob, unknown version, or
+    /// magic mismatch — never crashes.
+    public convenience init(deserializingCounts data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(PpmiProvider.countsMagic)
+        try r.expectVersion(basisFormatVersion)
+        let modelID = try r.readString()
+        let modelVersion = try r.readString()
+        let projectionSeed = try r.readU64()
+        let totalPairs = Int(try r.readU64())
+        let totalTerms = Int(try r.readU64())
+        let termCount = try r.readStringU32Map()
+        let outerCount = Int(try r.readU32())
+        var coCount: [String: [String: Int]] = [:]
+        coCount.reserveCapacity(outerCount)
+        for _ in 0..<outerCount {
+            let key = try r.readString()
+            coCount[key] = try r.readStringU32Map()
+        }
+        self.init(modelID: modelID, modelVersion: modelVersion, projectionSeed: projectionSeed)
+        self.coCount = coCount
+        self.termCount = termCount
+        self.totalPairs = totalPairs
+        self.totalTerms = totalTerms
+    }
 }
 
 // MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
@@ -494,4 +598,48 @@ extension PpmiProvider: TrainableEmbeddingBasis {
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try PpmiProvider(deserializing: basis)
     }
+
+    // MARK: Maintained counts (incremental-counts change set, P3)
+
+    /// Fold one chunk's text into the accumulated co-occurrence counts. PPMI's
+    /// accumulation consumes a term sequence, so the text is tokenized with the
+    /// canonical `defaultKeywordTokens` and folded at the canonical `ppmiWindow`
+    /// — the same per-document step `trainOnCorpus` runs, minus the finalize.
+    public func addToCounts(text: String) {
+        train(terms: defaultKeywordTokens(text), window: ppmiWindow)
+    }
+
+    /// Restore the accumulated co-occurrence counts in place from a counts blob,
+    /// so incremental maintenance resumes after a restart. Sets `coCount`,
+    /// `termCount`, and the running totals WITHOUT clearing the derived
+    /// `ppmiVectors` (the serving basis is restored separately from the basis
+    /// blob). Throws `CorpusKitError.decodingFailure` on a bad blob — never
+    /// crashes. Mirrors `init(deserializingCounts:)`, but mutates self.
+    public func restoreCounts(from data: Data) throws {
+        var r = BasisReader(data)
+        try r.expectMagic(PpmiProvider.countsMagic)
+        try r.expectVersion(basisFormatVersion)
+        _ = try r.readString()  // modelID — header for validation; row is keyed by it
+        _ = try r.readString()  // modelVersion
+        _ = try r.readU64()     // projectionSeed
+        let totalPairs = Int(try r.readU64())
+        let totalTerms = Int(try r.readU64())
+        let termCount = try r.readStringU32Map()
+        let outerCount = Int(try r.readU32())
+        var coCount: [String: [String: Int]] = [:]
+        coCount.reserveCapacity(outerCount)
+        for _ in 0..<outerCount {
+            let key = try r.readString()
+            coCount[key] = try r.readStringU32Map()
+        }
+        self.coCount = coCount
+        self.termCount = termCount
+        self.totalPairs = totalPairs
+        self.totalTerms = totalTerms
+    }
+
+    /// Maintained vocabulary size for the growth trigger: the count of unique
+    /// target terms seen during accumulation (before PPMI filtering), which is
+    /// the vocabulary the next finalize will derive from.
+    public var countsVocabularySize: Int { coCount.count }
 }

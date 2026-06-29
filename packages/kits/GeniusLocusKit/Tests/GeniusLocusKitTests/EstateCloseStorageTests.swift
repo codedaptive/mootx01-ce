@@ -160,8 +160,9 @@ struct EstateCloseStoragesMapTests {
 ///   registry, auditLogs, mountStates, storages, diaryStores, kgStores,
 ///   fingerprintStores, matrixTiers, calibrationRegistries,
 ///   matrixPersistenceBackends, nodeTopologyProviders, corpusKits,
-///   vectorStores, grantStores, scopeVaults, encodeDrainWorkers,
-///   encodeQueues, encodeHLCs
+///   vectorStores, grantStores, scopeVaults
+/// (The encode queue/drain/HLC now live inside the Corpus — CorpusKit owns the
+/// ingest pipeline — and are torn down when corpusKits[handle] is released.)
 @Suite("close() — per-estate map census")
 struct EstateCloseMapCensusTests {
 
@@ -246,14 +247,11 @@ struct EstateCloseMapCensusTests {
         let nodeTopoAfter = await kit.nodeTopologyProviders[handle]
         #expect(nodeTopoAfter == nil, "nodeTopologyProviders[handle] must be nil after close")
 
-        let encQueueAfter = await kit.encodeQueues[handle]
-        #expect(encQueueAfter == nil, "encodeQueues[handle] must be nil after close")
-
-        let encHLCAfter = await kit.encodeHLCs[handle]
-        #expect(encHLCAfter == nil, "encodeHLCs[handle] must be nil after close")
-
-        let encWorkerAfter = await kit.encodeDrainWorkers[handle]
-        #expect(encWorkerAfter == nil, "encodeDrainWorkers[handle] must be nil after close")
+        // The encode QUEUE + DRAIN worker now live inside the Corpus (CorpusKit
+        // owns the ingest pipeline). close() calls corpusKits[handle]?
+        // .dropIngestQueue() then releases corpusKits[handle], so the
+        // corpusKits-nil assertion above covers teardown of the encode pipeline;
+        // GLK no longer holds encodeQueues/encodeHLCs/encodeDrainWorkers maps.
 
         // Grant surface maps (dropped by dropGrantSurface)
         let grantStoreAfter = await kit.grantStores[handle]

@@ -139,6 +139,32 @@ public struct TermDocumentCounts {
         tfCounts.append(docTF)
     }
 
+    /// Fold one document into the maintained COUNTS ANCHOR only: grow the
+    /// vocabulary (encounter order) and increment the document count, WITHOUT
+    /// retaining the per-document TF row or accumulating document frequency.
+    ///
+    /// Used by the incremental-counts maintenance path (P3). The heavy TF/DF
+    /// inputs the factorization needs are re-derived by re-tokenizing the corpus
+    /// at refactor (Bob's re-tokenize-at-refactor decision), so the maintained
+    /// table keeps only the lightweight growth anchor — vocabulary size and
+    /// document count — current, bounding maintained state to O(vocab) rather
+    /// than the O(corpus) a full `addDocument` per chunk would accumulate.
+    ///
+    /// Vocabulary indices are assigned in the SAME encounter order as
+    /// `addDocument`, so the anchor's vocab map is deterministic and matches the
+    /// Rust port byte-for-byte. An empty TF row is appended so `documentCount`
+    /// reports correctly (the raw counts are intentionally not retained).
+    ///
+    /// - Note: Does NOT call Date() — determinism invariant.
+    public mutating func addDocumentForCountsAnchor(_ text: String) {
+        let terms = defaultKeywordTokens(text)
+        guard !terms.isEmpty else { return }
+        for term in terms where vocab[term] == nil {
+            vocab[term] = vocab.count
+        }
+        tfCounts.append([:])
+    }
+
     // MARK: - Accessors
 
     /// Number of documents added so far.

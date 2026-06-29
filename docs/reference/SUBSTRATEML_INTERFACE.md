@@ -533,7 +533,7 @@ impl CompositeDistance {
 
 SPEC § 5.9. Five platform-specific extractor structs each take a typed
 `*Sample` and produce an `AmbientSampleRow` via
-`extract(_:hlc:rowId:)`. There is no `FeatureExtractors` facade type;
+`extract(_:hlc:rowId:)`. There is no `FeatureExtractors` Interface type;
 each extractor is used directly.
 
 `StreamSourceFlag` is a single-bit-per-source bitmap (raw values are
@@ -1679,7 +1679,7 @@ the Swift suites against the same canonical inputs the Rust module tests use.
   of constants). No Rust top-level *type* is created. Behavior is bound by
   the shared conformance suites cited above — not drift. (The five
   ambient-source extractors are concrete structs in both ports — there is
-  no `FeatureExtractors` facade type.)
+  no `FeatureExtractors` Interface type.)
 - **Rust unit-struct namespaces** (`AuditLogFold`, `NMFAlternatingLeastSquares`,
   `EigenvalueCentrality`, `RandomWalks`, `UDCTreeDistance`, `LatticeDistance`,
   `WikidataGraphDistance`, `CompositeDistance`, `MomentSummary`,

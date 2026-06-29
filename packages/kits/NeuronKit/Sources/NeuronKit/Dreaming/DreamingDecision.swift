@@ -7,10 +7,11 @@
 // Bucket A; the Rust version at `NeuronKit/rust/src/dreaming_decision.rs`
 // implements the same logic and both gate on shared fixtures.
 //
-// What stays in the actor: the async seam reads (recall traces,
-// co-occurrence observations, existing tunnels), the per-target reward
-// reduction, the proposal emission (`sink.propose`), the diary write, and
-// the across-cycle state (`consolidated`, `proposedKeys`, `cycleCount`).
+// What stays in the actor: the async seam reads (dreaming queue drain,
+// co-recall window accumulation, recall traces for reward, existing tunnels),
+// the per-target reward reduction, the proposal emission (`sink.propose`),
+// the diary write, and the across-cycle state (`consolidated`, `proposedKeys`,
+// `cycleCount`).
 // What moves here: every DECISION — the InfoNCE contrastive score (step 3),
 // the EWC++ consolidation blend (step 4), duplicate suppression against
 // existing tunnels + already-proposed keys (step 5), and the
@@ -37,8 +38,8 @@ public enum DreamingDecision {
     /// Matches `DreamingDaemon.ewcRetention`.
     public static let ewcRetention: Float = 0.9
 
-    /// A latent co-occurrence candidate — the identity-free projection of
-    /// `CoOccurrenceObservation` (no substrate dependency).
+    /// A co-recall window drained from the dreaming queue — the identity-free
+    /// projection of a dreaming queue item (no substrate dependency).
     public struct Observation: Sendable, Equatable {
         public let endpointA: String
         public let endpointB: String
@@ -135,12 +136,23 @@ public enum DreamingDecision {
         var emitted: [EmittedCandidate] = []
         var suppressedDuplicates = 0
         var belowThreshold = 0
+        // Reserve up front: each grows by up to one entry per observation, and on
+        // a high-traffic estate `observations` can be a large co-recall pair set
+        // (bounded by the recalled set² within the drain window, not estate shape).
+        // Without this, Swift's Dictionary/Set rehash-on-grow
+        // (_copyOrMoveAndResize → String.hash) dominated the dreaming cycle —
+        // profiled as the top CPU consumer once the ingest write path was fixed.
+        // reserveCapacity changes no results (the Rust twin uses BTreeMap and
+        // needs no equivalent — tree inserts never rehash).
         var scores: [String: Float] = [:]
+        scores.reserveCapacity(observations.count)
         var updatedConsolidated = consolidated
+        updatedConsolidated.reserveCapacity(consolidated.count + observations.count)
         // Track keys emitted THIS cycle too, so a duplicate pair within one
         // observation batch is not proposed twice (mirrors the actor
         // inserting into proposedKeys as it emits).
         var emittedKeysThisCycle: Set<String> = []
+        emittedKeysThisCycle.reserveCapacity(observations.count)
 
         for obs in observations {
             let key = candidateKey(obs.endpointA, obs.endpointB)

@@ -79,16 +79,22 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v2 adds the nullable `.json` `ext`
-    /// forward-compatibility slot to the `keys` table (ADR-012), bringing
-    /// every persistent entity table to the one-`ext`-column convention.
-    /// There is no migration ladder behind v2 — no estate data has
-    /// shipped, so the bump re-declares the full column set fresh.
-    public static let version = 2
+    /// Current schema version. v8 changes nodes.merkle_root from TEXT
+    /// to BLOB (NT-Q1 — eliminates hex encoding waste). v7 added
+    /// content_hash BLOB nullable to drawers (NT-L3) and
+    /// snapshot_registry + snapshot_attestations tables (NT-L3 Part 3).
+    /// v6 added order_key REAL nullable to tunnels (ADR-017 §11,
+    /// mission NT-L5). v5 added erasure_ledger (NT-L4). v4 replaced
+    /// wing/room with parent_node_id (NT-L2). v3 added nodes (NT-L1).
+    /// v2 added keys.ext (ADR-012). No migration ladder — no estate
+    /// data has shipped.
+    public static let version = 8
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
-    /// append-only trigger, and index from this single value.
+    /// and index from this single value. No trigger declarations are
+    /// present; trigger-like behaviour (e.g. audit log rows) is
+    /// implemented in Swift at the verb layer.
     public static var schema: SchemaDeclaration {
         SchemaDeclaration(
             kitID: kitID,
@@ -106,7 +112,11 @@ public enum LocusKitSchema {
                 nodeBundlesTable,
                 containerFingerprintsTable,
                 recallTraceTable,
-                keysTable
+                keysTable,
+                nodesTable,
+                ErasureLedgerSchema.ledgerTable,
+                SnapshotSchema.registryTable,
+                SnapshotSchema.attestationsTable,
             ],
             indices: indices
         )
@@ -114,10 +124,10 @@ public enum LocusKitSchema {
 
     // MARK: - drawers
 
-    /// The drawer table. Primary key `id` is TEXT, not UUID: LocusKit
-    /// drawer ids are arbitrary content strings ("d1",
-    /// "supersedes:<a>:<b>"), never UUIDs, so the key is a plain text
-    /// column and the store does not rely on UUID key resolution.
+    /// The drawer table. Primary key `id` is TEXT storing a UUID string.
+    /// Current gated write paths (`DrawerStore.requireUuid`) validate that
+    /// ids are well-formed UUIDs before any insert; `Drawer`'s initializer
+    /// defaults `id` to `UUID().uuidString`.
     ///
     /// Generated columns expose the indexed bit-range field extracts
     /// the retrieval layer dispatches on. They are derived from the
@@ -127,8 +137,9 @@ public enum LocusKitSchema {
         columns: [
             .text("id"),
             .text("content"),
-            .text("wing"),
-            .text("room"),
+            // FK to nodes.id (the room node containing this drawer).
+            // Replaces the stored wing/room text columns (ADR-017 NT-L2).
+            .text("parent_node_id"),
             .text("sourceFile", nullable: true),
             .int("chunkIndex", nullable: true),
             .text("addedBy"),
@@ -169,7 +180,12 @@ public enum LocusKitSchema {
             // NULL = plaintext row (mode 1). Non-null references
             // keys.key_id and means the content column is ciphertext under
             // that key. Nullable so plaintext estates write nothing here.
-            .text("keyID", nullable: true)
+            .text("keyID", nullable: true),
+            // Per-row content hash computed by the hash-on-write hook
+            // (NT-P2 HashingRowStore). BLOB nullable: NULL for rows
+            // written before hash-on-write was wired. The Merkle rollup
+            // (NT-L3) reads this column to build room/wing/estate roots.
+            .blob("content_hash", nullable: true)
         ],
         primaryKey: ["id"],
         generatedColumns: [
@@ -201,7 +217,8 @@ public enum LocusKitSchema {
                 type: .int,
                 expression: .bitAnd(.column("operationalBitmap"), .literal(0xF))
             )
-        ]
+        ],
+        hashable: true
     )
 
     // MARK: - tunnels
@@ -230,6 +247,9 @@ public enum LocusKitSchema {
             .bitmap("adjectiveBitmap"),
             .bitmap("operationalBitmap"),
             .bitmap("provenanceBitmap"),
+            // Fractional-index sibling ordering for .parent tunnels
+            // (ADR-017 §11, NT-L5). REAL nullable; nil for non-parent kinds.
+            .float("order_key", nullable: true),
             .json("ext", nullable: true)
         ],
         primaryKey: ["id"]
@@ -598,16 +618,46 @@ public enum LocusKitSchema {
         primaryKey: ["key_id"]
     )
 
+    // MARK: - nodes (ADR-017 §2)
+
+    /// Container nodes for the estate's containment tree. Estate
+    /// (depth 0), wing (depth 1), room (depth 2). Drawers reference
+    /// their parent room via `parent_node_id` on the drawers table
+    /// (NT-L2). The `merkle_root` column stores a 32-byte BLOB
+    /// populated by `MerkleRollup`; current capture paths defer the
+    /// rollup rather than computing it inline on every write.
+    ///
+    /// HLC columns (`created_hlc`, `tombstoned_hlc`) are tagged with
+    /// ColumnRole so PersistenceKit's as-of filter operates over nodes
+    /// identically to drawers (ADR-017 §15).
+    static let nodesTable = TableDeclaration(
+        name: "nodes",
+        columns: [
+            .text("id"),
+            .text("parent_id", nullable: true),
+            .text("display_name"),
+            .text("lookup_name"),
+            .int("depth"),
+            .int("lifecycle"),
+            .createdHlc("created_hlc"),
+            .tombstonedHlc("tombstoned_hlc"),
+            .timestamp("tombstoned_at", nullable: true),
+            .blob("merkle_root", nullable: true),
+            .timestamp("created_at"),
+            .timestamp("updated_at"),
+            .json("ext", nullable: true)
+        ],
+        primaryKey: ["id"]
+    )
+
     // MARK: - indices
 
     /// Every index from the prior hand-rolled schema, including the
     /// bit-range functional indices, which now name generated columns
     /// rather than inline "column & mask" SQL expressions.
     static let indices: [IndexDeclaration] = [
-        // drawers
-        IndexDeclaration(name: "idx_drawers_wing", table: "drawers", columns: ["wing"]),
-        IndexDeclaration(name: "idx_drawers_room", table: "drawers", columns: ["room"]),
-        IndexDeclaration(name: "idx_drawers_wing_room", table: "drawers", columns: ["wing", "room"]),
+        // drawers — parent_node_id replaces the wing/room indices (ADR-017 NT-L2)
+        IndexDeclaration(name: "idx_drawers_parent_node_id", table: "drawers", columns: ["parent_node_id"]),
         IndexDeclaration(name: "idx_drawers_sourceFile", table: "drawers", columns: ["sourceFile"]),
         IndexDeclaration(name: "idx_drawers_tombstoned", table: "drawers", columns: ["tombstonedAt"]),
         IndexDeclaration(name: "idx_drawers_lineageID", table: "drawers", columns: ["lineageID"]),
@@ -620,6 +670,10 @@ public enum LocusKitSchema {
         // tunnels
         IndexDeclaration(name: "idx_tunnels_source", table: "tunnels", columns: ["sourceWing", "sourceRoom"]),
         IndexDeclaration(name: "idx_tunnels_target", table: "tunnels", columns: ["targetWing", "targetRoom"]),
+        // Parent-edge lookup: find the parent tunnel for a child drawer,
+        // and find all children of a parent drawer (ADR-017 §11, NT-L5).
+        IndexDeclaration(name: "idx_tunnels_kind_source_drawer", table: "tunnels", columns: ["kind_id", "sourceDrawerId"]),
+        IndexDeclaration(name: "idx_tunnels_kind_target_drawer", table: "tunnels", columns: ["kind_id", "targetDrawerId"]),
         // diary
         IndexDeclaration(name: "idx_diary_agent", table: "diary", columns: ["agentName"]),
         IndexDeclaration(name: "idx_diary_wing", table: "diary", columns: ["wing"]),
@@ -651,6 +705,13 @@ public enum LocusKitSchema {
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration(name: "idx_recall_trace_target", table: "recall_trace", columns: ["target"]),
-        IndexDeclaration(name: "idx_recall_trace_recalledAt", table: "recall_trace", columns: ["recalledAt"])
+        IndexDeclaration(name: "idx_recall_trace_recalledAt", table: "recall_trace", columns: ["recalledAt"]),
+        // nodes — ADR-017 §2: parent_id for child queries,
+        // (parent_id, lookup_name) supports I-NT-4 active-uniqueness lookup
+        // (app-layer enforcement only — partial unique not DB-enforceable),
+        // (depth, lookup_name) for depth-scoped resolution.
+        IndexDeclaration(name: "idx_nodes_parent_id", table: "nodes", columns: ["parent_id"]),
+        IndexDeclaration(name: "idx_nodes_parent_lookup", table: "nodes", columns: ["parent_id", "lookup_name"]),
+        IndexDeclaration(name: "idx_nodes_depth_lookup", table: "nodes", columns: ["depth", "lookup_name"])
     ]
 }

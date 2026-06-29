@@ -40,6 +40,13 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # GLK and LocusKit do not depend on NeuronKit.
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
 locus-kit = { path = "../../LocusKit/rust" }
+# T5 (ADR-021 Decision 7): ensure_scheduler mounts the shared per-estate
+# queue.sqlite signals lane (PersistenceKitBackend + DrainLease) on SQLite
+# estates, and a transient in-memory backend on non-SQLite estates. Mirrors the
+# Swift SignalAPI.ensureScheduler backend selection. Layering: neuron-kit
+# (composition) → queuekit (substrate) does NOT invert; queuekit has no
+# dependency on neuron-kit.
+queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 # Keystones (Lens 1, Structure) surfaces SubstrateML's gated
 # EigenvalueCentrality as a NeuronKit reasoning function — the deep matrix
 # math lives in SubstrateML; NeuronKit shapes it into a substrate result.
@@ -52,11 +59,15 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # snapshots and telemetry event tags. Promoted from dev-dependencies when the
 # governor moved from AriaMcpKit to NeuronKit.
 uuid = { version = "1", features = ["v4"] }
+# T5 (ADR-021 Decision 7): ensure_scheduler selects the SQLite vs in-memory
+# signals queue backend using persistence_kit::sqlite::SqliteStorage and
+# persistence_kit::inmemory::InMemoryStorage. Promoted from dev-dependencies
+# to production dep because autonomic_governor.rs uses both in non-test code.
+# Layering: neuron-kit (composition) → persistence-kit (substrate) does NOT
+# invert; persistence-kit has no dependency on neuron-kit.
+persistence-kit = { path = "../../PersistenceKit/rust" }
 
 [dev-dependencies]
-# Test-only: building a parent estate to derive branches from needs the
-# in-memory Storage backend (the same construction LocusKit's own tests use).
-persistence-kit = { path = "../../PersistenceKit/rust" }
 
 # uuid is also a production dep (AutonomicGovernor formats estate UUIDs).
 # Listed separately in [dependencies] above; the dev-dependencies entry is

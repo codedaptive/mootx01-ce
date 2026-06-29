@@ -8,11 +8,14 @@
 //!     existing callers.
 //!
 //! ADR-016: wing targeting at capture time.
+//! ADR-017: wing/room resolved from node tree via parent_node_id.
 
 #![cfg(test)]
 
 use crate::default_wings::DEFAULT_WING_NAME;
+use crate::drawer::Drawer;
 use crate::drawer_operational::CaptureChannel;
+use crate::drawer_store::DrawerStore;
 use crate::drawer_store_inmemory::InMemoryDrawerStore;
 use crate::estate::Estate;
 use crate::estate_types::{LatticeAnchor, OwnerCredentials};
@@ -22,7 +25,8 @@ use std::sync::Arc;
 const NOW: i64 = 1_700_000_000;
 
 /// Build a fresh estate on an in-memory store (no disk I/O needed for
-/// capture-into-wing; the assertions are on the returned Drawer alone).
+/// capture-into-wing; tests assert wing/room placement through the
+/// node tree via `resolve_node_names`, not only on the returned Drawer).
 fn make_estate() -> Estate {
     let store = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
     Estate::create(store, OwnerCredentials::new("wing-test-owner"), None).unwrap()
@@ -42,6 +46,14 @@ fn frame_with_wing(content: &str, wing: Option<&str>) -> CaptureFrame {
     f
 }
 
+/// Resolve the wing name for a drawer via its parent_node_id in the
+/// estate's node tree (ADR-017).
+fn resolve_wing(estate: &Estate, drawer: &Drawer) -> String {
+    let names = estate.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+    let (wing, _) = names.get(&drawer.parent_node_id).expect("wing node must resolve");
+    wing.clone()
+}
+
 // -----------------------------------------------------------------------
 // 1. Explicit wing — drawer lands in the named wing
 // -----------------------------------------------------------------------
@@ -51,8 +63,8 @@ fn capture_explicit_wing_drawer_lands_in_wing() {
     let frame = frame_with_wing("user canon content", Some("User Canon"));
     let drawer = estate.capture(frame, NOW).unwrap();
     assert_eq!(
-        drawer.wing, "User Canon",
-        "drawer.wing should equal the frame's explicit wing, not the default"
+        resolve_wing(&estate, &drawer), "User Canon",
+        "drawer wing should equal the frame's explicit wing, not the default"
     );
 }
 
@@ -61,7 +73,7 @@ fn capture_personal_wing_drawer_lands_in_personal() {
     let estate = make_estate();
     let frame = frame_with_wing("personal note", Some("Personal"));
     let drawer = estate.capture(frame, NOW).unwrap();
-    assert_eq!(drawer.wing, "Personal");
+    assert_eq!(resolve_wing(&estate, &drawer), "Personal");
 }
 
 // -----------------------------------------------------------------------
@@ -73,7 +85,7 @@ fn capture_none_wing_drawer_lands_in_default_wing() {
     let frame = frame_with_wing("agentic capture", None);
     let drawer = estate.capture(frame, NOW).unwrap();
     assert_eq!(
-        drawer.wing, DEFAULT_WING_NAME,
+        resolve_wing(&estate, &drawer), DEFAULT_WING_NAME,
         "None wing must fall through to the estate default '{}'",
         DEFAULT_WING_NAME
     );
@@ -97,7 +109,7 @@ fn capture_no_wing_field_default_wing_unchanged() {
     assert!(frame.wing.is_none(), "CaptureFrame::new() must set wing: None");
     let drawer = estate.capture(frame, NOW).unwrap();
     assert_eq!(
-        drawer.wing, "Agentic Memory",
+        resolve_wing(&estate, &drawer), "Agentic Memory",
         "omitting wing must preserve the 'Agentic Memory' default"
     );
 }
@@ -115,8 +127,8 @@ fn capture_two_wings_both_stored_correctly() {
     let canon = estate.capture(canon_frame, NOW).unwrap();
     let agentic = estate.capture(agentic_frame, NOW + 1).unwrap();
 
-    assert_eq!(canon.wing, "User Canon");
-    assert_eq!(agentic.wing, DEFAULT_WING_NAME);
+    assert_eq!(resolve_wing(&estate, &canon), "User Canon");
+    assert_eq!(resolve_wing(&estate, &agentic), DEFAULT_WING_NAME);
     // IDs must differ.
     assert_ne!(canon.id, agentic.id);
 }

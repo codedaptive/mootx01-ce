@@ -13,15 +13,13 @@ struct DrawerTests {
     func designatedInit() {
         let now = t(1_700_000_000)
         let d = Drawer(
-            id: "d1", content: "hello", wing: "w", room: "r",
+            id: "d1", content: "hello", parentNodeId: "test-parent",
             sourceFile: "/tmp/x.md", chunkIndex: 3,
             addedBy: "bilby", filedAt: now,
             embeddingModelID: "minilm-v6"
         )
         #expect(d.id == "d1")
         #expect(d.content == "hello")
-        #expect(d.wing == "w")
-        #expect(d.room == "r")
         #expect(d.sourceFile == "/tmp/x.md")
         #expect(d.chunkIndex == 3)
         #expect(d.addedBy == "bilby")
@@ -38,7 +36,7 @@ struct DrawerTests {
     func codableRoundTrip() throws {
         let now = t(1_700_000_000)
         let d = Drawer(
-            id: "d1", content: "hello", wing: "w", room: "r",
+            id: "d1", content: "hello", parentNodeId: "test-parent",
             sourceFile: "/tmp/x.md", chunkIndex: 3,
             addedBy: "bilby", filedAt: now,
             // Explicit eventTime distinct from filedAt (ING-01) so the
@@ -59,7 +57,7 @@ struct DrawerTests {
     func codableNilOptionals() throws {
         let now = t(1_700_000_000)
         let d = Drawer(
-            id: "d2", content: "hello", wing: "w", room: "r",
+            id: "d2", content: "hello", parentNodeId: "test-parent",
             addedBy: "bilby", filedAt: now,
             embeddingModelID: "minilm-v6"
         )
@@ -80,10 +78,10 @@ struct DrawerTests {
         // spec § 5.10), which would correctly make two
         // independently-constructed drawers unequal.
         let lineage = UUID()
-        let a = Drawer(id: "x", content: "c", wing: "w", room: "r",
+        let a = Drawer(id: "x", content: "c", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: now, embeddingModelID: "m",
                        lineageID: lineage)
-        let b = Drawer(id: "x", content: "c", wing: "w", room: "r",
+        let b = Drawer(id: "x", content: "c", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: now, embeddingModelID: "m",
                        lineageID: lineage)
         #expect(a == b)
@@ -93,9 +91,9 @@ struct DrawerTests {
     @Test("Equatable: differing content makes drawers unequal")
     func notEqualOnContent() {
         let now = t(1_700_000_000)
-        let a = Drawer(id: "x", content: "c1", wing: "w", room: "r",
+        let a = Drawer(id: "x", content: "c1", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: now, embeddingModelID: "m")
-        let b = Drawer(id: "x", content: "c2", wing: "w", room: "r",
+        let b = Drawer(id: "x", content: "c2", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: now, embeddingModelID: "m")
         #expect(a != b)
     }
@@ -103,9 +101,9 @@ struct DrawerTests {
     @Test("default id is a fresh UUID")
     func defaultIdIsFreshUUID() {
         let now = t(1_700_000_000)
-        let a = Drawer(content: "c", wing: "w", room: "r",
+        let a = Drawer(content: "c", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: now, embeddingModelID: "m")
-        let b = Drawer(content: "c", wing: "w", room: "r",
+        let b = Drawer(content: "c", parentNodeId: "test-parent",
                        addedBy: "b", filedAt: now, embeddingModelID: "m")
         #expect(a.id != b.id)
         #expect(UUID(uuidString: a.id) != nil)
@@ -115,7 +113,7 @@ struct DrawerTests {
     func defaultAdjectiveBitmapZero() {
         let now = t(1_700_000_000)
         let d = Drawer(
-            content: "c", wing: "w", room: "r",
+            content: "c", parentNodeId: "test-parent",
             addedBy: "b", filedAt: now, embeddingModelID: "m"
         )
         #expect(d.adjectiveBitmap == 0)
@@ -125,7 +123,7 @@ struct DrawerTests {
     func defaultOperationalBitmapZero() {
         let now = t(1_700_000_000)
         let d = Drawer(
-            content: "c", wing: "w", room: "r",
+            content: "c", parentNodeId: "test-parent",
             addedBy: "b", filedAt: now, embeddingModelID: "m"
         )
         #expect(d.operationalBitmap == 0)

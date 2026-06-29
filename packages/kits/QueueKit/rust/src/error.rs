@@ -31,6 +31,11 @@ pub enum QueueError {
     /// at a stalled drain worker; a non-zero `pending` at a worker that never
     /// claimed). Swift parity: `QueueError.drainTimeout(pending:inFlight:)`.
     DrainTimeout { pending: usize, in_flight: usize },
+    /// A stream_id, job id, or other caller-supplied identifier contains a
+    /// path separator (`/` or `\`), equals `.` or `..`, or contains an ASCII
+    /// control character. Such identifiers can escape the queue root when used
+    /// as filename components. Swift parity: `QueueError.invalidIdentifier`.
+    InvalidIdentifier(String),
 }
 
 impl fmt::Display for QueueError {

@@ -108,8 +108,9 @@ struct FdcCaptureTests {
     }
 
     /// Filing noise content (no meaningful FDC signature) must NOT crash and
-    /// must NOT produce an error tool result. The drawer may fall back to
-    /// "000.000" — the important invariant is that the tool succeeds.
+    /// must NOT produce an error tool result. The implementation uses `"000"`
+    /// as the canonical unclassified UDC sentinel; the test only requires a
+    /// non-empty `udcCode`. The important invariant is that the tool succeeds.
     @Test func fileMemoryWithUnclassifiableContentSucceeds() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
 
@@ -359,6 +360,41 @@ struct FdcCaptureTests {
         #expect(
             storedCode == explicitCode,
             "seam must preserve an explicit non-sentinel udcCode, not re-classify; expected: '\(explicitCode)', got: '\(storedCode)'"
+        )
+    }
+
+    // MARK: - ADR-017: parentNodeId populated on capture
+
+    /// Filing a memory through `moot_file_memory` must produce a drawer whose
+    /// `parentNodeId` is populated (non-empty). ADR-017 §3 requires every drawer
+    /// to reference its containing room node; the GLK capture seam resolves
+    /// wing+room names to node IDs at write time.
+    @Test func capturedDrawerHasParentNodeId() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content":  .string("ADR-017 parentNodeId verification content"),
+                "location": .string("test-room"),
+            ])
+        )
+
+        #expect(!isError(result), "file_memory must succeed; got: \(result)")
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [], hydrationLevel: .structured, limit: nil, ordering: .byCaptureTimeDesc)
+        )
+
+        #expect(drawers.count == 1, "exactly one drawer must exist")
+
+        let drawer = drawers[0]
+        // ADR-017: parentNodeId must be a non-empty UUID string referencing
+        // the room node that contains this drawer in the estate's node tree.
+        #expect(
+            !drawer.parentNodeId.isEmpty,
+            "captured drawer must have a non-empty parentNodeId (ADR-017 §3)"
         )
     }
 }

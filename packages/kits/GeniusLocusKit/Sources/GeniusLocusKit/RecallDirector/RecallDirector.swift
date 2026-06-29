@@ -36,6 +36,12 @@ public extension GeniusLocusKit {
     /// 2. Computes a `RecallPlan` — effective mode and frontier-K.
     /// 3. Dispatches to the lane named in `request.mode`.
     /// 4. Returns a `GLKRecallResult` carrying the plan, hits, and provenance.
+    /// 5. If `request.origin == .external` and the result has ≥ 2 distinct drawer ids,
+    ///    enqueues a dreaming item onto the estate's "dreaming" stream (ADR-021 Phase 2b,
+    ///    spec §12.2). The enqueue is a non-fatal side effect — any failure is logged and
+    ///    the recall result is returned unchanged. Only external-origin scored recall
+    ///    enqueues dreaming items (B-10a): internal reads (dreaming, signals, recipes,
+    ///    migration, benchmarks) never enqueue.
     ///
     /// All four modes are live: `.locusOnly`, `.corpusOnly`, `.hybrid`, and
     /// `.unionBest` (greedy MMR deduplication across all lanes).
@@ -46,6 +52,11 @@ public extension GeniusLocusKit {
     /// - Returns: A `GLKRecallResult` with hits ordered as the active lane produced them.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func recall(_ handle: EstateHandle, _ request: GLKRecallRequest) async throws -> GLKRecallResult {
+        // Gate quiesced/draining estates before any plan work. The requireMounted
+        // check is the same gate wired to the write verbs in VerbSurface — recall
+        // is included here because AriaMcpKit can call this method directly with a
+        // GLKRecallRequest, bypassing the RecallFrame shim in VerbSurface.
+        try requireMounted(handle, verb: "recall")
         // Resolve the estate up front. A stale handle surfaces here as
         // estateNotOpen before any plan work.
         let estate = try estate(for: handle)
@@ -69,20 +80,21 @@ public extension GeniusLocusKit {
             "RecallDirector: mode=\(request.mode.rawValue, privacy: .public) limit=\(request.limit, privacy: .public) frontierK=\(frontierK, privacy: .public)"
         )
 
+        let result: GLKRecallResult
         switch request.mode {
         case .locusOnly:
-            return try await recallLocusOnly(estate: estate, request: request, plan: plan)
+            result = try await recallLocusOnly(estate: estate, request: request, plan: plan)
 
         case .corpusOnly:
-            return try await recallCorpusOnly(
+            result = try await recallCorpusOnly(
                 estate: estate, request: request, plan: plan, handle: handle)
 
         case .hybrid:
-            return try await recallHybrid(
+            result = try await recallHybrid(
                 estate: estate, request: request, plan: plan, handle: handle)
 
         case .unionBest:
-            return try await recallUnionBest(
+            result = try await recallUnionBest(
                 estate: estate, request: request, plan: plan, handle: handle)
 
         case .nodeTreeNative:
@@ -98,8 +110,29 @@ public extension GeniusLocusKit {
             //
             // nodeTreeNative routes to locusOnly; no corpus/vector stages are
             // attempted, so degradedStages is always empty for this mode.
-            return try await recallLocusOnly(estate: estate, request: request, plan: plan)
+            result = try await recallLocusOnly(estate: estate, request: request, plan: plan)
         }
+
+        // ADR-021 Phase 2b: enqueue a dreaming item for external-origin scored recalls.
+        //
+        // Guard (spec §12.2 + B-10a):
+        //   - origin must be .external — only ARIA boundary recalls are dreaming
+        //     candidates; internal reads (dreaming daemon, standing signals, recipes,
+        //     migration, benchmarks) must NEVER enqueue (they would feed back into the
+        //     dreaming pipeline, creating a self-referential loop).
+        //   - result must have ≥ 2 distinct surfaced drawer ids — a single drawer
+        //     makes no co-recall pair for the REM-ALPHA drainer.
+        //
+        // The enqueue is non-fatal: `enqueueDreamingItem` catches and logs all
+        // failures internally so this method never throws due to a queue error.
+        // `now` is Date() here — the allowed call site per the determinism rule
+        // (Date() inside sub-engines is forbidden; the verb boundary is the
+        // sanctioned entry point, identical to propose/associate).
+        if request.origin == .external {
+            await enqueueDreamingItem(drawers: result.drawers, handle: handle, now: Date())
+        }
+
+        return result
     }
 
     // MARK: - Late body hydration capability
@@ -125,6 +158,26 @@ public extension GeniusLocusKit {
         let estate = try estate(for: handle)
         let bodies = try await estate.hydrateBodies(ids: ids)
         return Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0.content) })
+    }
+
+    /// FRAME-AWARE LATE HYDRATION — read specific drawer ids only when they
+    /// satisfy the same bitmap/content filter pipeline used by normal recall.
+    ///
+    /// Distillation recipes use vector/tunnel candidate ids rather than the
+    /// standard recall lanes, so they must explicitly apply a recall frame
+    /// before exposing hydrated bodies at the MCP boundary. `Estate` enforces
+    /// tombstone exclusion and default state/trust/sensitivity filters inside
+    /// `getDrawers(ids:matchingFrame:hydrationLevel:)`.
+    public func hydrate(
+        _ handle: EstateHandle,
+        ids: [String],
+        matchingFrame frame: RecallFrame,
+        hydrationLevel: HydrationLevel = .full
+    ) async throws -> [Drawer] {
+        let estate = try estate(for: handle)
+        return try await estate.getDrawers(
+            ids: ids, matchingFrame: frame, hydrationLevel: hydrationLevel
+        ).admissible
     }
 
     // MARK: - locusOnly lane
@@ -283,7 +336,30 @@ public extension GeniusLocusKit {
                     weights: plan.weights
                 )
                 Self.recallLog.debug("RecallDirector corpusOnly: no corpus registered — degrading to locusOnly")
-                return try await recallLocusOnly(estate: estate, request: request, plan: degradedPlan)
+                // Run the locusOnly delegate. Its result may carry a
+                // "locusOnly.matrixAware" stage if the request uses matrixAware
+                // scoring — but from the caller's perspective the lane was
+                // corpusOnly, so the stage vocabulary must reflect that.
+                let inner = try await recallLocusOnly(estate: estate, request: request, plan: degradedPlan)
+                // Remap stage labels from the inner locusOnly call to their
+                // corpusOnly equivalents so the caller sees accurate vocabulary:
+                //   "corpusOnly.degraded" — always present; signals the corpus
+                //     lane was unavailable and execution fell back to locusOnly.
+                //   "corpusOnly.matrixAware" — replaces "locusOnly.matrixAware"
+                //     when matrixAware scoring was requested; the score fallback
+                //     originates from the corpusOnly request context, not a
+                //     locusOnly request that the caller issued directly.
+                let remappedStages: [String] = inner.degradedStages.map { stage in
+                    stage == "locusOnly.matrixAware" ? "corpusOnly.matrixAware" : stage
+                }
+                return GLKRecallResult(
+                    request: inner.request,
+                    plan: inner.plan,
+                    unionProfile: inner.unionProfile,
+                    hits: inner.hits,
+                    denseLaneStatus: inner.denseLaneStatus,
+                    degradedStages: ["corpusOnly.degraded"] + remappedStages
+                )
             }
             throw GeniusLocusKitError.recallLaneUnavailable(.corpus)
         }
@@ -1991,8 +2067,7 @@ public extension GeniusLocusKit {
         LocusKit.Drawer(
             id: d.id,
             content: body,
-            wing: d.wing,
-            room: d.room,
+            parentNodeId: d.parentNodeId,
             sourceFile: d.sourceFile,
             chunkIndex: d.chunkIndex,
             addedBy: d.addedBy,
@@ -2031,8 +2106,7 @@ public extension GeniusLocusKit {
             return LocusKit.Drawer(
                 id: d.id,
                 content: "",
-                wing: d.wing,
-                room: d.room,
+                parentNodeId: d.parentNodeId,
                 sourceFile: d.sourceFile,
                 chunkIndex: d.chunkIndex,
                 addedBy: d.addedBy,

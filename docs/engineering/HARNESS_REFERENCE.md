@@ -1,9 +1,9 @@
 ---
 title: GeniusLocus Substrate Conformance Harness Reference
-version: 1.0.1
+version: 1.0.2
 description: Single-source index of the substrate's conformance-gated primitives, their Swift/Rust API surfaces, test vectors, and file locations.
 status: implementation-grade specification
-date: 2026-06-14
+date: 2026-06-20
 author: MOOTx01 maintainers
 purpose: |
   Single-source index of the substrate's conformance-gated
@@ -30,7 +30,7 @@ Hamming distance, an OR-reduce, a fingerprint, a lattice distance,
 an HLC compare, a matrix decay, a moment summary, a Bradley-Terry
 update, a tier contribution, a FFT rhythm pass, a Hamming-NN top-K,
 an NMF factorization, a temporal compression, an audit-log fold,
-an anomaly z-score, an info-theoretic measure, an eigenvalue
+a Merkle/commitment digest, an anomaly z-score, an info-theoretic measure, an eigenvalue
 centrality computation, a field-presence matrix update, a partial
 state recall, a pairing handshake, or a bitwise/bitfield extraction
 — **stop and look in §2 first**. There is a fully cross-validated,
@@ -42,16 +42,12 @@ Rust implementations are byte-for-byte identical on their canonical
 test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
-The gate currently holds **28** conformance-gated primitives (the
+The gate currently holds **29** conformance-gated primitives (the
 count of record is `primitive-catalog.md`, the machine-readable
 catalog, and the Swift/Rust harness registries — all three agree at
-28). This reference details 24 of them in full below; the four most
-recently promoted primitives (`association_rule_mining`,
-`formal_concept_analysis`, `sampling`, `shingle_similarity`) are
-gated and have test vectors, but their per-primitive §2.x entries
-here are still pending (see §5 step 9 — updating this reference is
-the last promotion step and lags the catalog). For the canonical
-gated-primitive list, treat `primitive-catalog.md` as authoritative.
+29). This reference details all 29 in full below. For the canonical
+gated-primitive list and CRC source of record, treat
+`primitive-catalog.md` as authoritative.
 
 The harness lives at
 `docs/validation/substrate_math_performance/test-harness/` (repo-relative).
@@ -91,7 +87,7 @@ candidate for promotion (see §5).
 
 ---
 
-## §2. The conformance-gated primitives (24 indexed here, 28 gated)
+## §2. The conformance-gated primitives (29 indexed here)
 
 Each row tells an agent four things:
 1. **Where the math lives** (cookbook §).
@@ -118,9 +114,12 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 | `hlc` | SubstrateTypes | `HLC.swift` | `hlc.rs` |
 | `fnv` | SubstrateTypes | `FNV.swift` | `fnv.rs` |
 | `bit_field_masked_equals` | SubstrateKernel | `BitField.swift` | `bit_field.rs` |
+| `merkle_commitment` | SubstrateKernel | `MerkleCommitment.swift` | `merkle_commitment.rs` |
 | `lattice` | SubstrateML | `LatticeDistance.swift` | `lattice_distance.rs` |
 | `info_theory` | SubstrateML | `InformationTheory.swift` | `info_theory.rs` |
 | `bradley_terry` | SubstrateML | `BradleyTerry.swift` | `bradley_terry.rs` |
+| `sampling` | SubstrateML | `Sampling.swift` | `sampling.rs` |
+| `shingle_similarity` | SubstrateML | `ShingleSimilarity.swift` | `shingle_similarity.rs` |
 | `partial_state_recall` | SubstrateML | `PartialStateRecall.swift` | `partial_state_recall.rs` |
 | `temporal_compression` | SubstrateML | `TemporalCompression.swift` | `temporal_compression.rs` |
 | `anomaly` | SubstrateML | `AnomalyDetection.swift` | `anomaly.rs` |
@@ -134,11 +133,13 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 | `nmf` | SubstrateML | `NMFAlternatingLeastSquares.swift` | `nmf.rs` |
 | `eigenvalue_centrality` | SubstrateML | `EigenvalueCentrality.swift` | `eigenvalue_centrality.rs` |
 | `audit_log_fold` | SubstrateML | `AuditLogFold.swift` | `audit_log_fold.rs` |
+| `association_rule_mining` | SubstrateML | `AssociationRuleMining.swift` | `association_rule_mining.rs` |
+| `formal_concept_analysis` | SubstrateML | `FormalConceptAnalysis.swift` | `formal_concept_analysis.rs` |
 
 (`AuditGate`, `Verbs`, and `RowStateAutomaton` are the orchestration
 layer in SubstrateLib — not gated primitives, so not in this table.)
 
-### §2.1. Tier 1 — atomic primitives (8 ops)
+### §2.1. Tier 1 — atomic primitives (9 ops)
 
 These are the substrate's irreducible bit operations. Any kit using
 these MUST call the substrate API named below — never a reimplementation
@@ -244,6 +245,24 @@ these MUST call the substrate API named below — never a reimplementation
   behavior is the standard two's-complement AND, byte-identical
   across ports.
 
+#### `merkle_commitment` — NT-P0 / I-27 — CRC `0x2476cee9`
+- **Swift:** `MerkleCommitment.{canonicalLeafPayload,leafHash,interiorRoot,tombstoneHash,keyedCommitment}(...)`
+  in `packages/libs/SubstrateKernel/Sources/SubstrateKernel/MerkleCommitment.swift`
+- **Rust:** `merkle_commitment::{canonical_leaf_payload,leaf_hash,interior_root,tombstone_hash,keyed_commitment}(...)`
+  in `packages/libs/SubstrateKernel/rust/src/merkle_commitment.rs`
+- **Types:** `ContentHash`, `MerkleRoot`, and `KeyedCommitment`
+  in `packages/libs/SubstrateTypes/Sources/SubstrateTypes/ContentHash.swift`
+  and `packages/libs/SubstrateTypes/rust/src/content_hash.rs`
+- **Harness Swift:** `test-harness/swift/Sources/Harness/Primitives/MerkleCommitmentPrimitive.swift`
+- **Harness Rust:** `test-harness/rust/src/primitives/merkle_commitment.rs`
+- **Vector:** `test-harness/vectors/merkle_commitment.json`
+- **What:** Domain-separated SHA-256 Merkle leaf/interior/tombstone/
+  empty-root construction plus HMAC-SHA256 keyed commitments over
+  canonical drawer content and VectorKit-sidecar vector bytes. This
+  is the NT-P0 extension of the I-27 integrity surface; it reuses
+  SubstrateKernel `SHA256` and the existing `GrantHKDF`/`hkdf`
+  HMAC implementation rather than adding a second HMAC primitive.
+
 ### §2.2. Tier 2 — algorithmic primitives (9 ops)
 
 These compose Tier-1 primitives with substrate-state-aware
@@ -277,6 +296,29 @@ algorithms. Higher-level than bitops but still bandwidth-bounded.
 - **What:** Online pairwise-comparison gradient update with
   projection to the non-negative simplex. Drives W_tournament
   and W_ranking learning (cookbook §6.7).
+
+#### `sampling` — §8.17 — CRC `0xfc883023`
+- **Swift:** `Sampling.{sampleNormal,sampleGamma,sampleBeta}(rng:)`
+  in `packages/libs/SubstrateML/Sources/SubstrateML/Sampling.swift`
+- **Rust:** `sampling::{sample_normal,sample_gamma,sample_beta}(rng:)`
+  in `packages/libs/SubstrateML/rust/src/sampling.rs`
+- **Harness:** `SamplingPrimitive.swift` / `sampling.rs`
+- **Vector:** `vectors/sampling.json`
+- **What:** Deterministic SplitMix64-threaded Normal, Gamma, and
+  Beta sampling. This is the substrate-owned sampling math under
+  Thompson-style dreaming-trigger selection; policy remains above
+  the substrate.
+
+#### `shingle_similarity` — §8.20 — CRC `0x8a5d8888`
+- **Swift:** `ShingleSimilarity.similarity(_:_:) -> Float32`
+  in `packages/libs/SubstrateML/Sources/SubstrateML/ShingleSimilarity.swift`
+- **Rust:** `shingle_similarity::similarity(a:b:) -> f32`
+  in `packages/libs/SubstrateML/rust/src/shingle_similarity.rs`
+- **Harness:** `ShingleSimilarityPrimitive.swift` / `shingle_similarity.rs`
+- **Vector:** `vectors/shingle_similarity.json`
+- **What:** Character 3-shingle Jaccard similarity used by recall
+  ranking diversity and MMR-style deduplication. Pure string-set
+  math; no tokenizer, clock, or randomness.
 
 #### `partial_state_recall` — §8.8 — CRC `0xe8d3b221`
 - **Swift:** `PartialStateRecall.score(row:anchor:matchBlocks:differBlocks:) -> Double`
@@ -413,6 +455,31 @@ dreaming-daemon-driven; sub-linear amortized cost per row.
   source-of-truth read path under the capture-genesis-event model
   (cookbook §5.3, Capture Genesis Event decision).
 
+#### `association_rule_mining` — §6.3 — CRC `0xdd61f0d0`
+- **Swift:** `mineAssociationRules(matrix:activeRowCount:thresholds:) -> [AssociationRule]`
+  in `packages/libs/SubstrateML/Sources/SubstrateML/AssociationRuleMining.swift`
+- **Rust:** `association_rule_mining::mine_association_rules(...) -> Vec<AssociationRule>`
+  in `packages/libs/SubstrateML/rust/src/association_rule_mining.rs`
+- **Harness:** `AssociationRuleMiningPrimitive.swift` / `association_rule_mining.rs`
+- **Vector:** `vectors/association_rule_mining.json`
+- **What:** Pairwise association-rule mining over MatrixO
+  co-occurrence counts, emitting support, confidence, lift,
+  leverage, and conviction. The vector is hand-crafted and
+  validates in both languages.
+
+#### `formal_concept_analysis` — §8 pure engine — CRC `0xfeb1a9e9`
+- **Swift:** `FormalContext`, `BoundedConceptMiner`, `ConceptCoverDeltas`,
+  and implication helpers in
+  `packages/libs/SubstrateML/Sources/SubstrateML/FormalConceptAnalysis.swift`
+- **Rust:** `formal_concept_analysis::{FormalContext,BoundedConceptMiner,...}`
+  in `packages/libs/SubstrateML/rust/src/formal_concept_analysis.rs`
+- **Harness:** `FormalConceptAnalysisPrimitive.swift` / `formal_concept_analysis.rs`
+- **Vector:** `vectors/formal_concept_analysis.json`
+- **What:** Bounded Formal Concept Analysis over materialized
+  row-attribute contexts. It mines exact closures and cover deltas
+  without enumerating the full concept lattice. The vector is
+  hand-crafted and validates in both languages.
+
 ### §2.4. Pending promotion (deferred, not yet gated)
 
 - `community_detection` phase 2 (Louvain phase 2 graph aggregation)
@@ -423,14 +490,7 @@ eigenvalue_centrality, moment_summary, field_presence_matrix_f,
 udc_tree_distance) are either gated above or clarified as already
 covered (udc_tree_distance is the `lattice` row).
 
-Four further primitives — `association_rule_mining`,
-`formal_concept_analysis`, `sampling`, and `shingle_similarity` —
-are already gated (test vectors committed, four-way conformance
-passing, registered in both harness registries and counted in
-`primitive-catalog.md`'s total of 28). They are NOT pending; only
-their full §2.x entries in this reference are outstanding (§5 step 9).
-Until those entries land, consult `primitive-catalog.md` for their
-CRCs and API surfaces.
+All other catalogued primitives are indexed above.
 
 ---
 
@@ -491,7 +551,7 @@ code should match its language's idiom.
 
 ## §5. Workflow — adding a new primitive to the gate
 
-Every gated op (28 at time of writing — see §0/§2) was promoted
+Every gated op (29 at time of writing — see §0/§2) was promoted
 through this workflow. If you are adding the next primitive, the
 steps are mechanical. The worked example lives at
 `test-harness/primitive-walkthrough-SimHash.md`.
@@ -698,7 +758,7 @@ backend, or compiler is conforming if and only if it can:
 2. `validate-vectors <name>.json` against the Swift-generated
    canonical vector and PASS.
 
-A platform that passes for all gated primitives (28 — the
+A platform that passes for all gated primitives (29 — the
 `primitive-catalog.md` total) is fully substrate-conforming. A
 platform that passes for the Tier-1 subset (§2.1) is
 hot-path-conforming and can run reads but not the dreaming daemon.
@@ -791,6 +851,16 @@ you don't have to write are 12 lines of bugs you don't have to
 fix.*
 
 ## Changelog
+
+### 1.0.2 -- 2026-06-20
+Added `merkle_commitment` as the 29th conformance-gated primitive
+at CRC `0x2476cee9`. The entry records the NT-P0 content-integrity
+extension, the SubstrateKernel Swift/Rust byte-contract APIs, the
+SubstrateTypes digest wrappers, and the canonical vector file.
+Closed the four remaining catalog-only §2 entries for
+`association_rule_mining`, `formal_concept_analysis`, `sampling`,
+and `shingle_similarity`; this reference now indexes all 29 gated
+primitives.
 
 ### 1.0.1 -- 2026-06-14
 Reconciled the gated-primitive count against ground truth: the harness now gates 28 primitives (per `primitive-catalog.md` and both Swift/Rust harness registries), not 24. The §0 TL;DR, §2 header, §2.4, §5, and §7 count claims were updated; this reference indexes 24 in full, with four newly promoted primitives (`association_rule_mining`, `formal_concept_analysis`, `sampling`, `shingle_similarity`) gated but their per-primitive §2.x entries pending (§5 step 9). `primitive-catalog.md` is named as the authoritative count of record.

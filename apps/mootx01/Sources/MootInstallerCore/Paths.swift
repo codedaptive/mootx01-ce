@@ -77,8 +77,8 @@ public enum MootPaths {
     /// server entry to the current project rather than the global
     /// `~/.claude.json`.
     ///
-    /// - Parameter workingDirectory: the directory in which install.sh
-    ///   was invoked (i.e. `$PWD` at install time). Inject in tests;
+    /// - Parameter workingDirectory: the current working directory at install
+    ///   time (i.e. `$PWD` when `mootx01 install` is run). Inject in tests;
     ///   pass `URL(fileURLWithPath: FileManager.default.currentDirectoryPath)`
     ///   in the executable.
     /// - Returns: `workingDirectory/.mcp.json`. Does not touch the filesystem.

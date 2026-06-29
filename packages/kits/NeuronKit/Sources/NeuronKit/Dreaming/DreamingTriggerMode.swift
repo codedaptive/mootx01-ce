@@ -22,17 +22,17 @@
 // `.timer`  — `pump(now:)` fires on the configured `tickIntervalMs`
 //             cadence. `pumpOnEvent` returns nil.
 // `.event`  — `pumpOnEvent(observationCount:now:)` fires when the
-//             co-occurrence observation count from the substrate reader
-//             meets `DreamingPolicy.eventObservationThreshold`. `pump`
+//             dreaming queue depth (drained co-recall windows) meets
+//             `DreamingPolicy.eventObservationThreshold`. `pump`
 //             returns nil so the timer path cannot accidentally fire.
 // `.hybrid` — both paths are active. `pump` fires on the timer cadence;
 //             `pumpOnEvent` also fires on the event threshold. The host
 //             loop calls both; either may produce a cycle independently.
 //
-// Event source: `DreamingSubstrateReader.coOccurrenceObservations()` is
-// the activity signal. The caller counts the returned observations and
-// passes the count to `pumpOnEvent`; the daemon gates against the
-// `eventObservationThreshold` in the current policy.
+// Event source: the dreaming queue depth — the count of co-recall windows
+// drained from the estate's dreaming queue per cycle — is the activity signal.
+// External-origin recalls enqueue windows; the daemon drains them each cycle
+// and gates against `DreamingPolicy.eventObservationThreshold`.
 
 import Foundation
 
@@ -42,8 +42,8 @@ import Foundation
 ///
 /// - `.timer`: fires on the configured `tickIntervalMs` cadence via
 ///   `pump(now:)`. The event path (`pumpOnEvent`) is inactive.
-/// - `.event`: fires when the co-occurrence observation count meets
-///   `DreamingPolicy.eventObservationThreshold` via `pumpOnEvent`. The
+/// - `.event`: fires when the dreaming queue depth (drained co-recall windows)
+///   meets `DreamingPolicy.eventObservationThreshold` via `pumpOnEvent`. The
 ///   timer path (`pump`) is inactive.
 /// - `.hybrid`: both paths active — `pump` fires on cadence and
 ///   `pumpOnEvent` fires on the activity threshold. The host loop calls
@@ -56,8 +56,8 @@ public enum DreamingTriggerMode: String, Sendable, Codable, CaseIterable, Equata
     /// Tick purely on the configured interval. The v1 default.
     case timer
 
-    /// Tick in response to estate activity: a co-occurrence observation
-    /// count at or above `DreamingPolicy.eventObservationThreshold` fires
+    /// Tick in response to estate activity: a dreaming queue depth
+    /// at or above `DreamingPolicy.eventObservationThreshold` fires
     /// a cycle via `pumpOnEvent(observationCount:now:)`. The timer path
     /// is inactive in this mode.
     case event

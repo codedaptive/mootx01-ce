@@ -3,9 +3,10 @@
 //! fingerprinted under a SHARED hyperplane family (so the spaces are
 //! comparable) and reduced to ONE differentially-private aggregate (NeuronKit
 //! `dp_summary`); the two aggregates are compared (`summary_overlap`). The
-//! comparison touches only the DP summaries — never either estate's individual
-//! memories. "The moat": overlap computed without either side reading the
-//! other's content.
+//! The implementation recalls each estate's drawers and fingerprints each
+//! drawer locally before reducing to a DP summary. The final comparison uses
+//! only the two summaries; the local computation still touches individual
+//! drawers. "The moat": neither estate's raw content crosses the estate boundary.
 //!
 //! This is the REAL MindOverlap, distinct from `estate_divergence_recipe`
 //! (which reads both estates' room distributions directly). Paired with the
@@ -160,9 +161,9 @@ mod tests {
     }
 
     // CK-MO-1: two estates with the SAME memories overlap more than an estate
-    // and one with disjoint memories — computed only from the DP summaries
-    // (the comparison never reads either estate's drawers). The privacy-
-    // preserving overlap distinguishes convergent from divergent minds.
+    // and one with disjoint memories. The test calls run_mind_overlap, which
+    // recalls both estates' drawer sets and fingerprints them locally before
+    // reducing to DP summaries. The final comparison is over summaries only.
     #[test]
     fn ck_mo1_convergent_overlaps_more_than_divergent() {
         let mut coord = EstateCoordinator::new();

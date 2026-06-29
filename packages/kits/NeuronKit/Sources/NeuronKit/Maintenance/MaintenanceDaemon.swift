@@ -127,6 +127,26 @@ public actor MaintenanceDaemon {
         if let stored = try await policyStore.loadPolicy() {
             policy = stored
         }
+        // F6 / ADR-020: restore the daemon's idempotency/cycle memory so a restart
+        // does not repeat suppressed proposals or reset its counters. Absent state
+        // leaves the in-memory defaults in place.
+        if let state = try await policyStore.loadDaemonState() {
+            lastTickAt = state.lastTickAt
+            lastAuditCheckAt = state.lastAuditCheckAt
+            proposedKeys = Set(state.proposedKeys)
+            cycleCount = state.cycleCount
+        }
+    }
+
+    /// Snapshot the current daemon cycle state for persistence. `proposedKeys`
+    /// is emitted sorted so the serialized manifest value is byte-stable.
+    private func currentDaemonState() -> MaintenanceDaemonState {
+        MaintenanceDaemonState(
+            lastTickAt: lastTickAt,
+            lastAuditCheckAt: lastAuditCheckAt,
+            proposedKeys: proposedKeys.sorted(),
+            cycleCount: cycleCount
+        )
     }
 
     /// The current policy. Exposed for the manifest round-trip test.
@@ -139,6 +159,16 @@ public actor MaintenanceDaemon {
     /// cycle report when it fires, or `nil` when the interval has not yet
     /// elapsed. The caller advances `now` from its own clock; the daemon
     /// performs no sleeping. The first pump (no prior tick) always fires.
+    /// Cheap predicate: would `pump(now:)` fire at `now`? Lets the resident
+    /// governor SKIP building the EstateMaintenanceReader snapshot on ticks where
+    /// the interval has not elapsed (maintenance fires every 5 min by default but
+    /// the governor ticks sub-second). Mirrors the gate inside `pump`; does NOT
+    /// mutate state. Rust twin: `MaintenanceDaemon::due`.
+    public func due(now: Date) -> Bool {
+        guard let last = lastTickAt else { return true }
+        return now.timeIntervalSince(last) * 1000.0 >= Double(policy.tickIntervalMs)
+    }
+
     public func pump(now: Date) async throws -> MaintenanceCycleReport? {
         if let last = lastTickAt {
             let elapsedMs = now.timeIntervalSince(last) * 1000.0
@@ -395,6 +425,33 @@ public actor MaintenanceDaemon {
             ts: cycleTs
         ))
 
+        // ── Step 5.9: ADR-017 node invariant verification ────────────────
+        // Verify a subset of ADR-017 node-tree containment invariants from
+        // the drawer corpus already fetched. Full invariant verification
+        // (I-NT-1 through I-NT-6) requires node-table access not yet
+        // exposed through the GLK public surface; the subset below uses
+        // only drawer-level data.
+        //
+        //   I-NT-3 (partial): every drawer must have a non-empty parentNodeId.
+        var nodeInvariantViolations = 0
+        for drawer in active {
+            if drawer.parentNodeId.isEmpty {
+                nodeInvariantViolations += 1
+                Intellectus.report(.metric(
+                    name: "neuronkit.node_invariant.empty_parent",
+                    value: 1.0,
+                    tags: ["drawer_id": drawer.id],
+                    ts: cycleTs
+                ))
+            }
+        }
+        Intellectus.report(.metric(
+            name: "neuronkit.node_invariant.violations",
+            value: Double(nodeInvariantViolations),
+            tags: ["cycle": "\(cycleCount + 1)"],
+            ts: cycleTs
+        ))
+
         // ── Step 6: write exactly one diary entry recording the cycle ──
         cycleCount += 1
         let entry = DiaryEntry(
@@ -406,7 +463,8 @@ public actor MaintenanceDaemon {
                 + "byReference-drift \(byReferenceDrifts), "
                 + "proposed \(emitted.count), suppressed \(suppressed), "
                 + "qid-retried \(qidRetried), qid-resolved \(qidResolved), "
-                + "qid-proposed \(qidProposed), qid-pending \(qidStillPending)",
+                + "qid-proposed \(qidProposed), qid-pending \(qidStillPending), "
+                + "node-invariant-violations \(nodeInvariantViolations)",
             topic: "maintenance-cycle",
             wing: Self.diaryWing,
             room: "diary",
@@ -416,6 +474,11 @@ public actor MaintenanceDaemon {
         try await sink.recordCycleDiary(entry)
 
         lastTickAt = now
+        // F6 / ADR-020: persist the daemon's idempotency/cycle memory after every
+        // cycle so a restart resumes from here. All cycle mutations — cycleCount,
+        // proposedKeys, lastAuditCheckAt, lastTickAt — are complete by this point.
+        // Default store impl is a no-op, so in-memory/test daemons are unaffected.
+        try await policyStore.saveDaemonState(currentDaemonState())
         return MaintenanceCycleReport(
             tickedAt: now,
             auditChecked: auditChecked,
@@ -431,7 +494,8 @@ public actor MaintenanceDaemon {
             qidRetried: qidRetried,
             qidResolved: qidResolved,
             qidProposed: qidProposed,
-            qidStillPending: qidStillPending
+            qidStillPending: qidStillPending,
+            nodeInvariantViolations: nodeInvariantViolations
         )
     }
 

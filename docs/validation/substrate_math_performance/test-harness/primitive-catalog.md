@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-06-06
-last_updated: 2026-06-14
+last_updated: 2026-06-20
 ---
 
 # Primitive Catalog
@@ -17,17 +17,23 @@ This document is kept in sync with the registries in:
 
 ## Conformance state
 
-All 28 primitives in the Tier 1-3 tables below pass the four-way
-cross-language conformance gate. Each has a committed vector file
-in `test-harness/vectors/` (28 `.json` files, one per primitive).
-A 29th primitive, `community_detection`, has a live reference but
+All 29 primitives in the Tier 1-3 tables below pass the conformance
+gate. Each has a committed vector file in `test-harness/vectors/`
+(29 `.json` files, one per primitive).
+A 30th primitive, `community_detection`, has a live reference but
 is not yet harnessed; it is listed under "Pending future work" and
 is NOT part of the conformance gate.
+
+For the 27 generator-driven primitives, the full four-way matrix is:
 
 | Vector file generated in | Validated by Swift | Validated by Rust |
 |---|---|---|
 | Swift generator | PASS | PASS |
 | Rust generator | PASS | PASS |
+
+The two hand-crafted primitives (`association_rule_mining` and
+`formal_concept_analysis`) have no generator path. They are gated by
+Swift and Rust validation of their checked-in vector files.
 
 CRC32 values quoted below are over the canonical binary
 serialization of all case outputs in case order; same value in
@@ -35,7 +41,7 @@ both languages for every primitive.
 
 ## Primitives
 
-### Tier 1: bitmap and fingerprint core
+### Tier 1: bitmap, fingerprint, and content-integrity core
 
 | Primitive | CRC32 | Cookbook | Swift reference | Rust reference |
 |---|---|---|---|---|
@@ -47,6 +53,7 @@ both languages for every primitive.
 | `hlc` | `0x9303e020` | §5.2 | `SubstrateTypes/Sources/SubstrateTypes/HLC.swift` | `SubstrateTypes/rust/src/hlc.rs` |
 | `fnv` | `0x275fd2bf` | §3.3 | `SubstrateTypes/Sources/SubstrateTypes/FNV.swift` | `SubstrateTypes/rust/src/fnv.rs` |
 | `bit_field_masked_equals` | `0x54f6c65f` | §2.8 | `SubstrateKernel/Sources/SubstrateKernel/BitField.swift` | `SubstrateKernel/rust/src/bit_field.rs` |
+| `merkle_commitment` | `0x2476cee9` | NT-P0 / I-27 | `SubstrateKernel/Sources/SubstrateKernel/MerkleCommitment.swift` | `SubstrateKernel/rust/src/merkle_commitment.rs` |
 
 ### Tier 2: structural coordinate system
 
@@ -99,13 +106,13 @@ The conformance CI at `.github/workflows/geniuslocus-conformance.yml`
 runs the four-way matrix on every push and pull request affecting
 the substrate or harness sources.
 
-Of the 28 conformant primitives, the 26 RNG-seeded ones run
+Of the 29 conformant primitives, the 27 generator-driven ones run
 through the generator-driven iterator below. The two hand-crafted
 primitives (`association_rule_mining` and `formal_concept_analysis`)
 are gated separately, as described in the note under the Tier 3
 table: their `generate()` throws, so CI validates them against
 checked-in hand-crafted vectors rather than regenerating from a
-seed. 26 RNG-seeded + 2 hand-crafted = all 28 conformant
+seed. 27 generator-driven + 2 hand-crafted = all 29 conformant
 primitives.
 
 The matrix iterator:
@@ -117,7 +124,7 @@ for primitive in simhash hamming or_reduce bitwise anomaly hlc \
                  partial_state_recall temporal_compression \
                  tier_contribution fft hamming_nn pairing_handshake \
                  nmf audit_log_fold matrix_decay eigenvalue_centrality moment_summary field_presence_matrix_f fnv \
-                 sampling shingle_similarity; do
+                 sampling shingle_similarity merkle_commitment; do
     swift run gen-vectors --primitive $primitive --seed 0xCAFEBABEDEADBEEF --out /tmp/sw-$primitive.json
     cargo run --release --bin gen-vectors -- --primitive $primitive --seed 0xCAFEBABEDEADBEEF --out /tmp/rs-$primitive.json
     swift run validate-vectors test-harness/vectors/$primitive.json
@@ -127,7 +134,7 @@ for primitive in simhash hamming or_reduce bitwise anomaly hlc \
 done
 ```
 
-The loop above covers the 26 RNG-seeded primitives. The two
+The loop above covers the 27 generator-driven primitives. The two
 hand-crafted primitives (`association_rule_mining`,
 `formal_concept_analysis`) are validated in a separate CI step
 against their checked-in vectors. Any cell failing in either step

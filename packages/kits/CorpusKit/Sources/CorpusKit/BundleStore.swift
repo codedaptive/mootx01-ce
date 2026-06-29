@@ -15,7 +15,9 @@
 //     text         TEXT NOT NULL,
 //     hlc          HLC NOT NULL,
 //     metadata     JSON NOT NULL,
-//     created_at   TIMESTAMP NOT NULL
+//     created_at   TIMESTAMP NOT NULL,
+//     ext          JSON,              -- v2: forward-compat slot (ADR-012)
+//     content_hash BLOB               -- v3: SHA-256 via MerkleHash.leaf (NT-C1)
 //   )
 //
 // Indices on (source_id) for "give me everything from this doc"
@@ -37,13 +39,16 @@
 // CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
 // self-report telemetry to insert. The emit calls are placed at the
 // operation boundary, after the batch completes, so the storage
-// behaviour is unchanged. When monitoring is disabled (the default),
-// the Intellectus.report(_:) call short-circuits after a single
-// Atomic<Bool> load.
+// behaviour is unchanged. The insert path always reads Date() for
+// startTime, Date() for each chunk's created_at, and Date() for
+// endTime before calling Intellectus.report; the disabled-monitoring
+// path does not short-circuit these clock reads.
 
 import Foundation
 import IntellectusLib
 import SubstrateTypes
+import SubstrateLib
+import SubstrateKernel
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -59,22 +64,82 @@ import PersistenceKit
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
+/// Thread-safe cache mapping chunk UUIDs to their Merkle containment
+/// parent chain. Populated by BundleStore.insert before each
+/// HashingRowStore write so the synchronous HashParentChainProvider
+/// callback can look up the corpus-level parent without async I/O.
+final class ParentChainCache: @unchecked Sendable {
+    private var cache: [UUID: (parent: UUID, grandparent: UUID)] = [:]
+    private let lock = NSLock()
+
+    func set(_ key: UUID, parent: UUID, grandparent: UUID) {
+        lock.lock()
+        cache[key] = (parent, grandparent)
+        lock.unlock()
+    }
+
+    func get(_ key: UUID) -> (parentNodeId: UUID, grandparentNodeId: UUID)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = cache[key] else { return nil }
+        return (parentNodeId: entry.parent, grandparentNodeId: entry.grandparent)
+    }
+
+    func clear() {
+        lock.lock()
+        cache.removeAll()
+        lock.unlock()
+    }
+}
+
 public actor BundleStore {
 
     let storage: any Storage
 
+    /// The hashing decorator wrapping the raw row store. Intercepts
+    /// inserts to hashable tables, computes ContentHash via
+    /// MerkleHash.leaf, and emits DirtyChainEvents for Merkle rollup.
+    private let hashingRowStore: HashingRowStore
+
+    /// Pre-insert cache for the HashParentChainProvider callback.
+    private let parentChainCache = ParentChainCache()
+
+    /// Fixed UUID representing the corpus-level root node (grandparent
+    /// in the chunk → corpus → root containment chain). Deterministic
+    /// across Swift and Rust — SHA-256 of a fixed seed, first 16 bytes.
+    static let corpusRootUUID: UUID = {
+        let digest = SHA256.hash(Array("CorpusKit.corpusRoot".utf8))
+        return UUID(uuid: (digest[0], digest[1], digest[2], digest[3],
+                           digest[4], digest[5], digest[6], digest[7],
+                           digest[8], digest[9], digest[10], digest[11],
+                           digest[12], digest[13], digest[14], digest[15]))
+    }()
+
+    /// Derives a deterministic UUID for a corpus from its source_id.
+    /// SHA-256 of a fixed namespace prefix + source_id, first 16 bytes.
+    /// Both Swift and Rust ports use identical derivation for
+    /// byte-identical Merkle containment chains.
+    static func corpusUUID(for sourceID: String) -> UUID {
+        var input = Array("CorpusKit.corpusNamespace:".utf8)
+        input.append(contentsOf: Array(sourceID.utf8))
+        let digest = SHA256.hash(input)
+        return UUID(uuid: (digest[0], digest[1], digest[2], digest[3],
+                           digest[4], digest[5], digest[6], digest[7],
+                           digest[8], digest[9], digest[10], digest[11],
+                           digest[12], digest[13], digest[14], digest[15]))
+    }
+
     /// Schema declaration consumed by Storage.open(schema:).
     ///
-    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012),
-    /// distinct from the existing per-chunk `metadata` column: `ext`
-    /// reserves the slot for unforeseeable future typed attributes
-    /// (e.g. federation/encryption per-chunk metadata) without a
-    /// migration. 1.0 writes NULL / omits it on insert and never reads it.
-    /// The `chunks` table is append-only; a nullable column with no read
-    /// path is inert under that constraint.
+    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012).
+    /// v3 adds `content_hash` BLOB column and marks the table `hashable`
+    /// for hash-on-write via HashingRowStore (ADR-017 §14, NT-C1).
+    /// The `content_hash` column is nullable: NULL for rows inserted
+    /// before v3 (backward-compatible migration, no backfill required).
+    /// v3 also adds the `corpus_metadata` table for per-corpus Merkle roots.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKit",
-        version: 2,
+        version: 3,
         tables: [
             TableDeclaration(
                 name: "chunks",
@@ -87,13 +152,30 @@ public actor BundleStore {
                     ColumnDeclaration(name: "hlc", type: .hlc, nullable: false),
                     .json("metadata", nullable: false),
                     .timestamp("created_at", nullable: false),
-                    // ADR-012 forward-compat slot. Nullable `.json`, present
-                    // from schema v2. Distinct from `metadata`: reserves the
-                    // slot, not a shape. 1.0 omits it on insert and never reads it.
-                    .json("ext", nullable: true)
+                    // ADR-012 forward-compat slot (v2). Nullable JSON; distinct
+                    // from `metadata`. 1.0 omits it on insert and never reads it.
+                    .json("ext", nullable: true),
+                    // NT-C1 (v3): SHA-256 content hash computed by
+                    // HashingRowStore on write via MerkleHash.leaf.
+                    // Nullable for backward compat with pre-v3 rows.
+                    .blob("content_hash", nullable: true)
                 ],
                 primaryKey: ["id"],
-                appendOnly: true
+                appendOnly: false,
+                hashable: true
+            ),
+            // Per-corpus Merkle root: MerkleHash.interior over the
+            // content_hashes of all chunks sharing a source_id.
+            // Updated incrementally after each insert batch (NT-C1 Part 3).
+            TableDeclaration(
+                name: "corpus_metadata",
+                columns: [
+                    .text("source_id", nullable: false),
+                    // MerkleRoot bytes (32-byte SHA-256). NULL until the
+                    // first rollup computes it.
+                    .blob("merkle_root", nullable: true)
+                ],
+                primaryKey: ["source_id"]
             )
         ],
         indices: [
@@ -110,23 +192,73 @@ public actor BundleStore {
         ]
     )
 
-    public init(storage: any Storage) {
+    /// Designated initialiser.
+    ///
+    /// Wraps the storage's raw row store in a `HashingRowStore` that
+    /// computes ContentHash via `MerkleHash.leaf` on every chunk insert.
+    /// The `dirtyChainSink` parameter accepts DirtyChainEvents for
+    /// downstream Merkle rollup consumers (Part 3).
+    public init(
+        storage: any Storage,
+        dirtyChainSink: HashingRowStore.ObserverRegistryRef? = nil
+    ) {
         self.storage = storage
+
+        let cache = parentChainCache
+        let hashableTables: Set<String> = ["chunks"]
+
+        let config = HashOnWriteConfig(
+            hashableTables: hashableTables,
+            hashProvider: { table, rowKey, values -> ContentHash in
+                // Extract the chunk text for hashing. The text column
+                // is the chunk's content; vectors live in VectorKit
+                // (not inline), so the vector input is empty.
+                let contentBytes: [UInt8]
+                if case let .text(text) = values["text"] ?? .null {
+                    contentBytes = Array(text.utf8)
+                } else {
+                    contentBytes = []
+                }
+                return MerkleHash.leaf(
+                    drawerId: rowKey,
+                    content: contentBytes,
+                    vectors: []
+                )
+            },
+            parentChainProvider: { table, rowKey in
+                cache.get(rowKey)
+            }
+        )
+
+        self.hashingRowStore = HashingRowStore(
+            backing: storage.rowStore,
+            config: config,
+            dirtyChainSink: dirtyChainSink
+        )
     }
 
     /// Insert a batch of chunks. Idempotent on primary key:
     /// re-inserting a chunk with the same id is a no-op.
     ///
-    /// The table is append-only, so the idempotent path is a plain
-    /// insert that tolerates a duplicate-key rejection rather than an
-    /// upsert. An upsert with a non-empty update set compiles to
-    /// `INSERT ... ON CONFLICT DO UPDATE`, whose UPDATE branch the
-    /// append-only trigger aborts; a plain insert hits the primary-key
-    /// constraint instead and surfaces StorageError.duplicateKey,
-    /// which is caught here and treated as the documented no-op. The
-    /// first write of a given id wins; a later insert of the same id
-    /// is dropped, which is correct because chunks are immutable and
-    /// content-addressed.
+    /// Returns the subset of `chunks` that were ACTUALLY inserted (new ids), in
+    /// input order — duplicate-key no-ops are excluded. Callers that maintain
+    /// derived per-chunk state which must NOT double-count on re-ingest (the
+    /// maintained provider counts) fold only over the returned set; callers that
+    /// don't care discard it (`@discardableResult`).
+    ///
+    /// The idempotent path is a plain insert that tolerates a
+    /// duplicate-key rejection rather than an upsert. A plain insert
+    /// hits the primary-key constraint and surfaces
+    /// StorageError.duplicateKey, which is caught here and treated as
+    /// the documented no-op. The first write of a given id wins; a
+    /// later insert of the same id is dropped, which is correct because
+    /// chunks are immutable and content-addressed.
+    ///
+    /// Note: the chunks table is NOT append-only (appendOnly: false),
+    /// enabling `scrubText(sourceID:)` to zero verbatim text on expunge
+    /// (secfix/ws2-coredelete: hard-delete destruction contract). The
+    /// idempotent insert path is unaffected — duplicate-key rejection
+    /// happens at the primary-key constraint level, not via triggers.
     ///
     /// Telemetry: emits `corpuskit.ingest.latency_ms` (wall time for the
     /// full batch insert) and `corpuskit.ingest.chunk_count` (number of
@@ -134,12 +266,15 @@ public actor BundleStore {
     /// enabled. Both are emitted at the operation boundary — after the last
     /// insert attempt completes — so they cannot affect the stored values or
     /// any thrown error. Off-path: single Atomic<Bool> load per call.
-    public func insert(_ chunks: [Chunk]) async throws {
-        guard !chunks.isEmpty else { return }
+    @discardableResult
+    public func insert(_ chunks: [Chunk]) async throws -> [Chunk] {
+        guard !chunks.isEmpty else { return [] }
+        var inserted: [Chunk] = []
+        inserted.reserveCapacity(chunks.count)
 
-        // Capture start time before the I/O. One Date() read per
-        // call; the computed latency is forwarded to the sink only when
-        // monitoring is enabled (inside the @autoclosure guard).
+        // Capture start time before the I/O. The code also stamps
+        // created_at with Date() for every chunk and reads endTime
+        // after the insert loop; multiple Date() reads occur per call.
         let startTime = Date().timeIntervalSince1970
 
         for chunk in chunks {
@@ -159,16 +294,34 @@ public actor BundleStore {
                 "metadata": .json(metadataJSON),
                 "created_at": .timestamp(Date())
             ]
+            // Pre-populate parent chain cache so the synchronous
+            // HashParentChainProvider callback can map this chunk
+            // to its corpus-level parent in the Merkle tree.
+            let corpusUUID = Self.corpusUUID(for: chunk.sourceID)
+            parentChainCache.set(
+                chunk.id,
+                parent: corpusUUID,
+                grandparent: Self.corpusRootUUID
+            )
             do {
-                _ = try await storage.rowStore.insert(
+                _ = try await hashingRowStore.insert(
                     table: "chunks",
                     values: values
                 )
+                inserted.append(chunk)
             } catch StorageError.duplicateKey {
                 // Idempotent no-op: the chunk is already stored. Chunks
-                // are immutable, so there is nothing to reconcile.
+                // are immutable, so there is nothing to reconcile. NOT added to
+                // `inserted` — derived per-chunk state must not double-count it.
                 continue
             }
+        }
+        parentChainCache.clear()
+
+        // Recompute per-corpus Merkle roots for all affected sources.
+        let affectedSources = Set(chunks.map(\.sourceID))
+        for sourceID in affectedSources {
+            try await rollupCorpusMerkleRoot(sourceID: sourceID)
         }
 
         // Emit ingest telemetry at the operation boundary, after all inserts
@@ -191,21 +344,23 @@ public actor BundleStore {
             tags: ["kit": "CorpusKit"],
             ts: endTime
         ))
+        return inserted
     }
 
-    public func get(id: UUID) async throws -> Chunk? {
+    public func get(id: UUID, asOf: AsOfCoordinate? = nil) async throws -> Chunk? {
         let rows = try await storage.rowStore.query(
             table: "chunks",
             where: .eq(Column(table: "chunks", name: "id"), .uuid(id)),
             orderBy: [],
             limit: 1,
-            offset: nil
+            offset: nil,
+            asOf: asOf
         )
         guard let row = rows.first else { return nil }
         return Self.decodeChunk(row)
     }
 
-    public func getMany(ids: [UUID]) async throws -> [Chunk] {
+    public func getMany(ids: [UUID], asOf: AsOfCoordinate? = nil) async throws -> [Chunk] {
         guard !ids.isEmpty else { return [] }
         let values = ids.map { TypedValue.uuid($0) }
         let rows = try await storage.rowStore.query(
@@ -213,12 +368,13 @@ public actor BundleStore {
             where: .in(Column(table: "chunks", name: "id"), values),
             orderBy: [],
             limit: nil,
-            offset: nil
+            offset: nil,
+            asOf: asOf
         )
         return rows.compactMap(Self.decodeChunk)
     }
 
-    public func chunksForSource(_ sourceID: String) async throws -> [Chunk] {
+    public func chunksForSource(_ sourceID: String, asOf: AsOfCoordinate? = nil) async throws -> [Chunk] {
         let rows = try await storage.rowStore.query(
             table: "chunks",
             where: .eq(Column(table: "chunks", name: "source_id"), .text(sourceID)),
@@ -229,7 +385,8 @@ public actor BundleStore {
                 )
             ],
             limit: nil,
-            offset: nil
+            offset: nil,
+            asOf: asOf
         )
         return rows.compactMap(Self.decodeChunk)
     }
@@ -241,13 +398,14 @@ public actor BundleStore {
     /// one chunk and therefore do not need to be enqueued for re-encoding.
     /// The query is a full-table scan over the source_id index, but it is only
     /// called in maintenance/admin contexts (not on hot paths).
-    public func allSourceIDs() async throws -> Set<String> {
+    public func allSourceIDs(asOf: AsOfCoordinate? = nil) async throws -> Set<String> {
         let rows = try await storage.rowStore.query(
             table: "chunks",
             where: nil,
             orderBy: [],
             limit: nil,
-            offset: nil
+            offset: nil,
+            asOf: asOf
         )
         var ids = Set<String>()
         for row in rows {
@@ -258,11 +416,51 @@ public actor BundleStore {
         return ids
     }
 
-    public func count() async throws -> Int {
+    /// Compact projection — chunk UUID → source_id pairs for ALL non-tombstoned rows.
+    ///
+    /// Used by `Corpus.init` to warm-load `chunkSourceMap` on open WITHOUT loading
+    /// chunk body text. Selecting only `id` and `source_id` avoids the O(N·body)
+    /// cold-start cost of `allChunks()` when all we need is the reverse-map join key.
+    ///
+    /// "Non-tombstoned" here means the same filtering contract `activeChunks()`
+    /// applies — callers combine this result with `RemovedSourceStore.removedIDs()`
+    /// to exclude removed sources. Ordering is unspecified (the join key lookup
+    /// is O(1) per UUID regardless of order).
+    public func chunkSourcePairs() async throws -> [(id: UUID, sourceID: String)] {
+        // Query with an empty orderBy to avoid the HLC-ordered full scan that
+        // allChunks() uses — we only need the two key columns, not body or ordering.
+        let rows = try await storage.rowStore.query(
+            table: "chunks",
+            where: nil,
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        var pairs: [(id: UUID, sourceID: String)] = []
+        pairs.reserveCapacity(rows.count)
+        for row in rows {
+            // Tolerate both `.uuid` (InMemory backend) and `.text` UUID string (SQLite
+            // backend) — the same primitive-tolerance discipline all BundleStore decoders use.
+            let maybeID: UUID?
+            switch row["id"] ?? .null {
+            case .uuid(let u):    maybeID = u
+            case .text(let s):   maybeID = UUID(uuidString: s)
+            default:             maybeID = nil
+            }
+            guard let id = maybeID,
+                  case let .text(sourceID) = row["source_id"] ?? .null else { continue }
+            pairs.append((id: id, sourceID: sourceID))
+        }
+        return pairs
+    }
+
+    // asOf not forwarded: RowStore.count has no as-of variant.
+    // Count includes all rows regardless of snapshot coordinate.
+    public func count(asOf: AsOfCoordinate? = nil) async throws -> Int {
         try await storage.rowStore.count(table: "chunks", where: nil)
     }
 
-    public func allChunks() async throws -> [Chunk] {
+    public func allChunks(asOf: AsOfCoordinate? = nil) async throws -> [Chunk] {
         let rows = try await storage.rowStore.query(
             table: "chunks",
             where: nil,
@@ -273,9 +471,162 @@ public actor BundleStore {
                 )
             ],
             limit: nil,
-            offset: nil
+            offset: nil,
+            asOf: asOf
         )
         return rows.compactMap(Self.decodeChunk)
+    }
+
+    // MARK: - Hard-delete erasure (secfix/ws2-coredelete)
+
+    /// Zero the verbatim text of every chunk belonging to `sourceID`.
+    ///
+    /// This is the corpus layer's contribution to the hard-delete destruction
+    /// contract: `CorpusKit.remove(sourceID:)` removes a source from recall
+    /// (invertedIndex, vectorStore, removedSourceStore) but leaves the verbatim
+    /// chunk text rows in SQLite. `scrubText` performs the actual erasure —
+    /// UPDATE `chunks` SET `text` = "" WHERE `source_id` = sourceID.
+    ///
+    /// Called by `CorpusKit.expunge(sourceID:)` as part of the two-phase
+    /// expunge flow: scrub first, then remove. Callers that only want to
+    /// suppress recall without erasing content continue to use `remove`.
+    ///
+    /// The update bypasses the `HashingRowStore` wrapper intentionally — the
+    /// content_hash column is left stale after scrubbing (the hash no longer
+    /// matches the empty text). This is acceptable: the row is being destroyed;
+    /// the Merkle chain accuracy of a destroyed corpus is not a requirement.
+    ///
+    /// - Parameter sourceID: the source to scrub.
+    /// - Returns: the number of chunk rows whose text was zeroed.
+    @discardableResult
+    public func scrubText(sourceID: String) async throws -> Int {
+        try await storage.rowStore.update(
+            table: "chunks",
+            values: ["text": .text("")],
+            where: .eq(Column(table: "chunks", name: "source_id"), .text(sourceID))
+        )
+    }
+
+    // MARK: - Per-corpus Merkle root (NT-C1 Part 3)
+
+    /// Recompute the Merkle root for one corpus (source_id) from
+    /// the content_hashes of its chunks. Stores the result in the
+    /// `corpus_metadata` table via upsert.
+    ///
+    /// For chunks without a stored content_hash (pre-v3 data), a
+    /// leaf hash is computed on-demand from the chunk text. The
+    /// rollup is called after every insert batch for each affected
+    /// source_id, mirroring LocusKit's room-level rollup pattern.
+    func rollupCorpusMerkleRoot(sourceID: String) async throws {
+        let rows = try await storage.rowStore.query(
+            table: "chunks",
+            where: .eq(Column(table: "chunks", name: "source_id"), .text(sourceID)),
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+
+        var childHashes: [(UUID, ContentHash)] = []
+        for row in rows {
+            guard let chunkId = Self.decodeRowUUID(row["id"]) else { continue }
+            let contentHash: ContentHash
+
+            if case .blob(let data) = row["content_hash"], data.count == 32 {
+                contentHash = ContentHash(bytes: Array(data))
+            } else {
+                // No stored hash (pre-v3 row) — compute on-demand.
+                let text: String
+                if case .text(let t) = row["text"] ?? .null {
+                    text = t
+                } else {
+                    text = ""
+                }
+                contentHash = MerkleHash.leaf(
+                    drawerId: chunkId,
+                    content: Array(text.utf8),
+                    vectors: []
+                )
+            }
+            childHashes.append((chunkId, contentHash))
+        }
+
+        let root = MerkleHash.interior(childHashes: childHashes)
+        _ = try await storage.rowStore.upsert(
+            table: "corpus_metadata",
+            values: [
+                "source_id": .text(sourceID),
+                "merkle_root": .blob(Data(root.bytes))
+            ],
+            conflictColumns: ["source_id"]
+        )
+    }
+
+    /// Returns the current per-corpus Merkle root for the given source.
+    /// Returns `MerkleRoot.empty` if the corpus has no metadata row yet.
+    public func corpusMerkleRoot(for sourceID: String) async throws -> MerkleRoot {
+        let rows = try await storage.rowStore.query(
+            table: "corpus_metadata",
+            where: .eq(Column(table: "corpus_metadata", name: "source_id"), .text(sourceID)),
+            orderBy: [],
+            limit: 1,
+            offset: nil
+        )
+        guard let row = rows.first,
+              case .blob(let data) = row["merkle_root"],
+              data.count == 32 else {
+            return MerkleRoot.empty
+        }
+        return MerkleRoot(bytes: Array(data))
+    }
+
+    /// Returns the estate-level corpus Merkle root — the interior hash
+    /// over all per-corpus roots. Returns `MerkleRoot.empty` when no
+    /// corpora exist.
+    public func globalCorpusMerkleRoot() async throws -> MerkleRoot {
+        let rows = try await storage.rowStore.query(
+            table: "corpus_metadata",
+            where: nil,
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        var childHashes: [(UUID, ContentHash)] = []
+        for row in rows {
+            guard case .text(let sourceID) = row["source_id"] ?? .null else { continue }
+            let corpusId = Self.corpusUUID(for: sourceID)
+            let rootBytes: [UInt8]
+            if case .blob(let data) = row["merkle_root"], data.count == 32 {
+                rootBytes = Array(data)
+            } else {
+                rootBytes = MerkleRoot.empty.bytes
+            }
+            childHashes.append((corpusId, ContentHash(bytes: rootBytes)))
+        }
+        return MerkleHash.interior(childHashes: childHashes)
+    }
+
+    // MARK: - Upgrade backfill
+
+    /// Recompute Merkle roots for all existing corpora.
+    ///
+    /// Called on every `Corpus.init` after schema migration to backfill any
+    /// existing chunks that were inserted before the `corpus_metadata` table
+    /// was introduced (schema v3). Without this call, `globalCorpusMerkleRoot`
+    /// returns `MerkleRoot.empty` for any estate that was upgraded from v2,
+    /// even though chunks exist (WS2-F3).
+    ///
+    /// The operation is idempotent: if `corpus_metadata` rows already exist,
+    /// re-rolling the hash is a harmless upsert. For large corpora this adds
+    /// a one-time startup cost; for typical estates (tens of thousands of
+    /// chunks) the cost is sub-second and not repeated after the first run.
+    func recomputeAllCorpusMerkleRoots() async throws {
+        // Collect all distinct source_ids from the chunks table. This includes
+        // sources that may not yet have a corpus_metadata row (pre-v3 estates).
+        let sourceIDs = try await allSourceIDs()
+        for sourceID in sourceIDs {
+            // rollupCorpusMerkleRoot is idempotent: upsert on conflict.
+            try await rollupCorpusMerkleRoot(sourceID: sourceID)
+        }
     }
 
     // MARK: - Decode

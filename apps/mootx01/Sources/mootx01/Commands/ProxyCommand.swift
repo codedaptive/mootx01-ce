@@ -36,8 +36,16 @@ struct ProxyCommand: AsyncParsableCommand {
     var http: String = "http://127.0.0.1:4242"
 
     func run() async throws {
-        guard let url = URL(string: http) else {
-            proxyStderrLog("mootx01 proxy: invalid daemon URL '\(http)'")
+        // Planned hardening: validate that --http is a loopback HTTP URL before
+        // forwarding any frames. A non-loopback URL would proxy the stdio bridge
+        // to a remote server, violating the loopback-only contract (fails CLOSED).
+        guard let url = URL(string: http),
+              url.scheme == "http",
+              let host = url.host,
+              host == "127.0.0.1" || host == "localhost" || host == "::1" else {
+            proxyStderrLog(
+                "mootx01 proxy: '--http' must be a loopback HTTP URL (e.g. http://127.0.0.1:4242), got '\(http)'"
+            )
             throw ExitCode.failure
         }
         try await waitForDaemon(url: url)

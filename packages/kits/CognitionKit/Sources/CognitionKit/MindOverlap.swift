@@ -20,13 +20,13 @@ public struct MindOverlap: Sendable, Equatable {
 
 /// MindOverlapLens — the conscious "where two minds converge vs
 /// diverge" recipe (Lens 9, Federated), privacy-preserving. Each
-/// estate's drawers are fingerprinted under a SHARED hyperplane family
-/// (so the spaces are comparable) and reduced to ONE
-/// differentially-private aggregate (NeuronKit `dpSummary`); the two
-/// aggregates are compared (`summaryOverlap`). The comparison touches
-/// only the DP summaries — never either estate's individual memories.
-/// "The moat": overlap computed without either side reading the other's
-/// content.
+/// estate's drawers are recalled and fingerprinted locally under a
+/// SHARED hyperplane family (so the spaces are comparable), then reduced
+/// to ONE differentially-private aggregate (NeuronKit `dpSummary`). The
+/// final overlap comparison uses only the two DP summaries (`summaryOverlap`),
+/// never the individual memory content. The local fingerprinting step
+/// reads each estate's drawer set; no individual content crosses the
+/// estate boundary.
 ///
 /// The recipe entry point is `MindOverlapLens` (the result type
 /// `MindOverlap` is the bare value type; the recipe namespace is

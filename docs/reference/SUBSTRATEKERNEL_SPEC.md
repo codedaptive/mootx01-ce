@@ -1,12 +1,13 @@
 ---
 title: SubstrateKernel Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-23
 description: "Behavioral specification for SubstrateKernel: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
+  - docs/decisions/DECISION_SIMHASH_BACKENDS_2026-05-18.md
   - docs/reference/SUBSTRATEKERNEL_INTERFACE.md
   - docs/reference/SUBSTRATETYPES_SPEC.md
   - docs/reference/SUBSTRATEML_SPEC.md
@@ -129,6 +130,10 @@ Every kernel implements the protocol's surface:
 - `simhashSign(_ input: SimHashInput, _ family: HyperplaneFamily) -> Fingerprint256`
 - `orReduce256(_ fingerprints: [Fingerprint256]) -> Fingerprint256`
 - `xor256(_ a: Fingerprint256, _ b: Fingerprint256) -> Fingerprint256`
+- *(planned, see § 5.4)* the **float-input SimHash projection** — the
+  dispatch home for `SubstrateML.FloatSimHash.project` (the float variant
+  the embedding providers use), promoted from a scalar-only standalone
+  function into this backend-selected surface.
 
 Implementations vary in their dispatch strategy (loop unrolling,
 SIMD width, GPU offload) but every implementation produces the same
@@ -167,6 +172,37 @@ Rust version today exposes `ScalarKernel` plus portable SIMD via the
 `simd-nightly` feature; NEON/Metal are Apple-specific backends
 implemented in the Swift version; the Rust version targets the
 non-Apple ecosystem and does not provide them.
+
+### § 5.4 Float-input SimHash projection (dispatch promotion)
+
+The float-input SimHash projection — `SubstrateML.FloatSimHash.project`,
+which the embedding providers (FDC, distributional, named-model) call to
+turn a dense float vector into a `Fingerprint256` — is a backend-selected
+dispatch op of this surface, with `ScalarKernel` as the canonical oracle
+(I-25). It previously ran only as a hand-written scalar loop in SubstrateML,
+bypassing the dispatch; promoting it gives the float variant the same
+multi-backend treatment `simhashSign` (the bitmap variant) already has.
+
+Backend selection follows `DECISION_SIMHASH_BACKENDS_2026-05-18`:
+
+- **`SimdKernel` is the production backend**, via the measured
+  over-hyperplanes vertical-SIMD pattern: the 256 hyperplanes are
+  independent, so each lane runs *one* hyperplane's signed-sum
+  accumulation in canonical (scalar-equal) order. This is parallelism
+  *across* hyperplanes, never a split of a single reduction — so the output
+  is **bit-identical to `ScalarKernel`** (cross-port AND cross-backend),
+  preserving the engram as a stable Hamming key.
+- **Crossover ~ batch ≥ 4**: below that the per-batch setup loses; at and
+  above it SIMD wins (≈2–6× per the decision's measurements). A single
+  capture (bs=1) stays scalar.
+- **Metal/GPU is declined** for this op (the decision's Phase 2.γ-3): the
+  ~70 µs Metal dispatch floor puts the crossover near ~1,186 calls and
+  SimdKernel already wins below that. Revisit only at dreaming-daemon
+  bulk-index scale (10K–1M per call); no Metal shader is built.
+
+`l2Normalize` (FloatVecOps), which feeds this projection, is parallelized
+the same way — across vectors, each vector's sum-of-squares serial — and is
+secondary (cheap relative to the 256-hyperplane projection).
 
 ### § 5.4 BitField
 
@@ -269,6 +305,9 @@ on another in-repo kit when a recorded decision requires it. The telemetry it en
 the single `substrate.kernel.backend_selected` metric described in § 8.1.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-23
+Added § 5.4: the float-input SimHash projection (`SubstrateML.FloatSimHash.project`) is promoted from a scalar-only standalone function into this backend-selected dispatch surface — `ScalarKernel` oracle, `SimdKernel` production backend via the over-hyperplanes pattern (bit-identical cross-port and cross-backend), crossover ~bs 4, Metal declined per DECISION_SIMHASH_BACKENDS_2026-05-18. Listed as a planned dispatch op in § 5.1. `l2Normalize` parallelized across vectors as the secondary feeder op.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

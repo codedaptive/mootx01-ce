@@ -31,10 +31,10 @@
 
 import Foundation
 
-/// Canonical 4-byte key for an O-matrix cell. Field indices are
-/// 0..63 (we reserve 6 bits, anticipating §11.x growth); values
-/// are 0..63 (6 bits, the field-width floor I-15). The compound
-/// key fits in a UInt32 with 4 bits to spare.
+/// Canonical key for an O-matrix cell, packed into a UInt32 with
+/// four 8-bit lanes: fieldI | valueI | fieldJ | valueJ (high → low).
+/// Field indices and values are validated to 0..63 (6 bits, I-15)
+/// at construction; the upper 2 bits of each lane are always zero.
 public struct CooccurrenceKey: Hashable, Comparable, Sendable {
     public let fieldI: UInt8
     public let valueI: UInt8

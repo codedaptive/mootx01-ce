@@ -71,6 +71,23 @@ struct Note: Identifiable, Hashable {
             .trimmingCharacters(in: .whitespaces)
         guard !id.isEmpty else { return nil }
 
+        // Security: validate the extracted id is a UUID before accepting it.
+        //
+        // MOOT drawer ids default to a freshly-generated UUID string. A crafted
+        // note body could contain text before "[room]" that looks like a row
+        // header — for example, a note whose text begins with a fake id followed
+        // by "[notes]" could influence how this text line is parsed and inject a
+        // synthetic id into the moot_withdraw_memory call on delete.
+        //
+        // Validating as a UUID here means only real drawer ids (which are always
+        // UUIDs under the current substrate) can drive destructive operations.
+        // This is the safe pattern: derive action-bearing ids from a reliable
+        // structural contract, not from re-parsing free text.
+        //
+        // If the substrate ever permits non-UUID drawer ids, this guard needs
+        // to be relaxed together with a corresponding update to the deletion path.
+        guard UUID(uuidString: id) != nil else { return nil }
+
         // room = the text inside the brackets.
         let afterOpen = trimmed.index(after: open)
         let room = String(trimmed[afterOpen..<close])
@@ -134,11 +151,9 @@ final class NotepadModel {
 
     /// Rebuild `notes` from the MOOT.
     ///
-    /// We call `moot_memory_search`. Passing a broad query recalls everything
-    /// in the estate; we then keep only rows whose room is ours ("notes"),
-    /// because the estate could in principle hold drawers from other rooms
-    /// (e.g. ones filed by the generic Capture intent, or sample data). The
-    /// `limit` keeps the list bounded.
+    /// We call `moot_memory_search` with a broad query and `limit: 200`.
+    /// Results are filtered to rows whose room is ours ("notes"). The limit
+    /// bounds the list; it is not a guaranteed exhaustive search.
     ///
     /// THE TEXT EDGE: the result is text, so we split it into lines and run
     /// each through Note.parse. See Note.parse for the line shape.
@@ -238,13 +253,10 @@ final class NotepadModel {
 
     // -- SEED: sample data on first run ------------------------------------
 
-    /// Sample-data approach: if the notebook is empty the very first time the
-    /// app runs, file three example notes so the list has content out of the
-    /// box. We detect "empty" by asking the MOOT — if a broad search finds no
-    /// notes in our room, we seed.
-    ///
-    /// This runs once per fresh estate. Delete the SQLite file (see the app
-    /// file for its location) to reset and re-seed.
+    /// Sample-data approach: if no notes are found in the opening probe, file
+    /// three example notes so the list has content out of the box. The probe
+    /// uses `moot_memory_search` with `limit: 10`; if the first ten results
+    /// include no notes in our room, we seed. Delete the SQLite file to reset.
     func seedIfEmpty() async {
         guard let bridge else { return }
 

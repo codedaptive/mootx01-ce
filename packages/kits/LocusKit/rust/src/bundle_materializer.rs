@@ -151,10 +151,15 @@ mod tests {
 
     fn drawer_at(id: &str, wing: &str, room: &str) -> Drawer {
         // The fingerprint derivation reads adjective / operational /
-        // provenance / udc / wikidata_qid / lineage_id; varying the id
-        // (which feeds into lineage_id via Drawer::new) gives each test
-        // drawer a distinct fingerprint.
-        Drawer::new(id, "content", wing, room, "alice", 0, "test-v1")
+        // provenance / udc / wikidata_qid / lineage_id; each drawer has
+        // a distinct id and `Drawer::new` assigns a fresh random
+        // lineage_id, so each test drawer gets a distinct fingerprint.
+        let mut d = Drawer::new(id, "content", "test-parent", "alice", 0, "test-v1");
+        // ADR-017: wing/room are resolved from node tree, not stored on Drawer.
+        // The bundle materializer tests only need distinct drawers with different
+        // parent_node_ids; the actual wing/room names are irrelevant here.
+        d.parent_node_id = format!("node-{}-{}", wing, room);
+        d
     }
 
     fn make_materializer<'a>(

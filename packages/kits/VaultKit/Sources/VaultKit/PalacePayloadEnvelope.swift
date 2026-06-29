@@ -223,8 +223,9 @@ public enum PalacePayloadEnvelope {
     /// byte-identical bytes.
     ///
     /// When `fields` is empty the body is returned UNCHANGED (no empty
-    /// envelope): a fact with no extra metadata sends a clean `source_closet`,
-    /// and a plain item stays plain. This mirrors the per-noun mapping's
+    /// envelope), and a plain item stays plain. A KG fact with no envelope
+    /// fields sends no `source_closet` content — callers check for a
+    /// non-empty result before sending. This mirrors the per-noun mapping's
     /// "ride only when there is something to carry" rule.
     ///
     /// - Parameters:
@@ -240,9 +241,9 @@ public enum PalacePayloadEnvelope {
         return "\(body)\n\n\(openMarkerPrefix)\(formatVersion)\n\(json)\n\(closeMarker)"
     }
 
-    /// One decoded four-noun envelope: the verbatim body with the envelope
-    /// stripped, plus the recovered field map (empty when the content carried
-    /// no envelope).
+    /// One decoded four-noun envelope: the body with the envelope stripped
+    /// and surrounding whitespace trimmed, plus the recovered field map
+    /// (empty when the content carried no envelope).
     public struct DecodedFields: Sendable, Equatable {
         /// The native text with the fenced envelope removed and surrounding
         /// whitespace trimmed.

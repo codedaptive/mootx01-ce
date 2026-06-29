@@ -104,6 +104,7 @@ enum VaultTools {
                     properties: [
                         "vaultPath": vaultPathSchema,
                         "estateID": estateIDSchema,
+                        "mode": stringSchema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large vaults. SPEED only — the write strategy (bulk transaction vs per-item stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground)."),
                     ],
                     required: ["vaultPath"]),
                 provenance: .vault),
@@ -198,9 +199,22 @@ enum VaultTools {
                 scope: scope, jobRegistry: jobRegistry)
 
         case "moot_vault_import":
+            // mode = encode SPEED (foreground default); the WRITE strategy (bulk
+            // vs per-item stream) is size-gated automatically (ImportPolicy), not
+            // chosen here. Fail-closed on an unknown value.
+            let modeStr = (args["mode"]?.stringValue ?? "foreground").lowercased()
+            let importMode: EncodeSpeed
+            switch modeStr {
+            case "foreground": importMode = .foreground
+            case "background": importMode = .background
+            default:
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)")
+            }
             return try await runImport(
                 kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL,
-                jobRegistry: jobRegistry)
+                mode: importMode, jobRegistry: jobRegistry)
 
         case "moot_vault_status":
             // status reads only the filesystem — no estate is consulted,
@@ -234,13 +248,28 @@ enum VaultTools {
     /// requirements. `Date()` inside the Task samples the real export
     /// instant (a wall-clock event, not a deterministic computation —
     /// same precedent as `LensTools` sampling `Date()` for manifests).
+    /// Maximum number of vault jobs (import or export) that may run concurrently.
+    ///
+    /// Each vault job spawns an unstructured Task that performs potentially
+    /// expensive filesystem and estate work. Without a cap an attacker with
+    /// access to the local MCP server can issue back-to-back vault calls to
+    /// exhaust memory and I/O bandwidth. Four concurrent jobs is generous for
+    /// any legitimate single-user workflow; the cap is checked against the live
+    /// running-job count before registration so it is enforced per-process.
+    private static let maxConcurrentVaultJobs = 4
+
     private static func runExport(
         kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
-        scope: VaultExportScope = .believed,
+        scope: VaultExportScope = .exportable,
         jobRegistry: VaultJobRegistry
     ) async throws -> JSONValue {
-        let jobID = UUID().uuidString
-        await jobRegistry.register(jobID: jobID, kind: .`export`, vaultPath: vaultURL.path)
+        // Atomic cap-check-and-register: a single actor turn enforces the cap
+        // and inserts the job record. Using two separate actor calls
+        // (runningJobCount then register) had a TOCTOU window — concurrent
+        // launches could all pass the guard before any registered, exceeding
+        // the cap. checkAndRegister closes that window.
+        let jobID = try await jobRegistry.checkAndRegister(
+            kind: .`export`, vaultPath: vaultURL.path, maxJobs: maxConcurrentVaultJobs)
 
         let bridge = VaultBridge(kit: kit)
         let capturedScope = scope
@@ -252,8 +281,14 @@ enum VaultTools {
                 // receipt). The returned ExportReport's note count is also
                 // available from the manifest below; tier-exclusion counts
                 // surface via the receipt in the estate diary.
+                let capturedJobID = jobID
+                let capturedRegistry = jobRegistry
                 _ = try await bridge.export(
-                    estate: handle, to: vaultURL, scope: capturedScope, now: Date())
+                    estate: handle, to: vaultURL, scope: capturedScope, now: Date(),
+                    progress: { processed, total in
+                        Task { await capturedRegistry.updateProgress(
+                            jobID: capturedJobID, processed: processed, total: total) }
+                    })
                 let manifest = try VaultTools.buildManifest(vaultURL: vaultURL, now: Date())
                 try VaultTools.writeManifest(manifest, to: vaultURL)
                 await jobRegistry.complete(
@@ -276,22 +311,54 @@ enum VaultTools {
 
     /// Register a vault import job and immediately return its `job_id`.
     ///
-    /// A quick `hashAllNotes` scan runs synchronously before the Task so
-    /// the immediate response can include `note_count` (useful for progress
-    /// framing). `hashAllNotes` is a pure filesystem enumeration over `Data`
-    /// reads — typically under 1 ms even for large vaults. The bridge import
-    /// itself runs in an unstructured `Task`; all captured values satisfy
-    /// Swift 6 task-capture requirements (see `runExport` for the same
-    /// Sendability analysis). The bridge is idempotent per note's
+    /// The cap (`checkAndRegister`) is acquired BEFORE `hashAllNotes` so
+    /// concurrent expensive preflight work is bounded to `maxConcurrentVaultJobs`.
+    /// Running `hashAllNotes` outside the cap defeated its purpose: up to the
+    /// HTTP transport concurrency limit worth of filesystem traversal + full-file
+    /// reads + SHA-256 hashing could run simultaneously before the cap was consulted.
+    ///
+    /// If `hashAllNotes` throws after the slot is acquired (e.g. permission-denied
+    /// on a regular `.md` file), `jobRegistry.fail(jobID:)` releases the slot so it
+    /// is never permanently consumed. The background `Task`'s own do/catch owns the
+    /// slot from the moment the Task is created onward.
+    ///
+    /// Slot-release invariant: every successful `checkAndRegister` is matched by
+    /// exactly one terminal `fail(jobID:)` or `complete(jobID:result:)` on every
+    /// code path — the pre-Task catch handles preflight throws; the Task's catch
+    /// handles bridge throws.
+    ///
+    /// The bridge import itself runs in an unstructured `Task`; all captured
+    /// values satisfy Swift 6 task-capture requirements (see `runExport` for
+    /// the same Sendability analysis). The bridge is idempotent per note's
     /// `stableSourceKey`.
     private static func runImport(
         kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
-        jobRegistry: VaultJobRegistry
+        mode: EncodeSpeed, jobRegistry: VaultJobRegistry
     ) async throws -> JSONValue {
-        let noteCount = try hashAllNotes(vaultURL: vaultURL).count
+        // Acquire the cap slot BEFORE running the expensive preflight.
+        // The cap must bound expensive filesystem/estate work; running hashAllNotes
+        // outside checkAndRegister allowed up to the HTTP transport concurrency
+        // limit worth of parallel hashing before the cap was consulted.
+        // Atomic cap-check-and-register: a single actor turn enforces the cap
+        // and inserts the job record, closing the TOCTOU window that existed
+        // when count-check and register were two separate actor calls.
+        let jobID = try await jobRegistry.checkAndRegister(
+            kind: .`import`, vaultPath: vaultURL.path, maxJobs: maxConcurrentVaultJobs)
 
-        let jobID = UUID().uuidString
-        await jobRegistry.register(jobID: jobID, kind: .`import`, vaultPath: vaultURL.path)
+        // Preflight: enumerate notes while holding the cap slot. Non-regular
+        // .md entries (directories, symlinks) are skipped inside hashAllNotes
+        // and return 0 without throwing. If this throws on a genuinely
+        // unreadable regular .md file, release the slot via fail() so the
+        // throwing preflight never permanently consumes a cap slot.
+        let noteCount: Int
+        do {
+            noteCount = try hashAllNotes(vaultURL: vaultURL).count
+        } catch {
+            // Preflight failed after the slot was acquired — release it so a
+            // throwing preflight never permanently consumes a cap slot.
+            await jobRegistry.fail(jobID: jobID, errorMsg: error.localizedDescription)
+            throw error
+        }
 
         let bridge = VaultBridge(kit: kit)
 
@@ -299,7 +366,15 @@ enum VaultTools {
             do {
                 // `now: Date()` samples the import instant at the access
                 // surface; the bridge stamps it on the audit receipt.
-                let report = try await bridge.importVault(at: vaultURL, into: handle, now: Date())
+                let capturedJobID = jobID
+                let capturedRegistry = jobRegistry
+                let report = try await bridge.importVault(
+                    at: vaultURL, into: handle, now: Date(),
+                    progress: { processed, total in
+                        Task { await capturedRegistry.updateProgress(
+                            jobID: capturedJobID, processed: processed, total: total) }
+                    },
+                    mode: mode)
                 await jobRegistry.complete(
                     jobID: jobID,
                     result: .imported(ImportResult(
@@ -411,7 +486,7 @@ enum VaultTools {
             // non-candidate notes never enter the capture loop.
             let bridge = VaultBridge(kit: kit)
             let report = try await bridge.importVault(
-                at: vaultURL, includingPaths: candidatePaths, into: handle, now: now)
+                at: vaultURL, includingPaths: candidatePaths, into: handle, now: now, mode: .foreground)
             lines.append("apply: true — candidates actioned via vault import")
             lines.append("  drawersWritten: \(report.drawersWritten)")
             lines.append("  drawersUpdated: \(report.drawersUpdated)")
@@ -449,13 +524,17 @@ enum VaultTools {
 
         switch job.status {
         case .running:
-            return ToolDispatcher.textResult("""
+            var runningLines = """
             job_id: \(job.jobID)
             kind: \(job.kind.rawValue)
             vault: \(job.vaultPath)
             status: running
             elapsed_s: \(elapsedStr)
-            """)
+            """
+            if let p = job.latestProgress {
+                runningLines += "\nprogress: \(p.processed)/\(p.total)"
+            }
+            return ToolDispatcher.textResult(runningLines)
         case .complete:
             switch job.result {
             case .imported(let r):
@@ -520,6 +599,14 @@ enum VaultTools {
     /// keyed by vault-relative path. Mirrors `ObsidianAdapter.toIR` exactly:
     /// - `.skipsHiddenFiles` so `.moot/export-manifest.json` is never included
     ///   in its own stamp.
+    /// - Skips non-regular `.md` entries (directories, symlinks, special files
+    ///   with a `.md` extension). Caller-controlled vault contents may include a
+    ///   directory named `something.md` or a broken `.md` symlink — these are
+    ///   not notes. Reading their resource value and skipping non-regular entries
+    ///   prevents a spurious throw and, as defense-in-depth, avoids triggering
+    ///   the slot-release guard in `runImport` on non-note entries. A genuinely
+    ///   unreadable REGULAR `.md` file still throws — that is a real error; the
+    ///   guard releases the slot via `fail()` and propagates the error to the caller.
     /// - Skips OKF navigation files (`index.md`, `log.md`) that `fromIR`
     ///   emits for progressive-disclosure nav but that `toIR` never imports
     ///   as notes. Without this skip the manifest count is inflated by one
@@ -534,6 +621,11 @@ enum VaultTools {
 
         var out: [String: ManifestEntry] = [:]
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "md" {
+            // Skip non-regular .md entries (directories, symlinks, special files).
+            // The enumerator prefetches .isRegularFileKey; reading it here is a
+            // cache hit — no additional filesystem round-trip.
+            guard let rv = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  rv.isRegularFile == true else { continue }
             // Skip OKF navigation files — mirrors ObsidianAdapter.toIR which
             // skips files with stem "index" or "log" on read.
             let stem = fileURL.deletingPathExtension().lastPathComponent
@@ -626,10 +718,10 @@ enum VaultTools {
     /// Schema for the optional `scope` argument on `moot_vault_export`.
     private static var scopeSchema: JSONValue {
         stringSchema(
-            "Export scope: believed (default), exportable, confirmed, unconfirmed. " +
+            "Export scope: exportable (default), believed, believed-including-private, confirmed, unconfirmed. " +
             "Controls which drawers are included. " +
+            "'exportable' (default) restricts to drawers marked as public — a default export never writes non-exportable/private rows. " +
             "'believed' exports all currently-believed drawers regardless of confirmation state. " +
-            "'exportable' restricts to drawers marked as public. " +
             "'confirmed' restricts to user-confirmed drawers. " +
             "'unconfirmed' is the capture-inbox (pre-review) subset."
         )
@@ -637,12 +729,13 @@ enum VaultTools {
 
     /// Parse the optional `scope` argument to a `VaultExportScope`.
     ///
-    /// - Returns the named scope, or `.believed` when the argument is absent.
+    /// - Returns the named scope, or `.exportable` when the argument is absent
+    ///   (CAND-032: a default disk export writes only exportable-marked rows).
     /// - Throws `JSONRPCError.invalidParams` when the argument is present but
     ///   names an unknown scope. Clear error surfaces to the MCP client.
     private static func parseScope(_ value: JSONValue?) throws -> VaultExportScope {
         guard let strValue = value?.stringValue, !strValue.isEmpty else {
-            return .believed   // absent or empty → default
+            return .exportable   // absent or empty → default (CAND-032)
         }
         guard let scope = VaultExportScope(rawValue: strValue) else {
             throw JSONRPCError(
@@ -668,5 +761,9 @@ enum VaultTools {
 
     private static func stringSchema(_ description: String) -> JSONValue {
         .object(["type": .string("string"), "description": .string(description)])
+    }
+
+    private static func booleanSchema(_ description: String) -> JSONValue {
+        .object(["type": .string("boolean"), "description": .string(description)])
     }
 }

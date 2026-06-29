@@ -468,24 +468,27 @@
         {
           "adjectiveBitmap" : 0,
           "content" : "carbon organic compounds",
+          "parentNodeId" : "test-room-node",
           "room" : "r1",
           "wing" : "alpha"
         },
         {
           "adjectiveBitmap" : 0,
           "content" : "organic chemistry carbon",
+          "parentNodeId" : "test-room-node",
           "room" : "r2",
           "wing" : "alpha"
         },
         {
           "adjectiveBitmap" : 0,
           "content" : "physics waves photons",
+          "parentNodeId" : "test-room-node",
           "room" : "r1",
           "wing" : "beta"
         }
       ],
       "successRate" : "0x3f800000",
-      "summary" : "3 drawers; dominant wing alpha; dominant room r1."
+      "summary" : "3 drawers; dominant node test-room-node."
     },
     {
       "keyInsights" : [
@@ -504,18 +507,20 @@
         {
           "adjectiveBitmap" : 0,
           "content" : "alpha beta gamma delta echo",
+          "parentNodeId" : "test-room-node",
           "room" : "r1",
           "wing" : "w1"
         },
         {
           "adjectiveBitmap" : 2,
           "content" : "withdrawn item here",
+          "parentNodeId" : "test-room-node",
           "room" : "r1",
           "wing" : "w1"
         }
       ],
       "successRate" : "0x3f800000",
-      "summary" : "2 drawers; dominant wing w1; dominant room r1."
+      "summary" : "2 drawers; dominant node test-room-node."
     }
   ],
   "drift" : [

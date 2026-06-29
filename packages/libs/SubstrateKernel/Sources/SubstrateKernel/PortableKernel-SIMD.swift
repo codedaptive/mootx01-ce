@@ -16,11 +16,11 @@
 // substrate uses, per cookbook § 4.4 ("select the optimal backend
 // at runtime") and § 17.5 ("bandwidth-bound, not compute-bound").
 //
-// SimdKernel is the first non-scalar kernel introduced. Phase
-// 2.α-1 added `or_reduce_*`. Phase 2.β-1 (this update) adds
-// `hammingDistance256`, `hammingDistanceBatch`, and `hammingTopK`.
-// `simhash_block_batch` still inherits the scalar default until
-// Phase 2.γ lands its decision record.
+// SimdKernel provides optimized implementations of the bandwidth-
+// bound ops: `orReduce256/Batch` (SIMD4<UInt64>), `hammingDistance256`,
+// `hammingDistanceBatch`, `hammingTopK`, and `simhashBlockBatch`
+// (vertical SIMD over hyperplanes, Phase 2.γ-1). `simhashCompute`
+// retains the scalar reference implementation.
 //
 // Per the decision records, this kernel strictly dominates
 // ScalarKernel for the ops it implements. The dispatcher returns

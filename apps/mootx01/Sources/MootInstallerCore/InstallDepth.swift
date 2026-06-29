@@ -175,7 +175,8 @@ public enum DepthInstaller {
     public static func apply(
         clientID: String,
         depth: InstallDepth,
-        homeDirectory: URL
+        homeDirectory: URL,
+        binaryPath: String
     ) throws -> DepthOutcome {
         if depth == .server { return .server }
 
@@ -191,7 +192,7 @@ public enum DepthInstaller {
             return try writeSkill(host: host, homeDirectory: homeDirectory)
         case .plugin:
             if host.supportsPlugin {
-                return try installPlugin(host: host, homeDirectory: homeDirectory)
+                return try installPlugin(host: host, homeDirectory: homeDirectory, binaryPath: binaryPath)
             }
             // Ceiling: fall back to skills and report it (§4.4).
             let outcome = try writeSkill(host: host, homeDirectory: homeDirectory)
@@ -217,7 +218,7 @@ public enum DepthInstaller {
     /// Mode 3: materialise the host's pre-generated package tree from the
     /// embedded bundle into the host's plugin root (the parent of the skill's
     /// `skills/` dir). The package's own SKILL.md is byte-identical to Mode 2's.
-    private static func installPlugin(host: InstallMapHost, homeDirectory: URL) throws -> DepthOutcome {
+    private static func installPlugin(host: InstallMapHost, homeDirectory: URL, binaryPath: String) throws -> DepthOutcome {
         let files = InstallBundle.embedded.packageFiles(forHostID: host.id)
         guard !files.isEmpty else {
             // No embedded package for this host — fall back to skills.
@@ -245,8 +246,37 @@ public enum DepthInstaller {
             let fileURL = dest.appendingPathComponent(rel)
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try contents.write(to: fileURL, atomically: true, encoding: .utf8)
+            let safeContents = rewriteBareMootCommand(in: contents, binaryPath: binaryPath)
+            try safeContents.write(to: fileURL, atomically: true, encoding: .utf8)
         }
         return .plugin(path: dest.path)
+    }
+
+    /// Embedded plugin package MCP configs are generated with a portable bare
+    /// executable name. Rewrite that placeholder at install time so plugin
+    /// launches use the same absolute binary path as the normal MCP config.
+    private static func rewriteBareMootCommand(in contents: String, binaryPath: String) -> String {
+        let escapedBinaryPath = jsonEscapedString(binaryPath)
+        return contents
+            .replacingOccurrences(of: "\"command\" : \"mootx01\"", with: "\"command\" : \"\(escapedBinaryPath)\"")
+            .replacingOccurrences(of: "\"command\": \"mootx01\"", with: "\"command\": \"\(escapedBinaryPath)\"")
+    }
+
+    private static func jsonEscapedString(_ value: String) -> String {
+        // Use .withoutEscapingSlashes so paths like /usr/local/bin/mootx01 are
+        // written verbatim in the rewritten MCP config. Forward slashes are legal
+        // unescaped in JSON (RFC 8259 §7); escaping them as \/ adds noise without
+        // benefit and breaks string-search assertions in both tests and shell scripts.
+        // .withoutEscapingSlashes is available on macOS 13+ (target is macOS 15+).
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        guard let data = try? encoder.encode(value),
+              let encoded = String(data: data, encoding: .utf8),
+              encoded.count >= 2
+        else {
+            return value.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        return String(encoded.dropFirst().dropLast())
     }
 }

@@ -39,6 +39,7 @@
 import Testing
 import Foundation
 import SubstrateTypes
+import EngramLib
 import LocusKit
 import VectorKit
 import CorpusKit
@@ -54,32 +55,41 @@ import PersistenceKitReplication
 struct CompositeSchemaVersionTests {
 
     /// The composite version is the sum of component versions.
-    /// Components after ADR-012 `ext` pre-provisioning:
-    ///   LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
+    /// Components after matrix_snapshot inclusion:
+    ///   LocusKit v8 + VectorKit v3 + CorpusKit/BundleStore v3 + Grants v1 + MatrixSnapshot v1 = 16.
     /// This guards the version coupling the Rust replication gate depends on:
     /// a drift between composite and the gate's expected value would let a
     /// fresh estate open at a version the gate rejects.
-    @Test("composite version equals component sum and equals 7")
+    @Test("composite version includes grant and matrix_snapshot tables and equals 16")
     func compositeVersionEqualsComponentSum() {
+        // +1 grants addend, +1 matrix_snapshot addend = two GLK-owned table addends
         let componentSum =
             LocusKitSchema.version
             + VectorStore.schemaDeclaration.version
             + BundleStore.schemaDeclaration.version
+            + 1  // grants
+            + 1  // matrix_snapshot
         #expect(GeniusLocusKitSchema.version == componentSum)
-        #expect(GeniusLocusKitSchema.version == 7)
-        // The declaration the gate actually consumes carries the same version.
-        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 7)
+        #expect(GeniusLocusKitSchema.version == 16)
+        // The declaration the gate actually consumes carries the same version
+        // and includes grant authorization state and matrix snapshot state
+        // in hydrate/flush snapshots.
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 16)
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "grants" })
+        // matrix_snapshot must be in the composite so hydration copies persisted
+        // calibration state from the durable backend into the in-memory backend.
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "matrix_snapshot" })
     }
 
     /// A fresh in-memory estate opens with the composite schema and registers
     /// the composite version under the "GeniusLocusKit" kit ID — the value the
     /// replication schema gate checks.
-    @Test("fresh estate opens and registers composite version 7")
+    @Test("fresh estate opens and registers composite version 16")
     func freshEstateOpensAtCompositeVersion() async throws {
         let storage = makeInMemoryStorage()
         try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
         let registered = try await storage.currentSchemaVersion(for: GeniusLocusKitSchema.kitID)
-        #expect(registered == 7)
+        #expect(registered == 16)
     }
 }
 
@@ -328,5 +338,173 @@ struct HydrateRoundTripTests {
         // This validates that MatrixTier.fullRebuild called both passes.
         // A value of .zero means rebuildTemporal did NOT run — a correctness bug.
         #expect(hydratedTier.temporalWatermarkHLC != .zero)
+    }
+}
+
+// MARK: - Vector sidecar persistence + VectorStore unification (F3)
+
+/// F3: the estate has ONE dense VectorStore (Corpus owns it; GLK borrows it), and
+/// its resident-array `.vec` sidecar is persisted on the derived-accelerator flush
+/// so a cold restart loads it instead of rebuilding from a full table scan.
+@Suite("GLK vector sidecar persistence + unification")
+struct VectorSidecarUnificationTests {
+
+    /// The GLK scored-recall vector lane is Corpus's single shared instance — not a
+    /// second VectorStore over the same `vectors` table.
+    @Test
+    func standaloneVectorStoreIsCorpusSharedInstance() async throws {
+        let owner = OwnerCredentials(ownerIdentifier: "owner-f3-unify")
+        let (sqlite, url) = try makeSQLiteStorage()
+        defer { cleanupSQLite(at: url) }
+
+        _ = try await LocusKit.Estate.create(storage: sqlite, owner: owner)
+        let kit = GeniusLocusKit()
+        let handle = try await kit.open(storage: sqlite, owner: owner)
+        try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
+
+        let glkVS = await kit.vectorStores[handle]
+        let corpus = await kit.corpusKits[handle]
+        #expect(glkVS != nil)
+        #expect(corpus != nil)
+        // Identity: the registered scored-recall store IS Corpus's shared store.
+        let shared = await corpus?.sharedVectorStore
+        #expect(shared === glkVS)
+    }
+
+    /// `defaultSidecarURL` derives a `.vec` path beside the estate SQLite file,
+    /// and the derived-accelerator flush writes it to disk after a vector write.
+    @Test
+    func vectorSidecarPersistsOnDerivedAcceleratorFlush() async throws {
+        let owner = OwnerCredentials(ownerIdentifier: "owner-f3-sidecar")
+        let (sqlite, url) = try makeSQLiteStorage()
+        defer { cleanupSQLite(at: url) }
+
+        let sidecar = VectorStore.defaultSidecarURL(for: sqlite)
+        #expect(sidecar != nil)
+        #expect(sidecar?.pathExtension == "vec")
+        defer { if let s = sidecar { try? FileManager.default.removeItem(at: s) } }
+
+        _ = try await LocusKit.Estate.create(storage: sqlite, owner: owner)
+        let kit = GeniusLocusKit()
+        let handle = try await kit.open(storage: sqlite, owner: owner)
+        try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
+
+        let vs = await kit.vectorStores[handle]
+        #expect(vs != nil)
+        // Write one binary vector through the shared store, then flush via the
+        // derived-accelerator persist point.
+        try await vs?.addVector(
+            itemID: "f3-item-1",
+            engram: Engram(blocks: 0b1011, 0, 0, 0),
+            modelID: "test-model",
+            modelVersion: "v1",
+            filedAt: t0
+        )
+        try await kit.rebuildDerivedAccelerators(for: handle, now: t0)
+
+        // The sidecar now exists on disk beside the estate database.
+        if let s = sidecar {
+            #expect(FileManager.default.fileExists(atPath: s.path))
+        }
+    }
+}
+
+// MARK: - Matrix snapshot persistence (on-disk SQLite, load-and-fold-forward)
+
+/// Verifies the matrix tier is PERSISTED to its SQLite table and, on the next
+/// launch, LOADED and folded forward over only the audit tail — never recomputed
+/// from the whole log on every launch. The store is exercised against a REAL
+/// SQLite backend so the primitive read-back path (BLOB→.blob, INTEGER→.int) is
+/// covered, not just the InMemory backend that preserves semantic TypedValues.
+@Suite("GLK matrix snapshot persistence")
+struct MatrixSnapshotPersistenceTests {
+
+    /// First rebuild persists a snapshot; the row is present on disk afterwards,
+    /// and a second rebuild (after more captures) loads it and folds the tail
+    /// forward to a tier cell-for-cell equal to a from-scratch full rebuild.
+    @Test
+    func rebuildPersistsSnapshotAndLoadsForward() async throws {
+        let owner = OwnerCredentials(ownerIdentifier: "owner-matrix-persist-1")
+        let (sqlite, url) = try makeSQLiteStorage()
+        defer { cleanupSQLite(at: url) }
+
+        _ = try await LocusKit.Estate.create(storage: sqlite, owner: owner)
+        let kit = GeniusLocusKit()
+        // open(storage:owner:) backs the estate with this SQLite directly, so
+        // storages[handle] is SQLite and the snapshot store writes/reads real rows.
+        let handle = try await kit.open(storage: sqlite, owner: owner)
+
+        // ── First wave of captures, then the cold-start rebuild (persists) ──────
+        for i in 0..<3 {
+            _ = try await kit.capture(handle, CaptureFrame(
+                content: "matrix snapshot persistence row \(i)",
+                channel: .typed,
+                room: "matrix-persist",
+                latticeAnchor: .udc("000"),
+                addedBy: "persist-test",
+                embeddingModelID: "test-model-v1"
+            ))
+        }
+        try await kit.rebuildDerivedAccelerators(for: handle, now: t0)
+
+        // The snapshot row must now exist on disk and reflect the 3 captures.
+        let store = MatrixSnapshotStore(storage: sqlite)
+        let persisted = try await store.load(estateID: handle.estateUUID)
+        #expect(persisted != nil)
+        #expect(persisted?.tier.liveRowCount == 3)
+        #expect(persisted?.schemaVersion == MatrixSnapshot.currentSchemaVersion)
+
+        // ── Second wave, then a rebuild that LOADS the snapshot + folds forward ──
+        for i in 3..<5 {
+            _ = try await kit.capture(handle, CaptureFrame(
+                content: "matrix snapshot persistence row \(i)",
+                channel: .typed,
+                room: "matrix-persist",
+                latticeAnchor: .udc("000"),
+                addedBy: "persist-test",
+                embeddingModelID: "test-model-v1"
+            ))
+        }
+        try await kit.rebuildDerivedAccelerators(for: handle, now: t0)
+
+        // The registered tier must equal a from-scratch full rebuild of the whole
+        // audit log — proving load+fold-forward is exact, not an approximation.
+        let registered = await kit.matrixTiers[handle]
+        let fullLog = try await kit.auditLog(for: handle)
+        let fromScratch = MatrixTier.fullRebuild(from: fullLog)
+        #expect(registered == fromScratch)
+        #expect(registered?.liveRowCount == 5)
+
+        // The persisted snapshot must have advanced to the 5-capture state too.
+        let persisted2 = try await store.load(estateID: handle.estateUUID)
+        #expect(persisted2?.tier.liveRowCount == 5)
+        #expect(persisted2?.tier == fromScratch)
+    }
+
+    /// A snapshot row whose schema_version does not match the current format is
+    /// rejected on load (returns nil) so the caller falls back to a full rebuild.
+    @Test
+    func staleSchemaVersionRejectedOnLoad() async throws {
+        let (sqlite, url) = try makeSQLiteStorage()
+        defer { cleanupSQLite(at: url) }
+
+        try await sqlite.migrate(to: MatrixSnapshotStore.schemaDeclaration)
+        let estateID = UUID()
+        // Write a row carrying a foreign schema_version directly. The cheap column
+        // gate must reject it without trusting the blob.
+        _ = try await sqlite.rowStore.upsert(
+            table: "matrix_snapshot",
+            values: [
+                "estate_id": .text(estateID.uuidString),
+                "schema_version": .int(Int64(MatrixSnapshot.currentSchemaVersion + 99)),
+                "snapshot": .blob(Data([0x00])),  // deliberately undecodable
+                "last_hlc": .text("0.0.0"),
+                "updated_at": .timestamp(t0)
+            ],
+            conflictColumns: ["estate_id"]
+        )
+        let store = MatrixSnapshotStore(storage: sqlite)
+        let loaded = try await store.load(estateID: estateID)
+        #expect(loaded == nil)
     }
 }

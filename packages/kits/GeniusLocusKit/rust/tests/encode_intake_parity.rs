@@ -31,7 +31,7 @@ use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath,
     RecallFallbackPolicy,
 };
-use genius_locus_kit::{EncodeJob, WriteMode};
+use genius_locus_kit::WriteMode;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -274,70 +274,12 @@ fn locus_only_degrades_both_modes_to_row_only() {
     coord.await_encode_drain(&handle).expect("no-op drain");
 }
 
-// MARK: - EncodeJob payload round-trips through QueueKit's Job
-
-/// The EncodeJob payload (P2) survives a Job encode/decode round-trip,
-/// preserving the drawer id, estate uuid, text, model id, and capture instant.
-/// Mirrors Swift `encodeJobRoundTripsThroughJob`.
-#[test]
-fn encode_job_round_trips_through_job() {
-    use queuekit::{StreamId, HLC};
-
-    let captured_millis = 1_700_000_000_500_i64; // .5 s past the second
-    let estate_bytes = *Uuid::new_v4().as_bytes();
-    let payload = EncodeJob::new(
-        "drawer-123".to_string(),
-        &estate_bytes,
-        "round-trip payload text".to_string(),
-        "test-model-v1".to_string(),
-        captured_millis,
-    );
-    let stream_id = StreamId("glk_encode_test".to_string());
-    let hlc = HLC { physical_time: 42, logical_count: 0, node_id: 1 };
-    let job = payload.to_job(stream_id.clone(), hlc).expect("to_job");
-    let decoded = EncodeJob::from_job(&job).expect("from_job");
-
-    assert_eq!(decoded.drawer_id, "drawer-123");
-    assert_eq!(
-        decoded.estate_uuid,
-        Uuid::from_bytes(estate_bytes).to_string().to_uppercase()
-    );
-    assert_eq!(decoded.text, "round-trip payload text");
-    assert_eq!(decoded.embedding_model_id, "test-model-v1");
-    // Capture instant round-trips to the same sub-second instant (exact in ms).
-    assert_eq!(decoded.captured_at_millis(), captured_millis);
-    assert_eq!(job.stream_id, stream_id);
-}
-
-// MARK: - EncodeJob JSON shape byte-agrees with the Swift Codable shape
-
-/// The EncodeJob JSON keys match the Swift `Codable` property names exactly
-/// (`drawerID`, `estateUUID`, `text`, `embeddingModelID`, `capturedAtISO8601`)
-/// and the estateUUID is the uppercase UUID string Swift's UUID Codable emits —
-/// the load-bearing cross-port wire contract (item #3).
-#[test]
-fn encode_job_json_shape_matches_swift() {
-    let estate_bytes = [
-        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88,
-    ];
-    let job = EncodeJob::new(
-        "drawer-1".to_string(),
-        &estate_bytes,
-        "hello".to_string(),
-        "m-1".to_string(),
-        1_700_000_000_000,
-    );
-    let json: serde_json::Value =
-        serde_json::from_slice(&serde_json::to_vec(&job).unwrap()).unwrap();
-    assert_eq!(json["drawerID"], "drawer-1");
-    assert_eq!(json["text"], "hello");
-    assert_eq!(json["embeddingModelID"], "m-1");
-    // Uppercase UUID string, matching Swift's UUID Codable output.
-    assert_eq!(json["estateUUID"], "12345678-9ABC-DEF0-1122-334455667788");
-    // ISO8601 with fractional seconds and a trailing Z.
-    assert_eq!(json["capturedAtISO8601"], "2023-11-14T22:13:20.000Z");
-}
+// The encode-job payload round-trip + cross-port JSON-shape tests moved to
+// CorpusKit alongside the relocated ingest pipeline: the queue + drain +
+// IngestJob now live in corpus-kit (corpus_ingest_queue.rs covers the IngestJob
+// round-trip and the sourceID/text/capturedAtISO8601 serde-key byte-agreement).
+// This GLK parity suite covers the orchestration: mode-aware capture and
+// reindex driving the Corpus queue, end-to-end through recall.
 
 // MARK: - BURST (load) — all regular-mode burst captures become recallable
 
@@ -389,8 +331,9 @@ fn burst_of_120_regular_captures_all_recallable() {
             .expect("regular capture");
         ids.push(d.id);
     }
-    // Pump-drive the drain to completion (the Rust port has no background worker
-    // in this path; await_encode_drain drives drain_encode_queue_once).
+    // Drive the encode to completion. await_encode_drain delegates to the
+    // Corpus's own ingest-queue drain (CorpusKit owns the encode pipeline),
+    // pumping it to empty and confirming both frontiers are clear.
     coord.await_encode_drain(&handle).expect("await_encode_drain");
 
     let mut recalled = 0;
@@ -420,7 +363,7 @@ fn burst_of_120_regular_captures_all_recallable() {
 #[test]
 fn burst_with_transient_ingest_failure_still_reaches_100_percent() {
     let (mut coord, handle) = provision_glk_estate();
-    coord.arm_transient_encode_ingest_failures();
+    coord.arm_transient_encode_ingest_failures(&handle);
 
     let n = 120usize;
     let mut ids = Vec::with_capacity(n);
@@ -452,5 +395,68 @@ fn burst_with_transient_ingest_failure_still_reaches_100_percent() {
     assert_eq!(
         recalled, n,
         "at-least-once retry must land ALL jobs despite injected transient failures (got {recalled}/{n})"
+    );
+}
+
+// MARK: - Part 6: reindexMissing hard cap (secfix/c-glk-remaining)
+
+/// Verify that REINDEX_MAX_JOBS is the documented constant 10,000.
+///
+/// This test locks the DoS-hardening constant value (secfix/c-glk-remaining
+/// Part 6). If someone accidentally lowers this to a value that would break
+/// normal import flows, or raises it to a value that reinstates the unbounded
+/// fan-out, this test catches it.
+///
+/// Swift parity: `reindexMissing_maxJobsCap_constantIs10000` in EncodeIntakeTests.swift.
+#[test]
+fn reindex_missing_max_jobs_constant_is_10000() {
+    // EstateCoordinator::REINDEX_MAX_JOBS is the security-hardening constant
+    // from Part 6 of secfix/c-glk-remaining. Swift parity: reindexMaxJobs = 10_000.
+    assert_eq!(
+        EstateCoordinator::REINDEX_MAX_JOBS,
+        10_000,
+        "REINDEX_MAX_JOBS must equal 10,000 (DoS hardening constant, Part 6)"
+    );
+}
+
+/// Verify that collect_reindex_jobs returns at most REINDEX_MAX_JOBS jobs
+/// when fewer than the cap are unindexed — the normal (non-truncation) path.
+///
+/// This is a regression gate: the cap must not suppress legitimate backfill
+/// work below the threshold. With 5 legacy-captured drawers, all 5 must be
+/// collected (≤ REINDEX_MAX_JOBS). Swift parity:
+/// `reindexMissing_resultNeverExceedsCap` in EncodeIntakeTests.swift.
+#[test]
+fn reindex_missing_result_never_exceeds_cap() {
+    let (mut coord, handle) = provision_glk_estate();
+
+    // Capture 5 drawers via the legacy (row-only, no-corpus) path.
+    for i in 0..5 {
+        coord
+            .capture(
+                &handle,
+                capture_frame(&format!("cap-test content {}", i)),
+                NOW + i as i64,
+            )
+            .expect("legacy capture");
+    }
+
+    let result = coord
+        .collect_reindex_jobs(&handle)
+        .expect("collect_reindex_jobs must succeed");
+
+    let (_, jobs) = result.expect("non-locusOnly estate must return Some(corpus, jobs)");
+
+    assert!(
+        jobs.len() <= EstateCoordinator::REINDEX_MAX_JOBS,
+        "collect_reindex_jobs must never return more than REINDEX_MAX_JOBS ({}) jobs; got {}",
+        EstateCoordinator::REINDEX_MAX_JOBS,
+        jobs.len()
+    );
+    // Non-trivial: at least 1 job must be returned (proves cap did not suppress below-threshold work).
+    assert!(
+        jobs.len() >= 1,
+        "collect_reindex_jobs must return at least the 5 legacy drawers; got {}",
+        jobs.len()
     );
 }

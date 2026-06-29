@@ -29,10 +29,37 @@ struct AutonomicGovernorTests {
         return (kit, handle)
     }
 
+    /// Seed the dreaming queue with one item so the REM-ALPHA pending-count gate
+    /// (T9 / NEURONKIT_SPEC §12.2) opens: capture two distinct drawers, then fire
+    /// one external-origin recall, which mounts the dreaming queue and enqueues a
+    /// DreamingItem (pending → 1). The cycle drains the queue when it fires, so a
+    /// later fire-tick must re-seed. Mirrors the Rust ag* governor-test seeding.
+    private func seedDreamingQueue(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle
+    ) async throws {
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "ag-dream-seed-alpha", channel: .typed, room: "ag-dream-room",
+            latticeAnchor: .udc("000"), addedBy: "ag-test", embeddingModelID: "test-model-v1"))
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "ag-dream-seed-beta", channel: .typed, room: "ag-dream-room",
+            latticeAnchor: .udc("000"), addedBy: "ag-test", embeddingModelID: "test-model-v1"))
+        // External-origin recall enqueues one DreamingItem (B-10a: only external
+        // recalls write dreaming items).
+        _ = try await kit.recall(handle, GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                ordering: .byCaptureTimeDesc),
+            mode: .locusOnly, scoring: .raw, limit: 50,
+            fallback: .failClosed, origin: .external))
+    }
+
     @Test func firstTickFiresDreamingAndMaintenance() async throws {
         let (kit, handle) = try await makeEstate()
         let governor = AutonomicGovernor(kit: kit, handle: handle)
-        // A daemon's first pump always fires (no prior run to gate against).
+        // v2 (T9): dreaming fires on the first due tick ONLY when the dreaming
+        // queue has pending work. Seed one item so the REM-ALPHA gate opens.
+        try await seedDreamingQueue(kit, handle)
         let report = await governor.tick(now: Date(timeIntervalSince1970: 1_000_000))
         #expect(report.dreamingFired)
         #expect(report.maintenanceFired)
@@ -42,10 +69,14 @@ struct AutonomicGovernorTests {
         let (kit, handle) = try await makeEstate()
         let governor = AutonomicGovernor(kit: kit, handle: handle)
         let t0 = Date(timeIntervalSince1970: 2_000_000)
-        _ = await governor.tick(now: t0)                                  // first fires
-        let early = await governor.tick(now: t0.addingTimeInterval(29))   // < 30s default
+        try await seedDreamingQueue(kit, handle)
+        _ = await governor.tick(now: t0)                                  // first fires + drains
+        let early = await governor.tick(now: t0.addingTimeInterval(29))   // < 30s default → cadence skip
         #expect(!early.dreamingFired)
-        let due = await governor.tick(now: t0.addingTimeInterval(30))     // 30s → fires
+        // Re-seed: the first tick drained the queue, so a fresh item is needed for
+        // the due tick to have work AND pass the cadence gate.
+        try await seedDreamingQueue(kit, handle)
+        let due = await governor.tick(now: t0.addingTimeInterval(30))     // 30s + pending → fires
         #expect(due.dreamingFired)
     }
 
@@ -92,7 +123,10 @@ struct AutonomicGovernorTests {
         let (kit, handle) = try await makeEstate()
         let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
-            let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+            let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
+            let estate = try await kit.estate(for: handle)
+            let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
                 _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
@@ -115,7 +149,10 @@ struct AutonomicGovernorTests {
             embeddingModelID: "test-model-v1"))
         let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
-            let wings = Set(drawers.compactMap { $0.tombstonedAt == nil ? $0.wing : nil }).sorted()
+            let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
+            let estate = try await kit.estate(for: handle)
+            let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
                 _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
@@ -135,7 +172,7 @@ struct AutonomicGovernorTests {
             kit: kit,
             handle: handle,
             topologyCadenceMs: 0,
-            topologyHandler: { _, _, _ in await counter.increment() }
+            topologyHandler: { _, _, _, _ in await counter.increment() }
         )
         let report = await governor.tick(now: Date(timeIntervalSince1970: 8_000_000))
         #expect(report.topologySnapshotFired)
@@ -148,7 +185,7 @@ struct AutonomicGovernorTests {
             kit: kit,
             handle: handle,
             topologyCadenceMs: 300_000,
-            topologyHandler: { _, _, _ in }
+            topologyHandler: { _, _, _, _ in }
         )
         let t0 = Date(timeIntervalSince1970: 9_000_000)
         let first = await governor.tick(now: t0)
@@ -172,7 +209,7 @@ struct AutonomicGovernorTests {
             kit: kit,
             handle: handle,
             now: now
-        ) { _, _, data in await capture.set(data) }
+        ) { _, _, data, _ in await capture.set(data) }
 
         let data = try #require(await capture.value, "handler must be called with non-nil data")
         // Decode just enough to verify the wire shape.
@@ -191,10 +228,10 @@ struct AutonomicGovernorTests {
         let capture2 = DataCapture()
 
         try await AutonomicGovernor.topologySnapshotDuty(kit: kit, handle: handle, now: now) {
-            _, _, d in await capture1.set(d)
+            _, _, d, _ in await capture1.set(d)
         }
         try await AutonomicGovernor.topologySnapshotDuty(kit: kit, handle: handle, now: now) {
-            _, _, d in await capture2.set(d)
+            _, _, d, _ in await capture2.set(d)
         }
 
         let a = try #require(await capture1.value)
@@ -211,11 +248,11 @@ struct AutonomicGovernorTests {
 
         let token1 = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 12_000_000)
-        ) { _, _, _ in await counter.increment() }
+        ) { _, _, _, _ in await counter.increment() }
         let token2 = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 12_000_300),
-            previous: token1
-        ) { _, _, _ in await counter.increment() }
+            previousFingerprint: token1.fingerprint
+        ) { _, _, _, _ in await counter.increment() }
 
         #expect(token1 == token2, "Unchanged estate must yield an identical dirty token")
         #expect(await counter.count == 1, "Handler must not fire on the skipped cadence")
@@ -229,7 +266,7 @@ struct AutonomicGovernorTests {
 
         let token1 = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 13_000_000)
-        ) { _, _, _ in await counter.increment() }
+        ) { _, _, _, _ in await counter.increment() }
 
         _ = try await kit.capture(handle, CaptureFrame(
             content: "dirty-check wake", channel: .typed, room: "gov-test",
@@ -238,49 +275,59 @@ struct AutonomicGovernorTests {
 
         let token2 = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 13_000_300),
-            previous: token1
-        ) { _, _, _ in await counter.increment() }
+            previousFingerprint: token1.fingerprint
+        ) { _, _, _, _ in await counter.increment() }
 
         #expect(token1 != token2, "A new capture must change the dirty token")
         #expect(await counter.count == 2, "Handler must re-fire after an estate change")
     }
 
-    @Test func topologyInputsTokenIsNeverPersisted() async throws {
-        // The dirty token is PROCESS-LOCAL governor state: it is returned to the
-        // caller in memory only and is NEVER handed to the storage handler. Prove
-        // it by capturing every byte the duty delivers to its handler and
-        // asserting the encoded token never crosses that boundary.
-        //
-        // The token's order-independent inputs digest is the only token field
-        // that is process-local-salted (Swift `hashValue`); if any code path
-        // were persisting the token, the digest's decimal string would have to
-        // appear in the handler payload. It must not.
+    @Test func topologyPayloadExcludesTokenFieldsButFingerprintIsDelivered() async throws {
+        // F5: the duty now delivers a stable topology fingerprint as the handler's
+        // 4th argument so the host persists it beside the snapshot (enabling the
+        // post-restart skip). Two things must hold:
+        //   1. The fingerprint IS delivered (non-empty, equals the returned token's
+        //      fingerprint) — the host needs it to persist.
+        //   2. The fingerprint and its inputs digest are NOT embedded in the served
+        //      payload JSON (3rd arg) — /api/graph serves the snapshot wire shape
+        //      verbatim, which carries no token fields.
         let (kit, handle) = try await makeEstate()
         // Non-empty estate so the order-independent inputs digest is a large,
-        // process-local-salted value (an empty estate digests to 0, which would
-        // trivially appear in any payload — a false positive).
+        // stable value (an empty estate digests to 0, which would trivially appear
+        // in any payload — a false positive).
         _ = try await kit.capture(handle, CaptureFrame(
-            content: "never-persisted probe", channel: .typed, room: "gov-test",
+            content: "fingerprint-delivery probe", channel: .typed, room: "gov-test",
             latticeAnchor: .udc("510"),
             addedBy: "test", embeddingModelID: "test-model-v1"))
         let sink = DataCapture()
+        let fingerprintSink = StringCapture()
 
         let token = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 15_000_000)
-        ) { _, _, data in await sink.set(data) }
+        ) { _, _, data, fingerprint in
+            await sink.set(data)
+            await fingerprintSink.set(fingerprint)
+        }
 
         // The digest must be non-trivial for the substring check to be meaningful.
         #expect(token.inputsDigest != 0, "Probe estate must produce a non-trivial inputs digest")
 
+        // (1) The fingerprint is delivered for persistence.
+        let deliveredFingerprint = try #require(await fingerprintSink.value)
+        #expect(!deliveredFingerprint.isEmpty, "Handler must receive a non-empty fingerprint")
+        #expect(deliveredFingerprint == token.fingerprint,
+                "Delivered fingerprint must equal the returned token's fingerprint")
+
+        // (2) The served payload is the topology wire shape only — no token fields.
         let body = try #require(await sink.value)
         let json = String(decoding: body, as: UTF8.self)
-        // The persisted payload is the topology wire shape only — no token field.
-        #expect(!json.contains("inputsDigest"), "Token field name must not appear in persisted payload")
+        #expect(!json.contains("inputsDigest"), "Token field name must not appear in served payload")
         #expect(!json.contains("\(token.inputsDigest)"),
-                "Process-local inputs digest must never be written to the persisted payload")
-        // What SHOULD be in the payload: the topology wire shape. Sanity-check
-        // the boundary is the snapshot, not the dirty token.
-        #expect(json.contains("structurePending"), "Persisted payload must be the topology snapshot")
+                "Inputs digest must never be written into the served payload JSON")
+        #expect(!json.contains(deliveredFingerprint),
+                "Fingerprint must travel as a separate column, not embedded in the payload JSON")
+        // What SHOULD be in the payload: the topology wire shape.
+        #expect(json.contains("structurePending"), "Served payload must be the topology snapshot")
     }
 
     @Test func topologyGateFalseSkipsTheDuty() async throws {
@@ -291,7 +338,7 @@ struct AutonomicGovernorTests {
         let governor = AutonomicGovernor(
             kit: kit, handle: handle, baseTickMs: 0,
             topologyCadenceMs: 0,
-            topologyHandler: { _, _, _ in await counter.increment() },
+            topologyHandler: { _, _, _, _ in await counter.increment() },
             topologyGate: { false },
             clock: { Date(timeIntervalSince1970: 14_000_000) })
         _ = await governor.tick(now: Date(timeIntervalSince1970: 14_000_000))
@@ -299,6 +346,46 @@ struct AutonomicGovernorTests {
         // (incorrectly) fire before asserting it did not.
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(await counter.count == 0, "Gate false must skip the topology duty")
+    }
+
+    @Test func topologyRestartLoadsFingerprintAndSkipsRecompute() async throws {
+        // F5: a FRESH governor (simulating a process restart) loads the persisted
+        // fingerprint on its first duty and skips the recompute when the estate is
+        // unchanged. Proves the persist→load→skip chain holds across the governor's
+        // in-memory state boundary. Mirrors Rust `ag15c`.
+        let (kit, handle) = try await makeEstate()
+        // Non-empty estate so the fingerprint is a meaningful, stable value.
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "restart-skip probe", channel: .typed, room: "gov-test",
+            latticeAnchor: .udc("510"),
+            addedBy: "test", embeddingModelID: "test-model-v1"))
+
+        // Shared "disk" across both governor lifetimes: persisted fingerprint +
+        // a write counter standing in for the snapshot generatedTs advancing.
+        let disk = FingerprintStore()
+        let handler: @Sendable (String, Date, Data, String) async -> Void = { _, _, _, fp in
+            await disk.persist(fp)
+        }
+        let loader: @Sendable () async -> String? = { await disk.load() }
+
+        // First "process": governor computes and persists the fingerprint.
+        let governor1 = AutonomicGovernor(
+            kit: kit, handle: handle, topologyCadenceMs: 0,
+            topologyHandler: handler, topologyFingerprintLoader: loader)
+        _ = await governor1.tick(now: Date(timeIntervalSince1970: 16_000_000))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(await disk.writeCount == 1, "First governor must persist one snapshot")
+
+        // Second "process": a brand-new governor (no in-memory fingerprint) on the
+        // same disk + unchanged estate. Its first duty loads the persisted
+        // fingerprint, finds it matches, and skips the write.
+        let governor2 = AutonomicGovernor(
+            kit: kit, handle: handle, topologyCadenceMs: 0,
+            topologyHandler: handler, topologyFingerprintLoader: loader)
+        _ = await governor2.tick(now: Date(timeIntervalSince1970: 16_000_600))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(await disk.writeCount == 1,
+                "Restart with unchanged estate must skip recompute (loaded fingerprint matched)")
     }
 
     // MARK: - § Autonomic-loop activation (OP-3)
@@ -561,4 +648,21 @@ private actor CallCounter {
 private actor DataCapture {
     private(set) var value: Data? = nil
     func set(_ data: Data) { value = data }
+}
+
+/// Actor-isolated string capture. Thread-safe for @Sendable handler closures.
+/// Captures the topology fingerprint delivered as the handler's 4th argument.
+private actor StringCapture {
+    private(set) var value: String? = nil
+    func set(_ s: String) { value = s }
+}
+
+/// Actor-isolated stand-in for the persisted topology fingerprint "disk" (F5).
+/// `persist` mirrors the StatsStore write (counts writes so a skip is observable);
+/// `load` mirrors the one-shot fingerprint loader a restarting governor calls.
+private actor FingerprintStore {
+    private(set) var value: String? = nil
+    private(set) var writeCount = 0
+    func persist(_ fp: String) { value = fp; writeCount += 1 }
+    func load() -> String? { value }
 }

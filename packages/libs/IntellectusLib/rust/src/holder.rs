@@ -9,9 +9,10 @@
 //   - `report(_:)`      ↔  report(&self, make: impl FnOnce() -> StatSample)
 //
 // Threading model:
-//   - `_enabled` is an AtomicBool. Reads are Relaxed (the fastest load);
-//     writes are Release/Acquire to establish a happens-before edge
-//     between set_enabled() and the subsequent is_enabled() reads.
+//   - `_enabled` is an AtomicBool. Reads use Acquire ordering (both
+//     is_enabled() and the report() gate); writes use Release ordering
+//     to establish the happens-before edge with subsequent is_enabled()
+//     reads.
 //     This gives the hot path a true single-atomic-load cost when
 //     monitoring is disabled — no Mutex, no contention.
 //   - `_sink` is a Mutex<Arc<dyn StatsSink>>. The Mutex is held only
@@ -74,7 +75,7 @@ impl IntellectusHolder {
     /// Enable or disable the telemetry gate.
     ///
     /// Uses Release ordering so that subsequent `is_enabled()` loads
-    /// (Relaxed or Acquire) observe the update correctly.
+    /// (Acquire) observe the update correctly.
     pub fn set_enabled(&self, enabled: bool) {
         self._enabled.store(enabled, Ordering::Release);
     }

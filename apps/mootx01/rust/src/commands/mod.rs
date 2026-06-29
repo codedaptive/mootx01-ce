@@ -9,6 +9,8 @@ use std::process::ExitCode;
 use crate::cli::Command;
 
 pub mod db;
+pub mod drain;
+pub mod dream;
 pub mod install;
 pub mod proxy;
 pub mod query;
@@ -21,13 +23,20 @@ pub fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Serve { db, http } => serve::run(db, http),
         Command::Install {
-            target, location, yes, no_permissions, no_mgr, no_daemon, vault_on, depth,
-        } => install::run(target, location, yes, no_permissions, no_mgr, no_daemon, vault_on, depth),
-        Command::Uninstall { target, yes, purge } => uninstall::run(target, yes, purge),
+            target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth,
+        } => install::run(target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth),
+        Command::Uninstall {
+            target,
+            location,
+            yes,
+            purge,
+        } => uninstall::run(target, location, yes, purge),
         Command::Db(sub) => db::run(sub),
         Command::Status => status::run(),
         Command::Query { verb, db, json, args } => query::run(verb, db, json, args),
         Command::Proxy { daemon_url } => proxy::run(daemon_url),
+        Command::Drain { db } => drain::run(db),
+        Command::Dream { db } => dream::run(db),
         Command::Upgrade { from, check, yes, no_restart } => {
             upgrade::run(from, check, yes, no_restart)
         }

@@ -1,8 +1,10 @@
 // code_test.rs — FDC code grammar conformance
 //
-// Mirrors Swift CodeTests.swift exactly. Every input/expected pair here
-// must produce the same result from Rust `is_well_formed` / `integer_base`
-// as from Swift `Code.isWellFormed` / `Code.integerBase(of:)`.
+// Mirrors the core Swift CodeTests.swift grammar cases: every shared
+// input/expected pair must produce the same result from Rust
+// `is_well_formed` / `integer_base` as from Swift `Code.isWellFormed` /
+// `Code.integerBase(of:)`. Adds Rust-side boundary coverage for malformed
+// inputs and extension-length limits not present in the Swift suite.
 //
 // Conformance scope:
 //   Swift Code.isWellFormed  == Rust is_well_formed  (same result for all inputs)

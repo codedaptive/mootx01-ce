@@ -105,7 +105,57 @@ struct StdioFramingTests {
         let object = try #require(parsed.objectValue)
         let result = try #require(object["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        #expect(!tools.isEmpty, "tools/list must project the lexicon surface")
+        #expect(!tools.isEmpty, "tools/list must project the tool surface")
+    }
+
+    /// Verifies the frame size cap (CAND-051): a frame that exceeds the cap
+    /// without a newline terminator causes the server to close input cleanly
+    /// rather than growing the buffer unboundedly. The writer gets no response
+    /// (the server never dispatched a frame) and the server exits without panic.
+    @Test func testOversizedFrameClosesInputCleanly() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-oversize-test")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let dispatcher = ARIA_MCPDispatcher(
+            info: .init(name: "ARIA_MCP", version: "test"),
+            tooling: ToolDispatcher(kit: kit, handle: handle)
+        )
+        let server = StdioServer(dispatcher: dispatcher)
+
+        let inPipe = Pipe()
+        let outPipe = Pipe()
+
+        // Write a payload larger than the cap (1 byte over 4 MiB), with NO newline.
+        // The server must break the read loop when the buffer exceeds the cap.
+        let capBytes = 4 * 1024 * 1024
+        let oversized = Data(repeating: 0x41 /* 'A' */, count: capBytes + 1)
+        try inPipe.fileHandleForWriting.write(contentsOf: oversized)
+        try inPipe.fileHandleForWriting.close()
+
+        // Use a small maxFrameBytes so the test runs quickly without allocating 4 MiB.
+        // 64 bytes cap, 65 bytes payload: same logic, much less memory.
+        let smallCap = 64
+        let smallPayload = Data(repeating: 0x42 /* 'B' */, count: smallCap + 1)
+
+        let inPipe2 = Pipe()
+        let outPipe2 = Pipe()
+        try inPipe2.fileHandleForWriting.write(contentsOf: smallPayload)
+        try inPipe2.fileHandleForWriting.close()
+
+        await server.run(
+            input: inPipe2.fileHandleForReading,
+            output: outPipe2.fileHandleForWriting,
+            maxFrameBytes: smallCap
+        )
+        try outPipe2.fileHandleForWriting.close()
+
+        // No newline was ever sent, so no frame was dispatched — output must be empty.
+        let response = try outPipe2.fileHandleForReading.readToEnd() ?? Data()
+        #expect(response.isEmpty, "oversized frame with no newline must produce no response; got \(response.count) bytes")
     }
 
     @Test func testParseErrorEmitsNullIDResponse() async throws {

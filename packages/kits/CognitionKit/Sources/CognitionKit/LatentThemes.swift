@@ -39,7 +39,7 @@ public enum LatentThemesLens {
     /// pair walk below is deterministic.
     private static func fieldValueLabels(_ drawer: Drawer) -> [String] {
         let labels = Set([
-            "room:\(drawer.room)",
+            "room:\(drawer.parentNodeId)",
             "kind:\(drawer.contentKind)",
             "channel:\(drawer.captureChannel)",
             "sensitivity:\(drawer.adjectiveSensitivity)",

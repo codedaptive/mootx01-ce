@@ -15,7 +15,7 @@
 /// kit then treats the row as a forward-schema entry it does not know how
 /// to interpret).
 ///
-/// All 23 cases — 18 required + 5 optional — are present and ordered
+/// All 25 cases — 18 required + 7 optional — are present and ordered
 /// to match the Swift declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifestKey {
@@ -39,12 +39,25 @@ pub enum ManifestKey {
     BitmapLayoutVersion,
     ProvenanceBitmapVersion,
 
-    // Optional keys (5)
+    // Optional keys (7)
     FederationGroupID,
     MiningPatternsHash,
     TinyModelID,
     TinyModelTrainingCorpusSize,
     OperationalBitmapLayouts,
+
+    /// The estate's Ed25519 (Curve25519 signing) public key, base64 of
+    /// the raw 32-byte representation. Generated on first open and used
+    /// as the estate's federation identity once a non-manifest private-key
+    /// storage/wrapping layer is available for signing grants.
+    /// Per DECISION_SYNCKIT_DESIGN_2026-05-19 §8.
+    Ed25519PublicKey,
+
+    /// Reserved seam for a future hardware/OS-wrapped Ed25519 private
+    /// signing key. The Rust LocusKit manifest must not store raw private
+    /// key bytes here: `manifest.value` is ordinary metadata and is not
+    /// protected by row encryption.
+    Ed25519PrivateKeyWrapped,
 }
 
 impl ManifestKey {
@@ -75,6 +88,8 @@ impl ManifestKey {
             ManifestKey::TinyModelID => "tiny_model_id",
             ManifestKey::TinyModelTrainingCorpusSize => "tiny_model_training_corpus_size",
             ManifestKey::OperationalBitmapLayouts => "operational_bitmap_layouts",
+            ManifestKey::Ed25519PublicKey => "ed25519_public_key",
+            ManifestKey::Ed25519PrivateKeyWrapped => "ed25519_private_key_wrapped",
         }
     }
 
@@ -113,6 +128,8 @@ impl ManifestKey {
             "tiny_model_id" => ManifestKey::TinyModelID,
             "tiny_model_training_corpus_size" => ManifestKey::TinyModelTrainingCorpusSize,
             "operational_bitmap_layouts" => ManifestKey::OperationalBitmapLayouts,
+            "ed25519_public_key" => ManifestKey::Ed25519PublicKey,
+            "ed25519_private_key_wrapped" => ManifestKey::Ed25519PrivateKeyWrapped,
             _ => return None,
         })
     }
@@ -140,20 +157,22 @@ impl ManifestKey {
         ManifestKey::ProvenanceBitmapVersion,
     ];
 
-    /// The 5 optional keys. Absent means "not configured".
-    pub const OPTIONAL: [ManifestKey; 5] = [
+    /// The 7 optional keys. Absent means "not configured".
+    pub const OPTIONAL: [ManifestKey; 7] = [
         ManifestKey::FederationGroupID,
         ManifestKey::MiningPatternsHash,
         ManifestKey::TinyModelID,
         ManifestKey::TinyModelTrainingCorpusSize,
         ManifestKey::OperationalBitmapLayouts,
+        ManifestKey::Ed25519PublicKey,
+        ManifestKey::Ed25519PrivateKeyWrapped,
     ];
 }
 
 // MARK: - ManifestValues
 
-/// A typed, read-only snapshot of the estate manifest. Obtained via the
-/// future `DrawerStore::read_manifest`. Consumed by `Estate::manifest`.
+/// A typed, read-only snapshot of the estate manifest. Obtained via
+/// `DrawerStore::read_manifest`. Consumed by `Estate::manifest`.
 ///
 /// ## Type choices
 ///
@@ -206,6 +225,15 @@ pub struct ManifestValues {
     pub tiny_model_id: Option<String>,
     pub tiny_model_training_corpus_size: Option<i64>,
     pub operational_bitmap_layouts: Option<String>,
+
+    /// The estate's Ed25519 public key as base64 of the raw 32-byte
+    /// representation, or None on an estate opened before the identity
+    /// keypair was generated.
+    pub ed25519_public_key: Option<String>,
+
+    /// Reserved for a future hardware/OS-wrapped Ed25519 private key.
+    /// Must remain absent unless a real wrapping layer is introduced.
+    pub ed25519_private_key_wrapped: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -291,11 +319,11 @@ mod tests {
         assert_eq!(ManifestKey::from_str("Manifest_Version"), None); // case sensitive
     }
 
-    /// 18 required keys, 5 optional, 23 total.
+    /// 18 required keys, 7 optional, 25 total.
     #[test]
     fn key_counts() {
         assert_eq!(ManifestKey::REQUIRED.len(), 18);
-        assert_eq!(ManifestKey::OPTIONAL.len(), 5);
+        assert_eq!(ManifestKey::OPTIONAL.len(), 7);
     }
 
     /// Required and optional sets are disjoint.
@@ -337,6 +365,8 @@ mod tests {
             tiny_model_id: None,
             tiny_model_training_corpus_size: None,
             operational_bitmap_layouts: None,
+            ed25519_public_key: None,
+            ed25519_private_key_wrapped: None,
         };
         let mv2 = mv.clone();
         assert_eq!(mv, mv2);

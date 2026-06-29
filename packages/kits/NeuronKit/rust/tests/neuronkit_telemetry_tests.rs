@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use intellectus_lib::{Intellectus, NoOpSink, StatSample, StatsSink};
 use neuron_kit::{
     bradley_terry, PairwiseOutcome,
-    CoOccurrenceObservation, DreamingDaemon, DreamingPolicy, DreamingProposalSink,
+    DreamingDaemon, DreamingPolicy, DreamingProposalSink,
     DreamingSubstrateReader,
     ProposeFrameOut, RecallTraceItem, TunnelLink,
     rerank, DrawerRow, RecallFrameTuning,
@@ -121,16 +121,36 @@ impl StatsSink for CapturingSink {
 
 // MARK: - Fake dreaming infrastructure
 
+/// Drain-window fake reader. `window_batches` is a FIFO of per-call return
+/// values: each call to `drain_dreaming_window` pops the front batch. When
+/// exhausted, returns an empty Vec — drain-once semantics. Uses
+/// `RefCell<VecDeque>` for interior mutability since the trait takes `&self`.
 struct FakeReader {
-    observations: Vec<CoOccurrenceObservation>,
+    /// Each element is one drain call's return value.
+    window_batches: std::cell::RefCell<std::collections::VecDeque<Vec<Vec<String>>>>,
+}
+
+impl FakeReader {
+    /// No windows — zero drain results every call.
+    fn empty() -> Self {
+        Self { window_batches: Default::default() }
+    }
+
+    /// Single drain call returning `windows`.
+    fn with_windows(windows: Vec<Vec<String>>) -> Self {
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(windows);
+        Self { window_batches: std::cell::RefCell::new(q) }
+    }
 }
 
 impl DreamingSubstrateReader for FakeReader {
     fn recent_recall_traces(&self) -> Vec<RecallTraceItem> {
         vec![]
     }
-    fn co_occurrence_observations(&self) -> Vec<CoOccurrenceObservation> {
-        self.observations.clone()
+    fn drain_dreaming_window(&self) -> Vec<Vec<String>> {
+        let mut q = self.window_batches.borrow_mut();
+        q.pop_front().unwrap_or_default()
     }
     fn existing_tunnels(&self) -> Vec<TunnelLink> {
         vec![]
@@ -237,7 +257,7 @@ fn run_cycle_emits_start_and_complete() {
     Intellectus::set_enabled(true);
 
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
-    let reader = FakeReader { observations: vec![] };
+    let reader = FakeReader::empty();
     let mut recording_sink = RecordingSink::default();
     // Injected now (epoch-seconds f64) — determinism contract: the daemon
     // never reads SystemTime; the caller supplies the timestamp.
@@ -281,7 +301,7 @@ fn two_run_cycle_calls_emit_four_metrics() {
     Intellectus::set_enabled(true);
 
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
-    let reader = FakeReader { observations: vec![] };
+    let reader = FakeReader::empty();
     let mut s = RecordingSink::default();
     let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
     let _ = daemon.run_cycle(1_030_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
@@ -302,7 +322,7 @@ fn run_cycle_emits_nothing_when_disabled() {
     Intellectus::set_enabled(false);
 
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
-    let reader = FakeReader { observations: vec![] };
+    let reader = FakeReader::empty();
     let mut s = RecordingSink::default();
     let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
 
@@ -320,22 +340,19 @@ fn drawers_touched_tag_matches_observation_count() {
     Intellectus::install(sink.clone());
     Intellectus::set_enabled(true);
 
-    let obs = vec![
-        CoOccurrenceObservation {
-            endpoint_a: "a".to_string(),
-            endpoint_b: "b".to_string(),
-            attempts: 2,
-            evidence_targets: vec![],
-        },
-        CoOccurrenceObservation {
-            endpoint_a: "c".to_string(),
-            endpoint_b: "d".to_string(),
-            attempts: 1,
-            evidence_targets: vec![],
-        },
+    // 3 windows for (a,b) + 3 windows for (c,d) → 2 distinct pairs after drain.
+    // min_attempts=3 (default); coRecallCount(a,b)=3 and coRecallCount(c,d)=3 clear the gate.
+    // The drain produces 2 candidates → drawers_touched tag = "2".
+    let windows = vec![
+        vec!["a".to_string(), "b".to_string()],
+        vec!["a".to_string(), "b".to_string()],
+        vec!["a".to_string(), "b".to_string()],
+        vec!["c".to_string(), "d".to_string()],
+        vec!["c".to_string(), "d".to_string()],
+        vec!["c".to_string(), "d".to_string()],
     ];
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
-    let reader = FakeReader { observations: obs };
+    let reader = FakeReader::with_windows(windows);
     let mut s = RecordingSink::default();
     let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
 
@@ -347,7 +364,7 @@ fn drawers_touched_tag_matches_observation_count() {
     assert!(complete_metric.is_some(), "must emit a complete metric");
     if let Some(StatSample::Metric { tags, .. }) = complete_metric {
         assert_eq!(tags.get("drawers_touched").map(|v| v.as_str()), Some("2"),
-            "drawers_touched must equal observation count; got {:?}", tags.get("drawers_touched"));
+            "drawers_touched must equal distinct-pair count; got {:?}", tags.get("drawers_touched"));
     }
 
     Intellectus::set_enabled(false);
@@ -484,19 +501,18 @@ fn bradley_terry_result_identical_with_and_without_telemetry() {
 #[test]
 fn dreaming_cycle_report_identical_with_and_without_telemetry() {
     let _guard = global_lock();
-    let obs = vec![
-        CoOccurrenceObservation {
-            endpoint_a: "ep-a".to_string(),
-            endpoint_b: "ep-b".to_string(),
-            attempts: 2,
-            evidence_targets: vec![],
-        },
+    // 3 windows for (ep-a, ep-b) → 1 distinct pair; coRecallCount=3 clears min_attempts=3.
+    // Each daemon gets its own reader so drain-once state is independent.
+    let make_windows = || vec![
+        vec!["ep-a".to_string(), "ep-b".to_string()],
+        vec!["ep-a".to_string(), "ep-b".to_string()],
+        vec!["ep-a".to_string(), "ep-b".to_string()],
     ];
 
     // OFF path.
     Intellectus::set_enabled(false);
     let mut daemon_off = DreamingDaemon::new(DreamingPolicy::default());
-    let reader_off = FakeReader { observations: obs.clone() };
+    let reader_off = FakeReader::with_windows(make_windows());
     let mut sink_off = RecordingSink::default();
     let report_off = daemon_off.run_cycle(1_000_000.0, &reader_off, &neuron_kit::RecallTraceRewardSource, &mut sink_off);
 
@@ -505,7 +521,7 @@ fn dreaming_cycle_report_identical_with_and_without_telemetry() {
     Intellectus::install(capture_sink.clone());
     Intellectus::set_enabled(true);
     let mut daemon_on = DreamingDaemon::new(DreamingPolicy::default());
-    let reader_on = FakeReader { observations: obs.clone() };
+    let reader_on = FakeReader::with_windows(make_windows());
     let mut sink_on = RecordingSink::default();
     let report_on = daemon_on.run_cycle(1_000_000.0, &reader_on, &neuron_kit::RecallTraceRewardSource, &mut sink_on);
 

@@ -46,7 +46,7 @@ struct FormalConceptAnalysisMultiSeedTests {
     ///
     /// Revised context — "bridge" pattern:
     ///   0: {A, B}    — rows 0,1,2 all carry A
-    ///   1: {A, B}    — rows 0,1,2,3 all carry B
+    ///   1: {A, B}    — rows 0,1,3 carry B (row 2 is {A,C}, no B)
     ///   2: {A, C}    — rows 2,3 carry C
     ///   3: {B, C}
     ///

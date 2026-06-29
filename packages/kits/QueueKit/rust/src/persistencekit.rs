@@ -40,7 +40,7 @@ use persistence_kit::storage::{Storage, StorageTransaction};
 use persistence_kit::predicate::OrderClause;
 use persistence_kit::types::{Column, StorageRow};
 
-use crate::backend::QueueBackend;
+use crate::backend::{QueueBackend, WatchHandler};
 use crate::error::QueueError;
 use crate::job::{ArtifactRef, Job, JobId, ObservationStatus, SessionId, StreamId};
 
@@ -261,6 +261,46 @@ impl PersistenceKitBackend {
             .map_err(|e| QueueError::WriteFailed(e.to_string()))
     }
 
+    /// Complete EVERY in-flight ("cur") job claimed under `session` in one pass,
+    /// flipping them to terminal `status`. Returns the number completed.
+    ///
+    /// The single-pass twin of the session-batched `drain_available` claim: a
+    /// drain worker that claimed a whole batch under one session retires the
+    /// whole batch with ONE guarded bulk update instead of N per-job `complete`
+    /// calls (each an O(N) predicate scan → O(N²) per batch — the second half of
+    /// the bulk-import wall, alongside the claim). Artifacts are empty: the batch
+    /// fast path carries none; a job that needs artifacts uses per-job `complete`.
+    ///
+    /// Inherent (not on `QueueBackend`): only the PersistenceKit backend drives
+    /// the encode drain, and the concrete handle is held there — keeping it off
+    /// the trait avoids forcing the optimization onto every backend. The guard is
+    /// status="cur" so any job already completed individually (e.g. an undecodable
+    /// job replied "blocked" before this call) is untouched.
+    pub fn complete_session(
+        &self,
+        session: &SessionId,
+        status: ObservationStatus,
+    ) -> Result<usize, QueueError> {
+        if !status.is_terminal() {
+            return Err(QueueError::InvalidTerminalStatus(status.raw().to_string()));
+        }
+        let artifacts_text = Self::encode_artifacts(&[])?;
+        let mut affected: usize = 0;
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn: &dyn StorageTransaction| {
+            let mut update_vals = BTreeMap::new();
+            update_vals.insert("status".to_string(), TypedValue::Text("done".to_string()));
+            update_vals.insert("signal_status".to_string(), TypedValue::Text(status.raw().to_string()));
+            update_vals.insert("artifacts".to_string(), TypedValue::Text(artifacts_text.clone()));
+            let guard = StoragePredicate::And(vec![
+                StoragePredicate::Eq(Self::col("session_id"), TypedValue::Text(session.0.clone())),
+                StoragePredicate::Eq(Self::col("status"), TypedValue::Text("cur".to_string())),
+            ]);
+            affected = txn.row_store().update(QUEUE_KIT_TABLE_NAME, update_vals, &guard)?;
+            Ok(())
+        }).map_err(storage_err)?;
+        Ok(affected)
+    }
+
     /// List jobs with a given status, optionally filtered by stream_id.
     fn list_jobs(
         &self,
@@ -287,6 +327,60 @@ impl PersistenceKitBackend {
             .map_err(storage_err)?;
         Ok(rows.iter().filter_map(Self::decode_row).collect())
     }
+
+    /// Reset every stale in-flight ("cur") job for `stream` back to "new",
+    /// clearing the `session_id` so the next `drain_available_for_stream` call
+    /// re-claims and re-drives them. Returns the count of reclaimed rows.
+    ///
+    /// # Safety
+    ///
+    /// Must ONLY be called when the caller has JUST successfully acquired the
+    /// stream's `DrainLease` via `try_acquire`. A freshly-acquired lease means
+    /// the prior holder is dead (crashed or cleanly exited), so every "cur" row
+    /// for this stream is an orphan — no live drainer is processing it.
+    /// `try_acquire` succeeds only when the prior lease is absent OR stale
+    /// (heartbeat older than TTL = 15 s), ensuring no other drainer holds a
+    /// fresh lease simultaneously. This rules out yanking a "cur" job from under
+    /// a live drainer.
+    ///
+    /// Idempotent and crash-safe: reclaimed jobs land in "new", are re-drained,
+    /// and re-ingested. Ingest is content-addressed, so re-processing a reclaimed
+    /// job is harmless (AT-LEAST-ONCE guarantee).
+    ///
+    /// Stream-scoped: only this stream's "cur" rows are reset; other streams'
+    /// rows are never touched. This mirrors the stream isolation of
+    /// `drain_available_for_stream` (ADR-021 Decision 7: one per-estate queue,
+    /// per-stream drainers).
+    ///
+    /// Swift twin: `PersistenceKitBackend.reclaimInFlight(stream:)`.
+    pub fn reclaim_in_flight_for_stream(&self, stream: &StreamId) -> Result<usize, QueueError> {
+        let mut reclaimed: usize = 0;
+        let pred = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Self::col("status"),
+                TypedValue::Text("cur".to_string()),
+            ),
+            StoragePredicate::Eq(
+                Self::col("stream_id"),
+                TypedValue::Text(stream.0.clone()),
+            ),
+        ]);
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn: &dyn StorageTransaction| {
+            let mut update_vals = BTreeMap::new();
+            update_vals.insert("status".to_string(), TypedValue::Text("new".to_string()));
+            // Clear the session_id so the reclaimed rows appear as unowned to
+            // the next drain_available_for_stream call. TypedValue::Null is the
+            // storage-level NULL, not an empty string — consistent with how the
+            // SQLite backend decodes absent session_id columns.
+            update_vals.insert("session_id".to_string(), TypedValue::Null);
+            let count = txn
+                .row_store()
+                .update(QUEUE_KIT_TABLE_NAME, update_vals, &pred)?;
+            reclaimed = count;
+            Ok(())
+        }).map_err(storage_err)?;
+        Ok(reclaimed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +388,10 @@ impl PersistenceKitBackend {
 // ---------------------------------------------------------------------------
 
 impl QueueBackend for PersistenceKitBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     // Bare insert per spec §10 invariant 1 — DO NOT wrap in transaction.
     fn write(&self, job: &Job) -> Result<(), QueueError> {
         let ext_json = serde_json::to_string(
@@ -317,62 +415,116 @@ impl QueueBackend for PersistenceKitBackend {
             .map_err(|e| QueueError::WriteFailed(e.to_string()))
     }
 
+    // Enqueue all jobs in ONE transaction instead of N autocommits (T4 perf
+    // parity — mirrors Swift PersistenceKitBackend.writeBatch). On the encrypted
+    // SQLite queue.sqlite a per-job autocommit is a full commit each; wrapping the
+    // inserts in a single transaction keeps the bulk-reindex enqueue cheap (the
+    // batched-enqueue win this session landed on the maildir, preserved on the DB
+    // backend). Row value-maps are built up front so serialization can surface a
+    // QueueError before the transaction; `.read_committed` matches the per-job
+    // `write()` isolation — bare inserts (status="new"), just batched.
+    fn write_batch(&self, jobs: &[Job]) -> Result<usize, QueueError> {
+        if jobs.is_empty() {
+            return Ok(0);
+        }
+        let mut rows: Vec<BTreeMap<String, TypedValue>> = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let ext_json = serde_json::to_string(&serde_json::Value::Object(job.extensions.clone()))
+                .map_err(|e| QueueError::WriteFailed(e.to_string()))?;
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Text(job.id.0.clone()));
+            values.insert("stream_id".to_string(), TypedValue::Text(job.stream_id.0.clone()));
+            values.insert("physical_time".to_string(), TypedValue::Int(job.submitted_at.physical_time));
+            values.insert("logical_count".to_string(), TypedValue::Int(job.submitted_at.logical_count as i64));
+            values.insert("node_id".to_string(), TypedValue::Int(job.submitted_at.node_id as i64));
+            values.insert("priority".to_string(), TypedValue::Int(job.priority as i64));
+            values.insert("status".to_string(), TypedValue::Text("new".to_string()));
+            values.insert("payload".to_string(), TypedValue::Blob(job.payload.clone()));
+            values.insert("extensions".to_string(), TypedValue::Text(ext_json));
+            rows.push(values);
+        }
+        self.storage
+            .transaction(
+                IsolationLevel::ReadCommitted,
+                &mut |txn: &dyn StorageTransaction| {
+                    let rs = txn.row_store();
+                    for values in &rows {
+                        rs.insert(QUEUE_KIT_TABLE_NAME, values.clone())?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| QueueError::WriteFailed(e.to_string()))?;
+        Ok(jobs.len())
+    }
+
     // Serializable atomic claim: find all "new" rows ordered by HLC,
     // attempt rename to "cur" with a status guard. Per spec §10 invariant 3.
     fn drain_available(&self) -> Result<Vec<(Job, SessionId)>, QueueError> {
+        // SINGLE-PASS CLAIM. One guarded bulk UPDATE flips every available
+        // ("new") job to "cur" under this call's unique batch session, then we
+        // read the claimed rows back BY THAT SESSION. This replaces the prior N
+        // single-row guarded updates — each an O(N) predicate scan (InMemory and
+        // SQLite both evaluate the guard row-by-row) — which made a bulk claim
+        // O(N²) in queue depth and the dominant cost of a 40k import. The bulk
+        // update is one O(N) pass; the session-tagged read-back is another, so a
+        // whole batch claims in O(N).
+        //
+        // Reading back by the call's UNIQUE session (not by status="cur") keeps
+        // the claim robust under any isolation model: a concurrent drainer's rows
+        // carry a different session, so the two drainers partition the "new"
+        // frontier and never double-count a job. spec §10 invariant 3 (the claim
+        // is still a status-guarded atomic new→cur transition).
+        let session = SessionId(uuid::Uuid::new_v4().to_string().to_lowercase());
         let mut claimed: Vec<(Job, SessionId)> = Vec::new();
 
         self.storage.transaction(IsolationLevel::Serializable, &mut |txn: &dyn StorageTransaction| {
+            // 1. Atomically claim EVERY "new" job into "cur" under this session.
+            let mut update_vals = BTreeMap::new();
+            update_vals.insert("status".to_string(), TypedValue::Text("cur".to_string()));
+            update_vals.insert("session_id".to_string(), TypedValue::Text(session.0.clone()));
+            let claim_guard = StoragePredicate::Eq(
+                Column::new(QUEUE_KIT_TABLE_NAME, "status"),
+                TypedValue::Text("new".to_string()),
+            );
+            let claimed_count = txn
+                .row_store()
+                .update(QUEUE_KIT_TABLE_NAME, update_vals, &claim_guard)?;
+            if claimed_count == 0 {
+                return Ok(());
+            }
+
+            // 2. Read back EXACTLY the rows this call claimed (by session), in HLC
+            //    order. Same serializable transaction, so the read sees the
+            //    update's own writes.
             let order = vec![
                 OrderClause::ascending(Column::new(QUEUE_KIT_TABLE_NAME, "physical_time")),
                 OrderClause::ascending(Column::new(QUEUE_KIT_TABLE_NAME, "logical_count")),
                 OrderClause::ascending(Column::new(QUEUE_KIT_TABLE_NAME, "node_id")),
             ];
-            let pred = StoragePredicate::Eq(
-                Column::new(QUEUE_KIT_TABLE_NAME, "status"),
-                TypedValue::Text("new".to_string()),
-            );
-            let rows = txn.row_store()
+            let pred = StoragePredicate::And(vec![
+                StoragePredicate::Eq(
+                    Column::new(QUEUE_KIT_TABLE_NAME, "status"),
+                    TypedValue::Text("cur".to_string()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new(QUEUE_KIT_TABLE_NAME, "session_id"),
+                    TypedValue::Text(session.0.clone()),
+                ),
+            ]);
+            let rows = txn
+                .row_store()
                 .query(QUEUE_KIT_TABLE_NAME, Some(&pred), &order, None, None)?;
-
             for row in &rows {
-                let row_id = match row.get("id") {
-                    Some(TypedValue::Text(s)) => s.clone(),
-                    _ => continue,
-                };
-
-                // Generate a new session ID for this claim.
-                let session = SessionId(uuid::Uuid::new_v4().to_string().to_lowercase());
-
-                let mut update_vals = BTreeMap::new();
-                update_vals.insert("status".to_string(), TypedValue::Text("cur".to_string()));
-                update_vals.insert("session_id".to_string(), TypedValue::Text(session.0.clone()));
-
-                // Guard: only update if status is still "new" (atomic claim).
-                let guard = StoragePredicate::And(vec![
-                    StoragePredicate::Eq(
-                        Column::new(QUEUE_KIT_TABLE_NAME, "status"),
-                        TypedValue::Text("new".to_string()),
-                    ),
-                    StoragePredicate::Eq(
-                        Column::new(QUEUE_KIT_TABLE_NAME, "id"),
-                        TypedValue::Text(row_id),
-                    ),
-                ]);
-
-                let updated = txn.row_store()
-                    .update(QUEUE_KIT_TABLE_NAME, update_vals, &guard)?;
-
-                if updated == 1 {
-                    if let Some(job) = Self::decode_row(row) {
-                        claimed.push((job, session));
-                    }
+                if let Some(job) = Self::decode_row(row) {
+                    claimed.push((job, session.clone()));
                 }
             }
             Ok(())
         }).map_err(storage_err)?;
 
-        // Sort by HLC ascending — matches Swift's claimed.sort.
+        // Sort by HLC ascending — matches Swift's claimed.sort (the query already
+        // orders; kept explicit so the final contract is port-identical).
         claimed.sort_by(|a, b| {
             (a.0.submitted_at.physical_time,
              a.0.submitted_at.logical_count,
@@ -450,15 +602,112 @@ impl QueueBackend for PersistenceKitBackend {
             .map_err(storage_err)
     }
 
+    // ── Stream-scoped drain (ADR-021 Decision 7 / T1) ──────────────────────
+
+    /// Claim and return only the pending jobs that belong to `stream`.
+    ///
+    /// Uses the same serializable bulk-update claim as `drain_available()`, but
+    /// adds `AND stream_id = ?` to the predicate. The `idx_queuekit_stream
+    /// (stream_id, status)` index makes the predicated UPDATE cheap. Only this
+    /// stream's "new" rows are flipped to "cur" under the batch session; other
+    /// streams' rows are untouched. Swift twin:
+    /// `PersistenceKitBackend.drainAvailable(stream:)`.
+    fn drain_available_for_stream(
+        &self,
+        stream: &StreamId,
+    ) -> Result<Vec<(Job, SessionId)>, QueueError> {
+        let session = SessionId(uuid::Uuid::new_v4().to_string().to_lowercase());
+        let mut claimed: Vec<(Job, SessionId)> = Vec::new();
+
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn: &dyn StorageTransaction| {
+            // 1. Atomically claim EVERY "new" job for this stream into "cur".
+            let mut update_vals = BTreeMap::new();
+            update_vals.insert("status".to_string(), TypedValue::Text("cur".to_string()));
+            update_vals.insert("session_id".to_string(), TypedValue::Text(session.0.clone()));
+            let claim_guard = StoragePredicate::And(vec![
+                StoragePredicate::Eq(
+                    Column::new(QUEUE_KIT_TABLE_NAME, "status"),
+                    TypedValue::Text("new".to_string()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new(QUEUE_KIT_TABLE_NAME, "stream_id"),
+                    TypedValue::Text(stream.0.clone()),
+                ),
+            ]);
+            let claimed_count = txn
+                .row_store()
+                .update(QUEUE_KIT_TABLE_NAME, update_vals, &claim_guard)?;
+            if claimed_count == 0 {
+                return Ok(());
+            }
+
+            // 2. Read back EXACTLY the rows this call claimed (by session), in
+            //    HLC order. Same serializable transaction sees the update's writes.
+            let order = vec![
+                OrderClause::ascending(Column::new(QUEUE_KIT_TABLE_NAME, "physical_time")),
+                OrderClause::ascending(Column::new(QUEUE_KIT_TABLE_NAME, "logical_count")),
+                OrderClause::ascending(Column::new(QUEUE_KIT_TABLE_NAME, "node_id")),
+            ];
+            let pred = StoragePredicate::And(vec![
+                StoragePredicate::Eq(
+                    Column::new(QUEUE_KIT_TABLE_NAME, "status"),
+                    TypedValue::Text("cur".to_string()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new(QUEUE_KIT_TABLE_NAME, "session_id"),
+                    TypedValue::Text(session.0.clone()),
+                ),
+            ]);
+            let rows = txn
+                .row_store()
+                .query(QUEUE_KIT_TABLE_NAME, Some(&pred), &order, None, None)?;
+            for row in &rows {
+                if let Some(job) = Self::decode_row(row) {
+                    claimed.push((job, session.clone()));
+                }
+            }
+            Ok(())
+        }).map_err(storage_err)?;
+
+        // Sort by HLC ascending — matches Swift's sort.
+        claimed.sort_by(|a, b| {
+            (a.0.submitted_at.physical_time,
+             a.0.submitted_at.logical_count,
+             a.0.submitted_at.node_id)
+                .cmp(&(b.0.submitted_at.physical_time,
+                       b.0.submitted_at.logical_count,
+                       b.0.submitted_at.node_id))
+        });
+
+        Ok(claimed)
+    }
+
+    /// Count pending jobs (status = "new") belonging to `stream` only.
+    ///
+    /// Uses `idx_queuekit_stream (stream_id, status)` — no cursor advance.
+    /// Swift twin: `PersistenceKitBackend.pendingCount(stream:)`.
+    fn pending_count_for_stream(&self, stream: &StreamId) -> Result<usize, QueueError> {
+        let pred = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Self::col("status"),
+                TypedValue::Text("new".to_string()),
+            ),
+            StoragePredicate::Eq(
+                Self::col("stream_id"),
+                TypedValue::Text(stream.0.clone()),
+            ),
+        ]);
+        self.storage.row_store()
+            .count(QUEUE_KIT_TABLE_NAME, Some(&pred))
+            .map_err(storage_err)
+    }
+
     // watch(): subscribe to INSERT events on the jobs table, wake on each
     // event, and re-read through drain_available() (spec §10 invariant 2).
     //
     // The observer event is a wake signal only; never trust event payloads
     // as authoritative job data — they may reflect uncommitted state.
-    fn watch<F>(&self, handler: F) -> Result<(), QueueError>
-    where
-        F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync,
-    {
+    fn watch(&self, handler: WatchHandler) -> Result<(), QueueError> {
         let mut events = BTreeSet::new();
         events.insert(StorageEvent::Insert);
 

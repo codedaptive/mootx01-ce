@@ -12,7 +12,7 @@ relates_to:
   - INTELLECTUSLIB_SPEC.md
 purpose: |
   Public API surface of IntellectusLib in both ports: StatSample,
-  EventKind, StatsSink, NoOpSink, Intellectus global facade, and the
+  EventKind, StatsSink, NoOpSink, Intellectus global Interface, and the
   short-circuit report API. The companion SPEC carries the behavioral
   contracts (invariants I-1…I-8, including § 9).
 ---
@@ -28,7 +28,7 @@ purpose: |
 - `Sources/IntellectusLib/RecentWindowSink.swift` — `RecentWindowSink`
   (bounded recent-window sink)
 - `Sources/IntellectusLib/Intellectus.swift` — `_IntellectusHolder` (internal),
-  `_intellectus` singleton (internal), `Intellectus` public facade
+  `_intellectus` singleton (internal), `Intellectus` public Interface
 - `Tests/IntellectusLibTests/IntellectusLibTests.swift` — 24 conformance tests
 - `Package.swift` — zero-dependency manifest (Foundation only)
 
@@ -39,7 +39,7 @@ purpose: |
 - `src/sink.rs` — `StatsSink` trait, `NoOpSink`
 - `src/window.rs` — `RecentWindowSink` (bounded recent-window sink)
 - `src/holder.rs` — `IntellectusHolder` (per-instance state, used in tests)
-- `src/global.rs` — `Intellectus` public facade
+- `src/global.rs` — `Intellectus` public Interface
 - `tests/intellectus_lib_tests.rs` — 24 conformance tests + 4 doc-tests
 - `Cargo.toml` — zero-dependency manifest (std only)
 
@@ -215,7 +215,7 @@ impl StatsSink for RecentWindowSink {
 Both ports: `capacity` clamps to a minimum of 1; the forward sink runs OUTSIDE
 the internal lock (SPEC I-7 discipline); `receive` is safe under concurrency.
 
-## § 3 — Global facade: `Intellectus`
+## § 3 — Global Interface: `Intellectus`
 
 The public API entry point for hosts and substrate callers. See SPEC §§ 3, 6.
 

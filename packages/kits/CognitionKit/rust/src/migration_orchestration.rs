@@ -7,8 +7,10 @@
 //! order (derive → capture-each → benchmark, per plan) and how it threads
 //! minted ids + benchmark results into the ranked report — can be tested
 //! deterministically without a live estate. The three substrate operations
-//! are abstracted behind the trait; the orchestration is a pure function
-//! of (substrate, plans, origin).
+//! are abstracted behind the trait; the sequencing logic is a pure function
+//! of (substrate, plans, origin) when run through the trait abstraction. The
+//! live path in `migration_live` invokes mutable estate operations and captures
+//! `SystemTime` for telemetry.
 //!
 //! Every DECISION (C-13 gate, combined-score, ranking, tie-break,
 //! duplicate-plan guard, lost-concept union) is delegated to

@@ -257,8 +257,9 @@ struct FusionTests {
     //   item-B: vector rank 2, keyword rank 1 → fused = 0.6/62 + 0.4/61
     //   item-C: vector rank 3 only            → fused = 0.6/63
     //
-    // Expected order: item-A (≈0.0162) > item-B (≈0.0162) with tie broken
-    // by itemID ASC when scores are equal, > item-C (≈0.0095).
+    // Expected order: item-A > item-B > item-C (≈0.0095). item-A and item-B
+    // appear equal at two decimal places but A wins by a small numeric margin
+    // (see the derivation at lines 309-313).
 
     @Test func hybridRecallTwoLaneFormulaConformance() {
         // Compute expected scores directly from the RRF formula.
@@ -341,9 +342,15 @@ struct FusionTests {
 
         try await vectorStorage.open(schema: VectorStore.schemaDeclaration)
         try await bundleStorage.open(schema: BundleStore.schemaDeclaration)
+        // InvertedIndexStore sidecar tables live in the bundle storage (same
+        // backend pattern as the production Corpus init, which migrates IIX
+        // tables into its single Storage instance alongside the chunk tables).
+        try await bundleStorage.migrate(to: InvertedIndexStore.schemaDeclaration)
 
         let vectorStore = VectorStore(storage: vectorStorage)
         let bundleStore = BundleStore(storage: bundleStorage)
+        let invertedIndex = InvertedIndexStore(storage: bundleStorage)
+        try await invertedIndex.open()
 
         // Fixed reference date; passed as filedAt so Date() is not called inside engines.
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
@@ -362,10 +369,14 @@ struct FusionTests {
         }
         try await bundleStore.insert(chunks)
 
-        // Index BM25 over the chunks.
-        let tokenizer = CorpusDefaultTokenizer()
-        let bm25 = BM25Index(tokenizer: tokenizer)
-        await bm25.index(chunks)
+        // Index each chunk into the durable InvertedIndexStore.
+        for chunk in chunks {
+            try await invertedIndex.index(
+                itemID: chunk.id.uuidString,
+                tokens: CorpusDefaultTokenizer().keywordTokens(chunk.text),
+                now: now
+            )
+        }
 
         // Seed VectorStore with Engrams: chunk 0 closest to probe, chunk 2 farthest.
         // Probe is all-zeros; distances are popcount(engram) = 1, 2, 3.
@@ -391,7 +402,7 @@ struct FusionTests {
             modelID: "test-model",
             limit: 3,
             vectorStore: vectorStore,
-            bm25: bm25,
+            invertedIndex: invertedIndex,
             bundleStore: bundleStore
         )
 
@@ -465,9 +476,12 @@ struct FusionTests {
 
         try await vectorStorage.open(schema: VectorStore.schemaDeclaration)
         try await bundleStorage.open(schema: BundleStore.schemaDeclaration)
+        try await bundleStorage.migrate(to: InvertedIndexStore.schemaDeclaration)
 
         let vectorStore = VectorStore(storage: vectorStorage)
         let bundleStore = BundleStore(storage: bundleStorage)
+        let invertedIndex = InvertedIndexStore(storage: bundleStorage)
+        try await invertedIndex.open()
 
         let now = Date(timeIntervalSinceReferenceDate: 2_000_000)
 
@@ -481,8 +495,11 @@ struct FusionTests {
         )
         try await bundleStore.insert([chunk])
 
-        let bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
-        await bm25.index([chunk])
+        try await invertedIndex.index(
+            itemID: chunk.id.uuidString,
+            tokens: CorpusDefaultTokenizer().keywordTokens(chunk.text),
+            now: now
+        )
 
         // Store the engram and use the IDENTICAL engram as the probe.
         // Hamming distance = 0 → raw vectorScore = 0.0 (minimum distance).
@@ -503,7 +520,7 @@ struct FusionTests {
             modelID: "test-model",
             limit: 5,
             vectorStore: vectorStore,
-            bm25: bm25,
+            invertedIndex: invertedIndex,
             bundleStore: bundleStore
         )
 

@@ -1,6 +1,6 @@
 //! Cookbook §2.5 + §2.8 verification-table conformance gate for the
 //! Drawer provenance bitmap constants LocusKit owns: SourceType,
-//! Channel, CaptureChannel (mirrored from operational §2.4),
+//! Channel (provenance bitmap §2.5 bits 6–11),
 //! Confirmation, Confidence, Sensitivity, EnrichmentStatus.
 //!
 //! Mirror of `Tests/LocusKitTests/ProvenanceBitmapConformanceTests.swift`.
