@@ -7,13 +7,19 @@
 # places the binaries; the cross-platform Rust CLI owns client detection and
 # wiring (core/clients.rs), so every platform sees the identical client roster.
 #
-# Standard one-liner install (the TLS 1.2 set is required on Windows PowerShell
-# 5.1, which otherwise negotiates TLS 1.0/1.1 and is refused by GitHub's CDN):
-#   [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
+# Install — DO NOT pipe this script straight into the interpreter
+# (`irm ... | iex`): that executes remote code before you can review it or
+# verify its integrity. Download it, then run it locally. The TLS 1.2 line is
+# required on Windows PowerShell 5.1, which otherwise negotiates TLS 1.0/1.1
+# and is refused by GitHub's CDN:
+#   [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+#   irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
+#   # review install.ps1, then:
+#   .\install.ps1
 #
 # Uninstall (removes the binaries + PATH entry, and delegates client-wiring and
 # scheduled-task cleanup to `mootx01 uninstall`):
-#   iex "& { $(irm https://...) } -Uninstall"
+#   .\install.ps1 -Uninstall
 #
 # Or clone the repo and run directly:
 #   .\install.ps1 [-Uninstall] [-Version v1.2.3]

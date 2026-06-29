@@ -5,6 +5,18 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## develop/1.0.x — 2026-06-29
+
+### apps/installer — CAND-005 (CE edition-surface port)
+
+- **PowerShell installer no longer advertises `irm | iex`** — `install.ps1`'s
+  header documented `irm <url> | iex` / `iex "& { $(irm <url>) }"` one-liners,
+  which execute remote code before it can be reviewed or integrity-checked.
+  Replaced with a download-(review)-then-run instruction and an explicit warning
+  not to pipe remote code into the interpreter (the legitimate `Invoke-RestMethod`
+  tag lookup is unchanged). Ports the EE secfix to CE's edition-surface installer;
+  CE's `install.sh` was already fail-closed (minisign port).
+
 ## v1.0.4-beta — 2026-06-19
 
 Fifth beta of the 1.0 line. A large drive-test hardening campaign across the ARIA
