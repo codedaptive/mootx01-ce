@@ -11,6 +11,12 @@
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
 ![interface](https://img.shields.io/badge/interface-ARIA%20over%20MCP-purple)
 ![license](https://img.shields.io/badge/license-open%20core-lightgrey)
+![security](https://img.shields.io/badge/security-audit%20in%20progress-yellow)
+
+> **Security audit in progress.** MOOTx01 is under active security review and
+> hardening ahead of its first stable release. Pre-release builds may change as
+> findings are addressed; treat the current line as a release candidate, not a
+> final release.
 
 ## What it is
 

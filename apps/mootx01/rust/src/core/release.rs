@@ -1,5 +1,12 @@
 //! core/release.rs — GitHub release download / verify / place for `upgrade`.
 //!
+//! ⚠️ EDITION-DIVERGENT — DO NOT let an EE→CE sync overwrite this file.
+//! CE ships the minisign Ed25519 signature-verification path (CAND-004) wired
+//! into this module; EE's copy differs. The push-script / moot-packager sync
+//! MUST exclude `apps/mootx01/rust/src/core/release.rs` (and `scripts/minisign.pub`)
+//! from byte-identical replacement, or CE's minisign trust root is silently lost.
+//! If you are reconciling editions, port changes by hand — never bulk-copy.
+//!
 //! Mirrors the bash `install.sh` semantics: resolve the latest tag
 //! via the GitHub releases API, download
 //! `mootx01-{ver}-{os}-{arch}.tar.gz` + `checksums.txt` from the release,
