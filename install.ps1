@@ -183,7 +183,10 @@ function Verify-MinisignSignature {
     )
 
     # Require the minisign binary — fail closed with installation instructions.
+    # Clean up $tmpDir before exiting so the partial download does not linger
+    # in %TEMP% (the caller does not get a chance to clean up after exit 1).
     if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         Write-Error "mootx01: release signature verification requires the minisign binary."
         Write-Error "mootx01: to install minisign on Windows:"
         Write-Error "  winget install minisign      (Windows 10/11 Package Manager)"
@@ -207,6 +210,7 @@ function Verify-MinisignSignature {
         # -V = verify, -p = public key file, -m = signed file, -x = detached sig
         $result = & minisign -V -p $tmpPubKey -m $ChecksumsFile -x $SigFile 2>&1
         if ($LASTEXITCODE -ne 0) {
+            Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
             Write-Error "mootx01: minisign signature verification FAILED for checksums.txt."
             Write-Error "mootx01: the release may have been tampered with — do not proceed."
             Write-Error $result
@@ -240,12 +244,14 @@ function Verify-Checksum {
         }
     }
     if (-not $expected) {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         Write-Error "mootx01: no checksum entry found for '$AssetName' in checksums.txt."
         exit 1
     }
 
     $hash = (Get-FileHash $File -Algorithm SHA256).Hash.ToLower()
     if ($hash -ne $expected.ToLower()) {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         Write-Error "mootx01: SHA-256 checksum mismatch for $AssetName."
         Write-Error "  expected: $expected"
         Write-Error "  actual:   $hash"
