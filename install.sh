@@ -190,9 +190,17 @@ verify_checksum "$tmp/mootx01.tar.gz" "$tmp/checksums.txt" "$asset"
 # macOS uses Developer ID / Gatekeeper (the binary itself is signed and
 # notarized; verifying the tarball signature is redundant with Gatekeeper).
 if [ "$os" != "macos" ]; then
-  # Locate the bundled public key relative to this installer script.
-  _script_dir="$(dirname "$0")"
-  _pub_key="${_script_dir}/scripts/minisign.pub"
+  # The public key is embedded here directly rather than resolved from a
+  # repository path. In the documented install mode (`curl ... | sh`) $0 is
+  # the shell binary, so `dirname "$0"` yields a system directory (e.g. /bin)
+  # and a path-relative lookup would fail — there is no repo checkout.
+  # Embedding the key keeps the trust anchor intact for all install modes.
+  #
+  # Key ID: 2A2AD38EB13379AB
+  # Source: scripts/minisign.pub in codedaptive/mootx01-ce at build time.
+  _pub_key="$tmp/minisign.pub"
+  printf 'untrusted comment: minisign public key 2A2AD38EB13379AB\nRWSreTOxjtMqKgsFO1lpgRwzQQLTgeX3fq6ak7/ZIZh6zEWEa475bZhs\n' \
+    > "$_pub_key"
   verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
 fi
 
