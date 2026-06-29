@@ -5,7 +5,14 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
-## develop/1.0.x — 2026-06-29
+## v1.0.5-beta — 2026-06-29
+
+Sixth beta of the 1.0 line. A security-remediation campaign across the Swift
+and Rust verticals (Postgres TLS no-downgrade floor, vault job-slot and
+concurrency-cap hardening, tar member-validation deadlock fix, recall sort-key
+determinism, sync error-status sanitization, release-workflow secret handling),
+plus the CE installer build path and the `irm | iex` installer-header fix
+(CAND-005). minisign release signing is wired fail-closed.
 
 ### CI — installer build path (ce-installer-ci)
 
