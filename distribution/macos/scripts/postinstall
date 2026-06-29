@@ -75,12 +75,17 @@ if [ -d "$STAGING" ]; then
         fi
     fi
 
-    # Verify that the realpath of STAGING is the expected canonical path.
-    # This guards against hardlink or bind-mount tricks that pass -L but
-    # resolve elsewhere.
+    # Verify that the canonical (symlink-resolved) path of STAGING is the
+    # expected path. This guards against any path-component symlink that
+    # redirects elsewhere even when STAGING itself passed the -L check above.
+    # Resolved with a shell-native `cd … && pwd -P` (subshell) rather than
+    # python3: a stock end-user Mac has no python3 until the Command Line Tools
+    # are installed, and a missing interpreter here would make every install
+    # silently no-op. `pwd -P` resolves all symlinks in the path using only the
+    # shell. `cd` into a root-owned, non-writable dir is safe for root.
     if [ "$STAGING_OK" -eq 0 ]; then
         CANONICAL_STAGING="/Library/Application Support/com.codedaptive.mootx01/staging"
-        REAL_STAGING="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$STAGING" 2>/dev/null)"
+        REAL_STAGING="$(cd "$STAGING" 2>/dev/null && pwd -P)"
         if [ "$REAL_STAGING" != "$CANONICAL_STAGING" ]; then
             echo "postinstall: SECURITY: staging realpath '$REAL_STAGING' != expected '$CANONICAL_STAGING' — aborting" >&2
             STAGING_OK=1
