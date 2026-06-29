@@ -60,6 +60,89 @@ target="${os}-${arch}"
 # headless Rust build on Linux (x86_64/arm64) and Windows. Its admin control
 # channel is a Unix-domain socket on Unix and a named pipe on Windows.
 
+# Calculate and verify release checksums before extracting downloaded archives.
+
+sha256_file() {
+  # Compute a SHA-256 hex digest for the given file. Tries sha256sum (Linux)
+  # and then shasum -a 256 (macOS). Fails closed — aborts if neither is found,
+  # rather than proceeding with an unverified binary.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "mootx01: sha256sum or shasum is required to verify release integrity." >&2
+    exit 1
+  fi
+}
+
+verify_checksum() {
+  # Verify $1 (a downloaded file) against the expected SHA-256 recorded in
+  # $2 (checksums.txt) under the asset name $3. Fails closed on any mismatch
+  # or when the asset is absent from checksums.txt.
+  file="$1"
+  checksums_file="$2"
+  asset_name="$3"
+
+  expected="$(awk -v name="$asset_name" '$2 == name { print $1; found=1; exit } END { if (!found) exit 1 }' "$checksums_file")" \
+    || { echo "mootx01: no checksum found for $asset_name in checksums.txt." >&2; exit 1; }
+  actual="$(sha256_file "$file")"
+
+  if [ "$actual" != "$expected" ]; then
+    echo "mootx01: checksum mismatch for $asset_name." >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    exit 1
+  fi
+}
+
+# verify_minisign verifies a detached Ed25519 minisign signature of the
+# checksums.txt file against the public key bundled at scripts/minisign.pub.
+# This provides an independent trust root beyond the TLS transport used to
+# fetch the release from GitHub.
+#
+# Fail-closed in two ways:
+#   1. If scripts/minisign.pub contains the PLACEHOLDER sentinel, the
+#      operator has not yet committed a real keypair. Exit non-zero.
+#   2. If the `minisign` binary is not present on PATH, exit non-zero with
+#      installation instructions. Do NOT skip verification — omitting it
+#      would silently remove the independent trust root.
+#
+# Linux/POSIX-only. macOS uses Developer ID / Gatekeeper (not called there).
+verify_minisign() {
+  checksums_file="$1"
+  sig_file="$2"
+  pub_key_file="$3"
+
+  # Guard 1: placeholder key — verification is wired but pending operator setup.
+  if grep -q '^PLACEHOLDER' "$pub_key_file" 2>/dev/null; then
+    echo "mootx01: minisign public key is a PLACEHOLDER — signature verification not yet active." >&2
+    echo "mootx01: to activate, generate a real keypair:" >&2
+    echo "  minisign -G -p scripts/minisign.pub -s /path/to/minisign.sec" >&2
+    echo "mootx01: then commit scripts/minisign.pub and add MINISIGN_SECRET_KEY to GitHub secrets." >&2
+    exit 1
+  fi
+
+  # Guard 2: minisign must be installed.
+  if ! command -v minisign >/dev/null 2>&1; then
+    echo "mootx01: minisign is required for release signature verification but was not found." >&2
+    echo "mootx01: install minisign:" >&2
+    echo "  Debian/Ubuntu:  apt-get install minisign" >&2
+    echo "  Arch:           pacman -S minisign" >&2
+    echo "  Fedora:         dnf install minisign" >&2
+    echo "  Homebrew (any): brew install minisign" >&2
+    echo "  From source:    https://github.com/jedisct1/minisign" >&2
+    echo "mootx01: minisign verifies the Ed25519 release signature — do not bypass this check." >&2
+    exit 1
+  fi
+
+  # Verify the detached signature. -V = verify, -p = public key, -m = signed file.
+  # The .minisig file must be adjacent to the file it signs (standard minisign convention).
+  minisign -V -p "$pub_key_file" -m "$checksums_file" -x "$sig_file" \
+    || { echo "mootx01: minisign signature verification FAILED for checksums.txt." >&2; \
+         echo "mootx01: the release may have been tampered with — do not proceed." >&2; exit 1; }
+}
+
 # 2. Resolve the version. Use the releases/latest *web* redirect (no API rate
 #    limit) and fall back to the API. Matches codegraph's approach.
 version="${MOOTX01_VERSION:-}"
@@ -74,16 +157,47 @@ fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
 case "$version" in v*) ;; *) version="v$version" ;; esac
 
-# 3. Download + extract. Every archive carries two bare binaries at the root —
-#    `mootx01` and `moot-mgr` (the management console). This script handles the
-#    macOS/Linux tarballs; the Windows .zip is the PowerShell installer's domain
-#    (release.yml).
+# 3. Download the archive, checksums.txt, and the detached minisign signature.
+#    Verification order (fail closed at each step before proceeding to the next):
+#      1. SHA-256 checksum — verifies asset integrity against checksums.txt.
+#      2. minisign Ed25519 signature — verifies checksums.txt against the
+#         project's signing key (Linux/POSIX independent trust root). macOS uses
+#         Developer ID / Gatekeeper instead; this step is applied on Linux only.
+#      3. Extraction.
+#
+#    Every archive carries two bare binaries at the root — `mootx01` and
+#    `moot-mgr` (the management console). This script handles the macOS/Linux
+#    tarballs; the Windows .zip is the PowerShell installer's domain (release.yml).
 asset="mootx01-${version}-${target}.tar.gz"
 url="https://github.com/$REPO/releases/download/$version/$asset"
+checksums_url="https://github.com/$REPO/releases/download/$version/checksums.txt"
 echo "Installing mootx01 $version ($target)..."
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$url" -o "$tmp/mootx01.tar.gz" || { echo "mootx01: download failed: $url" >&2; exit 1; }
+curl -fsSL "$checksums_url" -o "$tmp/checksums.txt" || { echo "mootx01: download failed: $checksums_url" >&2; exit 1; }
+# Download the detached minisign signature for checksums.txt. The .minisig file
+# is produced during release by signing checksums.txt with the project's
+# Ed25519 key (see .github/workflows/release.yml — requires MINISIGN_SECRET_KEY secret).
+checksums_sig_url="https://github.com/$REPO/releases/download/$version/checksums.txt.minisig"
+curl -fsSL "$checksums_sig_url" -o "$tmp/checksums.txt.minisig" \
+  || { echo "mootx01: download failed: $checksums_sig_url" >&2; exit 1; }
+
+# Step 1: SHA-256 checksum — verifies asset integrity against checksums.txt.
+verify_checksum "$tmp/mootx01.tar.gz" "$tmp/checksums.txt" "$asset"
+
+# Step 2: minisign Ed25519 signature verification — Linux/POSIX only.
+# macOS uses Developer ID / Gatekeeper (the binary itself is signed and
+# notarized; verifying the tarball signature is redundant with Gatekeeper).
+if [ "$os" != "macos" ]; then
+  # Locate the bundled public key relative to this installer script.
+  _script_dir="$(dirname "$0")"
+  _pub_key="${_script_dir}/scripts/minisign.pub"
+  verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
+fi
+
+# Step 3: Extract. Archives carry `mootx01` (required) and `moot-mgr`
+# (optional — installed when present).
 tar -xzf "$tmp/mootx01.tar.gz" -C "$tmp"
 [ -f "$tmp/mootx01" ] || { echo "mootx01: archive did not contain the expected binary." >&2; exit 1; }
 

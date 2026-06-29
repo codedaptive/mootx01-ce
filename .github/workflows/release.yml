@@ -382,6 +382,9 @@ jobs:
         with:
           path: assets
 
+      - name: Checkout repository (for bundled public key)
+        uses: actions/checkout@v4
+
       - name: Generate checksums.txt
         working-directory: assets
         run: |
@@ -391,12 +394,81 @@ jobs:
           cd flat
           sha256sum * > ../checksums.txt
 
+      # ── Minisign signature (CAND-004) ──────────────────────────────────────
+      # Signs checksums.txt with the project's Ed25519 private key, producing
+      # checksums.txt.minisig. The .minisig file is uploaded as a release asset
+      # alongside checksums.txt; Linux/POSIX installers (`install.sh`) and the
+      # `mootx01 upgrade` command download and verify it against the public key
+      # bundled at scripts/minisign.pub in the repository.
+      #
+      # OPERATOR ACTION REQUIRED to activate:
+      #   1. Generate a keypair:
+      #        minisign -G -p scripts/minisign.pub -s /path/to/minisign.sec
+      #   2. Replace any PLACEHOLDER content in scripts/minisign.pub with the
+      #      generated public key and commit it.
+      #   3. Add two GitHub repository secrets:
+      #        MINISIGN_SECRET_KEY          — contents of /path/to/minisign.sec
+      #        MINISIGN_SECRET_KEY_PASSWORD — passphrase (empty string if none)
+      #
+      # Until these secrets are populated, this step is skipped (the `if:` guard
+      # below checks for secret presence). Installers will fail closed when they
+      # encounter a missing .minisig — this is expected until the operator
+      # completes the steps above.
+      - name: Sign checksums with minisign (CAND-004)
+        # NOTE: GitHub Actions forbids referencing `secrets` in a step-level
+        # `if:` conditional, so the secret-present check is done INSIDE the
+        # script (the secret is exposed via env below). The step always runs but
+        # no-ops cleanly when the signing key is not configured.
+        working-directory: assets
+        env:
+          # The Ed25519 private key, stored as a GitHub repository secret.
+          # Format: the raw contents of the minisign .sec file (base64 blob).
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          # Passphrase for the private key (empty string if the key has no passphrase).
+          MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
+        run: |
+          # Secret-present gate (in-script, since `secrets` is not allowed in
+          # step `if:`). Without a configured signing key, skip cleanly — the
+          # release publishes unsigned and Linux/POSIX installers fail-closed.
+          if [ -z "${MINISIGN_SECRET_KEY}" ]; then
+            echo "MINISIGN_SECRET_KEY not set — skipping signing (release will be unsigned)."
+            exit 0
+          fi
+
+          # Install minisign on the runner (ubuntu-22.04; the release job).
+          # minisign is not pre-installed on GitHub-hosted ubuntu runners.
+          sudo apt-get install -y minisign
+
+          # Write the private key to a mode-0600 temp file. The key is provided
+          # as the raw .sec file contents via the secret; minisign -S requires a
+          # file path (not inline key material).
+          MINISIGN_KEY_FILE="$(mktemp)"
+          chmod 600 "${MINISIGN_KEY_FILE}"
+          printf '%s' "${MINISIGN_SECRET_KEY}" > "${MINISIGN_KEY_FILE}"
+
+          # Sign checksums.txt. -S = sign, -s = private key path, -m = file to sign.
+          # minisign reads the passphrase from stdin when -W is not set; supply
+          # it via echo to avoid interactive prompts.
+          echo "${MINISIGN_SECRET_KEY_PASSWORD}" \
+            | minisign -S -s "${MINISIGN_KEY_FILE}" -m checksums.txt
+
+          # Securely remove the private key temp file.
+          rm -f "${MINISIGN_KEY_FILE}"
+
+          echo "checksums.txt.minisig produced."
+
       - name: Create release and upload assets
+        # checksums.txt.minisig is included when present (i.e. when
+        # MINISIGN_SECRET_KEY is populated and the signing step ran).
+        # The glob 'assets/checksums.txt.minisig' is silently absent if the
+        # signing step was skipped; action-gh-release ignores missing glob matches.
         uses: softprops/action-gh-release@v2
         with:
           files: |
             assets/checksums.txt
+            assets/checksums.txt.minisig
             assets/flat/*
           generate_release_notes: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
