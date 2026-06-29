@@ -678,8 +678,15 @@ public struct HTTPServer: Sendable {
         if request.method == "GET" {
             switch request.path {
             case "/api/graph":
-                let estate = Self.queryValue("estate", in: request.query)
-                return await Self.graphSnapshot(estate: estate, topologyReader: topologyReader)
+                // The ?estate= query param is intentionally NOT forwarded. The
+                // graph endpoint always uses the default estate — matching the Rust
+                // posture (get_graph_snapshot ignores ?estate= and reads
+                // registry.default). Forwarding a caller-supplied estate selector
+                // would let an unauthenticated caller select an arbitrary estate's
+                // topology snapshot. The endpoint is loopback-only but its
+                // authentication is posture-level, not credential-level, so the
+                // caller must not influence estate selection here.
+                return await Self.graphSnapshot(topologyReader: topologyReader)
             case "/api/admin/estates":
                 return await Self.adminEstatesSnapshot(dispatcher: dispatcher)
             case "/api/lattice":
@@ -815,16 +822,23 @@ public struct HTTPServer: Sendable {
     /// NO compute-on-read fallback — this is intentional: the governor is the
     /// single source of topology truth.
     ///
-    /// The `estate` query param is forwarded to the reader; it selects which
-    /// estate's snapshot to serve (defaults to the server's own estate UUID
-    /// when nil). Content-safety: the payload bytes come from the governor
-    /// directly and contain only UUIDs, ordinals, floats, and ISO-8601 timestamps.
-    private static func graphSnapshot(estate: String?, topologyReader: (@Sendable (String?) async -> Data?)?) async -> HTTPResponse {
+    /// Always reads the **default estate's** topology snapshot by passing `nil`
+    /// to the reader. The `?estate=` query param from GET /api/graph is
+    /// intentionally NOT forwarded here — an unauthenticated caller must not
+    /// be able to select an arbitrary registered estate's snapshot. This matches
+    /// the Rust `get_graph_snapshot` which always uses `registry.default` and
+    /// explicitly documents that `?estate=` is ignored.
+    ///
+    /// Content-safety: the payload bytes come from the governor directly and
+    /// contain only UUIDs, ordinals, floats, and ISO-8601 timestamps.
+    private static func graphSnapshot(topologyReader: (@Sendable (String?) async -> Data?)?) async -> HTTPResponse {
         let pending = Data(#"{"nodes":[],"edges":[],"structurePending":true,"communities":[]}"#.utf8)
         guard let reader = topologyReader else {
             return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: pending)
         }
-        guard let body = await reader(estate) else {
+        // Pass nil so the reader uses the default estate. See doc comment above
+        // for why a caller-supplied estate string is never accepted here.
+        guard let body = await reader(nil) else {
             return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: pending)
         }
         return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: body)
@@ -939,23 +953,6 @@ public struct HTTPServer: Sendable {
                 body: Data(#"{"hosted":[]}"#.utf8)
             )
         }
-    }
-
-    // MARK: - Query-string helper
-
-    /// Extract a single percent-decoded value by key from a raw `key=value&...` query.
-    ///
-    /// Returns nil when the key is absent or the query is empty. Only the first
-    /// occurrence of `key` is honoured. Used by `GET /api/graph` for `?estate=`.
-    private static func queryValue(_ key: String, in query: String) -> String? {
-        guard !query.isEmpty else { return nil }
-        for pair in query.split(separator: "&") {
-            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard kv.first.map(String.init) == key else { continue }
-            let raw = kv.count > 1 ? String(kv[1]) : ""
-            return raw.removingPercentEncoding ?? raw
-        }
-        return nil
     }
 
 }

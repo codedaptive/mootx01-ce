@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.13.0
+version: 1.14.0
 status: active
 date: 2026-06-29
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -657,7 +657,7 @@ GET /api/admin/estates
 
 ### Swift
 
-Implemented as `latticeSnapshot(dispatcher:)`, `graphSnapshot(dispatcher:estate:)`,
+Implemented as `latticeSnapshot(dispatcher:)`, `graphSnapshot(topologyReader:)`,
 and `adminEstatesSnapshot(dispatcher:)` in `HTTPServer.swift`, called from the
 `route(_:)` function before the POST guard.
 
@@ -983,6 +983,17 @@ filters). The `.recipe` bucket grows to 29 tools and the whole surface to 55
 
 ### 1.0.1 -- 2026-06-14
 Reconciled the `.recipe` provenance tool count: the §`Recipe and lens tools` body enumerated only 5 CognitionKit recipe tools (yielding 26 with the 21 lenses) while the heading, the `ToolProvenance` projection, and the 53-tool census all carry 28. Added the two missing recipe tools (`moot_recall_precise`, `moot_dream`) to the body so it lists all 7 recipe tools + 21 lenses = 28, consistent with the verified Swift/Rust surface (`ToolProjection.tools()` / `tool_list.rs`, both gated at 53).
+
+### 1.14.0 -- 2026-06-29
+Security fix (secfix/c-aria-minor, CAND-043): `GET /api/graph` now ignores the
+`?estate=` query parameter and always reads the **default estate's** topology
+snapshot. The Swift private function signature changed from
+`graphSnapshot(estate:topologyReader:)` to `graphSnapshot(topologyReader:)`;
+callers (the `route` function) no longer extract the `estate` query string or
+pass it to the reader. The `queryValue(_:in:)` helper was removed as it had no
+remaining callers. This matches the existing Rust posture where `get_graph_snapshot`
+always uses `registry.default` and explicitly documents that `?estate=` is ignored.
+The observable GET /api/graph response format is unchanged.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

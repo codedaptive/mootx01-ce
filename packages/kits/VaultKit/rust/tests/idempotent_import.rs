@@ -302,3 +302,35 @@ fn moot_id_hijack_guard_blocks_body_replacement() {
 
     let _ = std::fs::remove_dir_all(&vault);
 }
+
+// MARK: - Part B: encode-enqueue sweep after bulk import (no-Corpus path)
+
+/// `ImportReport.enqueued_for_encode` must be 0 when the estate has no
+/// registered Corpus (the LocusOnly path). This verifies the field exists on
+/// `ImportReport`, the `collect_reindex_jobs` guard returns `None`, and the
+/// vault import completes without error.
+///
+/// The provisioned-Corpus path (enqueued > 0) is covered by the Swift
+/// `bulkVaultImportEnqueuesDrawersForEncode` test in `VaultBridgeTests.swift`
+/// and the GLK Rust `encode_intake_parity.rs` suite which exercises
+/// `collect_reindex_jobs` directly.
+#[test]
+fn bulk_import_enqueued_for_encode_is_zero_without_corpus() {
+    let (mut coord, handle) = open_one();
+    let vault = seed_vault("encode-enqueue");
+
+    // Import the vault into an estate with no Corpus (open_one uses a plain
+    // InMemoryDrawerStore, no Corpus provisioned). collect_reindex_jobs returns
+    // None → enqueued_for_encode stays 0.
+    let report = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("import must succeed even without a Corpus");
+
+    assert_eq!(report.drawers_written, 1, "one note must be written");
+    assert_eq!(
+        report.enqueued_for_encode, 0,
+        "no Corpus → enqueued_for_encode must be 0 (not an error)"
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}

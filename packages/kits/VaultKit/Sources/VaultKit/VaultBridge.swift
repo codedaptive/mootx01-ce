@@ -60,6 +60,21 @@ public struct ImportReport: Sendable, Equatable {
     /// pass can detect the gap.
     public var drawersSkippedPartialWrite: Int
 
+    /// Number of drawers enqueued for semantic encoding after the import.
+    ///
+    /// The bulk `captureBatch` path intentionally skips the per-item encode
+    /// enqueue to avoid flooding the queue for large imports. After the batch
+    /// write completes, `importNotes` calls `reindexMissing` to enqueue
+    /// encode jobs for every newly-imported drawer that is not yet in the
+    /// Corpus BundleStore (capped at `reindexMaxJobs` = 10,000 per call).
+    ///
+    /// The per-item path (`kit.capture(mode:)`) enqueues each drawer
+    /// individually; `enqueuedForEncode` is 0 for those runs.
+    ///
+    /// A value of 0 on a bulk import means either every drawer was already
+    /// indexed (idempotent re-import) or the estate has no registered Corpus.
+    public var enqueuedForEncode: Int
+
     public init(
         drawersWritten: Int = 0,
         drawersUpdated: Int = 0,
@@ -70,7 +85,8 @@ public struct ImportReport: Sendable, Equatable {
         fieldsDropped: [String: Int] = [:],
         drawersSkippedUnchanged: Int = 0,
         drawersSkippedTombstoned: Int = 0,
-        drawersSkippedPartialWrite: Int = 0
+        drawersSkippedPartialWrite: Int = 0,
+        enqueuedForEncode: Int = 0
     ) {
         self.drawersWritten = drawersWritten
         self.drawersUpdated = drawersUpdated
@@ -82,6 +98,7 @@ public struct ImportReport: Sendable, Equatable {
         self.drawersSkippedUnchanged = drawersSkippedUnchanged
         self.drawersSkippedTombstoned = drawersSkippedTombstoned
         self.drawersSkippedPartialWrite = drawersSkippedPartialWrite
+        self.enqueuedForEncode = enqueuedForEncode
     }
 }
 
@@ -452,9 +469,18 @@ public struct VaultBridge: Sendable {
             }
         }
 
+        // Encode-enqueue sweep: the bulk `captureBatch` path intentionally skips
+        // the per-item encode hook (to avoid O(N) queue writes inside a single
+        // transaction on large imports). After the batch write completes, enqueue
+        // all newly-imported drawers that are not yet in the Corpus BundleStore via
+        // `reindexMissing` (idempotent, capped at reindexMaxJobs = 10,000 per call).
+        // The per-item path uses `kit.capture(mode:)` which enqueues each drawer
+        // individually, so the sweep is a no-op (returns 0) for those runs.
+        report.enqueuedForEncode = try await kit.reindexMissing(handle: handle, now: now)
+
         try await writeImportReceipt(report, source: source, handle: handle, now: now)
         Self.log.info(
-            "imported vault: \(report.drawersWritten, privacy: .public) written, \(report.drawersUpdated, privacy: .public) updated, \(report.itemsSkipped, privacy: .public) skipped, \(report.drawersSkippedUnchanged, privacy: .public) unchanged, \(report.drawersSkippedTombstoned, privacy: .public) tombstoned, \(report.drawersSkippedPartialWrite, privacy: .public) partial-write (DisciplineViolation after cascade)"
+            "imported vault: \(report.drawersWritten, privacy: .public) written, \(report.drawersUpdated, privacy: .public) updated, \(report.itemsSkipped, privacy: .public) skipped, \(report.drawersSkippedUnchanged, privacy: .public) unchanged, \(report.drawersSkippedTombstoned, privacy: .public) tombstoned, \(report.drawersSkippedPartialWrite, privacy: .public) partial-write (DisciplineViolation after cascade), \(report.enqueuedForEncode, privacy: .public) enqueued for encode"
         )
         return report
     }

@@ -294,9 +294,14 @@ public struct ObsidianAdapter: VaultAdapter {
         var out = ""
         if !fm.isEmpty {
             out += "---\n"
-            // Sorted keys for deterministic output.
+            // Sorted keys for deterministic output. Values are YAML-quoted to
+            // prevent injection: a room/wing name containing '\nmoot_id: evil'
+            // would forge an additional structural frontmatter key if emitted
+            // raw. yamlScalarQuote wraps unsafe values in double-quoted scalars
+            // so every value is contained to its own key — attacker-influenced
+            // strings cannot escape their field boundary.
             for key in fm.keys.sorted() {
-                out += "\(key): \(fm[key]!)\n"
+                out += "\(key): \(ObsidianAdapter.yamlScalarQuote(fm[key]!))\n"
             }
             out += "---\n"
         }
@@ -359,6 +364,158 @@ public struct ObsidianAdapter: VaultAdapter {
     }
 
     // MARK: - OKF helpers
+
+    /// Emit a YAML scalar that safely contains `value` within its own
+    /// frontmatter key — no matter what characters the value carries.
+    ///
+    /// ## Why this matters (CAND-003 class of attack)
+    ///
+    /// VaultKit emits frontmatter like `room: <value>`. If `value` is
+    /// attacker-influenced (e.g. a room/wing name that contains a newline
+    /// followed by `moot_id: evil-uuid`), a bare scalar emission would forge
+    /// an additional structural frontmatter key. Wrapping the value in a
+    /// double-quoted YAML scalar prevents the escape — the newline becomes
+    /// `\n` inside the quotes and is read back as a literal newline character,
+    /// not as a new frontmatter key.
+    ///
+    /// ## Quoting rules
+    ///
+    /// A value is emitted bare when it contains ONLY printable ASCII
+    /// characters that are safe as YAML unquoted scalars (no newlines,
+    /// no colon-space, no leading/trailing whitespace, no YAML indicator
+    /// characters). All other values are wrapped in double quotes with
+    /// only the minimal escaping required by the YAML 1.1 spec:
+    ///   - `"` → `\"`
+    ///   - `\` → `\\`
+    ///   - LF (U+000A) → `\n`
+    ///   - CR (U+000D) → `\r`
+    ///   - TAB (U+0009) → `\t`
+    ///   - Other control characters (U+0000–U+001F, U+007F) → `\uXXXX`
+    ///
+    /// Legitimate values (e.g. a room name "User Canon/Notes") round-trip
+    /// verbatim: the quoted form reads back as exactly the original string
+    /// via `splitFrontmatter`'s `key: value` parser, which strips one
+    /// level of outer double-quotes when it sees them.
+    ///
+    /// Rust parity: `yaml_scalar_quote` in obsidian_adapter.rs.
+    static func yamlScalarQuote(_ value: String) -> String {
+        // Fast path: check whether the value can be emitted as a bare scalar.
+        // Bare is safe when the value is non-empty, starts and ends with a
+        // non-whitespace printable ASCII character, and contains none of the
+        // YAML indicator characters that could change parse semantics.
+        let needsQuoting = value.isEmpty
+            || value.unicodeScalars.contains(where: yamlNeedsQuoting)
+            || value.first.map(\.isWhitespace) == true
+            || value.last.map(\.isWhitespace) == true
+        guard needsQuoting else { return value }
+
+        // Double-quoted form: wrap and escape minimally.
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\":    out += "\\\\"
+            case "\"":    out += "\\\""
+            case "\n":    out += "\\n"
+            case "\r":    out += "\\r"
+            case "\t":    out += "\\t"
+            default:
+                if scalar.value < 0x20 || scalar.value == 0x7F {
+                    out += String(format: "\\u%04x", scalar.value)
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        out += "\""
+        return out
+    }
+
+    /// Decode a raw YAML value string that may be double-quoted.
+    ///
+    /// If `raw` is wrapped in `"…"` (starts and ends with a double-quote
+    /// character), the outer quotes are stripped and the escape sequences
+    /// that `yamlScalarQuote` produces are decoded:
+    ///   - `\"` → `"`
+    ///   - `\\` → `\`
+    ///   - `\n` → LF
+    ///   - `\r` → CR
+    ///   - `\t` → TAB
+    ///   - `\uXXXX` → the Unicode scalar with that hex code
+    ///
+    /// Non-quoted values (no surrounding `"`) are returned unchanged so that
+    /// pre-existing vaults written with bare scalar values continue to parse
+    /// correctly (backward-compatible).
+    ///
+    /// Rust parity: `decode_yaml_double_quoted` in obsidian_adapter.rs.
+    static func decodeYamlDoubleQuoted(_ raw: String) -> String {
+        guard raw.count >= 2,
+              raw.first == "\"",
+              raw.last == "\"" else {
+            // Not a double-quoted value — pass through unchanged.
+            return raw
+        }
+        // Strip outer quotes.
+        let inner = String(raw.dropFirst().dropLast())
+        var result = ""
+        var iter = inner.unicodeScalars.makeIterator()
+        while let s = iter.next() {
+            if s == "\\" {
+                guard let next = iter.next() else {
+                    result.unicodeScalars.append(s)
+                    break
+                }
+                switch next {
+                case "\"": result.append("\"")
+                case "\\": result.append("\\")
+                case "n":  result.append("\n")
+                case "r":  result.append("\r")
+                case "t":  result.append("\t")
+                case "u":
+                    // \uXXXX — consume exactly 4 hex digits.
+                    var hex = ""
+                    for _ in 0..<4 {
+                        guard let d = iter.next() else { break }
+                        hex.unicodeScalars.append(d)
+                    }
+                    if let codePoint = UInt32(hex, radix: 16),
+                       let scalar = Unicode.Scalar(codePoint) {
+                        result.unicodeScalars.append(scalar)
+                    } else {
+                        // Malformed \uXXXX — emit as-is (defensive).
+                        result += "\\u" + hex
+                    }
+                default:
+                    // Unknown escape — keep backslash and character.
+                    result.unicodeScalars.append(s)
+                    result.unicodeScalars.append(next)
+                }
+            } else {
+                result.unicodeScalars.append(s)
+            }
+        }
+        return result
+    }
+
+    /// Returns `true` when a Unicode scalar must cause the surrounding YAML
+    /// value to be quoted. Covers:
+    ///   - Control characters including newlines (injection vector).
+    ///   - YAML indicator characters that alter bare-scalar semantics
+    ///     (`#`, `:`, `{`, `}`, `[`, `]`, `|`, `>`, `!`, `&`, `*`).
+    ///   - Leading/trailing whitespace is checked separately on the full string.
+    private static func yamlNeedsQuoting(_ s: Unicode.Scalar) -> Bool {
+        // Control characters (U+0000–U+001F, U+007F).
+        if s.value < 0x20 || s.value == 0x7F { return true }
+        // YAML indicator characters that are not safe in bare scalars.
+        // A colon followed by space is the key-value separator; we conservatively
+        // quote any value containing a colon so embedded `: ` patterns cannot
+        // be misread as new frontmatter keys by a lenient YAML parser.
+        switch s {
+        case ":", "#", "{", "}", "[", "]", "|", ">", "!", "&", "*", "'", "\"", "%", "@", "`":
+            return true
+        default:
+            return false
+        }
+    }
 
     /// Derive the OKF `type:` value from a NoteIR kind string.
     ///
@@ -486,9 +643,15 @@ public struct ObsidianAdapter: VaultAdapter {
             let line = lines[i].trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
             guard let colon = line.firstIndex(of: ":") else { continue }
             let key = String(line[line.startIndex..<colon]).trimmingCharacters(in: .whitespaces)
-            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            let rawValue = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             guard !key.isEmpty else { continue }
-            map[key] = value
+            // Decode double-quoted YAML scalars produced by yamlScalarQuote.
+            // A value that starts and ends with `"` is treated as a YAML
+            // double-quoted scalar: the outer quotes are stripped and the
+            // minimal escape sequences (\n, \r, \t, \\, \", \uXXXX) are
+            // decoded so values round-trip verbatim through export→import.
+            // Non-quoted values (no surrounding `"`) pass through unchanged.
+            map[key] = ObsidianAdapter.decodeYamlDoubleQuoted(rawValue)
         }
 
         let bodyLines = lines[(close + 1)...]

@@ -1,0 +1,50 @@
+#!/bin/bash
+# postinstall — runs after the macOS .pkg places files.
+#
+# The .pkg installs into /tmp/mootx01-install/ (a staging area that
+# avoids baking a specific home path into the package at build time).
+# This script:
+#   1. Moves the staged files to ~/.mootx01/ in the installing user's home.
+#   2. Creates ~/.local/bin symlinks (same layout install.sh uses).
+#   3. Launches the setup assistant for interactive client wiring.
+#
+# IMPORTANT: this script must NEVER return non-zero. A postinstall
+# failure causes the macOS Installer to roll back ALL file placement,
+# which is worse than any individual step failing here. Every command
+# is guarded; exit 0 is unconditional.
+
+STAGING="/tmp/mootx01-install"
+INSTALL_DIR="$HOME/.mootx01"
+LOCAL_BIN="$HOME/.local/bin"
+
+# 1. Move staged files to the user's home.
+if [ -d "$STAGING" ]; then
+    mkdir -p "$INSTALL_DIR" 2>/dev/null
+    # Use ditto for reliable recursive merge (handles .app bundles, xattrs).
+    ditto "$STAGING/bin"              "$INSTALL_DIR/bin"              2>/dev/null
+    ditto "$STAGING/Mootx01Setup.app" "$INSTALL_DIR/Mootx01Setup.app" 2>/dev/null
+    # Clean up the staging area.
+    rm -rf "$STAGING" 2>/dev/null
+fi
+
+# 2. Symlinks onto PATH.
+mkdir -p "$LOCAL_BIN" 2>/dev/null
+ln -sf "$INSTALL_DIR/bin/mootx01"  "$LOCAL_BIN/mootx01"  2>/dev/null
+ln -sf "$INSTALL_DIR/bin/moot-mgr" "$LOCAL_BIN/moot-mgr" 2>/dev/null
+
+# 3. Fix ownership — pkgbuild runs as root but these are user files.
+REAL_USER="${USER:-$(stat -f '%Su' "$HOME" 2>/dev/null)}"
+if [ -n "$REAL_USER" ]; then
+    chown -R "$REAL_USER" "$INSTALL_DIR" 2>/dev/null
+    chown -h "$REAL_USER" "$LOCAL_BIN/mootx01" 2>/dev/null
+    chown -h "$REAL_USER" "$LOCAL_BIN/moot-mgr" 2>/dev/null
+fi
+
+# 4. Launch the setup assistant (best-effort). If this fails for any
+#    reason the user can always run `mootx01 install` from a terminal.
+SETUP_APP="$INSTALL_DIR/Mootx01Setup.app"
+if [ -d "$SETUP_APP" ] && [ -n "$REAL_USER" ]; then
+    sudo -u "$REAL_USER" open "$SETUP_APP" 2>/dev/null &
+fi
+
+exit 0

@@ -858,6 +858,15 @@ pub fn build_manifest(
 }
 
 /// Write the manifest to `.moot/export-manifest.json` inside the vault.
+///
+/// Applies a symlink-containment guard before writing — the same pattern the
+/// Swift `ObsidianAdapter.ensureWritableFileTarget` uses for note writes. If a
+/// pre-existing symlink exists at the manifest path, the write is refused
+/// unconditionally: a symlink could redirect the manifest write outside the vault
+/// root and is never a legitimate state for this layer-owned sidecar file.
+/// `symlink_metadata` is used (not `metadata`) so the check targets the link
+/// itself rather than its destination.
+///
 /// The `.moot/` directory is created if absent. Sorted keys keep the
 /// on-disk JSON byte-stable across exports.
 pub fn write_manifest(
@@ -867,6 +876,21 @@ pub fn write_manifest(
     let moot_dir = vault_path.join(".moot");
     std::fs::create_dir_all(&moot_dir)?;
     let manifest_path = vault_path.join(MANIFEST_RELATIVE_PATH);
+
+    // Symlink-containment guard: refuse a pre-existing symlink at the manifest
+    // path. symlink_metadata succeeds even for broken symlinks (unlike metadata),
+    // so this correctly detects the attack vector regardless of symlink target.
+    if manifest_path.exists() || manifest_path.symlink_metadata().is_ok() {
+        if let Ok(meta) = manifest_path.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "manifest path targets a pre-existing symlink; write refused",
+                ));
+            }
+        }
+    }
+
     let json =
         serde_json::to_string_pretty(manifest).map_err(std::io::Error::other)?;
     std::fs::write(manifest_path, json.as_bytes())

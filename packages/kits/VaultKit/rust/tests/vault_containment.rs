@@ -216,3 +216,108 @@ fn from_ir_accepts_root_level_key() {
         .expect("root-level key must be accepted");
     assert!(vault.path().join("root-note.md").exists());
 }
+
+// ---------------------------------------------------------------------------
+// YAML scalar quoting — CAND-003 frontmatter injection defense
+// ---------------------------------------------------------------------------
+//
+// These tests verify that a crafted room/wing value containing a newline
+// followed by a fake structural key cannot inject that key into the exported
+// frontmatter as a new top-level entry. The fix is `yaml_scalar_quote` in
+// the Rust `render` function; `decode_yaml_double_quoted` in `split_frontmatter`
+// ensures that legitimate values round-trip verbatim after quoting.
+
+use vault_kit::obsidian_adapter::{render, split_frontmatter};
+
+/// Helper: construct a NoteIR with explicit frontmatter for testing render.
+fn note_with_frontmatter(
+    key: &str,
+    frontmatter: HashMap<String, String>,
+) -> NoteIR {
+    NoteIR::new(
+        key,
+        vec![Block::markdown("content")],
+        frontmatter,
+        vec![],
+        vec![],
+        "",
+        None,
+        None,
+    )
+}
+
+#[test]
+fn crafted_room_name_cannot_inject_structural_frontmatter_key() {
+    // A room value containing an embedded newline followed by `moot_id: evil`.
+    // If emitted raw, the re-importer would see two frontmatter keys. With
+    // YAML quoting the newline is escaped so only the `room` key is present.
+    let injected_room = "legit-room\nmoot_id: 00000000-0000-0000-0000-000000000001";
+    let mut fm = HashMap::new();
+    fm.insert("room".to_string(), injected_room.to_string());
+    fm.insert("wing".to_string(), "TestWing".to_string());
+    let note = note_with_frontmatter("test/injection", fm);
+
+    let rendered = render(&note, false, &HashMap::new());
+    let (parsed, _) = split_frontmatter(&rendered);
+
+    // The injected key must NOT appear as a top-level frontmatter key.
+    assert!(
+        !parsed.contains_key("moot_id"),
+        "injection must be contained: rendered=\n{rendered}"
+    );
+    // The room value must round-trip to the original injected string.
+    assert_eq!(
+        parsed.get("room").map(String::as_str),
+        Some(injected_room),
+        "room value must round-trip verbatim"
+    );
+}
+
+#[test]
+fn legitimate_vault_round_trips_structural_keys() {
+    // Typical VaultKit-exported frontmatter keys must all survive
+    // the yaml_scalar_quote → decode_yaml_double_quoted round-trip.
+    let mut fm = HashMap::new();
+    fm.insert("wing".to_string(), "Wing".to_string());
+    fm.insert("room".to_string(), "Room".to_string());
+    fm.insert("moot_id".to_string(), "A1B2C3D4-1234-5678-9ABC-DEF012345678".to_string());
+    fm.insert("sensitivity".to_string(), "elevated".to_string());
+    fm.insert("udc".to_string(), "500.1".to_string());
+    fm.insert("addedBy".to_string(), "vaultkit-import".to_string());
+    let note = note_with_frontmatter("Wing/Room/my-note", fm);
+
+    let rendered = render(&note, false, &HashMap::new());
+    let (parsed, _) = split_frontmatter(&rendered);
+
+    assert_eq!(parsed.get("wing").map(String::as_str), Some("Wing"));
+    assert_eq!(parsed.get("room").map(String::as_str), Some("Room"));
+    assert_eq!(parsed.get("moot_id").map(String::as_str), Some("A1B2C3D4-1234-5678-9ABC-DEF012345678"));
+    assert_eq!(parsed.get("sensitivity").map(String::as_str), Some("elevated"));
+    assert_eq!(parsed.get("udc").map(String::as_str), Some("500.1"));
+}
+
+#[test]
+fn user_custom_frontmatter_key_passes_through_opaque() {
+    // A user-defined frontmatter key that VaultKit does not interpret as
+    // structural must survive the render→parse round-trip unchanged.
+    let mut fm = HashMap::new();
+    fm.insert("wing".to_string(), "Wing".to_string());
+    fm.insert("room".to_string(), "Room".to_string());
+    fm.insert("my-custom-field".to_string(), "custom-value".to_string());
+    fm.insert("obsidian-plugin-data".to_string(), "some data".to_string());
+    let note = note_with_frontmatter("Wing/Room/note", fm);
+
+    let rendered = render(&note, false, &HashMap::new());
+    let (parsed, _) = split_frontmatter(&rendered);
+
+    assert_eq!(
+        parsed.get("my-custom-field").map(String::as_str),
+        Some("custom-value"),
+        "custom user key must round-trip"
+    );
+    assert_eq!(
+        parsed.get("obsidian-plugin-data").map(String::as_str),
+        Some("some data"),
+        "Obsidian plugin key must round-trip"
+    );
+}

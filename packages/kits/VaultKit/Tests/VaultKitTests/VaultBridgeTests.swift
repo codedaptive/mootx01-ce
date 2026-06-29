@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import LocusKit
 import GeniusLocusKit
+import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import VaultKit
@@ -1554,5 +1555,76 @@ struct VaultBridgeTests {
         let pTunnel = try #require(provenanceTunnels.first)
         #expect(pTunnel.targetRoom == sourceNames.room,
                 "Bug N: provenance tunnel must point to the source drawer's room")
+    }
+
+    // MARK: - Part B: encode-enqueue sweep after bulk vault import
+
+    /// Open a PROVISIONED estate (with Corpus mounted) for encode-enqueue tests.
+    ///
+    /// `kit.provision()` wires the Corpus and dedicated encode queue so that
+    /// `reindexMissing` can return > 0 after a bulk import. The
+    /// `.deterministic` embedding model requires no CoreML and is reproducible.
+    private func openProvisionedEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "vaultkit-encode-enqueue-tests")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        let params = EstateProvisionParams(
+            estateName: "VaultKit Encode Enqueue Test Estate",
+            kind: .glk,
+            zoomWindowLow: 1,
+            zoomWindowHigh: 10,
+            frameworkProfile: "KnowledgeWork",
+            syncMode: .none
+        )
+        let handle = try await kit.provision(
+            storage: storage, owner: owner, params: params,
+            embeddingModels: [.deterministic]
+        )
+        return (kit, handle)
+    }
+
+    /// After a bulk vault import, `ImportReport.enqueuedForEncode` must be > 0.
+    ///
+    /// The bulk `captureBatch` path intentionally skips the per-item encode
+    /// hook to keep the SQLite transaction bounded. Part B (secfix/c-vault-export2)
+    /// adds a `reindexMissing` sweep after the batch write to backfill the encode
+    /// queue. This test verifies that at least one drawer is enqueued after a
+    /// batch import into a provisioned estate (one that has a Corpus).
+    @Test("bulk vault import enqueues imported drawers for semantic encoding")
+    func bulkVaultImportEnqueuesDrawersForEncode() async throws {
+        let (kit, handle) = try await openProvisionedEstate()
+        let vaultURL = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vaultURL) }
+
+        // Write two notes into a temp vault; both will be captured via
+        // captureBatch (count ≤ ImportPolicy.bulkThreshold).
+        let wing = "TestWing"
+        let wingDir = vaultURL.appendingPathComponent(wing, isDirectory: true)
+        try write("""
+            ---
+            wing: \(wing)
+            room: RoomA
+            ---
+            Content of note A.
+            """, to: wingDir.appendingPathComponent("RoomA.md"))
+        try write("""
+            ---
+            wing: \(wing)
+            room: RoomB
+            ---
+            Content of note B.
+            """, to: wingDir.appendingPathComponent("RoomB.md"))
+
+        let bridge = VaultBridge(kit: kit)
+        let report = try await bridge.importVault(at: vaultURL, into: handle, now: Date())
+
+        // At least the two imported drawers must have been enqueued for encode.
+        // reindexMissing skips already-indexed drawers (idempotent) so the count
+        // can equal the write count on a fresh estate.
+        #expect(report.drawersWritten == 2,
+                "both notes must be written: \(report)")
+        #expect(report.enqueuedForEncode > 0,
+                "bulk import must enqueue imported drawers for encoding; enqueuedForEncode=\(report.enqueuedForEncode)")
     }
 }

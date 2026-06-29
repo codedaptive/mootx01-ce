@@ -87,6 +87,22 @@ pub struct ImportReport {
     /// surfaced so a reconciliation pass can detect the gap. Mirrors Swift
     /// `ImportReport.drawersSkippedPartialWrite`.
     pub drawers_skipped_partial_write: usize,
+
+    /// Number of drawers enqueued for semantic encoding after the import.
+    ///
+    /// The bulk `capture_batch` path intentionally skips the per-item encode
+    /// enqueue to avoid flooding the queue for large imports. After the batch
+    /// write completes, `import_notes` calls `collect_reindex_jobs` and enqueues
+    /// the resulting jobs via `Corpus::enqueue_ingest_batch` (capped at
+    /// `REINDEX_MAX_JOBS` = 10,000 per call).
+    ///
+    /// The per-item path (`capture_with_mode(WriteMode::Regular)`) enqueues each
+    /// drawer individually; `enqueued_for_encode` is 0 for those runs.
+    ///
+    /// A value of 0 on a bulk import means either every drawer was already
+    /// indexed (idempotent re-import) or the estate has no registered Corpus.
+    /// Mirrors Swift `ImportReport.enqueuedForEncode`.
+    pub enqueued_for_encode: usize,
 }
 
 /// Counts returned by an export run, including the per-tier exclusion counts
@@ -445,6 +461,27 @@ impl<'a> VaultBridge<'a> {
                 }
             }
         }
+        // Encode-enqueue sweep: the bulk `capture_batch` path intentionally skips
+        // the per-item encode hook (to avoid O(N) queue writes inside a single
+        // transaction on large imports). After the batch write completes, collect
+        // all newly-imported drawers not yet in the Corpus BundleStore and enqueue
+        // them for BM25/vector encoding (idempotent, capped at REINDEX_MAX_JOBS =
+        // 10,000 per call). The per-item path uses `capture_with_mode(Regular)` which
+        // enqueues each drawer individually, so this sweep returns 0 for those runs.
+        if let Some((corpus, jobs)) = self
+            .coordinator
+            .collect_reindex_jobs(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("collect_reindex_jobs failed: {e:?}")))?
+        {
+            report.enqueued_for_encode = jobs.len();
+            corpus
+                .enqueue_ingest_batch(&jobs)
+                .map_err(|e| VaultKitError::VerbError(format!("enqueue_ingest_batch failed: {e:?}")))?;
+            self.coordinator
+                .rollup_after_reindex(handle, now / 1000)
+                .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;
+        }
+
         let entry = format!(
             "{{\"operation\":\"vault-import\",\"source\":{},\"drawersWritten\":{},\"drawersUpdated\":{},\"itemsSkipped\":{},\"tunnelsCreated\":{},\"occurredAt\":\"{}\"}}",
             json_string(source),

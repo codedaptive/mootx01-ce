@@ -429,4 +429,57 @@ struct HTTPServerTests {
         let result = try #require(httpRequest(port: port, method: "GET", body: "", path: "/api/events"))
         #expect(result.status == 404)
     }
+
+    // MARK: - Default-estate enforcement (secfix/c-aria-minor CAND-043)
+
+    /// GET /api/graph with an arbitrary `?estate=` query param MUST NOT forward
+    /// that param to the topology reader — the reader is always called with `nil`
+    /// (the default estate), matching the Rust posture of ignoring `?estate=`.
+    ///
+    /// The test wires a reader that records the estate argument it receives and
+    /// returns a synthetic payload. A request with `?estate=<random-uuid>` must
+    /// call the reader with `nil`, not with the random UUID.
+    @Test func httpGraphIgnoresCallerSuppliedEstateQueryParam() async throws {
+        let storedPayload = Data("""
+        {"nodes":[],"edges":[],"structurePending":false,"communities":[],
+         "generatedTs":"2026-01-01T00:00:00Z"}
+        """.utf8)
+
+        // Capture the estate argument the reader is called with.
+        actor EstateSpy {
+            var received: String?? = nil // outer Optional = not yet called; inner = the arg
+            func record(_ arg: String?) { received = .some(arg) }
+        }
+        let spy = EstateSpy()
+
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher, topologyReader: { estate in
+            await spy.record(estate)
+            return storedPayload
+        })
+        defer { stop() }
+
+        // Send a request with an arbitrary ?estate= query param.
+        let arbitraryEstateID = UUID().uuidString
+        let result = try #require(
+            httpRequest(port: port, method: "GET", body: "",
+                       path: "/api/graph?estate=\(arbitraryEstateID)"))
+        #expect(result.status == 200)
+
+        // Give the async reader a moment to run (the server dispatches asynchronously).
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // The reader must have been called with nil — not the arbitrary estate ID.
+        let receivedArg = await spy.received
+        // receivedArg is Optional<Optional<String>>:
+        // .none = reader not called yet (test infra issue)
+        // .some(.none) = reader called with nil ✅
+        // .some(.some(id)) = reader called with an estate ID ❌
+        guard case .some(let arg) = receivedArg else {
+            Issue.record("topologyReader was not called; check test harness")
+            return
+        }
+        #expect(arg == nil,
+                "topologyReader must be called with nil (default estate), not \"\(arg ?? "non-nil")\"")
+    }
 }

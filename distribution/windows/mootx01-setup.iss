@@ -1,0 +1,110 @@
+; mootx01-setup.iss — Inno Setup script for MOOTx01 on Windows.
+;
+; Produces a single mootx01-setup.exe that:
+;   1. Places mootx01.exe and moot-mgr.exe into {userappdata}\.mootx01\bin
+;   2. Adds that directory to the user PATH
+;   3. Runs `mootx01 install` as a post-install step so the user can
+;      select which AI clients to wire (interactive terminal picker)
+;
+; Build:
+;   iscc.exe /DMyAppVersion=1.0.0 /DArch=x86_64 mootx01-setup.iss
+;
+; The binaries (mootx01.exe, moot-mgr.exe) must be in the same directory
+; as this script, or pass /DBinDir=path\to\binaries.
+
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
+#ifndef Arch
+  #define Arch "x86_64"
+#endif
+#ifndef BinDir
+  #define BinDir "."
+#endif
+
+[Setup]
+AppId={{E3A7B1C9-4D2F-4E8A-B5C6-1F9D0A2E3B4C}
+AppName=MOOTx01
+AppVersion={#MyAppVersion}
+AppPublisher=Codedaptive LLC
+AppPublisherURL=https://github.com/codedaptive/mootx01-ce
+AppSupportURL=https://github.com/codedaptive/mootx01-ce/issues
+DefaultDirName={userappdata}\.mootx01\bin
+DisableProgramGroupPage=yes
+DisableDirPage=yes
+; User-scoped install — no admin elevation required.
+PrivilegesRequired=lowest
+OutputBaseFilename=mootx01-{#MyAppVersion}-windows-{#Arch}-setup
+Compression=lzma2/ultra64
+SolidCompression=yes
+; Modern visual style
+WizardStyle=modern
+WizardSizePercent=110
+SetupIconFile=compiler:SetupClassicIcon.ico
+UninstallDisplayIcon={app}\mootx01.exe
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+Source: "{#BinDir}\mootx01.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+[Registry]
+; Add the install dir to the user PATH (same effect as install.ps1).
+Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
+  ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
+
+[Run]
+; After files are placed, launch the interactive client wiring in a
+; terminal window. The user sees the same numbered picker that
+; `mootx01 install` shows in PowerShell — detection, selection, wiring.
+Filename: "{app}\mootx01.exe"; Parameters: "install"; \
+  Description: "Connect AI clients to MOOTx01"; \
+  Flags: postinstall nowait skipifsilent runasoriginaluser
+
+[UninstallRun]
+; Run `mootx01 uninstall --yes` before deleting files so client configs
+; and scheduled tasks are cleaned up (same sequence as install.ps1).
+Filename: "{app}\mootx01.exe"; Parameters: "uninstall --yes"; \
+  Flags: runhidden waituntilterminated skipifdoesntexist
+
+[UninstallDelete]
+; Clean up the install directory. Estate data under %LOCALAPPDATA%\MOOTx01
+; is intentionally left intact (the uninstall message notes this).
+Type: filesandordirs; Name: "{app}"
+
+[Messages]
+WelcomeLabel1=Welcome to MOOTx01 Setup
+WelcomeLabel2=MOOTx01 gives your AI tools a persistent, private memory that lives on your machine.%n%nThis will install MOOTx01 and let you connect your AI clients.%n%nClick Next to continue.
+FinishedLabel=MOOTx01 has been installed.%n%nIf you checked "Connect AI clients," a terminal window will open to let you select which clients to wire.%n%nYour estate data is stored at %LOCALAPPDATA%\MOOTx01 and stays on this machine.
+
+[Code]
+// Check whether the install dir is already on the user PATH.
+// Prevents duplicate entries on reinstall.
+function NeedsAddPath(Param: string): Boolean;
+var
+  OrigPath: string;
+begin
+  if not RegQueryStringValue(HKEY_CURRENT_USER,
+    'Environment', 'Path', OrigPath) then
+  begin
+    Result := True;
+    exit;
+  end;
+  // Look for the path both with and without trailing backslash.
+  Result := (Pos(';' + Param + ';', ';' + OrigPath + ';') = 0) and
+            (Pos(';' + Param + '\;', ';' + OrigPath + ';') = 0);
+end;
+
+// On uninstall, notify the user their data was preserved.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
+           'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
+           'Remove that folder manually if you want to erase your data.',
+           mbInformation, MB_OK);
+  end;
+end;

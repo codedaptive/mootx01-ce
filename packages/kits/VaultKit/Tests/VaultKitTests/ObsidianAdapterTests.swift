@@ -582,4 +582,164 @@ struct ObsidianAdapterTests {
         let tags = ObsidianAdapter.parseTags(in: "# Heading\nText #realtag here")
         #expect(tags == ["realtag"])
     }
+
+    // MARK: - YAML scalar quoting (CAND-003 injection defense)
+
+    @Test("yamlScalarQuote: safe ASCII value passes through unquoted")
+    func yamlScalarQuoteSafeValue() {
+        // Plain alphanumeric values must not be wrapped in quotes; wrapping
+        // them would change the appearance of exported vaults for normal use.
+        let plain = "User Canon"
+        // "User Canon" contains a space but no colon, hash, or newline.
+        // Space alone does not require quoting in YAML bare scalars.
+        let result = ObsidianAdapter.yamlScalarQuote(plain)
+        // Space is safe in a YAML bare scalar; plain must pass through.
+        #expect(!result.hasPrefix("\""), "plain value must not be wrapped in quotes: \(result)")
+    }
+
+    @Test("yamlScalarQuote: value with colon is quoted to prevent key-injection")
+    func yamlScalarQuoteColon() {
+        // A value containing ':' must be quoted. An unquoted `moot_id: evil`
+        // embedded in a room name would add a second structural key on export.
+        let withColon = "something: evil"
+        let result = ObsidianAdapter.yamlScalarQuote(withColon)
+        #expect(result.hasPrefix("\"") && result.hasSuffix("\""),
+                "value with colon must be double-quoted: \(result)")
+    }
+
+    @Test("yamlScalarQuote: value with newline is quoted and newline is escaped")
+    func yamlScalarQuoteNewline() {
+        let injected = "legit\nmoot_id: evil-uuid"
+        let result = ObsidianAdapter.yamlScalarQuote(injected)
+        #expect(result.hasPrefix("\"") && result.hasSuffix("\""),
+                "value with newline must be double-quoted: \(result)")
+        #expect(!result.contains("\n"),
+                "literal newline must be escaped inside double-quoted value: \(result)")
+        #expect(result.contains("\\n"),
+                "escaped newline sequence \\n must appear in result: \(result)")
+    }
+
+    @Test("crafted room name cannot inject structural frontmatter key on re-import")
+    func craftedRoomNameCannotInjectFrontmatter() throws {
+        // Arrange: a NoteIR whose `room` frontmatter value contains an embedded
+        // newline followed by a fake `moot_id` key. If the exporter emits this
+        // raw, the re-importer would see two frontmatter keys: `room` and `moot_id`.
+        // With YAML quoting the newline is escaped; the re-importer sees only `room`.
+        let injectedRoom = "legit-room\nmoot_id: 00000000-0000-0000-0000-000000000001"
+        let note = NoteIR(
+            stableSourceKey: "test/injection",
+            body: [Block(kind: "markdown", text: "content")],
+            frontmatter: ["room": injectedRoom, "wing": "TestWing"],
+            links: [],
+            tags: [],
+            originalPath: "legit-room",
+            originDate: nil,
+            source: nil,
+            mootID: nil
+        )
+
+        // Act: render to Markdown text and parse the frontmatter back.
+        let rendered = ObsidianAdapter.render(note, pureObsidianLinks: false)
+        let (parsed, _) = ObsidianAdapter.splitFrontmatter(rendered)
+
+        // Assert: the parsed map must NOT contain a key named `moot_id` that
+        // was not in the original note — the injected key must be contained
+        // within the `room` value, not promoted to a top-level frontmatter key.
+        #expect(parsed["moot_id"] == nil,
+                "injection must be contained: rendered=\(rendered)")
+        // The room value must round-trip to the original injected string
+        // (the newline is a legitimate character; only its frontmatter-breaking
+        // role is blocked by quoting — the content itself is preserved).
+        #expect(parsed["room"] == injectedRoom,
+                "room value must round-trip verbatim: got \(String(describing: parsed["room"]))")
+    }
+
+    @Test("legitimate vault round-trips structural keys losslessly")
+    func legitimateVaultRoundTrips() throws {
+        // Arrange: a note with typical exported VaultKit structural keys.
+        let note = NoteIR(
+            stableSourceKey: "Wing/Room/my-note",
+            body: [Block(kind: "markdown", text: "# My Note\n\nContent here.")],
+            frontmatter: [
+                "wing": "Wing",
+                "room": "Room",
+                "moot_id": "A1B2C3D4-1234-5678-9ABC-DEF012345678",
+                "sensitivity": "elevated",
+                "addedBy": "vaultkit-import",
+                "udc": "500.1",
+            ],
+            links: [],
+            tags: ["alpha", "beta"],
+            originalPath: "Room",
+            originDate: nil,
+            source: nil,
+            mootID: nil
+        )
+
+        // Act: render → splitFrontmatter (the export→import boundary).
+        let rendered = ObsidianAdapter.render(note, pureObsidianLinks: false)
+        let (parsed, _) = ObsidianAdapter.splitFrontmatter(rendered)
+
+        // Assert: every structural key must round-trip to its original value.
+        #expect(parsed["wing"] == "Wing")
+        #expect(parsed["room"] == "Room")
+        #expect(parsed["moot_id"] == "A1B2C3D4-1234-5678-9ABC-DEF012345678")
+        #expect(parsed["sensitivity"] == "elevated")
+        #expect(parsed["udc"] == "500.1")
+    }
+
+    @Test("user custom non-structural frontmatter key survives export→import unchanged")
+    func customFrontmatterKeyPassesThrough() throws {
+        // Arrange: a note carrying a user-defined frontmatter key that VaultKit
+        // never interprets as structural. This key must survive the export→import
+        // round-trip in NoteIR.frontmatter (opaque pass-through) and must never
+        // affect placement or sensitivity.
+        let note = NoteIR(
+            stableSourceKey: "Wing/Room/note",
+            body: [Block(kind: "markdown", text: "content")],
+            frontmatter: [
+                "wing": "Wing",
+                "room": "Room",
+                "my-custom-field": "custom-value",
+                "obsidian-plugin-data": "some data",
+            ],
+            links: [],
+            tags: [],
+            originalPath: "Room",
+            originDate: nil,
+            source: nil,
+            mootID: nil
+        )
+
+        // Act: render → splitFrontmatter.
+        let rendered = ObsidianAdapter.render(note, pureObsidianLinks: false)
+        let (parsed, _) = ObsidianAdapter.splitFrontmatter(rendered)
+
+        // Assert: custom keys survive the round-trip.
+        #expect(parsed["my-custom-field"] == "custom-value",
+                "custom user key must round-trip: rendered=\(rendered)")
+        #expect(parsed["obsidian-plugin-data"] == "some data",
+                "Obsidian plugin key must round-trip: rendered=\(rendered)")
+    }
+
+    // MARK: - decodeYamlDoubleQuoted helper
+
+    @Test("decodeYamlDoubleQuoted: non-quoted value passes through unchanged")
+    func decodeNonQuotedValue() {
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("hello world") == "hello world")
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("") == "")
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("abc") == "abc")
+    }
+
+    @Test("decodeYamlDoubleQuoted: double-quoted value is unwrapped and unescaped")
+    func decodeQuotedValue() {
+        // \n → LF
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("\"line1\\nline2\"") == "line1\nline2")
+        // \" → "
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("\"say \\\"hi\\\"\"") == "say \"hi\"")
+        // \\ → \
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("\"back\\\\slash\"") == "back\\slash")
+        // \uXXXX → Unicode scalar
+        #expect(ObsidianAdapter.decodeYamlDoubleQuoted("\"\\u0041\"") == "A")
+    }
 }

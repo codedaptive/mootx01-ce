@@ -1033,6 +1033,28 @@ public struct DrawerMapping: Sendable {
     ///   3. `lineageID(forStableSourceKey:)` — FNV-1a over the vault path,
     ///      used for brand-new human notes that were never exported by VaultKit.
     func makeCaptureFrame(for note: NoteIR, content: String) -> (CaptureFrame, classified: Bool) {
+        // ## Structural-keys allowlist (CAND-003 injection defense)
+        //
+        // `makeCaptureFrame` reads only a named set of frontmatter keys that
+        // have structural significance. Any key not in this allowlist has NO
+        // effect on placement, identity, or privilege — it rides through
+        // `note.frontmatter` as opaque pass-through and is re-emitted verbatim
+        // on the next export. This means a forged extra key injected by an
+        // attacker (e.g. via a newline in a room name that was NOT caught by
+        // the export-side YAML quoting) cannot alter the capture frame — the
+        // extra key is simply ignored here.
+        //
+        // STRUCTURAL keys consumed:
+        //   room, wing, udc, addedBy, embeddingModelID, moot_id,
+        //   wikidataQID, sensitivity, distilled_from_sources,
+        //   captureChannel (informational — not re-honored on import),
+        //   contentKind (informational — not re-honored on import),
+        //   created (→ eventTime via originDate), type (OKF tag — ignored).
+        //
+        // The export-side YAML quoting (`ObsidianAdapter.yamlScalarQuote`)
+        // is the primary defense; this comment documents the secondary
+        // (and pre-existing) defense: unknown frontmatter keys are harmless.
+        //
         // Room resolution — priority order:
         //   1. Explicit frontmatter `room` (round-trip identity; always wins).
         //      For exports produced by VaultKit after ADR-016, the `room`

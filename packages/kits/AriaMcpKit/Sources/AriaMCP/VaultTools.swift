@@ -638,12 +638,42 @@ enum VaultTools {
     }
 
     /// Write the manifest to `.moot/export-manifest.json` atomically.
+    ///
+    /// Applies a symlink-containment guard before writing — the same pattern
+    /// `ObsidianAdapter.ensureWritableFileTarget` uses for note writes in
+    /// VaultKit. `ObsidianAdapter`'s guard is internal to VaultKit and cannot
+    /// be called from here, so the check is applied inline. If a pre-existing
+    /// symlink exists at the manifest path, the write is refused unconditionally:
+    /// a symlink could redirect the write outside the vault root and is never a
+    /// legitimate state for this layer-owned sidecar file.
+    ///
     /// Sorted keys keep the on-disk JSON byte-stable across exports.
     static func writeManifest(_ manifest: ExportManifest, to vaultURL: URL) throws {
         let dir = vaultURL.appendingPathComponent(".moot", isDirectory: true)
         try FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true)
         let url = vaultURL.appendingPathComponent(manifestRelativePath)
+
+        // Symlink-containment guard: refuse a pre-existing symlink at the manifest
+        // path. A symlink here could redirect the manifest write to an attacker-
+        // controlled path outside the vault. This mirrors the guard
+        // ObsidianAdapter.ensureWritableFileTarget applies to note write targets:
+        // reject any pre-existing symlink unconditionally, regardless of where it
+        // points. VaultKitError.adapterError is the correct error type — this layer
+        // owns the vault sidecar file and VaultKitError is already the error surface
+        // for vault adapter faults.
+        //
+        // NOTE: `resourceValues(forKeys:)` is used directly (not guarded by
+        // `fileExists`) because `fileExists` follows the symlink and returns `false`
+        // for a broken symlink — which would silently skip the guard. `resourceValues`
+        // with `.isSymbolicLinkKey` correctly returns `isSymbolicLink = true` for
+        // both live and broken symlinks, closing the attack vector in both cases.
+        if let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           values.isSymbolicLink == true {
+            throw VaultKitError.adapterError(
+                "manifest path targets a pre-existing symlink; write refused")
+        }
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         try encoder.encode(manifest).write(to: url, options: .atomic)

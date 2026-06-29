@@ -391,7 +391,7 @@ fn collect_md_files(
 ///
 /// In both modes `type:` and frontmatter `tags:` are emitted.
 /// Mirrors Swift `ObsidianAdapter.render(_:pureObsidianLinks:keyByName:)`.
-pub(crate) fn render(
+pub fn render(
     note: &NoteIR,
     pure_obsidian_links: bool,
     key_by_name: &HashMap<String, String>,
@@ -422,8 +422,13 @@ pub(crate) fn render(
     if !fm.is_empty() {
         out.push_str("---\n");
         // BTreeMap iterates in sorted key order — deterministic. Mirrors Swift.
+        // Values are YAML-quoted to prevent injection: a room/wing name containing
+        // '\nmoot_id: evil' would forge an additional structural frontmatter key
+        // if emitted raw. yaml_scalar_quote wraps unsafe values in double-quoted
+        // scalars so every value is contained to its own key.
+        // Mirrors Swift `ObsidianAdapter.yamlScalarQuote(_:)`.
         for (key, value) in &fm {
-            out.push_str(&format!("{}: {}\n", key, value));
+            out.push_str(&format!("{}: {}\n", key, yaml_scalar_quote(value)));
         }
         out.push_str("---\n");
     }
@@ -606,7 +611,7 @@ fn parent_folder(key: &str) -> String {
 /// `key: value`; the body is everything after. With no opening fence the
 /// whole file is the body and the map is empty.
 /// Mirrors Swift `ObsidianAdapter.splitFrontmatter(_:)`.
-pub(crate) fn split_frontmatter(raw: &str) -> (HashMap<String, String>, String) {
+pub fn split_frontmatter(raw: &str) -> (HashMap<String, String>, String) {
     if !raw.starts_with("---\n") && !raw.starts_with("---\r\n") {
         return (HashMap::new(), raw.to_owned());
     }
@@ -631,15 +636,133 @@ pub(crate) fn split_frontmatter(raw: &str) -> (HashMap<String, String>, String) 
         let line = line.trim_end_matches('\r');
         if let Some(colon_pos) = line.find(':') {
             let key = line[..colon_pos].trim().to_owned();
-            let value = line[colon_pos + 1..].trim().to_owned();
+            let raw_value = line[colon_pos + 1..].trim().to_owned();
             if !key.is_empty() {
-                map.insert(key, value);
+                // Decode double-quoted YAML scalars produced by yaml_scalar_quote.
+                // A value wrapped in `"…"` has its outer quotes stripped and its
+                // escape sequences decoded so values round-trip verbatim through
+                // export→import. Non-quoted values pass through unchanged.
+                // Mirrors Swift `ObsidianAdapter.decodeYamlDoubleQuoted(_:)`.
+                map.insert(key, decode_yaml_double_quoted(&raw_value));
             }
         }
     }
 
     let body = lines[close + 1..].join("\n");
     (map, body)
+}
+
+/// Emit a YAML scalar that safely contains `value` within its own
+/// frontmatter key — no matter what characters the value carries.
+///
+/// A value is emitted bare when it contains ONLY printable ASCII characters
+/// that are safe as YAML unquoted scalars (no newlines, no colon, no `#`,
+/// no leading/trailing whitespace, no YAML indicator characters). All other
+/// values are wrapped in double quotes with minimal escaping:
+///   - `\` → `\\`
+///   - `"` → `\"`
+///   - LF → `\n`
+///   - CR → `\r`
+///   - TAB → `\t`
+///   - Control characters (U+0000–U+001F, U+007F) → `\uXXXX`
+///
+/// Legitimate values round-trip verbatim: the quoted form reads back via
+/// `decode_yaml_double_quoted` as exactly the original string.
+///
+/// Mirrors Swift `ObsidianAdapter.yamlScalarQuote(_:)`.
+pub(crate) fn yaml_scalar_quote(value: &str) -> String {
+    // Fast path: check whether the value can be emitted as a bare scalar.
+    let needs_quoting = value.is_empty()
+        || value.chars().any(yaml_char_needs_quoting)
+        || value.starts_with(char::is_whitespace)
+        || value.ends_with(char::is_whitespace);
+
+    if !needs_quoting {
+        return value.to_owned();
+    }
+
+    // Double-quoted form: wrap and escape minimally.
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"'  => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Returns `true` when a character must cause the surrounding YAML value to
+/// be quoted. Mirrors Swift `ObsidianAdapter.yamlNeedsQuoting(_:)`.
+fn yaml_char_needs_quoting(c: char) -> bool {
+    // Control characters (U+0000–U+001F, U+007F) — newline is the injection vector.
+    if (c as u32) < 0x20 || c as u32 == 0x7F {
+        return true;
+    }
+    // YAML indicator characters that are not safe in bare scalars.
+    // A colon embedded in a value is conservatively quoted so `key: ` patterns
+    // within values cannot be mistaken for additional frontmatter keys.
+    matches!(c,
+        ':' | '#' | '{' | '}' | '[' | ']' | '|' | '>' | '!' | '&'
+        | '*' | '\'' | '"' | '%' | '@' | '`'
+    )
+}
+
+/// Decode a raw YAML value string that may be double-quoted.
+///
+/// If `raw` starts and ends with `"`, the outer quotes are stripped and the
+/// escape sequences that `yaml_scalar_quote` produces are decoded. Non-quoted
+/// values (no surrounding `"`) are returned unchanged (backward-compatible).
+///
+/// Mirrors Swift `ObsidianAdapter.decodeYamlDoubleQuoted(_:)`.
+pub(crate) fn decode_yaml_double_quoted(raw: &str) -> String {
+    if raw.len() < 2 || !raw.starts_with('"') || !raw.ends_with('"') {
+        return raw.to_owned();
+    }
+    // Strip outer quotes.
+    let inner = &raw[1..raw.len() - 1];
+    let mut result = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"')  => result.push('"'),
+            Some('\\') => result.push('\\'),
+            Some('n')  => result.push('\n'),
+            Some('r')  => result.push('\r'),
+            Some('t')  => result.push('\t'),
+            Some('u')  => {
+                // \uXXXX — consume exactly 4 hex digits.
+                let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                if let Some(cp) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    result.push(cp);
+                } else {
+                    // Malformed — emit as-is.
+                    result.push_str("\\u");
+                    result.push_str(&hex);
+                }
+            }
+            Some(other) => {
+                // Unknown escape — keep both characters.
+                result.push('\\');
+                result.push(other);
+            }
+            None => result.push('\\'),
+        }
+    }
+    result
 }
 
 /// Parse both wikilinks `[[Target]]` / `[[Target|Alias]]` and standard-md

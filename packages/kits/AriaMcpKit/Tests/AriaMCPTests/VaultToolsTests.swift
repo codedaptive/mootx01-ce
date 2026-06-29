@@ -1095,4 +1095,46 @@ struct VaultToolsTests {
         #expect(failures.count == total - maxJobs,
                 "Expected \(total - maxJobs) rejections; got \(failures.count)")
     }
+
+    // MARK: - Symlink containment (secfix/c-aria-minor CAND-014)
+
+    /// A pre-planted symlink at `.moot/export-manifest.json` causes `writeManifest`
+    /// to throw rather than follow the link. This verifies the symlink-containment
+    /// guard added to `writeManifest` — mirroring `ObsidianAdapter.ensureWritableFileTarget`
+    /// which protects note writes against the same attack vector.
+    @Test func writeManifest_refusesPreExistingSymlinkAtManifestPath() throws {
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent("symlink-guard-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Create the .moot directory and plant a symlink at the manifest path.
+        let mootDir = vault.appendingPathComponent(".moot", isDirectory: true)
+        try FileManager.default.createDirectory(at: mootDir, withIntermediateDirectories: true)
+        let manifestURL = vault.appendingPathComponent(VaultTools.manifestRelativePath)
+
+        // Symlink points to an arbitrary location outside the vault — exactly
+        // the attacker's setup. The symlink target does NOT need to exist (broken
+        // symlink); the guard must detect it via resourceValues, not fileExists
+        // (fileExists follows the symlink and returns false for broken symlinks).
+        let target = FileManager.default.temporaryDirectory
+            .appendingPathComponent("symlink-target-\(UUID().uuidString).json")
+        try FileManager.default.createSymbolicLink(at: manifestURL, withDestinationURL: target)
+        // Verify the symlink was created by reading the destination string directly.
+        let destination = try FileManager.default.destinationOfSymbolicLink(
+            atPath: manifestURL.path(percentEncoded: false))
+        #expect(!destination.isEmpty, "symlink must be planted before the guard test")
+
+        // A minimal manifest — content doesn't matter, the guard fires before encode.
+        let manifest = VaultTools.ExportManifest(
+            exportedAt: "2026-01-01T00:00:00Z", noteCount: 0, files: [:])
+
+        // writeManifest must throw, not follow the symlink.
+        #expect(throws: (any Error).self) {
+            try VaultTools.writeManifest(manifest, to: vault)
+        }
+
+        // The symlink target must NOT have been created — confirm the write was refused.
+        #expect(!FileManager.default.fileExists(atPath: target.path(percentEncoded: false)),
+                "symlink target must not be created; the manifest write must be refused")
+    }
 }

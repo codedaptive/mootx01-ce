@@ -53,6 +53,16 @@ let package = Package(
         // Blast Radius Report). Layering: VaultKit (above GLK) → QueueKit (kit
         // layer); no inversion.
         .package(name: "QueueKit", path: "../QueueKit"),
+        // CorpusKit: TEST-ONLY dep added for the Part B encode-enqueue test
+        // (secfix/c-vault-export2). The test must call kit.provision() with
+        // EmbeddingModel.deterministic to mount a Corpus so reindexMissing
+        // can return > 0 after a bulk import. Without a Corpus the test can
+        // only assert the no-Corpus path (returns 0), which does not verify
+        // the encode-enqueue behaviour. Layering: VaultKit sits above GLK;
+        // GLK already depends on CorpusKit — this adds the direct test dep
+        // so VaultKitTests can name the type. No production code in VaultKit
+        // imports CorpusKit; the dep is test-target-only.
+        .package(name: "CorpusKit", path: "../CorpusKit"),
     ],
     targets: [
         .target(
@@ -74,6 +84,9 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
+                // CorpusKit: needed to name EmbeddingModel.deterministic in the
+                // Part B encode-enqueue test (secfix/c-vault-export2).
+                .product(name: "CorpusKit", package: "CorpusKit"),
             ],
             path: "Tests/VaultKitTests"
         ),
