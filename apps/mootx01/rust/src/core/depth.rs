@@ -391,6 +391,21 @@ mod tests {
         d
     }
 
+    /// Join a `/`-separated relative path onto `home` segment-by-segment, the
+    /// same way the production path builders (`expand_tilde`) do. This yields
+    /// native separators on every platform — `PathBuf::join` on a single
+    /// `/`-containing string keeps the `/` literally on Windows, which would not
+    /// match the backslash paths the code produces there.
+    fn join_rel(home: &Path, rel: &str) -> PathBuf {
+        let mut p = home.to_path_buf();
+        for seg in rel.split('/') {
+            if !seg.is_empty() {
+                p = p.join(seg);
+            }
+        }
+        p
+    }
+
     #[test]
     fn server_depth_is_noop() {
         let home = tmp_home("server");
@@ -402,7 +417,7 @@ mod tests {
     fn skills_depth_writes_canonical_skill() {
         let home = tmp_home("skills");
         let outcome = apply("claude-code", InstallDepth::Skills, &home).unwrap();
-        let dest = home.join(".claude/skills/mootx01-memory/SKILL.md");
+        let dest = join_rel(&home, ".claude/skills/mootx01-memory/SKILL.md");
         assert_eq!(outcome, DepthOutcome::Skills(dest.display().to_string()));
         let written = std::fs::read_to_string(&dest).unwrap();
         assert_eq!(written, InstallBundle::embedded().skill_markdown);
@@ -413,7 +428,7 @@ mod tests {
     fn plugin_depth_installs_package() {
         let home = tmp_home("plugin");
         let outcome = apply("claude-code", InstallDepth::Plugin, &home).unwrap();
-        let root = home.join(".claude/mootx01-plugin");
+        let root = join_rel(&home, ".claude/mootx01-plugin");
         assert_eq!(outcome, DepthOutcome::Plugin(root.display().to_string()));
         assert!(root.join("skills/mootx01-memory/SKILL.md").exists());
         assert!(root.join(".claude-plugin/plugin.json").exists());
@@ -424,7 +439,7 @@ mod tests {
     fn plugin_falls_back_to_skills_for_module_host() {
         let home = tmp_home("fallback");
         let outcome = apply("opencode", InstallDepth::Plugin, &home).unwrap();
-        let dest = home.join(".config/opencode/skills/mootx01-memory/SKILL.md");
+        let dest = join_rel(&home, ".config/opencode/skills/mootx01-memory/SKILL.md");
         match outcome {
             DepthOutcome::PluginFellBackToSkills(path, reason) => {
                 assert_eq!(path, dest.display().to_string());
