@@ -713,6 +713,13 @@ jobs:
       - build-windows-arm64
     runs-on: ubuntu-22.04
     steps:
+      # Checkout MUST precede the artifact download: actions/checkout cleans its
+      # working directory, so running it after the download would delete the
+      # just-downloaded assets/ tree. Checkout first (for scripts/minisign.pub),
+      # then populate assets/.
+      - name: Checkout repository (for bundled public key)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
       - name: Download all assets
         # Downloads every artifact uploaded by the build jobs into assets/<name>/.
         # This includes the new installer artifacts (macos-arm64-pkg,
@@ -721,9 +728,6 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: assets
-
-      - name: Checkout repository (for bundled public key)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Generate checksums.txt
         working-directory: assets
