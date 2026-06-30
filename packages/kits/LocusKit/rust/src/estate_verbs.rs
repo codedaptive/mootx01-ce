@@ -1480,7 +1480,9 @@ impl Estate {
                 "expunge requires confirmation: true (destructive op)".to_string(),
             ));
         }
-        let drawer = self.store.get_drawer(row_id)?
+        // Resolve to validate existence before the destructive op; the drawer
+        // value itself is not needed past this guard.
+        let _drawer = self.store.get_drawer(row_id)?
             .ok_or_else(|| LocusKitError::DrawerNotFound {
                 id: row_id.to_string(),
             })?;
