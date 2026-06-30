@@ -919,3 +919,288 @@ fn tls_unrecognised_dsn_sslmode_preserved_verbatim() {
         "unrecognised sslmode must mandate a TLS connector (conservative)"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// CAND-047 — SQLite backend end-to-end identifier injection guard
+// (SECFIX-WS2-PK F7/F9/F10)
+//
+// These tests drive injection payloads through the real SQLite backend
+// (in-memory DB) so the guards fire at the SQL-building layer — one
+// seam per concern — not just at the shared utility level. Every
+// test that verifies rejection of a bad identifier also verifies that
+// the equivalent valid identifier passes (guard is not vacuously
+// reject-all).
+//
+// F9: table name validated in ALL RowStore write+read paths.
+// F7: ORDER BY column name validated in query / query_projected / count.
+// F10: skip-corrupt projection column name validated in
+//      query_projected_skip_corrupt.
+// ─────────────────────────────────────────────────────────────────
+
+/// Helper: open an in-memory SqliteStorage with a simple "items" table.
+/// Uses path="" (SQLite in-memory mode) so no temp file is needed.
+fn make_sqlite_storage() -> persistence_kit::sqlite::SqliteStorage {
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
+    use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
+
+    let storage = SqliteStorage::new(EstateConfiguration::new(
+        uuid::Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: ":memory:".to_string(),
+            busy_timeout_secs: 5.0,
+        },
+    ))
+    .expect("SqliteStorage::new must succeed for :memory:");
+
+    let schema = SchemaDeclaration::new(
+        "SecFixSQLiteKit",
+        1,
+        vec![TableDeclaration::new(
+            "items",
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::text("label"),
+                ColumnDeclaration::bitmap("flags"),
+            ],
+            vec!["id".to_string()],
+        )],
+    );
+    storage.open(&schema).expect("open schema");
+    storage
+}
+
+// ── F9: table name injection ────────────────────────────────────
+
+/// `query` with an injection payload as the table name must be rejected
+/// with `InvalidIdentifier` before any SQL is built.
+#[test]
+fn sqlite_f9_query_rejects_injected_table_name() {
+    use persistence_kit::{StorageError, Storage};
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().query(
+        r#"items" WHERE 1=1; --"#,
+        None,
+        &[],
+        None,
+        None,
+    );
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "query with injected table name must be rejected with InvalidIdentifier"
+    );
+}
+
+/// `query` with a valid table name must succeed (guard is not vacuously reject-all).
+#[test]
+fn sqlite_f9_query_accepts_valid_table_name() {
+    use persistence_kit::Storage;
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().query("items", None, &[], None, None);
+    assert!(result.is_ok(), "query with valid table name must succeed");
+}
+
+/// `insert` with an injected table name must be rejected.
+#[test]
+fn sqlite_f9_insert_rejects_injected_table_name() {
+    use persistence_kit::{StorageError, Storage};
+    let storage = make_sqlite_storage();
+    let mut row = std::collections::BTreeMap::new();
+    row.insert("id".to_string(), persistence_kit::TypedValue::Uuid(uuid::Uuid::new_v4()));
+    row.insert("label".to_string(), persistence_kit::TypedValue::Text("x".into()));
+    row.insert("flags".to_string(), persistence_kit::TypedValue::Bitmap(0));
+    let result = storage.row_store().insert(r#"items; DROP TABLE items; --"#, row);
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "insert with injected table name must be rejected"
+    );
+}
+
+/// `update` with an injected table name must be rejected.
+#[test]
+fn sqlite_f9_update_rejects_injected_table_name() {
+    use persistence_kit::{StorageError, Storage, StoragePredicate};
+    let storage = make_sqlite_storage();
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("label".to_string(), persistence_kit::TypedValue::Text("y".into()));
+    let result = storage.row_store().update(
+        r#"items" WHERE 1=1; --"#,
+        values,
+        &StoragePredicate::IsTrue,
+    );
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "update with injected table name must be rejected"
+    );
+}
+
+/// `delete` with an injected table name must be rejected.
+#[test]
+fn sqlite_f9_delete_rejects_injected_table_name() {
+    use persistence_kit::{StorageError, Storage, StoragePredicate};
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().delete(
+        r#"items; DROP TABLE sqlite_master; --"#,
+        &StoragePredicate::IsTrue,
+    );
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "delete with injected table name must be rejected"
+    );
+}
+
+/// `count` with an injected table name must be rejected.
+#[test]
+fn sqlite_f9_count_rejects_injected_table_name() {
+    use persistence_kit::{StorageError, Storage};
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().count(r#"items" UNION SELECT 1; --"#, None);
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "count with injected table name must be rejected"
+    );
+}
+
+// ── F7: ORDER BY column injection ───────────────────────────────
+
+/// `query` with an injected column name in the ORDER BY clause must be rejected.
+#[test]
+fn sqlite_f7_query_order_by_rejects_injected_column() {
+    use persistence_kit::{Column, Storage, StorageError};
+    use persistence_kit::predicate::{OrderClause, OrderDirection};
+    let storage = make_sqlite_storage();
+    let bad_col = Column::new("items", r#"label" DESC; DROP TABLE items; --"#);
+    let order = vec![OrderClause::new(bad_col, OrderDirection::Ascending)];
+    let result = storage.row_store().query("items", None, &order, None, None);
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "query ORDER BY with injected column name must be rejected"
+    );
+}
+
+/// `query` with a valid ORDER BY column name must succeed.
+#[test]
+fn sqlite_f7_query_order_by_accepts_valid_column() {
+    use persistence_kit::{Column, Storage};
+    use persistence_kit::predicate::{OrderClause, OrderDirection};
+    let storage = make_sqlite_storage();
+    let col = Column::new("items", "label");
+    let order = vec![OrderClause::new(col, OrderDirection::Ascending)];
+    let result = storage.row_store().query("items", None, &order, None, None);
+    assert!(result.is_ok(), "query ORDER BY with valid column name must succeed");
+}
+
+/// `query_projected` with an injected ORDER BY column name must be rejected.
+#[test]
+fn sqlite_f7_query_projected_order_by_rejects_injected_column() {
+    use persistence_kit::{Column, Storage, StorageError};
+    use persistence_kit::predicate::{OrderClause, OrderDirection};
+    let storage = make_sqlite_storage();
+    let bad_col = Column::new("items", r#"label" DESC; --"#);
+    let order = vec![OrderClause::new(bad_col, OrderDirection::Descending)];
+    let result = storage.row_store().query_projected("items", &["id", "label"], None, &order, None, None);
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "query_projected ORDER BY with injected column name must be rejected"
+    );
+}
+
+// ── F7: predicate column injection (end-to-end through SQLite) ──
+
+/// `query` with an injected column name in the predicate (Eq arm) must be rejected.
+#[test]
+fn sqlite_f7_predicate_eq_rejects_injected_column() {
+    use persistence_kit::{Column, Storage, StorageError, StoragePredicate, TypedValue};
+    let storage = make_sqlite_storage();
+    let bad_col = Column::new("items", r#"id" UNION SELECT 1,2,3; --"#);
+    let predicate = StoragePredicate::Eq(bad_col, TypedValue::Text("val".into()));
+    let result = storage.row_store().query("items", Some(&predicate), &[], None, None);
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "query with predicate Eq on injected column name must be rejected"
+    );
+}
+
+/// `query` with a valid predicate column name must succeed.
+#[test]
+fn sqlite_f7_predicate_eq_accepts_valid_column() {
+    use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
+    let storage = make_sqlite_storage();
+    let col = Column::new("items", "label");
+    let predicate = StoragePredicate::Eq(col, TypedValue::Text("nonexistent".into()));
+    let result = storage.row_store().query("items", Some(&predicate), &[], None, None);
+    // Predicate is valid even if no rows match.
+    assert!(result.is_ok(), "query with valid predicate column name must succeed");
+}
+
+/// `delete` with an injected predicate column name must be rejected.
+#[test]
+fn sqlite_f7_predicate_delete_rejects_injected_column() {
+    use persistence_kit::{Column, Storage, StorageError, StoragePredicate, TypedValue};
+    let storage = make_sqlite_storage();
+    let bad_col = Column::new("items", r#"id"; DROP TABLE items; --"#);
+    let predicate = StoragePredicate::Eq(bad_col, TypedValue::Bitmap(0));
+    let result = storage.row_store().delete("items", &predicate);
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "delete with injected predicate column name must be rejected"
+    );
+}
+
+// ── F10: skip-corrupt projection column injection ────────────────
+
+/// `query_projected_skip_corrupt` with an injected projection column name must be rejected.
+#[test]
+fn sqlite_f10_skip_corrupt_rejects_injected_projection_column() {
+    use persistence_kit::{Storage, StorageError};
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().query_projected_skip_corrupt(
+        "items",
+        &[r#"id" UNION SELECT 1,2,3; --"#],
+        None,
+        &[],
+        None,
+        None,
+    );
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "query_projected_skip_corrupt with injected column name must be rejected"
+    );
+}
+
+/// `query_projected_skip_corrupt` with valid projection columns must succeed.
+#[test]
+fn sqlite_f10_skip_corrupt_accepts_valid_projection_columns() {
+    use persistence_kit::Storage;
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().query_projected_skip_corrupt(
+        "items",
+        &["id", "label"],
+        None,
+        &[],
+        None,
+        None,
+    );
+    assert!(result.is_ok(), "query_projected_skip_corrupt with valid columns must succeed");
+    let (rows, skipped) = result.unwrap();
+    assert!(rows.is_empty(), "freshly-opened table must return zero rows");
+    assert_eq!(skipped, 0, "no rows to skip in an empty table");
+}
+
+/// `query_projected_skip_corrupt` with an injected table name must be rejected.
+#[test]
+fn sqlite_f10_skip_corrupt_rejects_injected_table_name() {
+    use persistence_kit::{Storage, StorageError};
+    let storage = make_sqlite_storage();
+    let result = storage.row_store().query_projected_skip_corrupt(
+        r#"items" WHERE 1=1; --"#,
+        &["id"],
+        None,
+        &[],
+        None,
+        None,
+    );
+    assert!(
+        matches!(result, Err(StorageError::InvalidIdentifier { .. })),
+        "query_projected_skip_corrupt with injected table name must be rejected"
+    );
+}
