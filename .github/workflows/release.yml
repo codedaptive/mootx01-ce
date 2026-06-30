@@ -744,7 +744,7 @@ jobs:
     steps:
       # Checkout MUST precede the artifact download: actions/checkout cleans its
       # working directory, so running it after the download would delete the
-      # just-downloaded assets/ tree. Checkout first (for scripts/minisign.pub),
+      # just-downloaded assets/ tree. Checkout first (for distribution/minisign.pub),
       # then populate assets/.
       - name: Checkout repository (for bundled public key)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -776,12 +776,12 @@ jobs:
       # checksums.txt.minisig. The .minisig file is uploaded as a release asset
       # alongside checksums.txt; Linux/POSIX installers (`install.sh`) and the
       # `mootx01 upgrade` command download and verify it against the public key
-      # bundled at scripts/minisign.pub in the repository.
+      # bundled at distribution/minisign.pub in the repository.
       #
       # OPERATOR ACTION REQUIRED to activate:
       #   1. Generate a keypair:
-      #        minisign -G -p scripts/minisign.pub -s /path/to/minisign.sec
-      #   2. Replace any PLACEHOLDER content in scripts/minisign.pub with the
+      #        minisign -G -p distribution/minisign.pub -s /path/to/minisign.sec
+      #   2. Replace any PLACEHOLDER content in distribution/minisign.pub with the
       #      generated public key and commit it.
       #   3. Add two GitHub repository secrets:
       #        MINISIGN_SECRET_KEY          — contents of /path/to/minisign.sec
