@@ -157,16 +157,27 @@ impl EstateBranch {
         estate.recall(frame, now).collect_all()
     }
 
-    /// Rebuild a `CaptureFrame` from a stored row, preserving content,
-    /// capture channel, room, the full lattice anchor, author, embedding
-    /// model, adjective sensitivity, and content kind (the fields the Swift
-    /// re-capture preserves).
+    /// Rebuild a `CaptureFrame` from a stored row, preserving all
+    /// security-relevant, placement-relevant, and lifecycle-relevant fields:
+    /// content, capture channel, room, wing (ADR-016 grant/federation
+    /// boundary), lattice anchor, author, embedding model, adjective
+    /// sensitivity, content kind, the full provenance bitmap
+    /// (source_type, channel, provenance_sensitivity, confirmation,
+    /// confidence), event_time, feature_flags, and exportability.
     ///
+    /// `wing_name` is the resolved display name of the drawer's grandparent
+    /// wing node (None → CaptureFrame falls through to the default wing
+    /// "Agentic Memory", preserving existing behaviour for default-wing rows
+    /// where the node-tree walk can't resolve the wing).
     /// `room_name` is the resolved display name of the drawer's parent
     /// room node — Drawer no longer stores wing/room strings directly
-    /// (ADR-017 node tree migration). Callers resolve it from the
-    /// source estate's NodeStore via `resolve_room_name`.
-    fn capture_frame_from(row: &Drawer, room_name: &str) -> CaptureFrame {
+    /// (ADR-017 node tree migration). Callers resolve both from the
+    /// source estate's NodeStore via `resolve_node_names`.
+    ///
+    /// `lineageID` is intentionally NOT preserved — branch promotion is
+    /// copy semantics, not move semantics; a new lineage prevents
+    /// unintended supersession cascades across estate boundaries.
+    fn capture_frame_from(row: &Drawer, wing_name: Option<&str>, room_name: &str) -> CaptureFrame {
         let mut frame = CaptureFrame::new(
             row.content.clone(),
             row.capture_channel(),
@@ -180,32 +191,68 @@ impl EstateBranch {
             row.added_by.clone(),
             row.embedding_model_id.clone(),
         );
+        // Operational: sensitivity, kind already decoded from operational/adjective bitmaps.
         frame.sensitivity = row.adjective_sensitivity();
         frame.kind = row.content_kind();
+        // Provenance bitmap axes — preserve original capture context so a
+        // promoted/merged/derived row reflects who captured it and how,
+        // not the branch-promotion agent's identity.
+        frame.source_type = row.source_type();
+        frame.provenance_channel = row.channel();
+        frame.provenance_sensitivity = row.sensitivity();
+        frame.confirmation = row.confirmation();
+        frame.confidence = row.confidence();
+        // Temporal: preserve original event_time so temporal recall accuracy
+        // is not reset to branch-promotion time for historical ingests.
+        // event_time is epoch seconds in both Drawer and CaptureFrame.
+        frame.event_time = Some(row.event_time);
+        // Feature flags: isKeystone, isLockedZone, hasLinks etc. affect
+        // wing boundary enforcement — must survive branch round-trips.
+        frame.feature_flags = row.feature_flags();
+        // Exportability: born-public drawers must remain public after
+        // branch promotion; born-private must remain private.
+        frame.exportability = row.exportability();
+        // Wing (ADR-016): the grant/federation boundary. None falls through
+        // to DEFAULT_WING_NAME in estate_verbs so existing default-wing rows
+        // are unaffected; non-default-wing rows land in the correct wing.
+        frame.wing = wing_name.map(|w| w.to_owned());
         frame
     }
 
-    /// Resolve a drawer's room display name from its parent_node_id
-    /// via a NodeStore reference. Falls back to empty string when the
-    /// store is absent or lookup fails (non-fatal). The NodeStore comes
-    /// from the coordinator's `node_stores` registry — `estate.node_store`
-    /// is `pub(crate)` in LocusKit and not accessible from this crate.
-    fn resolve_room_name(
+    /// Resolve a drawer's wing and room display names from its parent_node_id
+    /// via a NodeStore reference. Falls back to (None, "") when the store is
+    /// absent or lookup fails (non-fatal). wing = None means the node tree
+    /// could not be walked — CaptureFrame will fall through to defaultWing().
+    ///
+    /// Node topology (ADR-017): root → wing (depth 1) → room (depth 2) →
+    /// drawers. room_node.parent_id → wing_node.display_name.
+    ///
+    /// The NodeStore comes from the coordinator's `node_stores` registry —
+    /// `estate.node_store` is `pub(crate)` in LocusKit and not accessible
+    /// from this crate.
+    fn resolve_node_names(
         ns: Option<&Arc<locus_kit::node_store::NodeStore>>,
         drawer: &Drawer,
-    ) -> String {
+    ) -> (Option<String>, String) {
         let ns = match ns {
             Some(ns) => ns,
-            None => return String::new(),
+            None => return (None, String::new()),
         };
         let room_uuid = match Uuid::parse_str(&drawer.parent_node_id) {
             Ok(u) => u,
-            Err(_) => return String::new(),
+            Err(_) => return (None, String::new()),
         };
-        match ns.get_node(room_uuid) {
-            Ok(Some(n)) => n.display_name,
-            _ => String::new(),
-        }
+        let room_node = match ns.get_node(room_uuid) {
+            Ok(Some(n)) => n,
+            _ => return (None, String::new()),
+        };
+        let room_name = room_node.display_name.clone();
+        // Walk one level up: room_node.parent_id is the wing node's UUID.
+        let wing_name = room_node
+            .parent_id
+            .and_then(|wing_uuid| ns.get_node(wing_uuid).ok().flatten())
+            .map(|wing_node| wing_node.display_name);
+        (wing_name, room_name)
     }
 
     /// Build a fresh, isolated in-memory branch estate (owner encodes the
@@ -233,8 +280,11 @@ impl EstateBranch {
         let branch_estate = Self::new_branch_estate(branch_id, now)?;
         let mut snapshot_ids = BTreeSet::new();
         for row in snapshot_rows {
-            let room = Self::resolve_room_name(node_store, row);
-            let stored = branch_estate.capture(Self::capture_frame_from(row, &room), now)?;
+            let (wing, room) = Self::resolve_node_names(node_store, row);
+            let stored = branch_estate.capture(
+                Self::capture_frame_from(row, wing.as_deref(), &room),
+                now,
+            )?;
             snapshot_ids.insert(stored.id);
         }
         Ok(EstateBranch {
@@ -324,11 +374,16 @@ impl EstateBranch {
         for id in drawer_ids {
             match rows.iter().find(|r| &r.id == id) {
                 Some(row) => {
-                    let room = Self::resolve_room_name(
+                    // Wing integrity (ADR-016): resolve both wing and room so
+                    // non-default-wing rows land in the correct wing rather than
+                    // silently falling back to defaultWing() on merge.
+                    let (wing, room) = Self::resolve_node_names(
                         self.branch_estate.node_store(), row,
                     );
-                    self.parent_estate
-                        .capture(Self::capture_frame_from(row, &room), now)?;
+                    self.parent_estate.capture(
+                        Self::capture_frame_from(row, wing.as_deref(), &room),
+                        now,
+                    )?;
                     merged.push(id.clone());
                 }
                 None => skipped.push(id.clone()),
@@ -438,15 +493,17 @@ impl EstateCoordinator {
                 .into_iter()
                 .filter(|row| !branch.snapshot_ids.contains(&row.id))
                 .collect();
-            // Resolve room names while we still hold the branch estate
-            // reference (Drawer no longer stores room — ADR-017).
-            let resolved: Vec<(Drawer, String)> = rows
+            // Resolve wing and room names while we still hold the branch
+            // estate reference (Drawer no longer stores either — ADR-017).
+            // Wing integrity (ADR-016): non-default-wing rows must land in
+            // the correct wing after promotion, not silently in defaultWing().
+            let resolved: Vec<(Drawer, Option<String>, String)> = rows
                 .into_iter()
                 .map(|row| {
-                    let room = EstateBranch::resolve_room_name(
+                    let (wing, room) = EstateBranch::resolve_node_names(
                         branch.branch_estate.node_store(), &row,
                     );
-                    (row, room)
+                    (row, wing, room)
                 })
                 .collect();
             resolved
@@ -456,9 +513,14 @@ impl EstateCoordinator {
         // Phase 2 — capture each post-derivation row through the coordinator's
         // GLK-level verb so the encode queue (BM25/vector lane) is fed. Parity
         // of Swift `capture(handle, captureFrame, mode: .regular)` in `glkPromoteBranch`.
-        for (row, room) in &new_rows {
-            self.capture_with_mode(handle, EstateBranch::capture_frame_from(row, room), now, WriteMode::Regular)
-                .map_err(BranchError::from)?;
+        for (row, wing, room) in &new_rows {
+            self.capture_with_mode(
+                handle,
+                EstateBranch::capture_frame_from(row, wing.as_deref(), room),
+                now,
+                WriteMode::Regular,
+            )
+            .map_err(BranchError::from)?;
         }
 
         // Phase 3 — transition the branch to Won. This mutably borrows
@@ -817,6 +879,159 @@ mod tests {
             found,
             "promoted row must be reachable via CorpusBm25 lane after drain; got {} hits",
             results.hits.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wing integrity (ADR-016) — Finding A: branch re-capture preserves wing
+    //
+    // Before this fix `capture_frame_from` built a CaptureFrame without the
+    // `wing` field, silently re-filing every derived/promoted/merged row into
+    // DEFAULT_WING_NAME regardless of its original wing. These tests verify
+    // the fix across all three branch paths.
+    // -----------------------------------------------------------------------
+
+    /// Helper: open a fresh coordinator + estate, capture a wing-tagged row,
+    /// return (coordinator, handle). The coordinator carries the InMemory
+    /// node_store so resolveNodeNames can walk wing→room.
+    fn coord_with_wing_row(wing: &str, room: &str, content: &str) -> (EstateCoordinator, EstateHandle) {
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+        let handle = coord
+            .open(store, OwnerCredentials::new("wing-integrity-owner"), 0, 100)
+            .unwrap();
+        let mut frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            room,
+            LatticeAnchor::udc("000"),
+            "wing-integrity-agent",
+            "test-model-v1",
+        );
+        frame.wing = Some(wing.to_owned());
+        coord.capture(&handle, frame, NOW).unwrap();
+        (coord, handle)
+    }
+
+    /// Recall all rows in an estate whose wing matches `wing_name`.
+    fn recall_in_wing(
+        coord: &EstateCoordinator,
+        handle: &EstateHandle,
+        wing_name: &str,
+    ) -> Vec<locus_kit::drawer::Drawer> {
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed, Filter::InWing(wing_name.to_owned())]);
+        frame.hydration_level = HydrationLevel::Full;
+        coord.recall(handle, frame, NOW).unwrap()
+    }
+
+    // BR-WI-1: derive preserves wing (Finding A — derivation path).
+    //
+    // A row captured into the parent in "User Canon" must appear in the
+    // branch's "User Canon" wing after glk_derive_branch.
+    #[test]
+    fn br_wi1_derive_preserves_wing() {
+        let (mut coord, handle) = coord_with_wing_row("User Canon", "study", "wing-tagged-derive");
+
+        let bid = coord.glk_derive_branch("wing-derive-branch", &handle, NOW).unwrap();
+        let branch = coord.branch_handle_for(bid).unwrap();
+
+        // Recall from branch using InWing filter: the row must appear.
+        let mut frame = RecallFrame::new(vec![
+            Filter::Unconfirmed,
+            Filter::InWing("User Canon".to_owned()),
+        ]);
+        frame.hydration_level = HydrationLevel::Full;
+        let wing_rows: Vec<_> = branch
+            .recall_with(frame, NOW)
+            .into_iter()
+            .filter(|r| r.content == "wing-tagged-derive")
+            .collect();
+        assert_eq!(
+            wing_rows.len(),
+            1,
+            "derived branch row must be in 'User Canon' wing — wing was dropped before this fix"
+        );
+    }
+
+    // BR-WI-2: promote preserves wing (Finding A — promotion path).
+    //
+    // A row captured directly into the branch (post-derivation) in "User Canon"
+    // must land in "User Canon" in the parent estate after glk_promote_branch.
+    #[test]
+    fn br_wi2_promote_preserves_wing() {
+        let (mut coord, handle) = coord_with_wing_row("default-wing", "study", "seed");
+
+        let bid = coord.glk_derive_branch("wing-promote-branch", &handle, NOW).unwrap();
+
+        // Capture a wing-tagged row into the branch (post-derivation → new row).
+        let mut frame = CaptureFrame::new(
+            "branch-wing-tagged-promote",
+            CaptureChannel::Typed,
+            "study",
+            LatticeAnchor::udc("000"),
+            "agent",
+            "test-v1",
+        );
+        frame.wing = Some("User Canon".to_owned());
+        coord
+            .branch_handle_for(bid)
+            .unwrap()
+            .capture(frame, NOW)
+            .unwrap();
+
+        // Promote: the wing-tagged row should land in "User Canon" in the parent.
+        coord.glk_promote_branch(bid, &handle, NOW).unwrap();
+
+        let parent_wing_rows = recall_in_wing(&coord, &handle, "User Canon");
+        assert!(
+            parent_wing_rows.iter().any(|r| r.content == "branch-wing-tagged-promote"),
+            "promoted branch row must land in 'User Canon' wing — wing was dropped before this fix"
+        );
+    }
+
+    // BR-WI-3: derive preserves exportability (Finding A — field audit).
+    //
+    // A born-public row must remain public after derivation. Silently
+    // re-privatizing it would break recall filters scoped to exportable content.
+    #[test]
+    fn br_wi3_derive_preserves_exportability() {
+        use locus_kit::adjectives::AdjectiveExportability;
+
+        let (mut coord, handle) = {
+            let mut c = EstateCoordinator::new();
+            let store: Arc<dyn DrawerStore> =
+                Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+            let h = c
+                .open(store, OwnerCredentials::new("exp-owner"), 0, 100)
+                .unwrap();
+            let mut f = CaptureFrame::new(
+                "born-public-content",
+                CaptureChannel::Typed,
+                "pub-room",
+                LatticeAnchor::udc("000"),
+                "agent",
+                "test-v1",
+            );
+            f.exportability = AdjectiveExportability::Public;
+            c.capture(&h, f, NOW).unwrap();
+            (c, h)
+        };
+
+        let bid = coord.glk_derive_branch("exportability-branch", &handle, NOW).unwrap();
+        let branch = coord.branch_handle_for(bid).unwrap();
+
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        frame.hydration_level = HydrationLevel::Full;
+        let rows = branch.recall_with(frame, NOW);
+        let row = rows
+            .iter()
+            .find(|r| r.content == "born-public-content")
+            .expect("must find born-public row in branch");
+        assert_eq!(
+            row.exportability(),
+            AdjectiveExportability::Public,
+            "exportability must be preserved on derive — born-public row went private before fix"
         );
     }
 }

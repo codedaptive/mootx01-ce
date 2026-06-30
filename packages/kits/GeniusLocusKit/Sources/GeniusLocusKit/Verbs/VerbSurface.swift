@@ -1208,15 +1208,22 @@ public extension GeniusLocusKit {
         // drawers become BM25/vector searchable via the drain worker — a
         // direct parentEstate.capture() bypass the Corpus feed entirely.
         //
-        // Resolve parentNodeId → room names once for all new rows.
+        // Resolve parentNodeId → (wing, room) names once for all new rows.
         // Drawer no longer carries wing/room stored properties (node-tree
-        // migration); room is recovered from the BRANCH estate's node tree
-        // (branch rows have parentNodeIds pointing to branch-local nodes,
-        // not parent estate nodes).
+        // migration); wing and room are both recovered from the BRANCH
+        // estate's node tree (branch rows have parentNodeIds pointing to
+        // branch-local nodes, not parent estate nodes).
+        //
+        // Wing integrity (ADR-016): all security/placement/lifecycle fields
+        // are preserved on promotion so non-default-wing rows re-file into
+        // the correct wing rather than silently falling back to defaultWing().
+        // lineageID is intentionally NOT preserved — see derivation comment.
         let branchNodeIds = Array(Set(newRows.map(\.parentNodeId)))
         let branchNodeNames = try await concreteBranch.branchEstate.resolveNodeNames(parentNodeIds: branchNodeIds)
         for row in newRows {
-            let roomName = branchNodeNames[row.parentNodeId]?.room ?? ""
+            let names = branchNodeNames[row.parentNodeId]
+            let wingName = names?.wing       // nil → CaptureFrame defaults to defaultWing()
+            let roomName = names?.room ?? ""
             let captureFrame = CaptureFrame(
                 content: row.content,
                 channel: row.captureChannel,
@@ -1230,7 +1237,16 @@ public extension GeniusLocusKit {
                 addedBy: row.addedBy,
                 embeddingModelID: row.embeddingModelID,
                 sensitivity: row.adjectiveSensitivity,
-                kind: row.contentKind
+                kind: row.contentKind,
+                provenanceChannel: row.channel,
+                sourceType: row.sourceType,
+                provenanceSensitivity: row.sensitivity,
+                confirmation: row.confirmation,
+                confidence: row.confidence,
+                eventTime: row.eventTime,
+                featureFlags: row.featureFlags,
+                exportability: row.exportability,
+                wing: wingName
             )
             _ = try await capture(handle, captureFrame, mode: .regular)
         }
@@ -1290,11 +1306,16 @@ public extension GeniusLocusKit {
         let branchRows = try await concreteBranch.recall(frame)
         let rowsByID = Dictionary(uniqueKeysWithValues: branchRows.map { ($0.id, $0) })
 
-        // Resolve parentNodeId → room names once for all branch rows.
+        // Resolve parentNodeId → (wing, room) names once for all branch rows.
         // Drawer no longer carries wing/room stored properties (node-tree
-        // migration); room is recovered from the BRANCH estate's node tree
-        // (branch rows have parentNodeIds pointing to branch-local nodes,
-        // not parent estate nodes).
+        // migration); wing and room are both recovered from the BRANCH
+        // estate's node tree (branch rows have parentNodeIds pointing to
+        // branch-local nodes, not parent estate nodes).
+        //
+        // Wing integrity (ADR-016): all security/placement/lifecycle fields
+        // are preserved on merge so non-default-wing rows re-file into the
+        // correct wing rather than silently falling back to defaultWing().
+        // lineageID is intentionally NOT preserved — see derivation comment.
         let mergeNodeIdSet = Array(Set(branchRows.map(\.parentNodeId)))
         let mergeNodeNames = try await concreteBranch.branchEstate.resolveNodeNames(parentNodeIds: mergeNodeIdSet)
 
@@ -1309,8 +1330,11 @@ public extension GeniusLocusKit {
             // mode: .regular routes through the GLK encode pipeline so merged
             // drawers become BM25/vector searchable via the drain worker — a
             // direct parentEstate.capture() would bypass the Corpus feed entirely.
-            // Room resolved from the node tree (Drawer no longer stores wing/room).
-            let roomName = mergeNodeNames[row.parentNodeId]?.room ?? ""
+            // Wing and room both resolved from the node tree (Drawer no longer
+            // stores wing/room); wing nil → CaptureFrame defaults to defaultWing().
+            let names = mergeNodeNames[row.parentNodeId]
+            let wingName = names?.wing
+            let roomName = names?.room ?? ""
             let captureFrame = CaptureFrame(
                 content: row.content,
                 channel: row.captureChannel,
@@ -1324,7 +1348,16 @@ public extension GeniusLocusKit {
                 addedBy: row.addedBy,
                 embeddingModelID: row.embeddingModelID,
                 sensitivity: row.adjectiveSensitivity,
-                kind: row.contentKind
+                kind: row.contentKind,
+                provenanceChannel: row.channel,
+                sourceType: row.sourceType,
+                provenanceSensitivity: row.sensitivity,
+                confirmation: row.confirmation,
+                confidence: row.confidence,
+                eventTime: row.eventTime,
+                featureFlags: row.featureFlags,
+                exportability: row.exportability,
+                wing: wingName
             )
             _ = try await capture(handle, captureFrame, mode: .regular)
             merged.append(id)

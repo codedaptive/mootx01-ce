@@ -1553,6 +1553,16 @@ public extension Estate {
                 "reanchor requires toRoom, toWing, or toLattice"
             )
         }
+        // Wing non-empty invariant: when toWing is supplied it must be
+        // non-empty. An empty wing string would create a nameless wing
+        // node and violate the same invariant the capture path enforces.
+        // Mirror the capture-path guard so move_memory cannot produce an
+        // estate state that capture would refuse to create.
+        if let w = toWing, w.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw LocusKitError.invalidContent(
+                "reanchor: toWing must not be empty or whitespace-only"
+            )
+        }
         guard try await store.getDrawer(id: rowID) != nil else {
             throw LocusKitError.drawerNotFound(id: rowID)
         }
