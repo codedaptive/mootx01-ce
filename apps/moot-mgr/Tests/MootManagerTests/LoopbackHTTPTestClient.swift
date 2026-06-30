@@ -97,8 +97,14 @@ private func blockingLoopbackExchange(port: UInt16, request: [UInt8]) throws -> 
     guard fd >= 0 else { throw LoopbackHTTPError.connect }
     defer { close(fd) }
 
-    // Safety net: a server that fails to close must not hang the worker thread.
-    var tv = timeval(tv_sec: 5, tv_usec: 0)
+    // Generous receive timeout (90s) — a backstop against a server that never
+    // closes, NOT a tight per-request bound. On the macos-26 CI runner, loopback
+    // can take ~60s to deliver the first byte (the raw-socket SSE test passes
+    // only by waiting it out at ~62s; a 5s timeout fired empty before the slow
+    // response arrived, producing the spurious status=-1 failures). 90s leaves
+    // ample margin over the observed latency while still bounding a truly stuck
+    // read. Locally the response is immediate, so this never delays a real run.
+    var tv = timeval(tv_sec: 90, tv_usec: 0)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
     request.withUnsafeBytes { raw in
