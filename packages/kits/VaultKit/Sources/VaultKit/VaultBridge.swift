@@ -645,10 +645,25 @@ public struct VaultBridge: Sendable {
         // content-idempotent check (FINDING-1a). The cost is one extra blob
         // read per drawer versus .structured, which is acceptable at import time
         // since the vault is the authoritative source being reconciled.
+        //
+        // Security (Finding 6 — all-tier gap): the scan must cover ALL active
+        // (non-tombstoned) drawers regardless of confirmation state or sensitivity
+        // tier. The previous filterChain: [.unconfirmed] made confirmed, restricted,
+        // and secret lineages invisible to the collision guard — a hostile vault note
+        // claiming one of those lineage UUIDs with different content would bypass
+        // the guard and poison that lineage. The fix mirrors existingSensitivityByLineage,
+        // which already lifts the sensitivity ceiling to .secret for the same reason.
+        // This is an internal integrity guard only: lineage IDs and content hashes are
+        // read locally for collision detection and never leave this function.
         let drawers = try await kit.recall(
             handle,
             RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [
+                    .currentlyBelieve,
+                    .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                    .any([.trustworthy, .requiresConfirmation]),
+                    .sensitivityAtMost(.secret),
+                ],
                 hydrationLevel: .full,
                 limit: 10_000_000
             )

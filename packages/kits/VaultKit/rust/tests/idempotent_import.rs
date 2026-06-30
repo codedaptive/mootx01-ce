@@ -24,12 +24,13 @@ use std::sync::Arc;
 
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
+    adjectives::AdjectiveSensitivity,
     drawer_operational::CaptureChannel,
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::{LatticeAnchor, OwnerCredentials},
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
-    frames::CaptureFrame,
+    frames::{CaptureFrame, MutationKind},
 };
 use vault_kit::{DrawerMapping, ObsidianAdapter, VaultBridge};
 
@@ -298,6 +299,187 @@ fn moot_id_hijack_guard_blocks_body_replacement() {
     assert_eq!(
         victim_after.content, victim_content,
         "victim drawer content must be unchanged after hostile import"
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// Finding 6 (all-tier gap): the lineage-hijack guard must fire even when the
+/// victim drawer is CONFIRMED (userConfirmed) — not just when it is unconfirmed.
+/// Before the fix, `existing_drawer_state` used `filter_chain: vec![Filter::Unconfirmed]`,
+/// so confirmed lineages were invisible to the collision set and a hostile note
+/// claiming a confirmed lineage with different content would bypass the guard.
+///
+/// Mirrors Swift `mootIDHijackGuardBlocksBodyReplacementOnConfirmedLineage`.
+#[test]
+fn moot_id_hijack_guard_blocks_body_replacement_on_confirmed_lineage() {
+    let (mut coord, handle) = open_one();
+
+    // 1. Capture the victim drawer and confirm it (moves from unconfirmed → userConfirmed).
+    let victim_content = "confirmed content that a hostile note must not replace";
+    let victim_frame = CaptureFrame::new(
+        victim_content,
+        CaptureChannel::Typed,
+        "secure",
+        LatticeAnchor::udc("000"),
+        "owner",
+        "test-v1",
+    );
+    let victim = coord.capture(&handle, victim_frame, NOW).expect("capture victim");
+    // Confirm the drawer — moves it out of the unconfirmed pool.
+    // Before the fix, existing_drawer_state only scanned [Filter::Unconfirmed], so
+    // confirmed lineage IDs were invisible to the collision guard.
+    coord
+        .mutate(&handle, &victim.id, MutationKind::Confirm, None)
+        .expect("confirm victim");
+
+    // 2. Craft a hostile vault file: claims victim's lineage_id, different body, foreign path.
+    let vault = std::env::temp_dir()
+        .join(format!("vaultkit-hijack-confirmed-{}", uuid::Uuid::new_v4()));
+    write_note(
+        &vault,
+        "attack/confirmed-hijack.md",
+        &format!(
+            "---\nroom: secure\nmoot_id: {}\n---\nattacker-controlled replacement content targeting a confirmed drawer\n",
+            victim.lineage_id
+        ),
+    );
+
+    // 3. Import the hostile vault file.
+    let report = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("import hostile vault");
+
+    // 4. Guard must have fired: hostile lands as a NEW drawer (moot_id claim rejected).
+    assert_eq!(
+        report.drawers_written, 1,
+        "hostile file must land as a new drawer, not an update to the confirmed victim"
+    );
+    assert_eq!(
+        report.drawers_updated, 0,
+        "hostile import must not update the confirmed victim"
+    );
+
+    // 5. Victim's content must be completely unchanged.
+    let all_frame = RecallFrame {
+        filter_chain: vec![
+            Filter::CurrentlyBelieve,
+            Filter::Any(vec![
+                Filter::UserConfirmed,
+                Filter::Unconfirmed,
+                Filter::AutomatedConfirmedOnly,
+            ]),
+            Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+            Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
+        ],
+        hydration_level: HydrationLevel::Full,
+        limit: None,
+        ordering: Ordering::ByCaptureTimeDesc,
+        as_of: None,
+        trace_limit: None,
+    };
+    let all_drawers = coord.recall(&handle, all_frame, NOW).expect("recall all");
+    assert_eq!(
+        all_drawers.len(), 2,
+        "estate must have the confirmed victim + the isolated hostile drawer"
+    );
+    let victim_after = all_drawers
+        .iter()
+        .find(|d| d.lineage_id == victim.lineage_id)
+        .expect("confirmed victim lineage must still exist");
+    assert_eq!(
+        victim_after.content, victim_content,
+        "confirmed victim drawer content must be unchanged after hostile import"
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// Finding 6 (all-tier gap): the lineage-hijack guard must fire even when the
+/// victim drawer has elevated sensitivity (Restricted). Before the fix,
+/// `existing_drawer_state` used `filter_chain: vec![Filter::Unconfirmed]` which
+/// excluded restricted/secret drawers (default sensitivity ceiling), so a hostile
+/// note could claim those lineage IDs and bypass the guard.
+///
+/// Mirrors Swift `mootIDHijackGuardBlocksBodyReplacementOnRestrictedLineage`.
+#[test]
+fn moot_id_hijack_guard_blocks_body_replacement_on_restricted_lineage() {
+    let (mut coord, handle) = open_one();
+
+    // 1. Capture the victim drawer at restricted sensitivity tier.
+    let victim_content = "restricted content that must never be overwritten by a hostile import";
+    let mut victim_frame = CaptureFrame::new(
+        victim_content,
+        CaptureChannel::Typed,
+        "classified",
+        LatticeAnchor::udc("000"),
+        "owner",
+        "test-v1",
+    );
+    // Restricted tier: invisible to the default recall ceiling.
+    // Before the fix, existing_drawer_state scanned only [Filter::Unconfirmed]
+    // (with no sensitivity override) and thus could not see restricted drawers.
+    victim_frame.sensitivity = AdjectiveSensitivity::Restricted;
+    let victim = coord.capture(&handle, victim_frame, NOW).expect("capture restricted victim");
+
+    // 2. Craft a hostile vault file: claims victim's lineage_id, different body, foreign path.
+    let vault = std::env::temp_dir()
+        .join(format!("vaultkit-hijack-restricted-{}", uuid::Uuid::new_v4()));
+    write_note(
+        &vault,
+        "attack/restricted-hijack.md",
+        &format!(
+            "---\nroom: classified\nmoot_id: {}\nsensitivity: restricted\n---\nattacker-controlled replacement content targeting a restricted drawer\n",
+            victim.lineage_id
+        ),
+    );
+
+    // 3. Import the hostile vault file.
+    let report = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("import hostile vault");
+
+    // 4. Guard must have fired: hostile lands as a NEW drawer.
+    assert_eq!(
+        report.drawers_written, 1,
+        "hostile file must land as a new drawer, not an update to the restricted victim"
+    );
+    assert_eq!(
+        report.drawers_updated, 0,
+        "hostile import must not update the restricted victim"
+    );
+
+    // 5. Victim's content must be unchanged. Include restricted drawers via
+    //    SensitivityAtMost(Secret) — the same filter existing_drawer_state now uses.
+    let all_frame = RecallFrame {
+        filter_chain: vec![
+            Filter::CurrentlyBelieve,
+            Filter::Any(vec![
+                Filter::UserConfirmed,
+                Filter::Unconfirmed,
+                Filter::AutomatedConfirmedOnly,
+            ]),
+            Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+            Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
+        ],
+        hydration_level: HydrationLevel::Full,
+        limit: None,
+        ordering: Ordering::ByCaptureTimeDesc,
+        as_of: None,
+        trace_limit: None,
+    };
+    let all_drawers = coord.recall(&handle, all_frame, NOW).expect("recall all");
+    assert_eq!(
+        all_drawers.len(), 2,
+        "estate must have the restricted victim + the isolated hostile drawer"
+    );
+    let victim_after = all_drawers
+        .iter()
+        .find(|d| d.lineage_id == victim.lineage_id)
+        .expect("restricted victim lineage must still exist");
+    assert_eq!(
+        victim_after.content, victim_content,
+        "restricted victim drawer content must be unchanged after hostile import"
     );
 
     let _ = std::fs::remove_dir_all(&vault);

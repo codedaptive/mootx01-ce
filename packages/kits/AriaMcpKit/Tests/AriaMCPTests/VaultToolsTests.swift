@@ -1137,4 +1137,50 @@ struct VaultToolsTests {
         #expect(!FileManager.default.fileExists(atPath: target.path(percentEncoded: false)),
                 "symlink target must not be created; the manifest write must be refused")
     }
+
+    /// Finding 13: `writeManifest` must also check that the `.moot` PARENT directory
+    /// itself is not a symlink pointing outside the vault root. Without this check,
+    /// an attacker can pre-plant a symlink at `.moot` (pointing to a foreign directory)
+    /// and `createDirectory(at: dir, withIntermediateDirectories: true)` silently follows
+    /// it, creating the directory at the attacker-controlled path. The subsequent
+    /// leaf-symlink check on `export-manifest.json` does not fire because the file does
+    /// not exist at the now-foreign `.moot/export-manifest.json` path.
+    ///
+    /// The fix adds a parent-dir containment check (inline analog of
+    /// `ObsidianAdapter.ensureContainedInVault`) on `dir` after `createDirectory`,
+    /// mirroring the two-layer check note exports apply.
+    @Test func writeManifest_refusesSymlinkedMootParentDir() throws {
+        let fm = FileManager.default
+        let vault = fm.temporaryDirectory
+            .appendingPathComponent("moot-parent-symlink-guard-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: vault) }
+
+        // Pre-plant a symlink at the `.moot` path pointing to a directory
+        // OUTSIDE the vault root — exactly the attacker's setup.
+        let mootPath = vault.appendingPathComponent(".moot", isDirectory: true)
+        let foreignDir = fm.temporaryDirectory
+            .appendingPathComponent("foreign-moot-target-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: foreignDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: foreignDir) }
+        try fm.createSymbolicLink(at: mootPath, withDestinationURL: foreignDir)
+
+        // Verify the symlink was planted at the .moot path before we test.
+        let rv = try mootPath.resourceValues(forKeys: [.isSymbolicLinkKey])
+        #expect(rv.isSymbolicLink == true, ".moot must be a symlink before the guard test")
+
+        // A minimal manifest — content doesn't matter, the guard fires at dir creation.
+        let manifest = VaultTools.ExportManifest(
+            exportedAt: "2026-01-01T00:00:00Z", noteCount: 0, files: [:])
+
+        // writeManifest must throw — the symlinked .moot parent is foreign to the vault.
+        #expect(throws: (any Error).self) {
+            try VaultTools.writeManifest(manifest, to: vault)
+        }
+
+        // The foreign dir must NOT contain the manifest file — confirms the guard fired
+        // before any write reached the attacker-controlled path.
+        #expect(!fm.fileExists(atPath: foreignDir.appendingPathComponent("export-manifest.json").path),
+                "manifest must NOT be written into the foreign symlink target")
+    }
 }

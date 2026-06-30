@@ -875,9 +875,35 @@ pub fn write_manifest(
 ) -> Result<(), std::io::Error> {
     let moot_dir = vault_path.join(".moot");
     std::fs::create_dir_all(&moot_dir)?;
+
+    // Parent-dir containment guard (Finding 13): verify that the `.moot` directory
+    // itself resolves inside the vault root after create_dir_all. An attacker can
+    // pre-plant a symlink at the `.moot` path pointing to a foreign directory;
+    // create_dir_all silently follows it and creates the target there, so all
+    // subsequent writes land outside the vault. The leaf-symlink check below does
+    // not catch this because the manifest file does not yet exist at the now-foreign
+    // path.
+    //
+    // `canonicalize` follows symlinks and returns the real absolute path. If the
+    // resolved `.moot` path does not start with the resolved vault root, reject
+    // the write unconditionally. This is the inline analog of Swift
+    // `ObsidianAdapter.ensureContainedInVault`.
+    let vault_canonical = vault_path.canonicalize()?;
+    let moot_canonical  = moot_dir.canonicalize()?;
+    let vault_str = vault_canonical.to_string_lossy();
+    let moot_str  = moot_canonical.to_string_lossy();
+    if moot_str != vault_str.as_ref()
+        && !moot_str.starts_with(&format!("{}/", vault_str))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            ".moot parent directory resolves outside the vault root after symlink expansion; write refused",
+        ));
+    }
+
     let manifest_path = vault_path.join(MANIFEST_RELATIVE_PATH);
 
-    // Symlink-containment guard: refuse a pre-existing symlink at the manifest
+    // Leaf symlink-containment guard: refuse a pre-existing symlink at the manifest
     // path. symlink_metadata succeeds even for broken symlinks (unlike metadata),
     // so this correctly detects the attack vector regardless of symlink target.
     if manifest_path.exists() || manifest_path.symlink_metadata().is_ok() {

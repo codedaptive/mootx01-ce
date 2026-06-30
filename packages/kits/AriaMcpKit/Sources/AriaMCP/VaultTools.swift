@@ -652,9 +652,30 @@ enum VaultTools {
         let dir = vaultURL.appendingPathComponent(".moot", isDirectory: true)
         try FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true)
+
+        // Parent-dir containment guard (Finding 13): verify that the `.moot` directory
+        // itself resolves inside the vault root after `createDirectory`. An attacker can
+        // pre-plant a symlink at the `.moot` path pointing to a foreign directory;
+        // createDirectory(withIntermediateDirectories: true) silently follows it and
+        // creates the target there, so all subsequent writes land outside the vault.
+        // The leaf-symlink check below does not catch this because the manifest file
+        // does not yet exist at the now-foreign path.
+        //
+        // This is an inline analog of ObsidianAdapter.ensureContainedInVault — that
+        // helper is internal to VaultKit and unreachable from AriaMcpKit. The logic
+        // is identical: resolve symlinks on both sides and verify the dir path stays
+        // inside the vault root. Called after createDirectory so resolvingSymlinksInPath
+        // can fully walk any symlink chain that was pre-planted.
+        let vaultResolved = vaultURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let dirResolved   = dir.resolvingSymlinksInPath().standardizedFileURL.path
+        guard dirResolved == vaultResolved || dirResolved.hasPrefix(vaultResolved + "/") else {
+            throw VaultKitError.adapterError(
+                ".moot parent directory resolves outside the vault root after symlink expansion; write refused")
+        }
+
         let url = vaultURL.appendingPathComponent(manifestRelativePath)
 
-        // Symlink-containment guard: refuse a pre-existing symlink at the manifest
+        // Leaf symlink-containment guard: refuse a pre-existing symlink at the manifest
         // path. A symlink here could redirect the manifest write to an attacker-
         // controlled path outside the vault. This mirrors the guard
         // ObsidianAdapter.ensureWritableFileTarget applies to note write targets:

@@ -592,8 +592,28 @@ impl<'a> VaultBridge<'a> {
         // HydrationLevel::Full: required to populate drawer.content for the
         // content-idempotent check (FINDING-1a). Structured would leave content
         // blank, making every re-import appear changed.
+        //
+        // Security (Finding 6 — all-tier gap): the scan must cover ALL active
+        // (non-tombstoned) drawers regardless of confirmation state or sensitivity
+        // tier. The previous filter_chain: vec![Filter::Unconfirmed] made confirmed,
+        // restricted, and secret lineages invisible to the collision guard — a hostile
+        // vault note claiming one of those lineage IDs with different content would
+        // bypass the guard and poison that lineage. The fix mirrors
+        // existing_sensitivity_by_lineage (lines below), which already lifts the
+        // sensitivity ceiling to Secret for the same reason. This is an internal
+        // integrity guard only: lineage IDs and content hashes are read locally for
+        // collision detection and never leave this function.
         let frame = RecallFrame {
-            filter_chain: vec![Filter::Unconfirmed],
+            filter_chain: vec![
+                Filter::CurrentlyBelieve,
+                Filter::Any(vec![
+                    Filter::UserConfirmed,
+                    Filter::Unconfirmed,
+                    Filter::AutomatedConfirmedOnly,
+                ]),
+                Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+                Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
+            ],
             hydration_level: HydrationLevel::Full,
             limit: Some(10_000_000),
             ordering: Ordering::ByCaptureTimeDesc,
