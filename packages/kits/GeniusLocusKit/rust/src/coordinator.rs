@@ -3683,6 +3683,28 @@ impl EstateCoordinator {
 
     // MARK: - mine_apriori_rules
 
+    /// Hard ceiling on the number of audit entries materialized for Apriori
+    /// mining. `ordered_entries()` is HLC-ascending; we take the most-recent
+    /// MAX_APRIORI_AUDIT_ENTRIES entries (the tail of the sorted Vec).
+    ///
+    /// Rationale for 50,000:
+    ///   - Each UnifiedAuditEntry is ~150–200 bytes. 50,000 entries ≈ 10 MB
+    ///     of raw Vec allocation before Apriori work, well within a
+    ///     single-call memory budget for a local server.
+    ///   - A real human-driven estate producing 10 mutations per drawer
+    ///     at 1,000 drawers yields ~10,000 entries — safely under the cap.
+    ///   - Automated/adversarial loads that replay unbounded lifetime history
+    ///     are bounded to the most-recent 50,000 events, keeping mining
+    ///     latency and allocation predictable regardless of estate age.
+    ///   - Apriori's RowAttributeView layer applies last-HLC-wins deduplication
+    ///     per (tier, row, field), so the effective row count is much smaller
+    ///     than 50,000 in practice; the cap is a materialization guard, not
+    ///     an accuracy floor.
+    ///
+    /// Mirrors Swift's `maxAuditEntriesForMining` in
+    /// `EstateAssociationRuleMining.swift`.
+    const MAX_APRIORI_AUDIT_ENTRIES: usize = 50_000;
+
     /// Mine multi-antecedent Apriori association rules from the estate's
     /// audit log.
     ///
@@ -3715,6 +3737,20 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         thresholds: substrate_ml::apriori_mining::AprioriThresholds,
     ) -> Result<Vec<substrate_ml::apriori_mining::AprioriRule>, VerbDispatchError> {
+        self.mine_apriori_rules_with_limit(handle, thresholds, Self::MAX_APRIORI_AUDIT_ENTRIES)
+    }
+
+    /// Internal entry point for `mine_apriori_rules` that accepts an explicit
+    /// entry limit. The public surface always passes `MAX_APRIORI_AUDIT_ENTRIES`;
+    /// this variant exists so tests can exercise the cap at a small scale
+    /// without injecting 50,000 entries. Mirrors Swift's
+    /// `mineAprioriRules(estate:thresholds:entryLimit:)`.
+    pub(crate) fn mine_apriori_rules_with_limit(
+        &self,
+        handle: &EstateHandle,
+        thresholds: substrate_ml::apriori_mining::AprioriThresholds,
+        entry_limit: usize,
+    ) -> Result<Vec<substrate_ml::apriori_mining::AprioriRule>, VerbDispatchError> {
         use crate::audit::UnifiedAuditValue;
         use substrate_ml::row_attribute_view::{RowAuditEntry, RowAuditValue, RowAttributeView};
 
@@ -3728,11 +3764,23 @@ impl EstateCoordinator {
         let log = crate::hydration::feed_audit_log_from_estate(estate)
             .map_err(|e| VerbDispatchError::from(remap("mine_apriori_rules", "", e)))?;
 
-        let ordered = log.ordered_entries();
+        let all_ordered = log.ordered_entries();
 
-        if ordered.is_empty() {
+        if all_ordered.is_empty() {
             return Ok(vec![]);
         }
+
+        // Bound the materialization to the most-recent `entry_limit` entries
+        // (HLC-ascending tail). Prevents a caller-induced OOM/hang on estates
+        // with a large lifetime audit history. Entries beyond the cap are
+        // oldest-first; dropping them means the oldest events are excluded,
+        // which is the correct behavior for a recency-biased analysis window.
+        // Mirrors Swift's suffix(entryLimit) in mineAprioriRules(estate:thresholds:entryLimit:).
+        let ordered: &[_] = if all_ordered.len() > entry_limit {
+            &all_ordered[all_ordered.len() - entry_limit..]
+        } else {
+            &all_ordered
+        };
 
         // Convert each UnifiedAuditEntry to RowAuditEntry using the same
         // value mapping as Swift's `toRowAuditEntry` helper
@@ -7295,6 +7343,88 @@ mod tests {
         assert!(report.valid, "fed chain is intact");
         assert_eq!(report.entry_count, log.count());
         assert!(report.first_broken_at_millis.is_none());
+    }
+
+    // CAP-1: MAX_APRIORI_AUDIT_ENTRIES constant guard. If the cap is ever
+    // changed, this test fails loudly rather than silently regressing the
+    // safety property. Mirrors Swift's `auditEntriesCapConstantValue` test.
+    #[test]
+    fn cap1_max_apriori_audit_entries_constant_is_50000() {
+        assert_eq!(
+            EstateCoordinator::MAX_APRIORI_AUDIT_ENTRIES,
+            50_000,
+            "MAX_APRIORI_AUDIT_ENTRIES must be 50,000; change only with documented rationale"
+        );
+    }
+
+    // CAP-2: zero-limit edge case — mine_apriori_rules_with_limit(limit=0)
+    // must not panic and must return an empty rule set (no entries, no rows,
+    // no associations). Verifies the slice is bounds-safe at limit=0.
+    #[test]
+    fn cap2_zero_entry_limit_returns_empty_without_panic() {
+        let (coord, h) = open_one();
+        // Populate the estate so it has audit entries.
+        for _ in 0..4 {
+            coord.capture(&h, cap_frame("study"), NOW).expect("capture");
+        }
+        let thresholds = substrate_ml::apriori_mining::AprioriThresholds::new(
+            0.0, 0.0, 0.0, 2,
+        );
+        // entry_limit=0 means the slice is empty; Apriori over zero rows
+        // is vacuously empty. Must not panic.
+        let out = coord
+            .mine_apriori_rules_with_limit(&h, thresholds, 0)
+            .expect("must not error on zero-limit");
+        assert!(
+            out.is_empty(),
+            "zero-limit window must produce no rules (no transactions)"
+        );
+    }
+
+    // CAP-3: behavioral — when entry_limit is smaller than the full audit log,
+    // only the most-recent entries (HLC-ascending tail) are mined. Injects
+    // entries via real captures, then uses mine_apriori_rules_with_limit to
+    // restrict to a subset and verifies it returns without error. We cannot
+    // control the exact values produced by capture, but we can prove:
+    //   (a) full-limit ≥ entries (no truncation): result same as mine_apriori_rules.
+    //   (b) limit=1 (one entry, one row-attribute row): cannot form associations.
+    // Mirrors Swift's `auditEntriesCapExcludesOldestEntries` in spirit.
+    #[test]
+    fn cap3_entry_limit_restricts_mining_window() {
+        let (coord, h) = open_one();
+        // Capture 4 rows to populate the audit trail.
+        for _ in 0..4 {
+            coord.capture(&h, cap_frame("study"), NOW).expect("capture");
+        }
+        let thresholds = substrate_ml::apriori_mining::AprioriThresholds::new(
+            0.0, 0.0, 0.0, 2,
+        );
+
+        // Full-size limit (larger than any realistic audit log for this test):
+        // must agree with mine_apriori_rules.
+        let full_out = coord
+            .mine_apriori_rules_with_limit(&h, thresholds.clone(), 100_000)
+            .expect("full limit must not error");
+        let canonical_out = coord
+            .mine_apriori_rules(&h, thresholds.clone())
+            .expect("canonical path must not error");
+        assert_eq!(
+            full_out, canonical_out,
+            "full-limit path and canonical path must return identical results"
+        );
+
+        // Limit=1: a single audit entry produces at most one RowAttributeView
+        // row with one item; Apriori needs ≥2 items per transaction for rules.
+        // Result must not panic and must be empty or rule-free.
+        let single_out = coord
+            .mine_apriori_rules_with_limit(&h, thresholds, 1)
+            .expect("single-entry limit must not error");
+        // A single-entry row can produce at most one item, which cannot form
+        // an antecedent+consequent pair — no rules are possible.
+        assert!(
+            single_out.is_empty(),
+            "single-entry window cannot produce Apriori rules"
+        );
     }
 
     // ACC-5: feed_audit_log is idempotent — re-feeding the same trail is a

@@ -304,4 +304,151 @@ struct EstateAssociationRuleMiningTests {
         let twoAntecedent = rules.filter { $0.antecedent.count == 2 }
         #expect(twoAntecedent.count > 0, "maxK=3 should produce 2-antecedent rules")
     }
+
+    // MARK: - Audit-entry cap (vulnerability fix)
+
+    // These two tests verify the audit-entry cap introduced to prevent a
+    // caller-induced OOM/hang via `moot_lens_apriori` on estates with large
+    // lifetime audit histories. The cap is exercised via the internal
+    // `mineAprioriRules(estate:thresholds:entryLimit:)` overload so the
+    // test does not need to inject 50,000 entries.
+
+    // CAP-1: constant value guard. If the constant is ever changed, this
+    // test fails loudly rather than silently regressing the safety property.
+    @Test("maxAuditEntriesForMining constant is 50,000")
+    func auditEntriesCapConstantValue() {
+        // The cap must be large enough that normal human-driven estates
+        // (≤ 10,000 entries) mine fully, and small enough that adversarial
+        // replay cannot OOM the server process.
+        #expect(GeniusLocusKit.maxAuditEntriesForMining == 50_000)
+    }
+
+    // CAP-2: behavioral — entries outside the cap (oldest) are excluded,
+    // entries within the cap (newest) are included. Uses the internal
+    // `entryLimit` override so the cap boundary can be exercised with a
+    // small fixture (10 old entries + 10 new entries, limit = 10).
+    //
+    // Design:
+    //   Old group (HLC 1-10): 5 rows × 2 fields, values (f.x=1, f.y=2).
+    //     Pattern: Item(field:0, value:1) ↔ Item(field:1, value:2)
+    //
+    //   New group (HLC 11-20): 5 rows × 2 fields, values (f.x=3, f.y=4).
+    //     Pattern: Item(field:0, value:3) ↔ Item(field:1, value:4)
+    //
+    //   With entryLimit=10: only the 10 newest entries (the new group) are
+    //   visible to the Apriori engine. Rules must involve values 3 and 4
+    //   (not 1 or 2). The old group is excluded by the cap.
+    //
+    //   With entryLimit=20 (all entries): both groups are visible. Rows are
+    //   distinct (different UUIDs), so both patterns contribute, and rules
+    //   for values 1, 2, 3, 4 can appear.
+    //
+    // RowAttributeView vocab sorts field paths alphabetically: "f.x" < "f.y"
+    // → "f.x" is field index 0, "f.y" is field index 1.
+    // Item values come from Int64 low-byte extraction (val & 0x3F).
+    //   value 1  → Item(field:0, value:1) or Item(field:1, value:1) etc.
+    @Test("Apriori cap excludes oldest entries and mines only the bounded window")
+    func auditEntriesCapExcludesOldestEntries() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // 5 row UUIDs for the old group, 5 for the new group.
+        let oldRows = (0..<5).map { _ in UUID() }
+        let newRows = (0..<5).map { _ in UUID() }
+
+        var entries: [UnifiedAuditEntry] = []
+
+        // Old group: HLC 1-10. Values (1, 2).
+        for (i, rowID) in oldRows.enumerated() {
+            entries.append(UnifiedAuditEntry(
+                tier: .locus,
+                hlc: hlc(Int64(i + 1), 0),
+                verb: .capture,
+                rowID: rowID,
+                fieldPath: "f.x",
+                beforeValue: .null,
+                afterValue: .integer(1)
+            ))
+            entries.append(UnifiedAuditEntry(
+                tier: .locus,
+                hlc: hlc(Int64(i + 1), 1),
+                verb: .capture,
+                rowID: rowID,
+                fieldPath: "f.y",
+                beforeValue: .null,
+                afterValue: .integer(2)
+            ))
+        }
+
+        // New group: HLC 11-20. Values (3, 4).
+        for (i, rowID) in newRows.enumerated() {
+            entries.append(UnifiedAuditEntry(
+                tier: .locus,
+                hlc: hlc(Int64(11 + i), 0),
+                verb: .capture,
+                rowID: rowID,
+                fieldPath: "f.x",
+                beforeValue: .null,
+                afterValue: .integer(3)
+            ))
+            entries.append(UnifiedAuditEntry(
+                tier: .locus,
+                hlc: hlc(Int64(11 + i), 1),
+                verb: .capture,
+                rowID: rowID,
+                fieldPath: "f.y",
+                beforeValue: .null,
+                afterValue: .integer(4)
+            ))
+        }
+
+        await kit.injectAuditEntries(entries, for: handle)
+
+        let thresholds = AprioriThresholds(
+            minSupport: 0.5,
+            minConfidence: 0.5,
+            minLift: 1.0,
+            maxK: 2
+        )
+
+        // With entryLimit=10 (the new group only): rules for values 3 and 4.
+        let cappedRules = try await kit.mineAprioriRules(
+            estate: handle,
+            thresholds: thresholds,
+            entryLimit: 10
+        )
+        // All items in capped rules must have values 3 or 4 (the new-group values).
+        // Values 1 and 2 belong to the excluded old group.
+        for rule in cappedRules {
+            for item in rule.antecedent {
+                // Low-6-bit extraction: value 3 → 3, value 4 → 4.
+                #expect(item.value == 3 || item.value == 4,
+                    "capped mining must only see values from the new group (3 or 4), got \(item.value)")
+            }
+            let cVal = rule.consequent.value
+            #expect(cVal == 3 || cVal == 4,
+                "capped mining must only see values from the new group (3 or 4), got \(cVal)")
+        }
+        // Cap must not exclude all entries — with minSupport=0.5 over 5 rows
+        // each carrying both fields, we expect exactly 2 rules.
+        #expect(cappedRules.count == 2, "expected 2 rules from the new-group window")
+
+        // With entryLimit=20 (all entries): both groups are included. Old and
+        // new rows are distinct, so both patterns contribute. The combined
+        // dataset has 10 rows with two distinct (field, value) pairs each.
+        // All 10 rows carry f.x and f.y, so all items are frequent at 0.5.
+        // We expect rules — but both old-group (1,2) and new-group (3,4)
+        // values will appear because all 10 rows are included.
+        let allRules = try await kit.mineAprioriRules(
+            estate: handle,
+            thresholds: thresholds,
+            entryLimit: 20
+        )
+        let allValues = Set(allRules.flatMap { rule in
+            rule.antecedent.map { $0.value } + [rule.consequent.value]
+        })
+        // When all entries are included, the old-group values (1 and 2)
+        // must appear in at least one rule (not filtered out).
+        #expect(allValues.contains(1) || allValues.contains(2),
+            "uncapped mining should see old-group values (1 or 2)")
+    }
 }
