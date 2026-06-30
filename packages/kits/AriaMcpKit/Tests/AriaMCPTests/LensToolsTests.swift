@@ -8,6 +8,11 @@
 // (trust_grounded_synthesis), the lens-refusal face
 // (partial_cue_recall with an unknown anchor), and a two-estate
 // federated lens (estate_divergence via estateIDB routing).
+//
+// Also covers the sensitivity policy gate (ce-recall-policy-gate):
+// moot_lens_node_motion and moot_estate_map are verified to honour the
+// default BitmapEvaluator ceiling (SensitivityAtMost(.elevated)) —
+// restricted and secret drawers are treated as not-found by both tools.
 
 import Testing
 import Foundation
