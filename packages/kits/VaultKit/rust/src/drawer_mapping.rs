@@ -376,6 +376,30 @@ impl DrawerMapping {
                 .push(fact);
         }
 
+        // CAND-EXP-PROV: Build the set of exportable "wing/room" pairs from the
+        // already-scope-filtered `drawers` vec. Used below to filter `_distilled_from`
+        // provenance tunnel targets so a normal exported factoid cannot leak the location
+        // (wing/room) of a secret or scope-excluded restricted source drawer.
+        //
+        // Rationale: provenance tunnels carry only `target_wing`/`target_room` — not a
+        // `target_drawer_id` (it is None in this path; see import at `target_drawer_id = None`).
+        // The check must therefore be keyed on the wing+room pair rather than the drawer id.
+        // The `included_drawer_ids` set above covers KG fact anchors (keyed by drawer.id);
+        // this set covers provenance tunnel targets (keyed by wing/room display name).
+        //
+        // Round-trip note: dropping an excluded target from `distilled_from_sources`
+        // means the provenance edge to that excluded drawer will NOT survive a vault
+        // round-trip (export → re-import). This is the correct privacy behavior —
+        // the excluded drawer's location must not be persisted in any exported artifact.
+        let included_wing_rooms: std::collections::HashSet<String> = drawers
+            .iter()
+            .filter_map(|d| {
+                node_names
+                    .get(&d.parent_node_id)
+                    .map(|(w, r)| format!("{}/{}", w, r))
+            })
+            .collect();
+
         let notes: Vec<NoteIR> = drawers
             .iter()
             .map(|drawer| {
@@ -388,8 +412,22 @@ impl DrawerMapping {
                     .map(|ts| {
                         ts.iter()
                             .filter(|t| {
-                                t.source_drawer_id.as_deref() == Some(&drawer.id)
-                                    && t.kind == TunnelKind::References
+                                if t.source_drawer_id.as_deref() != Some(&drawer.id) {
+                                    return false;
+                                }
+                                if t.kind != TunnelKind::References {
+                                    return false;
+                                }
+                                // Content-reference tunnels (non-provenance) are always included.
+                                // Provenance tunnels (`_distilled_from`) are included only if their
+                                // target drawer's wing/room pair is in the exportable set. This prevents
+                                // a normal exported factoid from leaking the location of a secret or
+                                // restricted-under-default-scope source drawer via frontmatter.
+                                if t.label == "_distilled_from" {
+                                    let target_key = format!("{}/{}", t.target_wing, t.target_room);
+                                    return included_wing_rooms.contains(&target_key);
+                                }
+                                true
                             })
                             .collect()
                     })
