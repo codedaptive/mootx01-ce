@@ -14,12 +14,12 @@ jobs:
     name: Build macOS arm64
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Select Swift 6.2 toolchain (latest stable Xcode)
         # macos-26 carries the Swift 6.2 OS runtime the packages require; pair it
         # with the latest stable Xcode so the build toolchain and runtime match.
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
 
@@ -95,7 +95,7 @@ jobs:
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-arm64
           path: ${{ env.ASSET }}
@@ -191,7 +191,7 @@ jobs:
           rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
 
       - name: Upload macOS .pkg installer (arm64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-arm64-pkg
           path: ${{ env.PKG_ASSET }}
@@ -200,11 +200,11 @@ jobs:
     name: Build macOS x86_64
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Select Swift 6.2 toolchain (latest stable Xcode)
         # See arm64 job: macos-26 ships the 6.2 runtime; latest-stable Xcode matches it.
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
 
@@ -277,7 +277,7 @@ jobs:
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-x86_64
           path: ${{ env.ASSET }}
@@ -349,7 +349,7 @@ jobs:
           rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
 
       - name: Upload macOS .pkg installer (x86_64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-x86_64-pkg
           path: ${{ env.PKG_ASSET }}
@@ -363,13 +363,13 @@ jobs:
     name: Build Linux x86_64
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -393,7 +393,7 @@ jobs:
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-x86_64
           path: ${{ env.ASSET }}
@@ -404,13 +404,13 @@ jobs:
     # the old `ubuntu-22.04-arm64` matched no runner and queued forever.
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -434,7 +434,7 @@ jobs:
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-arm64
           path: ${{ env.ASSET }}
@@ -449,15 +449,15 @@ jobs:
     name: Build Windows x86_64
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -485,7 +485,7 @@ jobs:
           "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-x86_64
           path: ${{ env.ASSET }}
@@ -528,7 +528,7 @@ jobs:
           "SETUP_ASSET=$setupAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload Windows setup installer (x86_64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-x86_64-setup
           path: ${{ env.SETUP_ASSET }}
@@ -541,15 +541,15 @@ jobs:
     name: Build Windows arm64
     runs-on: windows-11-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-pc-windows-msvc
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -577,7 +577,7 @@ jobs:
           "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-arm64
           path: ${{ env.ASSET }}
@@ -610,7 +610,7 @@ jobs:
           "SETUP_ASSET=$setupAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload Windows setup installer (arm64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-arm64-setup
           path: ${{ env.SETUP_ASSET }}
@@ -632,12 +632,12 @@ jobs:
         # This includes the new installer artifacts (macos-arm64-pkg,
         # macos-x86_64-pkg, windows-x86_64-setup, windows-arm64-setup) alongside
         # the existing binary archives.
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: assets
 
       - name: Checkout repository (for bundled public key)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Generate checksums.txt
         working-directory: assets
@@ -720,7 +720,7 @@ jobs:
         # MINISIGN_SECRET_KEY is populated and the signing step ran).
         # The glob 'assets/checksums.txt.minisig' is silently absent if the
         # signing step was skipped; action-gh-release ignores missing glob matches.
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             assets/checksums.txt
