@@ -1883,16 +1883,26 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
+        // Active = non-tombstoned rows.
         let active = drawers.filter { $0.tombstonedAt == nil }
 
-        // Resolve all active drawers' parentNodeIds to display names once.
-        let nodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: active.map(\.parentNodeId))
+        // Sensitivity ceiling — matches the default BitmapEvaluator ceiling
+        // (SensitivityAtMost(.elevated)) that normal recall applies. Restricted
+        // and secret rows are excluded from the public map so their wing/room
+        // names and counts are not visible to callers that do not hold an
+        // elevated-sensitivity grant. isBulkExportable is true for .normal and
+        // .elevated, false for .restricted and .secret.
+        let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
 
-        // Group by wing then room, counting ALL drawers per location (including
-        // hint memories in AI_Charter_Hint — they are normal drawers now).
+        // Resolve all visible drawers' parentNodeIds to display names once.
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: visible.map(\.parentNodeId))
+
+        // Group by wing then room, counting visible (sensitivity-gated) drawers
+        // per location. Charter drawers (_charter structural drawers) are
+        // auto-seeded at normal sensitivity and pass through unchanged.
         var map: [String: [String: Int]] = [:]
-        for d in active {
+        for d in visible {
             let names = nodeNames[d.parentNodeId]
             let wing = names?.wing ?? ""
             let room = names?.room ?? ""

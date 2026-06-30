@@ -243,6 +243,154 @@ struct LensToolsTests {
         #expect(body.contains("conflicting_facts:"))
         #expect(body.contains("none"))
     }
+
+    // MARK: - Sensitivity policy gate (ce-recall-policy-gate)
+
+    /// Helper: capture a drawer with an explicit sensitivity tier.
+    /// Used by the policy gate tests to seed drawers at restricted/secret/elevated tiers.
+    private func captureWithSensitivity(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle,
+        content: String, room: String,
+        sensitivity: AdjectiveSensitivity
+    ) async throws -> Drawer {
+        let estate = try await kit.estate(for: handle)
+        return try await estate.capture(CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: room,
+            latticeAnchor: .udc("004"),
+            addedBy: "policy-gate-test",
+            embeddingModelID: "test-model-v1",
+            sensitivity: sensitivity))
+    }
+
+    /// `moot_lens_node_motion` with a normal-sensitivity drawer succeeds.
+    /// Guard: the gate must not block legitimate (normal/elevated) queries.
+    @Test func nodeMotionNormalSensitivitySucceeds() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-ok"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let drawer = try await captureWithSensitivity(
+            kit, handle, content: "normal memory", room: "study", sensitivity: .normal)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_node_motion",
+            arguments: .object(["rowID": .string(drawer.id)]))
+
+        // Successful dispatch: isError false, node_motion header present.
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false,
+                "normal-sensitivity drawer must pass the node_motion gate")
+        let body = try text(result)
+        #expect(body.contains("node_motion:"), "response must contain node_motion header")
+    }
+
+    /// `moot_lens_node_motion` with a restricted drawer is rejected as not-found.
+    /// The gate must treat restricted rows as opaque — callers must not discover
+    /// that the row exists (isError true, same as an unknown id).
+    @Test func nodeMotionRestrictedSensitivityIsNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-r"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let drawer = try await captureWithSensitivity(
+            kit, handle, content: "restricted content", room: "vault", sensitivity: .restricted)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_node_motion",
+            arguments: .object(["rowID": .string(drawer.id)]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == true,
+                "restricted-sensitivity drawer must be rejected by node_motion gate")
+    }
+
+    /// `moot_lens_node_motion` with a secret drawer is rejected as not-found.
+    @Test func nodeMotionSecretSensitivityIsNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-s"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let drawer = try await captureWithSensitivity(
+            kit, handle, content: "secret content", room: "vault", sensitivity: .secret)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_node_motion",
+            arguments: .object(["rowID": .string(drawer.id)]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == true,
+                "secret-sensitivity drawer must be rejected by node_motion gate")
+    }
+
+    /// `moot_lens_node_motion` with an unknown rowID returns an error (pre-existing
+    /// behaviour — confirms gate short-circuits before the audit read).
+    @Test func nodeMotionUnknownRowIDIsNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-x"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_node_motion",
+            arguments: .object(["rowID": .string(UUID().uuidString)]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == true,
+                "unknown rowID must produce a not-found error")
+    }
+
+    /// `moot_estate_map` excludes restricted and secret drawers from wing/room counts.
+    /// A wing with ONLY restricted/secret rows must not appear in the output.
+    @Test func estateMapExcludesRestrictedAndSecretRows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "em-sr"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Normal row — must appear in map.
+        _ = try await captureWithSensitivity(
+            kit, handle, content: "public info", room: "reference", sensitivity: .normal)
+        // Restricted row — must NOT appear in map.
+        _ = try await captureWithSensitivity(
+            kit, handle, content: "restricted info", room: "vault", sensitivity: .restricted)
+        // Secret row — must NOT appear in map.
+        _ = try await captureWithSensitivity(
+            kit, handle, content: "top-secret", room: "vault", sensitivity: .secret)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_map",
+            arguments: JSONValue.object([String: JSONValue]()))
+
+        let body = try text(result)
+        // "vault" room comes from restricted/secret rows only — must be absent.
+        #expect(!body.contains("vault"),
+                "restricted/secret rooms must be excluded from estate_map output")
+        // "reference" room comes from the normal row — must be present.
+        #expect(body.contains("reference"),
+                "normal-sensitivity rooms must appear in estate_map output")
+    }
+
+    /// `moot_estate_map` with an elevated-sensitivity drawer includes it.
+    /// Elevated is within the default BitmapEvaluator ceiling (normal + elevated = bulk-exportable).
+    @Test func estateMapIncludesElevatedSensitivity() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "em-el"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await captureWithSensitivity(
+            kit, handle, content: "elevated info", room: "elevated-room", sensitivity: .elevated)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_map",
+            arguments: JSONValue.object([String: JSONValue]()))
+
+        let body = try text(result)
+        #expect(body.contains("elevated-room"),
+                "elevated-sensitivity drawer must appear in estate_map — within default ceiling")
+    }
 }
 
 // MARK: - Security hardening — window ordering and param clamping

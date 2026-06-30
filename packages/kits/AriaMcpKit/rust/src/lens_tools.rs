@@ -35,6 +35,7 @@ use cognition_kit::{
     run_trust_grounded_synthesis, run_tunnel_successor, CueMode,
 };
 use genius_locus_kit::{bridge_audit_event, event_lag_pairs};
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_operational::ContentKind;
 use locus_kit::tunnel_operational::TunnelKind;
 use substrate_ml::apriori_mining::AprioriThresholds;
@@ -254,6 +255,38 @@ pub fn dispatch(
             // write-time anomaly verdict. Mirrors Swift LensTools moot_lens_node_motion
             // (NodeMotionLens.run + classify over GeniusLocusKit.nodeAuditEntries).
             let row_id = require_string(args, "rowID")?;
+
+            // Sensitivity gate — mirrors the default BitmapEvaluator ceiling
+            // (SensitivityAtMost(.elevated)) that normal recall applies. Without
+            // this check, audit metadata (volatility, event count, UDC trajectory)
+            // for restricted/secret rows would be visible to any caller, bypassing
+            // the access-control posture.
+            //
+            // Resolution order:
+            //   1. Drawer not found (unknown id) → not-found error
+            //   2. Drawer tombstoned             → not-found error
+            //   3. Sensitivity restricted/secret → not-found error
+            //   4. Otherwise                     → proceed to motion fold
+            let drawer_opt = estate.store.get_drawer(row_id).map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INTERNAL_ERROR,
+                    format!("get_drawer failed: {e}"),
+                )
+            })?;
+            let drawer = match drawer_opt {
+                Some(d) => d,
+                None => return Ok(error_result(&format!("memory not found: {row_id}"))),
+            };
+            if drawer.tombstoned_at.is_some() {
+                return Ok(error_result(&format!("memory not found: {row_id}")));
+            }
+            // AdjectiveSensitivity lives in adjective_bitmap bits 6–11 (the same
+            // field the BitmapEvaluator sensitivity ceiling gates in Swift). Extract
+            // via the cookbook §2.3 shift: (adjective_bitmap >> 6) & 0x3F.
+            let sensitivity = AdjectiveSensitivity::from_raw((drawer.adjective_bitmap >> 6) & 0x3F);
+            if sensitivity == AdjectiveSensitivity::Restricted || sensitivity == AdjectiveSensitivity::Secret {
+                return Ok(error_result(&format!("memory not found: {row_id}")));
+            }
 
             // Read the memory's audit events and bridge them to unified entries —
             // the same accessor + bridge the precedence lens uses. audit_events_for_row

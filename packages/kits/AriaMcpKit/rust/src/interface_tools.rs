@@ -1589,20 +1589,36 @@ fn run_estate_map(
         .map(|m| m.estate_name)
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Use all_drawers (unfiltered) then filter to active (non-tombstoned) rows,
-    // mirroring Swift's:
+    // Use all_drawers (unfiltered) then apply two filters:
+    //   1. Active: non-tombstoned rows (mirrors Swift runEstateMap).
+    //   2. Sensitivity ceiling: exclude restricted and secret drawers to match
+    //      the default BitmapEvaluator ceiling (SensitivityAtMost(.elevated)).
+    //      Without this filter, restricted/secret rows contribute wing/room names
+    //      and counts to the public map, bypassing the access-control posture.
+    //
+    // AdjectiveSensitivity is read from adjective_bitmap bits 6–11 (cookbook §2.3
+    // shift: (adjective_bitmap >> 6) & 0x3F). Normal (0) and Elevated (16) pass;
+    // Restricted (32) and Secret (48) are excluded. Charter drawers (_charter
+    // structural drawers) are auto-seeded at normal sensitivity and pass through.
+    //
+    // Mirrors Swift:
     //   let active = drawers.filter { $0.tombstonedAt == nil }
+    //   let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
     let all = coord
         .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
-    let drawers: Vec<_> = all.into_iter().filter(|d| d.tombstoned_at.is_none()).collect();
+    let drawers: Vec<_> = all.into_iter().filter(|d| {
+        if d.tombstoned_at.is_some() { return false; }
+        let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
+        sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
+    }).collect();
 
-    // Resolve wing/room display names from node tree for all drawers.
+    // Resolve wing/room display names from node tree for all visible drawers.
     let map_node_ids: Vec<String> = drawers.iter().map(|d| d.parent_node_id.clone()).collect();
     let map_node_names = coord.resolve_drawer_node_names(&estate.handle, &map_node_ids);
 
-    // Group by wing then room, counting ALL drawers per location (including hint
-    // memories in AI_Charter_Hint — they are normal memories now).
+    // Group by wing then room, counting visible (sensitivity-gated) drawers per
+    // location. Charter drawers (AI_Charter_Hint) pass at normal sensitivity.
     let mut tree: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>> =
         std::collections::BTreeMap::new();
     for d in &drawers {
