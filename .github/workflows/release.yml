@@ -4,6 +4,22 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual debug trigger: build a single platform from a branch without tagging
+  # and without waiting for the slow legs (e.g. windows-11-arm). A real tag push
+  # always builds every platform and runs the publish (release) job; a manual
+  # run builds only the chosen platform and skips publishing.
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform(s) to build (manual debug runs only — does not publish)'
+        type: choice
+        default: all
+        options:
+          - all
+          - macos
+          - linux
+          - windows-x64
+          - windows-arm64
 
 permissions:
   contents: write
@@ -22,6 +38,7 @@ jobs:
   # ── macOS builds (arm64 + x86_64) ─────────────────────────────────────────
   build-macos-arm64:
     name: Build macOS arm64
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos' }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -234,6 +251,7 @@ jobs:
 
   build-macos-x86_64:
     name: Build macOS x86_64
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos' }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -423,6 +441,7 @@ jobs:
   # proxy, serve, uninstall, upgrade. Verified green by rust-cli.yml.
   build-linux-x86_64:
     name: Build Linux x86_64
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -468,6 +487,7 @@ jobs:
 
   build-linux-arm64:
     name: Build Linux arm64
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux' }}
     # GitHub-hosted arm64 Linux label is `ubuntu-22.04-arm` (no `-arm64` suffix);
     # the old `ubuntu-22.04-arm64` matched no runner and queued forever.
     runs-on: ubuntu-22.04-arm
@@ -521,6 +541,7 @@ jobs:
   # library, not the user-facing CLI.
   build-windows-x86_64:
     name: Build Windows x86_64
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -619,6 +640,7 @@ jobs:
   # for Snapdragon-class Windows-on-ARM machines.
   build-windows-arm64:
     name: Build Windows arm64
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
     runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -704,6 +726,9 @@ jobs:
   # ── Create GitHub release + attach assets ──────────────────────────────────
   release:
     name: Create Release
+    # Publish only on a real tag push. Manual debug runs build a subset and
+    # never publish (and would have skipped 'needs' jobs anyway).
+    if: ${{ github.event_name == 'push' }}
     needs:
       - build-macos-arm64
       - build-macos-x86_64
