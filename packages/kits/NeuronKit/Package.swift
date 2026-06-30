@@ -42,12 +42,12 @@ let package = Package(
     dependencies: [
         .package(path: "../../libs/EideticLib"),
         // LatticeLib supplies Tokenizer.tokenize (UAX #29 word boundaries) and
-        // LatticeLib.wordClass(_:tagger:) with the .hmm choice, which is the
-        // deterministic HMM/Viterbi novel-token tagger whose output is
-        // byte-identical Swift↔Rust. HMMFeatureExtractor (the production
-        // distillation feature extractor in Lenses/HMMFeatureExtractor.swift)
-        // depends on both. Citation: Distillation.swift §1 design note; mission
-        // feat/distillation-hmm-extractor.
+        // LatticeLib.wordClass(_:tagger:recordNovel:) with .hmm and recordNovel:false,
+        // which is the deterministic HMM/Viterbi novel-token tagger whose output is
+        // byte-identical Swift↔Rust. The recordNovel:false flag suppresses pool
+        // accumulation so memory-drawer content is not leaked to the pool pipeline.
+        // HMMFeatureExtractor (Lenses/HMMFeatureExtractor.swift) depends on both.
+        // Citation: Distillation.swift §1 design note; fix/ce-hmm-pool-leak.
         .package(path: "../../libs/LatticeLib"),
         // IntellectusLib is the zero-dependency telemetry leaf.
         // NeuronKit emits self-report metrics at hybrid recall, dreaming
