@@ -77,11 +77,39 @@ public extension GeniusLocusKit {
 
     // MARK: Apriori
 
+    /// Hard ceiling on the number of audit entries materialized for Apriori
+    /// mining. `orderedEntries` is HLC-ascending; we take the most-recent
+    /// `maxAuditEntriesForMining` via `suffix(_:)`.
+    ///
+    /// Rationale for 50,000:
+    ///   - Each UnifiedAuditEntry is ~150–200 bytes. 50,000 entries ≈ 10 MB
+    ///     of raw Array allocation before Apriori work, well within a
+    ///     single-call memory budget for a local server.
+    ///   - A real human-driven estate producing 10 mutations per drawer
+    ///     at 1,000 drawers yields ~10,000 entries — safely under the cap.
+    ///   - Automated/adversarial loads that replay unbounded lifetime history
+    ///     are bounded to the most-recent 50,000 events, keeping mining
+    ///     latency and allocation predictable regardless of estate age.
+    ///   - Apriori's RowAttributeView layer applies last-HLC-wins deduplication
+    ///     per (tier, row, field), so the effective row count is much smaller
+    ///     than 50,000 in practice; the cap is a materialization guard, not
+    ///     an accuracy floor.
+    ///
+    /// Mirrors Rust's `MAX_APRIORI_AUDIT_ENTRIES` const in `coordinator.rs`.
+    static let maxAuditEntriesForMining: Int = 50_000
+
     /// Mine multi-antecedent Apriori rules from the estate's audit log.
     ///
     /// Calls `currentAuditLog(in:)` to refresh and snapshot the audit log,
-    /// converts each entry's `afterValue` to a `RowAuditEntry`, builds
-    /// `RowAttributeView` rows, and delegates to `AprioriMining.mine`.
+    /// bounds the entry set to the most-recent `maxAuditEntriesForMining`
+    /// entries (HLC-ascending tail), converts each entry's `afterValue` to a
+    /// `RowAuditEntry`, builds `RowAttributeView` rows, and delegates to
+    /// `AprioriMining.mine`.
+    ///
+    /// The entry cap prevents a caller-induced OOM/hang on estates with a
+    /// large lifetime audit history. Dropping the oldest entries means the
+    /// analysis window covers recent activity, which is the correct behavior
+    /// for a recency-biased Apriori pass.
     ///
     /// - Parameters:
     ///   - estate: handle for the target estate.
@@ -94,8 +122,30 @@ public extension GeniusLocusKit {
         estate: EstateHandle,
         thresholds: AprioriThresholds
     ) async throws -> [AprioriRule] {
+        try await mineAprioriRules(
+            estate: estate,
+            thresholds: thresholds,
+            entryLimit: GeniusLocusKit.maxAuditEntriesForMining
+        )
+    }
+
+    /// Internal entry point for `mineAprioriRules` that accepts an explicit
+    /// entry limit. The public surface always passes `maxAuditEntriesForMining`;
+    /// this variant exists so tests can exercise the cap at a small scale
+    /// without injecting 50,000 entries.
+    internal func mineAprioriRules(
+        estate: EstateHandle,
+        thresholds: AprioriThresholds,
+        entryLimit: Int
+    ) async throws -> [AprioriRule] {
         let log = try await currentAuditLog(in: estate)
-        let auditEntries = log.orderedEntries.map { toRowAuditEntry($0) }
+        // Bound the materialization to the most-recent `entryLimit` entries.
+        // orderedEntries is HLC-ascending; suffix(_:) takes the tail, which is
+        // the most-recent window. Dropping the oldest entries means the analysis
+        // window covers recent activity — correct for a recency-biased Apriori pass.
+        // Mirrors Rust's &all_ordered[all_ordered.len() - MAX..] slice in coordinator.rs.
+        let bounded = log.orderedEntries.suffix(entryLimit)
+        let auditEntries = bounded.map { toRowAuditEntry($0) }
         let rows = RowAttributeView.from(auditEntries: auditEntries)
         return AprioriMining.mine(rows: rows, thresholds: thresholds)
     }
