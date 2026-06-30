@@ -193,6 +193,17 @@ public actor HTTPReadAPI {
     /// any request parsing runs. Mirrors the Rust port's `LoopbackConnGate`.
     private let connGate: MootMgrConnGate
 
+    /// Count of SSE streams currently open on this server. Actor-isolated: only
+    /// `streamEvents` increments/decrements this counter. The cap (8) prevents a
+    /// single observer from holding all `connGate` slots with long-lived SSE
+    /// streams, starving POST /api/control/* requests. 8 is generous for a local
+    /// dashboard (typically 1-2 tabs). The cap is separate from `connGate` so a
+    /// burst of normal API requests is not affected when the SSE cap is full.
+    private var activeSSECount: Int = 0
+    /// Maximum concurrent SSE streams. 8 covers realistic local dashboard use
+    /// (multiple browser tabs) while preventing unbounded slot consumption.
+    private let maxSSEConnections: Int = 8
+
     /// The listening socket fd; -1 when not running.
     private var listenFD: Int32 = -1
     /// The actual bound port (resolved when requestedPort was 0).
@@ -344,6 +355,31 @@ public actor HTTPReadAPI {
         // stream's source + lifetime are the consumer's (ADR-LOOPBACKHTTP-001).
         // streamEvents owns the fd from here and closes it when the stream ends.
         if request.method == "GET", request.path == "/api/events", request.wantsEventStream {
+            // CSRF/Origin guard: a browser from an origin other than a loopback
+            // address must not be allowed to open the 3600-second SSE loop. The Host
+            // guard above already caught DNS-rebinding Host spoofing; this Origin
+            // guard additionally blocks a cross-origin browser page that sends a
+            // non-loopback Origin. Absent Origin (curl / direct connections) is
+            // allowed. Mirrors the same guard in AriaMcpKit HTTPServer.serve() at
+            // the SSE branch and in route() for normal GET endpoints.
+            guard Self.isOriginAllowed(request.origin) else {
+                HTTPResponse.json(status: 403, body: Data(#"{"error":"forbidden_origin"}"#.utf8)).send(fd: fd)
+                close(fd)
+                return
+            }
+            // SSE concurrent-connection cap: prevents a single observer from holding
+            // all connGate slots with long-lived SSE streams, starving POST
+            // /api/control/* requests. Cap is separate from connGate so normal API
+            // calls are unaffected. Shed immediately with 503 — SSE clients reconnect
+            // automatically (EventSource spec). The connGate slot is released in the
+            // defer above; the SSE stream holds only the fd, not a gate slot.
+            guard activeSSECount < maxSSEConnections else {
+                HTTPResponse.json(status: 503, body: Data(#"{"error":"sse_capacity_exceeded"}"#.utf8)).send(fd: fd)
+                close(fd)
+                return
+            }
+            activeSSECount += 1
+            defer { activeSSECount -= 1 }
             await streamEvents(fd: fd)
             return
         }

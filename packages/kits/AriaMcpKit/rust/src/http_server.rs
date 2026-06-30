@@ -376,6 +376,14 @@ pub fn run_http_loop(
             update_inflight_hwm(in_flight);
             let start = Instant::now();
 
+            // Bound blocking reads: a peer that trickles bytes cannot stall a
+            // worker thread longer than this window, occupying a gate slot
+            // indefinitely. 30 seconds mirrors moot-mgr's serve() SO_RCVTIMEO
+            // and Swift HTTPServer.serve()'s setsockopt(SO_RCVTIMEO). Errors
+            // from set_read_timeout are non-fatal — the request parser will
+            // time out at OS level if the timeout is somehow unavailable.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+
             // Read the request bytes BEFORE locking the dispatcher and BEFORE
             // the SSE check. A slow client holds the TCP socket open while
             // writing its request; reading here — outside the Mutex — means a
@@ -395,6 +403,21 @@ pub fn run_http_loop(
                     gate_clone.release();
                     let elapsed_ns = start.elapsed().as_nanos() as u64;
                     record_latency_ns(elapsed_ns);
+
+                    // DNS-rebinding guard for SSE: checked here (before route())
+                    // since SSE is intercepted before route() is called. Mirrors
+                    // Swift HTTPServer.serve() which checks isLoopbackHost before
+                    // the SSE branch. Non-loopback Host → 421.
+                    if !is_loopback_host(req.host.as_deref()) {
+                        let body = br#"{"error":"misdirected_request"}"#;
+                        let head = format!(
+                            "HTTP/1.1 421 Misdirected Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(body);
+                        return;
+                    }
 
                     // CSRF/origin guard mirrors Swift HTTPServer.serve() SSE branch.
                     if !is_origin_allowed(req.origin.as_deref()) {
@@ -527,6 +550,11 @@ pub fn run_http_loop_for_test(
 
                 let start = Instant::now();
 
+                // Bound blocking reads: mirrors run_http_loop and moot-mgr's
+                // 30-second SO_RCVTIMEO. Prevents a slow-header attacker from
+                // occupying a gate slot indefinitely during the test variant.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+
                 // Read request BEFORE locking the dispatcher (fix #26).
                 let request = read_request(&mut stream, 4 * 1024 * 1024);
 
@@ -536,6 +564,18 @@ pub fn run_http_loop_for_test(
                         // Release normal gate early before entering long-lived stream.
                         gate_c.release();
                         let _ = start.elapsed();
+
+                        // DNS-rebinding guard: same as run_http_loop SSE branch.
+                        if !is_loopback_host(req.host.as_deref()) {
+                            let body = br#"{"error":"misdirected_request"}"#;
+                            let head = format!(
+                                "HTTP/1.1 421 Misdirected Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(head.as_bytes());
+                            let _ = stream.write_all(body);
+                            return;
+                        }
 
                         if !is_origin_allowed(req.origin.as_deref()) {
                             let body = br#"{"error":"forbidden_origin"}"#;
@@ -613,6 +653,9 @@ struct HttpRequest {
     path: String,
     /// Raw query string after '?', or "".
     query: String,
+    /// The Host header value (host[:port] without scheme), or None if absent.
+    /// Used by the DNS-rebinding guard on GET routes: non-loopback Host → 421.
+    host: Option<String>,
     origin: Option<String>,
     /// The Accept header value, or None.
     accept: Option<String>,
@@ -764,6 +807,7 @@ fn read_request(stream: &mut TcpStream, max_body_bytes: usize) -> Option<HttpReq
     };
 
     let mut content_length = 0usize;
+    let mut host: Option<String> = None;
     let mut origin: Option<String> = None;
     let mut accept: Option<String> = None;
     for line in lines {
@@ -774,6 +818,8 @@ fn read_request(stream: &mut TcpStream, max_body_bytes: usize) -> Option<HttpReq
             let name = name.trim();
             if name.eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("host") {
+                host = Some(value.trim().to_string());
             } else if name.eq_ignore_ascii_case("origin") {
                 origin = Some(value.trim().to_string());
             } else if name.eq_ignore_ascii_case("accept") {
@@ -798,7 +844,7 @@ fn read_request(stream: &mut TcpStream, max_body_bytes: usize) -> Option<HttpReq
         body.truncate(want);
     }
 
-    Some(HttpRequest { method, path, query, origin, accept, body })
+    Some(HttpRequest { method, path, query, host, origin, accept, body })
 }
 
 /// Route one request to `(status, body)`. The parse → decode → dispatch → encode
@@ -821,6 +867,14 @@ fn route(request: &HttpRequest, dispatcher: &Dispatcher, stats_store: Option<&St
     // be modelled as a stateless request/response pair.
     // Mirrors Swift HTTPServer.route() which also evaluates GET before POST.
     if request.method == "GET" {
+        // DNS-rebinding guard on GET routes: a browser from a rebinding domain
+        // always sends a Host header matching that domain. Native MCP clients and
+        // curl omit Host or send the loopback address. Reject any GET whose Host
+        // is present and non-loopback → 421 Misdirected Request (RFC 7540 §9.1.2).
+        // Mirrors moot-mgr http_read_api.rs route() and Swift HTTPServer.route().
+        if !is_loopback_host(request.host.as_deref()) {
+            return (421, br#"{"error":"misdirected_request"}"#.to_vec());
+        }
         return match request.path.as_str() {
             "/api/graph"         => get_graph_snapshot(&dispatcher.registry, stats_store),
             "/api/lattice"       => get_lattice_snapshot(&dispatcher.registry),
@@ -944,6 +998,41 @@ fn is_valid_origin_suffix(suffix: &str) -> bool {
         || suffix.strip_prefix(':').is_some_and(|port| {
             !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
         })
+}
+
+/// True if the Host header is acceptable for a GET route: absent/empty (curl /
+/// native connections that omit Host) or a loopback host+port pair.
+///
+/// The Host header is `host` or `host:port` — no scheme. IPv6 literals carry
+/// brackets: `[::1]` or `[::1]:PORT`. Absent/empty Host is allowed (curl, direct
+/// native connections). Mirrors Swift `HTTPServer.isLoopbackHost` and moot-mgr's
+/// `HTTPReadAPI.isLoopbackHost` / Rust `is_loopback_host` in http_read_api.rs.
+fn is_loopback_host(host: Option<&str>) -> bool {
+    match host.map(str::trim) {
+        None | Some("") => true, // absent or empty — allow (curl / direct)
+        Some(h) => {
+            let h_lower = h.to_ascii_lowercase();
+            // Strip port. IPv6 literals `[::1]` or `[::1]:PORT` require special
+            // handling because they contain colons inside the brackets.
+            let bare = if h_lower.starts_with('[') {
+                // Extract content inside the leading `[…]`.
+                let inner = h_lower
+                    .split(']')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches('[');
+                inner.to_string()
+            } else {
+                // IPv4 or hostname: strip port after the LAST colon.
+                // rfind not find so "127.0.0.1:4242" → "127.0.0.1".
+                match h_lower.rfind(':') {
+                    Some(pos) => h_lower[..pos].to_string(),
+                    None => h_lower,
+                }
+            };
+            matches!(bare.as_str(), "127.0.0.1" | "localhost" | "::1")
+        }
+    }
 }
 
 /// Find the first index of `needle` in `haystack`.

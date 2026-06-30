@@ -1788,7 +1788,16 @@ extension ToolDispatcher {
     func runReadJournal(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let agentName = try optionalString(args["agent"], argument: "agent") ?? Self.mcpAgentName
-        let lastN = try optionalInt(args["last_n"], argument: "last_n") ?? 10
+        // Clamp `last_n` through the shared boundary funnel: rejects negatives/zero with
+        // invalidParams (a bare optionalInt would let -1 through → SQLite LIMIT -1 = all rows),
+        // caps at 500 to prevent unbounded diary scans. Default 10 matches the moot_write_journal
+        // convention and the Rust port's default. Parity: matches run_read_journal in dispatch.rs.
+        let lastN = try Self.clampLimit(
+            try optionalInt(args["last_n"], argument: "last_n"),
+            argument: "last_n",
+            default: 10,
+            ceiling: Self.limitHardCeiling
+        )
         let entries = try await kit.readDiaryEntries(in: handle, agentName: agentName, lastN: lastN)
         let lines = entries.map { e -> String in
             let filed = ISO8601DateFormatter().string(from: e.filedAt)

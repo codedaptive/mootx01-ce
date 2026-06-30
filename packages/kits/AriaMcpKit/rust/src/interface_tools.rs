@@ -1445,9 +1445,15 @@ fn run_read_journal(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let agent = optional_string(args, "agent")?.unwrap_or("mcp-agent");
-    let last_n = optional_integer(args, "last_n")?
-        .map(|n| n as usize)
-        .unwrap_or(10);
+    // Clamp last_n through the shared boundary funnel: rejects negatives/zero with
+    // invalidParams (bare usize cast lets -1 overflow to usize::MAX → truncate no-op = all rows),
+    // caps at LIMIT_HARD_CEILING=500. Default 10. Parity: matches Swift clampLimit in runReadJournal.
+    let last_n = crate::dispatch::clamp_limit(
+        optional_integer(args, "last_n")?,
+        "last_n",
+        10,
+        crate::dispatch::LIMIT_HARD_CEILING,
+    )?;
 
     let coord = estate.coord.lock().unwrap();
     let mut entries = coord

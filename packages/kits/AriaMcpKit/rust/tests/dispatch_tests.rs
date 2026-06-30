@@ -1519,6 +1519,72 @@ fn read_journal_row_uses_iso8601_bracketed_timestamp() {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. Finding #4 — last_n clamping in moot_read_journal
+// ---------------------------------------------------------------------------
+
+/// last_n=-1 must return invalidParams (code -32602), not all rows.
+/// Before the fix, the bare `optional_integer → n as usize` cast silently
+/// turned -1 into usize::MAX → `entries.truncate(usize::MAX)` is a no-op →
+/// the caller could receive the entire diary table.
+#[test]
+fn read_journal_negative_last_n_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_read_journal",
+        &args!["last_n" => -1i64],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    );
+    // clamp_limit propagates the error; dispatch_tool returns Err.
+    match result {
+        Err(e) => {
+            // Verify the error is specifically invalidParams.
+            assert_eq!(e.code, -32602, "expected invalidParams (-32602); got code {}", e.code);
+        }
+        Ok(v) => {
+            // The error may be wrapped in a JSON-RPC error result object if the
+            // dispatch path returns Ok(JSONRPCResponse::failure(…)).
+            let is_error_field = v.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+            assert!(is_error_field, "last_n=-1 must yield an error result; got: {v:?}");
+        }
+    }
+}
+
+/// last_n=0 must also return invalidParams (0 is not ≥ 1).
+#[test]
+fn read_journal_zero_last_n_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_read_journal",
+        &args!["last_n" => 0i64],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    );
+    match result {
+        Err(e) => assert_eq!(e.code, -32602),
+        Ok(v) => {
+            let is_error_field = v.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+            assert!(is_error_field, "last_n=0 must yield an error result; got: {v:?}");
+        }
+    }
+}
+
+/// last_n=1000 (above ceiling 500) must be silently clamped — not an error.
+#[test]
+fn read_journal_huge_last_n_is_clamped_silently() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_read_journal",
+        &args!["last_n" => 1000i64],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("last_n=1000 must not error — clamped to 500 silently");
+    // Should be a success result (empty journal on fresh estate).
+    assert!(is_success(&result), "last_n=1000 must succeed; got: {result:?}");
+}
+
+// ---------------------------------------------------------------------------
 // 8. Tier 5 — Estate
 // ---------------------------------------------------------------------------
 
