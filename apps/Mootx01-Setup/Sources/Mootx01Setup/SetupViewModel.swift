@@ -145,7 +145,8 @@ final class SetupViewModel {
                 _ = try? DepthInstaller.apply(
                     clientID: client.client.id,
                     depth: .default,
-                    homeDirectory: home
+                    homeDirectory: home,
+                    binaryPath: binaryPath
                 )
             }
         }
