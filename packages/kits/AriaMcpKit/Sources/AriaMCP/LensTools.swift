@@ -571,6 +571,34 @@ enum LensTools {
 
         case "moot_lens_node_motion":
             let rowID = try requireString(args, "rowID")
+            // Sensitivity gate — mirrors the default BitmapEvaluator ceiling
+            // (SensitivityAtMost(.elevated)) that normal recall applies. Without
+            // this check, audit metadata (volatility, event count, UDC trajectory)
+            // for restricted/secret rows would be visible to any caller regardless
+            // of sensitivity tier, bypassing the access-control posture.
+            //
+            // Resolution order:
+            //   1. Drawer not found (unknown id)          → not-found error
+            //   2. Drawer tombstoned                      → not-found error
+            //      (tombstoned = permanently erased; audit data must not surface)
+            //   3. Sensitivity above .elevated (restricted or secret) → not-found
+            //      (matches the BitmapEvaluator ceiling for default recall)
+            //   4. Otherwise → proceed to motion fold
+            let estate = try await kit.estate(for: handle)
+            let resolved = try await estate.getDrawers(ids: [rowID])
+            guard let drawer = resolved.first else {
+                return ToolDispatcher.errorResult("memory not found: \(rowID)")
+            }
+            guard drawer.tombstonedAt == nil else {
+                return ToolDispatcher.errorResult("memory not found: \(rowID)")
+            }
+            guard drawer.adjectiveSensitivity.isBulkExportable else {
+                // Sensitivity above the default ceiling (restricted or secret) —
+                // treat as not found to avoid leaking the existence of these
+                // memories. isBulkExportable is true for normal + elevated, false
+                // for restricted + secret, matching BitmapEvaluator's ceiling.
+                return ToolDispatcher.errorResult("memory not found: \(rowID)")
+            }
             let motion = try await NodeMotionLens.run(kit: kit, handle: handle, rowID: rowID)
             let anomaly = NodeMotionLens.classify(motion: motion)
             let trajectory = motion.anchorTrajectory.map(String.init).joined(separator: " → ")

@@ -5273,6 +5273,271 @@ fn federated_search_over_ceiling_limit_is_clamped() {
         "over-ceiling limit must yield a well-formed no-grant result; got: {result:?}");
 }
 
+// ---------------------------------------------------------------------------
+// Recall policy gate — sensitivity ceiling enforcement
+//
+// Tests that moot_lens_node_motion and moot_estate_map honour the default
+// BitmapEvaluator ceiling (SensitivityAtMost(Elevated)), which excludes
+// rows at Restricted and Secret tiers from read surfaces.
+//
+// Findings addressed:
+//   A: moot_lens_node_motion bypassed the sensitivity ceiling when fetching
+//      audit entries for a target rowID (LensTools / lens_tools.rs).
+//   B: moot_estate_map counted restricted/secret rows in wing/room tallies
+//      (ToolDispatch / interface_tools.rs).
+// ---------------------------------------------------------------------------
+
+/// Helper: capture a memory into the default estate with a specific sensitivity tier.
+/// Returns the row ID of the created drawer.
+fn capture_with_sensitivity(
+    registry: &EstateRegistry,
+    content: &str,
+    room: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        room,
+        LatticeAnchor::udc("004"),
+        "policy-gate-test",
+        "test-model-v1",
+    );
+    // Set sensitivity tier directly on the frame before capture.
+    frame.sensitivity = sensitivity;
+
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("capture_with_sensitivity must succeed");
+    drawer.id.clone()
+}
+
+/// moot_lens_node_motion on a Normal-sensitivity drawer must succeed.
+/// Gate: Normal is bulk-exportable, so the motion analysis proceeds.
+#[test]
+fn node_motion_normal_sensitivity_succeeds() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let row_id = capture_with_sensitivity(
+        &registry,
+        "normal-sensitivity content for motion lens",
+        "policy-gate/normal",
+        AdjectiveSensitivity::Normal,
+    );
+
+    let result = dispatch_tool(
+        "moot_lens_node_motion",
+        &args!["rowID" => row_id.as_str()],
+        &registry,
+        &ledger,
+    ).expect("node_motion on Normal drawer must not be a transport fault");
+
+    // Normal drawers are bulk-exportable — the tool must succeed.
+    assert!(
+        is_success(&result),
+        "node_motion on Normal drawer must succeed (isError:false); got: {result:?}"
+    );
+}
+
+/// moot_lens_node_motion on a Restricted-sensitivity drawer must return
+/// isError:true with "memory not found". The tool must not reveal that
+/// the row exists at a higher sensitivity tier.
+#[test]
+fn node_motion_restricted_is_not_found() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let row_id = capture_with_sensitivity(
+        &registry,
+        "restricted content — must not surface via motion lens",
+        "policy-gate/restricted",
+        AdjectiveSensitivity::Restricted,
+    );
+
+    let result = dispatch_tool(
+        "moot_lens_node_motion",
+        &args!["rowID" => row_id.as_str()],
+        &registry,
+        &ledger,
+    ).expect("node_motion on Restricted drawer must not be a transport fault");
+
+    // Restricted drawers are NOT bulk-exportable — must return isError:true.
+    assert!(
+        is_tool_error(&result),
+        "node_motion on Restricted drawer must be refused (isError:true); got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains("memory not found"),
+        "refusal message must say 'memory not found'; got: {text}"
+    );
+}
+
+/// moot_lens_node_motion on a Secret-sensitivity drawer must return
+/// isError:true with "memory not found". Secret is above the default ceiling.
+#[test]
+fn node_motion_secret_is_not_found() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let row_id = capture_with_sensitivity(
+        &registry,
+        "secret content — must not surface via motion lens",
+        "policy-gate/secret",
+        AdjectiveSensitivity::Secret,
+    );
+
+    let result = dispatch_tool(
+        "moot_lens_node_motion",
+        &args!["rowID" => row_id.as_str()],
+        &registry,
+        &ledger,
+    ).expect("node_motion on Secret drawer must not be a transport fault");
+
+    // Secret drawers are NOT bulk-exportable — must return isError:true.
+    assert!(
+        is_tool_error(&result),
+        "node_motion on Secret drawer must be refused (isError:true); got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains("memory not found"),
+        "refusal message must say 'memory not found'; got: {text}"
+    );
+}
+
+/// moot_lens_node_motion on an unknown rowID must return isError:true.
+/// Confirms the "not found" path for non-existent rows.
+#[test]
+fn node_motion_unknown_row_id_is_not_found() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_lens_node_motion",
+        &args!["rowID" => "00000000-0000-0000-0000-000000000000"],
+        &registry,
+        &ledger,
+    ).expect("node_motion unknown rowID must not be a transport fault");
+
+    assert!(
+        is_tool_error(&result),
+        "node_motion unknown rowID must be refused (isError:true); got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains("memory not found"),
+        "refusal message must say 'memory not found'; got: {text}"
+    );
+}
+
+/// moot_estate_map must exclude Restricted and Secret drawers from wing/room counts.
+/// Only Normal and Elevated drawers must appear in the estate map.
+#[test]
+fn estate_map_excludes_restricted_and_secret_rows() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Seed one Normal drawer — must appear in map.
+    capture_with_sensitivity(
+        &registry,
+        "normal content for estate map test",
+        "policy-gate-map/visible",
+        AdjectiveSensitivity::Normal,
+    );
+
+    // Seed one Restricted drawer — must NOT appear in map.
+    capture_with_sensitivity(
+        &registry,
+        "restricted content — must not appear in estate map",
+        "policy-gate-map/hidden-restricted",
+        AdjectiveSensitivity::Restricted,
+    );
+
+    // Seed one Secret drawer — must NOT appear in map.
+    capture_with_sensitivity(
+        &registry,
+        "secret content — must not appear in estate map",
+        "policy-gate-map/hidden-secret",
+        AdjectiveSensitivity::Secret,
+    );
+
+    let result = dispatch_tool("moot_estate_map", &args![], &registry, &ledger)
+        .expect("estate_map must not throw");
+    assert!(
+        is_success(&result),
+        "estate_map must succeed; got: {result:?}"
+    );
+
+    let text = content_text(&result);
+
+    // The normal drawer's room must appear in the map.
+    assert!(
+        text.contains("policy-gate-map/visible") || text.contains("visible"),
+        "estate_map must include Normal drawer's room; got: {text}"
+    );
+
+    // The restricted and secret rooms must NOT appear in the map.
+    assert!(
+        !text.contains("hidden-restricted"),
+        "estate_map must exclude Restricted drawer's room; got: {text}"
+    );
+    assert!(
+        !text.contains("hidden-secret"),
+        "estate_map must exclude Secret drawer's room; got: {text}"
+    );
+}
+
+/// moot_estate_map must include Elevated-sensitivity drawers.
+/// Elevated is within the default BitmapEvaluator ceiling.
+#[test]
+fn estate_map_includes_elevated_sensitivity() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Seed one Elevated drawer — must appear in map.
+    capture_with_sensitivity(
+        &registry,
+        "elevated content for estate map test",
+        "policy-gate-elevated/visible",
+        AdjectiveSensitivity::Elevated,
+    );
+
+    let result = dispatch_tool("moot_estate_map", &args![], &registry, &ledger)
+        .expect("estate_map must not throw");
+    assert!(
+        is_success(&result),
+        "estate_map must succeed with Elevated drawer; got: {result:?}"
+    );
+
+    let text = content_text(&result);
+
+    // The elevated drawer's room must appear in the map.
+    assert!(
+        text.contains("policy-gate-elevated") || text.contains("elevated"),
+        "estate_map must include Elevated drawer's room; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+
 /// Helper: convert days-since-epoch to (year, month, day). Used in `dream_far_future_now`.
 fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let mut y = 1970u64;
