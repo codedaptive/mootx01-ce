@@ -500,6 +500,144 @@ struct VaultBridgeTests {
                 "estate must have exactly the victim drawer + the isolated hostile drawer")
     }
 
+    /// Security regression for Finding 6 (all-tier gap): the lineage-hijack guard
+    /// must fire even when the victim drawer is CONFIRMED (userConfirmed) — not just
+    /// when it is unconfirmed. Before the fix, `existingDrawerState` used
+    /// `filterChain: [.unconfirmed]`, so confirmed lineages were invisible to the
+    /// collision set and a hostile note claiming a confirmed lineage with different
+    /// content would bypass the guard and poison that lineage.
+    ///
+    /// Sequence:
+    ///   1. Capture a victim drawer and confirm it (moves from unconfirmed → userConfirmed).
+    ///   2. Craft a hostile vault file: same moot_id, different body, different path.
+    ///   3. Import the hostile file.
+    ///   4. Guard must fire: the moot_id claim is rejected, hostile lands under its
+    ///      own FNV lineage, victim's content is unchanged.
+    @Test("Finding 6: hostile moot_id claiming a CONFIRMED lineage with different content is rejected")
+    func mootIDHijackGuardBlocksBodyReplacementOnConfirmedLineage() async throws {
+        let (kit, handle) = try await openEstate()
+        defer {}
+
+        // 1. Capture the victim drawer and confirm it.
+        let victimContent = "confirmed content that a hostile note must not replace"
+        let victim = try await kit.capture(handle, CaptureFrame(
+            content: victimContent,
+            channel: .typed,
+            room: "secure",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "owner",
+            embeddingModelID: "test-v1"))
+        // Confirm the drawer — moves it out of the unconfirmed pool.
+        // Before the fix, existingDrawerState only scanned [.unconfirmed], so
+        // confirmed lineageIDs were invisible to the collision guard.
+        try await kit.mutate(handle, MutateFrame(rowID: victim.id, kind: .confirm))
+
+        // 2. Craft a hostile vault file: claims victim's moot_id, different body, foreign path.
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let hostileFile = vault.appendingPathComponent("attack/confirmed-hijack.md")
+        try FileManager.default.createDirectory(
+            at: hostileFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+            ---
+            room: secure
+            moot_id: \(victim.lineageID.uuidString)
+            ---
+            attacker-controlled replacement content targeting a confirmed drawer
+            """.write(to: hostileFile, atomically: true, encoding: .utf8)
+
+        // 3. Import the hostile vault file.
+        let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
+        let report = try await bridge.importVault(at: vault, into: handle, now: Date())
+
+        // 4. Guard must have fired: hostile lands as a NEW drawer (moot_id claim rejected),
+        //    not as an update to the victim.
+        #expect(report.drawersWritten == 1,
+                "hostile file must land as a new drawer, not an update to the confirmed victim")
+
+        // 5. Victim's content must be completely unchanged.
+        let allDrawers = try await kit.recall(handle, RecallFrame(
+            filterChain: [
+                .currentlyBelieve,
+                .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                .any([.trustworthy, .requiresConfirmation]),
+                .sensitivityAtMost(.secret),
+            ],
+            hydrationLevel: .full, limit: 10_000_000))
+        let victimAfter = try #require(
+            allDrawers.first { $0.lineageID == victim.lineageID },
+            "confirmed victim lineage must still exist in the estate")
+        #expect(victimAfter.content == victimContent,
+                "confirmed victim drawer content must be unchanged after hostile import")
+        // Estate has the confirmed victim + the isolated hostile drawer.
+        #expect(allDrawers.count == 2,
+                "estate must have exactly the confirmed victim + the isolated hostile drawer")
+    }
+
+    /// Security regression for Finding 6 (all-tier gap): the lineage-hijack guard
+    /// must fire even when the victim drawer has elevated sensitivity (.restricted).
+    /// Before the fix, existingDrawerState used filterChain: [.unconfirmed] which
+    /// excluded restricted/secret drawers (sensitivity ceiling default), so a hostile
+    /// note could claim those lineage UUIDs and bypass the guard.
+    @Test("Finding 6: hostile moot_id claiming a RESTRICTED lineage with different content is rejected")
+    func mootIDHijackGuardBlocksBodyReplacementOnRestrictedLineage() async throws {
+        let (kit, handle) = try await openEstate()
+        defer {}
+
+        // 1. Capture the victim drawer at restricted sensitivity tier.
+        let victimContent = "restricted content that must never be overwritten by a hostile import"
+        let victim = try await kit.capture(handle, CaptureFrame(
+            content: victimContent,
+            channel: .typed,
+            room: "classified",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "owner",
+            embeddingModelID: "test-v1",
+            sensitivity: .restricted))
+
+        // 2. Craft a hostile vault file: claims victim's moot_id, different body, foreign path.
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let hostileFile = vault.appendingPathComponent("attack/restricted-hijack.md")
+        try FileManager.default.createDirectory(
+            at: hostileFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+            ---
+            room: classified
+            moot_id: \(victim.lineageID.uuidString)
+            sensitivity: restricted
+            ---
+            attacker-controlled replacement content targeting a restricted drawer
+            """.write(to: hostileFile, atomically: true, encoding: .utf8)
+
+        // 3. Import the hostile vault file.
+        let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
+        let report = try await bridge.importVault(at: vault, into: handle, now: Date())
+
+        // 4. Guard must have fired: hostile lands as a NEW drawer (moot_id claim rejected).
+        #expect(report.drawersWritten == 1,
+                "hostile file must land as a new drawer, not an update to the restricted victim")
+
+        // 5. Verify victim's content is unchanged. Use sensitivityAtMost(.secret) to
+        //    include restricted drawers in the query — the same filter existingDrawerState
+        //    must now use so the collision guard can see restricted lineages.
+        let allDrawers = try await kit.recall(handle, RecallFrame(
+            filterChain: [
+                .currentlyBelieve,
+                .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                .any([.trustworthy, .requiresConfirmation]),
+                .sensitivityAtMost(.secret),
+            ],
+            hydrationLevel: .full, limit: 10_000_000))
+        let victimAfter = try #require(
+            allDrawers.first { $0.lineageID == victim.lineageID },
+            "restricted victim lineage must still exist in the estate")
+        #expect(victimAfter.content == victimContent,
+                "restricted victim drawer content must be unchanged after hostile import")
+        #expect(allDrawers.count == 2,
+                "estate must have the restricted victim + the isolated hostile drawer")
+    }
+
     /// Regression guard: a legitimate round-trip edit (same path, changed body) must
     /// supersede the existing drawer — NOT create a duplicate. This test captures the
     /// bug that the path-identity discriminator was introduced to fix: the old
