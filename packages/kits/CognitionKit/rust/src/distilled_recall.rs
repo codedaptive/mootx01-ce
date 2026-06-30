@@ -210,8 +210,16 @@ pub fn run_distilled_recall(
     //
     //    `now` is required by the BitmapEvaluator for liveness/state checks.
     //    B-1 compliant — no raw store access.
+    //
+    //    frame.limit = Some(input.pool): parity with Swift's
+    //      `RecallFrame(filterChain: [input.filter], hydrationLevel: .full, limit: input.limit)`
+    //    which uses a per-call limit so recall covers all NN candidates regardless of
+    //    estate size. The pool value (≥ input.limit * 5, min 50) bounds the lookup.
+    //    Without an explicit limit, coord.recall() caps at 50 (the frame.limit default),
+    //    which silently misses factoid bodies on estates with >50 drawers.
     let mut frame = RecallFrame::new(vec![input.filter.clone()]);
     frame.hydration_level = HydrationLevel::Full;
+    frame.limit = Some(input.pool);
     let policy_drawers = coord.recall(handle, frame, now).unwrap_or_default();
     let match_ids: std::collections::HashSet<&str> =
         matches.iter().map(|m| m.item_id.as_str()).collect();

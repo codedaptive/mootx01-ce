@@ -175,8 +175,19 @@ pub fn run_recollect(
     //    hydrationLevel: .full explicitly. Without Full, content is empty and
     //    DistilledHeader::parse always returns None → spurious NotADistilledDrawer.
     //    `now` is required for liveness/state evaluation. B-1 compliant.
+    //
+    //    recall_frame.limit = Some(usize::MAX): parity with Swift
+    //      step 1: `kit.hydrate(estate, ids: [factoidID], matchingFrame: RecallFrame(filterChain: [], limit: 1))`
+    //      step 4: `kit.hydrate(estate, ids: sourceIDs,   matchingFrame: RecallFrame(filterChain: [], limit: sourceIDs.count))`
+    //    Both are per-id lookups; limit bounds output to exactly the needed drawers.
+    //    In Rust, coord.recall() returns ALL matching drawers then caller does `take(cap)`.
+    //    Because we filter by id after the recall call, we need the cap to be large enough
+    //    to include both the factoid (step 1) and all source drawers (step 4) from any
+    //    estate. Using usize::MAX means no cap — the underlying Vec already bounds it.
+    //    B-1 compliant; the frame's sensitivity ceiling (insert_defaults) is still enforced.
     let mut recall_frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
     recall_frame.hydration_level = HydrationLevel::Full;
+    recall_frame.limit = Some(usize::MAX);
     let policy_drawers = coord.recall(handle, recall_frame, now)
         .map_err(RecollectError::from)?;
     let factoid = policy_drawers.iter()
@@ -238,11 +249,12 @@ pub fn run_recollect(
     //    with the existing "sources.count shrinks due to filtering" comment. This is
     //    the correct behaviour: the factoid was produced from a high-sensitivity
     //    source that has now aged or been reclassified; the source preview is not
-    //    admissible without an elevation grant. secfix/punt-g2 part 2.
+    //    admissible without an elevation grant.
     //
-    //    Re-uses the policy_drawers from step 1 (the recall already ran once); no
-    //    second I/O round-trip for source lookup — source drawers are in the same
-    //    policy-filtered result set as the factoid. B-1 compliant.
+    //    Re-uses policy_drawers from step 1. The step-1 frame uses limit=usize::MAX
+    //    so the result covers the full admissible estate; source drawers at any
+    //    position are guaranteed to be in the set if they exist and are admissible.
+    //    B-1 compliant.
     let source_set: std::collections::HashSet<&str> = source_tunnels
         .iter()
         .filter_map(|t| t.target_drawer_id.as_deref())
