@@ -736,7 +736,11 @@ jobs:
       - build-linux-arm64
       - build-windows-x86_64
       - build-windows-arm64
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04 (not 22.04): the minisign package is only in the universe
+    # repository from Ubuntu 23.10 onward, so it cannot be apt-installed on
+    # jammy. The Linux *binary* build jobs stay on 22.04 for broader glibc
+    # compatibility; only this publish job needs the newer image.
+    runs-on: ubuntu-24.04
     steps:
       # Checkout MUST precede the artifact download: actions/checkout cleans its
       # working directory, so running it after the download would delete the
@@ -808,10 +812,10 @@ jobs:
             exit 0
           fi
 
-          # Install minisign on the runner (ubuntu-22.04; the release job).
-          # minisign is not pre-installed on GitHub-hosted ubuntu runners and
-          # lives in the universe pocket. apt-get update first — without a fresh
-          # package index the install fails with "Unable to locate package".
+          # Install minisign on the runner (ubuntu-24.04; the release job).
+          # minisign lives in the universe pocket (Ubuntu 23.10+). apt-get update
+          # first — without a fresh package index the install fails with
+          # "Unable to locate package".
           sudo apt-get update
           sudo apt-get install -y minisign
 
