@@ -524,10 +524,21 @@ public struct HTTPServer: Sendable {
         // this, a slow-header attacker can occupy a gate slot indefinitely, starving real
         // MCP clients. The gate slot is already held (waitForSlot above); the timeout ensures
         // it is released within a bounded window even if the read never returns.
-        var tv = timeval(tv_sec: 30, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-        guard let request = HTTPRequest.read(fd: fd, maxBodyBytes: maxBodyBytes) else { return }
+        // Run the BLOCKING read on a GCD worker so it does not occupy a
+        // cooperative-pool thread for the 30s window: under parallel load that
+        // starves the pool and other connections' Tasks can't run promptly.
+        // The `await` suspends this Task (freeing the cooperative thread) while
+        // the read blocks — matching moot-mgr's readRequestOffPool and the Rust
+        // dedicated-thread-per-connection model. The 30s SO_RCVTIMEO below still
+        // bounds a slow-header attacker exactly as before.
+        let request: HTTPRequest? = await withCheckedContinuation { (cont: CheckedContinuation<HTTPRequest?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var tv = timeval(tv_sec: 30, tv_usec: 0)
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                cont.resume(returning: HTTPRequest.read(fd: fd, maxBodyBytes: maxBodyBytes))
+            }
+        }
+        guard let request else { return }
 
         // DNS-rebinding guard: applies to ALL GET requests including SSE. A browser from
         // a rebinding domain always sends a non-loopback Host; native MCP clients omit it.

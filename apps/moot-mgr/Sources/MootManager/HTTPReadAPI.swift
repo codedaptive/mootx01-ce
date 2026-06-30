@@ -328,15 +328,34 @@ public actor HTTPReadAPI {
 
     // MARK: - Connection handling
 
+    /// Read the request OFF the Swift cooperative pool.
+    ///
+    /// `HTTPRequest.read` is a BLOCKING syscall (bounded by the 30s SO_RCVTIMEO
+    /// it sets below, and by a peer that trickles bytes). Running it directly in
+    /// the per-connection `Task` occupies a cooperative-pool thread for that
+    /// whole window; under parallel load (especially the CI runner) that starves
+    /// the pool, so other connections' Tasks can't even reach `waitForSlot`
+    /// promptly — which both delays every request and breaks the concurrency-cap
+    /// gate (the slots aren't held within the cap test's window). Bridging the
+    /// blocking read onto a GCD worker SUSPENDS the Task (freeing the cooperative
+    /// thread) while the read blocks, matching the Rust port's
+    /// dedicated-thread-per-connection model and the loopback test client.
+    private static func readRequestOffPool(_ fd: Int32) async -> HTTPRequest? {
+        await withCheckedContinuation { (cont: CheckedContinuation<HTTPRequest?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Bound blocking reads: a peer that trickles bytes cannot stall the
+                // worker longer than this window. Mirrors the Rust port's
+                // `stream.set_read_timeout(Duration::from_secs(30))`.
+                var tv = timeval(tv_sec: 30, tv_usec: 0)
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                cont.resume(returning: HTTPRequest.read(fd: fd))
+            }
+        }
+    }
+
     /// Serve one accepted connection: read the request, route it, respond.
     private func serve(_ fd: Int32) async {
-        // Bound blocking reads: a peer that trickles bytes cannot stall a handler
-        // thread longer than this window. Mirrors the Rust port's
-        // `stream.set_read_timeout(Duration::from_secs(30))`.
-        var tv = timeval(tv_sec: 30, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-        guard let request = HTTPRequest.read(fd: fd) else { close(fd); return }
+        guard let request = await Self.readRequestOffPool(fd) else { close(fd); return }
 
         // DNS-rebinding guard: reject any GET whose Host header is present but
         // not a loopback address. A browser always sends Host; a rebinding attack
