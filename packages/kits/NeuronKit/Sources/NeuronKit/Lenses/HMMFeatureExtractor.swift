@@ -9,7 +9,7 @@
 //
 // Extraction rules (ALL deterministic — no randomness, no wall-clock):
 //
-//   ENT (entity):    noun-tagged tokens from LatticeLib.wordClass(_:tagger:.hmm)
+//   ENT (entity):    noun-tagged tokens from LatticeLib.wordClass(_:tagger:.hmm,recordNovel:false)
 //   REL (relation):  verb-tagged tokens
 //   NUM (numerical): tokens where every character is an ASCII digit
 //   TMP (temporal):  4-digit year tokens (YYYY) — the UAX #29 tokenizer
@@ -22,7 +22,10 @@
 //
 // Cross-port parity:
 //   - Tokenisation via Tokenizer.tokenize (UAX #29, conformance-gated).
-//   - Noun/verb tagging via LatticeLib.wordClass(_:tagger:.hmm).
+//   - Noun/verb tagging via LatticeLib.wordClass(_:tagger:.hmm,recordNovel:false).
+//     The recordNovel:false flag suppresses pool accumulation so memory-drawer
+//     content never leaks to the plaintext pool pipeline. Tag results are
+//     byte-identical to the recording path and to Rust's hmm_tag (parity fix).
 //   - docFrequency is 0 on every emitted feature — set by the pipeline.
 //
 // Layer discipline (B-1/B-2): pure function, no I/O, no state, no substrate.
@@ -77,7 +80,7 @@ extension NeuronKit {
     /// Production FeatureExtractor backed by the LatticeLib HMM/Viterbi tagger.
     ///
     /// Tokenises the input with `Tokenizer.tokenize`, then classifies each token
-    /// via `LatticeLib.wordClass(_:tagger:.hmm)`. Feature type dispatch:
+    /// via `LatticeLib.wordClass(_:tagger:.hmm, recordNovel: false)`. Feature type dispatch:
     ///
     ///   `.entity`    — noun-tagged tokens (HMM says .noun)
     ///   `.relation`  — verb-tagged tokens (HMM says .verb)
@@ -91,6 +94,10 @@ extension NeuronKit {
     /// fast-path inside `LatticeLib.wordClass` is cross-platform and table-resident
     /// tokens resolve identically; novel tokens fall through to the HMM and are also
     /// bit-identical. Using `.nlTagger` would break cross-port parity (cookbook §2.2).
+    ///
+    /// `recordNovel: false` ensures memory-drawer text never reaches the pool
+    /// pipeline — the extractor processes private estate content. This matches
+    /// the Rust port's `hmm_tag` call, which has no pool side effect at all.
     ///
     /// `docFrequency` is 0 on every emitted feature — the pipeline computes the real
     /// value from the incidence matrix (Stage 2). Callers must not read `docFrequency`
@@ -109,12 +116,21 @@ extension NeuronKit {
         case .entity:
             // ENT: tokens tagged .noun by the HMM tagger, minus function words.
             // The HMM path is mandatory for cross-port byte-identity.
+            //
+            // recordNovel: false — the distillation extractor operates over
+            // memory-drawer content that is private to the estate. Recording
+            // novel tokens into the pool pipeline would leak plaintext memory
+            // text to disk outside the estate's encryption/audit controls.
+            // The tag result is identical (byte-for-byte) whether or not
+            // recording is enabled; only the pool side effect is suppressed.
+            // This matches the Rust port, which calls hmm_tag directly with
+            // no pool accumulation (parity gap fix, Swift-only).
             for token in tokens {
                 let lower = token.lowercased()
                 // Drop function words: they recur but are scaffolding, and the
                 // HMM tagger mis-tags several of them ("the"/"by") as nouns.
                 if distillationStopwords.contains(lower) { continue }
-                let wc = LatticeLib.wordClass(lower, tagger: .hmm)
+                let wc = LatticeLib.wordClass(lower, tagger: .hmm, recordNovel: false)
                 if wc == .noun {
                     // value = Snowball stem (groups migration/migrations into one
                     // df + one fingerprint bit); display = surface form for the
@@ -130,10 +146,12 @@ extension NeuronKit {
 
         case .relation:
             // REL: tokens tagged .verb by the HMM tagger, minus function words.
+            // recordNovel: false — same rationale as the ENT case above;
+            // private memory content must not reach the pool pipeline.
             for token in tokens {
                 let lower = token.lowercased()
                 if distillationStopwords.contains(lower) { continue }
-                let wc = LatticeLib.wordClass(lower, tagger: .hmm)
+                let wc = LatticeLib.wordClass(lower, tagger: .hmm, recordNovel: false)
                 if wc == .verb {
                     // value = stem (unifies migrate/migrates); display = surface.
                     results.append(ExtractedFeature(

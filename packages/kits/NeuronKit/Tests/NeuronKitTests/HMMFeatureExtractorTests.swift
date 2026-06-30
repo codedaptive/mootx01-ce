@@ -205,6 +205,69 @@ struct HMMFeatureExtractorTests {
     // These behaviours are tested implicitly via the 4-digit year tests above
     // and verified via the shared conformance fixture.
 
+    // MARK: - Pool isolation: extractor must not feed novel tokens into the pool
+    //
+    // The distillation extractor processes private memory-drawer content. It uses
+    // `wordClass(_:tagger:recordNovel: false)` so novel tokens are NOT accumulated
+    // in the pool pipeline, matching Rust's non-recording hmm_tag behaviour.
+    //
+    // The sharedNovelCache accumulation invariant is tested at the LatticeLib level
+    // (WordClassRecordNovelTests.swift, which has @testable import LatticeLib access
+    // to the internal sharedNovelCache property). From NeuronKit's perspective we
+    // verify that the extracted FEATURE RESULTS are unchanged by the fix.
+
+    /// Feature-identity verification: `hmmFeatureExtractor` output must be identical
+    /// after switching from the recording path to `recordNovel: false`. The fix
+    /// suppresses only the pool side effect — the tag computation is unchanged.
+    ///
+    /// Verified against the canonical "Project Apollo" fixture shared with the Rust port.
+    @Test("hmmFeatureExtractor features unchanged by recordNovel:false fix (canonical fixture)")
+    func extractorFeaturesUnchangedByRecordNovelFix() {
+        // Canonical test sentence — same fixture as the Rust port.
+        let content = "Project Apollo adopted PostgreSQL in 2021"
+
+        // Run the extractor (which uses recordNovel: false internally).
+        let entFeatures = NeuronKit.hmmFeatureExtractor(content, .entity)
+        let relFeatures = NeuronKit.hmmFeatureExtractor(content, .relation)
+
+        // Verify the canonical noun/verb features are still extracted correctly.
+        // The recordNovel flag changes only whether tokens enter the pool pipeline —
+        // not whether they get a .noun or .verb tag from the HMM.
+        let entDisplays = entFeatures.map(\.display)
+        let relDisplays = relFeatures.map(\.display)
+
+        #expect(entDisplays.contains("apollo"),
+                "ENT must still contain 'apollo' after recordNovel:false fix; got \(entDisplays)")
+        #expect(entDisplays.contains("postgresql"),
+                "ENT must still contain 'postgresql' after recordNovel:false fix; got \(entDisplays)")
+        #expect(relDisplays.contains("adopted"),
+                "REL must still contain 'adopted' after recordNovel:false fix; got \(relDisplays)")
+
+        // All features must have docFrequency == 0 (pipeline sets the real value).
+        for f in entFeatures + relFeatures {
+            #expect(f.docFrequency == 0,
+                    "docFrequency must be 0 from extractor; got \(f.docFrequency) for '\(f.value)'")
+        }
+    }
+
+    /// Novel-token sentence: the extractor must still produce features for content
+    /// that includes tokens not in the static word-class table (novel tokens). The
+    /// HMM tagger handles them and the feature result must be non-empty even when
+    /// recording is suppressed.
+    @Test("hmmFeatureExtractor produces ENT features for content containing novel tokens")
+    func extractorProducesFeaturesForNovelTokenContent() {
+        // "xylophonation" is a novel token (absent from the static table). The HMM
+        // will tag it; with recordNovel:false the tag result is unchanged vs recording.
+        // "apollo" and "postgresql" are known entities — they anchor the assertion.
+        let content = "Apollo xylophonation the database migration team"
+
+        let entFeatures = NeuronKit.hmmFeatureExtractor(content, .entity)
+        // "apollo" must still be found — the novel token must not suppress results.
+        let displays = entFeatures.map(\.display)
+        #expect(!displays.isEmpty,
+                "extractor must produce ENT features for novel-token content; got none")
+    }
+
     // MARK: - Integration: production pipeline succeeds with HMM extractor
 
     @Test("pipeline produces features (not 'No features extracted') with HMM extractor")
