@@ -6,9 +6,13 @@
 #
 # Produces: mootx01-<version>-macos-<arch>.pkg (signed + ready for notarization).
 #
-# Strategy: the .pkg installs into a staging area under /tmp. The postinstall
-# script relocates the files to ~/.mootx01/ in the *installing user's* home.
-# This avoids baking a specific home path into the package at build time.
+# Strategy: the .pkg installs the payload into a root-owned staging area under
+# /Library/Application Support/com.codedaptive.mootx01/staging. The postinstall
+# script validates that staging area (ownership, not-a-symlink, permissions) then
+# relocates the files to ~/.mootx01/ in the *installing user's* home.
+# Using /Library/Application Support instead of /tmp eliminates the world-writable
+# staging attack surface: /Library is owned by root:wheel and not world-writable,
+# so a local attacker cannot pre-create or race-modify the staging directory.
 #
 # Requires:
 #   - pkgbuild, productbuild, productsign (Xcode command line tools)
@@ -32,9 +36,12 @@ ASSET="mootx01-${VERSION}-macos-${ARCH}.pkg"
 
 echo "Building macOS .pkg: $ASSET"
 
-# 1. Stage the payload. The .pkg drops these into a staging directory;
-#    the postinstall script moves them to ~/.mootx01/.
-STAGING_ROOT="/tmp/mootx01-install"
+# 1. Stage the payload. The .pkg places these into a root-owned staging directory
+#    under /Library/Application Support; the postinstall script validates and
+#    moves them to ~/.mootx01/. /Library/Application Support is owned by
+#    root:wheel (mode 755, not world-writable), so no local attacker can
+#    pre-create or race-replace this staging path without root.
+STAGING_ROOT="/Library/Application Support/com.codedaptive.mootx01/staging"
 PAYLOAD="$WORK/payload${STAGING_ROOT}"
 mkdir -p "$PAYLOAD/bin"
 cp "$MOOTX01_BIN" "$PAYLOAD/bin/mootx01"
