@@ -58,18 +58,15 @@ private func makeStartedHost(
 private func httpGET(port: UInt16, path: String) async throws
     -> (status: Int, contentType: String?, body: String)
 {
-    let req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
-    let (data, response) = try await URLSession.shared.data(for: req)
-    let http = response as? HTTPURLResponse
-    return (http?.statusCode ?? -1,
-            http?.value(forHTTPHeaderField: "Content-Type"),
-            String(data: data, encoding: .utf8) ?? "")
+    // Raw-socket client (see LoopbackHTTPTestClient): URLSession.shared times
+    // out against 127.0.0.1 on the macos-26 CI runner.
+    let r = try await loopbackHTTP(port: port, path: path)
+    return (r.status, r.headers["content-type"], r.body)
 }
 
 private func jsonObject(port: UInt16, path: String) async throws -> [String: Any] {
-    let (data, _) = try await URLSession.shared.data(
-        for: URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!))
-    return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    let r = try await loopbackHTTP(port: port, path: path)
+    return (try JSONSerialization.jsonObject(with: Data(r.body.utf8)) as? [String: Any]) ?? [:]
 }
 
 /// Seed the five canonical VizGraph signals for one estate.

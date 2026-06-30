@@ -59,7 +59,8 @@ private func makeStartedHost(
 }
 
 /// Issue an HTTP request over loopback and return (status, body string).
-/// Minimal raw-socket-free client via URLSession against 127.0.0.1.
+/// Delegates to the shared raw-socket client (see LoopbackHTTPTestClient):
+/// URLSession.shared times out against 127.0.0.1 on the macos-26 CI runner.
 private func httpRequest(
     port: UInt16,
     method: String,
@@ -67,13 +68,8 @@ private func httpRequest(
     headers: [String: String] = [:],
     body: Data? = nil
 ) async throws -> (status: Int, body: String) {
-    var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
-    req.httpMethod = method
-    for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-    req.httpBody = body
-    let (data, response) = try await URLSession.shared.data(for: req)
-    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-    return (status, String(data: data, encoding: .utf8) ?? "")
+    let r = try await loopbackHTTP(port: port, method: method, path: path, headers: headers, body: body)
+    return (r.status, r.body)
 }
 
 // MARK: - Read endpoints

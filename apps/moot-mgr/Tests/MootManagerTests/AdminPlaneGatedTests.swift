@@ -88,13 +88,10 @@ private func httpRequest(
     port: UInt16, method: String, path: String,
     headers: [String: String] = [:], body: Data? = nil
 ) async throws -> (status: Int, body: String) {
-    var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
-    req.httpMethod = method
-    for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-    req.httpBody = body
-    let (data, response) = try await URLSession.shared.data(for: req)
-    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-    return (status, String(data: data, encoding: .utf8) ?? "")
+    // Raw-socket client — URLSession.shared times out against 127.0.0.1 on the
+    // macos-26 CI runner (see LoopbackHTTPTestClient).
+    let r = try await loopbackHTTP(port: port, method: method, path: path, headers: headers, body: body)
+    return (r.status, r.body)
 }
 
 /// A provision request body (JSON) for a scratch InMemory GLK estate.
