@@ -15,8 +15,10 @@
 # so a local attacker cannot pre-create or race-modify the staging directory.
 #
 # Requires:
-#   - pkgbuild, productbuild, productsign (Xcode command line tools)
+#   - pkgbuild, productbuild, productsign, codesign (Xcode command line tools)
 #   - INSTALLER_IDENTITY env var (e.g. "Developer ID Installer: Codedaptive, LLC (G94X5T5GK7)")
+#   - APP_IDENTITY env var (e.g. "Developer ID Application: Codedaptive, LLC (G94X5T5GK7)")
+#     used to seal the bundled Mootx01Setup.app so the .pkg passes notarization.
 
 set -euo pipefail
 
@@ -60,6 +62,26 @@ SETUP_DIR="$(dirname "$SETUP_BIN")"
 for bundle in "$SETUP_DIR"/*.bundle; do
     [ -d "$bundle" ] && ditto "$bundle" "$APP/Contents/MacOS/$(basename "$bundle")"
 done
+
+# Seal the assembled .app bundle. The bare setup executable was already
+# runtime-signed before it was copied in, but notarization requires the WHOLE
+# .app bundle (its Info.plist, nested resource bundles, and main executable) to
+# carry a Developer ID Application signature with the hardened runtime. Sign
+# inside-out: any nested resource bundles that embed a Mach-O first, then the
+# .app itself. Without this seal the notary service returns status: Invalid.
+if [ -n "${APP_IDENTITY:-}" ]; then
+    find "$APP/Contents/MacOS" -name '*.bundle' -type d -print0 \
+        | while IFS= read -r -d '' nested; do
+            codesign --force --options runtime --timestamp \
+                --sign "$APP_IDENTITY" "$nested"
+        done
+    codesign --force --options runtime --timestamp \
+        --sign "$APP_IDENTITY" "$APP"
+    codesign --verify --strict --verbose=2 "$APP"
+    echo "Signed .app bundle: $APP"
+else
+    echo "WARNING: APP_IDENTITY not set — .app bundle left unsigned (notarization will fail)"
+fi
 
 # Copy resource bundles for the CLI binaries too.
 MOOTX01_DIR="$(dirname "$MOOTX01_BIN")"
