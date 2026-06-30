@@ -55,7 +55,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Safety net: should a test ever hang (e.g. a control-channel accept that
     # never exits), fail the leg fast rather than stalling the run for hours.
-    timeout-minutes: 20
+    # windows-11-arm is a slow runner: two cold `cargo test --release` compiles
+    # (mootx01 + moot-mgr) do not fit in 20 min, so that leg gets a wider net
+    # while the fast ubuntu leg keeps the tight one.
+    timeout-minutes: ${{ matrix.os == 'windows-11-arm' && 40 || 20 }}
     strategy:
       fail-fast: false
       matrix:
