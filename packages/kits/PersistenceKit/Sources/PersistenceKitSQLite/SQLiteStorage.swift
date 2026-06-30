@@ -157,36 +157,11 @@ actor SQLiteBackend {
 
     // MARK: - SQL identifier validation (SECFIX-WS2-PK F1)
 
-    /// Validate a caller-supplied SQL identifier (column or table name).
-    ///
-    /// Accepts only names matching `[A-Za-z_][A-Za-z0-9_]*`. This is the safe
-    /// subset of SQLite identifier syntax: no spaces, no `"` characters, no
-    /// SQL keywords embedded via special characters. Any name that LocusKit's
-    /// schema declares will pass this check; the gate rejects adversarial inputs
-    /// before they can be embedded in a dynamically-constructed SELECT list.
-    private func validateSQLIdentifier(_ name: String) throws {
-        guard !name.isEmpty else {
-            throw StorageError.invalidIdentifier(name: name)
-        }
-        for (index, char) in name.unicodeScalars.enumerated() {
-            let valid: Bool
-            if index == 0 {
-                // First character: letter or underscore.
-                valid = (char >= "A" && char <= "Z")
-                    || (char >= "a" && char <= "z")
-                    || char == "_"
-            } else {
-                // Subsequent characters: letter, digit, or underscore.
-                valid = (char >= "A" && char <= "Z")
-                    || (char >= "a" && char <= "z")
-                    || (char >= "0" && char <= "9")
-                    || char == "_"
-            }
-            guard valid else {
-                throw StorageError.invalidIdentifier(name: name)
-            }
-        }
-    }
+    // Identifier validation is provided by the module-level free function
+    // `validateSQLIdentifier` in SQLiteIdentifierValidator.swift. That single
+    // seam is shared by SQLiteStorage (row operations, table names, ORDER BY
+    // columns) and SQLitePredicateCompiler (predicate column names).
+    // No per-type copy of the rule exists (SECFIX-WS2-PK F7/F9/F10).
 
     func close() {
         connection.close()
@@ -436,12 +411,14 @@ actor SQLiteBackend {
     // MARK: - Row operations
 
     func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
-        // SQL-identifier injection guard (CAND-047): column names from the
-        // caller-supplied `values` map reach the INSERT column list directly.
-        // A name containing `"` or `;` can escape double-quote delimiters and
-        // alter the query. The shared `validateSQLIdentifier` (same check used
-        // by `queryProjected` and the Postgres backend) rejects any name outside
-        // `[A-Za-z_][A-Za-z0-9_]*` — one seam, no forked validator.
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the INSERT statement, and
+        // validate all column names from the caller-supplied `values` map before
+        // they reach the INSERT column list. A name containing `"` or `;` can
+        // escape double-quote delimiters and alter the query. The shared module-level
+        // `validateSQLIdentifier` (SQLiteIdentifierValidator.swift) rejects any
+        // name outside `[A-Za-z_][A-Za-z0-9_]*` — one seam, no forked validator.
+        try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2/3): encrypt the content column
         // and stamp the key identifier before binding. No-op for mode 1.
@@ -484,10 +461,12 @@ actor SQLiteBackend {
     // extend the encryption seam symmetrically with insertRow before this
     // guard would let such a write through.
     func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
-        // SQL-identifier injection guard (CAND-047): validate both the value-map
-        // column names and the conflict-column list before interpolating into the
-        // INSERT … ON CONFLICT … DO UPDATE SQL. Mirrors the Rust backend guard
-        // and the Postgres backend guard — shared seam, no forked validator.
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name, all value-map column names, and the conflict-column list
+        // before interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
+        // Mirrors the Rust backend guard and the Postgres backend guard — shared
+        // seam via module-level `validateSQLIdentifier`, no forked validator.
+        try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
         for name in conflictColumns { try validateSQLIdentifier(name) }
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
@@ -516,10 +495,12 @@ actor SQLiteBackend {
     }
 
     func updateRows(table: String, values: [String: TypedValue], where predicate: StoragePredicate) throws -> Int {
-        // SQL-identifier injection guard (CAND-047): column names from the
-        // caller-supplied `values` map reach the UPDATE SET clause directly.
-        // Mirrors the Rust backend guard and the Postgres backend guard —
-        // shared seam, no forked validator.
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name and all column names from the caller-supplied `values`
+        // map before they reach the UPDATE SET clause. Mirrors the Rust backend
+        // guard and the Postgres backend guard — shared seam via module-level
+        // `validateSQLIdentifier`, no forked validator.
+        try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
         // Structural content/keyID invariant (FUP-D): updateRows does not run
         // the encryption seam, so a content update on an encrypting estate
@@ -534,7 +515,7 @@ actor SQLiteBackend {
         let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
         let sortedKeys = values.keys.sorted()
         let setClause = sortedKeys.map { "\"\($0)\" = ?" }.joined(separator: ", ")
-        let compiled = SQLitePredicateCompiler.compile(predicate)
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "UPDATE \"\(table)\" SET \(setClause) WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
         defer { stmt.finalize() }
@@ -554,11 +535,15 @@ actor SQLiteBackend {
     }
 
     func deleteRows(table: String, where predicate: StoragePredicate) throws -> Int {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before interpolation. Predicate column names are validated by
+        // SQLitePredicateCompiler.compile (SECFIX-WS2-PK F7).
+        try validateSQLIdentifier(table)
         // Pre-query row keys before deletion so notifications carry them.
         // The SQLiteBackend actor serializes all operations, so no interleaving
         // is possible between this SELECT and the DELETE.
         let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
-        let compiled = SQLitePredicateCompiler.compile(predicate)
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "DELETE FROM \"\(table)\" WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
         defer { stmt.finalize() }
@@ -582,6 +567,10 @@ actor SQLiteBackend {
         tableSchema: TableDeclaration?,
         columns: [String]?
     ) throws -> [StorageRow] {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the SELECT statement. Mirrors the
+        // guard already applied in insertRow/upsertRow/updateRows/deleteRows.
+        try validateSQLIdentifier(table)
         // Resolve declared types from the retained schema so typed
         // columns decode to their proper TypedValue case. An explicit
         // tableSchema argument overrides the retained lookup.
@@ -610,12 +599,18 @@ actor SQLiteBackend {
         var sql = "SELECT \(projection) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
-            let compiled = SQLitePredicateCompiler.compile(predicate)
+            // compile is now `throws` — predicate column names are validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            let compiled = try SQLitePredicateCompiler.compile(predicate)
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
         if !orderBy.isEmpty {
-            let parts = orderBy.map { clause -> String in
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated into the SQL string.
+            // Mirrors the column-name guard applied in the predicate compiler.
+            let parts = try orderBy.map { clause -> String in
+                try validateSQLIdentifier(clause.column.name)
                 let dir = clause.direction == .ascending ? "ASC" : "DESC"
                 return "\"\(clause.column.name)\" \(dir)"
             }
@@ -668,9 +663,19 @@ actor SQLiteBackend {
         offset: Int?,
         columns: [String]?
     ) throws -> (rows: [StorageRow], skipped: Int) {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated. Mirrors queryRows and all write paths.
+        try validateSQLIdentifier(table)
         let resolvedSchema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        // SQL-identifier injection guard (SECFIX-WS2-PK F10): validate the
+        // projected column names here, just as queryRows does for its projection
+        // path. queryRowsSkipCorrupt shares the same SELECT construction, so the
+        // same injection surface exists. Reject before SQL is built.
         let projection: String
         if let columns, !columns.isEmpty {
+            for name in columns {
+                try validateSQLIdentifier(name)
+            }
             projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
         } else {
             projection = "*"
@@ -678,12 +683,17 @@ actor SQLiteBackend {
         var sql = "SELECT \(projection) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
-            let compiled = SQLitePredicateCompiler.compile(predicate)
+            // compile is now `throws` — predicate column names are validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            let compiled = try SQLitePredicateCompiler.compile(predicate)
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
         if !orderBy.isEmpty {
-            let parts = orderBy.map { clause -> String in
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate ORDER
+            // BY column names before interpolation. Mirrors queryRows.
+            let parts = try orderBy.map { clause -> String in
+                try validateSQLIdentifier(clause.column.name)
                 let dir = clause.direction == .ascending ? "ASC" : "DESC"
                 return "\"\(clause.column.name)\" \(dir)"
             }
@@ -835,10 +845,15 @@ actor SQLiteBackend {
     }
 
     func countRows(table: String, where predicate: StoragePredicate?) throws -> Int {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the COUNT query.
+        try validateSQLIdentifier(table)
         var sql = "SELECT COUNT(*) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
-            let compiled = SQLitePredicateCompiler.compile(predicate)
+            // compile is now `throws` — predicate column names are validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            let compiled = try SQLitePredicateCompiler.compile(predicate)
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
@@ -871,7 +886,9 @@ actor SQLiteBackend {
         let pkCol = schemaDeclaration?
             .tables.first(where: { $0.name == table })?
             .primaryKey.first ?? "row_id"
-        let compiled = SQLitePredicateCompiler.compile(predicate)
+        // compile is now `throws` — predicate column names are validated inside
+        // the compiler (SECFIX-WS2-PK F7).
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "SELECT \"\(pkCol)\" FROM \"\(table)\" WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
         defer { stmt.finalize() }

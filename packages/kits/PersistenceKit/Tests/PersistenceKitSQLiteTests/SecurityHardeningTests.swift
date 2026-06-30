@@ -452,6 +452,278 @@ struct F1WritePathInjectionTests {
     }
 }
 
+// MARK: - SECFIX-WS2-PK F9: Table-name injection guard (SQLite RowStore methods)
+//
+// Every RowStore method that interpolates a table name into SQL must validate it
+// before SQL construction. This extends the column-name guard (F7) to the table
+// identifier surface (F9): insert, upsert, update, delete, query, count, and
+// queryRowsSkipCorrupt. A table name like `items"; DROP TABLE items; --` can
+// escape the double-quote delimiter when interpolated directly into a FROM or
+// INTO clause.
+
+@Suite("SecurityHardeningTests — F9 table-name identifier guard (SECFIX-WS2-PK)")
+struct F9TableNameInjectionTests {
+
+    private func storage() async throws -> SQLiteStorage {
+        let s = try makeSQLiteStorage()
+        try await s.open(schema: simpleSchema())
+        return s
+    }
+
+    // ── query (read path) ─────────────────────────────────────────────────
+
+    /// A double-quote in the table name must be rejected before SELECT SQL is built.
+    @Test func queryRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items" UNION SELECT * FROM items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.query(
+                table: bad, where: nil, orderBy: [], limit: nil, offset: nil
+            )
+        }
+    }
+
+    /// A semicolon in the table name is a statement-stacking vector.
+    @Test func queryRejectsSemicolonInTableName() async throws {
+        let s = try await storage()
+        let bad = "items; DROP TABLE items; --"
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.query(
+                table: bad, where: nil, orderBy: [], limit: nil, offset: nil
+            )
+        }
+    }
+
+    /// Space-containing table names are rejected.
+    @Test func queryRejectsSpaceInTableName() async throws {
+        let s = try await storage()
+        await #expect(throws: StorageError.invalidIdentifier(name: "bad table")) {
+            _ = try await s.rowStore.query(
+                table: "bad table", where: nil, orderBy: [], limit: nil, offset: nil
+            )
+        }
+    }
+
+    /// A valid table name must still produce correct results.
+    @Test func queryAcceptsValidTableName() async throws {
+        let s = try await storage()
+        let id = UUID()
+        _ = try await s.rowStore.insert(
+            table: "items",
+            values: ["id": .uuid(id), "label": .text("hello"), "flags": .bitmap(0)]
+        )
+        let rows = try await s.rowStore.query(
+            table: "items", where: nil, orderBy: [], limit: nil, offset: nil
+        )
+        #expect(rows.count == 1)
+    }
+
+    // ── count ─────────────────────────────────────────────────────────────
+
+    /// A double-quote in the table name must be rejected in countRows.
+    @Test func countRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items" UNION SELECT 1; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.count(table: bad, where: nil)
+        }
+    }
+
+    // ── delete ────────────────────────────────────────────────────────────
+
+    /// A double-quote in the table name must be rejected in deleteRows.
+    @Test func deleteRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items" WHERE 1=1; DROP TABLE items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.delete(
+                table: bad, where: .isTrue
+            )
+        }
+    }
+
+    // ── insert ────────────────────────────────────────────────────────────
+
+    /// A double-quote in the table name must be rejected in insert.
+    @Test func insertRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items"; DROP TABLE items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.insert(
+                table: bad,
+                values: ["id": .uuid(UUID()), "label": .text("x"), "flags": .bitmap(0)]
+            )
+        }
+    }
+
+    // ── upsert ────────────────────────────────────────────────────────────
+
+    /// A double-quote in the table name must be rejected in upsert.
+    @Test func upsertRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items"; DROP TABLE items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.upsert(
+                table: bad,
+                values: ["id": .uuid(UUID()), "label": .text("x"), "flags": .bitmap(0)],
+                conflictColumns: ["id"]
+            )
+        }
+    }
+
+    // ── update ────────────────────────────────────────────────────────────
+
+    /// A double-quote in the table name must be rejected in update.
+    @Test func updateRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items"; DROP TABLE items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.update(
+                table: bad,
+                values: ["label": .text("x")],
+                where: .isTrue
+            )
+        }
+    }
+}
+
+// MARK: - SECFIX-WS2-PK F7: ORDER BY column injection guard (SQLite)
+//
+// The ORDER BY renderer interpolates column names from caller-supplied
+// OrderClause values. A malicious column name like `label"; DROP TABLE items; --`
+// can escape the double-quote delimiter. These tests confirm the guard fires
+// for query and queryRowsSkipCorrupt.
+
+@Suite("SecurityHardeningTests — F7 ORDER BY column identifier guard (SECFIX-WS2-PK)")
+struct F7OrderByInjectionTests {
+
+    private func storage() async throws -> SQLiteStorage {
+        let s = try makeSQLiteStorage()
+        try await s.open(schema: simpleSchema())
+        return s
+    }
+
+    /// A double-quote in an ORDER BY column name must be rejected by query.
+    @Test func queryRejectsDoubleQuoteInOrderByColumn() async throws {
+        let s = try await storage()
+        let bad = #"label"; DROP TABLE items; --"#
+        let badClause = OrderClause(column: Column(table: "items", name: bad), direction: .ascending)
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.query(
+                table: "items", where: nil, orderBy: [badClause], limit: nil, offset: nil
+            )
+        }
+    }
+
+    /// A semicolon in an ORDER BY column name must be rejected by query.
+    @Test func queryRejectsSemicolonInOrderByColumn() async throws {
+        let s = try await storage()
+        let bad = "label; DROP TABLE items; --"
+        let badClause = OrderClause(column: Column(table: "items", name: bad), direction: .ascending)
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.query(
+                table: "items", where: nil, orderBy: [badClause], limit: nil, offset: nil
+            )
+        }
+    }
+
+    /// A valid ORDER BY column name must produce correct results.
+    @Test func queryAcceptsValidOrderByColumn() async throws {
+        let s = try await storage()
+        let id1 = UUID()
+        let id2 = UUID()
+        _ = try await s.rowStore.insert(
+            table: "items",
+            values: ["id": .uuid(id1), "label": .text("b"), "flags": .bitmap(0)]
+        )
+        _ = try await s.rowStore.insert(
+            table: "items",
+            values: ["id": .uuid(id2), "label": .text("a"), "flags": .bitmap(0)]
+        )
+        let rows = try await s.rowStore.query(
+            table: "items",
+            where: nil,
+            orderBy: [OrderClause(column: Column(table: "items", name: "label"), direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        #expect(rows.count == 2)
+        #expect(rows[0]["label"] == .text("a"))
+        #expect(rows[1]["label"] == .text("b"))
+    }
+}
+
+// MARK: - SECFIX-WS2-PK F10: queryRowsSkipCorrupt column projection + table guard
+//
+// queryRowsSkipCorrupt shares the same SQL projection surface as queryRows but
+// was previously missing both the table-name guard (F9) and the projection
+// column guard (F10). These tests confirm both gaps are closed.
+
+@Suite("SecurityHardeningTests — F10 queryRowsSkipCorrupt identifier guards (SECFIX-WS2-PK)")
+struct F10SkipCorruptProjectionTests {
+
+    private func storage() async throws -> SQLiteStorage {
+        let s = try makeSQLiteStorage()
+        try await s.open(schema: simpleSchema())
+        return s
+    }
+
+    /// A double-quote in a projected column name must be rejected by
+    /// queryRowsSkipCorrupt, just as it is by queryRows (F1).
+    @Test func skipCorruptRejectsDoubleQuoteInProjectionColumn() async throws {
+        let s = try await storage()
+        _ = try await s.rowStore.insert(
+            table: "items",
+            values: ["id": .uuid(UUID()), "label": .text("ok"), "flags": .bitmap(0)]
+        )
+        let bad = #"id" FROM items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.querySkipCorrupt(
+                table: "items", where: nil, orderBy: [], limit: nil, offset: nil, columns: [bad]
+            )
+        }
+    }
+
+    /// A semicolon in a projected column name must be rejected.
+    @Test func skipCorruptRejectsSemicolonInProjectionColumn() async throws {
+        let s = try await storage()
+        let bad = "id; DROP TABLE items; --"
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.querySkipCorrupt(
+                table: "items", where: nil, orderBy: [], limit: nil, offset: nil, columns: [bad]
+            )
+        }
+    }
+
+    /// A double-quote in the table name must be rejected by queryRowsSkipCorrupt.
+    @Test func skipCorruptRejectsDoubleQuoteInTableName() async throws {
+        let s = try await storage()
+        let bad = #"items" UNION SELECT * FROM items; --"#
+        await #expect(throws: StorageError.invalidIdentifier(name: bad)) {
+            _ = try await s.rowStore.querySkipCorrupt(
+                table: bad, where: nil, orderBy: [], limit: nil, offset: nil, columns: nil
+            )
+        }
+    }
+
+    /// Valid table and column names must still produce correct results.
+    @Test func skipCorruptAcceptsValidIdentifiers() async throws {
+        let s = try await storage()
+        let id = UUID()
+        _ = try await s.rowStore.insert(
+            table: "items",
+            values: ["id": .uuid(id), "label": .text("ok"), "flags": .bitmap(0)]
+        )
+        // Project two valid columns; the third (flags) is intentionally omitted.
+        let result = try await s.rowStore.querySkipCorrupt(
+            table: "items", where: nil, orderBy: [], limit: nil, offset: nil, columns: ["id", "label"]
+        )
+        #expect(result.rows.count == 1)
+        #expect(result.skipped == 0)
+        #expect(result.rows[0]["id"] == .uuid(id))
+    }
+}
+
 // MARK: - CAND-052: Estate DB file symlink refusal
 //
 // A symlink pre-planted at the database path must be refused before

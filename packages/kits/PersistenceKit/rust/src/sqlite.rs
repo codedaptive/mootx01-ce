@@ -467,86 +467,119 @@ fn create_index_sql(decl: &IndexDeclaration) -> String {
 // Predicate compilation — mirrors SQLitePredicateCompiler.swift.
 // ─────────────────────────────────────────────────────────────────────
 
-fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<SqlValue>) -> String {
+/// Compile a `StoragePredicate` to a parameterized SQLite WHERE clause.
+///
+/// Returns `Err(StorageError::InvalidIdentifier)` if any column name in the
+/// predicate tree contains characters outside `[A-Za-z_][A-Za-z0-9_]*`.
+/// Binds are safe (bound values, never interpolated); only column identifiers
+/// reach the SQL string. Mirrors Swift's `SQLitePredicateCompiler.compile`
+/// (SECFIX-WS2-PK F7).
+fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<SqlValue>) -> StorageResult<String> {
     match p {
-        StoragePredicate::IsTrue => "1=1".into(),
-        StoragePredicate::IsFalse => "1=0".into(),
+        StoragePredicate::IsTrue => Ok("1=1".into()),
+        StoragePredicate::IsFalse => Ok("1=0".into()),
         StoragePredicate::And(preds) => {
             if preds.is_empty() {
-                return "1=1".into();
+                return Ok("1=1".into());
             }
-            let parts: Vec<String> = preds.iter().map(|x| compile_predicate(x, binds)).collect();
-            format!("({})", parts.join(" AND "))
+            let parts: Vec<String> = preds
+                .iter()
+                .map(|x| compile_predicate(x, binds))
+                .collect::<StorageResult<_>>()?;
+            Ok(format!("({})", parts.join(" AND ")))
         }
         StoragePredicate::Or(preds) => {
             if preds.is_empty() {
-                return "1=0".into();
+                return Ok("1=0".into());
             }
-            let parts: Vec<String> = preds.iter().map(|x| compile_predicate(x, binds)).collect();
-            format!("({})", parts.join(" OR "))
+            let parts: Vec<String> = preds
+                .iter()
+                .map(|x| compile_predicate(x, binds))
+                .collect::<StorageResult<_>>()?;
+            Ok(format!("({})", parts.join(" OR ")))
         }
-        StoragePredicate::Not(inner) => format!("NOT ({})", compile_predicate(inner, binds)),
+        StoragePredicate::Not(inner) => {
+            Ok(format!("NOT ({})", compile_predicate(inner, binds)?))
+        }
         StoragePredicate::Eq(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(to_sql(v));
-            format!("\"{}\" = ?", c.name)
+            Ok(format!("\"{}\" = ?", c.name))
         }
         StoragePredicate::Neq(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(to_sql(v));
-            format!("\"{}\" != ?", c.name)
+            Ok(format!("\"{}\" != ?", c.name))
         }
         StoragePredicate::Lt(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(to_sql(v));
-            format!("\"{}\" < ?", c.name)
+            Ok(format!("\"{}\" < ?", c.name))
         }
         StoragePredicate::Lte(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(to_sql(v));
-            format!("\"{}\" <= ?", c.name)
+            Ok(format!("\"{}\" <= ?", c.name))
         }
         StoragePredicate::Gt(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(to_sql(v));
-            format!("\"{}\" > ?", c.name)
+            Ok(format!("\"{}\" > ?", c.name))
         }
         StoragePredicate::Gte(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(to_sql(v));
-            format!("\"{}\" >= ?", c.name)
+            Ok(format!("\"{}\" >= ?", c.name))
         }
-        StoragePredicate::IsNull(c) => format!("\"{}\" IS NULL", c.name),
-        StoragePredicate::IsNotNull(c) => format!("\"{}\" IS NOT NULL", c.name),
+        StoragePredicate::IsNull(c) => {
+            validate_sql_identifier(&c.name)?;
+            Ok(format!("\"{}\" IS NULL", c.name))
+        }
+        StoragePredicate::IsNotNull(c) => {
+            validate_sql_identifier(&c.name)?;
+            Ok(format!("\"{}\" IS NOT NULL", c.name))
+        }
         StoragePredicate::In(c, values) => {
+            validate_sql_identifier(&c.name)?;
             if values.is_empty() {
-                return "1=0".into();
+                return Ok("1=0".into());
             }
             let ph = vec!["?"; values.len()].join(", ");
             for v in values {
                 binds.push(to_sql(v));
             }
-            format!("\"{}\" IN ({ph})", c.name)
+            Ok(format!("\"{}\" IN ({ph})", c.name))
         }
         StoragePredicate::Like(c, pattern) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(SqlValue::Text(pattern.clone()));
-            format!("\"{}\" LIKE ?", c.name)
+            Ok(format!("\"{}\" LIKE ?", c.name))
         }
         StoragePredicate::BitmaskAll { column, mask } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(SqlValue::Integer(*mask));
             binds.push(SqlValue::Integer(*mask));
-            format!("(\"{}\" & ?) = ?", column.name)
+            Ok(format!("(\"{}\" & ?) = ?", column.name))
         }
         StoragePredicate::BitmaskAny { column, mask } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(SqlValue::Integer(*mask));
-            format!("(\"{}\" & ?) != 0", column.name)
+            Ok(format!("(\"{}\" & ?) != 0", column.name))
         }
         StoragePredicate::BitmaskNone { column, mask } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(SqlValue::Integer(*mask));
-            format!("(\"{}\" & ?) = 0", column.name)
+            Ok(format!("(\"{}\" & ?) = 0", column.name))
         }
         StoragePredicate::BitwiseEq {
             column,
             expected,
             mask,
         } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(SqlValue::Integer(*mask));
             binds.push(SqlValue::Integer(*expected));
-            format!("(\"{}\" & ?) = ?", column.name)
+            Ok(format!("(\"{}\" & ?) = ?", column.name))
         }
     }
 }
@@ -1245,7 +1278,14 @@ fn fetch_matching_keys(
         .and_then(|t| t.primary_key.first().cloned())
         .unwrap_or_else(|| "row_id".to_string());
     let mut binds: Vec<SqlValue> = Vec::new();
-    let where_sql = compile_predicate(predicate, &mut binds);
+    // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+    // If validation fails the fetch silently returns empty (caller receives no pre-mutation
+    // keys — safe: the caller's subsequent write will re-validate and reject). This matches
+    // the existing error-swallowing convention in this helper.
+    let where_sql = match compile_predicate(predicate, &mut binds) {
+        Ok(sql) => sql,
+        Err(_) => return Vec::new(),
+    };
     let sql = format!("SELECT \"{pk_col}\" FROM \"{table}\" WHERE {where_sql}");
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
@@ -1311,12 +1351,14 @@ impl RowStore for SqliteRowStore {
         // an encrypting estate must carry a keyID. Correct encrypting inserts
         // become .blob + keyID here; the guard fires only if the seam failed.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
-        // SQL-identifier injection guard (CAND-047): column names from the
-        // caller-supplied `values` map reach the INSERT column list directly.
+        // SQL-identifier injection guard (CAND-047): the table name and all
+        // caller-supplied column names reach the INSERT SQL directly.
         // A name containing `"` or `;` can escape double-quote delimiters and
         // alter the query. The same `validate_sql_identifier` used by
         // `query_projected` and the Postgres backend rejects any name outside
         // `[A-Za-z_][A-Za-z0-9_]*` — one shared seam, no forked validator.
+        // Table validated first (SECFIX-WS2-PK F9) then every column key (F7).
+        validate_sql_identifier(table)?;
         for k in values.keys() {
             validate_sql_identifier(k)?;
         }
@@ -1358,10 +1400,12 @@ impl RowStore for SqliteRowStore {
         // net: a content-bearing upsert on an encrypting estate throws rather
         // than silently writing plaintext. Mirrors Swift `upsertRow` design.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
-        // SQL-identifier injection guard (CAND-047): validate both the value-map
-        // column names and the conflict-column list before interpolating into the
-        // INSERT … ON CONFLICT … DO UPDATE SQL. Reuses the shared
-        // `validate_sql_identifier` seam — no forked validator.
+        // SQL-identifier injection guard (CAND-047): validate the table name,
+        // all value-map column names, and the conflict-column list before
+        // interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
+        // Table validated first (SECFIX-WS2-PK F9) then columns (F7).
+        // Reuses the shared `validate_sql_identifier` seam — no forked validator.
+        validate_sql_identifier(table)?;
         for k in values.keys() {
             validate_sql_identifier(k)?;
         }
@@ -1423,10 +1467,12 @@ impl RowStore for SqliteRowStore {
         // on an encrypting estate throws rather than silently writing plaintext.
         // Mirrors Swift `updateRows` design.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
-        // SQL-identifier injection guard (CAND-047): column names from the
-        // caller-supplied `values` map reach the UPDATE SET clause directly.
+        // SQL-identifier injection guard (CAND-047): validate the table name
+        // and all caller-supplied SET column names before interpolating into SQL.
         // A name containing `"` or `;` can escape double-quote delimiters.
+        // Table validated first (SECFIX-WS2-PK F9) then columns (F7).
         // Reuses the shared `validate_sql_identifier` seam — no forked validator.
+        validate_sql_identifier(table)?;
         for k in values.keys() {
             validate_sql_identifier(k)?;
         }
@@ -1443,7 +1489,8 @@ impl RowStore for SqliteRowStore {
             .collect::<Vec<_>>()
             .join(", ");
         let mut binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
-        let where_sql = compile_predicate(predicate, &mut binds);
+        // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+        let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
         let changed = guard
             .conn
@@ -1462,13 +1509,18 @@ impl RowStore for SqliteRowStore {
     }
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the DELETE FROM clause.
+        // Predicate column names are validated inside compile_predicate (F7).
+        validate_sql_identifier(table)?;
         let guard = self.inner.lock().unwrap();
         // Pre-query row keys before deletion so notifications carry them.
         // The Mutex serializes all operations — no interleaving is possible
         // between this SELECT and the DELETE.
         let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
         let mut binds: Vec<SqlValue> = Vec::new();
-        let where_sql = compile_predicate(predicate, &mut binds);
+        // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+        let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
         let changed = guard
             .conn
@@ -1494,23 +1546,33 @@ impl RowStore for SqliteRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the SELECT FROM clause.
+        // Predicate and ORDER BY column names are validated at their respective seams.
+        validate_sql_identifier(table)?;
         let guard = self.inner.lock().unwrap();
         let mut sql = format!("SELECT * FROM \"{table}\"");
         let mut binds: Vec<SqlValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated into the SQL string.
+            // Mirrors the guard in Swift `SQLiteBackend.queryRows`.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -1560,13 +1622,16 @@ impl RowStore for SqliteRowStore {
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
         // Empty projection means "no projection" — fall back to SELECT *.
+        // `query` validates the table name, so the guard is upheld either way.
         if columns.is_empty() {
             return self.query(table, predicate, order_by, limit, offset);
         }
-        // Validate all caller-supplied column names before embedding them in SQL
-        // (SECFIX-WS2-PK F1). Double-quoting is insufficient: a name containing
-        // `"` can escape the quoting and alter the query. Reject any name that
-        // is not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9/F1):
+        // validate the table name and all caller-supplied projection column names
+        // before embedding them in SQL. Double-quoting is insufficient: a name
+        // containing `"` can escape the quoting and alter the query. Reject any
+        // name that is not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
+        validate_sql_identifier(table)?;
         for c in columns {
             validate_sql_identifier(c)?;
         }
@@ -1582,19 +1647,24 @@ impl RowStore for SqliteRowStore {
         let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
         let mut binds: Vec<SqlValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated. Mirrors queryRows.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -1632,11 +1702,17 @@ impl RowStore for SqliteRowStore {
     }
 
     fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the SELECT COUNT clause.
+        // Predicate column names are validated inside compile_predicate (F7).
+        validate_sql_identifier(table)?;
         let guard = self.inner.lock().unwrap();
         let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let mut binds: Vec<SqlValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         let n: i64 = guard
             .conn
@@ -1670,23 +1746,33 @@ impl RowStore for SqliteRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<(Vec<StorageRow>, usize)> {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the SELECT FROM clause.
+        // Predicate and ORDER BY column names are validated at their respective seams.
+        validate_sql_identifier(table)?;
         let guard = self.inner.lock().unwrap();
         let mut sql = format!("SELECT * FROM \"{table}\"");
         let mut binds: Vec<SqlValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated. Mirrors queryRows
+            // and queryRowsSkipCorrupt in Swift.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -1766,8 +1852,18 @@ impl RowStore for SqliteRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<(Vec<StorageRow>, usize)> {
+        // `query_skip_corrupt` validates the table name, so the guard is upheld
+        // on the empty-projection path as well.
         if columns.is_empty() {
             return self.query_skip_corrupt(table, predicate, order_by, limit, offset);
+        }
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9/F10):
+        // validate the table name and all projected column names before building
+        // the SELECT list. Mirrors the guard in query_projected and in Swift's
+        // queryRowsSkipCorrupt. Table first (F9), then columns (F10).
+        validate_sql_identifier(table)?;
+        for c in columns {
+            validate_sql_identifier(c)?;
         }
         let guard = self.inner.lock().unwrap();
         let select_list = columns
@@ -1778,19 +1874,24 @@ impl RowStore for SqliteRowStore {
         let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
         let mut binds: Vec<SqlValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated. Mirrors query_projected.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {

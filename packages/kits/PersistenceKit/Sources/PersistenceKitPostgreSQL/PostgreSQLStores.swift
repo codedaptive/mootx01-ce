@@ -39,40 +39,12 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         return try await block(conn)
     }
 
-    /// Validate a caller-supplied SQL identifier (column or table name).
-    ///
-    /// Accepts only names matching `[A-Za-z_][A-Za-z0-9_]*`. Double-quoting
-    /// alone is insufficient protection: a name containing `"` can escape the
-    /// delimiter and alter a dynamically-constructed SQL string. Mirrors the
-    /// guard already in `SQLiteStorage.validateSQLIdentifier` and in the Rust
-    /// backend's `validate_sql_identifier` (SECFIX-WS2-PK F2 — CAND-047).
-    private func validatePSQLIdentifier(_ name: String) throws {
-        guard !name.isEmpty else {
-            throw StorageError.invalidIdentifier(name: name)
-        }
-        for (index, char) in name.unicodeScalars.enumerated() {
-            let valid: Bool
-            if index == 0 {
-                // First character: letter or underscore.
-                valid = (char >= "A" && char <= "Z")
-                    || (char >= "a" && char <= "z")
-                    || char == "_"
-            } else {
-                // Subsequent characters: letter, digit, or underscore.
-                valid = (char >= "A" && char <= "Z")
-                    || (char >= "a" && char <= "z")
-                    || (char >= "0" && char <= "9")
-                    || char == "_"
-            }
-            guard valid else {
-                throw StorageError.invalidIdentifier(name: name)
-            }
-        }
-    }
-
     func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
-        // Validate all caller-supplied column names before interpolating into SQL.
-        // Mirrors the SQLite backend's guard (SECFIX-WS2-PK F2 — CAND-047).
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name and all value-map column names before interpolating into the INSERT
+        // statement. Uses the module-level `validatePSQLIdentifier` in
+        // PostgreSQLIdentifierValidator.swift — one seam, no forked validator.
+        try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
         // At-rest encryption seam (Mode 2 / RowEncryption): encrypt the content
         // column and stamp the keyID before binding. No-op for plaintext. The
@@ -99,8 +71,10 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func upsert(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
-        // Validate all caller-supplied column names before interpolating into SQL.
-        // Mirrors the SQLite backend's guard (SECFIX-WS2-PK F2 — CAND-047).
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name, all value-map column names, and the conflict-column list before
+        // interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
+        try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
         for name in conflictColumns { try validatePSQLIdentifier(name) }
         // upsert is not wired to encrypt: in the LocusKit schema it is only
@@ -135,8 +109,9 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func update(table: String, values: [String: TypedValue], where predicate: StoragePredicate) async throws -> Int {
-        // Validate all caller-supplied column names before interpolating into SQL.
-        // Mirrors the SQLite backend's guard (SECFIX-WS2-PK F2 — CAND-047).
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name and all value-map column names before interpolating into the UPDATE.
+        try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
         // update does not run the encryption seam, so a content update on an
         // encrypting estate would write plaintext with a null keyID. Guard it
@@ -150,9 +125,11 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         for (i, c) in cols.enumerated() {
             setClauses.append("\"\(c)\" = $\(i + 1)")
         }
-        // Compile predicate with bindings starting at $\(cols.count + 1)
+        // Compile predicate with bindings starting at $\(cols.count + 1).
+        // renderPredicate is now `throws` — predicate column names are validated
+        // inside the compiler (SECFIX-WS2-PK F7).
         var predBindings: [TypedValue] = []
-        let predSQL = renderPredicate(predicate, startIndex: cols.count + 1, bindings: &predBindings)
+        let predSQL = try renderPredicate(predicate, startIndex: cols.count + 1, bindings: &predBindings)
         bindings.append(contentsOf: predBindings)
         let sql = "UPDATE \"\(table)\" SET \(setClauses.joined(separator: ", ")) WHERE \(predSQL)"
         let _sql = sql
@@ -166,8 +143,12 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func delete(table: String, where predicate: StoragePredicate) async throws -> Int {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the DELETE statement. Predicate
+        // column names are validated inside renderPredicate via the compiler.
+        try validatePSQLIdentifier(table)
         var bindings: [TypedValue] = []
-        let predSQL = renderPredicate(predicate, startIndex: 1, bindings: &bindings)
+        let predSQL = try renderPredicate(predicate, startIndex: 1, bindings: &bindings)
         let sql = "DELETE FROM \"\(table)\" WHERE \(predSQL)"
         let _sql = sql
         let _bindings = bindings
@@ -184,16 +165,27 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         limit: Int?,
         offset: Int?
     ) async throws -> [StorageRow] {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the SELECT statement.
+        try validatePSQLIdentifier(table)
         let columns = await backend.columns(for: table)
         let colSelect = columns.isEmpty ? "*" : columns.map { "\"\($0.name)\"" }.joined(separator: ", ")
         var sql = "SELECT \(colSelect) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let p = predicate {
-            let where_ = renderPredicate(p, startIndex: 1, bindings: &bindings)
+            // renderPredicate is now `throws` — predicate column names are
+            // validated inside the compiler (SECFIX-WS2-PK F7).
+            let where_ = try renderPredicate(p, startIndex: 1, bindings: &bindings)
             sql += " WHERE \(where_)"
         }
         if !orderBy.isEmpty {
-            let parts = orderBy.map { "\"\($0.column.name)\" \($0.direction == .ascending ? "ASC" : "DESC")" }
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before interpolating into SQL.
+            let parts = try orderBy.map { clause -> String in
+                try validatePSQLIdentifier(clause.column.name)
+                let dir = clause.direction == .ascending ? "ASC" : "DESC"
+                return "\"\(clause.column.name)\" \(dir)"
+            }
             sql += " ORDER BY " + parts.joined(separator: ", ")
         }
         if let lim = limit { sql += " LIMIT \(lim)" }
@@ -217,10 +209,15 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     func count(table: String, where predicate: StoragePredicate?) async throws -> Int {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the COUNT query.
+        try validatePSQLIdentifier(table)
         var sql = "SELECT COUNT(*) AS \"c\" FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let p = predicate {
-            sql += " WHERE \(renderPredicate(p, startIndex: 1, bindings: &bindings))"
+            // renderPredicate is now `throws` — predicate column names validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            sql += " WHERE \(try renderPredicate(p, startIndex: 1, bindings: &bindings))"
         }
         let _sql = sql
         let _bindings = bindings
@@ -237,9 +234,14 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     }
 
     /// Predicate render with custom $-index start (for UPDATE statements).
-    private func renderPredicate(_ p: StoragePredicate, startIndex: Int, bindings: inout [TypedValue]) -> String {
-        // Compile and then renumber parameters.
-        let compiled = PostgreSQLPredicateCompiler.compile(p)
+    ///
+    /// Now `throws` because `PostgreSQLPredicateCompiler.compile` validates
+    /// every predicate column name and throws `StorageError.invalidIdentifier`
+    /// for names outside `[A-Za-z_][A-Za-z0-9_]*` (SECFIX-WS2-PK F7).
+    private func renderPredicate(_ p: StoragePredicate, startIndex: Int, bindings: inout [TypedValue]) throws -> String {
+        // Compile and then renumber parameters. compile is now `throws` so that
+        // predicate column names are validated before any SQL is built.
+        let compiled = try PostgreSQLPredicateCompiler.compile(p)
         bindings.append(contentsOf: compiled.bindings)
         // Replace $1 → $\(startIndex), $2 → $\(startIndex+1), ...
         guard startIndex != 1 else { return compiled.sql }
