@@ -295,4 +295,46 @@ struct ReanchorTests {
         let after = try await estate._peekDrawer(id: drawer.id)
         #expect(after?.udcCode == "200")
     }
+
+    // MARK: - Finding B: reanchor rejects empty/whitespace-only wing
+
+    /// `Estate.reanchor` with `toWing: ""` must throw `invalidContent`.
+    ///
+    /// An empty wing string would create a nameless wing node and violate
+    /// the non-empty invariant the capture path enforces. Before this fix
+    /// the guard only checked `toWing != nil`, so an empty string silently
+    /// persisted as an estate state that capture would refuse to create.
+    @Test("Estate.reanchor: empty toWing is rejected with invalidContent")
+    func reanchorRejectsEmptyWing() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await captureOne(estate: estate)
+
+        await #expect(throws: LocusKitError.self) {
+            try await estate.reanchor(rowID: drawer.id, toWing: "")
+        }
+    }
+
+    /// `Estate.reanchor` with `toWing: "   "` (whitespace-only) must also
+    /// throw `invalidContent`. Whitespace-only is equivalent to empty for
+    /// the wing name invariant.
+    @Test("Estate.reanchor: whitespace-only toWing is rejected with invalidContent")
+    func reanchorRejectsWhitespaceWing() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await captureOne(estate: estate)
+
+        await #expect(throws: LocusKitError.self) {
+            try await estate.reanchor(rowID: drawer.id, toWing: "   ")
+        }
+    }
+
+    /// `Estate.reanchor` with a valid non-empty `toWing` must succeed —
+    /// the empty-wing guard must not block legitimate wing moves.
+    @Test("Estate.reanchor: non-empty toWing is accepted")
+    func reanchorAcceptsNonEmptyWing() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await captureOne(estate: estate)
+
+        // Must not throw.
+        try await estate.reanchor(rowID: drawer.id, toWing: "Personal")
+    }
 }

@@ -309,4 +309,164 @@ struct GLK_COW_01_BranchTests {
         #expect(!report.newInBranch.isEmpty,
             "compareToParent must detect rows added to branch after derivation")
     }
+
+    // MARK: - Test 11: derive preserves wing (ADR-016 wing-integrity, Finding A)
+
+    /// A drawer captured into the parent in a non-default wing must land in the
+    /// SAME wing in the branch estate after derivation.
+    ///
+    /// Before this fix `EstateBranch.init` built CaptureFrame without the `wing`
+    /// field, silently re-filing every derived row into the default "Agentic Memory"
+    /// wing regardless of its original wing. Grant/federation boundary violations
+    /// like this are silent data-routing bugs — content becomes visible to filters
+    /// scoped to the wrong wing.
+    @Test
+    func deriveBranchPreservesWing() async throws {
+        let (kit, handle) = try await openEstate()
+        // Capture a row into the parent in a non-default wing ("User Canon").
+        let frame = CaptureFrame(
+            content: "wing-tagged-content",
+            channel: .typed,
+            room: "wing-room",
+            latticeAnchor: .udc("000"),
+            addedBy: "wing-integrity-test",
+            embeddingModelID: "test-model-v1",
+            wing: "User Canon"
+        )
+        _ = try await kit.capture(handle, frame)
+
+        // Derive a branch — the snapshot copy must preserve the wing.
+        let branch = try await kit.glkDeriveBranch(name: "wing-check-branch", from: handle)
+
+        // Recall from the branch with full hydration and verify the wing is preserved.
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .full,
+            ordering: .byCaptureTimeDesc
+        )
+        let branchRows = try await branch.recall(recallFrame)
+        let branchRow = try #require(branchRows.first(where: { $0.content == "wing-tagged-content" }),
+            "Branch should contain the parent's wing-tagged row after derivation")
+
+        // The wing is encoded in the node tree: the branch row's parentNodeId points to
+        // a room node whose parent is the wing node. Verify via recall filter — recall
+        // with a wing filter should surface the row.
+        let wingFilterFrame = RecallFrame(
+            filterChain: [.unconfirmed, .inWing("User Canon")],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let wingRows = try await branch.recall(wingFilterFrame)
+        #expect(wingRows.contains(where: { $0.id == branchRow.id }),
+            "Derived branch row must be in 'User Canon' wing — wing was dropped before this fix")
+    }
+
+    // MARK: - Test 12: promote preserves wing (ADR-016 wing-integrity, Finding A)
+
+    /// A drawer captured into the parent in a non-default wing must land in the
+    /// SAME wing after derive → capture-in-branch → promote.
+    ///
+    /// Specifically: rows that were already in the parent's branch snapshot are
+    /// NOT promoted (only branch-new rows are). This test captures a wing-tagged
+    /// row DIRECTLY INTO THE BRANCH (post-derivation) so it qualifies as a new
+    /// row that glkPromoteBranch will re-capture into the parent.
+    @Test
+    func promoteBranchPreservesWing() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Derive an empty branch.
+        let branch = try await kit.glkDeriveBranch(name: "promote-wing-branch", from: handle)
+
+        // Capture a wing-tagged row directly into the branch (post-derivation → new row).
+        let frame = CaptureFrame(
+            content: "branch-wing-tagged",
+            channel: .typed,
+            room: "wing-room",
+            latticeAnchor: .udc("000"),
+            addedBy: "wing-integrity-test",
+            embeddingModelID: "test-model-v1",
+            wing: "User Canon"
+        )
+        _ = try await branch.capture(frame)
+
+        // Promote — the new branch row should land in "User Canon" in the parent.
+        try await kit.glkPromoteBranch(branch, replacing: handle)
+
+        // Recall from the parent with a wing filter.
+        let wingFilterFrame = RecallFrame(
+            filterChain: [.unconfirmed, .inWing("User Canon")],
+            hydrationLevel: .full,
+            ordering: .byCaptureTimeDesc
+        )
+        let parentWingRows = try await kit.recall(handle, wingFilterFrame)
+        #expect(parentWingRows.contains(where: { $0.content == "branch-wing-tagged" }),
+            "Promoted branch row must land in 'User Canon' wing — wing was dropped before this fix")
+    }
+
+    // MARK: - Test 13: merge preserves wing (ADR-016 wing-integrity, Finding A)
+
+    /// A drawer cherry-picked via glkMergeDrawers must land in its original wing
+    /// in the parent estate, not the default wing.
+    @Test
+    func mergeDrawersPreservesWing() async throws {
+        let (kit, handle) = try await openEstate()
+        let branch = try await kit.glkDeriveBranch(name: "merge-wing-branch", from: handle)
+
+        // Capture a wing-tagged row into the branch.
+        let frame = CaptureFrame(
+            content: "merge-wing-tagged",
+            channel: .typed,
+            room: "wing-room",
+            latticeAnchor: .udc("000"),
+            addedBy: "wing-integrity-test",
+            embeddingModelID: "test-model-v1",
+            wing: "User Canon"
+        )
+        let captured = try await branch.capture(frame)
+
+        // Cherry-pick the row into the parent.
+        _ = try await kit.glkMergeDrawers([captured.id], from: branch, into: handle)
+
+        // Recall from the parent with a wing filter.
+        let wingFilterFrame = RecallFrame(
+            filterChain: [.unconfirmed, .inWing("User Canon")],
+            hydrationLevel: .full,
+            ordering: .byCaptureTimeDesc
+        )
+        let parentWingRows = try await kit.recall(handle, wingFilterFrame)
+        #expect(parentWingRows.contains(where: { $0.content == "merge-wing-tagged" }),
+            "Merged branch row must land in 'User Canon' wing — wing was dropped before this fix")
+    }
+
+    // MARK: - Test 14: derive preserves exportability (Finding A — field audit)
+
+    /// A born-public drawer must remain public after derivation.
+    /// Exportability is a security field — silently re-privatizing it would
+    /// break recall filters scoped to exportable content.
+    @Test
+    func deriveBranchPreservesExportability() async throws {
+        let (kit, handle) = try await openEstate()
+        let frame = CaptureFrame(
+            content: "born-public-content",
+            channel: .typed,
+            room: "pub-room",
+            latticeAnchor: .udc("000"),
+            addedBy: "wing-integrity-test",
+            embeddingModelID: "test-model-v1",
+            exportability: .public_
+        )
+        _ = try await kit.capture(handle, frame)
+
+        let branch = try await kit.glkDeriveBranch(name: "exportability-branch", from: handle)
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .full,
+            ordering: .byCaptureTimeDesc
+        )
+        let rows = try await branch.recall(recallFrame)
+        let row = try #require(rows.first(where: { $0.content == "born-public-content" }))
+        #expect(row.exportability == .public_,
+            "Exportability must be preserved on derive — born-public row went private before fix")
+    }
 }

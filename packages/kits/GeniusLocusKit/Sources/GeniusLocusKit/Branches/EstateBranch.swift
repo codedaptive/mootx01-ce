@@ -106,13 +106,22 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         //
         // Resolve parentNodeId → (wing, room) display names once for
         // the whole batch. Drawer no longer carries wing/room stored
-        // properties (node-tree migration); room is recovered from the
-        // node tree via resolveNodeNames.
+        // properties (node-tree migration); wing and room are both
+        // recovered from the node tree via resolveNodeNames.
+        //
+        // Wing integrity (ADR-016): wing is a grant/federation boundary.
+        // All security/placement/lifecycle fields are preserved so a
+        // branch snapshot is a faithful copy of the parent's estate state.
+        // lineageID is intentionally NOT preserved — branch promotion is
+        // copy semantics, not move semantics; a new lineage prevents
+        // unintended supersession cascades across estate boundaries.
         let parentNodeIds = Array(Set(snapshotRows.map(\.parentNodeId)))
         let nodeNames = try await parentEstate.resolveNodeNames(parentNodeIds: parentNodeIds)
         var ids = Set<DrawerID>()
         for row in snapshotRows {
-            let roomName = nodeNames[row.parentNodeId]?.room ?? ""
+            let names = nodeNames[row.parentNodeId]
+            let wingName = names?.wing       // nil → CaptureFrame defaults to defaultWing()
+            let roomName = names?.room ?? ""
             let frame = CaptureFrame(
                 content: row.content,
                 channel: row.captureChannel,
@@ -126,7 +135,16 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
                 addedBy: row.addedBy,
                 embeddingModelID: row.embeddingModelID,
                 sensitivity: row.adjectiveSensitivity,
-                kind: row.contentKind
+                kind: row.contentKind,
+                provenanceChannel: row.channel,
+                sourceType: row.sourceType,
+                provenanceSensitivity: row.sensitivity,
+                confirmation: row.confirmation,
+                confidence: row.confidence,
+                eventTime: row.eventTime,
+                featureFlags: row.featureFlags,
+                exportability: row.exportability,
+                wing: wingName
             )
             let stored = try await estate.capture(frame)
             ids.insert(stored.id)

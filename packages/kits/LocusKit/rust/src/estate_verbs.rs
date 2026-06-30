@@ -2072,6 +2072,18 @@ impl Estate {
                 "reanchor requires toRoom, toWing, or toLattice".to_string(),
             ));
         }
+        // Wing non-empty invariant: when to_wing is supplied it must be
+        // non-empty. An empty wing string would create a nameless wing
+        // node and violate the same invariant the capture path enforces.
+        // Mirror the capture-path guard so reanchor cannot produce estate
+        // state that capture would refuse to create.
+        if let Some(w) = to_wing {
+            if w.trim().is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "reanchor: to_wing must not be empty or whitespace-only".to_string(),
+                ));
+            }
+        }
         if self.store.get_drawer(row_id)?.is_none() {
             return Err(LocusKitError::DrawerNotFound {
                 id: row_id.to_string(),

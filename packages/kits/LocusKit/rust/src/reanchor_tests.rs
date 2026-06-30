@@ -319,4 +319,50 @@ mod tests {
         assert_eq!(room, "target-room", "room must also be updated");
         assert_ne!(wing, &original_wing, "wing must differ from original");
     }
+
+    // -----------------------------------------------------------------------
+    // Finding B: reanchor rejects empty / whitespace-only to_wing
+    //
+    // Before this fix the guard checked `to_wing.is_none()` only, so an
+    // empty string silently persisted as a nameless wing node — estate state
+    // that `capture` would refuse to create.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn estate_reanchor_empty_wing_returns_invalid_content() {
+        // An empty string wing must be rejected; mirrors the capture-path guard.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "empty wing guard", "room-a", "000");
+        let err = estate
+            .reanchor(&d.id, None, Some(""), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "expected InvalidContent for empty to_wing, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn estate_reanchor_whitespace_wing_returns_invalid_content() {
+        // A whitespace-only string is equivalent to empty for wing names.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "whitespace wing guard", "room-a", "000");
+        let err = estate
+            .reanchor(&d.id, None, Some("   "), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "expected InvalidContent for whitespace-only to_wing, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn estate_reanchor_valid_nonempty_wing_is_accepted() {
+        // The empty-wing guard must not block legitimate wing moves.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "valid wing move", "room-a", "000");
+        estate
+            .reanchor(&d.id, None, Some("Personal"), None)
+            .expect("non-empty to_wing must succeed");
+    }
 }
