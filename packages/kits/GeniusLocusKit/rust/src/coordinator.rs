@@ -2303,6 +2303,21 @@ impl EstateCoordinator {
             // Skip tombstoned, empty, or already-distilled-source drawers.
             if drawer.tombstoned_at.is_some() { continue; }
             if drawer.content.is_empty() { continue; }
+            // Skip restricted and secret source drawers — parity with Swift's
+            // distillItemsSweep which filters candidates through
+            // `getDrawers(ids:matchingFrame:RecallFrame(filterChain:[]))` whose
+            // `insert_defaults` enforces `SensitivityAtMost(Elevated)`.
+            // Elevated raw_value == 16; Restricted == 32, Secret == 48.
+            // A factoid produced from a restricted or secret source would inherit
+            // that tier (secfix/punt-g2 sensitivity floor below), so it could never
+            // be returned via the default recall ceiling anyway — but we exclude the
+            // source here as well so the sweep does not waste pipeline resources and
+            // does not store a vector fingerprint for an unreachable factoid slot.
+            if drawer.adjective_sensitivity().raw_value()
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                continue;
+            }
             let drawer_room = node_names.get(&drawer.parent_node_id)
                 .map(|(_, r)| r.as_str())
                 .unwrap_or("");
@@ -7790,5 +7805,93 @@ mod tests {
             .recall_kg_fact_timeline(&h, None)
             .expect("timeline");
         assert_eq!(timeline.len(), 2, "timeline must have both facts");
+    }
+
+    // CO-DIST-SEC-1: distill_items_sweep must not distill restricted or secret
+    //                source drawers — secfix/punt-g2 sensitivity ceiling parity.
+    //
+    // Parity with Swift distillItemsSweep which filters candidates through
+    //   `getDrawers(ids:matchingFrame: RecallFrame(filterChain: []))`,
+    // which goes through insert_defaults → SensitivityAtMost(Elevated).
+    // Restricted (32) and Secret (48) exceed the Elevated (16) ceiling and must
+    // be silently skipped, producing zero factoids for their content even when
+    // the content is long enough to be distillable (≥3 sentences).
+    #[test]
+    fn co_dist_sec1_sweep_skips_restricted_and_secret_source_drawers() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap()
+        );
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        // Long-enough content (3+ sentences, recurring capitalized entities) so the
+        // drawer qualifies as distillable at Normal sensitivity. The default
+        // capitalization extractor requires named entities that recur across ≥2
+        // of the 3+ segments to produce a non-zero fingerprint.
+        // "Memory" and "Rust" each appear in at least 2 of the 3 segments here.
+        let long_content = "Both Memory and Rust implement the same segmenter algorithm. \
+                            Memory retains context across Rust sentences. \
+                            Rust uses Memory to store recurring entities for distillation.";
+
+        // 1. Normal-tier drawer (must be distilled — control case).
+        let mut frame_normal = LkCaptureFrame::new(
+            long_content,
+            CaptureChannel::Typed,
+            "study",
+            LatticeAnchor::udc("0"),
+            "tester",
+            "test-v1",
+        );
+        // AdjectiveSensitivity::Normal is the default — no override needed.
+        let normal_id = coord.capture(&handle, frame_normal.clone(), NOW).expect("capture normal").id;
+
+        // 2. Restricted-tier drawer (must NOT be distilled).
+        frame_normal.sensitivity = AdjectiveSensitivity::Restricted;
+        let restricted_id = coord.capture(&handle, frame_normal.clone(), NOW).expect("capture restricted").id;
+
+        // 3. Secret-tier drawer (must NOT be distilled).
+        frame_normal.sensitivity = AdjectiveSensitivity::Secret;
+        let secret_id = coord.capture(&handle, frame_normal.clone(), NOW).expect("capture secret").id;
+
+        // Run the sweep with no VectorStore (fingerprint storage is dark, but
+        // factoid capture still succeeds — parity with production estates where
+        // VectorStore may not be registered at sweep time).
+        let produced = coord
+            .distill_items_sweep(&handle, NOW, None)
+            .expect("sweep must not error");
+
+        // The sweep must produce exactly 1 factoid (for the Normal drawer).
+        // Restricted and Secret drawers must be silently skipped.
+        assert_eq!(
+            produced, 1,
+            "sweep must produce exactly 1 factoid (Normal drawer only); \
+             restricted and secret source drawers must be excluded"
+        );
+
+        // Verify the produced factoid was derived from the Normal source,
+        // not from either of the elevated-sensitivity drawers.
+        // The factoid's lineage_id equals its source drawer's UUID.
+        let estate = coord.estate_for_verb(&handle).expect("estate_for_verb");
+        let all = estate.all_drawers().expect("all_drawers");
+        assert!(
+            all.iter().any(|d| d.lineage_id.to_string() == normal_id),
+            "factoid for Normal source must exist"
+        );
+        assert!(
+            all.iter().all(|d| d.lineage_id.to_string() != restricted_id),
+            "no factoid must exist for Restricted source; secfix/punt-g2 violated"
+        );
+        assert!(
+            all.iter().all(|d| d.lineage_id.to_string() != secret_id),
+            "no factoid must exist for Secret source; secfix/punt-g2 violated"
+        );
     }
 }

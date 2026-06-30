@@ -210,12 +210,24 @@ fn eidetic_segmenter_handles_trailing_period_text() {
 }
 
 // MARK: - T5 (secfix/punt-g2): factoid inherits source drawer sensitivity
+//
+// NOTE: The security fix (secfix/punt-g2 part 1) added the sensitivity floor
+// so factoids inherit their source's sensitivity tier. Part 2 of the same fix
+// added the sweep exclusion: Restricted (32) and Secret (48) source drawers are
+// NOW skipped entirely — the sweep cannot produce a factoid from an
+// above-Elevated source (parity with Swift distillItemsSweep which filters
+// candidates through an empty RecallFrame → insert_defaults →
+// SensitivityAtMost(Elevated)).
+//
+// This test verifies the sensitivity floor for ELEVATED sources — the
+// highest tier that remains within the sweep's admissibility window.
+// The Secret-source exclusion is separately verified in coordinator.rs
+// test co_dist_sec1_sweep_skips_restricted_and_secret_source_drawers.
 
-/// T5: A factoid produced from a secret-sensitivity source drawer must carry
-/// secret sensitivity. Pre-fix, `distill_items_sweep` always used the default
-/// `AdjectiveSensitivity::Normal` on the factoid `CaptureFrame` regardless of
-/// the source drawer — allowing secret memories to be downgraded into
-/// normal-tier recall.
+/// T5: A factoid produced from an elevated-sensitivity source drawer must carry
+/// elevated sensitivity — the floor rule applies to the admissible sensitivity
+/// range (Normal–Elevated). Restricted and Secret sources are excluded from
+/// the sweep by the sensitivity ceiling gate (secfix/punt-g2 part 2).
 #[test]
 fn distill_items_sweep_factoid_inherits_source_sensitivity() {
     let (coord, h) = open_one();
@@ -226,7 +238,8 @@ fn distill_items_sweep_factoid_inherits_source_sensitivity() {
                    Rust parity is verified by the same tests. \
                    Swift and Rust must produce identical factoid sensitivity.";
 
-    // Capture with secret sensitivity.
+    // Capture with ELEVATED sensitivity — the highest tier the sweep's admissibility
+    // window allows (Elevated raw_value == 16 <= SensitivityAtMost(Elevated) ceiling).
     let mut frame = CaptureFrame::new(
         content,
         CaptureChannel::Typed,
@@ -235,14 +248,14 @@ fn distill_items_sweep_factoid_inherits_source_sensitivity() {
         "test-secfix",
         "minilm-v6",
     );
-    frame.sensitivity = AdjectiveSensitivity::Secret;
-    coord.capture(&h, frame, NOW).expect("capture secret drawer");
+    frame.sensitivity = AdjectiveSensitivity::Elevated;
+    coord.capture(&h, frame, NOW).expect("capture elevated drawer");
 
     // Run the sweep; expect at least one factoid.
     let produced = coord
         .distill_items_sweep(&h, NOW, None)
         .expect("distill_items_sweep");
-    assert!(produced >= 1, "sweep must produce ≥1 factoid (got {produced})");
+    assert!(produced >= 1, "sweep must produce ≥1 factoid from Elevated source (got {produced})");
 
     // Find factoid drawers produced by the distillation daemon.
     // `all_drawers` is the public coordinator API (no estate_for_verb crossing
@@ -258,8 +271,8 @@ fn distill_items_sweep_factoid_inherits_source_sensitivity() {
     for factoid in &factoids {
         assert_eq!(
             factoid.adjective_sensitivity(),
-            AdjectiveSensitivity::Secret,
-            "factoid produced from Secret source must inherit Secret sensitivity; got {:?}",
+            AdjectiveSensitivity::Elevated,
+            "factoid produced from Elevated source must inherit Elevated sensitivity; got {:?}",
             factoid.adjective_sensitivity()
         );
     }

@@ -120,8 +120,23 @@ public struct Recollect: Recipe {
         kit: GeniusLocusKit
     ) async throws -> Output {
         // 1. Hydrate factoid drawer, validate DIST header.
-        let factoidBodyMap = try await kit.hydrate(estate, ids: [input.factoidDrawerID])
-        guard let factoidContent = factoidBodyMap[input.factoidDrawerID] else {
+        //
+        //    Frame-aware hydration (parity with Rust run_recollect step 1) enforces
+        //    the sensitivity ceiling via BitmapEvaluator::insert_defaults →
+        //    SensitivityAtMost(Elevated). A restricted or secret factoid is absent
+        //    from the admissible result → factoidNotFound — preventing disclosure
+        //    of elevated factoid bodies at the MCP boundary. secfix/punt-g2.
+        //
+        //    Empty filter chain: insert_defaults applies SensitivityAtMost(Elevated)
+        //    as the default ceiling; no caller-supplied filter is needed here because
+        //    this is a single-id lookup (no confirmation-axis narrowing required).
+        //    HydrationLevel.full is required so that drawer.content is populated for
+        //    DIST header parsing (Structured level leaves content empty → spurious
+        //    notADistilledDrawer). Parity with Rust's HydrationLevel::Full.
+        let factoidFrame = RecallFrame(filterChain: [], hydrationLevel: .full, limit: 1)
+        let factoidDrawers = try await kit.hydrate(
+            estate, ids: [input.factoidDrawerID], matchingFrame: factoidFrame, hydrationLevel: .full)
+        guard let factoidContent = factoidDrawers.first(where: { $0.id == input.factoidDrawerID })?.content else {
             throw RecollectError.factoidNotFound(id: input.factoidDrawerID)
         }
         guard let header = DistilledHeader.parse(factoidContent) else {
