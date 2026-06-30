@@ -1,4 +1,5 @@
-//! Tests for hint-drawer export behaviour and Bug N (_distilled_from provenance).
+//! Tests for hint-drawer export behaviour, Bug N (_distilled_from provenance),
+//! and CAND-EXP-PROV (provenance tunnel target privacy).
 //!
 //! Hint-drawer export: hint drawers (AI_Charter_Hint room) are normal drawers —
 //! they export and import like any other drawer. A provisioned estate with 7 hint
@@ -10,9 +11,20 @@
 //! import, the factoid drawer content must be clean, and the `_distilled_from`
 //! tunnel must exist in the re-imported estate.
 //!
-//! Mirrors Swift `VaultBridgeTests`:
+//! CAND-EXP-PROV: provenance tunnel targets are filtered by export scope so a
+//! normal exported factoid cannot leak the wing/room of a secret or
+//! restricted-under-default-scope source drawer via `distilled_from_sources`
+//! frontmatter. Three tests:
+//!   - `provenance_tunnel_to_secret_drawer_excluded_from_frontmatter`
+//!   - `provenance_tunnel_to_restricted_drawer_scope_gated`
+//!   - `provenance_tunnel_to_normal_drawer_always_included`
+//!
+//! Mirrors Swift `VaultBridgeTests` / `PrivacyTierAndReceiptTests`:
 //!   - `exportIncludesHintDrawers()`
 //!   - `distilledFromProvenanceRoundTrips()`
+//!   - `provenanceTunnelToSecretDrawerExcluded()`
+//!   - `provenanceTunnelToRestrictedDrawerScopeGated()`
+//!   - `provenanceTunnelToNormalDrawerAlwaysIncluded()`
 
 use std::{path::PathBuf, sync::Arc};
 
