@@ -784,7 +784,10 @@ jobs:
           fi
 
           # Install minisign on the runner (ubuntu-22.04; the release job).
-          # minisign is not pre-installed on GitHub-hosted ubuntu runners.
+          # minisign is not pre-installed on GitHub-hosted ubuntu runners and
+          # lives in the universe pocket. apt-get update first — without a fresh
+          # package index the install fails with "Unable to locate package".
+          sudo apt-get update
           sudo apt-get install -y minisign
 
           # Write the private key to a mode-0600 temp file. The key is provided
