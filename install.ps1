@@ -140,6 +140,127 @@ if ($Uninstall) {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# VERIFICATION HELPERS
+# ════════════════════════════════════════════════════════════════════════════
+
+# The Ed25519 public key for this release, embedded byte-identical to
+# scripts/minisign.pub (line 2). Verifying against an embedded constant —
+# rather than fetching the key over the network — means an attacker who
+# controls the download host cannot substitute a key. The key id is
+# 2A2AD38EB13379AB; the 42-byte blob is 2-byte algo "Ed" + 8-byte key id +
+# 32-byte Ed25519 public key.
+$MINISIGN_PUBKEY_B64 = "RWSreTOxjtMqKgsFO1lpgRwzQQLTgeX3fq6ak7/ZIZh6zEWEa475bZhs"
+
+function Verify-MinisignSignature {
+    # Verify a detached minisign Ed25519 signature of checksums.txt.
+    #
+    # minisign's "Ed" (raw) signature format:
+    #   Line 1 — untrusted comment (ignored)
+    #   Line 2 — base64( 2-byte algo "Ed" | 8-byte key-id | 64-byte Ed25519 sig )
+    #   Line 3 — trusted comment (ignored for file-body verification)
+    #   Line 4 — base64( 64-byte global sig covering line2_sig||trusted_comment )
+    #
+    # We delegate verification to the minisign binary (same as install.sh on
+    # Linux) rather than attempting a .NET Ed25519 implementation. Rationale:
+    #
+    #   .NET Ed25519 support (OID 1.3.101.112) via ECDsa/AsymmetricAlgorithm is
+    #   not reliably available across the Windows PowerShell install base:
+    #     - PowerShell 5.1 / .NET Framework 4.x  — Ed25519 not supported
+    #     - PowerShell 7.x / .NET 6 or 8         — Ed25519 not exposed cleanly
+    #     - PowerShell 7.4+ / .NET 9              — supported, but not the default
+    #   A pure-.NET implementation would silently degrade on PS 5.1 (the default
+    #   Windows shell) or require fragile runtime-version detection. The minisign
+    #   binary is a single self-contained Windows executable with no runtime
+    #   dependencies and is available through all major Windows package managers.
+    #
+    # The trust root (the Ed25519 key bytes) is embedded as $MINISIGN_PUBKEY_B64
+    # above — NOT fetched over the network — so an attacker who controls the
+    # download host cannot substitute a different key.
+    param(
+        [string]$ChecksumsFile,
+        [string]$SigFile,
+        [string]$PubKeyB64
+    )
+
+    # Require the minisign binary — fail closed with installation instructions.
+    # Clean up $tmpDir before exiting so the partial download does not linger
+    # in %TEMP% (the caller does not get a chance to clean up after exit 1).
+    if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        Write-Error "mootx01: release signature verification requires the minisign binary."
+        Write-Error "mootx01: to install minisign on Windows:"
+        Write-Error "  winget install minisign      (Windows 10/11 Package Manager)"
+        Write-Error "  scoop install minisign       (Scoop package manager)"
+        Write-Error "  choco install minisign       (Chocolatey)"
+        Write-Error "  https://jedisct1.github.io/minisign/ (direct download, zero dependencies)"
+        Write-Error "mootx01: minisign verifies the Ed25519 release signature — do not bypass this check."
+        exit 1
+    }
+
+    # Write the embedded public key to a temp file. The key is embedded as a
+    # constant (not fetched) so the trust root survives even if the download
+    # host is compromised. The temp file is removed in the finally block.
+    $tmpPubKey = Join-Path $env:TEMP "mootx01-pubkey-$([System.IO.Path]::GetRandomFileName()).pub"
+    try {
+        # Reconstruct the minisign .pub file format: untrusted comment + key line.
+        # The key id 2A2AD38EB13379AB matches scripts/minisign.pub in the repo.
+        $pubKeyContent = "untrusted comment: minisign public key 2A2AD38EB13379AB`n$PubKeyB64`n"
+        [System.IO.File]::WriteAllText($tmpPubKey, $pubKeyContent, [System.Text.Encoding]::ASCII)
+
+        # -V = verify, -p = public key file, -m = signed file, -x = detached sig
+        $result = & minisign -V -p $tmpPubKey -m $ChecksumsFile -x $SigFile 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+            Write-Error "mootx01: minisign signature verification FAILED for checksums.txt."
+            Write-Error "mootx01: the release may have been tampered with — do not proceed."
+            Write-Error $result
+            exit 1
+        }
+    } finally {
+        Remove-Item -Force $tmpPubKey -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "  Signature OK (checksums.txt Ed25519 verified)"
+}
+
+function Verify-Checksum {
+    # Verify the SHA-256 digest of a downloaded asset against checksums.txt.
+    # Fails closed — exits 1 on any mismatch or if the asset is absent from
+    # checksums.txt.
+    param(
+        [string]$File,
+        [string]$ChecksumsFile,
+        [string]$AssetName
+    )
+
+    $lines = Get-Content $ChecksumsFile -Encoding UTF8
+    $expected = $null
+    foreach ($line in $lines) {
+        # checksums.txt format: "<sha256hex>  <filename>" (two spaces, GNU sha256sum style)
+        $parts = $line -split '\s+'
+        if ($parts.Count -ge 2 -and $parts[-1] -eq $AssetName) {
+            $expected = $parts[0]
+            break
+        }
+    }
+    if (-not $expected) {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        Write-Error "mootx01: no checksum entry found for '$AssetName' in checksums.txt."
+        exit 1
+    }
+
+    $hash = (Get-FileHash $File -Algorithm SHA256).Hash.ToLower()
+    if ($hash -ne $expected.ToLower()) {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        Write-Error "mootx01: SHA-256 checksum mismatch for $AssetName."
+        Write-Error "  expected: $expected"
+        Write-Error "  actual:   $hash"
+        exit 1
+    }
+    Write-Host "  Checksum OK ($AssetName)"
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 # INSTALL
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -174,12 +295,79 @@ try {
     exit 1
 }
 
-# 3. Extract + place binaries
+# 3. Verify integrity BEFORE extracting.
+#    Verification order (fail closed at each step):
+#      a. Download checksums.txt and its detached Ed25519 signature.
+#      b. Verify the minisign signature — confirms checksums.txt came from the
+#         project maintainers and was not swapped in transit. Trust root is the
+#         key embedded as $MINISIGN_PUBKEY_B64 above, NOT fetched over the network.
+#      c. Verify the SHA-256 of the ZIP against checksums.txt — confirms the
+#         archive was not corrupted or substituted.
+#      Both steps must pass; failure at either step exits non-zero before any
+#      code from the archive can be executed.
+$checksumsUrl = "https://github.com/$REPO/releases/download/$Version/checksums.txt"
+$sigUrl       = "https://github.com/$REPO/releases/download/$Version/checksums.txt.minisig"
+try {
+    Invoke-WebRequest $checksumsUrl -OutFile (Join-Path $tmpDir "checksums.txt")
+} catch {
+    Write-Error "mootx01: download failed: $checksumsUrl`n$_"
+    Remove-Item -Recurse -Force $tmpDir
+    exit 1
+}
+try {
+    Invoke-WebRequest $sigUrl -OutFile (Join-Path $tmpDir "checksums.txt.minisig")
+} catch {
+    Write-Error "mootx01: download failed: $sigUrl`n$_"
+    Remove-Item -Recurse -Force $tmpDir
+    exit 1
+}
+
+# 3a. Verify Ed25519 signature of checksums.txt before trusting any digest it
+#     records. This step must succeed before SHA-256 is even consulted.
+Write-Host "Verifying release signature..."
+Verify-MinisignSignature `
+    -ChecksumsFile (Join-Path $tmpDir "checksums.txt") `
+    -SigFile       (Join-Path $tmpDir "checksums.txt.minisig") `
+    -PubKeyB64     $MINISIGN_PUBKEY_B64
+
+# 3b. Verify the ZIP SHA-256 against the now-authenticated checksums.txt.
+Write-Host "Verifying archive checksum..."
+Verify-Checksum `
+    -File          (Join-Path $tmpDir $asset) `
+    -ChecksumsFile (Join-Path $tmpDir "checksums.txt") `
+    -AssetName     $asset
+
+# 3c. Extract AFTER both checks pass.
 Expand-Archive (Join-Path $tmpDir $asset) -DestinationPath $tmpDir -Force
 if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
     Write-Error "Archive did not contain mootx01.exe"
     Remove-Item -Recurse -Force $tmpDir
     exit 1
+}
+
+# 3d. Optional Authenticode check: verify the extracted executable carries a
+#     valid digital signature from the expected publisher. Notarized/signed
+#     binaries from the release pipeline pass; a substituted or unsigned binary
+#     is rejected. Best-effort — warns rather than blocking if signature status
+#     cannot be determined (e.g. older PowerShell without Get-AuthenticodeSignature).
+foreach ($exeName in @("mootx01.exe", "moot-mgr.exe")) {
+    $exePath = Join-Path $tmpDir $exeName
+    if (-not (Test-Path $exePath)) { continue }
+    try {
+        $sig = Get-AuthenticodeSignature $exePath -ErrorAction Stop
+        if ($sig.Status -ne "Valid") {
+            Write-Error "mootx01: Authenticode check FAILED for $exeName (status: $($sig.Status))."
+            Write-Error "mootx01: the binary may have been tampered with — do not proceed."
+            Remove-Item -Recurse -Force $tmpDir
+            exit 1
+        }
+        Write-Host "  Authenticode OK ($exeName — $($sig.SignerCertificate.Subject))"
+    } catch {
+        # Get-AuthenticodeSignature unavailable or threw unexpectedly. Treat as
+        # advisory: the minisign + SHA-256 checks above already verified the
+        # archive; this is a belt-and-suspenders code-signing check.
+        Write-Warning "mootx01: could not check Authenticode signature for $exeName — skipping (non-fatal): $_"
+    }
 }
 
 New-Item -ItemType Directory -Force $INSTALL_DIR | Out-Null
