@@ -1011,12 +1011,22 @@ fn run_recall_distilled_tool(
     let limit = crate::dispatch::clamp_limit(
         optional_integer(args, "limit")?, "limit", 10, crate::dispatch::LIMIT_HARD_CEILING
     )?;
+    // Decode the caller's ARIA adjective filter — parity with Swift's
+    // `decodeSingleFilter(args["filter"])` in runRecallDistilled. The filter
+    // composes into the RecallFrame alongside the sensitivity ceiling enforced
+    // by insert_defaults; it can only be MORE restrictive, never less.
+    let filter = decode_precise_filter(args)?;
+    // wall_now() supplies the deterministic clock token required by the
+    // BitmapEvaluator inside coord.recall(). Parity: Swift awaits the async
+    // kit call which resolves now internally; Rust receives it as a parameter.
+    let now = crate::dispatch::wall_now();
 
     let coord = estate.coord.lock().unwrap();
     // Route through the CognitionKit library recipe — parity with Swift's
     // DistilledRecall.run(input:estate:kit:) call chain.
-    let input = cognition_kit::DistilledRecallInput::with_limit(query, limit);
-    let out = cognition_kit::run_distilled_recall(&input, &coord, &estate.handle)
+    let mut input = cognition_kit::DistilledRecallInput::with_limit(query, limit);
+    input.filter = filter;
+    let out = cognition_kit::run_distilled_recall(&input, &coord, &estate.handle, now)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -1094,10 +1104,15 @@ fn run_recollect_tool(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let drawer_id = require_string(args, "drawer_id")?;
+    // wall_now() supplies the deterministic clock token required by the
+    // BitmapEvaluator inside coord.recall(). The sensitivity ceiling gate
+    // (secfix/punt-g2 part 2) requires now to evaluate liveness/state on
+    // each candidate drawer.
+    let now = crate::dispatch::wall_now();
 
     let coord = estate.coord.lock().unwrap();
     let input = cognition_kit::RecollectInput::new(drawer_id);
-    let out = match cognition_kit::run_recollect(&input, &coord, &estate.handle) {
+    let out = match cognition_kit::run_recollect(&input, &coord, &estate.handle, now) {
         Ok(o) => o,
         Err(cognition_kit::RecollectError::FactoidNotFound { id }) => {
             return Ok(error_result(&format!("recollect: drawer not found: {id}")));

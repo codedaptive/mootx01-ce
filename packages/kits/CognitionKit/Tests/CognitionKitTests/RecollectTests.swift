@@ -173,4 +173,42 @@ struct RecollectTests {
         #expect(out.sourceCount == 3, "DIST header's src= count preserved from distillation time")
         #expect(out.sources.count == 2, "withdrawn drawer is absent from hydrate result — silently skipped")
     }
+
+    // EM-7 (secfix/punt-g2): recollect on a restricted factoid must throw factoidNotFound.
+    //
+    // Parity with Rust run_recollect which now routes the factoid lookup through
+    // coord.recall(frame, now) — the policy-enforcing path — so restricted/secret
+    // factoids are excluded before their body reaches the MCP boundary.
+    //
+    // The Swift port previously used kit.hydrate(_:ids:) (the NON-frame-aware
+    // overload) which bypasses insert_defaults and would return restricted content.
+    // This test gates the frame-aware fix: a restricted factoid must be absent
+    // from kit.hydrate(_:ids:matchingFrame:) → factoidNotFound.
+    @Test("restricted factoid is not found by frame-aware hydration (secfix/punt-g2)")
+    func restrictedFactoidIsNotFound() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Capture a DIST drawer at Restricted sensitivity. The frame-aware
+        // hydration enforces SensitivityAtMost(Elevated) → this drawer must be
+        // excluded from the admissible set, making it "not found" to the recipe.
+        let distContent = "[DIST|conf=0.85|src=2|snr=4.0] Restricted factoid prose."
+        var frame = CaptureFrame(
+            content: distContent,
+            channel: .typed,
+            room: "_distilled",
+            latticeAnchor: .udc("001"),
+            addedBy: "test",
+            embeddingModelID: "test-v1")
+        frame.sensitivity = .restricted
+        let factoidID = try await kit.capture(handle, frame).id
+
+        // Recollect must raise factoidNotFound because the sensitivity ceiling
+        // (SensitivityAtMost(Elevated)) excludes the restricted drawer from the
+        // frame-aware hydrate call in step 1 of run().
+        await #expect(throws: RecollectError.factoidNotFound(id: factoidID)) {
+            _ = try await Recollect().run(
+                input: Recollect.Input(factoidDrawerID: factoidID),
+                estate: handle, kit: kit)
+        }
+    }
 }

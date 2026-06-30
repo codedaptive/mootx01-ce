@@ -7,7 +7,7 @@
 // run_distilled_recall() sequence (parity with Swift DistilledRecall.run):
 //   1. DistillationPipeline::query_fingerprint → Fingerprint256 (Engram)
 //   2. EstateCoordinator::find_nearest_distilled → Vec<VectorMatch>
-//   3. EstateCoordinator::all_drawers + local filter → factoid body map
+//   3. Policy-enforcing coord.recall(frame) → factoid body map (secfix/punt-g2 part 2)
 //   4. DistilledHeader::parse per match → DistilledMatch array
 //   5. classify_distilled_discrimination(scores) → DistilledDiscriminationLevel
 //
@@ -17,16 +17,24 @@
 // directly to findNearestDistilled"). Pool semantic is documented as reserved
 // for future coarse-then-fine re-ranking.
 //
+// Filter parameter: caller-supplied ARIA adjective filter composed into the
+// RecallFrame (parity with Swift DistilledRecall.Input.filter). The frame's
+// insert_defaults enforces SensitivityAtMost(Elevated) as a floor; the caller
+// filter is composed on top of that floor — it can only be MORE restrictive,
+// never less. Default is Filter::CurrentlyBelieve (matches Swift default
+// .unconfirmed, which insert_defaults promotes to CurrentlyBelieve).
+//
 // DiscriminationLevel discrimination thresholds:
 //   HIGH_MARGIN = 0.25  — topGap at which rank-1 is clearly the best match.
 //   LOW_MARGIN  = 0.05  — topGap below which rank-1 is indistinguishable.
 //   LOW_SPREAD  = 0.15  — spread below which the whole list is flat.
 //
-// Layer discipline B-1/B-2: one GLK find_nearest_distilled + one all_drawers
-// call (no raw store access). Read-only (B-6, I-6). Deterministic (no clock).
+// Layer discipline B-1/B-2: one GLK find_nearest_distilled + one policy recall
+// call (no raw store access). Read-only (B-6, I-6). Deterministic (now param).
 
 use genius_locus_kit::coordinator::{EstateCoordinator, VerbDispatchError};
 use genius_locus_kit::handle::EstateHandle;
+use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
 use neuron_kit::InjectionDepth;
 use substrate_ml::distillation_pipeline::{DistilledHeader, DistillationPipeline};
 
@@ -88,20 +96,38 @@ pub struct DistilledRecallInput {
     /// `limit` directly to find_nearest_distilled (mirrors Swift comment:
     /// "current implementation passes limit directly to findNearestDistilled").
     pub pool: usize,
+    /// ARIA adjective filter applied during frame-aware hydration.
+    ///
+    /// Parity with Swift `DistilledRecall.Input.filter`. Composed into the
+    /// RecallFrame passed to `coord.recall` so the caller's desired state
+    /// constraint (unconfirmed, userConfirmed, currentlyBelieve, etc.) applies
+    /// on top of the sensitivity ceiling enforced by `insert_defaults`.
+    /// Default: `Filter::CurrentlyBelieve` — matches Swift's `.unconfirmed`
+    /// default which insert_defaults promotes to currentlyBelieve.
+    pub filter: Filter,
 }
 
 impl DistilledRecallInput {
-    /// Build with defaults: limit=20, pool=max(limit*5, 50) — mirrors Swift.
+    /// Build with defaults: limit=20, pool=max(limit*5, 50), filter=CurrentlyBelieve.
+    ///
+    /// Mirrors Swift `DistilledRecall.Input.init(query:filter:limit:pool:)` defaults.
     pub fn new(query: impl Into<String>) -> Self {
         let limit = 20;
         let pool = (limit * 5).max(50);
-        DistilledRecallInput { query: query.into(), limit, pool }
+        DistilledRecallInput { query: query.into(), limit, pool, filter: Filter::CurrentlyBelieve }
     }
 
-    /// Build with an explicit limit and default pool.
+    /// Build with an explicit limit and default pool. Filter defaults to CurrentlyBelieve.
     pub fn with_limit(query: impl Into<String>, limit: usize) -> Self {
         let pool = (limit * 5).max(50);
-        DistilledRecallInput { query: query.into(), limit, pool }
+        DistilledRecallInput { query: query.into(), limit, pool, filter: Filter::CurrentlyBelieve }
+    }
+
+    /// Build with an explicit filter. Limit and pool use defaults.
+    pub fn with_filter(query: impl Into<String>, filter: Filter) -> Self {
+        let limit = 20;
+        let pool = (limit * 5).max(50);
+        DistilledRecallInput { query: query.into(), limit, pool, filter }
     }
 }
 
@@ -124,7 +150,7 @@ pub struct DistilledRecallOutput {
 ///   1. Feature-extract the query into a structural fingerprint using
 ///      `DistillationPipeline::default_extractor` — no embedding model inference.
 ///   2. Dispatch to `EstateCoordinator::find_nearest_distilled`.
-///   3. Hydrate matched drawers via `EstateCoordinator::all_drawers` + local filter.
+///   3. Policy-enforcing coord.recall(frame) → factoid body map (SensitivityAtMost(Elevated)).
 ///   4. Parse `DistilledHeader` per match, build `DistilledMatch` array.
 ///   5. Classify discrimination over confidence scores.
 ///
@@ -140,6 +166,7 @@ pub fn run_distilled_recall(
     input: &DistilledRecallInput,
     coord: &EstateCoordinator,
     handle: &EstateHandle,
+    now: i64,
 ) -> Result<DistilledRecallOutput, VerbDispatchError> {
     // 1. Feature-extract the query into a structural fingerprint.
     //    default_extractor is the capitalization-heuristic stub (deterministic,
@@ -162,17 +189,43 @@ pub fn run_distilled_recall(
         });
     }
 
-    // 3. Hydrate matched drawers by reading all drawers and filtering by id.
-    //    Apply the same tombstone exclusion used by normal recall (parity with
-    //    the frame-aware hydrate path in Swift DistilledRecall). Tombstoned
-    //    factoids must not reach the MCP boundary even if they matched the
-    //    fingerprint NN query. B-1 compliant — no raw store access.
-    let all_drawers = coord.all_drawers(handle).unwrap_or_default();
+    // 3. Hydrate matched drawers through the policy-enforcing recall path.
+    //
+    //    Parity with Swift DistilledRecall.run step 3:
+    //      `kit.hydrate(estate, ids:, matchingFrame: RecallFrame(filterChain: [input.filter]))`
+    //    which routes through BitmapEvaluator::insert_defaults and enforces the
+    //    SensitivityAtMost(Elevated) ceiling (ADR-007 Decision 2 / VK-TIER-01).
+    //    Restricted and secret factoids are excluded before their body reaches
+    //    the MCP boundary — secfix/punt-g2 part 2.
+    //
+    //    `input.filter` is the caller's ARIA adjective filter, composed into the
+    //    RecallFrame alongside the sensitivity ceiling. insert_defaults enforces
+    //    SensitivityAtMost(Elevated) as a non-negotiable floor; the caller filter
+    //    applies on top (can only be MORE restrictive, never less).
+    //
+    //    HydrationLevel::Full is required so that drawer.content is populated for
+    //    DIST header parsing. Parity: Swift kit.hydrate uses hydrationLevel: .full.
+    //    Without Full, content is empty at Structured level and DistilledHeader::parse
+    //    returns None for all rows, making every hit a spurious miss.
+    //
+    //    `now` is required by the BitmapEvaluator for liveness/state checks.
+    //    B-1 compliant — no raw store access.
+    //
+    //    frame.limit = Some(input.pool): parity with Swift's
+    //      `RecallFrame(filterChain: [input.filter], hydrationLevel: .full, limit: input.limit)`
+    //    which uses a per-call limit so recall covers all NN candidates regardless of
+    //    estate size. The pool value (≥ input.limit * 5, min 50) bounds the lookup.
+    //    Without an explicit limit, coord.recall() caps at 50 (the frame.limit default),
+    //    which silently misses factoid bodies on estates with >50 drawers.
+    let mut frame = RecallFrame::new(vec![input.filter.clone()]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.limit = Some(input.pool);
+    let policy_drawers = coord.recall(handle, frame, now).unwrap_or_default();
     let match_ids: std::collections::HashSet<&str> =
         matches.iter().map(|m| m.item_id.as_str()).collect();
-    let factoid_map: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> = all_drawers
+    let factoid_map: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> = policy_drawers
         .iter()
-        .filter(|d| match_ids.contains(d.id.as_str()) && d.tombstoned_at.is_none())
+        .filter(|d| match_ids.contains(d.id.as_str()))
         .map(|d| (d.id.as_str(), d))
         .collect();
 
@@ -319,7 +372,7 @@ mod tests {
 
         let input = DistilledRecallInput::new("test query");
         // No VectorStore registered → find_nearest_distilled raises NotSupportedByEstate.
-        let result = run_distilled_recall(&input, &coord, &handle);
+        let result = run_distilled_recall(&input, &coord, &handle, NOW);
         assert!(result.is_err(), "missing VectorStore must return Err, not Ok");
     }
 
@@ -350,13 +403,191 @@ mod tests {
     }
 
     // CK-DR-8 (Rust): DistilledRecallInput defaults match Swift defaults.
+    //                  Verifies limit/pool calculations and filter default.
     #[test]
     fn ck_dr8_input_defaults() {
+        use locus_kit::filter::Filter;
+
         let input = DistilledRecallInput::new("hello");
         assert_eq!(input.limit, 20);
         assert_eq!(input.pool, 100); // max(20*5, 50) = 100
+        assert_eq!(input.filter, Filter::CurrentlyBelieve, "default filter must be CurrentlyBelieve");
         let input2 = DistilledRecallInput::with_limit("hello", 5);
         assert_eq!(input2.limit, 5);
         assert_eq!(input2.pool, 50); // max(5*5, 50) = 50
+        assert_eq!(input2.filter, Filter::CurrentlyBelieve, "with_limit default filter must be CurrentlyBelieve");
+        // with_filter preserves explicit filter
+        let input3 = DistilledRecallInput::with_filter("hello", Filter::UserConfirmed);
+        assert_eq!(input3.filter, Filter::UserConfirmed, "with_filter must carry the explicit filter");
+        assert_eq!(input3.limit, 20, "with_filter must use default limit");
+    }
+
+    // CK-DR-9 (Rust): run_distilled_recall applies the sensitivity ceiling from
+    //                  BitmapEvaluator insert_defaults — secret/restricted factoids
+    //                  must not appear in recall results.
+    //
+    // secfix/punt-g2 part 2: The sweep now propagates source sensitivity to the
+    // factoid (T5 in GLK distill_segmentation_parity tests). This test verifies
+    // the complementary read-path gate: a factoid with secret sensitivity is
+    // excluded by run_distilled_recall's policy-enforcing recall path.
+    //
+    // Implementation note: run_distilled_recall routes through coord.recall()
+    // which applies BitmapEvaluator::insert_defaults (SensitivityAtMost(Elevated)).
+    // A Secret factoid captured directly is above that ceiling and is excluded.
+    // This test exercises the path without a VectorStore (find_nearest_distilled
+    // returns an error) so we verify the policy gate is in place for the
+    // hydration step by confirming that a secret factoid would be absent from
+    // the policy-filtered candidate pool.
+    #[test]
+    fn ck_dr9_secret_factoid_excluded_by_sensitivity_gate() {
+        use std::sync::Arc;
+        use genius_locus_kit::coordinator::EstateCoordinator;
+        use locus_kit::{
+            adjectives::AdjectiveSensitivity,
+            drawer_operational::CaptureChannel,
+            drawer_store::DrawerStore,
+            drawer_store_inmemory::InMemoryDrawerStore,
+            estate_types::{LatticeAnchor, OwnerCredentials},
+            filter::{Filter, HydrationLevel, RecallFrame},
+            frames::CaptureFrame,
+        };
+
+        const NOW: i64 = 1_700_000_000;
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            InMemoryDrawerStore::new(NOW, None).expect("store"),
+        );
+        let handle = coord
+            .open(store, OwnerCredentials::new("test"), 0, i64::MAX)
+            .expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        // Capture a factoid with secret sensitivity directly (simulating what
+        // distill_items_sweep produces for a secret-tier source drawer after the
+        // secfix/punt-g2 propagation fix). Use a DIST-header body so the row is
+        // plausibly a distilled factoid, and secret sensitivity so it sits above
+        // the SensitivityAtMost(Elevated) ceiling that policy recall enforces.
+        let dist_content = "[DIST|conf=0.85|src=1|snr=3.0] Secret factoid prose.";
+        let mut frame = CaptureFrame::new(
+            dist_content,
+            CaptureChannel::Actuator,
+            "_distilled",
+            LatticeAnchor::udc("001"),
+            "distillation-daemon",
+            "distillation-features-v1",
+        );
+        frame.sensitivity = AdjectiveSensitivity::Secret;
+        // Capture and record the ID. Check by id in the recall result — checking
+        // by content requires Full hydration, but using id is simpler and more robust.
+        let secret_id = coord.capture(&handle, frame, NOW).expect("capture secret factoid").id;
+
+        // Verify the policy-enforcing recall path (the same path run_distilled_recall
+        // uses after secfix/punt-g2 part 2) excludes the secret factoid.
+        // RecallFrame with CurrentlyBelieve triggers insert_defaults which adds
+        // SensitivityAtMost(Elevated) — the secret factoid (Sensitivity::Secret)
+        // must not pass. Checking by id is robust — no content hydration needed.
+        let mut policy_frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+        policy_frame.hydration_level = HydrationLevel::Full;
+        let policy_drawers = coord
+            .recall(&handle, policy_frame, NOW)
+            .expect("recall must not fail");
+        let has_secret_factoid = policy_drawers
+            .iter()
+            .any(|d| d.id == secret_id);
+        assert!(
+            !has_secret_factoid,
+            "policy-enforcing recall must exclude secret-tier factoids; \
+             secfix/punt-g2 part 2 is not enforcing the sensitivity ceiling"
+        );
+    }
+
+    // CK-DR-10 (Rust): run_distilled_recall propagates input.filter into the
+    //                   RecallFrame — a factoid excluded by the caller's filter
+    //                   must not appear in the candidate pool.
+    //
+    // Parity with Swift DistilledRecall.run step 3, which uses
+    //   `RecallFrame(filterChain: [input.filter])`.
+    // The Rust path must compose input.filter identically.
+    //
+    // This test exercises the frame path directly (via coord.recall) because
+    // run_distilled_recall requires a VectorStore for the NN step. We verify
+    // that the same RecallFrame construction that run_distilled_recall uses
+    // would exclude a UserConfirmed-only drawer from an unconfirmed estate.
+    //
+    // Specifically: capture a drawer that is NOT yet user-confirmed (default
+    // state is Unconfirmed). Recall with Filter::UserConfirmed (the same filter
+    // run_distilled_recall would thread through when the caller passes
+    // `filter=userConfirmed`). The unconfirmed drawer must be absent.
+    #[test]
+    fn ck_dr10_caller_filter_is_applied_in_recall_frame() {
+        use std::sync::Arc;
+        use genius_locus_kit::coordinator::EstateCoordinator;
+        use locus_kit::{
+            drawer_operational::CaptureChannel,
+            drawer_store::DrawerStore,
+            drawer_store_inmemory::InMemoryDrawerStore,
+            estate_types::{LatticeAnchor, OwnerCredentials},
+            filter::{Filter, HydrationLevel, RecallFrame},
+            frames::CaptureFrame,
+        };
+
+        const NOW: i64 = 1_700_000_000;
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            InMemoryDrawerStore::new(NOW, None).expect("store"),
+        );
+        let handle = coord
+            .open(store, OwnerCredentials::new("test"), 0, i64::MAX)
+            .expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        // Capture an unconfirmed drawer (default state — no explicit UserConfirmed).
+        let dist_content = "[DIST|conf=0.75|src=1|snr=2.0] Unconfirmed factoid prose.";
+        let frame = CaptureFrame::new(
+            dist_content,
+            CaptureChannel::Actuator,
+            "_distilled",
+            LatticeAnchor::udc("001"),
+            "distillation-daemon",
+            "distillation-features-v1",
+        );
+        // Record the ID so we can verify presence/absence without relying on content
+        // hydration level — checking by id is robust regardless of HydrationLevel.
+        let factoid_id = coord.capture(&handle, frame, NOW).expect("capture unconfirmed factoid").id;
+
+        // Recall with Filter::UserConfirmed — parity with `input.filter = UserConfirmed`
+        // in run_distilled_recall. The unconfirmed factoid must be absent from results.
+        // Filter::UserConfirmed is a provenance filter (confirmation >= UserConfirmed);
+        // since no UserConfirmed mutation was applied, the freshly captured drawer must
+        // be absent.
+        let mut uc_frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+        uc_frame.hydration_level = HydrationLevel::Full;
+        let user_confirmed_drawers = coord
+            .recall(&handle, uc_frame, NOW)
+            .expect("recall must not fail");
+        let has_factoid = user_confirmed_drawers
+            .iter()
+            .any(|d| d.id == factoid_id);
+        assert!(
+            !has_factoid,
+            "UserConfirmed filter must exclude unconfirmed distilled factoids; \
+             input.filter is not being applied in the RecallFrame"
+        );
+
+        // Sanity check: recall with Filter::CurrentlyBelieve (the default) DOES include it,
+        // confirming the drawer is live and the filter is actually doing the exclusion work.
+        let mut cb_frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+        cb_frame.hydration_level = HydrationLevel::Full;
+        let cb_drawers = coord
+            .recall(&handle, cb_frame, NOW)
+            .expect("recall with CurrentlyBelieve must not fail");
+        let has_factoid_in_cb = cb_drawers
+            .iter()
+            .any(|d| d.id == factoid_id);
+        assert!(
+            has_factoid_in_cb,
+            "CurrentlyBelieve filter must include the unconfirmed factoid; \
+             sanity check for CK-DR-10 failed — the drawer may not have captured correctly"
+        );
     }
 }

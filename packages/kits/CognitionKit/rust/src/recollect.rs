@@ -4,23 +4,27 @@
 // outgoing "_distilled_from" tunnels. Models the human experience of
 // pausing and recalling deep long-term memory from a distilled factoid.
 //
-// GLK call sequence (parity with Swift Recollect.run):
-//   1. EstateCoordinator::all_drawers → find factoid by id (hydrate parity)
-//   2. DistilledHeader::parse → validate DIST header
-//   3. EstateCoordinator::recall_tunnels(wing) → filter _distilled_from tunnels
-//   4. EstateCoordinator::all_drawers → find source drawers (hydrate parity)
+// GLK call sequence (parity with Swift Recollect.run, secfix/punt-g2):
+//   1. coord.recall(handle, frame, now) → policy-filtered drawers; find factoid
+//      by id within the admissible set (SensitivityAtMost(Elevated) enforced).
+//   2. DistilledHeader::parse → validate DIST header.
+//   3. EstateCoordinator::recall_tunnels(wing) → filter _distilled_from tunnels.
+//   4. Re-use step-1 policy_drawers to find source drawers — no second I/O
+//      round-trip; source lookup from the same policy-filtered result set.
 //
-// Note: Swift `kit.hydrate` has no direct Rust coordinator equivalent.
-// The layer-correct path is `all_drawers + local filter` — which is what
-// AriaMcpKit `run_recollect_tool` already uses. This recipe follows the
-// same path.
+// secfix/punt-g2: policy-enforcing recall path enforces SensitivityAtMost(Elevated)
+// via BitmapEvaluator::insert_defaults. Restricted and secret factoids are absent
+// from the admissible set → factoidNotFound, preventing disclosure of elevated
+// factoid bodies at the MCP boundary. Restricted/secret source drawers are
+// silently omitted from source_by_id (same ceiling applies).
 //
 // Layer discipline B-1/B-2: pure sequencing. Read-only (B-6, I-6).
-// Deterministic: no clock calls.
+// Deterministic: now passed as parameter (required by BitmapEvaluator).
 
 use genius_locus_kit::brain::distillation_cycle::DISTILLED_FROM_LABEL;
 use genius_locus_kit::coordinator::{EstateCoordinator, VerbDispatchError};
 use genius_locus_kit::handle::EstateHandle;
+use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
 use substrate_ml::distillation_pipeline::DistilledHeader;
 
 // Test-only capture helper — consolidates the boilerplate for CaptureFrame::new
@@ -155,17 +159,39 @@ pub fn run_recollect(
     input: &RecollectInput,
     coord: &EstateCoordinator,
     handle: &EstateHandle,
+    now: i64,
 ) -> Result<RecollectOutput, RecollectError> {
-    // 1. Hydrate factoid drawer by reading all drawers and finding by id.
-    //    Tombstone exclusion enforced here to match Swift's frame-aware hydrate
-    //    (parity with Recollect.run which now uses matchingFrame hydration).
-    //    A tombstoned factoid drawer is treated as not-found: the tunnel graph
-    //    still exists but the body is no longer admissible.
-    //    all_drawers is the layer-correct path (B-1 — no raw store access).
-    let all = coord.all_drawers(handle)
+    // 1. Hydrate factoid drawer through the policy-enforcing recall path.
+    //
+    //    Parity with Swift Recollect.run step 1: `kit.hydrate([factoidID])` routes
+    //    through the frame-aware hydration which applies BitmapEvaluator::insert_defaults
+    //    (SensitivityAtMost(Elevated)). A restricted or secret factoid must not be
+    //    expanded — if the caller does not hold an elevation grant the factoid is
+    //    treated as not-found (FactoidNotFound), preventing disclosure of elevated
+    //    factoid bodies to the MCP boundary. secfix/punt-g2 part 2.
+    //
+    //    RecallFrame with HydrationLevel::Full is required so that drawer.content
+    //    is populated for DIST header parsing. Parity: Swift kit.hydrate uses
+    //    hydrationLevel: .full explicitly. Without Full, content is empty and
+    //    DistilledHeader::parse always returns None → spurious NotADistilledDrawer.
+    //    `now` is required for liveness/state evaluation. B-1 compliant.
+    //
+    //    recall_frame.limit = Some(usize::MAX): parity with Swift
+    //      step 1: `kit.hydrate(estate, ids: [factoidID], matchingFrame: RecallFrame(filterChain: [], limit: 1))`
+    //      step 4: `kit.hydrate(estate, ids: sourceIDs,   matchingFrame: RecallFrame(filterChain: [], limit: sourceIDs.count))`
+    //    Both are per-id lookups; limit bounds output to exactly the needed drawers.
+    //    In Rust, coord.recall() returns ALL matching drawers then caller does `take(cap)`.
+    //    Because we filter by id after the recall call, we need the cap to be large enough
+    //    to include both the factoid (step 1) and all source drawers (step 4) from any
+    //    estate. Using usize::MAX means no cap — the underlying Vec already bounds it.
+    //    B-1 compliant; the frame's sensitivity ceiling (insert_defaults) is still enforced.
+    let mut recall_frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+    recall_frame.hydration_level = HydrationLevel::Full;
+    recall_frame.limit = Some(usize::MAX);
+    let policy_drawers = coord.recall(handle, recall_frame, now)
         .map_err(RecollectError::from)?;
-    let factoid = all.iter()
-        .find(|d| d.id == input.factoid_drawer_id && d.tombstoned_at.is_none())
+    let factoid = policy_drawers.iter()
+        .find(|d| d.id == input.factoid_drawer_id)
         .ok_or_else(|| RecollectError::FactoidNotFound {
             id: input.factoid_drawer_id.clone(),
         })?;
@@ -214,21 +240,29 @@ pub fn run_recollect(
         });
     }
 
-    // 4. Hydrate source drawers by reading all drawers and filtering by id.
-    //    Tombstone exclusion enforced: parity with Swift Recollect.run which
-    //    now uses matchingFrame hydration before the MCP boundary. Withdrawn
-    //    (tombstoned) sources are absent from source_by_id and silently skipped,
-    //    consistent with the "sources.count shrinks due to filtering" comment.
-    //    Re-reads all drawers once — accepted for correctness (B-1).
-    let all_for_sources = coord.all_drawers(handle).unwrap_or_default();
+    // 4. Hydrate source drawers through the policy-enforcing recall path.
+    //
+    //    Parity with Swift Recollect.run step 4: `kit.hydrate(estate, ids: sourceIDs,
+    //    matchingFrame: RecallFrame(filterChain: []))` routes through insert_defaults
+    //    which enforces SensitivityAtMost(Elevated). Restricted/secret source
+    //    drawers are excluded — they are silently omitted from the result, consistent
+    //    with the existing "sources.count shrinks due to filtering" comment. This is
+    //    the correct behaviour: the factoid was produced from a high-sensitivity
+    //    source that has now aged or been reclassified; the source preview is not
+    //    admissible without an elevation grant.
+    //
+    //    Re-uses policy_drawers from step 1. The step-1 frame uses limit=usize::MAX
+    //    so the result covers the full admissible estate; source drawers at any
+    //    position are guaranteed to be in the set if they exist and are admissible.
+    //    B-1 compliant.
     let source_set: std::collections::HashSet<&str> = source_tunnels
         .iter()
         .filter_map(|t| t.target_drawer_id.as_deref())
         .collect();
     let source_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
-        all_for_sources
+        policy_drawers
             .iter()
-            .filter(|d| source_set.contains(d.id.as_str()) && d.tombstoned_at.is_none())
+            .filter(|d| source_set.contains(d.id.as_str()))
             .map(|d| (d.id.as_str(), d))
             .collect();
 
@@ -285,7 +319,7 @@ mod tests {
 
         let missing_id = Uuid::new_v4().to_string();
         let input = RecollectInput::new(&missing_id);
-        let result = run_recollect(&input, &coord, &handle);
+        let result = run_recollect(&input, &coord, &handle, NOW);
         match result {
             Err(RecollectError::FactoidNotFound { id }) => {
                 assert_eq!(id, missing_id, "error must name the missing id");
@@ -317,7 +351,7 @@ mod tests {
         let row = coord.capture(&handle, frame, NOW).expect("capture");
 
         let input = RecollectInput::new(row.id.to_string());
-        let result = run_recollect(&input, &coord, &handle);
+        let result = run_recollect(&input, &coord, &handle, NOW);
         match result {
             Err(RecollectError::NotADistilledDrawer { id }) => {
                 assert_eq!(id, row.id.to_string());
@@ -350,7 +384,7 @@ mod tests {
         let row = coord.capture(&handle, frame, NOW).expect("capture");
 
         let input = RecollectInput::new(row.id.to_string());
-        let result = run_recollect(&input, &coord, &handle);
+        let result = run_recollect(&input, &coord, &handle, NOW);
         match result {
             Err(RecollectError::NoSourceTunnels { id }) => {
                 assert_eq!(id, row.id.to_string());
