@@ -97,12 +97,17 @@ verify_checksum() {
 }
 
 # verify_minisign verifies a detached Ed25519 minisign signature of the
-# checksums.txt file against the public key bundled at scripts/minisign.pub.
-# This provides an independent trust root beyond the TLS transport used to
-# fetch the release from GitHub.
+# checksums.txt file against the public key passed as the pub_key_file
+# argument ($3). This provides an independent trust root beyond the TLS
+# transport used to fetch the release from GitHub.
+#
+# The caller supplies the key file path. In curl|sh install mode the key
+# is embedded in this script and written to a temp file by the call site;
+# in a repo checkout the caller could supply scripts/minisign.pub directly.
+# This function is agnostic about the source — it receives a file path.
 #
 # Fail-closed in two ways:
-#   1. If scripts/minisign.pub contains the PLACEHOLDER sentinel, the
+#   1. If the supplied key file contains the PLACEHOLDER sentinel, the
 #      operator has not yet committed a real keypair. Exit non-zero.
 #   2. If the `minisign` binary is not present on PATH, exit non-zero with
 #      installation instructions. Do NOT skip verification — omitting it
@@ -190,9 +195,17 @@ verify_checksum "$tmp/mootx01.tar.gz" "$tmp/checksums.txt" "$asset"
 # macOS uses Developer ID / Gatekeeper (the binary itself is signed and
 # notarized; verifying the tarball signature is redundant with Gatekeeper).
 if [ "$os" != "macos" ]; then
-  # Locate the bundled public key relative to this installer script.
-  _script_dir="$(dirname "$0")"
-  _pub_key="${_script_dir}/scripts/minisign.pub"
+  # The public key is embedded here directly rather than resolved from a
+  # repository path. In the documented install mode (`curl ... | sh`) $0 is
+  # the shell binary, so `dirname "$0"` yields a system directory (e.g. /bin)
+  # and a path-relative lookup would fail — there is no repo checkout.
+  # Embedding the key keeps the trust anchor intact for all install modes.
+  #
+  # Key ID: 2A2AD38EB13379AB
+  # Source: scripts/minisign.pub in codedaptive/mootx01-ce at build time.
+  _pub_key="$tmp/minisign.pub"
+  printf 'untrusted comment: minisign public key 2A2AD38EB13379AB\nRWSreTOxjtMqKgsFO1lpgRwzQQLTgeX3fq6ak7/ZIZh6zEWEa475bZhs\n' \
+    > "$_pub_key"
   verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
 fi
 
