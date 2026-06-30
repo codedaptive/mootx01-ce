@@ -1035,3 +1035,123 @@ fn sse_streams_do_not_starve_normal_gate_slots() {
         &resp_text[..resp_text.len().min(300)]
     );
 }
+
+// ── Finding #4 — last_n negative / zero / huge clamped in moot_read_journal ──
+
+#[test]
+fn read_journal_negative_last_n_returns_invalid_params() {
+    // last_n=-1 must return a JSON-RPC invalidParams error (-32602).
+    // Before the fix, optionalInt let -1 through → SQLite LIMIT -1 = all rows.
+    let (status, body) = round_trip(
+        "POST",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":-1}}}"#,
+    );
+    assert_eq!(status, 200, "JSON-RPC errors are always HTTP 200");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let code = v["error"]["code"].as_i64().expect("must have error.code; got result instead");
+    assert_eq!(code, -32602, "expected invalidParams (-32602); got {code}");
+}
+
+#[test]
+fn read_journal_zero_last_n_returns_invalid_params() {
+    let (status, body) = round_trip(
+        "POST",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":0}}}"#,
+    );
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let code = v["error"]["code"].as_i64().expect("must have error.code");
+    assert_eq!(code, -32602);
+}
+
+#[test]
+fn read_journal_huge_last_n_is_clamped_silently() {
+    // last_n=1000 (above ceiling 500) must not error — clamp to 500 and succeed.
+    let (status, body) = round_trip(
+        "POST",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":1000}}}"#,
+    );
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v.get("result").is_some(), "last_n=1000 must be clamped silently; got: {v}");
+}
+
+// ── Finding #8 — Host guard on ARIA MCP GET routes → 421 ──
+
+/// A GET with a non-loopback Host header must be rejected 421.
+/// Uses `run_http_loop_for_test` so the full gate+read path is exercised.
+#[test]
+fn http_get_with_non_loopback_host_returns_421() {
+    use std::sync::{Arc, Mutex};
+    let dispatcher = Arc::new(Mutex::new(make_dispatcher()));
+    let normal_gate = Arc::new(aria_mcp::http_server::ConcurrencyGate::new(4, 4));
+    let sse_gate = Arc::new(aria_mcp::http_server::ConcurrencyGate::new(2, 0));
+
+    for path in ["/api/graph", "/api/admin/estates", "/api/lattice"] {
+        let listener = bind_loopback(0).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: attacker.example.com\r\nContent-Length: 0\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let handle = aria_mcp::http_server::run_http_loop_for_test(
+            listener,
+            Arc::clone(&dispatcher),
+            Arc::clone(&normal_gate),
+            Arc::clone(&sse_gate),
+            1,
+        );
+        let _ = handle.join();
+
+        let mut resp = Vec::new();
+        client.read_to_end(&mut resp).unwrap();
+        let status: u16 = String::from_utf8_lossy(&resp)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        assert_eq!(status, 421, "GET {path} with non-loopback Host must return 421; got {status}");
+    }
+}
+
+/// A GET with a loopback Host header must succeed (200), not be blocked.
+#[test]
+fn http_get_with_loopback_host_succeeds() {
+    let (status, _) = round_trip_get("/api/graph");
+    assert_eq!(status, 200);
+}
+
+/// A GET with absent Host must succeed (curl omits Host).
+#[test]
+fn http_get_with_absent_host_succeeds() {
+    let listener = bind_loopback(0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let dispatcher = make_dispatcher();
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    // No Host header — absent host must be allowed.
+    let req = "GET /api/graph HTTP/1.1\r\nContent-Length: 0\r\n\r\n".to_string();
+    client.write_all(req.as_bytes()).unwrap();
+    client.flush().unwrap();
+
+    serve_once(&listener, &dispatcher, 4 * 1024 * 1024, None);
+
+    let mut resp = Vec::new();
+    client.read_to_end(&mut resp).unwrap();
+    let status: u16 = String::from_utf8_lossy(&resp)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert_eq!(status, 200, "absent Host must be allowed; got {status}");
+}

@@ -518,7 +518,30 @@ public struct HTTPServer: Sendable {
             recordLatencyNs(elapsed)
         }
 
+        // Bound blocking reads: a peer that trickles bytes cannot stall a cooperative-pool
+        // task longer than this window. Mirrors moot-mgr's HTTPReadAPI.serve(_:) which sets
+        // the same 30-second timeout via setsockopt before calling HTTPRequest.read. Without
+        // this, a slow-header attacker can occupy a gate slot indefinitely, starving real
+        // MCP clients. The gate slot is already held (waitForSlot above); the timeout ensures
+        // it is released within a bounded window even if the read never returns.
+        var tv = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
         guard let request = HTTPRequest.read(fd: fd, maxBodyBytes: maxBodyBytes) else { return }
+
+        // DNS-rebinding guard: applies to ALL GET requests including SSE. A browser from
+        // a rebinding domain always sends a non-loopback Host; native MCP clients omit it.
+        // Checked here (before the SSE branch and before route()) so that the SSE path
+        // cannot be reached with a hostile Host. Mirrors moot-mgr HTTPReadAPI.serve(_:)
+        // which checks isLoopbackHost before dispatching streamEvents.
+        if request.method == "GET", !Self.isLoopbackHost(request.headers["host"]) {
+            HTTPResponse(
+                status: 421,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"misdirected_request"}"#.utf8)
+            ).send(fd: fd)
+            return
+        }
 
         // SSE event-stream path. GET /api/events with the `text/event-stream`
         // Accept header (or ?stream=1 flag, parsed by HTTPRequest.wantsEventStream)
@@ -676,6 +699,19 @@ public struct HTTPServer: Sendable {
         // GET /api/events is handled in serve() before route() is called — it is not
         // a stateless route but a long-lived SSE stream (see serve() SSE branch).
         if request.method == "GET" {
+            // DNS-rebinding guard on GET routes: a browser page from a rebinding domain
+            // always sends a Host header matching that domain. Native MCP clients and curl
+            // omit Host or send the loopback address. Reject any GET whose Host header is
+            // present and non-loopback; return 421 Misdirected Request (RFC 7540 §9.1.2).
+            // POST routes are already protected by Origin + JSON-RPC framing; this guard is
+            // GET-specific. Mirrors moot-mgr HTTPReadAPI.serve(_:) line ~336-339.
+            guard Self.isLoopbackHost(request.headers["host"]) else {
+                return HTTPResponse(
+                    status: 421,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(#"{"error":"misdirected_request"}"#.utf8)
+                )
+            }
             switch request.path {
             case "/api/graph":
                 // The ?estate= query param is intentionally NOT forwarded. The
@@ -790,6 +826,43 @@ public struct HTTPServer: Sendable {
         guard suffix.first == ":" else { return false }
         let port = suffix.dropFirst()
         return !port.isEmpty && port.allSatisfy(\.isNumber)
+    }
+
+    /// True if the Host header is acceptable for a GET route: absent/empty (curl /
+    /// native connections that omit Host) or a loopback host+port pair.
+    ///
+    /// The Host header contains only `host` or `host:port`, never a scheme. IPv6
+    /// literals carry brackets: `[::1]` or `[::1]:PORT`. Absent/empty Host is
+    /// allowed — curl and direct native connections may omit it.
+    ///
+    /// Mirrors `HTTPReadAPI.isLoopbackHost` in moot-mgr and Rust `is_loopback_host`
+    /// in moot-mgr's http_read_api.rs. Called from `route()` to block DNS-rebinding
+    /// attacks on the unauthenticated GET endpoints.
+    static func isLoopbackHost(_ host: String?) -> Bool {
+        guard let host = host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty else {
+            return true // absent or empty — allow (curl / direct native connections)
+        }
+        let lower = host.lowercased()
+        // Strip port. IPv6 literals `[::1]` or `[::1]:PORT` need special handling
+        // because they contain colons inside the brackets.
+        let bare: String
+        if lower.hasPrefix("[") {
+            // Extract the content inside the leading `[…]`.
+            bare = lower
+                .components(separatedBy: "]").first
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "[")) }
+                ?? lower
+        } else {
+            // IPv4 or hostname: strip port after the LAST colon so
+            // "127.0.0.1:4242" → "127.0.0.1".
+            if let lastColon = lower.lastIndex(of: ":") {
+                bare = String(lower[lower.startIndex..<lastColon])
+            } else {
+                bare = lower
+            }
+        }
+        return bare == "127.0.0.1" || bare == "localhost" || bare == "::1"
     }
 
     // MARK: - Private wire-shape types for GET endpoints (non-graph)

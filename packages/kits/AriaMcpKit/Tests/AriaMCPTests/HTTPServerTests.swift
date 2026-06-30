@@ -430,6 +430,126 @@ struct HTTPServerTests {
         #expect(result.status == 404)
     }
 
+    // MARK: - Finding #4 — last_n negative / zero / huge clamped in moot_read_journal
+
+    /// last_n=-1 must return invalidParams (not all rows). Before the fix,
+    /// `optionalInt` let -1 through → SQLite LIMIT -1 = full table scan.
+    @Test func readJournalNegativeLastNReturnsInvalidParams() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":-1}}}"#
+        let result = try #require(httpRequest(port: port, method: "POST", body: body))
+        #expect(result.status == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        // JSON-RPC error object: code -32602 (invalid params).
+        let error = try #require(json["error"] as? [String: Any],
+                                 "last_n=-1 must yield a JSON-RPC error; got result instead")
+        #expect((error["code"] as? Int) == -32602, "expected invalidParams (-32602); got \(error["code"] ?? "nil")")
+    }
+
+    /// last_n=0 must also return invalidParams (0 is not ≥1).
+    @Test func readJournalZeroLastNReturnsInvalidParams() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let body = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":0}}}"#
+        let result = try #require(httpRequest(port: port, method: "POST", body: body))
+        #expect(result.status == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any],
+                                 "last_n=0 must yield a JSON-RPC error")
+        #expect((error["code"] as? Int) == -32602)
+    }
+
+    /// last_n=1000 (above ceiling 500) must be clamped to 500 — no error, just truncated.
+    @Test func readJournalHugeLastNIsClamped() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        // Absent estate still returns a success result (journal is empty on a fresh estate).
+        let body = #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":1000}}}"#
+        let result = try #require(httpRequest(port: port, method: "POST", body: body))
+        #expect(result.status == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        // Result (not error): clamping to ceiling is silent success.
+        #expect(json["result"] != nil,
+                "last_n=1000 must be clamped silently to 500 — must not error; got: \(json)")
+    }
+
+    // MARK: - Finding #8 — Host guard on ARIA MCP GET routes → 421
+
+    /// GET /api/graph with a non-loopback Host header must be rejected 421.
+    /// A DNS-rebinding attacker sends a non-loopback domain as Host; native
+    /// MCP clients omit Host or send 127.0.0.1.
+    @Test func httpGetWithNonLoopbackHostReturns421() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        for (path, desc) in [("/api/graph", "graph"), ("/api/admin/estates", "admin/estates"), ("/api/lattice", "lattice")] {
+            let raw = "GET \(path) HTTP/1.1\r\nHost: attacker.example.com\r\nContent-Length: 0\r\n\r\n"
+            let resp = try #require(rawSocketRequest(port: port, rawRequest: raw),
+                                    "no response for \(desc)")
+            let text = String(data: resp, encoding: .utf8) ?? ""
+            #expect(text.hasPrefix("HTTP/1.1 421"),
+                    "GET \(path) with non-loopback Host must return 421; got: \(text.prefix(40))")
+        }
+    }
+
+    /// GET /api/graph with a loopback Host must succeed (200), not be blocked.
+    @Test func httpGetWithLoopbackHostSucceeds() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let raw = "GET /api/graph HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n"
+        let resp = try #require(rawSocketRequest(port: port, rawRequest: raw))
+        let text = String(data: resp, encoding: .utf8) ?? ""
+        #expect(text.hasPrefix("HTTP/1.1 200"),
+                "GET /api/graph with loopback Host must return 200; got: \(text.prefix(40))")
+    }
+
+    /// GET /api/graph with absent Host must succeed (curl omits Host).
+    @Test func httpGetWithAbsentHostSucceeds() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let raw = "GET /api/graph HTTP/1.1\r\nContent-Length: 0\r\n\r\n"
+        let resp = try #require(rawSocketRequest(port: port, rawRequest: raw))
+        let text = String(data: resp, encoding: .utf8) ?? ""
+        #expect(text.hasPrefix("HTTP/1.1 200"),
+                "GET /api/graph with absent Host must return 200; got: \(text.prefix(40))")
+    }
+
+    // MARK: - Finding #8 — isLoopbackHost unit coverage
+
+    /// Verify the `isLoopbackHost` helper accepts expected loopback values and
+    /// rejects hostile ones. Mirrors `HTTPReadAPITests.isLoopbackHost*` tests.
+    @Test func isLoopbackHostAcceptsLoopbackValues() {
+        #expect(HTTPServer.isLoopbackHost(nil))
+        #expect(HTTPServer.isLoopbackHost(""))
+        #expect(HTTPServer.isLoopbackHost("127.0.0.1"))
+        #expect(HTTPServer.isLoopbackHost("127.0.0.1:4242"))
+        #expect(HTTPServer.isLoopbackHost("localhost"))
+        #expect(HTTPServer.isLoopbackHost("LOCALHOST"))
+        #expect(HTTPServer.isLoopbackHost("localhost:9000"))
+        #expect(HTTPServer.isLoopbackHost("[::1]"))
+        #expect(HTTPServer.isLoopbackHost("[::1]:8080"))
+    }
+
+    @Test func isLoopbackHostRejectsNonLoopback() {
+        #expect(!HTTPServer.isLoopbackHost("evil.example.com"))
+        #expect(!HTTPServer.isLoopbackHost("evil.example.com:8080"))
+        #expect(!HTTPServer.isLoopbackHost("localhost.evil"))
+        #expect(!HTTPServer.isLoopbackHost("127.0.0.1.evil"))
+        #expect(!HTTPServer.isLoopbackHost("192.168.1.5"))
+    }
+
     // MARK: - Default-estate enforcement (secfix/c-aria-minor CAND-043)
 
     /// GET /api/graph with an arbitrary `?estate=` query param MUST NOT forward
