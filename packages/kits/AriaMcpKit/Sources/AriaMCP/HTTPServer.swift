@@ -704,7 +704,7 @@ public struct HTTPServer: Sendable {
             // omit Host or send the loopback address. Reject any GET whose Host header is
             // present and non-loopback; return 421 Misdirected Request (RFC 7540 §9.1.2).
             // POST routes are already protected by Origin + JSON-RPC framing; this guard is
-            // GET-specific. Mirrors moot-mgr HTTPReadAPI.serve(_:) line ~336-339.
+            // GET-specific. Mirrors moot-mgr HTTPReadAPI.serve(_:) line ~347.
             guard Self.isLoopbackHost(request.headers["host"]) else {
                 return HTTPResponse(
                     status: 421,
