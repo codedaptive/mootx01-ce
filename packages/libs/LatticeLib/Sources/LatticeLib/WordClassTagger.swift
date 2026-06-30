@@ -240,6 +240,60 @@ public extension LatticeLib {
         return tagNovelToken(lowered, tagger: tagger)
     }
 
+    /// Classifies a single token under FDC encoder Step 1, dispatching the
+    /// novel-token fallback path according to the estate's configured
+    /// `NovelTokenTaggerChoice`, with explicit control over whether the novel
+    /// token result is accumulated into the shared pool cache.
+    ///
+    /// Identical fast-path logic to `wordClass(_:tagger:)`: the static
+    /// word-class table is checked first (verb before noun), and only tokens
+    /// absent from the table reach the tagger. The `tagger` parameter controls
+    /// the novel-token fallback engine; `recordNovel` controls whether the
+    /// result is recorded into `sharedNovelCache` for eventual pool submission.
+    ///
+    /// Pass `recordNovel: false` when the calling context must not leak token
+    /// text to the pool pipeline — for example, when classifying content that
+    /// is private to an estate and subject to the estate's own
+    /// encryption/audit controls (the distillation extractor use case). The
+    /// tag result is IDENTICAL regardless of this flag; only the side effect
+    /// (pool accumulation) is suppressed.
+    ///
+    /// The default (`recordNovel: true`) preserves the existing behaviour of
+    /// `wordClass(_:tagger:)` so all other call sites are unaffected.
+    ///
+    /// - Parameters:
+    ///   - token: a single raw token (not a phrase).
+    ///   - tagger: which novel-token tagger engine to invoke on a table miss.
+    ///   - recordNovel: if `false`, novel-token results are NOT recorded into
+    ///     the shared pool cache. Table-resident tokens are unaffected (they
+    ///     are never recorded regardless).
+    /// - Returns: the token's `WordClass`.
+    static func wordClass(
+        _ token: String,
+        tagger: NovelTokenTaggerChoice,
+        recordNovel: Bool
+    ) -> WordClass {
+        let lowered = token.lowercased()
+
+        if lowered.isEmpty {
+            return .other
+        }
+
+        // Fast path: table-resident tokens resolve without tagger or recording.
+        if WordClassTableCache.verbSet.contains(lowered) {
+            return .verb
+        }
+        if WordClassTableCache.nounSet.contains(lowered) {
+            return .noun
+        }
+
+        // Novel token: classify via the requested tagger engine. Recording into
+        // the pool cache is conditional on `recordNovel` — callers that process
+        // private/sensitive content (e.g. the distillation feature extractor)
+        // pass `false` so memory-drawer text never reaches the pool pipeline.
+        return tagNovelToken(lowered, tagger: tagger, recordNovel: recordNovel)
+    }
+
     /// Tags a novel (non-table) token using the specified tagger choice and
     /// records the result into the shared pool cache.
     ///
@@ -287,6 +341,46 @@ public extension LatticeLib {
         // Fire-and-forget accumulation toward the pool submission.
         sharedNovelCache.record(token: lowered, wordClass: tagged)
         return tagged
+    }
+
+    /// Tags a novel (non-table) token using the specified tagger choice, with
+    /// optional pool recording. This is the implementation backing the
+    /// `recordNovel` public overload; the `recordNovel: true` path delegates
+    /// to `tagNovelToken(_:tagger:)` so recording behaviour is identical to
+    /// the legacy path.
+    ///
+    /// Internal so tests can exercise it directly under `@testable import`.
+    internal static func tagNovelToken(
+        _ lowered: String,
+        tagger: NovelTokenTaggerChoice,
+        recordNovel: Bool
+    ) -> WordClass {
+        if recordNovel {
+            // Full path: tag + record. Delegates to the existing overload so
+            // there is exactly one place that calls sharedNovelCache.record
+            // for the recording case.
+            return tagNovelToken(lowered, tagger: tagger)
+        }
+        // Non-recording path: compute the tag via the same tagger engine but
+        // skip pool accumulation. The tag result is byte-identical to the
+        // recording path — only the side effect is suppressed.
+        switch tagger {
+        case .hmm:
+            return hmmViterbiTag(lowered)
+        case .nlTagger:
+            #if canImport(NaturalLanguage)
+            let minOS = WordClassTableCache.table?.minOSVersion ?? ""
+            guard taggerEnabled(
+                osVersion: ProcessInfo.processInfo.operatingSystemVersion,
+                minOSVersion: minOS
+            ) else {
+                return .other
+            }
+            return appleLexicalClass(lowered)
+            #else
+            return hmmViterbiTag(lowered)
+            #endif
+        }
     }
 
     /// HMM/Viterbi tagger — always available on all platforms.
