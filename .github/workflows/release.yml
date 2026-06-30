@@ -8,6 +8,16 @@ on:
 permissions:
   contents: write
 
+env:
+  # The untrusted Git tag name is handed to steps as an environment variable.
+  # It is NEVER interpolated as ${{ github.ref_name }} inside a `run:` script:
+  # a tag like `v$(payload)` would then execute as a shell command substitution
+  # on the runner — and the macOS jobs do so AFTER the Apple Developer ID signing
+  # key is imported and unlocked, turning it into a code-signing/supply-chain
+  # compromise. Steps read $RELEASE_TAG (a plain env value, not shell-evaluated)
+  # and validate it against a strict release-version regex before use.
+  RELEASE_TAG: ${{ github.ref_name }}
+
 jobs:
   # ── macOS builds (arm64 + x86_64) ─────────────────────────────────────────
   build-macos-arm64:
@@ -86,7 +96,13 @@ jobs:
 
       - name: Package binaries
         run: |
-          VERSION="${{ github.ref_name }}"
+          # Tag comes from $RELEASE_TAG (env, never ${{ }} in shell) and is
+          # validated against a strict release-version regex before any use.
+          VERSION="$RELEASE_TAG"
+          if [[ ! "$VERSION" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "mootx01: invalid release tag: $VERSION" >&2
+            exit 1
+          fi
           ASSET="mootx01-${VERSION}-macos-arm64.tar.gz"
           cp "$MOOT_BIN" mootx01
           cp "$MGR_BIN" moot-mgr
@@ -268,7 +284,13 @@ jobs:
 
       - name: Package binaries
         run: |
-          VERSION="${{ github.ref_name }}"
+          # Tag comes from $RELEASE_TAG (env, never ${{ }} in shell) and is
+          # validated against a strict release-version regex before any use.
+          VERSION="$RELEASE_TAG"
+          if [[ ! "$VERSION" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "mootx01: invalid release tag: $VERSION" >&2
+            exit 1
+          fi
           ASSET="mootx01-${VERSION}-macos-x86_64.tar.gz"
           cp "$MOOT_BIN" mootx01
           cp "$MGR_BIN" moot-mgr
@@ -385,7 +407,13 @@ jobs:
 
       - name: Package binaries
         run: |
-          VERSION="${{ github.ref_name }}"
+          # Tag comes from $RELEASE_TAG (env, never ${{ }} in shell) and is
+          # validated against a strict release-version regex before any use.
+          VERSION="$RELEASE_TAG"
+          if [[ ! "$VERSION" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "mootx01: invalid release tag: $VERSION" >&2
+            exit 1
+          fi
           ASSET="mootx01-${VERSION}-linux-x86_64.tar.gz"
           cp apps/mootx01/rust/target/release/mootx01 mootx01
           cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
@@ -426,7 +454,13 @@ jobs:
 
       - name: Package binaries
         run: |
-          VERSION="${{ github.ref_name }}"
+          # Tag comes from $RELEASE_TAG (env, never ${{ }} in shell) and is
+          # validated against a strict release-version regex before any use.
+          VERSION="$RELEASE_TAG"
+          if [[ ! "$VERSION" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "mootx01: invalid release tag: $VERSION" >&2
+            exit 1
+          fi
           ASSET="mootx01-${VERSION}-linux-arm64.tar.gz"
           cp apps/mootx01/rust/target/release/mootx01 mootx01
           cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
@@ -475,7 +509,13 @@ jobs:
       - name: Package binaries
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
+          # Tag comes from $env:RELEASE_TAG (never ${{ }} in shell) and is
+          # validated against a strict release-version regex before any use.
+          $version = $env:RELEASE_TAG
+          if ($version -notmatch '^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$') {
+            Write-Error "mootx01: invalid release tag: $version"
+            exit 1
+          }
           $asset = "mootx01-${version}-windows-x86_64.zip"
           Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
@@ -567,7 +607,13 @@ jobs:
       - name: Package binaries
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
+          # Tag comes from $env:RELEASE_TAG (never ${{ }} in shell) and is
+          # validated against a strict release-version regex before any use.
+          $version = $env:RELEASE_TAG
+          if ($version -notmatch '^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$') {
+            Write-Error "mootx01: invalid release tag: $version"
+            exit 1
+          }
           $asset = "mootx01-${version}-windows-arm64.zip"
           Copy-Item "apps/mootx01/rust/target/aarch64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/aarch64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
