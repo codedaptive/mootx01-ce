@@ -30,13 +30,7 @@ on:
 jobs:
   swift-apps:
     name: Swift apps — build + test (macOS)
-    # DIAGNOSTIC (loopback theory test): the moot-mgr HTTP tests fail on macos-26
-    # with ~60s loopback-connection latency (URLSession -1001; even the raw-socket
-    # SSE test only "passes" by waiting it out at ~62s). Pin the TEST job to the
-    # prior stable image to confirm the pathology is macos-26-specific. The Release
-    # build job stays on macos-26 (it needs the Swift 6.2 runtime); if this image
-    # cannot build the Swift-6.2 code, that itself answers whether macos-15 is viable.
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
