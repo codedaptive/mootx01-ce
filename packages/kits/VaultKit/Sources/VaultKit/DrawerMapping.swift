@@ -235,10 +235,40 @@ public struct DrawerMapping: Sendable {
             kgFactsByDrawerID[fact.sourceDrawerID, default: []].append(fact)
         }
 
+        // CAND-EXP-PROV: Build the set of exportable "wing/room" pairs from the
+        // already-scope-filtered `drawers` array. Used below to filter `_distilled_from`
+        // provenance tunnel targets so a normal exported factoid cannot leak the location
+        // (wing/room) of a secret or scope-excluded restricted source drawer.
+        //
+        // Rationale: provenance tunnels carry only `targetWing`/`targetRoom` — not a
+        // `targetDrawerId` (it is nil in this path; see import at `targetDrawerId: nil`).
+        // The check must therefore be keyed on the wing+room pair rather than the drawer ID.
+        // The `includedDrawerIDs` set above covers KG fact anchors (keyed by drawer.id);
+        // this set covers provenance tunnel targets (keyed by wing/room display name).
+        //
+        // Round-trip note: dropping an excluded target from `distilled_from_sources`
+        // means the provenance edge to that excluded drawer will NOT survive a vault
+        // round-trip (export → re-import). This is the correct privacy behavior —
+        // the excluded drawer's location must not be persisted in any exported artifact.
+        let includedWingRooms: Set<String> = Set(
+            drawers.compactMap { d -> String? in
+                guard let names = allNodeNames[d.parentNodeId] else { return nil }
+                return "\(names.wing)/\(names.room)"
+            }
+        )
+
         let notes = drawers.map { drawer in
             let names = allNodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
             let outgoing = (tunnelsByWing[names.wing] ?? []).filter {
                 $0.sourceDrawerId == drawer.id && $0.kind == .references
+            }.filter { tunnel in
+                // Content-reference tunnels (non-provenance) are always included.
+                // Provenance tunnels (`_distilled_from`) are included only if their
+                // target drawer's wing/room pair is in the exportable set. This prevents
+                // a normal exported factoid from leaking the location of a secret or
+                // restricted-under-default-scope source drawer via frontmatter.
+                guard tunnel.label == "_distilled_from" else { return true }
+                return includedWingRooms.contains("\(tunnel.targetWing)/\(tunnel.targetRoom)")
             }
             let drawerFacts = kgFactsByDrawerID[drawer.id] ?? []
             return Self.noteIR(from: drawer, wing: names.wing, room: names.room, references: outgoing, kgFacts: drawerFacts)

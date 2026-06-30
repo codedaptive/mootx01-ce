@@ -400,6 +400,286 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// CAND-EXP-PROV: provenance tunnel target privacy
+// ─────────────────────────────────────────────────────────────────
+
+/// Helper: capture a `_distilled_from` provenance tunnel from a factoid
+/// drawer to a source drawer, exactly as DistillationCycle does.
+fn capture_provenance_tunnel(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    factoid_id: &str,
+    factoid_wing: &str,
+    factoid_room: &str,
+    source_id: &str,
+    source_wing: &str,
+    source_room: &str,
+) {
+    let estate = coord.estate_for(handle).expect("estate_for");
+    let mut frame = TunnelCaptureFrame::new(
+        factoid_wing.to_owned(),
+        factoid_room.to_owned(),
+        source_wing.to_owned(),
+        source_room.to_owned(),
+        "_distilled_from".to_owned(),
+        "test".to_owned(),
+    );
+    frame.source_drawer_id = Some(factoid_id.to_owned());
+    frame.target_drawer_id = Some(source_id.to_owned());
+    frame.kind = TunnelKind::References;
+    frame.origin_class = TunnelOriginClass::Derived;
+    estate.capture_tunnel(frame, NOW).expect("capture provenance tunnel");
+}
+
+/// All `.md` text under a vault, concatenated (shared helper for prov tests).
+fn prov_all_markdown(vault: &PathBuf) -> String {
+    walkdir_md(vault)
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// CAND-EXP-PROV: A factoid with a `_distilled_from` tunnel to a SECRET source
+/// drawer must NOT include the secret drawer's wing/room in `distilled_from_sources`
+/// frontmatter. Secret drawers are excluded from bulk export (ADR-007 Decision 2);
+/// writing their location into frontmatter leaks it to any vault reader.
+///
+/// Mirrors Swift `PrivacyTierAndReceiptTests.provenanceTunnelToSecretDrawerExcluded`.
+#[test]
+fn provenance_tunnel_to_secret_drawer_excluded_from_frontmatter() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let (coord, handle) = open_simple("prov-secret");
+
+    // Capture a SECRET source drawer. Its wing/room must never appear in export output.
+    let mut secret_frame = CaptureFrame::new(
+        "Sensitive therapy session notes.",
+        CaptureChannel::Typed,
+        "Personal",                     // the location that must not leak
+        LatticeAnchor::udc("000"),
+        "owner",
+        "test-v1",
+    );
+    secret_frame.sensitivity = AdjectiveSensitivity::Secret;
+    let secret_drawer = coord.capture(&handle, secret_frame, NOW).expect("capture secret");
+
+    // Capture a normal factoid that was distilled FROM the secret source.
+    let factoid_frame = CaptureFrame::new(
+        "Distilled insight from private notes.",
+        CaptureChannel::Typed,
+        "factoids",
+        LatticeAnchor::udc("001"),
+        "distillation-daemon",
+        "test-v1",
+    );
+    let factoid_drawer = coord.capture(&handle, factoid_frame, NOW).expect("capture factoid");
+
+    // Resolve display names (ADR-017).
+    let both = vec![secret_drawer.clone(), factoid_drawer.clone()];
+    let names = resolve_drawer_node_names(&coord, &handle, &both);
+    let (secret_wing, _) = names.get(&secret_drawer.parent_node_id).cloned().unwrap_or_default();
+    let (factoid_wing, _) = names.get(&factoid_drawer.parent_node_id).cloned().unwrap_or_default();
+
+    // Wire the _distilled_from provenance tunnel: factoid → secret source.
+    capture_provenance_tunnel(
+        &coord, &handle,
+        &factoid_drawer.id, &factoid_wing, "factoids",
+        &secret_drawer.id, &secret_wing, "Personal",
+    );
+
+    // Export under the default scope (Believed). Secret drawers are excluded.
+    let vault = temp_vault("prov-secret");
+    std::fs::create_dir_all(&vault).expect("mkdir");
+    let mapping = DrawerMapping::new("test", "test-v1", false);
+    let projection = mapping
+        .export(&coord, &handle, NOW, VaultExportScope::Believed)
+        .expect("export");
+    let adapter = ObsidianAdapter::new();
+    adapter.from_ir(&projection.notes, &vault).expect("from_ir");
+
+    let all_md = prov_all_markdown(&vault);
+
+    // The secret source content must not appear in the vault.
+    assert!(
+        !all_md.contains("Sensitive therapy session notes."),
+        "secret drawer content must never appear in export"
+    );
+
+    // The factoid must be exported (it is Normal tier).
+    assert!(
+        all_md.contains("Distilled insight from private notes."),
+        "factoid must appear in export (Normal tier)"
+    );
+
+    // CAND-EXP-PROV: the secret source's wing/room must NOT appear in distilled_from_sources.
+    // If the fix is absent, the frontmatter contains "<defaultWing>/Personal" — leaking the
+    // existence and location of the secret drawer.
+    let secret_location = format!("{}/Personal", secret_wing);
+    assert!(
+        !all_md.contains(&secret_location),
+        "CAND-EXP-PROV: secret source location '{}' must not appear in exported frontmatter; got:\n{}",
+        secret_location,
+        all_md
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// CAND-EXP-PROV: A factoid with a `_distilled_from` tunnel to a RESTRICTED
+/// (private-tier) source drawer must NOT include the restricted drawer's location
+/// under the DEFAULT scope, but MUST include it under `BelievedIncludingPrivate`.
+///
+/// Mirrors Swift `PrivacyTierAndReceiptTests.provenanceTunnelToRestrictedDrawerScopeGated`.
+#[test]
+fn provenance_tunnel_to_restricted_drawer_scope_gated() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let (coord, handle) = open_simple("prov-restricted");
+
+    // Capture a RESTRICTED source drawer.
+    let mut restricted_frame = CaptureFrame::new(
+        "Private journal entry.",
+        CaptureChannel::Typed,
+        "journal",
+        LatticeAnchor::udc("000"),
+        "owner",
+        "test-v1",
+    );
+    restricted_frame.sensitivity = AdjectiveSensitivity::Restricted;
+    let restricted_drawer = coord.capture(&handle, restricted_frame, NOW).expect("capture restricted");
+
+    // Capture a normal factoid distilled from the restricted source.
+    let factoid_frame = CaptureFrame::new(
+        "Synthesized insight from private journal.",
+        CaptureChannel::Typed,
+        "factoids",
+        LatticeAnchor::udc("001"),
+        "distillation-daemon",
+        "test-v1",
+    );
+    let factoid_drawer = coord.capture(&handle, factoid_frame, NOW).expect("capture factoid");
+
+    let both = vec![restricted_drawer.clone(), factoid_drawer.clone()];
+    let names = resolve_drawer_node_names(&coord, &handle, &both);
+    let (restricted_wing, _) = names.get(&restricted_drawer.parent_node_id).cloned().unwrap_or_default();
+    let (factoid_wing, _) = names.get(&factoid_drawer.parent_node_id).cloned().unwrap_or_default();
+
+    capture_provenance_tunnel(
+        &coord, &handle,
+        &factoid_drawer.id, &factoid_wing, "factoids",
+        &restricted_drawer.id, &restricted_wing, "journal",
+    );
+
+    let restricted_location = format!("{}/journal", restricted_wing);
+    let mapping = DrawerMapping::new("test", "test-v1", false);
+    let adapter = ObsidianAdapter::new();
+
+    // --- Default scope: restricted source location must NOT appear in frontmatter ---
+    let vault_default = temp_vault("prov-restricted-default");
+    std::fs::create_dir_all(&vault_default).expect("mkdir default");
+    let proj_default = mapping
+        .export(&coord, &handle, NOW, VaultExportScope::Believed)
+        .expect("export default");
+    adapter.from_ir(&proj_default.notes, &vault_default).expect("from_ir default");
+    let md_default = prov_all_markdown(&vault_default);
+
+    assert!(
+        !md_default.contains(&restricted_location),
+        "CAND-EXP-PROV: restricted source location '{}' must not appear in default-scope export; got:\n{}",
+        restricted_location,
+        md_default
+    );
+    let _ = std::fs::remove_dir_all(&vault_default);
+
+    // --- Private scope: restricted source location MUST appear (opt-in includes it) ---
+    let vault_private = temp_vault("prov-restricted-private");
+    std::fs::create_dir_all(&vault_private).expect("mkdir private");
+    let proj_private = mapping
+        .export(&coord, &handle, NOW, VaultExportScope::BelievedIncludingPrivate)
+        .expect("export private");
+    adapter.from_ir(&proj_private.notes, &vault_private).expect("from_ir private");
+    let md_private = prov_all_markdown(&vault_private);
+
+    assert!(
+        md_private.contains(&restricted_location),
+        "CAND-EXP-PROV: restricted source location '{}' MUST appear in private-scope export; got:\n{}",
+        restricted_location,
+        md_private
+    );
+    let _ = std::fs::remove_dir_all(&vault_private);
+}
+
+/// CAND-EXP-PROV: A factoid with a `_distilled_from` tunnel to a NORMAL-tier source
+/// drawer continues to include the source's wing/room in `distilled_from_sources` —
+/// the fix must not break the existing round-trip for non-excluded targets.
+///
+/// Mirrors Swift `PrivacyTierAndReceiptTests.provenanceTunnelToNormalDrawerAlwaysIncluded`.
+#[test]
+fn provenance_tunnel_to_normal_drawer_always_included() {
+    let (coord, handle) = open_simple("prov-normal");
+
+    // Capture a Normal-tier source drawer.
+    let normal_frame = CaptureFrame::new(
+        "Plain public research note.",
+        CaptureChannel::Typed,
+        "research",
+        LatticeAnchor::udc("000"),
+        "owner",
+        "test-v1",
+    );
+    let normal_drawer = coord.capture(&handle, normal_frame, NOW).expect("capture normal");
+
+    // Capture a factoid that cites the normal source.
+    let factoid_frame = CaptureFrame::new(
+        "Summary of the research note.",
+        CaptureChannel::Typed,
+        "factoids",
+        LatticeAnchor::udc("001"),
+        "distillation-daemon",
+        "test-v1",
+    );
+    let factoid_drawer = coord.capture(&handle, factoid_frame, NOW).expect("capture factoid");
+
+    let both = vec![normal_drawer.clone(), factoid_drawer.clone()];
+    let names = resolve_drawer_node_names(&coord, &handle, &both);
+    let (normal_wing, _) = names.get(&normal_drawer.parent_node_id).cloned().unwrap_or_default();
+    let (factoid_wing, _) = names.get(&factoid_drawer.parent_node_id).cloned().unwrap_or_default();
+
+    capture_provenance_tunnel(
+        &coord, &handle,
+        &factoid_drawer.id, &factoid_wing, "factoids",
+        &normal_drawer.id, &normal_wing, "research",
+    );
+
+    let vault = temp_vault("prov-normal");
+    std::fs::create_dir_all(&vault).expect("mkdir");
+    let mapping = DrawerMapping::new("test", "test-v1", false);
+    let projection = mapping
+        .export(&coord, &handle, NOW, VaultExportScope::Believed)
+        .expect("export");
+    let adapter = ObsidianAdapter::new();
+    adapter.from_ir(&projection.notes, &vault).expect("from_ir");
+
+    let all_md = prov_all_markdown(&vault);
+    let normal_location = format!("{}/research", normal_wing);
+
+    // The normal source's wing/room MUST appear in distilled_from_sources.
+    assert!(
+        all_md.contains("distilled_from_sources"),
+        "factoid with normal provenance source must carry distilled_from_sources frontmatter key"
+    );
+    assert!(
+        all_md.contains(&normal_location),
+        "CAND-EXP-PROV: normal-tier source location '{}' must appear in distilled_from_sources; got:\n{}",
+        normal_location,
+        all_md
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Filesystem helpers
 // ─────────────────────────────────────────────────────────────────
 
