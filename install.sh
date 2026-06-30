@@ -103,7 +103,7 @@ verify_checksum() {
 #
 # The caller supplies the key file path. In curl|sh install mode the key
 # is embedded in this script and written to a temp file by the call site;
-# in a repo checkout the caller could supply scripts/minisign.pub directly.
+# in a repo checkout the caller could supply distribution/minisign.pub directly.
 # This function is agnostic about the source — it receives a file path.
 #
 # Fail-closed in two ways:
@@ -123,8 +123,8 @@ verify_minisign() {
   if grep -q '^PLACEHOLDER' "$pub_key_file" 2>/dev/null; then
     echo "mootx01: minisign public key is a PLACEHOLDER — signature verification not yet active." >&2
     echo "mootx01: to activate, generate a real keypair:" >&2
-    echo "  minisign -G -p scripts/minisign.pub -s /path/to/minisign.sec" >&2
-    echo "mootx01: then commit scripts/minisign.pub and add MINISIGN_SECRET_KEY to GitHub secrets." >&2
+    echo "  minisign -G -p distribution/minisign.pub -s /path/to/minisign.sec" >&2
+    echo "mootx01: then commit distribution/minisign.pub and add MINISIGN_SECRET_KEY to GitHub secrets." >&2
     exit 1
   fi
 
@@ -201,10 +201,10 @@ if [ "$os" != "macos" ]; then
   # and a path-relative lookup would fail — there is no repo checkout.
   # Embedding the key keeps the trust anchor intact for all install modes.
   #
-  # Key ID: 2A2AD38EB13379AB
-  # Source: scripts/minisign.pub in codedaptive/mootx01-ce at build time.
+  # Key ID: BC4D1E6ABCB5B788
+  # Source: distribution/minisign.pub in codedaptive/mootx01-ce at build time.
   _pub_key="$tmp/minisign.pub"
-  printf 'untrusted comment: minisign public key 2A2AD38EB13379AB\nRWSreTOxjtMqKgsFO1lpgRwzQQLTgeX3fq6ak7/ZIZh6zEWEa475bZhs\n' \
+  printf 'untrusted comment: minisign public key BC4D1E6ABCB5B788\nRWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12\n' \
     > "$_pub_key"
   verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
 fi

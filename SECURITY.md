@@ -95,8 +95,8 @@ installed is the one we shipped:
   for Linux/POSIX releases, mootx01 publishes a detached Ed25519
   signature of `checksums.txt` (the file `checksums.txt.minisig`)
   alongside each release, signed with the project's minisign key
-  (key id `2A2AD38EB13379AB`). The public key is bundled at
-  `scripts/minisign.pub` in the repository and embedded in the Rust
+  (key id `BC4D1E6ABCB5B788`). The public key is bundled at
+  `distribution/minisign.pub` in the repository and embedded in the Rust
   upgrade binary at compile time.
 
   The shell installer (`install.sh`) and the `mootx01 upgrade` command
@@ -114,7 +114,7 @@ installed is the one we shipped:
 
   **Current status:** The verification infrastructure is fully wired
   and fail-closed, and the **real public key is committed** at
-  `scripts/minisign.pub` (key id `2A2AD38EB13379AB`). Releases are
+  `distribution/minisign.pub` (key id `BC4D1E6ABCB5B788`). Releases are
   signed when the `MINISIGN_SECRET_KEY` GitHub repository secret is
   present. Until the signing secret is configured, releases are
   published unsigned and Linux/POSIX installers will (correctly)

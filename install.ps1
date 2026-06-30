@@ -144,12 +144,12 @@ if ($Uninstall) {
 # ════════════════════════════════════════════════════════════════════════════
 
 # The Ed25519 public key for this release, embedded byte-identical to
-# scripts/minisign.pub (line 2). Verifying against an embedded constant —
+# distribution/minisign.pub (line 2). Verifying against an embedded constant —
 # rather than fetching the key over the network — means an attacker who
 # controls the download host cannot substitute a key. The key id is
-# 2A2AD38EB13379AB; the 42-byte blob is 2-byte algo "Ed" + 8-byte key id +
+# BC4D1E6ABCB5B788; the 42-byte blob is 2-byte algo "Ed" + 8-byte key id +
 # 32-byte Ed25519 public key.
-$MINISIGN_PUBKEY_B64 = "RWSreTOxjtMqKgsFO1lpgRwzQQLTgeX3fq6ak7/ZIZh6zEWEa475bZhs"
+$MINISIGN_PUBKEY_B64 = "RWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12"
 
 function Verify-MinisignSignature {
     # Verify a detached minisign Ed25519 signature of checksums.txt.
@@ -203,8 +203,8 @@ function Verify-MinisignSignature {
     $tmpPubKey = Join-Path $env:TEMP "mootx01-pubkey-$([System.IO.Path]::GetRandomFileName()).pub"
     try {
         # Reconstruct the minisign .pub file format: untrusted comment + key line.
-        # The key id 2A2AD38EB13379AB matches scripts/minisign.pub in the repo.
-        $pubKeyContent = "untrusted comment: minisign public key 2A2AD38EB13379AB`n$PubKeyB64`n"
+        # The key id BC4D1E6ABCB5B788 matches distribution/minisign.pub in the repo.
+        $pubKeyContent = "untrusted comment: minisign public key BC4D1E6ABCB5B788`n$PubKeyB64`n"
         [System.IO.File]::WriteAllText($tmpPubKey, $pubKeyContent, [System.Text.Encoding]::ASCII)
 
         # -V = verify, -p = public key file, -m = signed file, -x = detached sig
