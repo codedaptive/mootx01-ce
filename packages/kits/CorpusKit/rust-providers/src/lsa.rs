@@ -46,6 +46,7 @@
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use crate::term_document_counts::TermDocumentCounts;
+use crate::reduced_vocab::{select_reduced_vocabulary, DEFAULT_REDUCED_VOCAB_CAP};
 use corpus_kit::default_keyword_tokens;
 use engram_lib::Engram;
 use std::collections::HashMap;
@@ -131,6 +132,14 @@ pub struct LsaProvider {
 
     /// Effective SVD rank after finalize().
     effective_rank: usize,
+
+    /// Reduced-vocabulary cap K for the dense factorization (ADR-022).
+    reduced_vocab_cap: usize,
+
+    /// The frozen reduced vocabulary (term → reduced column) the basis was
+    /// trained on (ADR-022). Projection + serialization key on THIS, not the
+    /// full `counts.vocab`. Empty until `finalize()`.
+    basis_vocab: HashMap<String, usize>,
 }
 
 impl LsaProvider {
@@ -154,6 +163,8 @@ impl LsaProvider {
             sigma: Vec::new(),
             doc_vecs: Vec::new(),
             effective_rank: 0,
+            reduced_vocab_cap: DEFAULT_REDUCED_VOCAB_CAP,
+            basis_vocab: HashMap::new(),
         }
     }
 
@@ -186,32 +197,51 @@ impl LsaProvider {
     ///   tfidf(t,d) = tf(t, d) * idf(t)
     pub fn finalize(&mut self) {
         let n = self.counts.document_count();
-        let vocab_size = self.counts.vocabulary_size();
-        if n == 0 || vocab_size == 0 {
+        if n == 0 || self.counts.vocabulary_size() == 0 {
             return;
         }
 
-        // Compute IDF weights.
-        // idf_weights[j] = ln((N+1) / (df_counts[j]+1)), clamped to >= 0.
-        // Using f32::ln — same transcendental as Swift's `log()` on f32.
-        self.idf_weights = vec![0.0_f32; vocab_size];
-        for (&term_idx, &df) in &self.counts.df_counts {
-            let idf = ((n + 1) as f32 / (df + 1) as f32).ln();
-            self.idf_weights[term_idx] = idf.max(0.0);
+        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
+        // (~10^15 ops, infeasible). Shared with NMF; frozen here; drives query
+        // projection. `vocab_size` below is the REDUCED column count — the SVD
+        // block that follows is unchanged and keys on it.
+        let reduced = select_reduced_vocabulary(
+            &self.counts.vocab,
+            &self.counts.df_counts,
+            n,
+            self.reduced_vocab_cap,
+        );
+        let vocab_size = reduced.size();
+        if vocab_size == 0 {
+            self.vt = Vec::new();
+            self.idf_weights = Vec::new();
+            return;
         }
 
-        // Build TF-IDF matrix M (numDocs × vocabSize, row-major).
-        // M[i][j] = log(1 + tf[i][j]) * idf[j]
+        // IDF over REDUCED columns, using the full-corpus df. f32::ln — same
+        // transcendental as Swift's `log()` on f32.
+        self.idf_weights = vec![0.0_f32; vocab_size];
+        for (&full_idx, &col) in &reduced.full_index_to_column {
+            let df = *self.counts.df_counts.get(&full_idx).unwrap_or(&0);
+            let idf = ((n + 1) as f32 / (df + 1) as f32).ln();
+            self.idf_weights[col] = idf.max(0.0);
+        }
+
+        // TF-IDF matrix M (numDocs × K, row-major). Map each doc's TF entries
+        // whose term is in the reduced vocab to its reduced column; drop the rest.
         let mut m: Vec<Vec<f32>> = vec![vec![0.0_f32; vocab_size]; n];
         for (doc_idx, doc_tf) in self.counts.tf_counts.iter().enumerate() {
-            for (&term_idx, &count) in doc_tf {
-                let tf = (1.0 + count as f32).ln();
-                let tfidf = tf * self.idf_weights[term_idx];
-                m[doc_idx][term_idx] = tfidf;
+            for (&full_idx, &count) in doc_tf {
+                if let Some(&col) = reduced.full_index_to_column.get(&full_idx) {
+                    let tf = (1.0 + count as f32).ln();
+                    m[doc_idx][col] = tf * self.idf_weights[col];
+                }
             }
         }
+        self.basis_vocab = reduced.term_to_column;
 
-        // Effective rank: min(requested, min(numDocs, vocabSize)).
+        // Effective rank: min(requested, min(numDocs, K)).
         let effective_rank = self.rank.min(n.min(vocab_size));
 
         // SVD on M (numDocs × vocabSize).
@@ -339,7 +369,9 @@ impl LsaProvider {
         w.write_u64(self.projection_seed);
         w.write_u32(self.counts.document_count() as u32);
         w.write_u32(self.effective_rank as u32);
-        w.write_string_u32_map(&self.counts.vocab);
+        // ADR-022: persist the REDUCED basis vocab; projection keys on it. The
+        // full counts vocab is persisted by serialize_counts as the drift anchor.
+        w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_array(&self.idf_weights);
         w.write_f32_matrix(&self.u);
         w.write_f32_array(&self.sigma);
@@ -386,13 +418,15 @@ impl LsaProvider {
             rank: rank.max(1),
             svd_sweeps,
             projection_seed,
-            counts: TermDocumentCounts::from_restored(vocab, document_count),
+            counts: TermDocumentCounts::from_restored(vocab.clone(), document_count),
             idf_weights,
             u,
             vt,
             sigma,
             doc_vecs,
             effective_rank,
+            reduced_vocab_cap: DEFAULT_REDUCED_VOCAB_CAP,
+            basis_vocab: vocab,
         })
     }
 
@@ -407,14 +441,16 @@ impl LsaProvider {
             return None;
         }
 
-        let vocab_size = self.counts.vocabulary_size();
+        // Projection keys on the REDUCED basis vocab (ADR-022); OOV terms
+        // outside top-K contribute nothing (covered by RI).
+        let vocab_size = self.basis_vocab.len();
         let k = self.effective_rank;
 
         // Build sparse TF-IDF query vector.
         let mut raw_counts: HashMap<usize, usize> = HashMap::new();
         let mut has_in_vocab = false;
         for term in &terms {
-            if let Some(&idx) = self.counts.vocab.get(term.as_str()) {
+            if let Some(&idx) = self.basis_vocab.get(term.as_str()) {
                 *raw_counts.entry(idx).or_insert(0) += 1;
                 has_in_vocab = true;
             }
@@ -508,7 +544,7 @@ impl EmbeddingProvider for LsaProvider {
     ///   issue, not a vocabulary miss.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         // No finalized basis or empty input: structural opt-out.
-        if !self.is_finalized() || self.counts.vocabulary_size() == 0 {
+        if !self.is_finalized() || self.basis_vocab.is_empty() {
             return Ok(vec![]);
         }
         if text.is_empty() {
@@ -518,13 +554,13 @@ impl EmbeddingProvider for LsaProvider {
         if terms.is_empty() {
             return Ok(vec![]);
         }
-        // OOV check before full projection: throw vocabMiss when basis is
-        // trained but query hits nothing in the vocab.
-        let has_in_vocab = terms.iter().any(|t| self.counts.vocab.contains_key(t.as_str()));
+        // OOV check before full projection: throw vocabMiss when the basis is
+        // trained but query hits nothing in the reduced vocab.
+        let has_in_vocab = terms.iter().any(|t| self.basis_vocab.contains_key(t.as_str()));
         if !has_in_vocab {
             return Err(VectorKitError::EmbedFloatVocabMiss(format!(
-                "lsa: vocab size {}, but 0 of {} query token(s) matched",
-                self.counts.vocabulary_size(),
+                "lsa: reduced vocab size {}, but 0 of {} query token(s) matched",
+                self.basis_vocab.len(),
                 terms.len()
             )));
         }

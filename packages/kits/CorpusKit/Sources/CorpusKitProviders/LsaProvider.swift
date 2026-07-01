@@ -155,6 +155,11 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// Requested LSA rank k.
     public let rank: Int
 
+    /// Reduced-vocabulary cap K for the dense factorization (ADR-022). The SVD
+    /// factors a `docs × K` matrix over the top-K informative terms instead of
+    /// `docs × full-vocab`. Optimizer knob; default `defaultReducedVocabCap`.
+    public let reducedVocabCap: Int
+
     /// Number of Jacobi sweeps for SVD. Pinned at 30 (same as Rust default).
     /// Changing this invalidates all conformance vectors.
     public let svdSweeps: Int
@@ -174,8 +179,13 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// SVD result from finalize(). Nil until finalize() is called.
     private var svd: SVDResult?
 
-    /// IDF weights, indexed by vocabulary position.
+    /// IDF weights, indexed by REDUCED vocabulary column (ADR-022).
     private var idfWeights: [Float]
+
+    /// The frozen reduced vocabulary (term → reduced column) the basis was
+    /// trained on (ADR-022). Query projection and basis serialization key on
+    /// THIS, not the full `counts.vocab`. Empty until `finalize()`.
+    private var basisVocab: [String: Int]
 
     // MARK: Initialiser
 
@@ -184,15 +194,18 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         modelVersion: String = "1.0.0",
         rank: Int = lsaDefaultRank,
         svdSweeps: Int = 30,
-        projectionSeed: UInt64 = lsaProjectionSeed
+        projectionSeed: UInt64 = lsaProjectionSeed,
+        reducedVocabCap: Int = defaultReducedVocabCap
     ) {
         self.modelID = modelID
         self.modelVersion = modelVersion
         self.rank = max(1, rank)
+        self.reducedVocabCap = max(1, reducedVocabCap)
         self.svdSweeps = max(0, svdSweeps)
         self.projectionSeed = projectionSeed
         self.counts = TermDocumentCounts()
         self.idfWeights = []
+        self.basisVocab = [:]
         self.svd = nil
     }
 
@@ -244,30 +257,46 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// Natural log on both sides; add-1 smoothing in IDF denominator.
     public func finalize() {
         let N = counts.documentCount
-        let vocabSize = counts.vocabularySize
-        guard N > 0, vocabSize > 0 else { return }
+        guard N > 0, counts.vocabularySize > 0 else { return }
 
-        // Compute IDF weights indexed by vocabulary position.
-        // idfWeights[j] = log((N+1) / (dfCounts[j]+1))
-        // Natural log: matches Rust's f32::ln().
+        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
+        // (~10^15 ops, infeasible). The reduced vocab is a corpus property
+        // shared with NMF; it is frozen here and drives query projection.
+        // `vocabSize` below is the REDUCED column count — the SVD block that
+        // follows is unchanged and keys on it.
+        let reduced = selectReducedVocabulary(
+            vocab: counts.vocab,
+            dfCounts: counts.dfCounts,
+            documentCount: N,
+            cap: reducedVocabCap
+        )
+        basisVocab = reduced.termToColumn
+        let vocabSize = reduced.size
+        guard vocabSize > 0 else { svd = nil; idfWeights = []; return }
+
+        // IDF over REDUCED columns, using the full-corpus df (informativeness is
+        // corpus-wide). idfWeights[col] = log((N+1)/(df+1)); natural log with
+        // add-1 smoothing — matches Rust's f32::ln().
         idfWeights = [Float](repeating: 0, count: vocabSize)
-        for (termIdx, df) in counts.dfCounts {
-            let idf = log(Float(N + 1) / Float(df + 1))
-            idfWeights[termIdx] = max(0, idf)  // clamp to 0 (always ≥ 0 with add-1 smoothing)
+        for (fullIdx, col) in reduced.fullIndexToColumn {
+            let df = counts.dfCounts[fullIdx] ?? 0
+            idfWeights[col] = max(0, log(Float(N + 1) / Float(df + 1)))
         }
 
-        // Build the TF-IDF matrix M (numDocs × vocabSize, row-major).
-        // M[i][j] = log(1 + tf[i][j]) * idfWeights[j]
+        // Build the TF-IDF matrix M (numDocs × K, row-major). Map each doc's TF
+        // entries whose term is in the reduced vocab to its reduced column;
+        // full-vocab terms outside the reduced set are dropped.
         var M: [[Float]] = [[Float]](repeating: [Float](repeating: 0, count: vocabSize), count: N)
         for (docIdx, docTF) in counts.tfCounts.enumerated() {
-            for (termIdx, count) in docTF {
+            for (fullIdx, count) in docTF {
+                guard let col = reduced.fullIndexToColumn[fullIdx] else { continue }
                 let tf = log(1 + Float(count))
-                let tfidf = tf * idfWeights[termIdx]
-                M[docIdx][termIdx] = tfidf
+                M[docIdx][col] = tf * idfWeights[col]
             }
         }
 
-        // Determine effective rank: min(requestedRank, min(numDocs, vocabSize)).
+        // Determine effective rank: min(requestedRank, min(numDocs, K)).
         let effectiveRank = min(rank, min(N, vocabSize))
 
         // Run the deterministic Jacobi SVD on M (numDocs × vocabSize).
@@ -335,19 +364,19 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     public func embedFloat(_ text: String) async throws -> [Float] {
         // No finalized basis: return [] (structural no-basis → providerOptOut
         // is the correct dark-lane signal, not vocabMiss).
-        guard svd != nil, counts.vocabularySize > 0 else { return [] }
+        guard svd != nil, !basisVocab.isEmpty else { return [] }
         // Empty or non-tokenisable input: return [] (emptyQuery guard fires
         // in Corpus.floatNearest before this path is reached in practice).
         guard !text.isEmpty else { return [] }
         let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return [] }
         // Check OOV before computing the full LSA projection.
-        // When vocab is non-empty but the query hits none of it, throw
-        // embedFloatVocabMiss so the corpus layer surfaces the correct reason.
-        let hasInVocab = terms.contains { counts.vocab[$0] != nil }
+        // When the reduced vocab is non-empty but the query hits none of it,
+        // throw embedFloatVocabMiss so the corpus layer surfaces the reason.
+        let hasInVocab = terms.contains { basisVocab[$0] != nil }
         guard hasInVocab else {
             throw VectorKitError.embedFloatVocabMiss(
-                "lsa: vocab size \(counts.vocabularySize), but 0 of \(terms.count) query token(s) matched"
+                "lsa: reduced vocab size \(basisVocab.count), but 0 of \(terms.count) query token(s) matched"
             )
         }
         // Projection may still return nil (e.g. all singular values near zero,
@@ -387,15 +416,18 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         guard !terms.isEmpty else { return nil }
 
         let k = svdResult.rank
-        let vocabSize = counts.vocabularySize
+        // Query projection keys on the REDUCED basis vocab (ADR-022), not the
+        // full counts vocab. Reduced-set terms map to their column; OOV terms
+        // (outside top-K) contribute nothing and are covered by RI.
+        let vocabSize = basisVocab.count
 
         // Compute the TF-IDF vector for the query text.
         // tf(t) = log(1 + raw_count(t)) * idf(t)
-        // Terms not in vocab are OOV and contribute nothing.
+        // Terms not in the reduced vocab are OOV and contribute nothing.
         var rawCounts: [Int: Int] = [:]
         var hasInVocab = false
         for term in terms {
-            if let idx = counts.vocab[term] {
+            if let idx = basisVocab[term] {
                 rawCounts[idx, default: 0] += 1
                 hasInVocab = true
             }
@@ -524,7 +556,10 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         w.writeU64(projectionSeed)
         w.writeU32(UInt32(counts.documentCount))
         w.writeU32(UInt32(svd?.rank ?? 0))
-        w.writeStringU32Map(counts.vocab)
+        // ADR-022: persist the REDUCED basis vocab (term → reduced column) —
+        // projection keys on it. The full counts vocab is persisted separately
+        // by serializeCounts() as the drift-trigger anchor.
+        w.writeStringU32Map(basisVocab)
         w.writeFloatArray(idfWeights)
         w.writeFloatMatrix(svd?.U ?? [])
         w.writeFloatArray(svd?.singularValues ?? [])
@@ -562,6 +597,11 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
                   projectionSeed: projectionSeed)
         // Restore the term-document support (vocab + doc count) without
         // re-tokenizing; raw TF rows are not embed-relevant.
+        // The persisted map IS the reduced basis vocab (ADR-022); projection
+        // keys on `basisVocab`. counts is restored from the same map so a
+        // reconstructed provider reports the basis vocab it embeds against
+        // (round-trip). The FULL vocab lives in the counts blob, not here.
+        self.basisVocab = vocab
         self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
         self.idfWeights = idfWeights
         // An empty SVD section means the source provider was never finalized;

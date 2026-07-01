@@ -38,6 +38,9 @@ pub mod basis_codec;
 // Owns vocab encounter-order construction, TF counts, and DF counts.
 // Swift port: Sources/CorpusKitProviders/TermDocumentCounts.swift.
 pub mod term_document_counts;
+// ADR-022: shared IDF-reduced vocabulary selection for the dense LSA/NMF
+// factorizations (bit-identical with Swift's CorpusKitProviders/ReducedVocab).
+pub mod reduced_vocab;
 // ADR-010 Decision B signal #1: LSA/SVD distributional-semantics provider.
 // Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
 pub mod lsa;
