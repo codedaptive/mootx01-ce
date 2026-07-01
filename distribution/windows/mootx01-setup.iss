@@ -60,7 +60,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; terminal window. The user sees the same numbered picker that
 ; `mootx01 install` shows in PowerShell — detection, selection, wiring.
 Filename: "{app}\mootx01.exe"; Parameters: "install"; \
-  Description: "Connect AI clients to MOOTx01"; \
+  Description: "Run MOOTx01 setup now to connect your AI clients - required (opens a terminal)"; \
   Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
