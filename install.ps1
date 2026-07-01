@@ -182,13 +182,37 @@ function Verify-MinisignSignature {
         [string]$PubKeyB64
     )
 
-    # Require the minisign binary — fail closed with installation instructions.
-    # Clean up $tmpDir before exiting so the partial download does not linger
-    # in %TEMP% (the caller does not get a chance to clean up after exit 1).
+    # Require the minisign binary. If it is missing, first try to bootstrap it
+    # automatically via winget (the Windows 10/11 package manager) so the
+    # one-line install completes on a clean box. This ONLY installs the
+    # verifier — it never bypasses the signature check below. Verification stays
+    # fully fail-closed: if the bootstrap is unavailable or fails, installation
+    # is aborted rather than proceeding with an unverified binary.
+    if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Host "  minisign not found — installing it via winget (required to verify the release signature)..."
+            # Non-interactive: accept agreements up front and disable prompts so
+            # the piped (irm | iex) install cannot hang waiting for input.
+            # --exact --id pins the well-known package rather than a name match.
+            & winget install --id jedisct1.Minisign --exact --source winget `
+                --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Host
+            # winget places its shims under %LOCALAPPDATA%\Microsoft\WinGet\Links,
+            # which is on the *persisted* user PATH but not this process's stale
+            # copy. Refresh PATH from the registry (Machine + User) so the freshly
+            # installed minisign is discoverable without opening a new shell.
+            $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                        [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        }
+    }
+
+    # Fail closed if minisign is still unavailable (winget absent, or the
+    # bootstrap failed). Clean up $tmpDir before exiting so the partial download
+    # does not linger in %TEMP% (the caller does not get a chance to clean up
+    # after exit 1).
     if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
         Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         Write-Error "mootx01: release signature verification requires the minisign binary."
-        Write-Error "mootx01: to install minisign on Windows:"
+        Write-Error "mootx01: automatic install via winget was unavailable or failed. Install it manually:"
         Write-Error "  winget install minisign      (Windows 10/11 Package Manager)"
         Write-Error "  scoop install minisign       (Scoop package manager)"
         Write-Error "  choco install minisign       (Chocolatey)"
