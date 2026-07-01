@@ -406,28 +406,46 @@ if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
     exit 1
 }
 
-# 3d. Optional Authenticode check: verify the extracted executable carries a
-#     valid digital signature from the expected publisher. Notarized/signed
-#     binaries from the release pipeline pass; a substituted or unsigned binary
-#     is rejected. Best-effort — warns rather than blocking if signature status
-#     cannot be determined (e.g. older PowerShell without Get-AuthenticodeSignature).
+# 3d. Authenticode check: belt-and-suspenders over the minisign + SHA-256
+#     verification above (which is the trust root on Windows). Three outcomes,
+#     handled distinctly so a tampered signature is never downgraded to a warning:
+#       - Valid     → a trusted signature is present and intact: OK.
+#       - NotSigned → EXPECTED. mootx01 Windows binaries are not (yet)
+#                     Authenticode-signed; integrity is already established by the
+#                     verified minisign signature + checksum. Quiet, non-fatal.
+#       - anything else (HashMismatch, NotTrusted, …) → a signature IS present but
+#                     INVALID: the binary was tampered with or re-signed. FATAL.
+#     The Get-AuthenticodeSignature call has its OWN narrow try/catch that only
+#     handles the cmdlet being unavailable (ancient PowerShell) — it must NOT wrap
+#     the fatal branch, or a terminating Write-Error would be swallowed and the
+#     abort silently skipped (the prior bug: NotSigned/HashMismatch alike were
+#     caught and downgraded to a non-fatal "could not check" warning).
 foreach ($exeName in @("mootx01.exe", "moot-mgr.exe")) {
     $exePath = Join-Path $tmpDir $exeName
     if (-not (Test-Path $exePath)) { continue }
+    $sig = $null
     try {
         $sig = Get-AuthenticodeSignature $exePath -ErrorAction Stop
-        if ($sig.Status -ne "Valid") {
-            Write-Error "mootx01: Authenticode check FAILED for $exeName (status: $($sig.Status))."
+    } catch {
+        # Get-AuthenticodeSignature genuinely unavailable — the minisign + SHA-256
+        # checks above already verified the archive, so this is advisory only.
+        Write-Warning "mootx01: Authenticode check unavailable for $exeName — relying on the verified minisign signature."
+        $sig = $null
+    }
+    if ($null -eq $sig) { continue }
+    switch ($sig.Status) {
+        "Valid" {
+            Write-Host "  Authenticode OK ($exeName — $($sig.SignerCertificate.Subject))"
+        }
+        "NotSigned" {
+            Write-Host "  $exeName is not Authenticode-signed (expected; integrity verified via minisign + SHA-256)."
+        }
+        default {
+            Write-Error "mootx01: Authenticode signature INVALID for $exeName (status: $($sig.Status))."
             Write-Error "mootx01: the binary may have been tampered with — do not proceed."
             Remove-Item -Recurse -Force $tmpDir
             exit 1
         }
-        Write-Host "  Authenticode OK ($exeName — $($sig.SignerCertificate.Subject))"
-    } catch {
-        # Get-AuthenticodeSignature unavailable or threw unexpectedly. Treat as
-        # advisory: the minisign + SHA-256 checks above already verified the
-        # archive; this is a belt-and-suspenders code-signing check.
-        Write-Warning "mootx01: could not check Authenticode signature for $exeName — skipping (non-fatal): $_"
     }
 }
 
