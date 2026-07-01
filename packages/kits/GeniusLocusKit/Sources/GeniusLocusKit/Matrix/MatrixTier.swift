@@ -531,8 +531,26 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         // as applyCapture on the hot path). Entries are taken in HLC order —
         // orderedEntries is already HLC-ascending, meeting TemporalCausalityFold's
         // precondition.
+        //
+        // INCREMENTAL PRUNE (launch cost): when folding forward from a non-zero
+        // watermark (hydration path), drop entries older than one window before
+        // the watermark. TemporalCausalityFold only emits pairs for entries with
+        // HLC > startWatermark, and a new entry pairs only with earlier entries
+        // within `temporalWindowMinutes` (physicalTime is ms; the fold's window
+        // check is `(newTime - olderTime) / 60_000 <= windowMinutes`). So any
+        // entry whose physicalTime < watermark - windowMinutes·60_000 can never
+        // be inside a post-watermark entry's window and contributes no delta —
+        // dropping it is exact, not an approximation, and it bounds the fold's
+        // materialization + O(N) buffer scan to the tail instead of re-folding
+        // the whole audit log on every launch (the recompute-on-launch that made
+        // a 50k-entry estate spend minutes single-threaded here). A full rebuild
+        // (startWatermark == .zero) keeps every entry — cutoff is Int64.min.
+        let temporalCutoffMs: Int64 = startWatermark == .zero
+            ? Int64.min
+            : startWatermark.physicalTime - Int64(Self.temporalWindowMinutes) * 60_000
         let temporalEntries: [TemporalAuditEntry] = log.orderedEntries
-            .filter { $0.verb == .capture || $0.verb == .expunge }
+            .filter { ($0.verb == .capture || $0.verb == .expunge)
+                      && $0.hlc.physicalTime >= temporalCutoffMs }
             .map { entry in
                 let coords: [TemporalFieldCoord]
                 switch entry.afterValue {

@@ -418,11 +418,30 @@ impl MatrixTier {
         // boundary. Only capture and expunge verbs contribute to T (same filter
         // as apply_capture on the hot path). ordered_entries is HLC-ascending,
         // meeting temporal_causality_fold's precondition.
+        //
+        // INCREMENTAL PRUNE (launch cost): when folding forward from a non-zero
+        // watermark (hydration path), drop entries older than one window before
+        // the watermark. temporal_causality_fold only emits pairs for entries with
+        // HLC > start_watermark, and a new entry pairs only with earlier entries
+        // within TEMPORAL_WINDOW_MINUTES (physical_time is ms; the fold's window
+        // check is `(new_time - older_time) / 60_000 <= window_minutes`). So any
+        // entry whose physical_time < watermark - window_minutes*60_000 can never
+        // be inside a post-watermark entry's window and contributes no delta —
+        // dropping it is exact, not an approximation, and it bounds the fold's
+        // materialization + O(N) buffer scan to the tail instead of re-folding
+        // the whole audit log on every launch. A full rebuild
+        // (start_watermark == ZERO) keeps every entry — cutoff is i64::MIN.
+        let temporal_cutoff_ms: i64 = if start_watermark == HLC::ZERO {
+            i64::MIN
+        } else {
+            start_watermark.physical_time - (Self::TEMPORAL_WINDOW_MINUTES as i64) * 60_000
+        };
         let temporal_entries: Vec<TemporalAuditEntry> = log
             .ordered_entries()
             .into_iter()
             .filter(|e| {
                 matches!(e.verb, UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge)
+                    && e.hlc.physical_time >= temporal_cutoff_ms
             })
             .map(|entry| {
                 let field_coords: Vec<TemporalFieldCoord> = match &entry.after_value {
