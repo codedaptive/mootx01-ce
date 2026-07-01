@@ -256,8 +256,12 @@ fi
 if [ "$os" = "macos" ]; then
   # Quarantine flags field: 0083 = downloaded from internet + should require
   # Gatekeeper assessment. The timestamp is the current time in hex seconds
-  # since the macOS epoch (2001-01-01 UTC = Unix 978307200).
-  _qts="$(printf '%x' "$(($(date +%s) - 978307200))" 2>/dev/null || echo "00000000")"
+  # since the Unix epoch (1970-01-01 UTC) — the format the com.apple.quarantine
+  # xattr stores. It is NOT CoreFoundation's 2001-01-01 epoch: writing
+  # 2001-epoch seconds here (current - 978307200) makes Gatekeeper read the
+  # value back as Unix seconds and report a creation date 31 years in the past
+  # (e.g. 2026 shown as 1995), which looks broken to the user.
+  _qts="$(printf '%x' "$(date +%s)" 2>/dev/null || echo "00000000")"
   _qval="0083;${_qts};mootx01-installer;"
   if command -v xattr >/dev/null 2>&1; then
     for _bin in "$INSTALL_DIR/mootx01" "$INSTALL_DIR/moot-mgr"; do
