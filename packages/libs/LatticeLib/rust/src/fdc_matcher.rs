@@ -12,6 +12,15 @@
 // `encode` is a pure function of the input text and the pinned artifacts —
 // the agreement property.
 //
+// PERFORMANCE — String→Int term interning (#31 Phase 2):
+// The codebook (sig_terms / index / idf) is loaded once at init from the pinned
+// FDCSignatures artifact and never mutated. Every term is assigned a dense usize
+// id at init (ascending String order → Int-sort == String-sort, preserving all
+// deterministic sort operations). The per-call hot path (encode_from_bag →
+// score / raw_overlap) then operates on Int-keyed structures, eliminating the
+// per-lookup String hash / HashMap find that dominated profiler samples on a
+// 49k-drawer palace import. Mirrors Swift FDCMatcher.swift.
+//
 // SCORING MODES
 // FDCMatcher supports four ScoreMode variants (mirrors Swift FDCMatcher.ScoreMode):
 //   Raw:       Σ_{t∈O} bag[t]                     (direct-init default)
@@ -27,10 +36,11 @@
 //   lexicographically. Same rule as Swift.
 // - frame descent tie-break: highest mode score wins; ties broken by lowest
 //   code lexicographically. Same rule as Swift.
-// - Sorted summation: floating-point addition is non-associative. Swift sums
-//   idf² terms (init) and numerator overlap (score) in SORTED term order to
-//   produce a deterministic result regardless of hash iteration order. Rust
-//   mirrors this: all f64 sums over term sets are computed in sorted order.
+// - Sorted summation: floating-point addition is non-associative. IDs are
+//   assigned in ascending String order so sorting by TermID produces the same
+//   sequence as sorting by String — all f64 sums that were previously computed
+//   over sorted-String term slices are now computed over sorted-usize id slices,
+//   with identical results. Mirrors Swift's init and score() sorted-term logic.
 // - The descent cutoff (stop_threshold) is compared against the RAW integer
 //   overlap, not the normalized score — mode-independent, as in Swift.
 // - No HashMap iteration order dependencies: ties are resolved by explicit
@@ -85,6 +95,12 @@ pub enum ScoreMode {
 /// Mirrors Swift `FDCMatcher.maximumTiedWinnersForClassification`.
 pub const MAX_TIED_WINNERS_FOR_CLASSIFICATION: usize = 4;
 
+/// An intern-keyed bag: TermID → count. Used internally for all scoring
+/// operations. Built from a ConceptBag in `encode_from_bag` by looking up
+/// each term's dense integer id. Terms absent from the codebook have no id
+/// and are silently dropped (they cannot match any signature).
+type InternedBag = HashMap<usize, usize>;
+
 pub struct FdcMatcher {
     /// Pinned descent cutoff (cookbook §6.1). v1.0 default is 1.
     pub stop_threshold: usize,
@@ -92,19 +108,42 @@ pub struct FdcMatcher {
     pub score_mode: ScoreMode,
     lexicon: CanonicalizationLexicon,
     frame: FdcFrame,
-    /// code -> signature term set
-    sig_terms: HashMap<String, std::collections::HashSet<String>>,
-    /// term -> sorted list of codes (inverted index)
-    index: HashMap<String, Vec<String>>,
-    /// term -> ln(N / df(t)) — precomputed IDF over the code signatures.
-    /// idf[t] = 0 for a term present in every signature. Only non-trivial for
-    /// ScoreMode::Idf and ScoreMode::IdfCosine, but always precomputed so the
-    /// init path is branch-free (cost: one pass over df at construction time).
-    idf: HashMap<String, f64>,
-    /// code -> sqrt(|sig|) — precomputed for ScoreMode::Cosine.
+
+    // MARK: — Interning table (#31 Phase 2)
+    //
+    // Terms are interned to dense usize ids once at init so encode_from_bag
+    // runs Int-keyed lookups instead of String-keyed ones. IDs are assigned in
+    // ascending String order → usize-sort == String-sort.
+
+    /// term → dense usize id. IDs are 0-based, contiguous, assigned in
+    /// ascending String order. Mirrors Swift `termToID`.
+    term_to_id: HashMap<String, usize>,
+
+    // MARK: — Int-keyed internal structures (hot path)
+
+    /// code → sorted Vec<TermID>. Replaces the old HashMap<String, HashSet<String>>.
+    /// The Vec is sorted in ascending TermID order (== ascending String order)
+    /// so iteration in TermID order == iteration in String order — required for
+    /// deterministic floating-point sums. Mirrors Swift `sigTermIDs`.
+    sig_term_ids: HashMap<String, Vec<usize>>,
+
+    /// TermID → sorted Vec<String> codes (inverted index). Replaces the old
+    /// HashMap<String, Vec<String>>. Key is a dense usize so lookup is a
+    /// single integer hash. Mirrors Swift `indexByID`.
+    index_by_id: Vec<Vec<String>>,
+
+    /// TermID → idf value (dense Vec, indexed by TermID). Replaces the old
+    /// HashMap<String, f64>. Indexed directly: `idf_by_id[id]`. Mirrors Swift
+    /// `idfByID`.
+    idf_by_id: Vec<f64>,
+
+    // MARK: — Code-keyed norm tables (unchanged from pre-interning)
+
+    /// code → sqrt(|sig|) — precomputed for ScoreMode::Cosine.
     sig_norm: HashMap<String, f64>,
-    /// code -> sqrt(Σ_{t∈sig} idf(t)²) — precomputed for ScoreMode::IdfCosine.
-    /// Summed in SORTED term order to match Swift's deterministic init.
+    /// code → sqrt(Σ_{t∈sig} idf(t)²) — precomputed for ScoreMode::IdfCosine.
+    /// Summed in SORTED TermID order (== sorted String order) to produce
+    /// bit-identical results to the pre-interning init. Mirrors Swift `sigIDFNorm`.
     sig_idf_norm: HashMap<String, f64>,
 }
 
@@ -125,56 +164,99 @@ impl FdcMatcher {
         stop_threshold: usize,
         score_mode: ScoreMode,
     ) -> Self {
-        let sig_terms = signatures.sig_terms.clone();
+        let sig_terms_orig = &signatures.sig_terms;
 
-        // Build inverted index: term -> sorted Vec<code>
-        let mut index: HashMap<String, Vec<String>> = HashMap::new();
-        for (code, terms) in &sig_terms {
-            for term in terms {
-                index.entry(term.clone()).or_default().push(code.clone());
+        // 1. Collect every unique term across all signatures, sort alphabetically
+        //    (BTreeSet), assign dense usize ids. Ascending String order → usize
+        //    sort == String sort. Mirrors Swift: `allTerms.sorted().enumerated()`.
+        let mut all_terms_set: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for terms in sig_terms_orig.values() {
+            for t in terms {
+                all_terms_set.insert(t.clone());
             }
         }
-        // Sort each code list for deterministic iteration order.
-        for codes in index.values_mut() {
+        let term_count = all_terms_set.len();
+        // BTreeSet is already sorted, so iteration gives ascending String order.
+        let mut term_to_id: HashMap<String, usize> = HashMap::with_capacity(term_count);
+        for (id, term) in all_terms_set.into_iter().enumerate() {
+            term_to_id.insert(term, id);
+        }
+
+        // 2. Rebuild sig_term_ids: code → sorted Vec<TermID>.
+        //    The Vec is sorted in ascending TermID order (== ascending String order)
+        //    so `sig_term_ids[code].iter()` is already in the same order as
+        //    `sig_terms[code].iter().sorted()` — no additional sort needed in
+        //    score() overlap computation. Mirrors Swift `sigTermIDs`.
+        let mut sig_term_ids: HashMap<String, Vec<usize>> =
+            HashMap::with_capacity(sig_terms_orig.len());
+        for (code, terms) in sig_terms_orig {
+            let mut ids: Vec<usize> = terms
+                .iter()
+                .filter_map(|t| term_to_id.get(t.as_str()).copied())
+                .collect();
+            // Sort ascending — ascending TermID == ascending String order.
+            ids.sort_unstable();
+            sig_term_ids.insert(code.clone(), ids);
+        }
+
+        // 3. Build index_by_id: dense Vec<Vec<String>> indexed by TermID.
+        //    Replaces the old HashMap<String, Vec<String>>. Direct integer
+        //    indexing avoids hash computation on the hot inner loop.
+        let mut index_by_id: Vec<Vec<String>> = vec![Vec::new(); term_count];
+        for (code, ids) in &sig_term_ids {
+            for &id in ids {
+                index_by_id[id].push(code.clone());
+            }
+        }
+        // Sort each code list for deterministic iteration order — same invariant
+        // as the old `for codes in index.values_mut() { codes.sort(); }`.
+        for codes in &mut index_by_id {
             codes.sort();
         }
 
-        // IDF over the code signatures: df(t) = # signatures containing t,
-        // N = total code signatures. idf(t) = ln(N / df(t)).
-        // A term in every signature carries idf 0; a term in one signature
-        // carries ln(N). Precomputed for all modes (cost: one df pass at init).
-        let n = sig_terms.len() as f64;
-        let mut df: HashMap<String, usize> = HashMap::new();
-        for (_, terms) in &sig_terms {
-            for t in terms {
-                *df.entry(t.clone()).or_insert(0) += 1;
+        // 4. Compute IDF over the code signatures.
+        //    df[id] = # signatures containing the term with that id.
+        //    idf[id] = ln(N / df[id]). A term in every signature carries idf 0.
+        //    Stored as a dense Vec<f64> indexed by TermID for O(1) access.
+        let n = sig_terms_orig.len() as f64;
+        let mut df: Vec<usize> = vec![0usize; term_count];
+        for (code, _) in sig_terms_orig {
+            // Use sig_term_ids (already built) to avoid iterating HashSet<String>.
+            if let Some(ids) = sig_term_ids.get(code) {
+                for &id in ids {
+                    df[id] += 1;
+                }
             }
         }
-        let mut idf: HashMap<String, f64> = HashMap::with_capacity(df.len());
-        for (t, d) in &df {
-            idf.insert(t.clone(), if *d > 0 { (n / *d as f64).ln() } else { 0.0 });
+        let mut idf_by_id: Vec<f64> = vec![0.0f64; term_count];
+        for id in 0..term_count {
+            if df[id] > 0 {
+                idf_by_id[id] = (n / df[id] as f64).ln();
+            }
         }
 
-        // Per-signature norms (big-signature penalty).
-        //   sig_norm[code]     = sqrt(|sig|)             for ScoreMode::Cosine
-        //   sig_idf_norm[code] = sqrt(Σ idf(t)²)         for ScoreMode::IdfCosine
+        // 5. Per-signature norms (big-signature penalty).
+        //    sig_norm[code]     = sqrt(|sig|)         for ScoreMode::Cosine
+        //    sig_idf_norm[code] = sqrt(Σ idf(t)²)    for ScoreMode::IdfCosine
         //
-        // The IDF norm sum MUST be in SORTED term order: floating-point addition
-        // is non-associative, and HashSet iteration order is randomized. Sorting
-        // pins the result to match Swift's init (which does `terms.sorted()`).
-        let mut sig_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms.len());
-        let mut sig_idf_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms.len());
-        for (code, terms) in &sig_terms {
+        //    The IDF norm sum MUST be in SORTED TermID order (== sorted String
+        //    order). sig_term_ids[code] is already sorted (step 2), so we iterate
+        //    it directly — no additional sort. This produces bit-identical f64
+        //    results to the pre-interning impl that did `terms.sorted()`.
+        let mut sig_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms_orig.len());
+        let mut sig_idf_norm: HashMap<String, f64> =
+            HashMap::with_capacity(sig_terms_orig.len());
+        for (code, ids) in &sig_term_ids {
             sig_norm.insert(
                 code.clone(),
-                if terms.is_empty() { 0.0 } else { (terms.len() as f64).sqrt() },
+                if ids.is_empty() { 0.0 } else { (ids.len() as f64).sqrt() },
             );
-            // Collect terms into a sorted Vec, then sum idf(t)² in that order.
-            let mut sorted_terms: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
-            sorted_terms.sort_unstable();
+            // ids is sorted → iterating gives ascending String order of terms,
+            // identical to the pre-interning `sorted_terms` summation order.
             let mut ss = 0.0f64;
-            for t in &sorted_terms {
-                let w = idf.get(*t).copied().unwrap_or(0.0);
+            for &id in ids {
+                let w = idf_by_id[id];
                 ss += w * w;
             }
             sig_idf_norm.insert(code.clone(), if ss > 0.0 { ss.sqrt() } else { 0.0 });
@@ -185,52 +267,51 @@ impl FdcMatcher {
             score_mode,
             lexicon,
             frame,
-            sig_terms,
-            index,
-            idf,
+            term_to_id,
+            sig_term_ids,
+            index_by_id,
+            idf_by_id,
             sig_norm,
             sig_idf_norm,
         }
     }
 
-    /// Score `code`'s overlap with `bag` under the active `score_mode`. The
-    /// numerator is summed over the overlap (terms shared between bag and the
-    /// code's membership signature) in SORTED term order for determinism.
-    /// The denominator is the mode's signature-side normalization (1.0 for
-    /// Raw/Idf). Returns 0.0 when there is no overlap.
-    ///
-    /// Used for BOTH the Step-4 argmax and the Step-5 descent ranking so both
-    /// are scored on one footing — mirrors Swift `FDCMatcher.score(code:bag:)`.
-    fn score(&self, code: &str, bag: &ConceptBag) -> f64 {
-        let terms = match self.sig_terms.get(code) {
-            Some(t) => t,
+    /// Score `code`'s overlap with the interned `bag` under the active
+    /// `score_mode`. The numerator is summed over the overlap in sorted TermID
+    /// order (== sorted String order by construction), producing bit-identical
+    /// f64 results to the pre-interning impl. Returns 0.0 when there is no
+    /// overlap. Mirrors Swift `FDCMatcher.score(code:bag:)`.
+    fn score(&self, code: &str, bag: &InternedBag) -> f64 {
+        let term_ids = match self.sig_term_ids.get(code) {
+            Some(ids) => ids,
             None => return 0.0,
         };
-        // Compute the overlap in SORTED term order: floating-point addition is
-        // non-associative, so a fixed summation order is required for IDF modes
-        // to be bit-reproducible (bag's HashMap iteration order is randomized).
-        // For Raw the sum is integral and order-independent, but we use the same
-        // sorted path for uniformity — mirroring Swift's score() function.
-        let mut overlap: Vec<&str> = terms
+        // term_ids is already sorted in ascending TermID order (== String order).
+        // Filter by bag membership and collect — no additional sort needed.
+        // This is the equivalent of the pre-interning `overlap.sort_unstable()`
+        // over a Vec built from `terms.iter().filter(...)`.
+        let overlap: Vec<usize> = term_ids
             .iter()
-            .filter(|t| bag.contains_key(t.as_str()))
-            .map(|t| t.as_str())
+            .filter(|&&id| bag.contains_key(&id))
+            .copied()
             .collect();
-        overlap.sort_unstable();
+        // overlap is already sorted (term_ids is sorted, filter preserves order).
 
         let mut num = 0.0f64;
         match self.score_mode {
             ScoreMode::Raw | ScoreMode::Cosine => {
                 // Raw numerator: Σ bag[t] over the overlap.
-                for t in &overlap {
-                    num += *bag.get(*t).unwrap_or(&0) as f64;
+                for &id in &overlap {
+                    num += *bag.get(&id).unwrap_or(&0) as f64;
                 }
             }
             ScoreMode::Idf | ScoreMode::IdfCosine => {
                 // IDF-weighted numerator: Σ bag[t]·idf(t) over the overlap.
-                for t in &overlap {
-                    let n = *bag.get(*t).unwrap_or(&0) as f64;
-                    let w = self.idf.get(*t).copied().unwrap_or(0.0);
+                for &id in &overlap {
+                    let n = *bag.get(&id).unwrap_or(&0) as f64;
+                    // id is guaranteed to be in range (built from sig_term_ids
+                    // which was built from term_to_id covering all sig terms).
+                    let w = self.idf_by_id.get(id).copied().unwrap_or(0.0);
                     num += n * w;
                 }
             }
@@ -249,16 +330,18 @@ impl FdcMatcher {
     }
 
     /// The RAW integer overlap Σ bag[t] over (bag ∩ sig), used for the
-    /// mode-independent descent cutoff comparison (stop_threshold). Mirrors
-    /// Swift `FDCMatcher.rawOverlap(code:bag:)`.
-    fn raw_overlap(&self, code: &str, bag: &ConceptBag) -> usize {
-        let terms = match self.sig_terms.get(code) {
-            Some(t) => t,
+    /// mode-independent descent cutoff comparison (stop_threshold). Iterates
+    /// the signature's TermID Vec and checks each in the interned bag — O(K)
+    /// where K is signature size (typically 5–20). Mirrors Swift
+    /// `FDCMatcher.rawOverlap(code:bag:)`.
+    fn raw_overlap(&self, code: &str, bag: &InternedBag) -> usize {
+        let term_ids = match self.sig_term_ids.get(code) {
+            Some(ids) => ids,
             None => return 0,
         };
         let mut o = 0usize;
-        for (term, n) in bag {
-            if terms.contains(term.as_str()) {
+        for &id in term_ids {
+            if let Some(&n) = bag.get(&id) {
                 o += n;
             }
         }
@@ -306,29 +389,48 @@ impl FdcMatcher {
     /// Score a pre-built concept bag against the FDC signatures (Steps 4–5)
     /// and return the best matching code + dominant Q-ID.
     ///
-    /// The bag must be fully constructed before calling this method; whether
-    /// novel-token classification was recorded into the pool cache is the
-    /// caller's responsibility. Both `encode_anchor` and
-    /// `encode_anchor_no_record` delegate here so the scoring logic lives in
-    /// exactly one place.
+    /// Converts the String-keyed ConceptBag to an Int-keyed InternedBag once,
+    /// then all scoring and overlap operations use Int-keyed lookups. Terms
+    /// absent from the codebook (no TermID) are silently dropped from the
+    /// interned bag — they cannot match any signature, identical to the
+    /// pre-interning `index.get(term) == None` skip.
     ///
     /// Mirrors Swift `FDCMatcher.encodeFromBag(_:)`.
     fn encode_from_bag(&self, bag: ConceptBag) -> (Option<String>, Option<String>) {
+        // dominant_qid scans for "Q"-prefixed keys in the String bag and is
+        // independent of the interning structures — compute from original bag.
         let qid = dominant_qid(&bag);
 
         if bag.is_empty() {
             return (None, qid);
         }
 
-        // Step 4 — match + score (§5.2/§5.3). The inverted index gives the
-        // set of candidate codes (any code sharing ≥1 bag term); each candidate
-        // is then scored under the active mode. For Raw the score is exactly
-        // Σ bag[t] (integers held in f64 — comparisons exact), reproducing the
-        // original ship behavior.
+        // Convert the String-keyed ConceptBag to an Int-keyed InternedBag.
+        // Terms absent from the codebook have no TermID and are silently
+        // dropped — they match no signature entry, identical behaviour to the
+        // pre-interning path (which skipped them via `index.get(term) == None`).
+        let mut interned_bag: InternedBag = HashMap::with_capacity(bag.len());
+        for (term, &count) in &bag {
+            if let Some(&id) = self.term_to_id.get(term.as_str()) {
+                *interned_bag.entry(id).or_insert(0) += count;
+            }
+        }
+
+        if interned_bag.is_empty() {
+            return (None, qid); // §5.2.3 — UNRESOLVED, no guess
+        }
+
+        // Step 4 — match + score (§5.2/§5.3). The Int-keyed inverted index
+        // gives the set of candidate codes (any code sharing ≥1 bag term); each
+        // candidate is then scored under the active mode. For Raw the score is
+        // exactly Σ bag[t] (integers held in f64 — comparisons exact),
+        // reproducing the original ship behavior.
         let mut candidate_set: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        for (term, _) in &bag {
-            if let Some(codes) = self.index.get(term.as_str()) {
+        for (&term_id, _) in &interned_bag {
+            // term_id is guaranteed in-range: it came from term_to_id which
+            // was built over the same domain as index_by_id.
+            if let Some(codes) = self.index_by_id.get(term_id) {
                 for code in codes {
                     candidate_set.insert(code.clone());
                 }
@@ -350,7 +452,7 @@ impl FdcMatcher {
         let mut node = String::new();
         let mut node_score = -f64::MAX;
         for code in &candidates {
-            let s = self.score(code, &bag);
+            let s = self.score(code, &interned_bag);
             if s > node_score || (s == node_score && (node.is_empty() || code < &node)) {
                 node = code.clone();
                 node_score = s;
@@ -366,7 +468,7 @@ impl FdcMatcher {
         // exceed the allowed maximum. Mirrors Swift FDCMatcher.encodeAnchor.
         let tied_count = candidates
             .iter()
-            .filter(|c| self.score(c, &bag) == node_score)
+            .filter(|c| self.score(c, &interned_bag) == node_score)
             .count();
         if tied_count > MAX_TIED_WINNERS_FOR_CLASSIFICATION {
             return (None, qid); // too many tied winners — no discriminating signal
@@ -382,14 +484,14 @@ impl FdcMatcher {
             let mut best_score = 0.0f64;
 
             for child in children {
-                if self.sig_terms.get(&child.code).is_none() {
+                if self.sig_term_ids.get(&child.code).is_none() {
                     continue;
                 }
                 // Cutoff check uses raw integer overlap — mode-independent.
-                if self.raw_overlap(&child.code, &bag) < self.stop_threshold {
+                if self.raw_overlap(&child.code, &interned_bag) < self.stop_threshold {
                     continue;
                 }
-                let s = self.score(&child.code, &bag);
+                let s = self.score(&child.code, &interned_bag);
                 if best.is_none()
                     || s > best_score
                     || (s == best_score && child.code < *best.as_ref().unwrap())
@@ -410,8 +512,10 @@ impl FdcMatcher {
 }
 
 /// The highest-count Wikidata Q-ID in `bag`, ties broken by lowest Q-ID
-/// lexicographically. None if the bag holds no Q-ID key. Mirrors
-/// `FDCMatcher.dominantQID` in Swift.
+/// lexicographically. None if the bag holds no Q-ID key.
+///
+/// Uses the original String-keyed ConceptBag — Q-ID extraction is independent
+/// of the term interning structures. Mirrors `FDCMatcher.dominantQID` in Swift.
 fn dominant_qid(bag: &ConceptBag) -> Option<String> {
     let mut best: Option<String> = None;
     let mut best_n = 0usize;
