@@ -210,11 +210,17 @@ function Verify-MinisignSignature {
         # (cleaned up on exit) and prepended to PATH for this session only.
         if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
             try {
-                $msVer = "0.11"
-                $msZipUrl = "https://github.com/jedisct1/minisign/releases/download/$msVer/minisign-win64.zip"
+                # Resolve the current win64 asset from the GitHub releases API so
+                # this does not break when the minisign version or asset naming
+                # changes. A single unauthenticated API call is within limits.
+                # GitHub requires a User-Agent header or it returns 403.
+                $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/jedisct1/minisign/releases/latest" `
+                    -Headers @{ "User-Agent" = "mootx01-installer" } -UseBasicParsing
+                $asset = $rel.assets | Where-Object { $_.name -like "*win64*.zip" } | Select-Object -First 1
+                if (-not $asset) { throw "no win64 asset in the latest minisign release" }
                 $msZip = Join-Path $tmpDir "minisign-win64.zip"
                 $msDir = Join-Path $tmpDir "minisign-bin"
-                Invoke-WebRequest -Uri $msZipUrl -OutFile $msZip -UseBasicParsing
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $msZip -UseBasicParsing
                 Expand-Archive -Path $msZip -DestinationPath $msDir -Force
                 $msExe = Get-ChildItem -Path $msDir -Recurse -Filter minisign.exe | Select-Object -First 1
                 if ($msExe) { $env:Path = "$($msExe.DirectoryName);$env:Path" }
