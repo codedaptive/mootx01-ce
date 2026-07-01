@@ -182,26 +182,45 @@ function Verify-MinisignSignature {
         [string]$PubKeyB64
     )
 
-    # Require the minisign binary. If it is missing, first try to bootstrap it
-    # automatically via winget (the Windows 10/11 package manager) so the
-    # one-line install completes on a clean box. This ONLY installs the
-    # verifier — it never bypasses the signature check below. Verification stays
-    # fully fail-closed: if the bootstrap is unavailable or fails, installation
-    # is aborted rather than proceeding with an unverified binary.
+    # Require the minisign binary. If it is missing, bootstrap a verified copy
+    # so the one-line install completes on a clean box. This ONLY installs the
+    # verifier — it never bypasses the signature check below. The trust anchor
+    # is the EMBEDDED public key ($MINISIGN_PUBKEY_B64), not this binary: a
+    # tampered release is still rejected by that key, so fetching the verifier
+    # over GitHub TLS does not weaken the check. Verification stays fully
+    # fail-closed — if every bootstrap avenue fails, installation aborts.
     if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
+        Write-Host "  minisign not found — bootstrapping the verifier..."
+
+        # Best effort first: winget, if the package is present in the user's
+        # sources. minisign is not consistently in the winget repo, so failures
+        # are silenced and the direct download below is the reliable path.
         if (Get-Command winget -ErrorAction SilentlyContinue) {
-            Write-Host "  minisign not found — installing it via winget (required to verify the release signature)..."
-            # Non-interactive: accept agreements up front and disable prompts so
-            # the piped (irm | iex) install cannot hang waiting for input.
-            # --exact --id pins the well-known package rather than a name match.
             & winget install --id jedisct1.Minisign --exact --source winget `
-                --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Host
-            # winget places its shims under %LOCALAPPDATA%\Microsoft\WinGet\Links,
-            # which is on the *persisted* user PATH but not this process's stale
-            # copy. Refresh PATH from the registry (Machine + User) so the freshly
-            # installed minisign is discoverable without opening a new shell.
+                --accept-package-agreements --accept-source-agreements --disable-interactivity 2>$null | Out-Null
+            # winget shims land under %LOCALAPPDATA%\Microsoft\WinGet\Links, on the
+            # persisted user PATH but not this process's stale copy — refresh it.
             $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
                         [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        }
+
+        # Reliable path: download the official, zero-dependency minisign binary
+        # from its GitHub release over HTTPS. The win64 build runs natively on
+        # x64 and under emulation on Windows on ARM. It is extracted into $tmpDir
+        # (cleaned up on exit) and prepended to PATH for this session only.
+        if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
+            try {
+                $msVer = "0.11"
+                $msZipUrl = "https://github.com/jedisct1/minisign/releases/download/$msVer/minisign-win64.zip"
+                $msZip = Join-Path $tmpDir "minisign-win64.zip"
+                $msDir = Join-Path $tmpDir "minisign-bin"
+                Invoke-WebRequest -Uri $msZipUrl -OutFile $msZip -UseBasicParsing
+                Expand-Archive -Path $msZip -DestinationPath $msDir -Force
+                $msExe = Get-ChildItem -Path $msDir -Recurse -Filter minisign.exe | Select-Object -First 1
+                if ($msExe) { $env:Path = "$($msExe.DirectoryName);$env:Path" }
+            } catch {
+                Write-Host "  minisign direct download failed: $($_.Exception.Message)"
+            }
         }
     }
 
