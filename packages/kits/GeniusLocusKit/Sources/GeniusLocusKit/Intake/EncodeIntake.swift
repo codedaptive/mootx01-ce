@@ -215,8 +215,27 @@ public extension GeniusLocusKit {
         // the normal capture path: classifiable sentinel frames are anchored
         // before storage so latticeSubtree grants never authorize them under
         // the wrong UDC scope. Explicit non-sentinel anchors are preserved.
-        let classifiedFrames = frames.map { frame -> CaptureFrame in
-            guard frame.latticeAnchor.udcCode == Self.unclassifiedSentinel,
+        // Parallel FDC classify — Pattern B (encode-perf #31, Phase 1).
+        //
+        // 49k-drawer palace import pegged one core for many minutes because this
+        // classify loop was purely serial and string/hashmap bound. Fan it across
+        // cap workers: each frame is independent, and
+        // EideticLib.lookup(recordNovel:false) is a pure read over the immutable
+        // pinned codebook — concurrent calls are safe.
+        //
+        // CaptureFrame is Sendable. Results yielded as (Int, CaptureFrame) tuples
+        // and gathered by index, giving byte-identical output to the serial version.
+        //
+        // Shape mirrors CorpusKit.boundedConcurrentMap: chunked withTaskGroup,
+        // cap = activeProcessorCount, serial fast-path for small batches.
+        let cap = ProcessInfo.processInfo.activeProcessorCount
+
+        // Single classify step as a @Sendable closure so it can be used by both
+        // the serial fast-path and the concurrent addTask body without logic
+        // duplication. Logic is identical to the serial path; only calling
+        // structure changes.
+        let classifyOneFrame: @Sendable (CaptureFrame) -> CaptureFrame = { frame in
+            guard frame.latticeAnchor.udcCode == GeniusLocusKit.unclassifiedSentinel,
                   !frame.content.isEmpty else {
                 return frame
             }
@@ -234,6 +253,34 @@ public extension GeniusLocusKit {
                 wikidataQID: anchor.wikidataQID
             )
             return classified
+        }
+
+        let classifiedFrames: [CaptureFrame]
+        if frames.count <= cap {
+            // Serial fast-path: avoid TaskGroup overhead for batches no larger
+            // than the worker cap.
+            classifiedFrames = frames.map { classifyOneFrame($0) }
+        } else {
+            // Fan-out across cap workers, chunked. Chunk size == cap keeps exactly
+            // cap tasks in flight per barrier — identical shape to CorpusKit's
+            // boundedConcurrentMap. Results gathered by index so output order is
+            // byte-identical to the serial version.
+            var results = [CaptureFrame?](repeating: nil, count: frames.count)
+            var start = 0
+            while start < frames.count {
+                let end = min(start + cap, frames.count)
+                await withTaskGroup(of: (Int, CaptureFrame).self) { group in
+                    for i in start..<end {
+                        let frame = frames[i]
+                        group.addTask { (i, classifyOneFrame(frame)) }
+                    }
+                    for await (i, classified) in group {
+                        results[i] = classified
+                    }
+                }
+                start = end
+            }
+            classifiedFrames = results.map { $0! }
         }
         let estateObj = try estate(for: handle)
         return try await estateObj.captureBatch(classifiedFrames)

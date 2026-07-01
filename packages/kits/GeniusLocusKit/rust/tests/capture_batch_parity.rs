@@ -282,3 +282,92 @@ fn capture_batch_mounted_estate_succeeds() {
         .expect("mounted estate must accept capture_batch");
     assert_eq!(result.len(), 1, "one frame must produce one drawer");
 }
+
+// -----------------------------------------------------------------------
+// encode-perf #31 Phase 1 — parallel classify parity
+// -----------------------------------------------------------------------
+
+/// Parallel classify parity (encode-perf #31): `capture_batch` (parallel
+/// classify) and `capture_with_mode` (single-frame serial classify) must
+/// produce the same lattice anchor for identical content, and the batch
+/// result must preserve the original frame order.
+///
+/// The FDC encoder is deterministic over the immutable pinned codebook, so
+/// the serial fast-path (len ≤ cap) and the thread::scope chunked path
+/// (len > cap) must agree on every code. The 20 fixed frames below are
+/// large enough to exercise the parallel path on most machines where
+/// `available_parallelism() < 20`. Order preservation is the load-bearing
+/// contract of the index-based result reassembly in the chunked path.
+///
+/// Mirrors Swift `CaptureBatchTests.captureBatchClassifyParityWithSingleFrameCapture`.
+#[test]
+fn capture_batch_parallel_classify_parity_with_single_frame() {
+    use locus_kit::frames::CaptureFrame;
+    use genius_locus_kit::WriteMode;
+
+    // 20 frames with distinctly classifiable CS content — same set as the
+    // Swift parity test so cross-port comparison is trivial.
+    let contents: &[&str] = &[
+        "software engineering algorithms data structures programming",
+        "compiler design lexical analysis parsing grammars",
+        "database systems relational algebra SQL transactions",
+        "operating systems process scheduling memory management",
+        "computer networks TCP IP protocols routing",
+        "machine learning neural networks gradient descent",
+        "object-oriented programming design patterns inheritance",
+        "cryptography encryption public key infrastructure",
+        "distributed systems consensus fault tolerance",
+        "software testing unit tests integration coverage",
+        "algorithms complexity sorting searching trees",
+        "computer architecture CPU cache pipeline",
+        "functional programming lambda calculus type systems",
+        "version control git branching merging workflows",
+        "cloud computing containers microservices deployment",
+        "web development HTTP REST API JSON",
+        "mobile application iOS Android platform SDK",
+        "code review refactoring technical debt maintainability",
+        "concurrency threads parallelism synchronization locks",
+        "data science analytics statistics programming Python",
+    ];
+
+    // Estate 1: capture_batch path (parallel classify for len > cap).
+    let (mut batch_coord, batch_handle) = open_one();
+    let batch_frames: Vec<CaptureFrame> = contents.iter().map(|c| frame(c)).collect();
+    let batch_drawers = batch_coord
+        .capture_batch(&batch_handle, batch_frames, NOW)
+        .expect("capture_batch must succeed");
+    assert_eq!(
+        batch_drawers.len(),
+        contents.len(),
+        "capture_batch must return one drawer per input frame"
+    );
+
+    // Estate 2: capture_with_mode path (single-frame serial classify).
+    let (mut serial_coord, serial_handle) = open_one();
+    let mut classified_count = 0usize;
+    for (i, content) in contents.iter().enumerate() {
+        let serial_drawer = serial_coord
+            .capture_with_mode(&serial_handle, frame(content), NOW, WriteMode::Regular)
+            .expect("capture_with_mode must succeed");
+
+        // Batch code must equal the single-frame code for the same content.
+        // Holds for BOTH classified codes and the "000" sentinel (UNRESOLVED):
+        // the FDC encoder is deterministic, so the same text always produces
+        // the same result regardless of which path (serial vs parallel) runs it.
+        assert_eq!(
+            batch_drawers[i].udc_code, serial_drawer.udc_code,
+            "batch result[{i}] code '{}' must equal single-frame code '{}' for '{content}'",
+            batch_drawers[i].udc_code, serial_drawer.udc_code,
+        );
+        if batch_drawers[i].udc_code != "000" {
+            classified_count += 1;
+        }
+    }
+    // At least some content must be classified (confirms the classify logic
+    // actually ran and is not silently no-oping on every frame).
+    assert!(
+        classified_count > 0,
+        "at least one frame must be classified to a non-sentinel code; got 0 of {}",
+        contents.len()
+    );
+}

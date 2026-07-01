@@ -1715,32 +1715,91 @@ impl EstateCoordinator {
         // the normal capture path: classifiable sentinel frames are anchored
         // before storage so latticeSubtree grants never authorize them under
         // the wrong UDC scope. Explicit non-sentinel anchors are preserved.
-        let classified: Vec<CaptureFrame> = frames
-            .into_iter()
-            .map(|frame| {
-                if frame.lattice_anchor.udc_code == crate::intake::UNCLASSIFIED_SENTINEL
-                    && !frame.content.is_empty()
-                {
-                    let (code_opt, qid_opt) =
-                        lattice_lib::fdc_runtime::Fdc::encode_anchor(&frame.content);
-                    match code_opt {
-                        Some(code) if !code.is_empty() => {
-                            let mut f = frame;
-                            f.lattice_anchor = LatticeAnchor {
-                                udc_code: code,
-                                udc_facets: None,
-                                wikidata_qid: qid_opt,
-                                wikidata_qids_secondary: None,
-                            };
-                            f
-                        }
-                        _ => frame,
+
+        // Parallel FDC classify — Pattern B (encode-perf #31, Phase 1).
+        //
+        // 49k-drawer palace import pegged one core for many minutes because this
+        // classify loop was purely serial and string/hashmap bound. Fan it across
+        // cap workers: each frame is independent, and
+        // Fdc::encode_anchor_no_record is a pure read over the immutable pinned
+        // codebook — concurrent calls are safe (OnceLock + RwLock<Arc<…>>).
+        //
+        // secfix/fdc-pool: use encode_anchor_no_record (not encode_anchor) so novel
+        // tokens from batch import content are NOT accumulated into
+        // SHARED_NOVEL_CACHE and do NOT flush to plaintext pool files — same
+        // guarantee as capture_with_mode in intake.rs. Result is byte-identical.
+        //
+        // Results gathered by index, giving byte-identical output to the serial
+        // version. Serial fast-path for small batches avoids thread spawn overhead.
+        // Shape mirrors CorpusKit's embed_concurrency_cap + thread::scope fan-out.
+
+        // Nested classify helper — pure over the pinned codebook, no capture needed.
+        // Uses encode_anchor_no_record (secfix/fdc-pool).
+        fn classify_one_frame_for_batch(frame: CaptureFrame) -> CaptureFrame {
+            if frame.lattice_anchor.udc_code == crate::intake::UNCLASSIFIED_SENTINEL
+                && !frame.content.is_empty()
+            {
+                // encode_anchor_no_record: batch import content must not leak novel
+                // tokens into the plaintext pool pipeline (secfix/fdc-pool, same
+                // rationale as capture_with_mode in intake.rs). Result is
+                // byte-identical to encode_anchor.
+                let (code_opt, qid_opt) =
+                    lattice_lib::fdc_runtime::Fdc::encode_anchor_no_record(&frame.content);
+                match code_opt {
+                    Some(code) if !code.is_empty() => {
+                        let mut f = frame;
+                        f.lattice_anchor = LatticeAnchor {
+                            udc_code: code,
+                            udc_facets: None,
+                            wikidata_qid: qid_opt,
+                            wikidata_qids_secondary: None,
+                        };
+                        f
                     }
-                } else {
-                    frame
+                    _ => frame,
                 }
-            })
-            .collect();
+            } else {
+                frame
+            }
+        }
+
+        let cap = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let classified: Vec<CaptureFrame> = if frames.len() <= cap {
+            // Serial fast-path: avoid thread spawn overhead for small batches.
+            frames.into_iter().map(classify_one_frame_for_batch).collect()
+        } else {
+            // Fan-out across cap workers, chunked. Chunk size == cap keeps exactly
+            // cap threads in flight per barrier — same shape as CorpusKit's Rust
+            // embed fan-out. thread::scope borrows from the current stack; no Arc.
+            // Results gathered by index for byte-identical output order.
+            let mut frames_opt: Vec<Option<CaptureFrame>> =
+                frames.into_iter().map(Some).collect();
+            let n = frames_opt.len();
+            let mut results: Vec<Option<CaptureFrame>> = (0..n).map(|_| None).collect();
+            let mut start = 0;
+            while start < n {
+                let end = (start + cap).min(n);
+                std::thread::scope(|s| {
+                    let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, CaptureFrame>)> =
+                        Vec::with_capacity(end - start);
+                    for i in start..end {
+                        let frame = frames_opt[i]
+                            .take()
+                            .expect("each frame taken exactly once");
+                        handles.push((i, s.spawn(move || classify_one_frame_for_batch(frame))));
+                    }
+                    for (i, handle) in handles {
+                        results[i] =
+                            Some(handle.join().expect("FDC classify thread panicked"));
+                    }
+                });
+                start = end;
+            }
+            results.into_iter().map(|r| r.unwrap()).collect()
+        };
 
         // Quiesce check BEFORE opening the transaction. `estate_for_verb`
         // returns `EstateQuiesced` when the mount state is Quiesced or
