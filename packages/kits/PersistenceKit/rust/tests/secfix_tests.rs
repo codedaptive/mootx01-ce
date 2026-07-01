@@ -1204,3 +1204,133 @@ fn sqlite_f10_skip_corrupt_rejects_injected_table_name() {
         "query_projected_skip_corrupt with injected table name must be rejected"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Two-handle encrypted SQLite regression test
+//
+// Regression for the "NOTADB on second SqliteStorage handle" bug
+// observed on Windows ARM (v1.0.5-beta). AriaMcpKit's
+// wire_sqlite_semantic_recall opens a SECOND SqliteStorage handle on
+// the same WAL-mode encrypted estate. This test confirms whether
+// both handles correctly receive the PRAGMA key from the sibling
+// db.key — or whether the second handle fails with NOTADB.
+//
+// On macOS with bundled-sqlcipher-vendored-openssl, resolve_install_encryption
+// is called inside SqliteStorage::new for both handles, so PRAGMA key is
+// applied to both. The test documents the macOS result so we have a baseline
+// before and after the fix of sharing a single Storage handle.
+//
+// The FIX (sharing the DrawerStore's keyed storage with Corpus/VectorStore
+// instead of opening a second handle) is implemented in
+// packages/kits/AriaMcpKit/rust/src/estate_registry.rs.
+// ─────────────────────────────────────────────────────────────────
+
+/// Opens a fresh encrypted SQLite estate via handle 1 (DrawerStore path),
+/// then opens a SECOND independent SqliteStorage on the same file
+/// (Corpus/VectorStore path) and asserts whether the second handle
+/// can run schema migration.
+///
+/// Expected result on macOS: PASS — resolve_install_encryption supplies
+/// PRAGMA key to both handles via SqliteStorage::new, so the second handle
+/// opens the encrypted file correctly.
+///
+/// Expected result on Windows ARM (reported bug): FAIL — the second handle
+/// gets NOTADB, indicating resolve_install_encryption or PRAGMA key is not
+/// working correctly for the second connection in that build.
+#[test]
+fn encrypted_estate_second_sqlite_handle_opens_with_key() {
+    use persistence_kit::{
+        ensure_install_key, BackendConfiguration, EstateConfiguration, SqliteStorage, Storage,
+        TypedValue,
+    };
+    use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
+    use std::collections::BTreeMap;
+
+    // Unique temp dir per test run to avoid cross-test collision.
+    let dir = std::env::temp_dir().join(format!(
+        "pk_twohandle_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join("estate.sqlite");
+    let db_path_str = db_path.to_string_lossy().into_owned();
+
+    // Step 1: Write the install key — mirrors production resident service behaviour.
+    ensure_install_key(&dir).expect("ensure_install_key must succeed");
+
+    // Step 2: Open FIRST handle (mirrors DrawerStore), migrate schema, write a row.
+    // This creates the encrypted database file with PRAGMA key.
+    let config1 = EstateConfiguration::new(
+        uuid::Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: db_path_str.clone(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage1 = SqliteStorage::new(config1).expect("first handle must open");
+    let schema = SchemaDeclaration::new(
+        "TwoHandleTestKit",
+        1,
+        vec![TableDeclaration::new(
+            "probe",
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::text("body"),
+                ColumnDeclaration::bitmap("flags"),
+            ],
+            vec!["id".to_string()],
+        )],
+    );
+    storage1.open(&schema).expect("first handle schema migration must succeed");
+    let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+    row.insert("id".to_string(), TypedValue::Uuid(uuid::Uuid::new_v4()));
+    row.insert("body".to_string(), TypedValue::Text("hello from handle 1".into()));
+    row.insert("flags".to_string(), TypedValue::Bitmap(0));
+    storage1.row_store().insert("probe", row)
+        .expect("insert via first handle must succeed");
+
+    // Step 3: Verify the DB file is actually encrypted.
+    // An encrypted SQLite page 1 does NOT start with "SQLite format 3\000" —
+    // that header is reserved for plaintext SQLite files. If it IS "SQLite format 3",
+    // then SQLCipher is not linked (PRAGMA key is a no-op) and this test's
+    // encryption analysis does not apply.
+    let raw_header: Vec<u8> = std::fs::read(&db_path).expect("read db file");
+    let header_tag = &raw_header[..std::cmp::min(16, raw_header.len())];
+    let is_encrypted = header_tag != b"SQLite format 3\x00";
+    if !is_encrypted {
+        // SQLCipher not linked — PRAGMA key is a no-op. The bug scenario
+        // (encrypted file + second handle without key) cannot occur.
+        // Clean up and skip the rest of the test by returning early.
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!(
+            "SKIP: DB file header is the standard SQLite magic — \
+             bundled-sqlcipher-vendored-openssl appears to be a no-op on this build. \
+             The NOTADB / two-handle encryption bug cannot be reproduced."
+        );
+        return;
+    }
+
+    // Step 4: Open SECOND handle on the same file — mirrors wire_sqlite_semantic_recall.
+    // This is the path that fails with NOTADB on Windows ARM.
+    let config2 = EstateConfiguration::new(
+        uuid::Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: db_path_str.clone(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let result_open = SqliteStorage::new(config2)
+        .and_then(|s| s.open(&schema).map(|_| s));
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        result_open.is_ok(),
+        "Second SqliteStorage handle on the same encrypted estate must succeed \
+         when resolve_install_encryption correctly supplies PRAGMA key. \
+         On macOS this is expected to PASS (bug is Windows-ARM-specific). \
+         Got error: {:?}",
+        result_open.err()
+    );
+}

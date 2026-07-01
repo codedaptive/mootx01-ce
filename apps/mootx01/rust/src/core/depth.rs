@@ -192,7 +192,12 @@ pub fn expand_tilde(path: &str, home: &Path) -> PathBuf {
 /// already happened in the caller's Mode-1 path); `Skills`/`Plugin` add the
 /// payload. Backs up an existing file/dir first (§4.2). Returns what was
 /// actually achieved.
-pub fn apply(client_id: &str, depth: InstallDepth, home: &Path) -> std::io::Result<DepthOutcome> {
+///
+/// `vault_off` — when true, `MOOTX01_VAULT=0` is injected into the `env` block
+/// of every MCP server entry written by the plugin installer. When false
+/// (default / vault-on) the env block is absent, which the server interprets
+/// as vault-on (ADR-015 §1: absent MOOTX01_VAULT means vault enabled).
+pub fn apply(client_id: &str, depth: InstallDepth, home: &Path, vault_off: bool) -> std::io::Result<DepthOutcome> {
     if depth == InstallDepth::Server {
         return Ok(DepthOutcome::Server);
     }
@@ -207,7 +212,7 @@ pub fn apply(client_id: &str, depth: InstallDepth, home: &Path) -> std::io::Resu
         InstallDepth::Skills => write_skill(host, home),
         InstallDepth::Plugin => {
             if host.supports_plugin() {
-                install_plugin(host, home)
+                install_plugin(host, home, vault_off)
             } else {
                 // §4.4 ceiling: fall back to skills and report it.
                 match write_skill(host, home)? {
@@ -236,7 +241,12 @@ fn write_skill(host: &InstallMapHost, home: &Path) -> std::io::Result<DepthOutco
 
 /// Mode 3: materialise the host's pre-generated package tree from the embedded
 /// bundle into the host's plugin root (parent of the skill's `skills/` dir).
-fn install_plugin(host: &InstallMapHost, home: &Path) -> std::io::Result<DepthOutcome> {
+///
+/// When `vault_off` is true, every MCP config JSON file in the package that
+/// declares a `mcpServers.mootx01` entry has `env.MOOTX01_VAULT=0` injected
+/// before being written. Skills files and plugin-metadata files (plugin.json
+/// without an mcpServers block) are written verbatim.
+fn install_plugin(host: &InstallMapHost, home: &Path, vault_off: bool) -> std::io::Result<DepthOutcome> {
     let bundle = InstallBundle::embedded();
     let files = bundle.package_files(&host.id);
     if files.is_empty() {
@@ -270,9 +280,54 @@ fn install_plugin(host: &InstallMapHost, home: &Path) -> std::io::Result<DepthOu
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&file, contents)?;
+        // When vault-off, patch MCP config files before writing so the
+        // plugin-spawned stdio server inherits the correct vault posture.
+        let out = if vault_off {
+            inject_vault_env(rel, contents)
+        } else {
+            contents.clone()
+        };
+        std::fs::write(&file, out)?;
     }
     Ok(DepthOutcome::Plugin(dest.display().to_string()))
+}
+
+/// Inject `"env": {"MOOTX01_VAULT": "0"}` on the `mcpServers.mootx01` entry
+/// of an MCP config JSON file. Only operates on `.json` files whose content
+/// declares an `mcpServers` block — plugin-metadata files (author/description
+/// only) and non-JSON files (SKILL.md, YAML) are returned unchanged.
+///
+/// On JSON parse failure the original content is returned unchanged so the
+/// host tool can surface the error rather than silently dropping the file.
+fn inject_vault_env(rel: &str, contents: &str) -> String {
+    // Fast-path: non-JSON files and JSON files without a server block.
+    if !rel.ends_with(".json") || !contents.contains("\"mcpServers\"") {
+        return contents.to_string();
+    }
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(contents) else {
+        // Unparseable embedded JSON is a build defect; return as-is.
+        return contents.to_string();
+    };
+    if let Some(server) = root
+        .get_mut("mcpServers")
+        .and_then(|m| m.get_mut("mootx01"))
+        .and_then(|v| v.as_object_mut())
+    {
+        // Merge into an existing env block or create a new one.
+        let env = server
+            .entry("env")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(env_map) = env.as_object_mut() {
+            env_map.insert(
+                "MOOTX01_VAULT".to_string(),
+                serde_json::Value::String("0".to_string()),
+            );
+        }
+    }
+    match serde_json::to_string_pretty(&root) {
+        Ok(s) => s + "\n",
+        Err(_) => contents.to_string(),
+    }
 }
 
 /// Back up an existing file or dir to `<name>.bak-<yyyymmdd-HHMMSS>` beside it
@@ -409,14 +464,14 @@ mod tests {
     #[test]
     fn server_depth_is_noop() {
         let home = tmp_home("server");
-        assert_eq!(apply("claude-code", InstallDepth::Server, &home).unwrap(), DepthOutcome::Server);
+        assert_eq!(apply("claude-code", InstallDepth::Server, &home, false).unwrap(), DepthOutcome::Server);
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn skills_depth_writes_canonical_skill() {
         let home = tmp_home("skills");
-        let outcome = apply("claude-code", InstallDepth::Skills, &home).unwrap();
+        let outcome = apply("claude-code", InstallDepth::Skills, &home, false).unwrap();
         let dest = join_rel(&home, ".claude/skills/mootx01-memory/SKILL.md");
         assert_eq!(outcome, DepthOutcome::Skills(dest.display().to_string()));
         let written = std::fs::read_to_string(&dest).unwrap();
@@ -427,7 +482,7 @@ mod tests {
     #[test]
     fn plugin_depth_installs_package() {
         let home = tmp_home("plugin");
-        let outcome = apply("claude-code", InstallDepth::Plugin, &home).unwrap();
+        let outcome = apply("claude-code", InstallDepth::Plugin, &home, false).unwrap();
         let root = join_rel(&home, ".claude/mootx01-plugin");
         assert_eq!(outcome, DepthOutcome::Plugin(root.display().to_string()));
         assert!(root.join("skills/mootx01-memory/SKILL.md").exists());
@@ -438,7 +493,7 @@ mod tests {
     #[test]
     fn plugin_falls_back_to_skills_for_module_host() {
         let home = tmp_home("fallback");
-        let outcome = apply("opencode", InstallDepth::Plugin, &home).unwrap();
+        let outcome = apply("opencode", InstallDepth::Plugin, &home, false).unwrap();
         let dest = join_rel(&home, ".config/opencode/skills/mootx01-memory/SKILL.md");
         match outcome {
             DepthOutcome::PluginFellBackToSkills(path, reason) => {
@@ -454,8 +509,70 @@ mod tests {
     #[test]
     fn mcp_only_client_degrades_to_server() {
         let home = tmp_home("mcp-only");
-        assert_eq!(apply("claude-desktop", InstallDepth::Plugin, &home).unwrap(), DepthOutcome::Server);
-        assert_eq!(apply("kiro", InstallDepth::Skills, &home).unwrap(), DepthOutcome::Server);
+        assert_eq!(apply("claude-desktop", InstallDepth::Plugin, &home, false).unwrap(), DepthOutcome::Server);
+        assert_eq!(apply("kiro", InstallDepth::Skills, &home, false).unwrap(), DepthOutcome::Server);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// vault-off must write MOOTX01_VAULT=0 into the env block of every MCP
+    /// config JSON in the installed plugin package. Skills files (SKILL.md)
+    /// and plugin-metadata JSON files (no mcpServers key) must be unmodified.
+    #[test]
+    fn vault_off_injects_env_into_plugin_mcp_configs() {
+        let home = tmp_home("vault-off");
+        let outcome = apply("claude-code", InstallDepth::Plugin, &home, true).unwrap();
+        let root = join_rel(&home, ".claude/mootx01-plugin");
+        assert_eq!(outcome, DepthOutcome::Plugin(root.display().to_string()));
+
+        // The .mcp.json in the plugin package carries MOOTX01_VAULT=0.
+        let mcp_path = root.join(".mcp.json");
+        let mcp_text = std::fs::read_to_string(&mcp_path).unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&mcp_text)
+            .expect(".mcp.json must be valid JSON after vault-off injection");
+        assert_eq!(
+            mcp["mcpServers"]["mootx01"]["env"]["MOOTX01_VAULT"],
+            "0",
+            "vault-off must write MOOTX01_VAULT=0 into .mcp.json"
+        );
+
+        // Plugin-metadata JSON (no mcpServers) must not gain a spurious env key.
+        let meta_path = root.join(".claude-plugin/plugin.json");
+        let meta_text = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_text).unwrap();
+        assert!(meta.get("env").is_none(), "plugin metadata must not be patched");
+
+        // SKILL.md must be present and unmodified.
+        assert!(root.join("skills/mootx01-memory/SKILL.md").exists());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// vault-on (default) must NOT inject an env block — absent MOOTX01_VAULT
+    /// means vault-on per ADR-015 §1.
+    #[test]
+    fn vault_on_does_not_inject_env() {
+        let home = tmp_home("vault-on");
+        apply("claude-code", InstallDepth::Plugin, &home, false).unwrap();
+        let root = join_rel(&home, ".claude/mootx01-plugin");
+        let mcp_text = std::fs::read_to_string(root.join(".mcp.json")).unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&mcp_text).unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["mootx01"]["env"],
+            serde_json::Value::Null,
+            "vault-on must leave env absent (absent = vault-on per ADR-015 §1)"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// inject_vault_env must leave non-JSON and metadata-only JSON files unchanged.
+    #[test]
+    fn inject_vault_env_skips_non_mcp_files() {
+        // Non-JSON file.
+        let md = "# SKILL.md\nsome content";
+        assert_eq!(inject_vault_env("skills/mootx01-memory/SKILL.md", md), md);
+
+        // JSON with no mcpServers key (plugin metadata).
+        let meta = r#"{"name":"mootx01","version":"0.1.0"}"#;
+        assert_eq!(inject_vault_env(".claude-plugin/plugin.json", meta), meta);
     }
 }

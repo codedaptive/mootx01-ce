@@ -34,6 +34,44 @@ import SubstrateTypes
 
 public extension GeniusLocusKit {
 
+    /// Returns the IDs of drawers whose `eventTime` falls within `window`.
+    ///
+    /// Uses `.structured` hydration — only metadata columns are read from storage;
+    /// the `content` blob is never fetched. This is an O(N_estate) metadata scan,
+    /// not an O(N_estate × blob_size) content scan.
+    ///
+    /// The returned set is lowercased UUID strings, matching the format expected by
+    /// `glkEventLagPairs(in:window:allowedRowIDs:)`. Callers pass this set as the
+    /// `allowedRowIDs` argument to gate the audit-entry fold to only the drawers
+    /// whose semantic event time falls within the requested window.
+    ///
+    /// `eventTime` is always populated: drawers written before the two-clock ingest
+    /// column was added get `eventTime = filedAt` as a backfill, so there is no
+    /// nil case.
+    ///
+    /// - Parameters:
+    ///   - handle: Open estate handle.
+    ///   - window: Closed date range; drawers whose `eventTime` falls within are
+    ///     included in the returned set.
+    /// - Returns: Lowercased UUID strings for all matching drawers.
+    /// - Throws: `.estateNotOpen` if the handle is not in the registry.
+    func glkDrawerIDsForEventTimeWindow(
+        in handle: EstateHandle,
+        window: ClosedRange<Date>
+    ) async throws -> Set<String> {
+        let estate = try estate(for: handle)
+        // .structured hydration: fetches id, eventTime, and all other metadata
+        // columns, but projects away the content blob. This avoids the
+        // O(N_estate × blob_size) full-corpus hydration that caused the
+        // medium-DoS on large estates (secfix/precedence).
+        let drawers = try await estate.allDrawers(hydrationLevel: .structured, limit: nil)
+        return Set(
+            drawers
+                .filter { window.contains($0.eventTime) }
+                .map { $0.id.lowercased() }
+        )
+    }
+
     /// Returns the estate's audit entries in the input shape
     /// `TemporalCausalityFold` consumes, filtered to `window`.
     ///
@@ -56,12 +94,12 @@ public extension GeniusLocusKit {
     ///     The caller uses this value as the `windowMinutes` floor when
     ///     calling the fold; it does not change which entries are returned.
     ///   - allowedRowIDs: When non-nil, only audit entries whose `rowID`
-    ///     is in this set contribute to the result. Used by the Precedence
-    ///     recipe to implement Option A — pre-filter drawers by `eventTime`
-    ///     before gathering their causal audit pairs (Bob's ruling, Wave C).
-    ///     Drawers without an explicit eventTime use `filedAt` as the
-    ///     fallback (resolved eagerly at capture time). Pass `nil` (the
-    ///     default) to include entries from all drawers.
+    ///     is in this set contribute to the result. Pass the result of
+    ///     `glkDrawerIDsForEventTimeWindow(in:window:)` to gate the fold to
+    ///     drawers whose `eventTime` falls in a specific range (Option A
+    ///     semantics: only drawers whose semantic event time participates in
+    ///     causal pairs). Pass `nil` (the default) to include entries from
+    ///     all drawers in the HLC window.
     /// - Returns: HLC-ascending `[TemporalAuditEntry]` for the window.
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
     func glkEventLagPairs(

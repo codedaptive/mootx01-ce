@@ -3,7 +3,7 @@
 //! ⚠️ EDITION-DIVERGENT — DO NOT let an EE→CE sync overwrite this file.
 //! CE ships the minisign Ed25519 signature-verification path (CAND-004) wired
 //! into this module; EE's copy differs. The push-script / moot-packager sync
-//! MUST exclude `apps/mootx01/rust/src/core/release.rs` (and `scripts/minisign.pub`)
+//! MUST exclude `apps/mootx01/rust/src/core/release.rs` (and `distribution/minisign.pub`)
 //! from byte-identical replacement, or CE's minisign trust root is silently lost.
 //! If you are reconciling editions, port changes by hand — never bulk-copy.
 //!
@@ -29,11 +29,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 // Minisign Ed25519 public key for release signature verification, bundled at
-// compile time from scripts/minisign.pub in the repository root. The installer
+// compile time from distribution/minisign.pub in the repository root. The installer
 // shell script uses the same file at runtime (same trust source, different
 // distribution path). If the key contains the PLACEHOLDER sentinel, verification
-// fails closed — the operator must commit a real keypair to scripts/minisign.pub.
-const MINISIGN_PUBLIC_KEY: &str = include_str!("../../../../../scripts/minisign.pub");
+// fails closed — the operator must commit a real keypair to distribution/minisign.pub.
+const MINISIGN_PUBLIC_KEY: &str = include_str!("../../../../../distribution/minisign.pub");
 
 pub const REPO: &str = "codedaptive/mootx01-ce";
 
@@ -204,8 +204,8 @@ pub fn verify_minisign_signature(
     if MINISIGN_PUBLIC_KEY.contains("PLACEHOLDER") {
         return Err(ReleaseError::Checksum(
             "minisign public key is a PLACEHOLDER — signature verification not yet active. \
-             Generate a real keypair: minisign -G -p scripts/minisign.pub -s /path/to/minisign.sec \
-             then commit scripts/minisign.pub and add MINISIGN_SECRET_KEY to GitHub secrets."
+             Generate a real keypair: minisign -G -p distribution/minisign.pub -s /path/to/minisign.sec \
+             then commit distribution/minisign.pub and add MINISIGN_SECRET_KEY to GitHub secrets."
                 .into(),
         ));
     }

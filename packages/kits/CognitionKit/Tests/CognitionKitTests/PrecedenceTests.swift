@@ -54,9 +54,11 @@ struct PrecedenceTests {
 
         let window = Date(timeIntervalSinceNow: -3600)...now
 
-        // Read lag pairs directly. Note: Precedence.run also filters recalled
-        // drawers by event time before calling glkEventLagPairs; this direct
-        // read omits that filter, but the fixture still produces matching output.
+        // Read lag pairs directly via the no-allowedRowIDs overload. Precedence.run
+        // also builds an eventTime-windowed allowed-ID set via
+        // glkDrawerIDsForEventTimeWindow before calling glkEventLagPairs; this direct
+        // read omits that filter, but the fixture captures everything within the
+        // window so results match.
         let entries = try await kit.glkEventLagPairs(in: handle, window: window)
 
         // Fold with the same window used by the recipe.
@@ -127,10 +129,12 @@ struct PrecedenceTests {
         #expect(out.antecedents.isEmpty)
     }
 
-    // CK-PR-4 (Wave C, Option A): drawer whose eventTime is outside the window
-    // must not contribute audit entries to the precedence fold. Bob's ruling:
-    // the window filter gates WHICH drawers participate by eventTime, not by
-    // HLC ingest time.
+    // CK-PR-4 (Option A): drawer whose eventTime is outside the window must not
+    // contribute audit entries to the precedence fold. The window filter gates
+    // WHICH drawers participate by eventTime (not by HLC ingest time).
+    // Implementation: Precedence.run calls glkDrawerIDsForEventTimeWindow, which
+    // uses .structured (no-blob) hydration to build the allowed-ID set without
+    // loading content blobs.
     @Test("drawer outside eventTime window contributes zero entries")
     func drawerOutsideEventTimeWindowContributesZeroEntries() async throws {
         let (kit, handle) = try await openEstate()
@@ -142,7 +146,8 @@ struct PrecedenceTests {
         let window = futureStart...futureEnd
 
         // Capture a drawer — its eventTime defaults to filedAt (now), which is
-        // outside the future window.
+        // outside the future window. glkDrawerIDsForEventTimeWindow therefore
+        // returns an empty set, and glkEventLagPairs returns no entries.
         _ = try await capture(kit, handle, content: "outside-window", room: "lab")
 
         let target = TemporalFieldCoord(fieldPath: "room", valueRepr: "string:lab")

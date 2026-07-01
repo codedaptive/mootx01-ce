@@ -437,6 +437,28 @@ public actor Estate {
         try await store.allDrawers(hydrationLevel: .full, limit: limit)
     }
 
+    /// All drawers in the estate at the requested hydration level, ordered by
+    /// `filedAt` ascending.
+    ///
+    /// This overload exposes `DrawerStore.allDrawers(hydrationLevel:limit:)` through
+    /// the `Estate` boundary so callers outside LocusKit (e.g. GeniusLocusKit) can
+    /// request a no-blob projection without reaching around the estate actor. At
+    /// `.structured` or `.bitmapOnly`, the `content` column is NOT fetched from
+    /// storage — all other columns (including `id`, `eventTime`, `filedAt`,
+    /// `adjectiveBitmap`, `operationalBitmap`) are returned intact.
+    ///
+    /// Use `.structured` when you need drawer metadata (e.g. `id`, `eventTime`)
+    /// without content blobs. Use `.full` only when content is required.
+    ///
+    /// Passing `nil` for `limit` scans the whole corpus. Passing a value applies
+    /// `LIMIT` at the storage tier (O(min(N_estate, limit))).
+    public func allDrawers(
+        hydrationLevel: HydrationLevel,
+        limit: Int?
+    ) async throws -> [Drawer] {
+        try await store.allDrawers(hydrationLevel: hydrationLevel, limit: limit)
+    }
+
     /// The set of lineage IDs whose rows have been permanently erased (cluster C:
     /// `tombstonedAt IS NOT NULL`). Delegates to `DrawerStore.tombstonedLineageIDs()`,
     /// which reads the `lineageID` column directly via a storage-tier `.isNotNull`

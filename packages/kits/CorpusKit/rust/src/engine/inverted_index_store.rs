@@ -59,21 +59,38 @@ impl InvertedIndexStore {
     }
 
     /// Open an `InvertedIndexStore` whose backing `Connection` is derived from
-    /// the provided `Storage` instance — the same pattern as
-    /// `VectorStore::default_sidecar_path`.
+    /// the provided `Storage` instance.
     ///
     /// For SQLite backends, opens a separate `rusqlite::Connection` to the same
-    /// on-disk database file; WAL-mode SQLite allows multiple readers alongside
-    /// the storage writer. For InMemory backends (tests), opens an in-memory
-    /// `:memory:` connection — state does not persist across process restarts,
-    /// but InMemory storage itself does not persist either, so both are ephemeral
-    /// consistently.
+    /// on-disk database file. WAL-mode SQLite allows concurrent readers and writers;
+    /// `InvertedIndexStore` holds the write lock only during `begin_batch` /
+    /// `commit_batch` windows, which corpus.rs sequences AFTER the main
+    /// `Storage`-connection transaction has committed — the two connections never
+    /// hold overlapping write locks simultaneously.
+    ///
+    /// For encrypted estates (those with a sibling `db.key` file), the
+    /// per-install SQLCipher key is applied to the private connection via
+    /// `persistence_kit::apply_install_encryption_to_conn` before any other SQL.
+    /// This mirrors the key-application step in `SqliteStorage::new` and ensures
+    /// the private connection can read the encrypted database header. The key
+    /// application uses CorpusKit's rusqlite, which acquires SQLCipher support
+    /// through Cargo feature unification with PersistenceKit's
+    /// `bundled-sqlcipher-vendored-openssl` feature.
+    ///
+    /// For InMemory and PostgreSQL backends, opens an ephemeral `:memory:`
+    /// connection — the IIX state is rebuilt on every open (matching the
+    /// ephemeral nature of those backends).
     ///
     /// Mirrors Swift `InvertedIndexStore.init(storage:)` + `open()` in two steps.
     pub fn open_for_storage(storage: &Arc<dyn Storage>) -> Result<Self, rusqlite::Error> {
         let conn = match &storage.configuration().backend {
             BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
                 let conn = Connection::open(path)?;
+                // Apply the per-install SQLCipher key BEFORE any other SQL. For
+                // plaintext estates (no sibling db.key), this is a no-op. For
+                // encrypted estates the PRAGMA key must be the first statement or
+                // the database header reads as NOTADB (SQLITE_NOTADB).
+                persistence_kit::apply_install_encryption_to_conn(&conn, path)?;
                 let timeout_ms = (*busy_timeout_secs * 1000.0) as u32;
                 conn.busy_timeout(std::time::Duration::from_millis(timeout_ms as u64))?;
                 conn

@@ -156,11 +156,14 @@ struct InstallCommand: AsyncParsableCommand {
             print("Integration depth: \(depth.rawValue)")
             for client in clients where installed.contains(client.displayName) {
                 do {
+                    // Thread the vault posture so plugin-spawned stdio servers
+                    // inherit MOOTX01_VAULT=0 when --vault-off was passed (sec-fix 6b08d56b).
                     let outcome = try DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
                         homeDirectory: home,
-                        binaryPath: binaryPath
+                        binaryPath: binaryPath,
+                        vaultOff: vaultOff
                     )
                     switch outcome {
                     case .server:

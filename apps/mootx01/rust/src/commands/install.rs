@@ -99,7 +99,9 @@ pub fn run(
             if !wired_ids.contains(&client.id) {
                 continue;
             }
-            match depth::apply(client.id, depth, &home) {
+            // vault_off = !vault_on: thread the vault posture into the plugin
+            // installer so plugin-spawned stdio servers inherit the correct env.
+            match depth::apply(client.id, depth, &home, !vault_on) {
                 Ok(DepthOutcome::Server) => println!(
                     "  ⓘ {}: server only (no skill/plugin payload for this client)",
                     client.display_name

@@ -476,9 +476,14 @@ enum LensTools {
             // the same (subject.lowercased, predicate.lowercased) key.
             let estate = try await kit.estate(for: handle)
             let allTunnels = try await estate.allTunnels()
-            // (a) Contradicts-tunnel pairs — non-tombstoned only.
+            // (a) Contradicts-tunnel pairs — non-tombstoned and within the MCP
+            // disclosure ceiling. Drops Restricted/Secret tunnels before any output,
+            // parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
+            // that normal recall applies via insertDefaults. Filter at the ARIA tool
+            // boundary only — allTunnels() has internal callers that need the full set.
             let contradictsTunnels = allTunnels.filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
+                    && $0.adjectiveSensitivity.isBulkExportable
             }
             var lines: [String] = []
             if contradictsTunnels.isEmpty {
@@ -491,9 +496,15 @@ enum LensTools {
                     lines.append("  \(src) contradicts \(tgt) (tunnel \(t.id))")
                 }
             }
-            // (b) Conflicting KG facts — group by (subject.lowercased, predicate.lowercased),
-            // flag groups where >1 distinct active object exists.
-            let allFacts = try await kit.recallKGFacts(handle)
+            // (b) Conflicting KG facts — apply MCP disclosure ceiling before grouping.
+            // Drops Restricted/Secret facts, parity with SensitivityAtMost(Elevated) that
+            // normal recall applies. Filter at the ARIA tool boundary only — recallKGFacts
+            // has internal callers that need the full set.
+            // Group by (subject.lowercased, predicate.lowercased), flag groups where
+            // >1 distinct active object exists.
+            let allFacts = (try await kit.recallKGFacts(handle)).filter {
+                $0.adjectiveSensitivity.isBulkExportable
+            }
             var factsByKey: [String: [KGFact]] = [:]
             for fact in allFacts {
                 let key = "\(fact.subject.lowercased())|\(fact.predicate.lowercased())"

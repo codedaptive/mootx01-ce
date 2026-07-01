@@ -56,7 +56,8 @@ pub use cache_invalidator::CacheInvalidator;
 pub use caching_row_store::{CachingRowStore, ParentChainProvider};
 pub use hashing_row_store::{HashingRowStore, HashOnWriteConfig, ContentHashProvider, HashParentChainProvider};
 pub use encryption::{
-    ensure_install_key, AeadProvider, AesGcmAeadProvider, EncryptionMode, EstateEncryptionConfig,
+    apply_install_encryption_to_conn, ensure_install_key,
+    AeadProvider, AesGcmAeadProvider, EncryptionMode, EstateEncryptionConfig,
     RowCrypto, INSTALL_KEY_FILE,
 };
 pub use error::*;

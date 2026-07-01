@@ -6,7 +6,7 @@
 
 > The frontier intelligence is rented. The memory is yours.
 
-![status](https://img.shields.io/badge/status-1.0.0--beta-orange)
+![status](https://img.shields.io/badge/status-1.0.5--beta-orange)
 ![platforms](https://img.shields.io/badge/platforms-Apple%20Silicon%20·%20PC%2FLinux-blue)
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
 ![interface](https://img.shields.io/badge/interface-ARIA%20over%20MCP-purple)
@@ -86,7 +86,7 @@ moot_memory_search {
 
 ## Where to go next
 
-- **Install it.** See [Quickstart](#quickstart-100-beta) below.
+- **Install it.** See [Quickstart](#quickstart-105-beta) below.
 - **Understand it fast.** Read [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md).
 - **Have an AI install it.** Give the AI [`AI_START_HERE.md`](AI_START_HERE.md).
 - **Read the story.** [`ABOUT.md`](ABOUT.md) explains why MOOTx01 exists and why memory belongs to you.
@@ -96,9 +96,9 @@ moot_memory_search {
 
 ---
 
-## Quickstart (1.0.0-beta)
+## Quickstart (1.0.5-beta)
 
-> **1.0.0-beta — early access.** Installable now, **not yet security-hardened**. The full security sweep precedes the general-availability binary. For early adopters and builders.
+> **1.0.5-beta — early access.** Installable now. Pre-release line; the general-availability binary follows. For early adopters and builders.
 
 ### 1 · Install the binary
 
@@ -168,17 +168,18 @@ If your AI client supports MCP tool discovery, confirm it can see MOOTx01 tools 
 
 ### 4 · Make the AI use memory automatically
 
-Installing the runtime gives the AI tools. The next step is installing the matching MOOTx01 adapter for your AI client so it knows when to reach for memory.
+Installing the runtime gives the AI the tools. The next step teaches the client *when* to reach for memory. `mootx01 install` wires this at the deepest level each client supports — three integration depths:
 
-Adapters live in:
+| Depth | What it installs | Clients |
+|---|---|---|
+| **Server** | MCP tools only | every MCP client |
+| **Skills** | a `SKILL.md` adapter that teaches the AI when to use memory | clients with a skills surface |
+| **Plugin** | a native plugin package for the client | clients with a plugin format (Claude Code, Cursor, …) |
+
+`install` picks the deepest available and falls back automatically (plugin → skills → server). The per-client adapters and plugin sources live in:
 
 ```text
-apps/moot-agent-skills/
-```
-
-Start with:
-
-```text
+apps/moot-agent-skills/        # claude · cursor · codex · continue · cline · roo · openai-agents · generic
 apps/moot-agent-skills/README.md
 ```
 
@@ -248,23 +249,10 @@ Foundation:
     IntellectusLib  Telemetry floor
     ObserverSink    Telemetry sink + SQLite stats store
     AriaLexiconLib  Reified ARIA grammar
+    AriaMcpKit      ARIA-over-MCP server surface
+    LoopbackHTTP    Minimal loopback HTTP transport
     VaultKit        Encrypted, portable estate export/import
 ```
-
-## Build status
-
-Two dimensions are tracked:
-
-- **Build** means functional with tests green.
-- **Security Review** means the security, quality-control, and hardening gate.
-
-Security review has not run on any kit yet, so review is pending across the board. Build status reflects functionality only.
-
-| Kit | Build | Security Review |
-|---|---|---|
-| AriaLexiconLib · CognitionKit · ConvergenceKit · CorpusKit · EideticLib · EngramLib · GeniusLocusKit · IntellectusLib · LatticeLib · LocusKit · NeuronKit · ObserverSink · PersistenceKit · QueueKit · SubstrateKernel · SubstrateLib · SubstrateML · SubstrateTypes · VaultKit · VectorKit | Built (Swift + Rust) | Pending |
-
-Per-kit detail lives in [`packages/PACKAGES.md`](packages/PACKAGES.md) and the specs under [`docs/reference/`](docs/reference/).
 
 ## Implementations
 
@@ -277,13 +265,20 @@ Neither port leads. Both must agree bit for bit.
 
 ## Roadmap
 
-Intended sequence, not committed dates.
+Version 1.1.x
+- **Docs and Specs** — Clean up agentic baggage in the documentation. Remove the noise and organize for humans
+- **Improved Sidecar and embedded examples** — reference app patterns.    
+- **Apple iOS Native App**  — Full App with Shortcut Support and App Intents for Mootx01 sharing to External Apps
+- **Apple Intelligence integration** — native capture and recall across Apple surfaces.  
+- **Apple iCloud Sync** Seemless default estate sharing between iOS and MacOs
+  
+Version 1.2.x
+- **Federation** — bounded cross-estate sharing.
+- **MiniLLM Support** — moot side local language model for schedule driven llm house keeping and data mining of the estates
 
-1. **Full security sweep** — pending.
-2. **Hardened GA binary** — follows the security sweep.
-3. **Sidecar and embedded examples** — reference app patterns.
-4. **Federation** — bounded cross-estate sharing.
-6. **Apple Intelligence integration** — native capture and recall across Apple surfaces.
+Version 1.3.x
+- **mootgres**  — full postgres extension to offload moot computations to a postgres server.
+
 
 ## Repository structure
 
@@ -296,7 +291,9 @@ mootx01/
 │   │             CorpusKit · GeniusLocusKit · NeuronKit · CognitionKit · VaultKit · AriaMcpKit
 │   └── PACKAGES.md
 ├── apps/         aria-mcp-server (MCP server) · mootx01 (CLI) · moot-mgr (console)
-│                 Mootx01-App (Apple app) · moot-math-benchmark · moot-agent-skills
+│                 moot-bridge (transport bridge) · Mootx01-App (Apple app)
+│                 Mootx01-Setup (macOS install assistant) · moot-math-benchmark
+│                 moot-agent-skills (client adapters)
 ├── examples/     SDK · SidecarDemo · MootNotepad · MootTodo · MootCalendarIngest
 └── docs/         start-here · concepts · reference · decisions · engineering · validation · archive
 ```

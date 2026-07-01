@@ -1576,7 +1576,14 @@ impl RowStore for SqliteRowStore {
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
-            sql.push_str(&format!(" LIMIT {l}"));
+            // SQLite LIMIT is a signed 64-bit count. A usize value beyond i64::MAX
+            // produces an overflowing SQL literal that SQLite rejects with
+            // "datatype mismatch (20)". Clamp to i64::MAX so any out-of-range value
+            // becomes a very large but syntactically valid limit rather than an invalid
+            // literal. Matches the pattern already in place on the audit-path query.
+            // (secfix/recollect: defence-in-depth guard — protects all future callers.)
+            let lim: i64 = l.min(i64::MAX as usize) as i64;
+            sql.push_str(&format!(" LIMIT {lim}"));
         }
         if let Some(o) = offset {
             if o > 0 {
@@ -1668,7 +1675,14 @@ impl RowStore for SqliteRowStore {
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
-            sql.push_str(&format!(" LIMIT {l}"));
+            // SQLite LIMIT is a signed 64-bit count. A usize value beyond i64::MAX
+            // produces an overflowing SQL literal that SQLite rejects with
+            // "datatype mismatch (20)". Clamp to i64::MAX so any out-of-range value
+            // becomes a very large but syntactically valid limit rather than an invalid
+            // literal. Matches the pattern already in place on the audit-path query.
+            // (secfix/recollect: defence-in-depth guard — protects all future callers.)
+            let lim: i64 = l.min(i64::MAX as usize) as i64;
+            sql.push_str(&format!(" LIMIT {lim}"));
         }
         if let Some(o) = offset {
             if o > 0 {
@@ -1776,7 +1790,14 @@ impl RowStore for SqliteRowStore {
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
-            sql.push_str(&format!(" LIMIT {l}"));
+            // SQLite LIMIT is a signed 64-bit count. A usize value beyond i64::MAX
+            // produces an overflowing SQL literal that SQLite rejects with
+            // "datatype mismatch (20)". Clamp to i64::MAX so any out-of-range value
+            // becomes a very large but syntactically valid limit rather than an invalid
+            // literal. Matches the pattern already in place on the audit-path query.
+            // (secfix/recollect: defence-in-depth guard — protects all future callers.)
+            let lim: i64 = l.min(i64::MAX as usize) as i64;
+            sql.push_str(&format!(" LIMIT {lim}"));
         }
         if let Some(o) = offset {
             if o > 0 {
@@ -1895,7 +1916,14 @@ impl RowStore for SqliteRowStore {
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
-            sql.push_str(&format!(" LIMIT {l}"));
+            // SQLite LIMIT is a signed 64-bit count. A usize value beyond i64::MAX
+            // produces an overflowing SQL literal that SQLite rejects with
+            // "datatype mismatch (20)". Clamp to i64::MAX so any out-of-range value
+            // becomes a very large but syntactically valid limit rather than an invalid
+            // literal. Matches the pattern already in place on the audit-path query.
+            // (secfix/recollect: defence-in-depth guard — protects all future callers.)
+            let lim: i64 = l.min(i64::MAX as usize) as i64;
+            sql.push_str(&format!(" LIMIT {lim}"));
         }
         if let Some(o) = offset {
             if o > 0 {

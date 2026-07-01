@@ -5,26 +5,29 @@
 // pausing and recalling deep long-term memory from a distilled factoid.
 //
 // GLK call sequence (parity with Swift Recollect.run, secfix/punt-g2):
-//   1. coord.recall(handle, frame, now) → policy-filtered drawers; find factoid
-//      by id within the admissible set (SensitivityAtMost(Elevated) enforced).
+//   1. coord.get_drawers_matching_frame([factoidID], full frame)
+//      → bounded by-ids hydration; find factoid in admissible set.
 //   2. DistilledHeader::parse → validate DIST header.
 //   3. EstateCoordinator::recall_tunnels(wing) → filter _distilled_from tunnels.
-//   4. Re-use step-1 policy_drawers to find source drawers — no second I/O
-//      round-trip; source lookup from the same policy-filtered result set.
+//   4. coord.get_drawers_matching_frame(sourceIDs, full frame)
+//      → second bounded by-ids hydration for source drawers.
 //
-// secfix/punt-g2: policy-enforcing recall path enforces SensitivityAtMost(Elevated)
-// via BitmapEvaluator::insert_defaults. Restricted and secret factoids are absent
-// from the admissible set → factoidNotFound, preventing disclosure of elevated
-// factoid bodies at the MCP boundary. Restricted/secret source drawers are
-// silently omitted from source_by_id (same ceiling applies).
+// secfix/recollect: both hydration calls route through BitmapEvaluator::
+// insert_defaults which prepends SensitivityAtMost(Elevated), Trustworthy,
+// and CurrentlyBelieve when the caller supplies an empty filter chain.
+// Restricted and secret factoids are absent from the admissible set →
+// factoidNotFound, preventing disclosure of elevated factoid bodies at the
+// MCP boundary. Restricted/secret source drawers are silently omitted from
+// the step-4 result (same ceiling applies).
 //
 // Layer discipline B-1/B-2: pure sequencing. Read-only (B-6, I-6).
-// Deterministic: now passed as parameter (required by BitmapEvaluator).
+// Deterministic: _now accepted in signature for API stability; the by-ids
+// hydration path derives no clock-dependent state from it.
 
 use genius_locus_kit::brain::distillation_cycle::DISTILLED_FROM_LABEL;
 use genius_locus_kit::coordinator::{EstateCoordinator, VerbDispatchError};
 use genius_locus_kit::handle::EstateHandle;
-use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
+use locus_kit::filter::{HydrationLevel, RecallFrame};
 use substrate_ml::distillation_pipeline::DistilledHeader;
 
 // Test-only capture helper — consolidates the boilerplate for CaptureFrame::new
@@ -159,38 +162,39 @@ pub fn run_recollect(
     input: &RecollectInput,
     coord: &EstateCoordinator,
     handle: &EstateHandle,
-    now: i64,
+    // _now is accepted for API compatibility with callers that supply a wall-clock
+    // timestamp. The by-ids hydration path uses no current-clock token; any
+    // historical reconstruction is driven by the frame's optional HLC field.
+    _now: i64,
 ) -> Result<RecollectOutput, RecollectError> {
-    // 1. Hydrate factoid drawer through the policy-enforcing recall path.
+    // 1. Hydrate the factoid drawer through the bounded by-ids path.
     //
-    //    Parity with Swift Recollect.run step 1: `kit.hydrate([factoidID])` routes
-    //    through the frame-aware hydration which applies BitmapEvaluator::insert_defaults
-    //    (SensitivityAtMost(Elevated)). A restricted or secret factoid must not be
-    //    expanded — if the caller does not hold an elevation grant the factoid is
-    //    treated as not-found (FactoidNotFound), preventing disclosure of elevated
-    //    factoid bodies to the MCP boundary. secfix/punt-g2 part 2.
+    //    Parity with Swift Recollect.run step 1:
+    //      `kit.hydrate(estate, ids: [factoidID],
+    //                   matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full, limit: 1))`
     //
-    //    RecallFrame with HydrationLevel::Full is required so that drawer.content
-    //    is populated for DIST header parsing. Parity: Swift kit.hydrate uses
-    //    hydrationLevel: .full explicitly. Without Full, content is empty and
-    //    DistilledHeader::parse always returns None → spurious NotADistilledDrawer.
-    //    `now` is required for liveness/state evaluation. B-1 compliant.
+    //    An empty filter chain causes BitmapEvaluator::insert_defaults to prepend
+    //    SensitivityAtMost(Elevated), Trustworthy, and CurrentlyBelieve — the same
+    //    defaults the full estate recall path enforces. A restricted or secret factoid
+    //    is absent from the admissible result → FactoidNotFound, preventing disclosure
+    //    of elevated factoid bodies at the MCP boundary. secfix/recollect.
     //
-    //    recall_frame.limit = Some(usize::MAX): parity with Swift
-    //      step 1: `kit.hydrate(estate, ids: [factoidID], matchingFrame: RecallFrame(filterChain: [], limit: 1))`
-    //      step 4: `kit.hydrate(estate, ids: sourceIDs,   matchingFrame: RecallFrame(filterChain: [], limit: sourceIDs.count))`
-    //    Both are per-id lookups; limit bounds output to exactly the needed drawers.
-    //    In Rust, coord.recall() returns ALL matching drawers then caller does `take(cap)`.
-    //    Because we filter by id after the recall call, we need the cap to be large enough
-    //    to include both the factoid (step 1) and all source drawers (step 4) from any
-    //    estate. Using usize::MAX means no cap — the underlying Vec already bounds it.
-    //    B-1 compliant; the frame's sensitivity ceiling (insert_defaults) is still enforced.
-    let mut recall_frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
-    recall_frame.hydration_level = HydrationLevel::Full;
-    recall_frame.limit = Some(usize::MAX);
-    let policy_drawers = coord.recall(handle, recall_frame, now)
+    //    HydrationLevel::Full is required so drawer.content is populated for DIST
+    //    header parsing. Structured hydration leaves content empty →
+    //    DistilledHeader::parse returns None → spurious NotADistilledDrawer.
+    //
+    //    No .limit is set: get_drawers_matching_frame is inherently bounded to
+    //    the ids slice. Passing usize::MAX as limit (the prior approach) caused
+    //    SQLite to receive LIMIT 18446744073709551615, which it rejects with
+    //    "datatype mismatch (20)" — surfaced as an empty degraded stream and a
+    //    spurious FactoidNotFound on non-trivial estates. secfix/recollect.
+    let mut factoid_frame = RecallFrame::new(vec![]);
+    factoid_frame.hydration_level = HydrationLevel::Full;
+    let factoid_results = coord
+        .get_drawers_matching_frame(handle, &[input.factoid_drawer_id.clone()], &factoid_frame)
         .map_err(RecollectError::from)?;
-    let factoid = policy_drawers.iter()
+    let factoid = factoid_results
+        .iter()
         .find(|d| d.id == input.factoid_drawer_id)
         .ok_or_else(|| RecollectError::FactoidNotFound {
             id: input.factoid_drawer_id.clone(),
@@ -240,29 +244,35 @@ pub fn run_recollect(
         });
     }
 
-    // 4. Hydrate source drawers through the policy-enforcing recall path.
+    // 4. Hydrate source drawers through a second bounded by-ids call.
     //
-    //    Parity with Swift Recollect.run step 4: `kit.hydrate(estate, ids: sourceIDs,
-    //    matchingFrame: RecallFrame(filterChain: []))` routes through insert_defaults
-    //    which enforces SensitivityAtMost(Elevated). Restricted/secret source
-    //    drawers are excluded — they are silently omitted from the result, consistent
-    //    with the existing "sources.count shrinks due to filtering" comment. This is
-    //    the correct behaviour: the factoid was produced from a high-sensitivity
-    //    source that has now aged or been reclassified; the source preview is not
-    //    admissible without an elevation grant.
+    //    Parity with Swift Recollect.run step 4:
+    //      `kit.hydrate(estate, ids: sourceIDs,
+    //                   matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full,
+    //                                              limit: sourceIDs.count))`
     //
-    //    Re-uses policy_drawers from step 1. The step-1 frame uses limit=usize::MAX
-    //    so the result covers the full admissible estate; source drawers at any
-    //    position are guaranteed to be in the set if they exist and are admissible.
+    //    An empty filter chain causes insert_defaults to apply the same sensitivity
+    //    ceiling (SensitivityAtMost(Elevated)). Restricted/secret source drawers are
+    //    absent from the admissible result and silently skipped — consistent with the
+    //    "sources.count shrinks due to filtering" contract: the factoid was produced
+    //    from a high-sensitivity source that has since aged or been reclassified, and
+    //    the source preview is not admissible without an elevation grant.
+    //
+    //    No .limit is set: the call is bounded by source_ids.len(), matching Swift's
+    //    `limit: sourceIDs.count` (both are per-id, not full-estate, scans).
     //    B-1 compliant.
-    let source_set: std::collections::HashSet<&str> = source_tunnels
+    let source_ids: Vec<String> = source_tunnels
         .iter()
-        .filter_map(|t| t.target_drawer_id.as_deref())
+        .filter_map(|t| t.target_drawer_id.clone())
         .collect();
+    let mut source_frame = RecallFrame::new(vec![]);
+    source_frame.hydration_level = HydrationLevel::Full;
+    let source_drawers = coord
+        .get_drawers_matching_frame(handle, &source_ids, &source_frame)
+        .map_err(RecollectError::from)?;
     let source_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
-        policy_drawers
+        source_drawers
             .iter()
-            .filter(|d| source_set.contains(d.id.as_str()))
             .map(|d| (d.id.as_str(), d))
             .collect();
 
