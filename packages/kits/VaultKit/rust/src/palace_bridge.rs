@@ -46,7 +46,7 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::EncodeSpeed;
 use genius_locus_kit::handle::EstateHandle;
 use locus_kit::{
-    adjectives::AdjectiveSensitivity,
+    adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     diary_entry::DiaryEntry,
     diary_operational::{DiaryActorClass, DiaryEventClass, DiarySeverity},
     drawer_operational::{CaptureChannel, ContentKind},
@@ -450,6 +450,8 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = floored;
+        frame.exportability =
+            import_exportability(metadata.get("exportability").map(String::as_str), floored);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         frame.event_time = Some(event_time_ms.unwrap_or(now));
@@ -537,6 +539,8 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = floored;
+        frame.exportability =
+            import_exportability(metadata.get("exportability").map(String::as_str), floored);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         frame.event_time = Some(event_time_ms.unwrap_or(now));
@@ -659,6 +663,7 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = sensitivity;
+        frame.exportability = import_exportability(None, sensitivity);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         frame.event_time = Some(event_time_ms.unwrap_or(now));
@@ -959,6 +964,24 @@ impl<'a> PalaceBridge<'a> {
 // MARK: - Module-level helpers
 
 /// Resolve room from palace metadata. Priority order mirrors Swift PalaceBridge.
+/// Exportability adjective for imported palace content. Palace/markdown sources
+/// are already-public material, so the policy default is `Public` (a `Private`
+/// default would wrongly wall off content that was never protected). A
+/// frontmatter `exportability:` label overrides. Clamped to `Private` when
+/// sensitivity is `Secret`: the capture gate rejects a secret+public row
+/// (invariant I-22). Mirrors Swift `PalaceBridge.importExportability`.
+fn import_exportability(
+    label: Option<&str>,
+    sensitivity: AdjectiveSensitivity,
+) -> AdjectiveExportability {
+    if sensitivity == AdjectiveSensitivity::Secret {
+        return AdjectiveExportability::Private;
+    }
+    label
+        .and_then(DrawerMapping::exportability_from_label)
+        .unwrap_or(AdjectiveExportability::Public)
+}
+
 fn resolve_room(metadata: &HashMap<String, String>, wing_key: Option<&str>) -> String {
     if let Some(explicit) = metadata.get("room").filter(|s| !s.is_empty()) {
         return explicit.clone();

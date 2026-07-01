@@ -33,7 +33,7 @@ use crate::note_ir::{NoteIR, OccurredAt, WikiLink};
 use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, intake::WriteMode};
 use locus_kit::{
-    adjectives::AdjectiveSensitivity,
+    adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
@@ -1309,6 +1309,27 @@ impl DrawerMapping {
             "elevated" => Some(AdjectiveSensitivity::Elevated),
             "restricted" => Some(AdjectiveSensitivity::Restricted),
             "secret" => Some(AdjectiveSensitivity::Secret),
+            _ => None,
+        }
+    }
+
+    /// Frontmatter label for a drawer's exportability adjective. Inverse of
+    /// `exportability_from_label`. Mirrors Swift `DrawerMapping.exportabilityLabel`.
+    pub fn exportability_label(e: AdjectiveExportability) -> &'static str {
+        match e {
+            AdjectiveExportability::Private => "private",
+            AdjectiveExportability::Public => "public",
+        }
+    }
+
+    /// Inverse of `exportability_label`. Returns `None` for unrecognised
+    /// labels; the import caller then applies its policy default (public for
+    /// already-public palace sources). Mirrors Swift
+    /// `DrawerMapping.exportability(fromLabel:)`.
+    pub fn exportability_from_label(label: &str) -> Option<AdjectiveExportability> {
+        match label {
+            "private" => Some(AdjectiveExportability::Private),
+            "public" => Some(AdjectiveExportability::Public),
             _ => None,
         }
     }
