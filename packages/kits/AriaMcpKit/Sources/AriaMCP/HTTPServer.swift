@@ -88,13 +88,92 @@ func updateInflightHighWater(_ current: Int) {
 }
 
 // ============================================================
+// MARK: - AsyncSemaphore
+//
+// A counting semaphore whose `wait()` is an async function — it
+// SUSPENDS the calling Task (freeing the cooperative-executor thread)
+// instead of blocking it. This is the key property the gate fix
+// depends on (finding 105e5a96).
+//
+// Implementation: an NSLock protects two mutable fields:
+//   slots   — the count of free tokens (starts at `value`).
+//   waiters — a FIFO queue of suspended continuations.
+//
+// `wait()`: if `slots > 0`, decrement and return immediately.
+//   Otherwise, stash the continuation in `waiters` and let the
+//   Task suspend (no thread is held).
+//
+// `signal()`: if `waiters` is non-empty, pull the first waiter and
+//   resume it. Otherwise, increment `slots`. The waiter is resumed
+//   OUTSIDE the lock to avoid holding the lock during callback
+//   scheduling.
+//
+// `@unchecked Sendable` is justified: all mutable state is
+// protected by `lock`. The Swift type system cannot verify this
+// automatically because NSLock is not a protocol; the `@unchecked`
+// annotation declares that we have verified it by inspection.
+// ============================================================
+private final class AsyncSemaphore: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var slots: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(value: Int) {
+        self.slots = value
+    }
+
+    /// Acquire one token, suspending the calling Task if none is available.
+    /// The Task suspension frees the cooperative-executor thread so other
+    /// work can proceed while this Task waits.
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            var canResumeImmediately = false
+            lock.lock()
+            if slots > 0 {
+                slots -= 1
+                canResumeImmediately = true
+            } else {
+                // No slot available — enqueue the continuation. signal() will
+                // resume it outside its own lock when a slot becomes free.
+                waiters.append(continuation)
+            }
+            lock.unlock()
+            if canResumeImmediately {
+                // Resume outside the lock: continuation.resume() schedules the
+                // caller back onto the cooperative executor without holding lock.
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Release one token. Resumes the longest-waiting suspended Task (FIFO),
+    /// or increments the free-slot count if no Task is waiting.
+    /// This method is synchronous so it can be called from `defer` blocks.
+    func signal() {
+        let waiter: CheckedContinuation<Void, Never>?
+        lock.lock()
+        if waiters.isEmpty {
+            slots += 1
+            waiter = nil
+        } else {
+            waiter = waiters.removeFirst()
+        }
+        lock.unlock()
+        // Resume outside the lock: avoids holding the lock during cooperative
+        // executor scheduling and eliminates any chance of re-entrancy.
+        waiter?.resume()
+    }
+}
+
+// ============================================================
 // MARK: - ConcurrencyGate
 //
-// A DispatchSemaphore-backed gate that bounds the number of
+// An AsyncSemaphore-backed gate that bounds the number of
 // simultaneous in-flight requests. It has two layers:
 //
 //   1. maxConcurrent: hard cap on simultaneous service tasks.
-//      Requests that acquire the semaphore proceed immediately.
+//      Requests that acquire a slot proceed immediately.
 //   2. maxQueued: cap on additional accepted-but-waiting connections.
 //      If `activeCount >= maxConcurrent + maxQueued`, the connection
 //      is accepted and immediately shed (HTTP 503) rather than
@@ -106,22 +185,30 @@ func updateInflightHighWater(_ current: Int) {
 //   1. tryEnqueue() — NON-BLOCKING depth check on the accept thread.
 //      Increments activeCount and returns true if within bounds, or
 //      decrements and returns false (overflow → 503 shed immediately).
-//   2. waitForSlot() — BLOCKING semaphore wait, called INSIDE the
-//      spawned Task, not on the accept thread. This is the correct
-//      backpressure point: connections wait for a concurrency slot
-//      while the accept loop continues accepting new connections.
+//   2. waitForSlot() — ASYNC suspension, called INSIDE the spawned
+//      Task, not on the accept thread. The Task SUSPENDS (freeing its
+//      cooperative-executor thread) until a slot is available. This
+//      is the correct backpressure point: connections wait while the
+//      accept loop continues accepting new connections AND existing
+//      Tasks' off-pool continuations can still resume.
 //
 // Why the split matters:
 //   Old (wrong): accept → tryAcquire (blocks on semaphore) → spawn Task
 //     → accept loop parks on semaphore; OS TCP backlog silently absorbs
 //     overflow; 503 cannot be returned promptly.
-//   New (correct): accept → tryEnqueue (never blocks) → spawn Task →
-//     Task calls waitForSlot (blocks if needed) → accept loop always
-//     free to accept the next fd and count/shed overflow immediately.
+//   Interim (#97 fix): accept → tryEnqueue (never blocks) → spawn Task
+//     → Task calls waitForSlot (DispatchSemaphore.wait() — STILL blocks
+//     a cooperative-pool thread). With enough queued Tasks, all pool
+//     threads are occupied by waiters and off-pool read continuations
+//     cannot resume → deadlock (finding 105e5a96).
+//   Current (correct): accept → tryEnqueue (never blocks) → spawn Task
+//     → Task calls await waitForSlot (AsyncSemaphore — Task SUSPENDS,
+//     thread is freed) → accept loop and off-pool continuations always
+//     have executor threads available.
 //
 // The gate must be Sendable so it can cross the accept-thread
-// boundary; DispatchSemaphore and the Atomic counters satisfy
-// that requirement.
+// boundary; AsyncSemaphore and the Atomic counters satisfy that
+// requirement via @unchecked Sendable.
 //
 // Default sizing rationale:
 //   maxConcurrent = 64:  Each request calls an async dispatcher
@@ -142,12 +229,14 @@ func updateInflightHighWater(_ current: Int) {
 ///
 /// The accept thread calls `tryEnqueue()` (non-blocking). If it returns
 /// `false` the caller sheds the connection immediately with 503. If it
-/// returns `true` the caller spawns a Task that calls `waitForSlot()`
+/// returns `true` the caller spawns a Task that calls `await waitForSlot()`
 /// before serving. When the request is done, call `release()`.
 ///
 /// This two-phase design keeps the accept thread unblocked so it can
 /// always accept new fds and count or shed overflow in-line with the
-/// documented 503 + Retry-After behaviour.
+/// documented 503 + Retry-After behaviour. The async `waitForSlot()`
+/// ensures queued Tasks SUSPEND rather than occupying cooperative-pool
+/// threads, preventing the deadlock described in finding 105e5a96.
 public final class ConcurrencyGate: @unchecked Sendable {
 
     public let maxConcurrent: Int
@@ -157,14 +246,15 @@ public final class ConcurrencyGate: @unchecked Sendable {
     /// actively being served) — incremented by tryEnqueue, decremented
     /// by release. Does NOT include connections that have been shed.
     private let activeCount: Atomic<Int> = Atomic(0)
-    /// Semaphore: starts at maxConcurrent free slots. waitForSlot()
-    /// decrements (blocks if 0); release() increments (wakes one waiter).
-    private let semaphore: DispatchSemaphore
+    /// Async semaphore: starts at maxConcurrent free slots. waitForSlot()
+    /// suspends the Task (freeing its thread) when slots == 0; release()
+    /// signals the semaphore, resuming the next queued Task.
+    private let semaphore: AsyncSemaphore
 
     public init(maxConcurrent: Int = 64, maxQueued: Int = 256) {
         self.maxConcurrent = maxConcurrent
         self.maxQueued = maxQueued
-        self.semaphore = DispatchSemaphore(value: maxConcurrent)
+        self.semaphore = AsyncSemaphore(value: maxConcurrent)
     }
 
     /// Phase 1 (accept thread, NON-BLOCKING): test whether the connection
@@ -174,7 +264,7 @@ public final class ConcurrencyGate: @unchecked Sendable {
     ///
     /// This method NEVER blocks. It increments activeCount and returns true
     /// when `depth <= maxConcurrent + maxQueued`; otherwise it undoes the
-    /// increment and returns false. The semaphore wait happens in
+    /// increment and returns false. The async wait happens in
     /// `waitForSlot()`, which is called inside the spawned Task.
     public func tryEnqueue() -> Bool {
         let depth = activeCount.add(1, ordering: .relaxed).newValue
@@ -186,16 +276,20 @@ public final class ConcurrencyGate: @unchecked Sendable {
         return true
     }
 
-    /// Phase 2 (worker Task, BLOCKING): wait until a concurrency slot is
+    /// Phase 2 (worker Task, ASYNC): suspend until a concurrency slot is
     /// free. Must be called after a successful `tryEnqueue()`, before
-    /// beginning request service. Blocks if all `maxConcurrent` slots are
-    /// occupied; returns as soon as one is released by a finishing request.
-    public func waitForSlot() {
-        semaphore.wait()
+    /// beginning request service. The Task suspends (freeing its
+    /// cooperative-executor thread) if all `maxConcurrent` slots are
+    /// occupied, and resumes as soon as one is released by a finishing
+    /// request. This suspension — not blocking — is what prevents the
+    /// deadlock described in finding 105e5a96.
+    public func waitForSlot() async {
+        await semaphore.wait()
     }
 
     /// Release a previously acquired slot (decrement activeCount, signal
-    /// semaphore so the next queued Task can proceed).
+    /// the semaphore so the next queued Task can resume).
+    /// Synchronous so it can be called from `defer` blocks.
     public func release() {
         _ = activeCount.add(-1, ordering: .relaxed)
         semaphore.signal()
@@ -205,15 +299,14 @@ public final class ConcurrencyGate: @unchecked Sendable {
     /// serving). Used for metrics.
     public var currentDepth: Int { activeCount.load(ordering: .relaxed) }
 
-    // MARK: - Legacy one-shot path (test/serve_once usage)
+    // MARK: - Convenience one-shot path (test usage)
 
-    /// Convenience: non-blocking enqueue + immediate blocking wait combined.
-    /// Preserved for `serve_once`-style callers that call on a thread they
-    /// control. Returns `true` if the slot was acquired (caller MUST release),
-    /// `false` if the queue was full (no slot acquired).
-    public func tryAcquire() -> Bool {
+    /// Convenience: non-blocking enqueue + async wait combined.
+    /// Returns `true` if the slot was acquired (caller MUST release),
+    /// `false` if the queue was full (no slot acquired, no release needed).
+    public func tryAcquire() async -> Bool {
         guard tryEnqueue() else { return false }
-        waitForSlot()
+        await waitForSlot()
         return true
     }
 }
@@ -295,11 +388,12 @@ public let globalSSEConcurrencyGate: ConcurrencyGate = {
 /// `tryEnqueue()` (non-blocking depth check, runs on the accept thread) is
 /// called immediately after `accept()`; overflow connections are shed inline
 /// with HTTP 503 + Retry-After:1 without ever parking the accept thread.
-/// `waitForSlot()` (the semaphore wait that enforces maxConcurrent) runs
-/// inside the spawned Task so the accept loop is always free to accept the
-/// next fd. Per-request latency is tracked in fast/mid/slow buckets and
-/// 4xx/5xx/shed counts are exposed as module-level atomics, picked up by
-/// `ServerMetricsTelemetry`.
+/// `waitForSlot()` (async suspension that enforces maxConcurrent) runs inside
+/// the spawned Task, freeing the cooperative-executor thread while the Task
+/// waits; this prevents the deadlock described in finding 105e5a96 where
+/// blocking waiters starved off-pool read continuations. Per-request latency
+/// is tracked in fast/mid/slow buckets and 4xx/5xx/shed counts are exposed
+/// as module-level atomics, picked up by `ServerMetricsTelemetry`.
 ///
 /// SSE isolation (CAND-025): SSE streams (`GET /api/events`) use a SEPARATE
 /// `globalSSEConcurrencyGate` (default 16 concurrent, maxQueued=0). A normal
@@ -358,13 +452,17 @@ public struct HTTPServer: Sendable {
     ///      If the gate is at `maxConcurrent + maxQueued` depth the connection is
     ///      shed immediately with HTTP 503 + `Retry-After: 1` before returning to
     ///      the accept call.
-    ///   2. `gate.waitForSlot()` — blocking semaphore wait that enforces
+    ///   2. `gate.waitForSlot()` — async suspension that enforces
     ///      `maxConcurrent`; runs inside the spawned Task, not on the accept thread.
+    ///      The Task suspends (freeing its cooperative-executor thread) until a slot
+    ///      is free, preventing the deadlock described in finding 105e5a96.
     ///
     /// This split means the accept loop is always free to accept the next fd and
     /// count or shed overflow in-line with the documented 503 behaviour. Connections
     /// that would exceed `maxConcurrent + maxQueued` never stall or hit the OS TCP
-    /// backlog — they are accepted and shed promptly.
+    /// backlog — they are accepted and shed promptly. Queued Tasks' async suspension
+    /// ensures cooperative-executor threads remain available for off-pool read
+    /// continuations, preventing the deadlock described in finding 105e5a96.
     ///
     /// - Note: For the OS-assigned `port: 0` test path, call `bind()` directly;
     ///   `bind()` returns the bound port and `boundPort` reflects the assigned
@@ -460,9 +558,10 @@ public struct HTTPServer: Sendable {
     /// releases the concurrency gate slot on exit.
     ///
     /// Assumes the caller already called `gate.tryEnqueue()` successfully
-    /// (the accept loop does this). This function calls `gate.waitForSlot()`
-    /// first — the semaphore wait that limits actual concurrency — then
-    /// proceeds to serve. The gate is released via defer on all exit paths.
+    /// (the accept loop does this). This function calls `await gate.waitForSlot()`
+    /// first — the async suspension that limits actual concurrency without
+    /// blocking a cooperative-executor thread — then proceeds to serve.
+    /// The gate is released via defer on all exit paths.
     ///
     /// SSE fast path: `GET /api/events` with `Accept: text/event-stream` is
     /// intercepted here, before `route()`, and handed to `driveSSEStream()`.
@@ -485,11 +584,14 @@ public struct HTTPServer: Sendable {
         gate: ConcurrencyGate = globalConcurrencyGate,
         sseGate: ConcurrencyGate = globalSSEConcurrencyGate
     ) async {
-        // Phase 2: wait for a concurrency slot. This is the semaphore
-        // wait — it blocks on the cooperative pool until one of the
-        // maxConcurrent slots is free. The accept thread already returned
-        // from tryEnqueue() and is back accepting new fds.
-        gate.waitForSlot()
+        // Phase 2: wait for a concurrency slot. This is the async suspension
+        // point — the Task suspends (freeing its cooperative-pool thread)
+        // until one of the maxConcurrent slots is free. The accept thread
+        // already returned from tryEnqueue() and is back accepting new fds.
+        // Suspension (not blocking) is what prevents the deadlock described
+        // in finding 105e5a96: freed threads remain available to resume
+        // off-pool read continuations held by active connections.
+        await gate.waitForSlot()
 
         // Track in-flight depth for the high-water counter.
         // Atomic.add returns (oldValue:, newValue:) in Swift 6.3.
@@ -587,9 +689,9 @@ public struct HTTPServer: Sendable {
 
             // Acquire the SSE gate slot. tryEnqueue() + waitForSlot() is the
             // two-phase protocol: tryEnqueue() does the maxQueued depth check
-            // (non-blocking); waitForSlot() waits for a maxConcurrent slot.
-            // For the SSE gate maxQueued=0, so tryEnqueue() rejects immediately
-            // when the SSE cap is hit — no silent queuing of SSE connections.
+            // (non-blocking); waitForSlot() async-suspends for a maxConcurrent
+            // slot. For the SSE gate maxQueued=0, tryEnqueue() rejects
+            // immediately when the SSE cap is hit — no queuing of SSE connections.
             guard sseGate.tryEnqueue() else {
                 // SSE capacity exhausted — respond 503 and close.
                 HTTPResponse(
@@ -602,7 +704,7 @@ public struct HTTPServer: Sendable {
                 ).send(fd: fd)
                 return
             }
-            sseGate.waitForSlot()
+            await sseGate.waitForSlot()
             defer { sseGate.release() }
 
             await driveSSEStream(fd: fd)
