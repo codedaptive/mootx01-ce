@@ -469,9 +469,21 @@ struct MatrixSnapshotPersistenceTests {
 
         // The registered tier must equal a from-scratch full rebuild of the whole
         // audit log — proving load+fold-forward is exact, not an approximation.
+        // The oracle must use the SAME eventTime map the hydration path builds:
+        // the temporal (T) matrix keys off eventTime, not the capture HLC
+        // (ADR-004), so a no-map fullRebuild would fold on the wrong clock and
+        // diverge by sub-ms eventTime/HLC rounding.
         let registered = await kit.matrixTiers[handle]
         let fullLog = try await kit.auditLog(for: handle)
-        let fromScratch = MatrixTier.fullRebuild(from: fullLog)
+        let oracleEstate = try await kit.estate(for: handle)
+        let oracleDrawers = try await oracleEstate.allDrawers()
+        var oracleEventTimes: [UUID: Int64] = [:]
+        for d in oracleDrawers where !d.id.isEmpty {
+            if let rowUUID = UUID(uuidString: d.id) {
+                oracleEventTimes[rowUUID] = Int64(d.eventTime.timeIntervalSince1970 * 1000)
+            }
+        }
+        let fromScratch = MatrixTier.fullRebuild(from: fullLog, eventTimes: oracleEventTimes)
         #expect(registered == fromScratch)
         #expect(registered?.liveRowCount == 5)
 

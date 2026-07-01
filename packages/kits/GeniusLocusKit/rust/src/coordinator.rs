@@ -3670,12 +3670,42 @@ impl EstateCoordinator {
         self.feed_audit_log(handle)?;
         let log = self.audit_log(handle)?;
 
+        // Build the event_time map (audit row_id → authored-in-world epoch ms) so
+        // the temporal (T) matrix pass keys off event_time, not the capture HLC —
+        // ADR-004: all temporal-cognition primitives key off eventTime. A bulk
+        // historical import stamps every capture with one HLC, so hlc-based lags
+        // are all 0 and no causality pairs form; the real ordering lives in each
+        // drawer's event_time. Rust holds event_time as epoch-SECONDS while the
+        // fold's physical_time is ms, so multiply by 1000. The row_id key mirrors
+        // bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
+        let event_times: std::collections::HashMap<crate::audit::EntryUUID, i64> = {
+            let estate = self.estate_for_verb(handle)?;
+            let drawers = estate.all_drawers().map_err(|e| {
+                VerbDispatchError::from(remap(
+                    "rebuild_derived_accelerators",
+                    &uuid_to_str(&handle.estate_uuid),
+                    e,
+                ))
+            })?;
+            drawers
+                .iter()
+                .filter_map(|d| {
+                    uuid::Uuid::parse_str(&d.id).ok().map(|u| {
+                        (
+                            crate::audit::EntryUUID(u.as_u128().to_be_bytes()),
+                            d.event_time * 1000,
+                        )
+                    })
+                })
+                .collect()
+        };
+
         // The matrix snapshot store needs a durable backing storage. In-memory
         // estates don't retain one (storages holds only DrawerStore-backed
         // storages); they full-rebuild without persistence, as in Swift's
         // .inMemory mode.
         let Some(storage) = self.storages.get(handle).cloned() else {
-            let tier = crate::matrix::MatrixTier::full_rebuild(&log);
+            let tier = crate::matrix::MatrixTier::full_rebuild(&log, &event_times);
             self.register_matrix_tier(handle, tier);
             return Ok(());
         };
@@ -3704,10 +3734,10 @@ impl EstateCoordinator {
                 // including cross-cursor expunge/withdraw and temporal
                 // window-boundary pairs — exact, not an approximation.
                 let mut loaded = snapshot.tier;
-                loaded.incremental_update(&log);
+                loaded.incremental_update(&log, &event_times);
                 loaded
             }
-            None => crate::matrix::MatrixTier::full_rebuild(&log),
+            None => crate::matrix::MatrixTier::full_rebuild(&log, &event_times),
         };
 
         // Step 3 — install so the matrixAware recall lane is live.

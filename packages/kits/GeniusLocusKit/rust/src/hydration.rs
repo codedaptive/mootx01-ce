@@ -364,8 +364,22 @@ pub fn open_hydrating(
     let unified_log = feed_audit_log_from_estate(&estate)
         .map_err(|e| HydrateError::AuditFeed(format!("{e:?}")))?;
 
-    // Step 6 — Matrix rebuild (full: both passes).
-    let matrix_tier = MatrixTier::full_rebuild(&unified_log);
+    // Step 6 — Matrix rebuild (full: both passes). Build the event_time map
+    // (row_id → authored-in-world epoch ms) so the temporal (T) pass keys off
+    // event_time, not the capture HLC — ADR-004. Rust holds event_time as
+    // epoch-SECONDS; the fold's physical_time is ms, so multiply by 1000. The
+    // row_id key mirrors bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
+    let event_times: std::collections::HashMap<EntryUUID, i64> = estate
+        .all_drawers()
+        .map_err(|e| HydrateError::AuditFeed(format!("{e:?}")))?
+        .iter()
+        .filter_map(|d| {
+            uuid::Uuid::parse_str(&d.id)
+                .ok()
+                .map(|u| (EntryUUID(u.as_u128().to_be_bytes()), d.event_time * 1000))
+        })
+        .collect();
+    let matrix_tier = MatrixTier::full_rebuild(&unified_log, &event_times);
 
     Ok(HydratedEstate { estate, unified_log, matrix_tier, storage })
 }

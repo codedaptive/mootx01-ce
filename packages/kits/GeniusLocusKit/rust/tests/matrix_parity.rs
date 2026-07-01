@@ -693,7 +693,7 @@ fn incremental_update_matches_full_rebuild_at_every_split() {
     for e in &entries {
         full_log.add(e.clone());
     }
-    let full = MatrixTier::full_rebuild(&full_log);
+    let full = MatrixTier::full_rebuild(&full_log, &std::collections::HashMap::new());
 
     let n = entries.len();
     for k in 1..=n {
@@ -705,8 +705,9 @@ fn incremental_update_matches_full_rebuild_at_every_split() {
         for e in entries.iter().take(k) {
             prefix_log.add(e.clone());
         }
-        let mut snapshot = MatrixTier::full_rebuild(&prefix_log); // persisted state
-        snapshot.incremental_update(&full_log); // load-forward
+        let mut snapshot =
+            MatrixTier::full_rebuild(&prefix_log, &std::collections::HashMap::new()); // persisted state
+        snapshot.incremental_update(&full_log, &std::collections::HashMap::new()); // load-forward
 
         assert_eq!(snapshot.field_presence, full.field_presence, "F differs at split {k}");
         assert_eq!(snapshot.co_occurrence, full.co_occurrence, "O differs at split {k}");

@@ -191,6 +191,23 @@ public extension GeniusLocusKit {
         try await feedAuditLog(for: handle)
         let log_ = try auditLog(for: handle)
 
+        // Build the eventTime map (rowID → authored-in-world epoch ms) so the
+        // temporal (T) matrix pass keys off `eventTime`, not the capture HLC —
+        // ADR-004: all temporal-cognition primitives key off eventTime. A bulk
+        // historical import stamps every capture with one HLC, so hlc-based lags
+        // are all 0 and no causality pairs form; the real ordering lives in each
+        // drawer's eventTime. For streaming capture eventTime == captureTime, so
+        // this leaves the T matrix unchanged there.
+        let estate_ = try estate(for: handle)
+        let drawers_ = try await estate_.allDrawers()
+        var eventTimes: [UUID: Int64] = [:]
+        eventTimes.reserveCapacity(drawers_.count)
+        for d in drawers_ where !d.id.isEmpty {
+            if let rowUUID = UUID(uuidString: d.id) {
+                eventTimes[rowUUID] = Int64(d.eventTime.timeIntervalSince1970 * 1000)
+            }
+        }
+
         // Steps 4 + 5 — Matrix tier: LOAD from disk and fold the tail forward,
         // else cold-start full rebuild.
         let store = try await matrixSnapshotStore(for: handle)
@@ -202,7 +219,7 @@ public extension GeniusLocusKit {
             // and temporal window-boundary pairs — so this is exact, not an
             // approximation, and it skips the O(N) full fold over the whole log.
             var loaded = snapshot.tier
-            loaded.incrementalUpdate(from: log_)
+            loaded.incrementalUpdate(from: log_, eventTimes: eventTimes)
             tier = loaded
             // Restore the persisted calibration registry if the estate has none in
             // memory yet — calibration is derived/reference state too, and lives in
@@ -215,7 +232,7 @@ public extension GeniusLocusKit {
             // Cold start (no snapshot) or stale format — full two-pass rebuild.
             // fullRebuild runs F/O/C then T and merges them; see
             // MatrixTier.fullRebuild(from:) for the two-pass rationale.
-            tier = MatrixTier.fullRebuild(from: log_)
+            tier = MatrixTier.fullRebuild(from: log_, eventTimes: eventTimes)
             log.info("rebuildDerivedAccelerators: matrix tier full-rebuilt (no snapshot) for \(handle.estateUUID, privacy: .public)")
         }
 

@@ -115,7 +115,7 @@ fn seed_matrix_tier(
 ) -> bool {
     coord.feed_audit_log(h).expect("feed_audit_log");
     let log = coord.audit_log(h).expect("audit_log");
-    let mut tier = MatrixTier::full_rebuild(&log);
+    let mut tier = MatrixTier::full_rebuild(&log, &std::collections::HashMap::new());
     let drawers = coord.all_drawers(h).unwrap_or_default();
     let d1_op = drawers.iter().find(|d| d.id == d1).map(|d| d.operational_bitmap as u64).unwrap_or(0);
     let d2_op = drawers.iter().find(|d| d.id == d2).map(|d| d.operational_bitmap as u64).unwrap_or(0);

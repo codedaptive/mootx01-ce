@@ -334,7 +334,7 @@ fn hydrate_round_trip_matrix_tier_equivalence() {
             }
         }
     }
-    let source_tier = MatrixTier::full_rebuild(&source_log);
+    let source_tier = MatrixTier::full_rebuild(&source_log, &std::collections::HashMap::new());
 
     // ── Flush to SQLite ────────────────────────────────────────────────
     glk_flush(source_storage.as_ref(), &sqlite)

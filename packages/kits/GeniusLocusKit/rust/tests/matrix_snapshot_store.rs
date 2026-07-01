@@ -64,7 +64,7 @@ fn snapshot_round_trips_through_sqlite() {
     log.add(cap(EntryUUID([1; 16]), "bm.a", 0b101, HLC::new(1_000, 0, 1)));
     log.add(cap(EntryUUID([2; 16]), "bm.a", 0b001, HLC::new(2_000, 0, 1)));
     log.add(cap(EntryUUID([2; 16]), "bm.b", 0b010, HLC::new(2_000, 0, 1)));
-    let tier = MatrixTier::full_rebuild(&log);
+    let tier = MatrixTier::full_rebuild(&log, &std::collections::HashMap::new());
 
     let estate_id = Uuid::new_v4().to_string();
     let snapshot = MatrixSnapshot::new(tier.clone(), MatrixCalibrationRegistry::default(), tier.last_hlc);
