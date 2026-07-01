@@ -192,7 +192,13 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     let pid_file = data.join("mootx01.pid");
     if let Some(p) = bound_port {
         if let Some(prev) = paths::read_port_file(&port_file) {
-            if prev != p && !port_free(prev) {
+            // Liveness = a real mootx01 daemon ANSWERS on the recorded port,
+            // not merely that the port is occupied. `!port_free(prev)` is true
+            // for ANY listener (a reused socket, an unrelated service, moot-mgr's
+            // dashboard) and would falsely refuse to start — the Swift port
+            // correctly checks the owning PID's liveness. Probe the daemon the
+            // same way the T4 stdio-forward path does (daemon_client::alive).
+            if prev != p && daemon_client::alive(prev) {
                 eprintln!(
                     "mootx01: estate is already served by a live resident daemon \
                      on port {prev}. One resident writer per estate \u{2014} stop it first."
