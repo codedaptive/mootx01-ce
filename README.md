@@ -265,9 +265,8 @@ Neither port leads. Both must agree bit for bit.
 
 ## Roadmap
 
-Intended sequence, not committed dates.
-  
 Version 1.1.x
+- **Docs and Specs** — Clean up agentic baggage in the documentation. Remove the noise and organize for humans
 - **Improved Sidecar and embedded examples** — reference app patterns.    
 - **Apple iOS Native App**  — Full App with Shortcut Support and App Intents for Mootx01 sharing to External Apps
 - **Apple Intelligence integration** — native capture and recall across Apple surfaces.  
