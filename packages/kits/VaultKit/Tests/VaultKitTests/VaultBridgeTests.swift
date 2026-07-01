@@ -1244,11 +1244,11 @@ struct VaultBridgeTests {
         let first = try await bridge.importVault(at: vault, into: handle, now: now)
         #expect(first.drawersWritten == 1, "first import must write the drawer")
 
-        // Retrieve the drawer and withdraw it (moves to cluster B / usedToBelieve).
+        // Retrieve the drawer and withdraw it (moves to state=18, withdrawn).
         // Withdraw is the vault-operator mechanism for "this note must not resurface."
         // (Expunge/tombstone uses tombstonedAt != nil and is invisible to recall;
-        // withdrawn drawers have tombstonedAt == nil and ARE detectable by the
-        // import guard via Filter.usedToBelieve.)
+        // withdrawn drawers have tombstonedAt == nil and are detected by the
+        // import guard via Filter.state(.withdrawn).)
         let drawers = try await currentDrawers(kit, handle)
         let drawer = try #require(drawers.first)
         try await kit.withdraw(handle, WithdrawFrame(rowID: drawer.id, reason: "test-withdrawal"))
@@ -1720,6 +1720,104 @@ struct VaultBridgeTests {
             embeddingModels: [.deterministic]
         )
         return (kit, handle)
+    }
+
+    // MARK: - Security finding b70cce13: tombstone set must not include superseded predecessors
+
+    /// A lineage that was superseded by a normal content update must NOT land in the
+    /// tombstone set. The prior implementation used `Filter.usedToBelieve` (all of
+    /// cluster B: superseded, decayed, withdrawn, expired), which caused the tombstone
+    /// guard to fire on any lineage that had ever been updated — blocking the THIRD
+    /// import (and all subsequent ones) and preventing sensitivity raises after any
+    /// content update.
+    ///
+    /// Scenario (the b70cce13 attack surface):
+    ///   1. Import note v1   → drawer1 (lineage L, state=active)
+    ///   2. Import note v2   → supersession: drawer1 (L, superseded), drawer2 (L, active)
+    ///   3. Import note v3   → SHOULD be updated; MUST NOT be skipped as tombstoned
+    ///   4. Import same v3 with sensitivity raise → MUST NOT be blocked by tombstone guard
+    ///
+    /// After the fix, the tombstone recall uses `Filter.state(.withdrawn)` only so
+    /// ordinary superseded predecessors are invisible to the tombstone set.
+    @Test("b70cce13: superseded predecessors do not block subsequent imports or sensitivity raises")
+    func supersededLineageNotBlockedByTombstoneSet() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let now = Date()
+
+        let notePath = vault.appendingPathComponent("Research/Note.md")
+
+        // Step 1: import v1.
+        try write("""
+            ---
+            room: research
+            ---
+            Version one of the note.
+            """, to: notePath)
+        let r1 = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(r1.drawersWritten == 1, "v1 must write a new drawer: \(r1)")
+        #expect(r1.drawersSkippedTombstoned == 0, "no tombstones yet: \(r1)")
+
+        // Step 2: import v2 (changed content) — supersession cascade fires.
+        // drawer1 → superseded; drawer2 created as active.
+        try write("""
+            ---
+            room: research
+            ---
+            Version two of the note — content has changed.
+            """, to: notePath)
+        let r2 = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(r2.drawersUpdated == 1, "v2 must supersede v1: \(r2)")
+        #expect(r2.drawersSkippedTombstoned == 0, "update must not trigger tombstone: \(r2)")
+
+        // Step 3: import v3 (changed content again). Before the fix this was
+        // blocked because the superseded drawer1 appeared in usedToBelieve → the
+        // tombstone guard fired on L → .skippedTombstoned instead of .updated.
+        try write("""
+            ---
+            room: research
+            ---
+            Version three of the note — second content update.
+            """, to: notePath)
+        let r3 = try await bridge.importVault(at: vault, into: handle, now: now)
+        #expect(r3.drawersUpdated == 1,
+                "v3 must update (not be skipped as tombstoned): \(r3)")
+        #expect(r3.drawersSkippedTombstoned == 0,
+                "superseded predecessor must NOT land in tombstone set: \(r3)")
+
+        // Step 4: import v3 again with a sensitivity raise to .elevated.
+        // .elevated is within the default sensitivityAtMost(.elevated) recall
+        // ceiling, so it appears in believedDrawers without lifting the ceiling.
+        // Before the fix this step was blocked for the same reason as Step 3:
+        // the superseded drawer2 appeared in usedToBelieve → tombstone guard
+        // fired → .skippedTombstoned instead of .updated.
+        try write("""
+            ---
+            room: research
+            sensitivity: elevated
+            ---
+            Version three of the note — second content update.
+            """, to: notePath)
+        let r4 = try await bridge.importVault(at: vault, into: handle, now: now)
+        // The sensitivity raise must land (the tier must go up) — not be skipped
+        // as tombstoned. Unchanged content + sensitivity upgrade triggers
+        // supersession (the isSensitivityUpgrade path in importNote).
+        #expect(r4.drawersSkippedTombstoned == 0,
+                "sensitivity raise must not be blocked by tombstone guard: \(r4)")
+        #expect(r4.drawersUpdated == 1,
+                "sensitivity raise with same content must trigger a supersession update: \(r4)")
+
+        // Verify the estate now has exactly one active drawer at the raised tier.
+        // .elevated is within the default recall ceiling so believedDrawers returns it.
+        let active = try await believedDrawers(kit, handle)
+        #expect(active.count == 1, "exactly one active drawer must remain: \(active.count)")
+        let liveDrawer = try #require(active.first)
+        #expect(liveDrawer.adjectiveSensitivity == .elevated,
+                "sensitivity must have been raised to .elevated: \(liveDrawer.adjectiveSensitivity)")
     }
 
     /// After a bulk vault import, `ImportReport.enqueuedForEncode` must be > 0.

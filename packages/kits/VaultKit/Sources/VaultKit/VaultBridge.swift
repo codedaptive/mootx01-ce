@@ -369,7 +369,8 @@ public struct VaultBridge: Sendable {
         // tombstonedLineageIDs: lineage IDs that exist in the estate but
         // whose last known state is erased/withdrawn (FINDING-1b). A note
         // whose lineage is in this set must NOT be resurrected on re-import.
-        let tombstonedLineageIDs = try await existingTombstonedLineageIDs(handle: handle)
+        let tombstonedLineageIDs = try await existingTombstonedLineageIDs(
+            handle: handle, activeLineageIDs: existingLineageIDs)
         var existingTunnelSignatures = try await existingTunnelSignatures(
             handle: handle, wings: existingWings
         )
@@ -707,46 +708,67 @@ public struct VaultBridge: Sendable {
         return (lineageIDs, wings, contentByLineage, stableSourceKeyByLineage)
     }
 
-    /// The set of lineage IDs the import path must not resurrect — the union
-    /// of cluster B (withdrawn/superseded) and cluster C (erased/tombstoned).
+    /// The set of lineage IDs the import path must not resurrect — lineages
+    /// that have been deliberately deleted (state = 18 withdrawn, or cluster C
+    /// erased/tombstoned) minus any lineage that currently has an active head.
     ///
-    /// Two disjoint sets are combined here because the recall pipeline hides
-    /// one of them from every recall-based query:
+    /// ## What belongs in the tombstone set
     ///
-    /// **Cluster B — withdrawn (state = 18, `tombstonedAt == nil`):**
-    /// Surfaced via `Filter.usedToBelieve` over the standard recall path.
-    /// These lineages were deliberately withdrawn by the operator. The import
-    /// path must not resurrect them.
-    ///
-    /// **Cluster C — erased/tombstoned (state ≥ 32, `tombstonedAt != nil`):**
-    /// Permanently erased via `moot_erase_memory` / the `expunge` verb, which
-    /// sets `tombstonedAt` and zeroes the content blob. The recall pipeline's
-    /// `liveRows` pre-filters `tombstonedAt == nil`, so cluster C rows are
-    /// invisible to any `recall`-based query. `GeniusLocusKit.tombstonedLineageIDs`
-    /// reaches them via `Estate.allDrawers()` — the only corpus scan that
-    /// explicitly includes tombstoned rows — and returns the distinct set of
-    /// erased lineage IDs.
-    ///
-    /// Both clusters are skipped and counted in
-    /// `ImportReport.drawersSkippedTombstoned` for full observability. The
-    /// combined guard ensures that neither a `withdraw` nor an `expunge`
-    /// (i.e. `moot_erase_memory`) can be undone by a subsequent vault
+    /// Only genuinely-removed lineages block re-import. "Withdrawn" (state 18)
+    /// is the explicit operator-retraction: the user or agent deliberately said
+    /// "this note should not resurface." Cluster C (rejected=32, tombstoned=33)
+    /// is a legal-compliance hard delete. Neither should be undone by a vault
     /// re-import.
+    ///
+    /// The previous implementation used `.usedToBelieve` (all of cluster B:
+    /// superseded=16, decayed=17, withdrawn=18, expired=19). That incorrectly
+    /// treated normal content-update predecessors as tombstones:
+    ///
+    ///   1. Import note (v1) → drawer1 (lineage L, state active)
+    ///   2. Import updated note (v2) → supersession cascade: drawer1 becomes
+    ///      (L, superseded), drawer2 created (L, active). Update succeeds.
+    ///   3. Import updated note (v3) → `usedToBelieve` returns drawer1 (L,
+    ///      superseded) → L in tombstone set → tombstone guard fires before
+    ///      the active-head / sensitivity-upgrade branch → `.skippedTombstoned`
+    ///      → update BLOCKED. Sensitivity raises after any content update
+    ///      were permanently blocked by the same false positive.
+    ///
+    /// Fix: restrict the cluster-B recall to `Filter.state(.withdrawn)` only —
+    /// the single state value that represents a deliberate operator retraction
+    /// with no active successor. Belt-and-suspenders: subtract `activeLineageIDs`
+    /// so a lineage cannot be simultaneously active and in the tombstone set,
+    /// guarding against any future cluster-B state that might also have
+    /// active successors.
+    ///
+    /// - Parameter activeLineageIDs: the set of lineages with a currently-
+    ///   believed active drawer, computed by `existingDrawerState` immediately
+    ///   before this call. Used as the subtraction mask.
     private func existingTombstonedLineageIDs(
-        handle: EstateHandle
+        handle: EstateHandle,
+        activeLineageIDs: Set<UUID>
     ) async throws -> Set<UUID> {
-        // Cluster B: withdrawn/superseded lineages (tombstonedAt == nil,
-        // state values 16..31). Visible to the recall pipeline via
-        // usedToBelieve. These have been deliberately withdrawn.
+        // Cluster B — withdrawn only (state = 18): explicit operator retraction.
+        //
+        // NOT .usedToBelieve (all of cluster B): superseded (16) is a normal
+        // content-update predecessor, decayed (17) is matrix-confidence decay,
+        // expired (19) is TTL expiry — all three can coexist with an active
+        // successor and must not block re-import. Only withdrawn (18) means
+        // "deliberately removed; do not resurface."
         let withdrawnDrawers = try await kit.recall(
             handle,
             RecallFrame(
-                filterChain: [.usedToBelieve],
+                filterChain: [.state(.withdrawn)],
                 hydrationLevel: .structured,
                 limit: 10_000_000
             )
         )
+        // Belt-and-suspenders: subtract the active-head set so a lineage can
+        // never be simultaneously active and tombstoned. This is a defence-in-
+        // depth guard — under the corrected .state(.withdrawn) filter no
+        // withdrawn lineage should have an active head; the subtraction guards
+        // against any edge case where that assumption is violated.
         let withdrawnIDs = Set(withdrawnDrawers.map(\.lineageID))
+            .subtracting(activeLineageIDs)
 
         // Cluster C: expunged/tombstoned lineages (tombstonedAt != nil,
         // state ≥ 32). Invisible to the recall pipeline. Reached via the

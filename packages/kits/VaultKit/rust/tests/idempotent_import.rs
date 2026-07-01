@@ -1,23 +1,26 @@
 //! Non-resurrection tests for the vault import guard.
 //!
 //! Mirrors Swift `VaultBridgeTests` `FINDING-1: content-idempotent +
-//! tombstone-aware import` section, covering both belief-cluster variants
-//! the import guard must block:
+//! tombstone-aware import` section, covering the deletion-state variants
+//! the import guard must block and the normal-update variant it must NOT block:
 //!
-//!   - **Cluster B (withdrawn):** drawer moved to `withdrawn` state via the
-//!     `withdraw` verb (`tombstoned_at IS NULL`, state = 18, surfaced by
-//!     `UsedToBelieve`). Re-import must not resurrect it.
+//!   - **Cluster B (withdrawn only):** drawer moved to `Withdrawn` state (18)
+//!     via the `withdraw` verb (`tombstoned_at IS NULL`). Detected by
+//!     `Filter::State(State::Withdrawn)`. Re-import must not resurrect it.
+//!     (Superseded/Decayed/Expired predecessors are NOT in the tombstone set —
+//!     see the b70cce13 fix and `normal_update_not_blocked_by_tombstone_set`.)
 //!
 //!   - **Cluster C (erased/tombstoned):** drawer permanently erased via the
 //!     `expunge` verb (`tombstoned_at IS NOT NULL`, state ≥ 32, invisible to
 //!     the recall pipeline). Re-import must not resurrect it. This is the gap
-//!     the prior fix (FINDING-1b) left open: `UsedToBelieve` only covers
+//!     the prior fix (FINDING-1b) left open: `UsedToBelieve` only covered
 //!     cluster B, not cluster C.
 //!
 //! The cluster C fix adds `EstateCoordinator::tombstoned_lineage_ids`, which
 //! uses `Estate::all_drawers()` — the only scan that includes tombstoned rows.
-//! `VaultBridge::existing_tombstoned_lineage_ids` now unions cluster B and
-//! cluster C so both are blocked.
+//! `VaultBridge::existing_tombstoned_lineage_ids` unions withdrawal (B) and
+//! cluster C so both deletion states are blocked while ordinary supersession
+//! predecessors are transparent to the guard.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -98,7 +101,7 @@ fn bridge(coord: &mut EstateCoordinator) -> VaultBridge<'_> {
     )
 }
 
-// MARK: - Cluster B: withdrawn (usedToBelieve)
+// MARK: - Cluster B: withdrawn (Filter::State(State::Withdrawn))
 
 /// Re-importing a note whose drawer was WITHDRAWN must not resurrect it.
 /// Mirrors Swift `reimportAfterWithdrawDoesNotResurrect`.
@@ -512,6 +515,84 @@ fn bulk_import_enqueued_for_encode_is_zero_without_corpus() {
     assert_eq!(
         report.enqueued_for_encode, 0,
         "no Corpus → enqueued_for_encode must be 0 (not an error)"
+    );
+
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+// MARK: - Security finding b70cce13: superseded predecessors must not block re-import
+
+/// A lineage that was superseded by a normal content update must NOT land in the
+/// tombstone set. The prior implementation used `Filter::UsedToBelieve` (all of
+/// cluster B: Superseded, Decayed, Withdrawn, Expired), which caused the tombstone
+/// guard to fire on any lineage that had ever been updated — blocking the THIRD
+/// import (and all subsequent ones) and preventing sensitivity raises after any
+/// content update.
+///
+/// Scenario (the b70cce13 attack surface):
+///   1. Import note v1   → drawer1 (lineage L, state Active)
+///   2. Import note v2   → supersession: drawer1 (L, Superseded), drawer2 (L, Active)
+///   3. Import note v3   → SHOULD be updated; MUST NOT be skipped as tombstoned
+///
+/// After the fix, the tombstone recall uses `Filter::State(State::Withdrawn)` only
+/// so ordinary superseded predecessors are invisible to the tombstone set.
+///
+/// Mirrors Swift `supersededLineageNotBlockedByTombstoneSet`.
+#[test]
+fn normal_update_not_blocked_by_tombstone_set() {
+    let (mut coord, handle) = open_one();
+
+    // Seed v1 and import it.
+    let vault = std::env::temp_dir()
+        .join(format!("vaultkit-tombstone-b70-{}", uuid::Uuid::new_v4()));
+    write_note(
+        &vault,
+        "Research/Note.md",
+        "---\nroom: research\n---\nVersion one of the note.\n",
+    );
+
+    // Step 1: import v1 — writes a new drawer (lineage L, Active).
+    let r1 = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("v1 import");
+    assert_eq!(r1.drawers_written, 1, "v1 must write a new drawer");
+    assert_eq!(r1.drawers_skipped_tombstoned, 0, "no tombstones yet");
+
+    // Step 2: import v2 (changed content) — supersession cascade fires.
+    // drawer1 → Superseded; drawer2 created as Active. Update must succeed.
+    write_note(
+        &vault,
+        "Research/Note.md",
+        "---\nroom: research\n---\nVersion two of the note — content has changed.\n",
+    );
+    let r2 = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("v2 import");
+    assert_eq!(r2.drawers_updated, 1, "v2 must supersede v1");
+    assert_eq!(
+        r2.drawers_skipped_tombstoned, 0,
+        "content update must not produce a tombstone skip"
+    );
+
+    // Step 3: import v3 (changed content again). Before the fix this was
+    // blocked because the Superseded drawer1 appeared in UsedToBelieve →
+    // tombstone guard fired on L → skipped_tombstoned instead of updated.
+    write_note(
+        &vault,
+        "Research/Note.md",
+        "---\nroom: research\n---\nVersion three of the note — second content update.\n",
+    );
+    let r3 = bridge(&mut coord)
+        .import_vault(&vault, &handle, NOW, None, genius_locus_kit::EncodeSpeed::Foreground)
+        .expect("v3 import");
+    assert_eq!(
+        r3.drawers_updated, 1,
+        "v3 must update (not be skipped as tombstoned); written={} updated={} tombstoned={}",
+        r3.drawers_written, r3.drawers_updated, r3.drawers_skipped_tombstoned
+    );
+    assert_eq!(
+        r3.drawers_skipped_tombstoned, 0,
+        "superseded predecessor must NOT land in tombstone set — b70cce13 fix"
     );
 
     let _ = std::fs::remove_dir_all(&vault);
