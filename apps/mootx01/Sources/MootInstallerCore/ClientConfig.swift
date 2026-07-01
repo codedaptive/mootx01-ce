@@ -9,15 +9,17 @@
 // Supported clients (11): Claude Desktop, Claude Code, Cursor, Cline, Continue,
 // Codex (Desktop & CLI), Opencode, Hermes, Gemini CLI, Antigravity, Kiro.
 //
-// Transport: clients are intentionally wired with stdio command entries by
-// default. The resident daemon still owns loopback HTTP for first-party
-// tooling, but installer-written third-party client configs must not trust a
-// fixed unauthenticated loopback URL that a local process can pre-bind.
+// Transport: every client uses native HTTP (supportsLocalHTTP: true) where
+// their config schema accepts a local HTTP url, or the proxy bridge
+// (useProxyBridge: true) where a stdio command entry is required. No client
+// uses bare stdio (isHeadlessStdio) — all clients have full monitoring.
 //
-// Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): the installer
-// supports HTTP, proxy, and stdio entry shapes, but supported clients default to
-// command entries unless an authenticated or ownership-proved HTTP transport is
-// available. The installed binary is reused, no Node.js or npx required.
+// Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): HTTP clients are
+// wired to the resident daemon's loopback endpoint so concurrent clients share
+// the one running daemon + autonomic governor. Claude Desktop uses the native proxy
+// subcommand (`mootx01 proxy`) so its calls execute inside
+// the resident daemon with full telemetry and single-writer semantics;
+// the installed binary is reused, no Node.js or npx required.
 //
 // Each client carries a `detectPath` that the installer probes before
 // touching any config. Clients not found on the machine are skipped,
@@ -89,9 +91,9 @@ public struct MCPClient: Sendable, Equatable {
     /// is invisible to moot-mgr. Use only for lightweight headless or embedded
     /// scenarios where the resident daemon is intentionally absent.
     ///
-    /// Supported clients that accept command entries use this mode rather than
-    /// trusting a fixed unauthenticated loopback URL in their config. This
-    /// property is the canonical name for the mode so future clients and their
+    /// No current entry in `MCPClients.supported` is in headless stdio mode
+    /// (all supported clients use HTTP or the proxy bridge). This property is
+    /// the canonical name for the mode so future headless clients and their
     /// tests can reference it explicitly.
     public var isHeadlessStdio: Bool {
         !supportsLocalHTTP && !useProxyBridge
@@ -244,11 +246,13 @@ public enum MCPClients {
     ///   Antigravity     → /Applications/Antigravity.app (macOS app bundle)
     ///   Kiro            → /Applications/Kiro.app (macOS app bundle)
     public static let supported: [MCPClient] = [
-        // Do not write fixed unauthenticated loopback URLs into third-party MCP
-        // client configs. A local low-privileged process can pre-bind the port
-        // and impersonate the resident daemon. Use command entries unless a
-        // client cannot support them, so the client starts the installed binary
-        // it was configured to trust.
+        // Transport per client (see ADR-LOOPBACKHTTP-001): clients are wired to the resident
+        // daemon over HTTP where their config schema accepts a local HTTP/url entry, so
+        // concurrent clients share the one running daemon + autonomic governor. Claude Desktop
+        // uses the native proxy subcommand (`mootx01 proxy`) — its
+        // config schema requires a stdio command entry, and the proxy routes each
+        // JSON-RPC frame through the resident daemon so telemetry fires and a single
+        // writer holds the estate (no second `mootx01 serve` process).
         MCPClient(
             id: "claude-desktop",
             displayName: "Claude Desktop",
@@ -269,7 +273,7 @@ public enum MCPClients {
             // Claude Code supports project-local MCP config via .mcp.json in
             // the project root. Other clients are global-only (nil).
             localConfigPath: ".mcp.json",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: true  // {"type":"http","url":...}
         ),
         MCPClient(
@@ -278,7 +282,7 @@ public enum MCPClients {
             configPath: ".cursor/mcp.json",
             serverName: serverName,
             detectPath: "/Applications/Cursor.app",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: false  // Cursor infers HTTP from a bare url
         ),
         MCPClient(
@@ -289,7 +293,7 @@ public enum MCPClients {
             // detectPath is the parent directory; isPresent enumerates it
             // for a saoudrizwan.claude-dev-* prefix (see isPresent implementation).
             detectPath: ".vscode/extensions",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: true  // {"type":"http","url":...}
         ),
         MCPClient(
@@ -298,7 +302,7 @@ public enum MCPClients {
             configPath: ".continue/mcpServers/mootx01.yaml",
             serverName: serverName,
             detectPath: ".continue",
-            supportsLocalHTTP: false
+            supportsLocalHTTP: true
         ),
 
         // Codex (Desktop & CLI) — Codex CLI and Codex Desktop share
@@ -312,7 +316,7 @@ public enum MCPClients {
             configPath: ".codex/config.toml",
             serverName: serverName,
             detectPath: ".codex",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: false  // TOML url field; no explicit type needed
         ),
 
@@ -329,7 +333,7 @@ public enum MCPClients {
             configPath: ".config/opencode/opencode.json",
             serverName: serverName,
             detectPath: ".config/opencode",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: true  // shape overridden in mergeIntoJSONConfig: {"type":"remote","url"}
         ),
 
@@ -345,7 +349,7 @@ public enum MCPClients {
             configPath: ".hermes/config.yaml",
             serverName: serverName,
             detectPath: ".hermes",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: false  // YAML url field; no explicit type needed
         ),
 
@@ -358,7 +362,7 @@ public enum MCPClients {
             configPath: ".gemini/settings.json",
             serverName: serverName,
             detectPath: ".gemini",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: false  // bare url field; Gemini CLI infers HTTP from url
         ),
 
@@ -372,7 +376,7 @@ public enum MCPClients {
             configPath: ".gemini/config/mcp_config.json",
             serverName: serverName,
             detectPath: "/Applications/Antigravity.app",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: false  // Antigravity uses "serverUrl" key (non-standard)
         ),
 
@@ -385,7 +389,7 @@ public enum MCPClients {
             configPath: ".kiro/settings/mcp.json",
             serverName: serverName,
             detectPath: "/Applications/Kiro.app",
-            supportsLocalHTTP: false,
+            supportsLocalHTTP: true,
             httpEntryIncludesType: false  // bare url field; Kiro accepts url for remote servers
         ),
     ]
