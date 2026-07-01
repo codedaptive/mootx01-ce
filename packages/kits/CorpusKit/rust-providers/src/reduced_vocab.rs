@@ -22,7 +22,9 @@
 use std::collections::HashMap;
 
 /// Default reduced-vocabulary cap K. Mirrors Swift `defaultReducedVocabCap`.
-pub const DEFAULT_REDUCED_VOCAB_CAP: usize = 2000;
+/// Dense SVD/ALS cost scales as ~K²·numDocs; 512 keeps a large-corpus reindex
+/// in the seconds range while far exceeding the providers' rank (LSA 64/NMF 32).
+pub const DEFAULT_REDUCED_VOCAB_CAP: usize = 512;
 
 /// A frozen reduced vocabulary: the ordered kept terms plus the maps to remap
 /// full-vocab TF rows to reduced columns at train time and query terms to

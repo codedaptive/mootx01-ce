@@ -25,10 +25,12 @@
 
 import Foundation
 
-/// Default reduced-vocabulary cap. A dense Jacobi SVD / NMF-ALS over ~2k columns
-/// is feasible on-device; the full vocabulary (tens of thousands of terms) is
-/// not (ADR-022). Parameterized so the quality optimizer can tune it.
-public let defaultReducedVocabCap: Int = 2000
+/// Default reduced-vocabulary cap. Dense Jacobi SVD / NMF-ALS cost scales as
+/// ~K²·numDocs, so K trades reindex latency against how many terms feed the
+/// latent factors. 512 keeps a large-corpus reindex in the seconds range while
+/// still giving far more input columns than the providers' rank (LSA 64 /
+/// NMF 32). Parameterized so the quality optimizer can tune it (ADR-022).
+public let defaultReducedVocabCap: Int = 512
 
 /// A frozen reduced vocabulary: the ordered kept terms plus the maps needed to
 /// (a) remap full-vocab TF rows to reduced columns at train time, and
