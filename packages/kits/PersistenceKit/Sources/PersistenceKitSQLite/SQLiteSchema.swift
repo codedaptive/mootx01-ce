@@ -148,6 +148,9 @@ enum SQLiteSchema {
       "after_qid" INTEGER NOT NULL,
       "actor" TEXT NOT NULL,
       "reason" TEXT,
+      "physical_time" INTEGER NOT NULL DEFAULT 0,
+      "logical_count" INTEGER NOT NULL DEFAULT 0,
+      "node_id" INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY ("event_id", "hlc")
     )
     """
