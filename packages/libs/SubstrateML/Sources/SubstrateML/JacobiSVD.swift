@@ -171,69 +171,87 @@ public enum JacobiSVD {
         // Each sweep visits every pair exactly once.
         // Fixed `sweeps` count ensures identical iteration counts on both
         // ports regardless of how quickly the matrix converges.
-        for _ in 0..<sweeps {
-            for p in 0..<(n - 1) {
-                for q in (p + 1)..<n {
-                    // Compute inner products for columns p and q.
-                    // alpha = <W[:,p], W[:,p]>, beta = <W[:,q], W[:,q]>
-                    // gamma = <W[:,p], W[:,q]>
-                    // All three use the same loop nest order as NMF's matMulFlat
-                    // so cross-port accumulation order matches.
-                    var alpha: Float = 0
-                    var beta:  Float = 0
-                    var gamma: Float = 0
-                    let pBase = p * m
-                    let qBase = q * m
-                    for i in 0..<m {
-                        let wp = W[pBase + i]
-                        let wq = W[qBase + i]
-                        alpha = alpha + wp * wp
-                        beta  = beta  + wq * wq
-                        gamma = gamma + wp * wq
-                    }
+        //
+        // PERF: the three inner loops below are the dominant cost of a dense
+        // reindex (O(sweeps · n² · m) float ops). Accessing `W`/`V` through
+        // bounds-checked `[Float]` subscripts prevents LLVM from
+        // auto-vectorizing these loops, leaving Swift ~100× behind the Rust
+        // port (whose `Vec<f32>` release build vectorizes freely) — enough to
+        // stall the encode drain on a large corpus. We take unsafe buffer
+        // pointers over W and V for the sweep so the arithmetic vectorizes.
+        // SAFETY: every index below is statically derived from the buffer
+        // dimensions the pointers were taken over — pBase/qBase ∈ {0,m,…,(n-1)m}
+        // with i ∈ 0..<m keeps pBase+i < n·m == W.count; vpBase/vqBase ∈
+        // {0,n,…,(n-1)n} with j ∈ 0..<n keeps vpBase+j < n·n == V.count. No
+        // index is derived from input data, so the bounds are provably in
+        // range and the checks the compiler would insert are pure overhead.
+        W.withUnsafeMutableBufferPointer { wBuf in
+            V.withUnsafeMutableBufferPointer { vBuf in
+                for _ in 0..<sweeps {
+                    for p in 0..<(n - 1) {
+                        for q in (p + 1)..<n {
+                            // Compute inner products for columns p and q.
+                            // alpha = <W[:,p], W[:,p]>, beta = <W[:,q], W[:,q]>
+                            // gamma = <W[:,p], W[:,q]>
+                            // All three use the same loop nest order as NMF's
+                            // matMulFlat so cross-port accumulation order matches.
+                            var alpha: Float = 0
+                            var beta:  Float = 0
+                            var gamma: Float = 0
+                            let pBase = p * m
+                            let qBase = q * m
+                            for i in 0..<m {
+                                let wp = wBuf[pBase + i]
+                                let wq = wBuf[qBase + i]
+                                alpha = alpha + wp * wp
+                                beta  = beta  + wq * wq
+                                gamma = gamma + wp * wq
+                            }
 
-                    // Check orthogonality: if gamma² ≤ eps² × alpha × beta
-                    // the columns are already orthogonal enough — skip the
-                    // rotation. This test is purely multiplicative, not
-                    // transcendental, so it diverges identically on both ports.
-                    let gammaAbs = gamma < 0 ? -gamma : gamma
-                    let threshold: Float = eps * (alpha < 0 ? -alpha : alpha).squareRoot() *
-                                                 (beta  < 0 ? -beta  : beta ).squareRoot()
-                    if gammaAbs <= threshold { continue }
+                            // Check orthogonality: if gamma² ≤ eps² × alpha × beta
+                            // the columns are already orthogonal enough — skip the
+                            // rotation. This test is purely multiplicative, not
+                            // transcendental, so it diverges identically on both ports.
+                            let gammaAbs = gamma < 0 ? -gamma : gamma
+                            let threshold: Float = eps * (alpha < 0 ? -alpha : alpha).squareRoot() *
+                                                         (beta  < 0 ? -beta  : beta ).squareRoot()
+                            if gammaAbs <= threshold { continue }
 
-                    // Compute the Jacobi rotation (c, s) that annihilates
-                    // the (p,q) off-diagonal entry of Wᵀ W.
-                    //
-                    //   ζ = (β − α) / (2γ)
-                    //   t = sign(ζ) / (|ζ| + sqrt(1 + ζ²))
-                    //   c = 1 / sqrt(1 + t²)
-                    //   s = c * t
-                    //
-                    // Using Float32 arithmetic throughout. Expression tree
-                    // is identical in Rust. Parenthesisation is explicit to
-                    // prevent compiler reordering.
-                    let (c, s) = jacobiCS(alpha: alpha, beta: beta, gamma: gamma)
+                            // Compute the Jacobi rotation (c, s) that annihilates
+                            // the (p,q) off-diagonal entry of Wᵀ W.
+                            //
+                            //   ζ = (β − α) / (2γ)
+                            //   t = sign(ζ) / (|ζ| + sqrt(1 + ζ²))
+                            //   c = 1 / sqrt(1 + t²)
+                            //   s = c * t
+                            //
+                            // Using Float32 arithmetic throughout. Expression tree
+                            // is identical in Rust. Parenthesisation is explicit to
+                            // prevent compiler reordering.
+                            let (c, s) = jacobiCS(alpha: alpha, beta: beta, gamma: gamma)
 
-                    // Apply the rotation to columns p and q of W:
-                    //   W'[:,p] = c * W[:,p] - s * W[:,q]
-                    //   W'[:,q] = s * W[:,p] + c * W[:,q]
-                    // In-place: compute new W[:,p] first using a temp, then W[:,q].
-                    for i in 0..<m {
-                        let wp = W[pBase + i]
-                        let wq = W[qBase + i]
-                        W[pBase + i] = c * wp - s * wq
-                        W[qBase + i] = s * wp + c * wq
-                    }
+                            // Apply the rotation to columns p and q of W:
+                            //   W'[:,p] = c * W[:,p] - s * W[:,q]
+                            //   W'[:,q] = s * W[:,p] + c * W[:,q]
+                            // In-place: compute new W[:,p] first using a temp, then W[:,q].
+                            for i in 0..<m {
+                                let wp = wBuf[pBase + i]
+                                let wq = wBuf[qBase + i]
+                                wBuf[pBase + i] = c * wp - s * wq
+                                wBuf[qBase + i] = s * wp + c * wq
+                            }
 
-                    // Apply the same rotation to V (accumulates Vᵀ row-by-row
-                    // but stored column-major here, so V[:,p] and V[:,q]).
-                    let vpBase = p * n
-                    let vqBase = q * n
-                    for j in 0..<n {
-                        let vp = V[vpBase + j]
-                        let vq = V[vqBase + j]
-                        V[vpBase + j] = c * vp - s * vq
-                        V[vqBase + j] = s * vp + c * vq
+                            // Apply the same rotation to V (accumulates Vᵀ row-by-row
+                            // but stored column-major here, so V[:,p] and V[:,q]).
+                            let vpBase = p * n
+                            let vqBase = q * n
+                            for j in 0..<n {
+                                let vp = vBuf[vpBase + j]
+                                let vq = vBuf[vqBase + j]
+                                vBuf[vpBase + j] = c * vp - s * vq
+                                vBuf[vqBase + j] = s * vp + c * vq
+                            }
+                        }
                     }
                 }
             }
