@@ -573,6 +573,36 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
             None,
         ));
     }
+
+    // Q-ID pointer → its own O/T coordinate. The UDC code alone collapses to a
+    // uniform class ("Knowledge") for most prose, so co-occurrence and temporal
+    // causality gain no per-content structure from it. The Q-ID is the varied
+    // per-content concept the FDC classifier resolved, so emit it as a distinct
+    // coordinate. Gated on a non-null Q-ID (pointer != 0) so content without a
+    // resolved concept adds no uniform-zero coordinate. Mirrors Swift AuditBridge.
+    let after_qid = event.after_lattice_anchor.qid_pointer;
+    let before_qid = event.before_lattice_anchor.map(|a| a.qid_pointer);
+    if before_qid != Some(after_qid) && (after_qid != 0 || before_qid.unwrap_or(0) != 0) {
+        let before_value = match before_qid {
+            Some(bq) if bq != 0 => UnifiedAuditValue::Integer(bq as i64),
+            _ => UnifiedAuditValue::Null,
+        };
+        let after_value = if after_qid != 0 {
+            UnifiedAuditValue::Integer(after_qid as i64)
+        } else {
+            UnifiedAuditValue::Null
+        };
+        entries.push(UnifiedAuditEntry::new(
+            AuditTier::Locus,
+            event.hlc,
+            unified_verb,
+            entry_uuid,
+            "wikidataQID".to_string(),
+            before_value,
+            after_value,
+            None,
+        ));
+    }
     entries
 }
 

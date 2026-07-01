@@ -383,6 +383,8 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "after_provenance" INTEGER NOT NULL,
   "before_lattice_anchor" INTEGER,
   "after_lattice_anchor" INTEGER NOT NULL,
+  "before_lattice_qid" INTEGER,
+  "after_lattice_qid" INTEGER NOT NULL DEFAULT 0,
   "actor" TEXT NOT NULL,
   "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
@@ -2128,13 +2130,15 @@ fn audit_binds(e: &AuditEvent) -> Vec<SqlValue> {
         SqlValue::Integer(e.after_provenance),
         opt_int(e.before_lattice_anchor.map(|v| v as i64)),
         SqlValue::Integer(e.after_lattice_anchor as i64),
+        opt_int(e.before_lattice_qid.map(|v| v as i64)),
+        SqlValue::Integer(e.after_lattice_qid as i64),
         SqlValue::Text(e.actor.clone()),
         // reason: None persists as NULL; Some(s) persists as TEXT.
         e.reason.as_deref().map(|s| SqlValue::Text(s.to_string())).unwrap_or(SqlValue::Null),
     ]
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","actor","reason""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","before_lattice_qid","after_lattice_qid","actor","reason""#;
 
 /// Decode one audit row from rusqlite into an AuditEvent.
 ///
@@ -2170,9 +2174,11 @@ fn decode_audit(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
         after_provenance: row.get(13)?,
         before_lattice_anchor: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
         after_lattice_anchor: row.get::<_, i64>(15)? as u64,
-        actor: row.get(16)?,
-        // reason at column index 17; NULL reads back as None.
-        reason: row.get::<_, Option<String>>(17)?,
+        before_lattice_qid: row.get::<_, Option<i64>>(16)?.map(|v| v as u64),
+        after_lattice_qid: row.get::<_, i64>(17)? as u64,
+        actor: row.get(18)?,
+        // reason at column index 19; NULL reads back as None.
+        reason: row.get::<_, Option<String>>(19)?,
     })
 }
 
@@ -2181,8 +2187,8 @@ impl AuditLog for SqliteAuditLog {
         let guard = self.inner.lock().unwrap();
         let sql = format!(
             "INSERT INTO \"_storagekit_audit\" ({AUDIT_COLS}) VALUES ({}) ON CONFLICT(\"event_id\",\"hlc\") DO NOTHING",
-            // 18 columns: original 17 + reason
-            vec!["?"; 18].join(", ")
+            // 20 columns: original 17 + reason + before/after lattice qid
+            vec!["?"; 20].join(", ")
         );
         guard
             .conn

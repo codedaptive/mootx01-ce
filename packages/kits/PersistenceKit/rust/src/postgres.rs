@@ -212,6 +212,8 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "after_provenance" BIGINT NOT NULL,
   "before_lattice_anchor" BIGINT,
   "after_lattice_anchor" BIGINT NOT NULL,
+  "before_lattice_qid" BIGINT,
+  "after_lattice_qid" BIGINT NOT NULL DEFAULT 0,
   "actor" TEXT NOT NULL,
   "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
@@ -1716,8 +1718,8 @@ struct TxAuditLog {
 impl AuditLog for TxAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut guard = self.conn.lock().unwrap();
-        // 18 columns: original 17 + reason
-        let ph = (1..=18)
+        // 20 columns: original 17 + reason + before/after lattice qid
+        let ph = (1..=20)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -2322,7 +2324,7 @@ struct PgAuditLog {
     pool: Arc<Pool>,
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","actor","reason""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","before_lattice_qid","after_lattice_qid","actor","reason""#;
 
 fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
     vec![
@@ -2342,6 +2344,8 @@ fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
         Box::new(e.after_provenance),
         Box::new(e.before_lattice_anchor.map(|v| v as i64)),
         Box::new(e.after_lattice_anchor as i64),
+        Box::new(e.before_lattice_qid.map(|v| v as i64)),
+        Box::new(e.after_lattice_qid as i64),
         Box::new(e.actor.clone()),
         // reason: None persists as NULL; Some(s) persists as TEXT.
         Box::new(e.reason.clone()),
@@ -2391,17 +2395,19 @@ fn decode_audit(row: &postgres::Row) -> StorageResult<AuditEvent> {
         after_provenance: row.get(13),
         before_lattice_anchor: row.get::<_, Option<i64>>(14).map(|v| v as u64),
         after_lattice_anchor: row.get::<_, i64>(15) as u64,
-        actor: row.get(16),
-        // reason at column index 17; NULL reads back as None.
-        reason: row.get(17),
+        before_lattice_qid: row.get::<_, Option<i64>>(16).map(|v| v as u64),
+        after_lattice_qid: row.get::<_, i64>(17) as u64,
+        actor: row.get(18),
+        // reason at column index 19; NULL reads back as None.
+        reason: row.get(19),
     })
 }
 
 impl AuditLog for PgAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut conn = self.pool.checkout()?;
-        // 18 columns: original 17 + reason
-        let ph = (1..=18)
+        // 20 columns: original 17 + reason + before/after lattice qid
+        let ph = (1..=20)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");

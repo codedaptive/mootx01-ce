@@ -756,7 +756,13 @@ impl DrawerStoreCore {
             }
         }
 
-        let anchor = substrate_lib::verbs::LatticeAnchor::udc(&drawer.udc_code);
+        // Carry the drawer's varied Q-ID into the sealed anchor (not just the
+        // often-uniform UDC class) so the matrix O/T lanes get per-content signal.
+        // Mirrors Swift DrawerStore capture seal.
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc_qid(
+            &drawer.udc_code,
+            drawer.wikidata_qid.as_deref().unwrap_or(""),
+        );
         let stamp = self.hlc.lock().unwrap().send(now * 1000);
 
         let event = audit_gate::admit(
@@ -5572,6 +5578,8 @@ fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
         after_provenance: e.after_bitmaps.2,
         before_lattice_anchor: e.before_lattice_anchor.map(|a| a.udc_code),
         after_lattice_anchor: e.after_lattice_anchor.udc_code,
+        before_lattice_qid: e.before_lattice_anchor.map(|a| a.qid_pointer),
+        after_lattice_qid: e.after_lattice_anchor.qid_pointer,
         actor: e.actor.clone(),
         // reason is threaded from the verb call site through the substrate
         // AuditEvent and forwarded here to PersistenceKit's flat type.
@@ -5602,10 +5610,13 @@ pub(crate) fn substrate_audit_event_from(e: &PkAuditEvent) -> substrate_lib::ver
         verb: e.verb.clone(),
         before_bitmaps: before,
         after_bitmaps: (e.after_adjective, e.after_operational, e.after_provenance),
-        before_lattice_anchor: e
-            .before_lattice_anchor
-            .map(|a| substrate_lib::verbs::LatticeAnchor::new(a, 0)),
-        after_lattice_anchor: substrate_lib::verbs::LatticeAnchor::new(e.after_lattice_anchor, 0),
+        before_lattice_anchor: e.before_lattice_anchor.map(|a| {
+            substrate_lib::verbs::LatticeAnchor::new(a, e.before_lattice_qid.unwrap_or(0))
+        }),
+        after_lattice_anchor: substrate_lib::verbs::LatticeAnchor::new(
+            e.after_lattice_anchor,
+            e.after_lattice_qid,
+        ),
         actor: e.actor.clone(),
         // reason is threaded back through the bridge for full round-trip fidelity.
         reason: e.reason.clone(),

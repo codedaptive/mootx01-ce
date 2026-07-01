@@ -290,7 +290,7 @@ fn audit_log_idempotent_on_duplicate_event() {
         after_operational: 0x02,
         after_provenance: 0x03,
         before_lattice_anchor: None,
-        after_lattice_anchor: 0,
+        after_lattice_anchor: 0, before_lattice_qid: None, after_lattice_qid: 0,
         actor: "test".into(),
         reason: None,
     };
@@ -324,7 +324,7 @@ fn audit_log_iterate_orders_by_hlc() {
             after_operational: 0,
             after_provenance: 0,
             before_lattice_anchor: None,
-            after_lattice_anchor: 0,
+            after_lattice_anchor: 0, before_lattice_qid: None, after_lattice_qid: 0,
             actor: "test".into(),
             reason: None,
         })

@@ -43,6 +43,13 @@ pub struct AuditEvent {
     pub after_provenance: i64,
     pub before_lattice_anchor: Option<u64>,
     pub after_lattice_anchor: u64,
+    /// Q-ID pointer of the lattice anchor (0 = null). Stored alongside the
+    /// UDC code so the varied per-content concept survives the round trip —
+    /// without it the matrix O/T lanes collapse to the uniform UDC class.
+    /// Swift's PersistenceKit reuses the substrate LatticeAnchor (udc + qid),
+    /// so these fields bring the Rust flat type to the same fidelity.
+    pub before_lattice_qid: Option<u64>,
+    pub after_lattice_qid: u64,
     pub actor: String,
     /// Human-readable reason for the mutation, persisted in the `reason`
     /// column of `_storagekit_audit`. None when the caller supplied no

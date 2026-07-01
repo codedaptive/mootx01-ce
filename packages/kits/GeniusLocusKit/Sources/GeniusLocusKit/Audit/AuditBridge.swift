@@ -118,6 +118,29 @@ enum AuditBridge {
                 originRowID: nil
             ))
         }
+
+        // Q-ID pointer → its own O/T coordinate. The UDC code alone collapses
+        // to a uniform class ("Knowledge") for most prose, so co-occurrence and
+        // temporal causality gain no per-content structure from it. The Q-ID is
+        // the varied per-content concept the FDC classifier resolved, so emit it
+        // as a distinct coordinate. Gated on a non-null Q-ID (pointer != 0) so
+        // content without a resolved concept adds no uniform-zero coordinate.
+        let afterQid = event.afterLatticeAnchor.qidPointer
+        let beforeQid = event.beforeLatticeAnchor?.qidPointer
+        if beforeQid != afterQid && (afterQid != 0 || (beforeQid ?? 0) != 0) {
+            entries.append(UnifiedAuditEntry(
+                tier: .locus,
+                hlc: event.hlc,
+                verb: unifiedVerb,
+                rowID: event.rowId,
+                fieldPath: "wikidataQID",
+                beforeValue: (beforeQid ?? 0) != 0
+                    ? .integer(Int64(bitPattern: beforeQid!)) : .null,
+                afterValue: afterQid != 0
+                    ? .integer(Int64(bitPattern: afterQid)) : .null,
+                originRowID: nil
+            ))
+        }
         return entries
     }
 
