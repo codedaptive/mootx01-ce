@@ -1175,9 +1175,18 @@ fn run_fact_search(
     // `has_corpus` is a cheap registry lookup — no I/O — so it is safe to call
     // under the same lock acquisition before the recall call.
     let dense_lane_dark = !coord.has_corpus(&estate.handle);
-    let facts = coord
+    let facts_raw = coord
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+
+    // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
+    // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
+    // that normal recall applies via insert_defaults. Filter at the ARIA tool boundary
+    // only — recall_kg_facts has internal callers that need the full set.
+    let facts: Vec<_> = facts_raw
+        .into_iter()
+        .filter(|f| f.adjective_sensitivity().is_bulk_exportable())
+        .collect();
 
     let matches: Vec<_> = facts
         .iter()
@@ -1189,6 +1198,32 @@ fn run_fact_search(
             }
         })
         .collect();
+
+    // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are about
+    // to emit, check whether it references an actual drawer row in the estate. If it does
+    // AND that drawer is Restricted/Secret (outside the default sensitivity ceiling), hide
+    // the ID at the MCP boundary. If it is NOT a drawer row (e.g. a server identity string
+    // such as "mootx01" or "aria-mcp-server"), pass it through — it carries provenance
+    // metadata, not a confidential drawer reference. Parity with Swift runFactSearch.
+    let hidden_source_ids: std::collections::HashSet<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let unique_source_ids: Vec<String> = matches
+            .iter()
+            .map(|f| f.source_drawer_id.clone())
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        let mut hidden = std::collections::HashSet::new();
+        for id in &unique_source_ids {
+            // Probe the raw store (bypasses frame filter) to determine whether this ID is a
+            // real drawer. If it is and falls outside the ceiling, suppress it.
+            if let Ok(Some(drawer)) = estate.store.get_drawer(id) {
+                if !drawer.adjective_sensitivity().is_bulk_exportable() {
+                    hidden.insert(id.clone());
+                }
+            }
+        }
+        hidden
+    };
 
     let header = if let Some(q) = query {
         format!("facts matching \"{q}\": {}", matches.len())
@@ -1202,11 +1237,19 @@ fn run_fact_search(
     let mut lines = vec![header];
     for f in &matches {
         let filed_iso = epoch_to_iso8601(f.filed_at);
-        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<id>".
-        // Double space after id, no leading indent, no dash separator — matches Swift exactly.
+        // Gate source= on source-drawer sensitivity: hide only when the source drawer
+        // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
+        // (server identity, custom tags) are not in hidden_source_ids and pass through.
+        let source_field = if hidden_source_ids.contains(&f.source_drawer_id) {
+            "source=<hidden>".to_string()
+        } else {
+            format!("source={}", f.source_drawer_id)
+        };
+        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<id|hidden>".
+        // Double space after id, no leading indent, no dash separator.
         lines.push(format!(
-            "{}  [{}] {} [{}]  filed={}  source={}",
-            f.id, f.subject, f.predicate, f.object, filed_iso, f.source_drawer_id
+            "{}  [{}] {} [{}]  filed={}  {}",
+            f.id, f.subject, f.predicate, f.object, filed_iso, source_field
         ));
     }
     // Dark-lane hint: when a query was supplied and the dense lane is dark (no
@@ -1367,6 +1410,37 @@ fn run_fact_timeline(
     // Sort here to be defensive in case backends return unordered rows.
     facts.sort_by_key(|f| f.filed_at);
 
+    // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
+    // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
+    // that normal recall applies via insert_defaults. Filter at the ARIA tool boundary
+    // only — recall_kg_fact_timeline has internal callers that need the full set.
+    facts.retain(|f| f.adjective_sensitivity().is_bulk_exportable());
+
+    // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are about
+    // to emit (capped at 200), check whether it references an actual drawer row in the
+    // estate. If it does AND that drawer is Restricted/Secret (outside the default
+    // sensitivity ceiling), hide the ID at the MCP boundary. Non-drawer provenance strings
+    // (e.g. server identity tags) are not in the store and pass through unchanged.
+    // Parity with Swift runFactTimeline.
+    let hidden_source_ids: std::collections::HashSet<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let unique_source_ids: Vec<String> = facts
+            .iter()
+            .take(200)
+            .map(|f| f.source_drawer_id.clone())
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        let mut hidden = std::collections::HashSet::new();
+        for id in &unique_source_ids {
+            if let Ok(Some(drawer)) = estate.store.get_drawer(id) {
+                if !drawer.adjective_sensitivity().is_bulk_exportable() {
+                    hidden.insert(id.clone());
+                }
+            }
+        }
+        hidden
+    };
+
     let header = if let Some(e) = entity_raw {
         format!("fact timeline for \"{e}\": {}", facts.len())
     } else {
@@ -1375,16 +1449,23 @@ fn run_fact_timeline(
 
     let mut lines = vec![header];
     // Cap at 200 rows matching the Swift port.
-    // Include source_drawer_id for provenance tracing (mirrors Swift runFactTimeline
-    // which adds sourceDrawerID in the same Part 6 change).
+    // Include source_drawer_id for provenance tracing, gated on source-drawer admissibility.
     for f in facts.iter().take(200) {
         let lifecycle_tag = lifecycle_tag_for_adjective_bitmap(f.adjective_bitmap);
         // Emit ISO8601 timestamps to match the Swift port's output format.
         // filed_at is epoch seconds; format as UTC RFC3339 / ISO8601.
         let filed_iso = epoch_to_iso8601(f.filed_at);
+        // Gate source= on source-drawer sensitivity: hide only when the source drawer
+        // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
+        // (server identity, custom tags) are not in hidden_source_ids and pass through.
+        let source_field = if hidden_source_ids.contains(&f.source_drawer_id) {
+            "source=<hidden>".to_string()
+        } else {
+            format!("source={}", f.source_drawer_id)
+        };
         lines.push(format!(
-            "{}  {}  {}  [{}] {} [{}]  source={}",
-            filed_iso, lifecycle_tag, f.id, f.subject, f.predicate, f.object, f.source_drawer_id
+            "{}  {}  {}  [{}] {} [{}]  {}",
+            filed_iso, lifecycle_tag, f.id, f.subject, f.predicate, f.object, source_field
         ));
     }
     Ok(text_result(&lines.join("\n")))
