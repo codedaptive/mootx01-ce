@@ -85,6 +85,64 @@ pub fn build_encoder_bag(
     build_bag(text, lexicon, table, &[WordClass::Noun, WordClass::Verb])
 }
 
+/// Build the concept bag for `text` without recording novel-token results into
+/// the pool cache (secfix/fdc-pool).
+///
+/// Identical to `build_bag` except that novel tokens (table misses) classified
+/// by `table.word_class_no_record` are NOT accumulated into `SHARED_NOVEL_CACHE`.
+/// Use this when `text` is user-supplied memory content that must not leak
+/// plaintext tokens into the pool pipeline — specifically the FDC anchor-encode
+/// path inside `FdcMatcher::encode_anchor_no_record` and `Fdc::encode_anchor_no_record`,
+/// called from `capture_with_mode` in GeniusLocusKit's `intake.rs`.
+///
+/// The concept bag result is byte-identical to `build_bag`; only the pool
+/// accumulation side effect is suppressed.
+///
+/// Mirrors Swift `BagBuilder.bag(_:lexicon:keep:recordNovel:false)`.
+pub fn build_bag_no_record(
+    text: &str,
+    lexicon: &CanonicalizationLexicon,
+    table: &WordClassTableCache,
+    keep_classes: &[WordClass],
+) -> ConceptBag {
+    let mut bag: ConceptBag = HashMap::new();
+
+    for token in tokenize(text) {
+        // Step 2: canonicalize (normalize + stem), then lexicon lookup.
+        let key = stem(&normalize(&token));
+        if key.is_empty() {
+            continue;
+        }
+        let concept: Option<&str> = lexicon.lookup(&key);
+
+        // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR Q-ID concepts.
+        let is_qid = concept.map(|c| c.starts_with('Q')).unwrap_or(false);
+        // Non-recording classify: result is identical to word_class; only the
+        // SHARED_NOVEL_CACHE.record side effect is omitted for novel tokens.
+        let wc = table.word_class_no_record(&token);
+        if !keep_classes.contains(&wc) && !is_qid {
+            continue;
+        }
+
+        // Step 3: accumulate (hit -> conceptID; miss kept via POS -> surface).
+        let bag_key = concept.unwrap_or(&key).to_owned();
+        *bag.entry(bag_key).or_insert(0) += 1;
+    }
+
+    bag
+}
+
+/// Convenience: build a non-recording bag with the default encoder keep classes
+/// (noun + verb). Mirrors Swift `BagBuilder.bag(_:lexicon:recordNovel: false)`
+/// when called from `FDCMatcher.encodeAnchor(_:recordNovel: false)`.
+pub fn build_encoder_bag_no_record(
+    text: &str,
+    lexicon: &CanonicalizationLexicon,
+    table: &WordClassTableCache,
+) -> ConceptBag {
+    build_bag_no_record(text, lexicon, table, &[WordClass::Noun, WordClass::Verb])
+}
+
 /// Build the concept bag with an explicit novel-token tagger choice (Layer-2a).
 ///
 /// Identical to `build_bag` except novel tokens (table misses) are classified

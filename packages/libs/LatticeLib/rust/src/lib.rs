@@ -48,7 +48,7 @@ pub mod qid_closure;
 
 pub use fdc_runtime::Fdc;
 pub use fdc_matcher::FdcMatcher;
-pub use concept_bag::{build_bag, build_bag_with_tagger, build_encoder_bag_with_tagger};
+pub use concept_bag::{build_bag, build_bag_with_tagger, build_encoder_bag_with_tagger, build_bag_no_record, build_encoder_bag_no_record};
 pub use lexicon::CanonicalizationLexicon;
 pub use fdc_frame::{FdcFrame, FdcEntry};
 pub use word_class::{WordClass, NovelTokenTaggerChoice};
@@ -60,8 +60,8 @@ pub use novel_token_cache::{
 pub use novel_pool_submitter::{local_dir_submitter, default_submitter, default_pool_dir, default_table_artifact};
 pub use word_class_table::{
     load_with_precedence as table_load_with_precedence, load_writable_table, BUNDLED_TABLE_JSON,
-    global_table, table_version, word_class, swap_global_table, swap_global_table_from_precedence,
-    seed_global_table, WordClassTableCache,
+    global_table, table_version, word_class, word_class_no_record, swap_global_table,
+    swap_global_table_from_precedence, seed_global_table, WordClassTableCache,
 };
 pub use pool_reducer::{reduce as pool_reduce, PoolReduceResult, PoolReducerError};
 // The Q-ID taxonomic-closure surface (mission #7b): transitive P31/P279

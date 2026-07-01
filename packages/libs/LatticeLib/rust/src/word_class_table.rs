@@ -175,6 +175,38 @@ impl WordClassTableCache {
         tagged
     }
 
+    /// Classify a token without recording the novel-token result into the pool
+    /// cache (secfix/fdc-pool).
+    ///
+    /// Identical fast-path to `word_class`: verb-before-noun table lookup,
+    /// constant time. For novel tokens (table misses), classifies via the
+    /// deterministic HMM tagger (`hmm_tag`) but does NOT call
+    /// `SHARED_NOVEL_CACHE.record` — so user-memory content tokens do not
+    /// accumulate in the plaintext pool pipeline.
+    ///
+    /// Mirrors Swift `LatticeLib.wordClass(_:recordNovel: false)`.
+    ///
+    /// Used by the FDC anchor-encode path: `build_encoder_bag_no_record` →
+    /// `FdcMatcher::encode_anchor_no_record` → `Fdc::encode_anchor_no_record`
+    /// → `capture_with_mode` in `intake.rs`.
+    pub fn word_class_no_record(&self, token: &str) -> WordClass {
+        let lowered = token.to_lowercase();
+        if lowered.is_empty() {
+            return WordClass::Other;
+        }
+        // Fast path: table lookup (verb first, matching Swift ordering).
+        if self.verb_set.contains(&lowered) {
+            return WordClass::Verb;
+        }
+        if self.noun_set.contains(&lowered) {
+            return WordClass::Noun;
+        }
+        // Novel token: HMM classify, no pool accumulation.
+        // The tag result is byte-identical to word_class; only the
+        // SHARED_NOVEL_CACHE.record side effect is omitted.
+        hmm_tag(&lowered)
+    }
+
     /// Classify a token using an explicit novel-token tagger choice (Layer-2a).
     ///
     /// Identical fast-path to `word_class`: verb-before-noun table lookup,
@@ -295,4 +327,14 @@ pub fn swap_global_table_from_precedence(artifact_path: &Path) -> Option<u64> {
 /// it reads through the live holder so a post-reduce swap is observed in-session.
 pub fn word_class(token: &str) -> WordClass {
     global_table().word_class(token)
+}
+
+/// Classify a single token without recording novel-token results into the pool
+/// cache (secfix/fdc-pool). Reads the LIVE process-global table (same as
+/// `word_class`) but omits the `SHARED_NOVEL_CACHE.record` call for novel tokens.
+///
+/// Mirrors Swift `LatticeLib.wordClass(_:recordNovel: false)`. Used by the
+/// FDC anchor-encode path inside `build_encoder_bag_no_record`.
+pub fn word_class_no_record(token: &str) -> WordClass {
+    global_table().word_class_no_record(token)
 }

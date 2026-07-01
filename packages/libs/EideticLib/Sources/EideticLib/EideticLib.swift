@@ -94,6 +94,53 @@ public enum EideticLib {
             dataVersion: FDC.dataVersion
         )
     }
+
+    /// Non-recording variant of `lookup` (secfix/fdc-pool).
+    ///
+    /// Identical result to `lookup(_:)` — the Anchor (code, Q-ID, confidence,
+    /// dataVersion) is byte-for-byte the same. Novel tokens encountered during
+    /// FDC concept-bag construction are NOT accumulated into LatticeLib's
+    /// `sharedNovelCache` when `recordNovel: false` is passed.
+    ///
+    /// Use this overload when `term` is user-supplied memory content that must
+    /// not leak plaintext tokens into the pool pipeline. The GLK capture seam
+    /// (`EncodeIntake`) calls this with `recordNovel: false` so that content
+    /// classified at capture time never reaches the pool submitter — even if
+    /// `LATTICE_POOL_DIR` is configured. A rejected or sensitive capture (e.g.
+    /// content that files to an empty room) leaks nothing because classification
+    /// runs here, before the capture write, and accumulation is suppressed.
+    ///
+    /// Delegates to `FDC.encodeAnchor(_:recordNovel:)` →
+    /// `FDCMatcher.encodeAnchor(_:recordNovel:)` →
+    /// `BagBuilder.bag(_:lexicon:keep:recordNovel:)` →
+    /// `LatticeLib.wordClass(_:recordNovel:)`.
+    ///
+    /// Mirrors Rust `Fdc::encode_anchor_no_record` called from `intake.rs`.
+    public static func lookup(_ term: String, recordNovel: Bool) -> Anchor {
+        guard FDC.isAvailable else {
+            fatalError(
+                "EideticLib: FDC artifacts failed to load — " +
+                "build/configuration error. The bundled canon is missing " +
+                "from this binary. No anchor can be produced. Fix the build."
+            )
+        }
+
+        let (code, qid) = FDC.encodeAnchor(term, recordNovel: recordNovel)
+        guard let code else {
+            return Anchor(
+                code: "",
+                wikidataQID: nil,
+                confidence: 0,
+                dataVersion: FDC.dataVersion
+            )
+        }
+        return Anchor(
+            code: code,
+            wikidataQID: qid,
+            confidence: 32,
+            dataVersion: FDC.dataVersion
+        )
+    }
 }
 
 /// The result of a EideticLib lookup. Pure data, byte-identical

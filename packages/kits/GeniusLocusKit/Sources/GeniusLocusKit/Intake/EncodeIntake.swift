@@ -108,7 +108,14 @@ public extension GeniusLocusKit {
                   !frame.content.isEmpty else {
                 return frame
             }
-            let anchor = EideticLib.lookup(frame.content)
+            // recordNovel: false — user-memory content must not leak novel tokens
+            // into the plaintext pool pipeline (secfix/fdc-pool). The FDC code and
+            // Q-ID are byte-identical to the recording path; only pool accumulation
+            // is suppressed. Even a rejected or sensitivity-gated capture (content
+            // that fails validation after this point) leaks nothing because
+            // classification runs before the write and recording is suppressed here.
+            // Rust parity: capture_with_mode calls Fdc::encode_anchor_no_record.
+            let anchor = EideticLib.lookup(frame.content, recordNovel: false)
             guard !anchor.code.isEmpty else {
                 // UNRESOLVED: content could not be classified. Leave sentinel.
                 return frame
@@ -213,7 +220,10 @@ public extension GeniusLocusKit {
                   !frame.content.isEmpty else {
                 return frame
             }
-            let anchor = EideticLib.lookup(frame.content)
+            // recordNovel: false — batch import content must not leak novel tokens
+            // into the plaintext pool pipeline (secfix/fdc-pool, same rationale as
+            // the single-frame capture path above).
+            let anchor = EideticLib.lookup(frame.content, recordNovel: false)
             guard !anchor.code.isEmpty else {
                 // UNRESOLVED: content could not be classified. Leave sentinel.
                 return frame

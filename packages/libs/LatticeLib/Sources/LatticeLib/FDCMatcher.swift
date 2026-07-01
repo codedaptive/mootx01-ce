@@ -196,6 +196,41 @@ public struct FDCMatcher: Sendable {
     /// so EideticLib fills an Anchor's code + wikidataQID without re-bagging.
     public func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
         let bag = BagBuilder.bag(text, lexicon: lexicon)
+        return encodeFromBag(bag)
+    }
+
+    /// Non-recording variant of `encodeAnchor` (secfix/fdc-pool).
+    ///
+    /// Identical classification result to `encodeAnchor(_:)` — the FDC code
+    /// and concept Q-ID are byte-for-byte the same. The only difference is that
+    /// novel tokens encountered while building the concept bag are NOT accumulated
+    /// into `sharedNovelCache`. Use this overload when `text` is user-supplied
+    /// memory content that must not leak into the plaintext pool pipeline.
+    ///
+    /// Pass `recordNovel: false` to suppress accumulation. Pass `recordNovel: true`
+    /// (or call the single-arg overload) to use the standard recording path.
+    ///
+    /// Mirrors Rust `FdcMatcher::encode_anchor_no_record` in fdc_matcher.rs.
+    public func encodeAnchor(_ text: String, recordNovel: Bool) -> (code: String?, conceptQID: String?) {
+        if recordNovel {
+            // Delegate to the recording path — identical behaviour, no duplication.
+            return encodeAnchor(text)
+        }
+        // Non-recording: build bag via the non-recording BagBuilder overload so
+        // novel user-memory tokens never accumulate in sharedNovelCache.
+        let bag = BagBuilder.bag(text, lexicon: lexicon, recordNovel: false)
+        return encodeFromBag(bag)
+    }
+
+    /// Score a pre-built concept bag against the FDC signatures (Steps 4–5) and
+    /// return the best matching code + dominant Q-ID.
+    ///
+    /// The bag must be fully constructed before calling this method; whether
+    /// novel-token classification was recorded into the pool cache is the
+    /// caller's responsibility. Both `encodeAnchor(_:)` and
+    /// `encodeAnchor(_:recordNovel:)` delegate here so the scoring logic lives
+    /// in exactly one place.
+    private func encodeFromBag(_ bag: ConceptBag) -> (code: String?, conceptQID: String?) {
         let qid = dominantQID(bag)              // independent of whether a code matches
         guard !bag.isEmpty else { return (nil, qid) }
 

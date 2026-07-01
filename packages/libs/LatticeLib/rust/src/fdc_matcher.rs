@@ -282,6 +282,38 @@ impl FdcMatcher {
         // runs against the immutable snapshot — no torn read.
         let table = crate::word_class_table::global_table();
         let bag = build_encoder_bag(text, &self.lexicon, &table);
+        self.encode_from_bag(bag)
+    }
+
+    /// Non-recording variant of `encode_anchor` (secfix/fdc-pool).
+    ///
+    /// Identical FDC code and Q-ID result to `encode_anchor`. Novel tokens
+    /// encountered while building the concept bag are NOT accumulated into
+    /// `SHARED_NOVEL_CACHE`, so user-memory content classified here does not
+    /// leak plaintext tokens to the pool pipeline.
+    ///
+    /// Called from `Fdc::encode_anchor_no_record` → `capture_with_mode` in
+    /// GeniusLocusKit `intake.rs`. Mirrors Swift
+    /// `FDCMatcher.encodeAnchor(_:recordNovel: false)`.
+    pub fn encode_anchor_no_record(&self, text: &str) -> (Option<String>, Option<String>) {
+        let table = crate::word_class_table::global_table();
+        // Non-recording bag build: SHARED_NOVEL_CACHE.record is not called for
+        // novel tokens, so no user-memory content leaks to the pool pipeline.
+        let bag = crate::concept_bag::build_encoder_bag_no_record(text, &self.lexicon, &table);
+        self.encode_from_bag(bag)
+    }
+
+    /// Score a pre-built concept bag against the FDC signatures (Steps 4–5)
+    /// and return the best matching code + dominant Q-ID.
+    ///
+    /// The bag must be fully constructed before calling this method; whether
+    /// novel-token classification was recorded into the pool cache is the
+    /// caller's responsibility. Both `encode_anchor` and
+    /// `encode_anchor_no_record` delegate here so the scoring logic lives in
+    /// exactly one place.
+    ///
+    /// Mirrors Swift `FDCMatcher.encodeFromBag(_:)`.
+    fn encode_from_bag(&self, bag: ConceptBag) -> (Option<String>, Option<String>) {
         let qid = dominant_qid(&bag);
 
         if bag.is_empty() {
