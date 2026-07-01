@@ -138,6 +138,81 @@ struct InstallDepthTests {
         #expect(try DepthInstaller.apply(clientID: "kiro", depth: .skills, homeDirectory: home, binaryPath: "/safe/bin/mootx01") == .server)
     }
 
+    // MARK: - vault posture propagation (sec-fix 6b08d56b)
+
+    /// vault-off must write MOOTX01_VAULT=0 into the env block of every MCP
+    /// config JSON in the installed plugin package. Skills files (SKILL.md) and
+    /// plugin-metadata JSON files (no mcpServers key) must be unmodified.
+    @Test("vault-off injects MOOTX01_VAULT=0 into plugin MCP config files")
+    func vaultOffInjectsEnvIntoMCPConfigs() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        let outcome = try DepthInstaller.apply(
+            clientID: "claude-code",
+            depth: .plugin,
+            homeDirectory: home,
+            binaryPath: "/safe/bin/mootx01",
+            vaultOff: true
+        )
+        guard case let .plugin(path) = outcome else {
+            Issue.record("expected .plugin, got \(outcome)"); return
+        }
+        let root = URL(fileURLWithPath: path)
+
+        // The .mcp.json in the plugin package must carry MOOTX01_VAULT=0.
+        let mcpURL = root.appendingPathComponent(".mcp.json")
+        let mcpData = try Data(contentsOf: mcpURL)
+        let mcp = try #require(
+            try? JSONSerialization.jsonObject(with: mcpData) as? [String: Any],
+            ".mcp.json must be valid JSON after vault-off injection"
+        )
+        let servers = mcp["mcpServers"] as? [String: Any]
+        let server = servers?["mootx01"] as? [String: Any]
+        let env = server?["env"] as? [String: Any]
+        #expect(env?["MOOTX01_VAULT"] as? String == "0",
+                "vault-off must write MOOTX01_VAULT=0 into .mcp.json env block")
+
+        // Plugin-metadata JSON (no mcpServers) must not gain a spurious env key.
+        let metaURL = root.appendingPathComponent(".claude-plugin/plugin.json")
+        let metaData = try Data(contentsOf: metaURL)
+        let meta = try #require(
+            try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+            ".claude-plugin/plugin.json must be valid JSON"
+        )
+        #expect(meta["env"] == nil,
+                "plugin-metadata JSON without mcpServers must not be patched")
+
+        // SKILL.md must be present and unmodified.
+        let skillURL = root.appendingPathComponent("skills/mootx01-memory/SKILL.md")
+        #expect(FileManager.default.fileExists(atPath: skillURL.path))
+    }
+
+    /// vault-on (the default) must NOT inject an env block — absent MOOTX01_VAULT
+    /// means vault-on per ADR-015 §1.
+    @Test("vault-on (default) does not inject env block into plugin MCP configs")
+    func vaultOnDoesNotInjectEnv() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        // Explicit vaultOff: false — same as default, but stated for clarity.
+        _ = try DepthInstaller.apply(
+            clientID: "claude-code",
+            depth: .plugin,
+            homeDirectory: home,
+            binaryPath: "/safe/bin/mootx01",
+            vaultOff: false
+        )
+        let root = home.appendingPathComponent(".claude/mootx01-plugin")
+        let mcpURL = root.appendingPathComponent(".mcp.json")
+        let mcpData = try Data(contentsOf: mcpURL)
+        let mcp = try #require(
+            try? JSONSerialization.jsonObject(with: mcpData) as? [String: Any]
+        )
+        let servers = mcp["mcpServers"] as? [String: Any]
+        let server = servers?["mootx01"] as? [String: Any]
+        #expect(server?["env"] == nil,
+                "vault-on must leave env absent (absent = vault-on per ADR-015 §1)")
+    }
+
     // MARK: - sandbox helpers
 
     private func sandbox() -> URL {

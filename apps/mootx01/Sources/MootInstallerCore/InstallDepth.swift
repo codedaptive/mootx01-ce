@@ -169,6 +169,12 @@ public enum DepthInstaller {
     ///   - clientID: the installer client id (e.g. "claude-code").
     ///   - depth: the requested global depth.
     ///   - homeDirectory: user's home (for ~ expansion).
+    ///   - binaryPath: absolute path of the placed binary, rewritten into MCP configs.
+    ///   - vaultOff: when `true`, `MOOTX01_VAULT=0` is injected into the env
+    ///     block of every MCP server entry written by the plugin installer so
+    ///     plugin-spawned stdio servers inherit the correct vault posture.
+    ///     Defaults to `false` (vault-on); absent `MOOTX01_VAULT` means
+    ///     vault-on per ADR-015 §1.
     /// - Returns: the achieved `DepthOutcome`.
     /// - Throws: filesystem errors writing the skill file or package tree.
     @discardableResult
@@ -176,7 +182,8 @@ public enum DepthInstaller {
         clientID: String,
         depth: InstallDepth,
         homeDirectory: URL,
-        binaryPath: String
+        binaryPath: String,
+        vaultOff: Bool = false
     ) throws -> DepthOutcome {
         if depth == .server { return .server }
 
@@ -192,7 +199,12 @@ public enum DepthInstaller {
             return try writeSkill(host: host, homeDirectory: homeDirectory)
         case .plugin:
             if host.supportsPlugin {
-                return try installPlugin(host: host, homeDirectory: homeDirectory, binaryPath: binaryPath)
+                return try installPlugin(
+                    host: host,
+                    homeDirectory: homeDirectory,
+                    binaryPath: binaryPath,
+                    vaultOff: vaultOff
+                )
             }
             // Ceiling: fall back to skills and report it (§4.4).
             let outcome = try writeSkill(host: host, homeDirectory: homeDirectory)
@@ -218,7 +230,17 @@ public enum DepthInstaller {
     /// Mode 3: materialise the host's pre-generated package tree from the
     /// embedded bundle into the host's plugin root (the parent of the skill's
     /// `skills/` dir). The package's own SKILL.md is byte-identical to Mode 2's.
-    private static func installPlugin(host: InstallMapHost, homeDirectory: URL, binaryPath: String) throws -> DepthOutcome {
+    ///
+    /// When `vaultOff` is true, every MCP config JSON file in the package that
+    /// declares a `mcpServers.mootx01` entry has `env.MOOTX01_VAULT=0` injected
+    /// after the binary-path rewrite. Skills files and plugin-metadata files
+    /// (plugin.json without an mcpServers block) are written verbatim.
+    private static func installPlugin(
+        host: InstallMapHost,
+        homeDirectory: URL,
+        binaryPath: String,
+        vaultOff: Bool
+    ) throws -> DepthOutcome {
         let files = InstallBundle.embedded.packageFiles(forHostID: host.id)
         guard !files.isEmpty else {
             // No embedded package for this host — fall back to skills.
@@ -246,10 +268,47 @@ public enum DepthInstaller {
             let fileURL = dest.appendingPathComponent(rel)
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let safeContents = rewriteBareMootCommand(in: contents, binaryPath: binaryPath)
+            // 1. Rewrite bare "mootx01" command placeholder to the installed path.
+            // 2. When vault-off, inject MOOTX01_VAULT=0 so the plugin-spawned
+            //    stdio server inherits the correct vault posture (sec-fix 6b08d56b).
+            var safeContents = rewriteBareMootCommand(in: contents, binaryPath: binaryPath)
+            if vaultOff {
+                safeContents = injectVaultEnv(in: safeContents, rel: rel)
+            }
             try safeContents.write(to: fileURL, atomically: true, encoding: .utf8)
         }
         return .plugin(path: dest.path)
+    }
+
+    /// Inject `env.MOOTX01_VAULT=0` into the `mcpServers.mootx01` entry of an
+    /// MCP config JSON file. Only operates on `.json` files whose content
+    /// declares an `mcpServers` block — plugin-metadata files (author/description
+    /// only) and non-JSON files (SKILL.md, YAML) are returned unchanged.
+    ///
+    /// On parse failure or re-serialisation failure the original content is
+    /// returned so the host tool can surface the error rather than silently
+    /// dropping the file.
+    private static func injectVaultEnv(in contents: String, rel: String) -> String {
+        // Fast-path: non-JSON files and JSON files without a server declaration.
+        guard rel.hasSuffix(".json"), contents.contains("\"mcpServers\"") else { return contents }
+        guard let data = contents.data(using: .utf8),
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var servers = root["mcpServers"] as? [String: Any],
+              var server = servers["mootx01"] as? [String: Any]
+        else { return contents }
+
+        // Merge MOOTX01_VAULT=0 into the existing env block or create a new one.
+        var env = server["env"] as? [String: Any] ?? [:]
+        env["MOOTX01_VAULT"] = "0"
+        server["env"] = env
+        servers["mootx01"] = server
+        root["mcpServers"] = servers
+
+        guard let patched = try? JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys]
+        ), let str = String(data: patched, encoding: .utf8) else { return contents }
+        return str.hasSuffix("\n") ? str : str + "\n"
     }
 
     /// Embedded plugin package MCP configs are generated with a portable bare
