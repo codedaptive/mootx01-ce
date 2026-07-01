@@ -97,14 +97,17 @@ begin
             (Pos(';' + Param + '\;', ';' + OrigPath + ';') = 0);
 end;
 
-// On uninstall, notify the user their data was preserved.
+// On uninstall, notify the user their data was preserved — but only in
+// interactive mode. UninstallSilent (NOT WizardSilent, which per the Inno
+// docs reports whether *Setup* ran silently) is the documented function for
+// detecting a silent uninstall; gating on it keeps `/VERYSILENT` uninstall
+// from hanging on a modal MsgBox — a Winget validation-VM requirement.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
-  begin
-    MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
-           'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
-           'Remove that folder manually if you want to erase your data.',
-           mbInformation, MB_OK);
-  end;
+    if not UninstallSilent then
+      MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
+             'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
+             'Remove that folder manually if you want to erase your data.',
+             mbInformation, MB_OK);
 end;
