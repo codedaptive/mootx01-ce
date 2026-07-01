@@ -1,5 +1,4 @@
 import Foundation
-import SubstrateKernel
 
 /// A typed cross-reference between two locations in the
 /// MemPalace surface.
@@ -137,22 +136,5 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
         self.tombstonedAt = tombstonedAt
         self.removedByBatch = removedByBatch
         self.orderKey = orderKey
-    }
-}
-
-// MARK: - Adjective bitmap accessors
-
-public extension Tunnel {
-
-    /// Decode bits 6–11 of `adjectiveBitmap` as an `AdjectiveSensitivity`.
-    ///
-    /// Returns `.normal` for unrecognised raw values, matching the estate-level
-    /// default access posture (same fail-closed direction as `KGFact.adjectiveSensitivity`
-    /// and `Drawer.adjectiveSensitivity`). Named `adjectiveSensitivity` (not `sensitivity`)
-    /// to avoid colliding with the provenance-bitmap `sensitivity` accessor. Cookbook
-    /// §2.3 6-bit field. Parity peer of Rust `Tunnel::adjective_sensitivity`.
-    var adjectiveSensitivity: AdjectiveSensitivity {
-        // Cookbook §2.3: sensitivity at bits 6–11 of adjectiveBitmap.
-        AdjectiveSensitivity(rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 6, width: 6))) ?? .normal
     }
 }

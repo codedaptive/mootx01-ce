@@ -27,9 +27,7 @@
 //!   `tunnel_operational.rs` still resolves the default for unknown
 //!   raw values.
 
-use crate::adjectives::AdjectiveSensitivity;
 use crate::tunnel_operational::TunnelKind;
-use substrate_kernel::bit_field;
 
 /// A typed cross-reference between two locations.
 ///
@@ -153,19 +151,6 @@ impl Tunnel {
             removed_by_batch: None,
             order_key: None,
         }
-    }
-
-    /// Decode bits 6–11 of `adjective_bitmap` as an `AdjectiveSensitivity`.
-    ///
-    /// Returns `AdjectiveSensitivity::Normal` for unrecognised raw values,
-    /// matching the estate-level default access posture (same fail-closed
-    /// direction as `KGFact::adjective_sensitivity` and `Drawer::adjective_sensitivity`).
-    /// Named `adjective_sensitivity` (not `sensitivity`) to avoid colliding
-    /// with the provenance-bitmap sensitivity accessor. Cookbook §2.3 6-bit
-    /// field. Parity peer of Swift `Tunnel.adjectiveSensitivity`.
-    pub fn adjective_sensitivity(&self) -> AdjectiveSensitivity {
-        // Cookbook §2.3: sensitivity at bits 6–11 of adjective_bitmap.
-        AdjectiveSensitivity::from_raw(bit_field::extract_field(self.adjective_bitmap, 6, 6))
     }
 }
 

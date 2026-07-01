@@ -387,17 +387,9 @@ pub fn dispatch(
             let all_tunnels = coord
                 .all_tunnels(&estate.handle)
                 .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::interface_tools::describe_verb_dispatch_error(&e)))?;
-            // MCP disclosure ceiling: drop Restricted/Secret tunnels before any output.
-            // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
-            // that normal recall applies via insert_defaults. Filter at the ARIA tool boundary
-            // only — all_tunnels() has internal callers that need the full set.
             let contradicts_tunnels: Vec<_> = all_tunnels
                 .into_iter()
-                .filter(|t| {
-                    t.kind == TunnelKind::Contradicts
-                        && t.tombstoned_at.is_none()
-                        && t.adjective_sensitivity().is_bulk_exportable()
-                })
+                .filter(|t| t.kind == TunnelKind::Contradicts && t.tombstoned_at.is_none())
                 .collect();
 
             let mut lines: Vec<String> = Vec::new();
@@ -421,17 +413,9 @@ pub fn dispatch(
             }
 
             // recall_kg_facts returns VerbDispatchError — same mapping as above.
-            let all_facts_raw = coord
+            let all_facts = coord
                 .recall_kg_facts(&estate.handle)
                 .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::interface_tools::describe_verb_dispatch_error(&e)))?;
-            // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
-            // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
-            // that normal recall applies via insert_defaults. Filter at the ARIA tool boundary
-            // only — recall_kg_facts has internal callers that need the full set.
-            let all_facts: Vec<_> = all_facts_raw
-                .into_iter()
-                .filter(|f| f.adjective_sensitivity().is_bulk_exportable())
-                .collect();
             // Group facts by (subject_lower, predicate_lower).
             let mut facts_by_key: BTreeMap<String, Vec<_>> = BTreeMap::new();
             for fact in &all_facts {

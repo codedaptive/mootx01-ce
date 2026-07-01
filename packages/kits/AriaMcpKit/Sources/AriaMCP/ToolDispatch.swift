@@ -1604,12 +1604,7 @@ extension ToolDispatcher {
     /// the ARIA surface consistent (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
     func runFactSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let allFactsRaw = try await kit.recallKGFacts(handle)
-        // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
-        // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
-        // that normal recall applies via insertDefaults. Filter at the ARIA tool boundary
-        // only — recallKGFacts has internal callers that need the full set.
-        let allFacts = allFactsRaw.filter { $0.adjectiveSensitivity.isBulkExportable }
+        let allFacts = try await kit.recallKGFacts(handle)
         // Optional query: substring match across subject, predicate, and object.
         // Omitting query returns all active facts (the unfiltered case).
         let queryRaw = try optionalString(args["query"], argument: "query")
@@ -1621,47 +1616,18 @@ extension ToolDispatcher {
                 $0.object.lowercased().contains(q)
             }
         } ?? allFacts
-        // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
-        // about to emit, check whether it references an actual drawer row in the estate.
-        // If it does AND is Restricted/Secret (outside the default sensitivity ceiling),
-        // hide the ID at the MCP boundary. Non-drawer provenance strings (server identity
-        // tags like "mootx01") are not found in the estate and pass through unchanged.
-        // We use getDrawers(ids:matchingFrame:hydrationLevel:) which returns both the
-        // admissible set and the full loadedIDs set — the difference is the blocked set.
-        // Parity with Rust run_fact_search.
-        let emittedFacts = Array(facts.prefix(100))
-        let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
-        let estate = try await kit.estate(for: handle)
-        let hiddenSourceIDs: Set<String>
-        if distinctSourceIDs.isEmpty {
-            hiddenSourceIDs = []
-        } else {
-            let result = try await estate.getDrawers(
-                ids: distinctSourceIDs,
-                matchingFrame: RecallFrame(filterChain: []),
-                hydrationLevel: .structured
-            )
-            // loaded but not admissible = exists as a drawer AND is Restricted/Secret
-            let admissibleIDs = Set(result.admissible.map { $0.id })
-            hiddenSourceIDs = result.loadedIDs.subtracting(admissibleIDs)
-        }
         // Include evaluation fields (filedAt, sourceDrawerID) so callers can
         // reason about provenance and temporal ordering without a separate
-        // timeline call. ISO8601 for filedAt; sourceDrawerID gated on admissibility.
+        // timeline call. ISO8601 for filedAt; sourceDrawerID for source tracing.
         let formatter = ISO8601DateFormatter()
-        let lines = emittedFacts.map { f -> String in
+        let lines = facts.prefix(100).map { f -> String in
             let filed = formatter.string(from: f.filedAt)
-            // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. Non-drawer provenance strings pass through.
-            let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
-                ? "source=<hidden>"
-                : "source=\(f.sourceDrawerID)"
-            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  \(sourceField)"
+            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  source=\(f.sourceDrawerID)"
         }
         let header = query != nil
             ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
             : "facts: \(facts.count)"
-        var outputLines = [header] + lines
+        var outputLines = [header] + Array(lines)
         // Dark-lane hint: when the caller supplied a query, probe the dense
         // recall lane to determine its status. If dark, append a recall_provenance
         // line so the AI caller knows the match was lexical-only (0 results means
@@ -1765,45 +1731,14 @@ extension ToolDispatcher {
     func runFactTimeline(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let entity = try optionalString(args["entity"], argument: "entity")
-        let factsRaw = try await kit.recallKGFactTimeline(handle, entity: entity)
-        // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
-        // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
-        // that normal recall applies via insertDefaults. Filter at the ARIA tool boundary
-        // only — recallKGFactTimeline has internal callers that need the full set.
-        let facts = factsRaw.filter { $0.adjectiveSensitivity.isBulkExportable }
-        // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
-        // about to emit (capped at 200), check whether it references an actual drawer in
-        // the estate. If it does AND is Restricted/Secret, hide the ID at the MCP boundary.
-        // Non-drawer provenance strings (server identity tags) are not in the estate and
-        // pass through unchanged. loadedIDs − admissible = the blocked (restricted/secret)
-        // drawer-reference set. Parity with Rust run_fact_timeline.
-        let emittedFacts = Array(facts.prefix(200))
-        let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
-        let estate = try await kit.estate(for: handle)
-        let hiddenSourceIDs: Set<String>
-        if distinctSourceIDs.isEmpty {
-            hiddenSourceIDs = []
-        } else {
-            let result = try await estate.getDrawers(
-                ids: distinctSourceIDs,
-                matchingFrame: RecallFrame(filterChain: []),
-                hydrationLevel: .structured
-            )
-            let admissibleIDs = Set(result.admissible.map { $0.id })
-            hiddenSourceIDs = result.loadedIDs.subtracting(admissibleIDs)
-        }
+        let facts = try await kit.recallKGFactTimeline(handle, entity: entity)
         let formatter = ISO8601DateFormatter()
-        // Include sourceDrawerID for provenance tracing, gated on source-drawer
-        // sensitivity. filedAt present for chronological ordering.
-        let lines = emittedFacts.map { f -> String in
+        // Include sourceDrawerID for provenance tracing. filedAt already present
+        // for chronological ordering; sourceDrawerID added for source evaluation.
+        let lines = facts.prefix(200).map { f -> String in
             let filed = formatter.string(from: f.filedAt)
             let lifecycleTag = Self.lifecycleTag(forAdjectiveBitmap: f.adjectiveBitmap)
-            // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. Non-drawer provenance strings pass through.
-            let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
-                ? "source=<hidden>"
-                : "source=\(f.sourceDrawerID)"
-            return "\(filed)  \(lifecycleTag)  \(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  \(sourceField)"
+            return "\(filed)  \(lifecycleTag)  \(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  source=\(f.sourceDrawerID)"
         }
         let count = facts.count
         let header: String
