@@ -167,10 +167,30 @@ fn powershell(command: &str) -> Result<String, String> {
 /// systemd --user).
 #[cfg(target_os = "windows")]
 pub fn register_task(task_name: &str, execute: &str, argument: &str) -> RegisterOutcome {
+    // Settings for a persistent resident daemon (NOT the default set):
+    //   ExecutionTimeLimit = 0  — no run-time cap. The Task Scheduler default is
+    //       PT72H (3 days), which silently kills a long-lived daemon on a machine
+    //       that stays logged in past 3 days. 0 = run indefinitely.
+    //   AllowStartIfOnBatteries + DontStopIfGoingOnBatteries — a laptop daemon
+    //       must not be refused on battery (default) nor stopped when unplugged.
+    //   RestartCount/RestartInterval — auto-restart if the process exits/crashes.
+    //   MultipleInstances IgnoreNew — if the daemon is already running, do not
+    //       start a second instance (the single-writer rule would reject it).
+    // Principal: LogonType S4U runs the task in the BACKGROUND (session 0, token
+    // only — no password, no interactive desktop), so the resident daemon does
+    // NOT flash a console window at logon the way the default Interactive logon
+    // type does. It still fires on the -AtLogOn trigger. This is the
+    // elevation-free "run hidden" pattern; the daemon is headless (loopback HTTP
+    // only) so it needs no interactive session.
     let cmd = format!(
         "$t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; \
          $a = New-ScheduledTaskAction -Execute {exe} -Argument {arg}; \
-         Register-ScheduledTask -TaskName {name} -Trigger $t -Action $a -Force | Out-Null; \
+         $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U; \
+         $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) \
+              -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+              -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) \
+              -MultipleInstances IgnoreNew; \
+         Register-ScheduledTask -TaskName {name} -Trigger $t -Action $a -Principal $p -Settings $s -Force | Out-Null; \
          Start-ScheduledTask -TaskName {name}",
         exe = ps_quote(execute),
         arg = ps_quote(argument),
