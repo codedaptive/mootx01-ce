@@ -27,16 +27,16 @@ public struct PrecedenceOutput: Sendable, Equatable {
 /// to rank the strongest antecedents for a target field-value coordinate.
 /// "What typically happens just before this field takes this value?"
 ///
-/// Layer discipline (SPEC § 5, B-1/B-2): pure sequencing — GLK dormant read
-/// (`glkEventLagPairs`) + SubstrateML `TemporalCausalityFold.fold` (input
-/// shaping, I-17) + NeuronKit `precedence`. Read-only (B-6, I-6). No write
-/// verb. The `now` parameter is accepted for signature parity but is not read
-/// by this recipe.
+/// Layer discipline (SPEC § 5, B-1/B-2): pure sequencing — GLK dormant reads
+/// (`glkDrawerIDsForEventTimeWindow` + `glkEventLagPairs`) + SubstrateML
+/// `TemporalCausalityFold.fold` (input shaping, I-17) + NeuronKit `precedence`.
+/// Read-only (B-6, I-6). No write verb. The `now` parameter is accepted for
+/// signature parity but is not read by this recipe.
 ///
-/// Rust peer: `run_precedence` in `precedence_recipe.rs`. Accepts pre-fetched
-/// `[TemporalAuditEntry]` because the Rust `EstateCoordinator` audit log is
-/// not yet exposed through its dormant surface; callers provide the entries
-/// directly.
+/// Rust peer: `run_precedence` in `precedence_recipe.rs`, called from the
+/// `moot_lens_precedence` arm in AriaMcpKit `lens_tools.rs`. The Rust caller
+/// performs the same Option A eventTime filter via `store.all_drawers()`
+/// (metadata-only in Rust) before passing entries to `run_precedence`.
 public enum Precedence {
 
     // Fold window in minutes: 128 matches the largest `MatrixTier.lagBuckets`
@@ -49,12 +49,13 @@ public enum Precedence {
     /// Empty entry set, k ≤ 0, or no entry targeting `target` yields an
     /// empty antecedent list (B-8 total-over-edge-input posture).
     ///
-    /// Option A (Bob's ruling, Wave C): only drawers whose `eventTime` falls
-    /// within `window` contribute causal pairs. The causality fold (HLC
-    /// ordering inside the audit log) is unchanged — only WHICH drawers
-    /// participate is gated by eventTime. Drawers without an explicit
-    /// eventTime fall back to `filedAt` (resolved eagerly at capture time),
-    /// so the fallback is always non-nil.
+    /// Option A: only drawers whose `eventTime` falls within `window` contribute
+    /// causal pairs. The causality fold (HLC ordering inside the audit log) is
+    /// unchanged — only WHICH drawers participate is gated by eventTime. The
+    /// allowed-ID set is built via `glkDrawerIDsForEventTimeWindow`, which uses
+    /// `.structured` (no-blob) hydration so content is never read from storage.
+    /// Drawers without an explicit eventTime fall back to `filedAt` (resolved
+    /// eagerly at capture time), so the fallback is always non-nil.
     ///
     /// - Parameters:
     ///   - kit: Open GeniusLocusKit instance.
@@ -73,16 +74,12 @@ public enum Precedence {
     ) async throws -> PrecedenceOutput {
         // Option A: pre-filter drawers by eventTime before gathering audit entries.
         // Only drawers whose eventTime falls within the window contribute causal pairs.
-        // Uses GeniusLocusKit.allDrawers(in:) — a dormant (read-only) GLK surface.
-        // Drawer.id is a String (UUID string representation); the audit log's
-        // UnifiedAuditEntry.rowID is a UUID. allowedRowIDs carries String IDs
-        // (lowercased) matched in glkEventLagPairs via entry.rowID.uuidString.
-        let allDrawers = try await kit.allDrawers(in: handle)
-        let allowedIDs: Set<String> = Set(
-            allDrawers
-                .filter { window.contains($0.eventTime) }
-                .map { $0.id.lowercased() }
-        )
+        // Uses glkDrawerIDsForEventTimeWindow — a metadata-only (.structured hydration)
+        // GLK scan that projects away the content blob. Drawer.id is a String (UUID
+        // string representation); the audit log's UnifiedAuditEntry.rowID is a UUID.
+        // allowedRowIDs carries lowercased UUID strings matched in glkEventLagPairs
+        // via entry.rowID.uuidString.lowercased().
+        let allowedIDs = try await kit.glkDrawerIDsForEventTimeWindow(in: handle, window: window)
         let entries = try await kit.glkEventLagPairs(
             in: handle, window: window, allowedRowIDs: allowedIDs)
         let entryCount = entries.count
