@@ -159,14 +159,59 @@ fn powershell(command: &str) -> Result<String, String> {
     }
 }
 
+/// Write a per-task VBScript launcher that runs the task's command with a
+/// HIDDEN window (`WScript.Shell.Run <cmd>, 0`) and return its path. The task
+/// runs this through `wscript.exe`, a windowless host, so the daemon never
+/// flashes a console window at logon. This is the documented, non-elevated way
+/// to run a scheduled console task with no window: the `-Hidden` task setting
+/// only hides the entry in the Task Scheduler UI (per Microsoft docs), and an
+/// S4U / "run whether logged on or not" principal is denied to a non-admin
+/// per-user install. The daemon binary is untouched — only how the task
+/// launches it.
+#[cfg(target_os = "windows")]
+fn write_hidden_launcher(task_name: &str, execute: &str, argument: &str) -> Result<String, String> {
+    let base = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("AppData").join("Local"))
+        })
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let dir = base.join("MOOTx01");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let vbs_path = dir.join(format!("{task_name}.vbs"));
+    // The command line the task would otherwise run directly. Quote the
+    // executable (paths may contain spaces) and double every `"` so the whole
+    // line survives the VBScript string literal. Run(cmd, 0, True): 0 = hidden
+    // window; True = wait, so wscript stays bound to the daemon for the task's
+    // lifetime (like the old `cmd /c serve`) — the task stays "running" and its
+    // RestartCount/RestartInterval auto-restart still applies on daemon exit.
+    let cmdline = format!("\"{execute}\" {argument}");
+    let vbs = format!(
+        "Set objShell = CreateObject(\"wscript.shell\")\r\nobjShell.Run \"{}\", 0, True\r\n",
+        cmdline.replace('"', "\"\"")
+    );
+    std::fs::write(&vbs_path, vbs).map_err(|e| format!("write {}: {e}", vbs_path.display()))?;
+    Ok(vbs_path.to_string_lossy().into_owned())
+}
+
 /// Create (or replace) a per-user logon task and start it now — the
 /// `enable --now` equivalent. Uses the Task Scheduler COM API via
 /// PowerShell cmdlets: schtasks.exe denies ONLOGON triggers to non-admins,
 /// but the COM API permits user-scoped logon triggers without elevation
 /// (verified live; keeps the install elevation-free like launchd agents and
-/// systemd --user).
+/// systemd --user). The task launches its command through a hidden `wscript`
+/// VBScript launcher (write_hidden_launcher) so no console window appears.
 #[cfg(target_os = "windows")]
 pub fn register_task(task_name: &str, execute: &str, argument: &str) -> RegisterOutcome {
+    // No-window launch: run the command through a windowless wscript host. The
+    // -Hidden task SETTING only hides the entry in the Task Scheduler UI (per
+    // Microsoft docs), and an S4U/background principal is denied to non-admins,
+    // so a hidden VBScript launcher is the documented non-elevated path.
+    let vbs_path = match write_hidden_launcher(task_name, execute, argument) {
+        Ok(p) => p,
+        Err(e) => return RegisterOutcome::Failed(format!("hidden launcher for {task_name}: {e}")),
+    };
+    let wscript_arg = format!("//B //Nologo \"{vbs_path}\"");
     // Settings for a persistent resident daemon (NOT the default set):
     //   ExecutionTimeLimit = 0  — no run-time cap. The Task Scheduler default is
     //       PT72H (3 days), which silently kills a long-lived daemon on a machine
@@ -178,15 +223,14 @@ pub fn register_task(task_name: &str, execute: &str, argument: &str) -> Register
     //       start a second instance (the single-writer rule would reject it).
     let cmd = format!(
         "$t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; \
-         $a = New-ScheduledTaskAction -Execute {exe} -Argument {arg}; \
+         $a = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument {arg}; \
          $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) \
               -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
               -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) \
               -MultipleInstances IgnoreNew; \
          Register-ScheduledTask -TaskName {name} -Trigger $t -Action $a -Settings $s -Force | Out-Null; \
          Start-ScheduledTask -TaskName {name}",
-        exe = ps_quote(execute),
-        arg = ps_quote(argument),
+        arg = ps_quote(&wscript_arg),
         name = ps_quote(task_name),
     );
     match powershell(&cmd) {
