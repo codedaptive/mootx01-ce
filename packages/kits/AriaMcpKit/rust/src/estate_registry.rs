@@ -54,7 +54,6 @@ use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::postgres::PostgresStorage;
-use persistence_kit::sqlite::SqliteStorage;
 use persistence_kit::storage::{BackendConfiguration, EstateConfiguration};
 use persistence_kit::storage::Storage;
 use uuid::Uuid;
@@ -275,21 +274,28 @@ impl EstateRegistry {
         // register a Corpus or VectorStore — so on a bare open the BM25 + vector
         // recall lanes are DARK and `moot_memory_search` degrades to LocusKit
         // row recall. We mirror exactly what the Swift ARIA_MCP does after open:
-        // build a Corpus (BM25 + internal vectors) and a standalone VectorStore on
-        // a second SqliteStorage handle pointing at the same WAL-mode database file,
-        // then register both with the coordinator so the scored-recall hybrid lanes
-        // are live from the first query.
+        // build a Corpus (BM25 + internal vectors) and a VectorStore, both using
+        // the SAME already-open, already-keyed storage connection as the DrawerStore.
         //
-        // Two SqliteStorage handles on one WAL-mode file: the DrawerStore tables and
-        // the Corpus/VectorStore tables are disjoint table namespaces; SQLite WAL
-        // serialises all writes, so concurrent access is safe. This is architecturally
-        // identical to the Swift single-storage pattern (one connection shared by all
-        // sub-stores) but expressed as two handles because the Rust DrawerStore wraps
-        // its SqliteStorage internally and does not expose it publicly.
+        // Sharing one storage instance (rather than opening a second SqliteStorage
+        // handle) ensures the encryption key is already applied — the DrawerStore's
+        // SqliteStorage received PRAGMA key at construction. A second independent
+        // handle opening the same encrypted WAL-mode file must also call PRAGMA key;
+        // on Windows ARM the SQLCipher build did not reliably propagate the key to
+        // a second connection, producing NOTADB on storage.migrate() in Corpus::open_many.
+        // Sharing the DrawerStore's storage eliminates the second connection entirely,
+        // matching the Swift pattern and closing the platform-specific bug.
+        //
+        // Table namespaces remain disjoint: LocusKit owns drawers/tunnels/kg_facts;
+        // CorpusKit/VectorKit own chunks/vectors. WAL serialises all writes through
+        // the single shared connection handle.
         //
         // Embedding model: Deterministic — reproducible across Swift/Rust ports,
         // no CoreML required. Matches the Swift leg's `model: .deterministic`.
-        wire_sqlite_semantic_recall(path, &handle, &coord)
+        let shared_storage = store.storage().ok_or_else(|| {
+            format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
+        })?;
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
@@ -368,8 +374,13 @@ impl EstateRegistry {
             .unwrap()
             .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("additional sqlite estate open must succeed");
-        // Wire semantic recall lanes — same policy as new_sqlite.
-        wire_sqlite_semantic_recall(path, &handle, &self.coord)
+        // Wire semantic recall lanes — same policy as new_sqlite:
+        // share the DrawerStore's already-keyed storage rather than opening
+        // a second independent SqliteStorage handle on the encrypted estate.
+        let shared_storage = store.storage().ok_or_else(|| {
+            format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
+        })?;
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
@@ -766,16 +777,19 @@ fn wire_postgres_semantic_recall(
 ///
 /// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore so hybrid
 /// vector+BM25 recall is live from the first capture. The deterministic embedding
-/// provider (FNV-1a + FloatSimHash projection) requires no CoreML. Called by both `new_sqlite`
-/// and `register_sqlite` after `coord.open`. Opens a second `SqliteStorage` handle
-/// on the same WAL-mode database file and registers a `Corpus` (BM25 + internal
-/// vectors) and a `VectorStore` (standalone vector lane) with the coordinator for
-/// `handle`.
+/// provider (FNV-1a + FloatSimHash projection) requires no CoreML. Called by both
+/// `new_sqlite` and `register_sqlite` after `coord.open`.
 ///
-/// Two handles on one WAL-mode file is safe: the LocusKit tables (drawers, tunnels,
-/// kg_facts, …) and the CorpusKit/VectorKit tables (chunks, vectors) are disjoint
-/// namespaces; SQLite WAL serialises all writes from both handles. This is the Rust
-/// equivalent of the Swift ARIA_MCP passing one `storage` instance to all sub-stores.
+/// `shared_storage` is the DrawerStore's already-open, already-keyed `Storage`
+/// handle, obtained via `DrawerStore::storage()`. Sharing this connection (rather
+/// than opening a second independent `SqliteStorage` on the same file) matches the
+/// Swift `AriaMCPMain.swift` pattern exactly — one connection, all sub-stores — and
+/// eliminates the Windows-ARM SQLCipher bug where a second connection to an encrypted
+/// WAL-mode estate fails to receive `PRAGMA key` and returns NOTADB on the first SQL.
+///
+/// Table namespaces remain disjoint: LocusKit owns drawers/tunnels/kg_facts/…;
+/// CorpusKit/VectorKit own chunks/vectors. WAL serialises all writes through the
+/// shared connection.
 ///
 /// Recall ensemble is the five honest signals (`default_ensemble()`:
 /// RI/PPMI/LSA/NMF/FDC) — reproducible across Swift/Rust ports, no CoreML.
@@ -783,23 +797,15 @@ fn wire_postgres_semantic_recall(
 /// (`CorpusEnsemble.defaultEnsemble()`).
 fn wire_sqlite_semantic_recall(
     path: &str,
+    shared_storage: Arc<dyn Storage>,
     handle: &EstateHandle,
     coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
 ) -> Result<(), String> {
-    // Construct a SqliteStorage on the same database file for Corpus + VectorStore.
-    // The estate_id in EstateConfiguration is a hint for logging only; the real
-    // estate UUID lives in the manifest table already written by SqliteDrawerStore.
-    let config = EstateConfiguration::new(
-        Uuid::new_v4(),
-        BackendConfiguration::Sqlite {
-            path: path.to_string(),
-            busy_timeout_secs: SQLITE_BUSY_TIMEOUT_SECS,
-        },
-    );
-    let storage: Arc<dyn Storage> = Arc::new(
-        SqliteStorage::new(config)
-            .map_err(|e| format!("SqliteStorage for semantic recall at {path:?}: {e}"))?,
-    );
+    // Use the DrawerStore's shared storage directly — no second SqliteStorage
+    // connection. The encryption key (PRAGMA key) was already applied when the
+    // DrawerStore opened the connection; Corpus::open_many runs idempotent schema
+    // migrations (BundleStore + VectorStore tables) on the same connection.
+    let storage = shared_storage;
 
     // Corpus: applies its own schema migration (BundleStore + VectorStore tables)
     // idempotently on construction — safe to call on an existing database.

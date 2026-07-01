@@ -12,8 +12,12 @@
 //!
 //! # Per-backend wiring policy (mirrors Swift AriaMCPMain.swift)
 //!
-//! - SQLite (ARIA_MCP_SQLITE_PATH set): semantic recall wired via a second
-//!   `SqliteStorage` handle on the same WAL-mode file.
+//! - SQLite (ARIA_MCP_SQLITE_PATH set): semantic recall wired via the DrawerStore's
+//!   shared `Storage` connection (passed as `shared_storage` to `wire_sqlite_semantic_recall`).
+//!   One connection for ALL sub-stores — LocusKit, Corpus, VectorStore. Matches the
+//!   Swift `wireGLKSubstores(for: handle, backingStorage: storage)` pattern exactly.
+//!   Fixes the Windows-ARM NOTADB bug where a second independent SqliteStorage handle
+//!   on an encrypted WAL-mode estate failed to receive the PRAGMA key.
 //! - In-memory (default, neither env var set): semantic recall wired via a
 //!   second `InMemoryStorage` handle. Corpus + VectorStore tables are disjoint
 //!   from the LocusKit tables — two handles, same ephemeral process.
@@ -35,6 +39,11 @@
 //!
 //! 4. `sqlite_semantic_lanes_lit_after_register_sqlite` — `register_sqlite` also
 //!    wires semantic recall (same helper as `new_sqlite`).
+//!
+//! 5. `sqlite_encrypted_estate_semantic_lanes_lit` — encrypted estate (db.key present)
+//!    wires semantic recall via the shared DrawerStore storage. Proves the Windows-ARM
+//!    fix: Corpus + VectorStore share the already-keyed connection rather than opening
+//!    a second independent handle that would see NOTADB on encrypted WAL-mode files.
 
 use std::collections::BTreeMap;
 
@@ -376,4 +385,91 @@ fn sqlite_semantic_lanes_lit_after_register_sqlite() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Encrypted estate wires semantic recall via shared DrawerStore storage
+// ---------------------------------------------------------------------------
+
+/// Prove that an encrypted SQLite estate (db.key sibling present) wires
+/// semantic recall — Corpus + VectorStore share the DrawerStore's already-keyed
+/// `Storage` connection via `wire_sqlite_semantic_recall`.
+///
+/// This is the regression test for the Windows-ARM NOTADB bug: before the fix,
+/// `wire_sqlite_semantic_recall` opened a SECOND `SqliteStorage` handle on the
+/// encrypted file. On Windows ARM the second handle failed to apply `PRAGMA key`,
+/// returning NOTADB on the first SQL executed by `Corpus::open_many`. The fix
+/// shares the DrawerStore's storage (which already received `PRAGMA key`) with
+/// all sub-stores, eliminating the second connection entirely.
+///
+/// On macOS the two-handle path also works (both handles receive the key via
+/// `resolve_install_encryption`), so this test verifies the shared-storage path
+/// is equally correct on macOS — one connection, all tables, same schema.
+#[test]
+fn sqlite_encrypted_estate_semantic_lanes_lit() {
+    use persistence_kit::ensure_install_key;
+
+    // Create a per-estate subdir so the db.key sibling is estate-local.
+    // `resolve_install_encryption` reads the key from the PARENT dir of the
+    // estate.sqlite file — exactly the layout `ensure_install_key` writes.
+    let dir = std::env::temp_dir()
+        .join(format!("aria_mcp_enc_estate_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create per-estate dir");
+    let path = dir.join("estate.sqlite").to_string_lossy().into_owned();
+
+    // Write the install key — mirrors what the resident service does at startup.
+    ensure_install_key(&dir).expect("ensure_install_key must succeed");
+
+    // new_sqlite on an encrypted estate: DrawerStore opens the file with
+    // PRAGMA key (via resolve_install_encryption), then wire_sqlite_semantic_recall
+    // passes that already-keyed storage to Corpus::open_many + VectorStore.
+    let registry = EstateRegistry::new_sqlite(&path, "test-owner-enc")
+        .expect("new_sqlite must succeed on an encrypted estate");
+    let ledger = SurfacedRecallLedger::new();
+
+    // Verify the Corpus is registered — semantic recall lanes are live.
+    {
+        let coord = registry.default.coord.lock().unwrap();
+        assert!(
+            coord.has_corpus(&registry.default.handle),
+            "encrypted SQLite estate must have a Corpus registered (shared-storage wiring)"
+        );
+    }
+
+    // Impatient capture → immediate BM25 search via the shared encrypted storage.
+    let capture_args = args![
+        "content" => "the barn owl hunts at dusk over open fields",
+        "location" => "memories/birds",
+        "impatient" => true,
+    ];
+    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+        .expect("moot_file_memory dispatch must not fail on encrypted estate");
+    assert!(
+        is_success(&capture_result),
+        "impatient moot_file_memory must succeed on encrypted estate; got: {capture_result:?}"
+    );
+
+    let search_args = args![
+        "query" => "barn owl dusk",
+        "scoring" => "rrf",
+    ];
+    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+        .expect("moot_memory_search dispatch must not fail on encrypted estate");
+    assert!(
+        is_success(&search_result),
+        "moot_memory_search must succeed on encrypted estate; got: {search_result:?}"
+    );
+
+    let text = content_text(&search_result);
+    assert!(
+        text.starts_with("found ") && !text.starts_with("found 0"),
+        "expected at least 1 result from encrypted estate BM25 lane; got: {text}"
+    );
+    assert!(
+        text.contains("barn owl"),
+        "search result must contain captured content from encrypted estate; got: {text}"
+    );
+
+    // Cleanup — remove the per-estate dir (estate.sqlite, db.key, WAL sidecars).
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -318,6 +318,60 @@ fn create_key_file_atomic(path: &Path, data: &[u8]) -> StorageResult<()> {
     })
 }
 
+/// Apply the per-install whole-file SQLCipher key to a raw `rusqlite::Connection`,
+/// if a `db.key` sibling file is found alongside `db_path`.
+///
+/// `PRAGMA key` MUST be the first statement on a new connection to an encrypted
+/// database — call this immediately after `Connection::open(path)` and before
+/// any other SQL.
+///
+/// Returns `Ok(())` in two cases:
+/// - No `db.key` file is present (unencrypted estate — no action needed).
+/// - The key was found and applied successfully via `PRAGMA key`.
+///
+/// Returns `Err(rusqlite::Error)` if the `PRAGMA key` statement itself fails
+/// (e.g. SQLCipher I/O error).
+///
+/// An out-of-spec key file (wrong byte length) is treated as absent: the
+/// connection proceeds without a key, and the database will fail naturally
+/// on its first real SQL statement with `SqliteFailure(NotADatabase)` — the
+/// same observable outcome as a missing key.
+///
+/// Called by `InvertedIndexStore::open_for_storage`, which opens a PRIVATE
+/// rusqlite `Connection` alongside the shared `SqliteStorage` connection. WAL
+/// mode allows concurrent readers/writers; the private connection needs the key
+/// applied before running `CREATE TABLE IF NOT EXISTS` on its first use.
+/// `SqliteStorage::new` handles key application through `resolve_install_encryption`
+/// for its own connection; this function is the parallel entry point for private
+/// raw connections.
+pub fn apply_install_encryption_to_conn(
+    conn: &rusqlite::Connection,
+    db_path: &str,
+) -> Result<(), rusqlite::Error> {
+    // In-memory databases have no directory and are never key-backed.
+    if db_path == ":memory:" || db_path.is_empty() {
+        return Ok(());
+    }
+    let parent = match Path::new(db_path).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => return Ok(()),
+    };
+    let key_path = parent.join(INSTALL_KEY_FILE);
+    match std::fs::read(&key_path) {
+        Ok(bytes) if bytes.len() == INSTALL_KEY_LEN => {
+            let key_hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            // `PRAGMA key = "x'<hex>'"` supplies the 32 raw bytes as the SQLCipher
+            // cipher key (no passphrase KDF). This must be the FIRST statement.
+            conn.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
+        }
+        // No key file or wrong-length key: proceed without encryption. A
+        // wrong-length key is a configuration bug (bad installer output); the
+        // database open will fail on the first real SQL with NotADatabase, which
+        // surfaces the misconfiguration without hiding it.
+        _ => Ok(()),
+    }
+}
+
 /// Resolve the whole-file encryption config for an estate file at `db_path`,
 /// IF a sibling `db.key` is present. Returns `None` when the key is absent — the
 /// estate is then a normal unencrypted SQLite file (the test / pre-lockdown
