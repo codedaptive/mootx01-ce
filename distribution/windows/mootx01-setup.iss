@@ -60,7 +60,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; terminal window. The user sees the same numbered picker that
 ; `mootx01 install` shows in PowerShell — detection, selection, wiring.
 Filename: "{app}\mootx01.exe"; Parameters: "install"; \
-  Description: "Connect AI clients to MOOTx01"; \
+  Description: "Run MOOTx01 setup now to connect your AI clients - required (opens a terminal)"; \
   Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
@@ -97,14 +97,17 @@ begin
             (Pos(';' + Param + '\;', ';' + OrigPath + ';') = 0);
 end;
 
-// On uninstall, notify the user their data was preserved.
+// On uninstall, notify the user their data was preserved — but only in
+// interactive mode. UninstallSilent (NOT WizardSilent, which per the Inno
+// docs reports whether *Setup* ran silently) is the documented function for
+// detecting a silent uninstall; gating on it keeps `/VERYSILENT` uninstall
+// from hanging on a modal MsgBox — a Winget validation-VM requirement.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
-  begin
-    MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
-           'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
-           'Remove that folder manually if you want to erase your data.',
-           mbInformation, MB_OK);
-  end;
+    if not UninstallSilent then
+      MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
+             'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
+             'Remove that folder manually if you want to erase your data.',
+             mbInformation, MB_OK);
 end;
