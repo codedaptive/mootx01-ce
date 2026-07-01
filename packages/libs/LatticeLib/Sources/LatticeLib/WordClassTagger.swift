@@ -181,6 +181,68 @@ public extension LatticeLib {
         return "hmm-viterbi-3"
     }
 
+    /// Classifies a single token under FDC encoder Step 1, with explicit
+    /// control over whether a novel-token result is accumulated into the shared
+    /// pool cache.
+    ///
+    /// Identical fast-path logic to the parameterless `wordClass(_:)`: the
+    /// static word-class table is checked first (verb before noun), and only
+    /// tokens absent from the table reach the HMM tagger. The `recordNovel`
+    /// parameter controls ONLY the novel-token side effect, not the tag result.
+    ///
+    /// Pass `recordNovel: false` when the calling context must not leak token
+    /// text to the pool pipeline — for example, when classifying user-memory
+    /// content via the FDC anchor-encode seam (capture path). The tag result is
+    /// IDENTICAL regardless of this flag; only pool accumulation is suppressed.
+    ///
+    /// This is the no-tagger-choice counterpart to
+    /// `wordClass(_:tagger:recordNovel:)` (added for the distillation-extractor
+    /// privacy fix). The FDC runtime encode path (BagBuilder → FDCMatcher →
+    /// EideticLib → GLK capture seam) uses HMM implicitly and goes through this
+    /// overload — not the tagger-choice overload — so this is the correct seam
+    /// for the FDC classification privacy fix (secfix/fdc-pool).
+    ///
+    /// - Parameters:
+    ///   - token: a single raw token (not a phrase).
+    ///   - recordNovel: if `false`, novel-token results are NOT recorded into
+    ///     the shared pool cache. Table-resident tokens are unaffected (they
+    ///     are never recorded regardless).
+    /// - Returns: the token's `WordClass`.
+    static func wordClass(_ token: String, recordNovel: Bool) -> WordClass {
+        let lowered = token.lowercased()
+        if lowered.isEmpty { return .other }
+        if WordClassTableCache.verbSet.contains(lowered) { return .verb }
+        if WordClassTableCache.nounSet.contains(lowered) { return .noun }
+        // Novel token: always HMM (the cross-port baseline). Recording controlled
+        // by caller so user-memory content tokens never leak to the pool pipeline.
+        return tagNovelToken(lowered, recordNovel: recordNovel)
+    }
+
+    /// Tags a novel (non-table) token via the deterministic HMM/Viterbi
+    /// tagger, with explicit recording control.
+    ///
+    /// When `recordNovel: true`, records the result into `sharedNovelCache`
+    /// (full path — identical to `tagNovelToken(_:)`). When `recordNovel: false`,
+    /// skips `sharedNovelCache.record` so no pool accumulation occurs. The
+    /// tag result is byte-identical in both cases — only the side effect differs.
+    ///
+    /// This is the no-tagger-choice counterpart to
+    /// `tagNovelToken(_:tagger:recordNovel:)`. Used by the FDC anchor-encode
+    /// path (via `wordClass(_:recordNovel:)`) to suppress recording of
+    /// user-memory content tokens during classification.
+    ///
+    /// Internal so tests can exercise it directly under `@testable import`.
+    internal static func tagNovelToken(_ lowered: String, recordNovel: Bool) -> WordClass {
+        let tagged = hmmViterbiTag(lowered)
+        // Suppress pool accumulation when the caller is processing private content
+        // (e.g. the FDC anchor-encode path at GLK capture time). The tag result
+        // is always the same; only the sharedNovelCache.record side effect is gated.
+        if recordNovel {
+            sharedNovelCache.record(token: lowered, wordClass: tagged)
+        }
+        return tagged
+    }
+
     /// Tags a novel (non-table) token via the deterministic HMM/Viterbi
     /// tagger and records the result into the shared pool cache (cookbook §2.2).
     ///

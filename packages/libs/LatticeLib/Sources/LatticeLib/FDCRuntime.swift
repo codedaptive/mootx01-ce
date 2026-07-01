@@ -33,6 +33,20 @@ public enum FDC {
         bundle?.matcher.encodeAnchor(text) ?? (nil, nil)
     }
 
+    /// Non-recording variant of `encodeAnchor` (secfix/fdc-pool).
+    ///
+    /// Identical result to `encodeAnchor(_:)` — the FDC code and Q-ID are
+    /// byte-for-byte the same. Novel tokens encountered during concept-bag
+    /// construction are NOT accumulated into `sharedNovelCache`, so user-memory
+    /// content classified here does not leak plaintext tokens to the pool
+    /// pipeline. Pass `recordNovel: false` from the GLK capture seam
+    /// (`EideticLib.lookup(_:recordNovel:)`) and its Rust equivalent.
+    ///
+    /// Mirrors Rust `Fdc::encode_anchor_no_record` in fdc_runtime.rs.
+    public static func encodeAnchor(_ text: String, recordNovel: Bool) -> (code: String?, conceptQID: String?) {
+        bundle?.matcher.encodeAnchor(text, recordNovel: recordNovel) ?? (nil, nil)
+    }
+
     /// True when the bundled artifacts loaded and the engine is ready.
     public static var isAvailable: Bool { bundle != nil }
 

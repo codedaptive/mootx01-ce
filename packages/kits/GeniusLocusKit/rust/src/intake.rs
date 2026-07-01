@@ -120,7 +120,15 @@ impl EstateCoordinator {
         let classified_frame = if frame.lattice_anchor.udc_code == UNCLASSIFIED_SENTINEL
             && !frame.content.is_empty()
         {
-            let (code_opt, qid_opt) = lattice_lib::fdc_runtime::Fdc::encode_anchor(&frame.content);
+            // secfix/fdc-pool: use the non-recording variant so novel tokens from
+            // user-supplied memory content are NOT accumulated into the process-wide
+            // SHARED_NOVEL_CACHE and do NOT flush to plaintext pool files under
+            // LATTICE_POOL_DIR. The anchor result (code, qid) is byte-identical to
+            // encode_anchor. Parity: Swift capture(_:_:mode:) calls
+            // EideticLib.lookup(_:recordNovel:false). Even rejected captures (empty room,
+            // unresolved content) spill nothing because classification runs here, before
+            // the capture write, and accumulation is suppressed.
+            let (code_opt, qid_opt) = lattice_lib::fdc_runtime::Fdc::encode_anchor_no_record(&frame.content);
             match code_opt {
                 Some(code) if !code.is_empty() => {
                     let mut f = frame;

@@ -59,6 +59,46 @@ public enum BagBuilder {
         return bag
     }
 
+    /// Build the concept bag for `text` without recording novel-token results
+    /// into the pool cache (secfix/fdc-pool).
+    ///
+    /// Identical to `bag(_:lexicon:keep:)` in every respect except that
+    /// novel tokens (table misses) classified by the HMM tagger are NOT
+    /// accumulated into `sharedNovelCache`. Use this overload when `text`
+    /// is user-supplied memory content that must not leak into the plaintext
+    /// pool pipeline — specifically the FDC anchor-encode seam inside the
+    /// GLK capture path (`EncodeIntake`), `EideticLib.lookup`, and the Rust
+    /// equivalent (`Fdc::encode_anchor_no_record` in `intake.rs`).
+    ///
+    /// The concept bag result is byte-identical to the recording overload;
+    /// only the pool side effect is suppressed.
+    ///
+    /// - Parameters:
+    ///   - text: raw input text to encode.
+    ///   - lexicon: pinned canonicalization lexicon for Step 2.
+    ///   - keepClasses: word classes Step 1 retains (default: nouns + verbs).
+    ///   - recordNovel: pass `false` to suppress novel-token pool accumulation.
+    /// - Returns: the weighted concept bag (identical result regardless of flag).
+    public static func bag(
+        _ text: String,
+        lexicon: CanonicalizationLexicon,
+        keep keepClasses: Set<WordClass> = [.noun, .verb],
+        recordNovel: Bool
+    ) -> ConceptBag {
+        var bag: ConceptBag = [:]
+        for token in Tokenizer.tokenize(text) {
+            let key = Stemmer.stem(Normalizer.normalize(token))
+            guard !key.isEmpty else { continue }
+            let concept = lexicon.entries[key]
+            let isQID = concept?.hasPrefix("Q") ?? false
+            // Use non-recording wordClass so novel user-memory tokens never
+            // accumulate in the pool cache when recordNovel is false.
+            guard keepClasses.contains(LatticeLib.wordClass(token, recordNovel: recordNovel)) || isQID else { continue }
+            bag[concept ?? key, default: 0] += 1
+        }
+        return bag
+    }
+
     /// Build the concept bag for `text` with an explicit novel-token tagger
     /// choice threaded from the estate's configuration.
     ///
