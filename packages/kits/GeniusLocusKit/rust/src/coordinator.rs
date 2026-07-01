@@ -1842,6 +1842,46 @@ impl EstateCoordinator {
         Ok(estate.recall(frame, now).collect_all())
     }
 
+    /// Frame-aware by-id drawer hydration.
+    ///
+    /// Loads only the drawers identified by `ids`, then applies the frame's
+    /// filter chain through `BitmapEvaluator::evaluate`. `insert_defaults`
+    /// prepends `SensitivityAtMost(Elevated)`, `Trustworthy`, and
+    /// `CurrentlyBelieve` when the caller passes an empty chain — the same
+    /// defaults the full estate `recall` path enforces.
+    ///
+    /// Returns only the admissible subset: drawers that passed every filter.
+    /// Drawers absent from the estate (or rejected by the filter) are silently
+    /// omitted — callers gate on `admissible.is_empty()` or a `find` over the
+    /// result.
+    ///
+    /// Parity peer of Swift `RecallDirector.hydrate(_:ids:matchingFrame:)`.
+    /// Unlike `recall`, which scans the full estate and applies a page limit,
+    /// this method is inherently bounded to the `ids` slice — no `limit` field
+    /// is required and no `now` clock token is needed (`BitmapEvaluator`
+    /// derives any `as_of` reconstruction from the frame's optional HLC field,
+    /// not a separate clock parameter).
+    ///
+    /// Internal callers only (B-10a). No recall-trace rows are written.
+    pub fn get_drawers_matching_frame(
+        &self,
+        handle: &EstateHandle,
+        ids: &[String],
+        frame: &RecallFrame,
+    ) -> Result<Vec<Drawer>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let result = estate
+            .get_drawers_matching_frame(ids, frame)
+            .map_err(|e| {
+                VerbDispatchError::Verb(remap(
+                    "get_drawers_matching_frame",
+                    &uuid_to_str(&handle.estate_uuid),
+                    e,
+                ))
+            })?;
+        Ok(result.admissible)
+    }
+
     // MARK: - dreaming queue (ADR-021 Phase 2b)
 
     /// Lazy-mount the per-estate dreaming queue and its HLC generator.
