@@ -204,28 +204,40 @@ function Verify-MinisignSignature {
                         [System.Environment]::GetEnvironmentVariable('Path', 'User')
         }
 
-        # Reliable path: download the official, zero-dependency minisign binary
-        # from its GitHub release over HTTPS. The win64 build runs natively on
-        # x64 and under emulation on Windows on ARM. It is extracted into $tmpDir
-        # (cleaned up on exit) and prepended to PATH for this session only.
+        # Reliable path: download a specific, HASH-PINNED minisign release from
+        # GitHub over HTTPS. Pinning the version + SHA-256 means the bootstrap
+        # does not depend on the GitHub API (blocked on some networks), cannot be
+        # silently swapped (a tampered download fails the hash and aborts), and
+        # keeps working indefinitely (old releases never disappear). The 0.12
+        # win64 archive ships BOTH native aarch64 and x86_64 builds, so it runs
+        # natively on Windows on ARM as well as x64. To bump minisign, update the
+        # URL and $msSha256 together. Extracted into $tmpDir (cleaned on exit)
+        # and prepended to PATH for this session only.
         if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
             try {
-                # Resolve the current win64 asset from the GitHub releases API so
-                # this does not break when the minisign version or asset naming
-                # changes. A single unauthenticated API call is within limits.
-                # GitHub requires a User-Agent header or it returns 403.
-                $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/jedisct1/minisign/releases/latest" `
-                    -Headers @{ "User-Agent" = "mootx01-installer" } -UseBasicParsing
-                $asset = $rel.assets | Where-Object { $_.name -like "*win64*.zip" } | Select-Object -First 1
-                if (-not $asset) { throw "no win64 asset in the latest minisign release" }
+                $msUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
+                $msSha256 = "37B600344E20C19314B2E82813DB2BFDCC408B77B876F7727889DBD46D539479"
                 $msZip = Join-Path $tmpDir "minisign-win64.zip"
                 $msDir = Join-Path $tmpDir "minisign-bin"
-                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $msZip -UseBasicParsing
+                Invoke-WebRequest -Uri $msUrl -OutFile $msZip -UseBasicParsing
+                # Fail closed on a hash mismatch — never run an unverified verifier.
+                $got = (Get-FileHash -Path $msZip -Algorithm SHA256).Hash
+                if ($got -ne $msSha256) {
+                    throw "minisign archive SHA-256 mismatch (expected $msSha256, got $got)"
+                }
                 Expand-Archive -Path $msZip -DestinationPath $msDir -Force
-                $msExe = Get-ChildItem -Path $msDir -Recurse -Filter minisign.exe | Select-Object -First 1
+                # The archive carries aarch64/ and x86_64/ subdirs — pick the
+                # build matching this machine, falling back to whatever is present.
+                $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or
+                            $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+                $msExe = Get-ChildItem -Path $msDir -Recurse -Filter minisign.exe |
+                         Where-Object { $_.FullName -like "*$arch*" } | Select-Object -First 1
+                if (-not $msExe) {
+                    $msExe = Get-ChildItem -Path $msDir -Recurse -Filter minisign.exe | Select-Object -First 1
+                }
                 if ($msExe) { $env:Path = "$($msExe.DirectoryName);$env:Path" }
             } catch {
-                Write-Host "  minisign direct download failed: $($_.Exception.Message)"
+                Write-Host "  minisign bootstrap failed: $($_.Exception.Message)"
             }
         }
     }
