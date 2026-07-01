@@ -98,7 +98,9 @@ struct HTTPTransportHardeningTests {
     ///
     /// Mirrors `HTTPServer.run()`'s two-phase gate protocol:
     ///   1. `tryEnqueue()` on the accept thread (non-blocking depth check).
-    ///   2. `waitForSlot()` inside the spawned Task (blocking semaphore wait).
+    ///   2. `await waitForSlot()` inside the spawned Task (async suspension —
+    ///      Task suspends and frees its cooperative-pool thread until a slot
+    ///      is available, per the 105e5a96 fix).
     private func startServing(
         _ dispatcher: ARIA_MCPDispatcher,
         gate: ConcurrencyGate,
@@ -118,8 +120,8 @@ struct HTTPTransportHardeningTests {
                     _ = globalShedCounter.add(1, ordering: .relaxed)
                     HTTPServer.sendShedResponse(cfd)
                 } else {
-                    // Phase 2 (inside Task): waitForSlot() is the semaphore
-                    // wait — runs on the cooperative pool, not the accept thread.
+                    // Phase 2 (inside Task): await waitForSlot() suspends the Task
+                    // (freeing its cooperative-pool thread) until a slot is free.
                     Task {
                         await HTTPServer.serve(
                             cfd,
@@ -141,12 +143,14 @@ struct HTTPTransportHardeningTests {
 
     /// Checks that a single tryAcquire followed by release leaves depth balanced.
     /// (The gate depth accounting is the correctness property under test.)
+    /// `tryAcquire()` is async because `waitForSlot()` now async-suspends rather
+    /// than blocking — so the test must run in an async context.
     @Test("ConcurrencyGate: rejects when queue is full")
-    func concurrencyGateRejectsWhenFull() {
+    func concurrencyGateRejectsWhenFull() async {
         let gate = ConcurrencyGate(maxConcurrent: 2, maxQueued: 1)
         // Acquire once, release, and verify depth returns to zero — the gate's
         // depth accounting is balanced.
-        let acquired = gate.tryAcquire()
+        let acquired = await gate.tryAcquire()
         #expect(acquired == true)
         gate.release()
         #expect(gate.currentDepth == 0)
@@ -160,27 +164,30 @@ struct HTTPTransportHardeningTests {
     func concurrencyGateZeroQueueSheds() async {
         let gate = ConcurrencyGate(maxConcurrent: 1, maxQueued: 0)
 
-        // Acquire and keep the first slot.
-        #expect(gate.tryAcquire() == true)
+        // Acquire and keep the first slot. tryAcquire() is async because
+        // waitForSlot() now async-suspends; here the slot is free so it
+        // returns immediately without suspending.
+        #expect(await gate.tryAcquire() == true)
         // Second: the queue depth is now 1 (=maxConcurrent+maxQueued), so this
-        // must fail. We run the check but do NOT wait because tryAcquire would
-        // block — instead we test the depth check path via the activeCount.
-        // We can observe shed behaviour through the return value.
+        // must fail. tryEnqueue() returns false immediately (overflow), so
+        // tryAcquire() returns false WITHOUT suspending — no need to "not wait."
         //
-        // Actually: after the first acquire, activeCount == 1. A second
-        // tryAcquire increments activeCount to 2, checks 2 > 1+0 = 1, sees
-        // the overflow, decrements back, returns false.
-        let secondResult = gate.tryAcquire()
+        // After the first acquire, activeCount == 1. A second tryAcquire calls
+        // tryEnqueue() which increments activeCount to 2, checks 2 > 1+0 = 1,
+        // sees the overflow, decrements back to 1, returns false — waitForSlot()
+        // is never called.
+        let secondResult = await gate.tryAcquire()
         // Release the first slot.
         gate.release()
         #expect(secondResult == false, "second concurrent request must be shed when maxQueued=0")
     }
 
     /// Acquire/release balance keeps currentDepth at 0.
+    /// `tryAcquire()` is async (waitForSlot() now suspends rather than blocks).
     @Test("ConcurrencyGate: depth returns to 0 after balanced acquire/release")
-    func concurrencyGateBalancedAcquireRelease() {
+    func concurrencyGateBalancedAcquireRelease() async {
         let gate = ConcurrencyGate(maxConcurrent: 4, maxQueued: 8)
-        let acquired = gate.tryAcquire()
+        let acquired = await gate.tryAcquire()
         #expect(acquired == true)
         #expect(gate.currentDepth == 1)
         gate.release()
@@ -277,7 +284,7 @@ struct HTTPTransportHardeningTests {
         let gate = ConcurrencyGate(maxConcurrent: 1, maxQueued: 0)
 
         // Manually fill the gate to simulate a saturated server.
-        #expect(gate.tryAcquire() == true, "first acquire must succeed")
+        #expect(await gate.tryAcquire() == true, "first acquire must succeed")
         // Do NOT release — the gate now has 1 in-flight and maxQueued=0.
 
         // The shed path writes 503 directly to the fd via sendShedResponse.
@@ -381,45 +388,41 @@ struct HTTPTransportHardeningTests {
     /// Verifies the second phase (waitForSlot) correctly unblocks when
     /// release() fires, without the accept loop being involved.
     ///
-    /// Implemented as a synchronous test using raw threads and DispatchSemaphore
-    /// so we can call DispatchSemaphore.wait() without triggering the Swift
-    /// "unavailable from asynchronous contexts" error.
+    /// With the 105e5a96 async fix, `waitForSlot()` is async: the waiter Task
+    /// SUSPENDS (frees its cooperative-pool thread) rather than blocking it.
+    /// The test therefore runs in an async context and uses Task instead of Thread.
     @Test("Queue drain: queued connection unblocks after slot frees")
-    func queueDrainAfterSlotFrees() {
+    func queueDrainAfterSlotFrees() async {
         let gate = ConcurrencyGate(maxConcurrent: 1, maxQueued: 1)
 
-        // Slot 1: acquire (tryEnqueue + waitForSlot via tryAcquire). Non-blocking
-        // because the semaphore has 1 free slot.
-        #expect(gate.tryAcquire() == true, "first acquire must succeed immediately")
+        // Slot 1: acquire (tryEnqueue + waitForSlot via tryAcquire). The one
+        // free slot is available so tryAcquire returns immediately.
+        #expect(await gate.tryAcquire() == true, "first acquire must succeed immediately")
 
         // Slot 2: enqueue into the soft queue (non-blocking depth check only).
         #expect(gate.tryEnqueue() == true, "second enqueue must succeed (enters soft queue)")
         #expect(gate.currentDepth == 2, "depth must be 2: one inflight + one queued")
 
-        // Waiter thread: calls waitForSlot() which blocks until slot 1 is released.
-        let waitStarted = DispatchSemaphore(value: 0)
-        let slotAcquired = DispatchSemaphore(value: 0)
-        let waiterThread = Thread {
-            waitStarted.signal()   // signal: about to block
-            gate.waitForSlot()     // blocks until release() is called below
-            slotAcquired.signal()  // signal: slot was granted
+        // Waiter task: awaits waitForSlot() which SUSPENDS the Task (freeing its
+        // cooperative-pool thread) until slot 1 is released. When done, releases
+        // its own slot so gate depth returns to 0.
+        let waiterTask = Task<Void, Never> {
+            await gate.waitForSlot()   // suspends until release() below resumes it
+            gate.release()             // release slot 2 to restore gate state
         }
-        waiterThread.start()
 
-        // Wait (no timeout needed — non-async, will not stall the cooperative pool).
-        waitStarted.wait()
-        // Short sleep to let the waiter reach the semaphore.wait() call.
-        Thread.sleep(forTimeInterval: 0.005)
+        // Yield twice to let the waiter task start and reach waitForSlot(), where
+        // it suspends. The cooperative executor will schedule the task immediately.
+        await Task.yield()
+        await Task.yield()
 
-        // Release slot 1 → waiter unblocks.
+        // Release slot 1 → AsyncSemaphore.signal() resumes the waiter's continuation.
         gate.release()
 
-        // Bounded wait (2 s): waiter must acquire its slot promptly.
-        let result = slotAcquired.wait(timeout: .now() + 2.0)
-        #expect(result == .success, "queued connection must acquire slot within 2 s")
+        // Wait for the waiter task to complete. With an async semaphore this is
+        // bounded: the continuation is enqueued for immediate execution by signal().
+        await waiterTask.value
 
-        // Release slot 2 to restore gate state.
-        gate.release()
         #expect(gate.currentDepth == 0, "gate depth must be 0 after both slots released")
     }
 
@@ -438,19 +441,22 @@ struct HTTPTransportHardeningTests {
     ///   A (slow in-flight):
     ///     - Connects and sends headers only; body withheld until after C reads its 503.
     ///     - tryEnqueue succeeds (depth→1 ≤ maxConcurrent=1). The spawned Task calls
-    ///       waitForSlot; depth=1 ≤ maxConcurrent=1 → slot granted immediately.
-    ///       The Task then blocks in HTTPRequest.read waiting for the body bytes.
+    ///       await waitForSlot; depth=1 ≤ maxConcurrent=1 → slot granted immediately.
+    ///       The Task then suspends in the off-pool read waiting for the body bytes
+    ///       (its cooperative-pool thread is freed for other work).
     ///
     ///   B (queued):
     ///     - Connects and sends a complete request.
     ///     - tryEnqueue succeeds (depth→2, within maxConcurrent+maxQueued=2).
-    ///     - The spawned Task calls waitForSlot; depth=2 > maxConcurrent=1 → parks on
-    ///       the semaphore. B is now in the soft queue.
+    ///     - The spawned Task calls await waitForSlot; depth=2 > maxConcurrent=1 →
+    ///       Task SUSPENDS (freeing its cooperative-pool thread). B is in the soft
+    ///       queue. With the 105e5a96 async fix, B's suspension does NOT occupy a
+    ///       pool thread, so A's off-pool read continuation can always resume.
     ///
     ///   C (+1 overflow):
     ///     - Connects AFTER A is confirmed in-flight and B is confirmed queued.
     ///     - tryEnqueue increments depth to 3, sees depth=3 > maxConcurrent+maxQueued=2
-    ///       → returns false immediately (no semaphore wait). The accept thread calls
+    ///       → returns false immediately (no async wait). The accept thread calls
     ///       sendShedResponse inline and C's fd is closed.
     ///     - C reads 503 + Retry-After from the wire within 2 s.
     ///
@@ -461,13 +467,6 @@ struct HTTPTransportHardeningTests {
     ///
     /// Drain check: after C confirms its 503, A's body is released. Both workers
     /// complete; A and B responses are read successfully.
-    ///
-    /// Note: waitForSlot() calls DispatchSemaphore.wait() (blocking). The Task for
-    /// B parks a cooperative-pool thread on the semaphore; the Task for A parks a
-    /// cooperative-pool thread inside HTTPRequest.read. Both are expected and safe
-    /// here because (a) the accept thread is a raw Thread and always unblocked,
-    /// (b) the test duration is short, and (c) this matches the production profile
-    /// where per-connection Tasks are expected to hold pool threads for their RTT.
     @Test("End-to-end saturation: overflow +1 reads 503 on the wire while slot-holder is in-flight")
     func saturationOverflowReads503OnWireWhileSlotHolderInFlight() async throws {
         let dispatcher = try await makeDispatcher()
@@ -529,8 +528,8 @@ struct HTTPTransportHardeningTests {
             shared.aDone = true
         }
 
-        // Allow time for A's Task to be spawned, call waitForSlot (granted at
-        // depth=1 ≤ maxConcurrent=1), and enter HTTPRequest.read.
+        // Allow time for A's Task to be spawned, call await waitForSlot (granted
+        // immediately at depth=1 ≤ maxConcurrent=1), and enter HTTPRequest.read.
         try await Task.sleep(nanoseconds: 30_000_000)  // 30 ms
 
         // Gate depth must be 1: A in-flight.
@@ -553,7 +552,7 @@ struct HTTPTransportHardeningTests {
         POSIXSocket.sendAll(bFD, bOut)
 
         // Allow time for B to be accepted, its Task to call waitForSlot, and
-        // park (depth=2 > maxConcurrent=1 → semaphore blocks).
+        // suspend (depth=2 > maxConcurrent=1 → Task suspends, thread freed).
         try await Task.sleep(nanoseconds: 20_000_000)  // 20 ms
 
         // Gate depth must be 2: A in-flight + B queued.
@@ -632,8 +631,85 @@ struct HTTPTransportHardeningTests {
 
     // MARK: - ConcurrencyGate: two-phase tryEnqueue / waitForSlot unit tests
 
+    // MARK: - Regression test for finding 105e5a96 (async gate deadlock)
+
+    /// Regression for finding 105e5a96: with the old DispatchSemaphore-backed gate,
+    /// K queued Tasks calling waitForSlot() each BLOCKED a cooperative-pool thread.
+    /// When K approached the pool thread count (≈ CPU count), no threads remained
+    /// available to resume off-pool read continuations held by active connections,
+    /// causing indefinite stall of the loopback HTTP endpoint.
+    ///
+    /// With the async fix, queued Tasks SUSPEND at waitForSlot() (freeing their
+    /// cooperative-pool threads), so the pool is never exhausted. This test
+    /// demonstrates that K >> cooperative-pool-thread-count queued waiters drain
+    /// correctly without deadlock. If the old blocking implementation were present,
+    /// this test would stall (all pool threads parked on semaphore.wait()).
+    ///
+    /// Shape: gate(maxConcurrent=2, maxQueued=20). Acquire 2 slots, enqueue 20
+    /// more via tryEnqueue; spawn a Task per queued slot that awaits waitForSlot()
+    /// and then releases. Release the 2 held slots; all 20 Tasks should drain.
+    @Test("Gate starvation regression (105e5a96): async waiters drain without deadlock")
+    func gateStarvationRegressionAsyncWaitersNeverDeadlock() async throws {
+        let maxConcurrent = 2
+        let queued = 20   // well above a typical cooperative-pool thread count
+        let gate = ConcurrencyGate(maxConcurrent: maxConcurrent, maxQueued: queued)
+
+        // Acquire all maxConcurrent slots (non-blocking: slots are available).
+        for _ in 0..<maxConcurrent {
+            #expect(gate.tryEnqueue() == true, "initial slot enqueue must succeed")
+        }
+        // Simulate that the active slots are held by off-pool reads (like real serve()),
+        // so we call tryEnqueue for the active slots without waitForSlot — the semaphore
+        // holds maxConcurrent tokens. Acquire them here to drain the token pool.
+        for _ in 0..<maxConcurrent { await gate.waitForSlot() }
+
+        // Enqueue `queued` additional waiters. Each Task SUSPENDS at waitForSlot()
+        // (the async fix) rather than blocking a cooperative-executor thread.
+        // With the old DispatchSemaphore.wait() these Tasks would each occupy a
+        // thread, exhausting the pool and preventing the release() defers from running.
+        // DrainState is a @unchecked Sendable reference type — the same pattern as
+        // SatShared in the E2E saturation test above. NSLock protects the counter.
+        final class DrainState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _count = 0
+            func increment() { lock.withLock { _count += 1 } }
+            var count: Int { lock.withLock { _count } }
+        }
+        let state = DrainState()
+
+        for _ in 0..<queued {
+            #expect(gate.tryEnqueue() == true, "soft-queue enqueue must succeed")
+            Task {
+                await gate.waitForSlot()   // suspends until signalled (not blocks)
+                state.increment()
+                gate.release()             // pass the slot forward
+            }
+        }
+
+        // Brief sleep so all Tasks reach waitForSlot() and suspend before we release.
+        try await Task.sleep(nanoseconds: 20_000_000)   // 20 ms
+
+        // Release the 2 held concurrent slots. Each release() signals one waiter;
+        // that waiter's release() signals the next — chain-draining all 20.
+        for _ in 0..<maxConcurrent { gate.release() }
+
+        // Poll until all 20 waiters have drained (bounded: 5 s).
+        let deadline = ContinuousClock.now + .seconds(5)
+        while state.count < queued && ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)   // 5 ms
+        }
+
+        #expect(state.count == queued, "all \(queued) queued waiters must drain without deadlock")
+        // Depth accounting: tryEnqueue was called (maxConcurrent + queued) = 22 times.
+        // Releases: 2 (our explicit releases before the poll loop, which triggered the
+        // chain) + 20 (each waiter task called gate.release() once) = 22 total.
+        // Final activeCount = 22 − 22 = 0.
+        for _ in 0..<5 { await Task.yield() }
+        #expect(gate.currentDepth == 0, "gate must be empty after all slots released")
+    }
+
     /// tryEnqueue is non-blocking and returns false when activeCount exceeds
-    /// maxConcurrent + maxQueued — without touching the semaphore.
+    /// maxConcurrent + maxQueued — without touching the async semaphore.
     @Test("ConcurrencyGate: tryEnqueue returns false on overflow, no semaphore wait")
     func tryEnqueueReturnsFalseOnOverflow() {
         let gate = ConcurrencyGate(maxConcurrent: 2, maxQueued: 1)
