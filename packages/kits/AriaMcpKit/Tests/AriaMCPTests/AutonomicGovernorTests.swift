@@ -56,7 +56,7 @@ struct AutonomicGovernorTests {
 
     @Test func firstTickFiresDreamingAndMaintenance() async throws {
         let (kit, handle) = try await makeEstate()
-        let governor = AutonomicGovernor(kit: kit, handle: handle)
+        let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)
         // v2 (T9): dreaming fires on the first due tick ONLY when the dreaming
         // queue has pending work. Seed one item so the REM-ALPHA gate opens.
         try await seedDreamingQueue(kit, handle)
@@ -67,7 +67,7 @@ struct AutonomicGovernorTests {
 
     @Test func dreamingRespectsCadence() async throws {
         let (kit, handle) = try await makeEstate()
-        let governor = AutonomicGovernor(kit: kit, handle: handle)
+        let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)
         let t0 = Date(timeIntervalSince1970: 2_000_000)
         try await seedDreamingQueue(kit, handle)
         _ = await governor.tick(now: t0)                                  // first fires + drains
@@ -82,7 +82,7 @@ struct AutonomicGovernorTests {
 
     @Test func signalTickBenignWhenNoSchedulerRegistered() async throws {
         let (kit, handle) = try await makeEstate()
-        let governor = AutonomicGovernor(kit: kit, handle: handle)
+        let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)
         // No standing signal registered → signalTick throws schedulerNotStarted,
         // which the governor treats as a benign skip: tick returns normally with
         // signalsTicked == false, never throwing or spamming.
@@ -95,7 +95,7 @@ struct AutonomicGovernorTests {
     @Test func graphAnalyticsFiredOnFirstTick() async throws {
         let (kit, handle) = try await makeEstate()
         // graphAnalyticsIntervalMs: 0 → every tick fires immediately.
-        let governor = AutonomicGovernor(kit: kit, handle: handle, graphAnalyticsIntervalMs: 0)
+        let governor = AutonomicGovernor(kit: kit, handle: handle, graphAnalyticsIntervalMs: 0, poolDirectory: nil, poolTableArtifactURL: nil)
         let report = await governor.tick(now: Date(timeIntervalSince1970: 4_000_000))
         #expect(report.graphAnalyticsFired)
     }
@@ -103,7 +103,7 @@ struct AutonomicGovernorTests {
     @Test func graphAnalyticsRespectsInterval() async throws {
         let (kit, handle) = try await makeEstate()
         // Default 10-minute interval — a second tick within the same second should NOT fire.
-        let governor = AutonomicGovernor(kit: kit, handle: handle)
+        let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)
         let t0 = Date(timeIntervalSince1970: 5_000_000)
         let first = await governor.tick(now: t0)
         #expect(first.graphAnalyticsFired)   // nil → true on first tick
@@ -172,7 +172,9 @@ struct AutonomicGovernorTests {
             kit: kit,
             handle: handle,
             topologyCadenceMs: 0,
-            topologyHandler: { _, _, _, _ in await counter.increment() }
+            topologyHandler: { _, _, _, _ in await counter.increment() },
+            poolDirectory: nil,
+            poolTableArtifactURL: nil
         )
         let report = await governor.tick(now: Date(timeIntervalSince1970: 8_000_000))
         #expect(report.topologySnapshotFired)
@@ -185,7 +187,9 @@ struct AutonomicGovernorTests {
             kit: kit,
             handle: handle,
             topologyCadenceMs: 300_000,
-            topologyHandler: { _, _, _, _ in }
+            topologyHandler: { _, _, _, _ in },
+            poolDirectory: nil,
+            poolTableArtifactURL: nil
         )
         let t0 = Date(timeIntervalSince1970: 9_000_000)
         let first = await governor.tick(now: t0)
@@ -340,6 +344,8 @@ struct AutonomicGovernorTests {
             topologyCadenceMs: 0,
             topologyHandler: { _, _, _, _ in await counter.increment() },
             topologyGate: { false },
+            poolDirectory: nil,
+            poolTableArtifactURL: nil,
             clock: { Date(timeIntervalSince1970: 14_000_000) })
         _ = await governor.tick(now: Date(timeIntervalSince1970: 14_000_000))
         // The duty runs in a detached Task; give it a bounded window to
@@ -371,7 +377,8 @@ struct AutonomicGovernorTests {
         // First "process": governor computes and persists the fingerprint.
         let governor1 = AutonomicGovernor(
             kit: kit, handle: handle, topologyCadenceMs: 0,
-            topologyHandler: handler, topologyFingerprintLoader: loader)
+            topologyHandler: handler, topologyFingerprintLoader: loader,
+            poolDirectory: nil, poolTableArtifactURL: nil)
         _ = await governor1.tick(now: Date(timeIntervalSince1970: 16_000_000))
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(await disk.writeCount == 1, "First governor must persist one snapshot")
@@ -381,7 +388,8 @@ struct AutonomicGovernorTests {
         // fingerprint, finds it matches, and skips the write.
         let governor2 = AutonomicGovernor(
             kit: kit, handle: handle, topologyCadenceMs: 0,
-            topologyHandler: handler, topologyFingerprintLoader: loader)
+            topologyHandler: handler, topologyFingerprintLoader: loader,
+            poolDirectory: nil, poolTableArtifactURL: nil)
         _ = await governor2.tick(now: Date(timeIntervalSince1970: 16_000_600))
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(await disk.writeCount == 1,

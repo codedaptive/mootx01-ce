@@ -218,17 +218,45 @@ fn edgeless_estate_scores_uniformly() {
     );
 }
 
+/// Per-call isolated pool paths so the governor's reducer never reads or writes
+/// the real user pool (ce-fdcpool test isolation). Unique per call via a PID +
+/// atomic counter — no `LATTICE_POOL_DIR` mutation, which would race across
+/// parallel test threads.
+fn isolated_pool_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("mootx01-testpool-{}-{}", std::process::id(), n));
+    let pool_dir = base.join("pool");
+    std::fs::create_dir_all(&pool_dir).unwrap();
+    (pool_dir, base.join("WordClassTable.json"))
+}
+
+/// Build a governor whose pool reducer targets a private temp dir (ce-fdcpool
+/// test isolation) instead of the real user pool. The 300_000 ms topology and
+/// 0 ms pool-reduce cadences mirror `new`'s production defaults, so behaviour is
+/// identical to `new` except for the pool location.
+fn hermetic_governor(registry: &EstateRegistry) -> AutonomicGovernor {
+    let (pool_dir, artifact) = isolated_pool_paths();
+    AutonomicGovernor::new_for_testing_with_pool(
+        Arc::clone(&registry.coord),
+        registry.default.handle,
+        Arc::clone(&registry.default.store),
+        300_000,
+        None,
+        0,
+        pool_dir,
+        artifact,
+    )
+}
+
 // ── Cadence ─────────────────────────────────────────────────────────────────────
 
 /// The producer fires on the first tick (last-fired marker is None).
 #[test]
 fn fires_on_first_tick() {
     let registry = EstateRegistry::new_inmemory();
-    let mut governor = AutonomicGovernor::new(
-        Arc::clone(&registry.coord),
-        registry.default.handle,
-        Arc::clone(&registry.default.store),
-    );
+    let mut governor = hermetic_governor(&registry);
     governor.set_graph_centrality_cadence_ms(0); // every tick
     let report = governor.tick(UNIX_EPOCH);
     assert!(report.graph_centrality_fired, "must fire on the first tick");
@@ -239,11 +267,7 @@ fn fires_on_first_tick() {
 #[test]
 fn respects_cadence() {
     let registry = EstateRegistry::new_inmemory();
-    let mut governor = AutonomicGovernor::new(
-        Arc::clone(&registry.coord),
-        registry.default.handle,
-        Arc::clone(&registry.default.store),
-    );
+    let mut governor = hermetic_governor(&registry);
     let first = governor.tick(UNIX_EPOCH);
     assert!(first.graph_centrality_fired, "first tick fires");
     let early = governor.tick(UNIX_EPOCH + Duration::from_secs(1));
@@ -264,11 +288,7 @@ fn recall_reads_live_graph_column() {
     let (hub, _) = build_star(&registry, 4);
 
     // Drive the producer via a governor tick (cadence 0 → fires now).
-    let mut governor = AutonomicGovernor::new(
-        Arc::clone(&registry.coord),
-        registry.default.handle,
-        Arc::clone(&registry.default.store),
-    );
+    let mut governor = hermetic_governor(&registry);
     governor.set_graph_centrality_cadence_ms(0);
     let report = governor.tick(UNIX_EPOCH);
     assert!(report.graph_centrality_fired, "producer must fire");

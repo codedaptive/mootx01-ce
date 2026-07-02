@@ -625,6 +625,28 @@ impl AutonomicGovernor {
         )
     }
 
+    /// Test-support: like `with_stop_flag_and_tick` but the pool reducer targets
+    /// the caller-supplied `pool_dir`/`pool_table_artifact` instead of the real
+    /// user pool. Keeps run-loop tests hermetic — a tick never reads or writes
+    /// the platform-default pool — without the `LATTICE_POOL_DIR` env race across
+    /// parallel test threads (ce-fdcpool test isolation). Test-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_stop_flag_tick_and_pool(
+        coord: Arc<Mutex<EstateCoordinator>>,
+        handle: EstateHandle,
+        store: Arc<dyn DrawerStore>,
+        stop_flag: Arc<AtomicBool>,
+        base_tick_ms: u64,
+        pool_dir: PathBuf,
+        pool_table_artifact: PathBuf,
+    ) -> Self {
+        Self::build_inner(
+            coord, handle, store, stop_flag, None,
+            base_tick_ms, parse_topology_cadence_ms(),
+            parse_pool_reduce_cadence_ms(), pool_dir, pool_table_artifact,
+        )
+    }
+
     /// Internal canonical constructor. All public constructors call this.
     /// `topology_cadence_ms_override`: when `Some`, skips env-var parsing and
     /// uses the provided value directly. Used by tests to avoid env-var

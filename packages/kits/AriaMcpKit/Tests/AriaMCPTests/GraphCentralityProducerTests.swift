@@ -202,7 +202,9 @@ struct GraphCentralityProducerTests {
     @Test("graph-centrality producer fires on the first tick")
     func firesOnFirstTick() async throws {
         let (kit, handle) = try await openEstate(owner: "ks-cadence-first")
-        let governor = AutonomicGovernor(kit: kit, handle: handle, graphCentralityIntervalMs: 0)
+        // ce-fdcpool test isolation: nil pool paths skip the reduce path so a tick
+        // never reads or writes the real user pool.
+        let governor = AutonomicGovernor(kit: kit, handle: handle, graphCentralityIntervalMs: 0, poolDirectory: nil, poolTableArtifactURL: nil)
         let report = await governor.tick(now: Date(timeIntervalSince1970: 6_000_000))
         #expect(report.graphCentralityFired)
         try await kit.close(handle)
@@ -211,7 +213,8 @@ struct GraphCentralityProducerTests {
     @Test("graph-centrality producer respects its cadence")
     func respectsCadence() async throws {
         let (kit, handle) = try await openEstate(owner: "ks-cadence-interval")
-        let governor = AutonomicGovernor(kit: kit, handle: handle)  // 10-min default
+        // ce-fdcpool test isolation: nil pool paths skip the reduce path.
+        let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)  // 10-min default
         let t0 = Date(timeIntervalSince1970: 7_000_000)
         let first = await governor.tick(now: t0)
         #expect(first.graphCentralityFired)                                   // nil → fires
