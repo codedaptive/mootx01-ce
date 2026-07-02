@@ -50,7 +50,7 @@
 //
 // Public entry point (for the autonomic governor or an operator command):
 //
-//   PoolReducer.reduce(poolDirectory:tableArtifactURL:now:) throws -> PoolReduceResult
+//   PoolReducer.reduce(poolDirectory:tableArtifactURL:now:maxFiles:) throws -> PoolReduceResult
 //
 // Current trigger host: `NeuronKit.AutonomicGovernor` invokes this after
 // a configurable idle window, passing the novel-pool directory and table-
@@ -124,7 +124,7 @@ public enum PoolReducerError: Error, Equatable, Sendable {
 
 /// Merges pooled novel-token observations into the WordClassTable artifact.
 ///
-/// `reduce(poolDirectory:tableArtifactURL:now:)` is the public entry point.
+/// `reduce(poolDirectory:tableArtifactURL:now:maxFiles:)` is the public entry point.
 /// It is idempotent: re-running after the pool is drained is a documented
 /// no-op.
 ///
@@ -150,13 +150,20 @@ public enum PoolReducer {
     ///     in place.
     ///   - now: the current date, injected for determinism. Used as the new
     ///     `snapshot_date` in the updated artifact.
+    ///   - maxFiles: caps how many submission files this run drains — the OLDEST
+    ///     `maxFiles` by filename (chronological). A backlog larger than the cap
+    ///     drains over successive runs (bounded near-realtime drain: the governor
+    ///     calls this synchronously on its tick, so an unbounded pass would stall
+    ///     the tick). Pass `Int.max` to drain the whole pool in one pass
+    ///     (operator/CLI/test use).
     /// - Returns: a `PoolReduceResult` summarising the run.
     /// - Throws: `PoolReducerError` if the artifact cannot be read or written,
     ///   or if the pool directory is unreadable.
     public static func reduce(
         poolDirectory: URL,
         tableArtifactURL: URL,
-        now: Date
+        now: Date,
+        maxFiles: Int
     ) throws -> PoolReduceResult {
 
         // Step 1: Ensure the writable artifact exists. When the reducer is
@@ -218,7 +225,15 @@ public enum PoolReducer {
         // deterministic — the oldest observation wins in a tie.
         let sortedFiles = poolFiles.sorted { $0.lastPathComponent < $1.lastPathComponent }
 
-        for fileURL in sortedFiles {
+        // Bounded drain: process at most `maxFiles` of the OLDEST submissions
+        // this run. A larger backlog drains over successive runs, so a burst that
+        // pushed the pool past the cap can never wedge the drainer (the prior
+        // "defer when over cap" behaviour deadlocked — over cap, the reduce that
+        // would shrink the pool was skipped, so it grew without bound). Files
+        // beyond the cap stay on disk, untouched, for the next run.
+        let batch = sortedFiles.prefix(maxFiles)
+
+        for fileURL in batch {
             // Decode the submission.
             let submission: PoolSubmission
             do {

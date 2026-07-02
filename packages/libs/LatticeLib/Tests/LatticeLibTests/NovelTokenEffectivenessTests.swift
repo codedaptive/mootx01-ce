@@ -101,7 +101,8 @@ struct NovelTokenEffectivenessTests {
         let result = try PoolReducer.reduce(
             poolDirectory: poolDir,
             tableArtifactURL: artifactURL,
-            now: now
+            now: now,
+            maxFiles: .max
         )
 
         // REDUCE RESULT: writable artifact was seeded, file consumed, tokens merged.
@@ -170,7 +171,8 @@ struct NovelTokenEffectivenessTests {
         let result = try PoolReducer.reduce(
             poolDirectory: poolDir,
             tableArtifactURL: artifactURL,
-            now: Date()
+            now: Date(),
+            maxFiles: .max
         )
 
         // reduce must not have thrown tableReadFailed.
@@ -292,7 +294,8 @@ struct NovelTokenEffectivenessTests {
         let r1 = try PoolReducer.reduce(
             poolDirectory: poolDir,
             tableArtifactURL: artifactURL,
-            now: Date()
+            now: Date(),
+            maxFiles: .max
         )
         #expect(r1.consumed == 1, "first reduce: file consumed")
 
@@ -303,7 +306,8 @@ struct NovelTokenEffectivenessTests {
         let r2 = try PoolReducer.reduce(
             poolDirectory: poolDir,
             tableArtifactURL: artifactURL,
-            now: Date()
+            now: Date(),
+            maxFiles: .max
         )
         #expect(r2.isNoop, "second reduce on drained pool must be no-op")
 
@@ -343,7 +347,8 @@ struct NovelTokenEffectivenessTests {
         _ = try PoolReducer.reduce(
             poolDirectory: poolDir,
             tableArtifactURL: artifactURL,
-            now: Date()
+            now: Date(),
+            maxFiles: .max
         )
 
         // Simulate NEXT PROCESS LOAD: load the merged table fresh from the

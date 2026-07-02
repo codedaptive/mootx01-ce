@@ -7,8 +7,9 @@
 //!   • KGFact subject-group cap in `graph_topology`: 51 drawers sharing one
 //!     subject produce ≤ 1 225 kgFact edges (not 1 275).
 //!   • `POOL_REDUCE_FILE_CAP` constant value (500) — parity with Swift.
-//!   • Pool-reduce file-count back-pressure: `GovernorReport.pool_reduce_fired`
-//!     is false when the pool directory holds > 500 files.
+//!   • Pool-reduce bounded drain: over the cap the tick FIRES and drains a
+//!     bounded batch (≤ cap) — it never defers (the prior defer-when-over-cap
+//!     behaviour deadlocked, growing the pool without bound).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -153,44 +154,55 @@ fn graph_topology_does_not_cap_at_limit_boundary() {
 // Pool-reduce file-count back-pressure
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// When the pool directory holds > 500 files the tick must defer (not fire).
-/// `GovernorReport.pool_reduce_fired` must be false.
-/// `last_pool_reduce_secs` must NOT advance so the next tick retries immediately.
+/// Over the cap the tick must FIRE and drain a bounded batch (≤ cap) — never
+/// defer. The prior "defer when > cap" behaviour deadlocked: over cap, the very
+/// reduce that shrinks the pool never ran, so the pool grew without bound. With
+/// 501 submissions, one tick drains exactly the cap (500), leaving one for the
+/// next tick.
 #[test]
-fn pool_reduce_defers_when_pool_dir_overloaded() {
+fn pool_reduce_drains_bounded_batch_when_over_cap() {
     let tmp = std::env::temp_dir()
         .join(format!("neuronkit-pool-cap-{}", uuid_v4_simple()));
     std::fs::create_dir_all(&tmp).expect("create tmp dir");
 
-    // Create 501 empty files (one above the 500-file cap).
+    // 501 valid submissions (one above the cap), named so filename order is
+    // chronological — the reducer drains oldest-first.
     let file_count = POOL_REDUCE_FILE_CAP + 1;
     for i in 0..file_count {
-        let file = tmp.join(format!("token-{i}.json"));
-        std::fs::write(&file, b"").expect("write empty file");
+        let body = format!(
+            r#"{{"table_version":"1.0.0","platform":"test","tagger_version":"1","entries":[{{"token":"tok{i}","tag":"NOUN"}}]}}"#
+        );
+        std::fs::write(tmp.join(format!("pool_{i:04}.json")), body).expect("write submission");
     }
-
-    let actual_count = std::fs::read_dir(&tmp)
-        .expect("read_dir")
-        .count();
-    assert_eq!(actual_count, file_count, "precondition: temp dir must hold {file_count} files");
 
     let table = tmp.join("table.json");
     let mut gov = make_governor_with_pool(tmp.clone(), table);
 
-    let t0 = SystemTime::now();
-    let report = gov.tick(t0);
+    let report = gov.tick(SystemTime::now());
+
+    // Remaining top-level pool_*.json submissions (drained ones moved to the
+    // archive/ or quarantine/ subdirs).
+    let remaining = std::fs::read_dir(&tmp)
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            e.path().is_file() && n.starts_with("pool_") && n.ends_with(".json")
+        })
+        .count();
 
     // Cleanup before assertions so a failed assert doesn't leave files.
     let _ = std::fs::remove_dir_all(&tmp);
 
     assert!(
-        !report.pool_reduce_fired,
-        "pool_reduce_fired must be false when pool dir holds > {} files (planned hardening)",
-        POOL_REDUCE_FILE_CAP
+        report.pool_reduce_fired,
+        "over-cap must FIRE a bounded drain, not defer — the deadlock is fixed"
     );
-    assert!(
-        !report.table_swapped,
-        "table_swapped must be false when reduce is deferred"
+    assert_eq!(
+        remaining,
+        file_count - POOL_REDUCE_FILE_CAP,
+        "one tick drains exactly the cap ({POOL_REDUCE_FILE_CAP}); the remainder stays for the next tick"
     );
 }
 
