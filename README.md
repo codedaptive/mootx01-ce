@@ -113,8 +113,14 @@ curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x
 **Windows** (PowerShell)
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
+# review install.ps1, then:
+.\install.ps1
 ```
+
+(Download-then-run, not `irm | iex` — the script itself should be reviewable
+before anything executes. The TLS line is required on Windows PowerShell 5.1.)
 
 Installs to:
 

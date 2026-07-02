@@ -1,7 +1,7 @@
 ---
-version: 1.0.0
+version: 2.0.0
 status: active
-date: 2026-06-14
+date: 2026-07-02
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
 ---
 
@@ -79,9 +79,13 @@ Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guara
 
 | Branch Pattern | Purpose |
 |---|---|
-| `stable/X.Y.x` | Production stable release line |
+| `stable/X.Y.x` | Production stable release line — published; user installs come from here |
+| `candidate/X.Y.x` | Release candidate line — builds are produced and validated here before promotion to stable |
 | `develop/X.Y.x` | Active development for next minor release |
 | `develop/X.0.x` or `develop/2.0` | Major version development, potentially experimental |
+
+All three branches of a release line (`develop`, `candidate`, `stable`) exist
+permanently and concurrently for the lifetime of that line.
 
 ### 2.2 Stable Branch Lifecycle
 
@@ -98,16 +102,39 @@ stable/1.0.x (branch, permanent)
 
 Multiple stable lines run concurrently. Users on `stable/1.0.x` receive bug fixes independently from users on `stable/1.1.x`.
 
-### 2.3 Promotion Flow
+### 2.3 Release Promotion Within a Line
 
-When a development branch stabilizes and ships:
+Every release moves through the three branches of its line in one direction.
+Promotion is strictly linear; development never reaches stable directly:
 
-1. `develop/1.1.x` is promoted to `stable/1.1.x`.
-2. `develop/1.1.x` is deleted or archived.
-3. A new `develop/1.2.x` branch is cut immediately.
-4. `stable/1.0.x` continues receiving backported bug fixes as long as it is supported.
+```
+develop/X.Y.x  --merge-->  candidate/X.Y.x  --merge-->  stable/X.Y.x
+ (daily work)              (build + validate)           (published)
+```
 
-### 2.4 Tagging Rules
+1. Development lands on `develop/X.Y.x`.
+2. When preparing a release, `develop` is merged into `candidate`. Release
+   artifacts are built from `candidate` and the installer validation
+   harness runs against those builds.
+3. On a passing validation run, `candidate` is merged into `stable` and the
+   release tag is cut from `stable`.
+4. Fixes for problems found during validation land on `develop`, then
+   re-merge to `candidate` for re-validation. Commits are never made
+   directly on `candidate` or `stable`, so the branches never diverge and
+   `develop` always contains everything.
+
+### 2.4 Line Promotion Flow
+
+When a development line stabilizes and ships as a new minor version:
+
+1. `develop/1.1.x` is promoted through `candidate/1.1.x` to `stable/1.1.x`
+   per section 2.3.
+2. A new `develop/1.2.x` branch is cut immediately, with its
+   `candidate/1.2.x` alongside.
+3. `stable/1.0.x` continues receiving backported bug fixes as long as it is
+   supported; backports flow through `candidate/1.0.x` like any release.
+
+### 2.5 Tagging Rules
 
 Every production release must be tagged in git at the exact commit that shipped.
 
@@ -216,6 +243,13 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 2.0.0 -- 2026-07-02
+Added `candidate/X.Y.x` branch and documented the three-branch release
+promotion flow (develop -> candidate -> stable). MAJOR bump per section
+3.3: redefines the prior promotion flow -- release-line branches are now
+permanent (the old flow deleted `develop/X.Y.x` after promotion).
+Line promotion and tagging renumbered to 2.4 and 2.5.
 
 ### 1.0.0 -- 2026-06-14
 Initial release.

@@ -27,7 +27,7 @@ HARNESS := docs/validation/substrate_math_performance/test-harness
 DIST    ?= dist
 
 .PHONY: help build build-swift build-rust test test-swift test-rust \
-        conformance release list clean clean-dry clean-index check-static-assets check-edition-boundary
+        conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
 	@echo "mootx01 build targets:"
@@ -41,6 +41,7 @@ help:
 	@echo "  check-edition-boundary — verify no SHARED file references an EE-only path"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
 	@echo "  release      — build host-arch release archive (mootx01 + moot-mgr) into $(DIST)/"
+	@echo "  pkg          — build the host-arch macOS .pkg installer into $(DIST)/ (unsigned without identities)"
 	@echo "  list         — print discovered packages and crates"
 	@echo "  clean        — remove all build artifacts (clean-dry previews, clean-index also drops .codegraph)"
 
@@ -161,6 +162,26 @@ release:
 	@arch=$$(uname -m); asset="mootx01-local-macos-$$arch.tar.gz"; \
 	 ( cd "$(DIST)" && tar -czf "$$asset" mootx01 moot-mgr && shasum -a 256 "$$asset" ); \
 	 echo "✓ release archive written to $(DIST)/"
+
+# ── macOS .pkg (local) ──────────────────────────────────────────────────
+# Reproduce, for the host architecture, the .pkg installer that
+# .github/workflows/release.yml builds in CI. Unsigned unless APP_IDENTITY
+# and INSTALLER_IDENTITY are exported (build-pkg.sh warns and proceeds —
+# fine for local layout testing, not distributable). Version defaults to
+# the newest CHANGELOG.md entry; override with make pkg PKG_VERSION=X.Y.Z.
+PKG_VERSION ?= $(shell sed -n 's/^\#\# v\([^ ]*\) .*/\1/p' CHANGELOG.md | head -1)
+pkg:
+	@mkdir -p "$(DIST)"
+	swift build -c release --package-path apps/mootx01 --product mootx01
+	swift build -c release --package-path apps/moot-mgr --product moot-mgr
+	swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup
+	@arch=$$(uname -m); \
+	 distribution/macos/build-pkg.sh "$(PKG_VERSION)" "$$arch" \
+	   apps/mootx01/.build/release/mootx01 \
+	   apps/moot-mgr/.build/release/moot-mgr \
+	   apps/Mootx01-Setup/.build/release/Mootx01Setup && \
+	 mv "mootx01-$(PKG_VERSION)-macos-$$arch.pkg" "$(DIST)/" && \
+	 echo "✓ .pkg written to $(DIST)/mootx01-$(PKG_VERSION)-macos-$$arch.pkg"
 
 list:
 	@echo "Swift packages ($(words $(SWIFT_PKGS))):"; for d in $(SWIFT_PKGS); do echo "  $$d"; done
