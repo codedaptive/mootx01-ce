@@ -458,6 +458,19 @@ impl MatrixTier {
                 if !matches!(entry.verb, UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge) {
                     return None;
                 }
+                // Exclude the wikidataQID coordinate from T. QID is the
+                // high-cardinality per-content concept the FDC classifier
+                // resolved; it is meaningful for co-occurrence (O, within-event
+                // structure) but as a temporal (T, cross-event) coordinate it
+                // pairs every distinct concept with every other, generating a
+                // unique source×target key per content pair — noise rather than
+                // causal signal, and the dominant term in the T key blow-up on a
+                // dense import window. It stays in O (rebuild()); it is dropped
+                // here only. Mirrors Swift MatrixTier.rebuildTemporal.
+                // See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+                if entry.field_path == "wikidataQID" {
+                    return None;
+                }
                 let clock = temporal_clock(&entry);
                 if clock.physical_time < temporal_cutoff_ms {
                     return None;

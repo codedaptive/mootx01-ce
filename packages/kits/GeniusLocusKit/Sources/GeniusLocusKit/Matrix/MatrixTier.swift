@@ -564,6 +564,17 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         let built: [(idx: Int, clock: HLC, coords: [TemporalFieldCoord])] =
             log.orderedEntries.enumerated().compactMap { (idx, entry) in
                 guard entry.verb == .capture || entry.verb == .expunge else { return nil }
+                // Exclude the wikidataQID coordinate from T. QID is the
+                // high-cardinality per-content concept the FDC classifier
+                // resolved; it is meaningful for co-occurrence (O, within-event
+                // structure) but as a temporal (T, cross-event) coordinate it
+                // pairs every distinct concept with every other, generating a
+                // unique source×target key per content pair — noise rather than
+                // causal signal, and the dominant term in the T key blow-up on a
+                // dense import window. It stays in O (rebuild()); it is dropped
+                // here only. Mirrors Rust MatrixTier::rebuild_temporal_from.
+                // See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+                guard entry.fieldPath != "wikidataQID" else { return nil }
                 let clock = temporalClock(for: entry)
                 guard clock.physicalTime >= temporalCutoffMs else { return nil }
                 let coords: [TemporalFieldCoord]

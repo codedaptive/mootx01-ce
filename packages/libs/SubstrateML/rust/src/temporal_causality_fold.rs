@@ -109,6 +109,19 @@ pub const LAG_BUCKETS: [i32; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 /// Window cap for T — pairs > defaultWindowMinutes apart are excluded.
 pub const DEFAULT_WINDOW_MINUTES: i32 = 256;
 
+/// Occupancy cap for the pairing buffer (cookbook §6.4, occupancy-cap
+/// amendment). A new entry pairs against at most the `MAX_WINDOW_OCCUPANCY`
+/// most-recent in-window sources; older in-window entries are dropped as
+/// sources. This bounds the fold to O(entries × MAX_WINDOW_OCCUPANCY),
+/// converting the otherwise-quadratic cost on a degenerate window (e.g. a
+/// bulk historical import where tens of thousands of events fall inside one
+/// 256-minute window) into a linear pass. The dropped sources are the oldest
+/// in the window — the weakest temporal proximity — so the near-lag causal
+/// signal the T matrix exists to capture is preserved. Must mirror Swift
+/// `TemporalCausalityFold.maxWindowOccupancy` exactly for bit-identical
+/// conformance. See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+pub const MAX_WINDOW_OCCUPANCY: usize = 512;
+
 /// Map a minute delta to the smallest lag bucket >= deltaMinutes.
 /// Mirrors Swift TemporalCausalityFold.lagBucket(forMinutes:) exactly.
 pub fn lag_bucket(minutes: i32) -> i32 {
@@ -199,6 +212,16 @@ pub fn fold(
         }
 
         buffer.push(entry);
+
+        // Occupancy cap: retain only the MAX_WINDOW_OCCUPANCY most-recent
+        // in-window entries as pairing sources. The buffer is ascending by
+        // clock, so the oldest sit at the front — drop them. This keeps the
+        // per-entry eviction scan and pairing loop bounded regardless of how
+        // many events share a window, and is applied identically in Swift.
+        if buffer.len() > MAX_WINDOW_OCCUPANCY {
+            let excess = buffer.len() - MAX_WINDOW_OCCUPANCY;
+            buffer.drain(0..excess);
+        }
     }
 
     // Reconstruct deltas in stable insertion order, filtering zero counts.
@@ -340,6 +363,51 @@ mod tests {
         assert_eq!(lag_bucket(65), 128);
         assert_eq!(lag_bucket(128), 128);
         assert_eq!(lag_bucket(200), 128); // above 128 → clamp to 128
+    }
+
+    #[test]
+    fn occupancy_cap_bounds_sources_to_max() {
+        // 514 entries, each 1 second apart (all inside the 256-minute window),
+        // each carrying one distinct source coord "s"="{i}". The last entry
+        // (index 513) must pair against only the MAX_WINDOW_OCCUPANCY (512)
+        // most-recent in-window sources — indices 1..=512 — because the cap
+        // drops the oldest as the buffer fills. Source 0 is dropped; source 1
+        // and source 512 survive. This bounds the fold to O(entries × cap) on a
+        // degenerate window and must be byte-identical to the Swift port.
+        let wm = HLC::ZERO;
+        let n = MAX_WINDOW_OCCUPANCY + 2; // 514
+        let entries: Vec<TemporalAuditEntry> = (0..n)
+            .map(|i| entry((i as i64) * 1000, vec![coord("s", &format!("{i}"))]))
+            .collect();
+        let result = fold(&entries, DEFAULT_WINDOW_MINUTES, wm);
+
+        // Collect the distinct source value_reprs that paired with the last
+        // target (index 513).
+        let last_target = format!("{}", n - 1);
+        let sources_for_last: std::collections::HashSet<String> = result
+            .deltas
+            .iter()
+            .filter(|(k, _)| k.target.value_repr == last_target)
+            .map(|(k, _)| k.source.value_repr.clone())
+            .collect();
+
+        assert_eq!(
+            sources_for_last.len(),
+            MAX_WINDOW_OCCUPANCY,
+            "last target must pair against exactly the cap-many most-recent sources"
+        );
+        assert!(
+            !sources_for_last.contains("0"),
+            "oldest source (0) must be dropped by the occupancy cap"
+        );
+        assert!(
+            sources_for_last.contains("1"),
+            "source 1 is the oldest surviving source"
+        );
+        assert!(
+            sources_for_last.contains(&format!("{}", MAX_WINDOW_OCCUPANCY)),
+            "source 512 (most-recent before target) must survive"
+        );
     }
 
     #[test]

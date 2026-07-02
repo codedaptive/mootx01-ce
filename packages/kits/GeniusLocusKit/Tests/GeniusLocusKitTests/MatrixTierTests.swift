@@ -138,6 +138,45 @@ struct MatrixTierTests {
         #expect(tier.temporalCausality.count == 1)
     }
 
+    /// The wikidataQID coordinate is excluded from T but retained in O. QID is
+    /// the high-cardinality per-content concept: valuable for within-event
+    /// co-occurrence (O) but noise + the dominant key-explosion term as a
+    /// cross-event temporal (T) coordinate. Mirrors Rust matrix_parity
+    /// wikidata_qid_excluded_from_temporal_but_kept_in_cooccurrence.
+    @Test
+    func wikidataQidExcludedFromTemporal() {
+        let rowA = UUID()
+        let rowB = UUID()
+        let h0 = hlc(0)
+        let h1 = hlc(300_000) // 5 minutes apart → within window
+
+        var log = UnifiedAuditLog()
+        // Each event carries a bitmap field AND a wikidataQID concept coordinate.
+        log.add(captureEntry(row: rowA, field: "bm.x", value: .bitmap(1), at: h0))
+        log.add(captureEntry(row: rowA, field: "wikidataQID", value: .integer(111), at: h0))
+        log.add(captureEntry(row: rowB, field: "bm.x", value: .bitmap(2), at: h1))
+        log.add(captureEntry(row: rowB, field: "wikidataQID", value: .integer(222), at: h1))
+
+        // T: no temporal key may touch wikidataQID, and the bitmap cross-pair
+        // must still be present.
+        let t = MatrixTier.rebuildTemporal(from: log)
+        #expect(t.temporalCausality.keys.allSatisfy {
+            $0.source.fieldPath != "wikidataQID" && $0.target.fieldPath != "wikidataQID"
+        }, "no T key may involve the wikidataQID coordinate")
+        let bmKey = MatrixTemporalKey(
+            source: MatrixValueCoord(fieldPath: "bm.x", value: .bitmap(1)),
+            target: MatrixValueCoord(fieldPath: "bm.x", value: .bitmap(2)),
+            lagBucket: 8)
+        #expect(t.temporalCausality[bmKey] == 1,
+                "the bitmap cross-pair must survive the QID exclusion")
+
+        // O: QID is retained — the within-event co-occurrence pair is present.
+        let o = MatrixTier.rebuild(from: log)
+        #expect(o.coOccurrence.keys.contains {
+            $0.a.fieldPath == "wikidataQID" || $0.b.fieldPath == "wikidataQID"
+        }, "wikidataQID must still contribute to co-occurrence (O)")
+    }
+
     // MARK: - Rebuild equals incremental
 
     @Test

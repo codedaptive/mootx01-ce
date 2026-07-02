@@ -179,6 +179,19 @@ public enum TemporalCausalityFold {
     /// `windowMinutes` are excluded (cookbook §6.4: 256 minutes).
     public static let defaultWindowMinutes: Int = 256
 
+    /// Occupancy cap for the pairing buffer (cookbook §6.4, occupancy-cap
+    /// amendment). A new entry pairs against at most the `maxWindowOccupancy`
+    /// most-recent in-window sources; older in-window entries are dropped as
+    /// sources. This bounds the fold to O(entries × maxWindowOccupancy),
+    /// converting the otherwise-quadratic cost on a degenerate window (e.g. a
+    /// bulk historical import where tens of thousands of events fall inside one
+    /// 256-minute window) into a linear pass. The dropped sources are the
+    /// oldest in the window — the weakest temporal proximity — so the near-lag
+    /// causal signal the T matrix exists to capture is preserved. Must mirror
+    /// Rust `MAX_WINDOW_OCCUPANCY` exactly for bit-identical conformance.
+    /// See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+    public static let maxWindowOccupancy: Int = 512
+
     /// Map a minute delta to the smallest lag bucket >= deltaMinutes.
     ///
     /// Out-of-window inputs are rejected upstream by the buffer eviction
@@ -306,6 +319,15 @@ public enum TemporalCausalityFold {
             // the watermark serve as sources when later new entries arrive
             // within the window.
             buffer.append(entry)
+
+            // Occupancy cap: retain only the maxWindowOccupancy most-recent
+            // in-window entries as pairing sources. The buffer is ascending by
+            // HLC, so the oldest sit at the front — drop them. This keeps the
+            // per-entry eviction scan and pairing loop bounded regardless of how
+            // many events share a window, and is applied identically in Rust.
+            if buffer.count > Self.maxWindowOccupancy {
+                buffer.removeFirst(buffer.count - Self.maxWindowOccupancy)
+            }
         }
 
         // Reconstruct deltas in stable insertion order.
