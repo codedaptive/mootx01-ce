@@ -25,6 +25,8 @@
     "download_unix": "build from the checked-out source; do not pipe mutable remote installer scripts into a shell",
     "download_windows": "build from the checked-out source, or use a pinned authenticated release artifact if one is published",
     "download_windows_note": "Do not evaluate remote PowerShell installer content; authenticate any installer before it runs.",
+    "download_homebrew": "brew install codedaptive/mootx01-ce/mootx01 (tap: codedaptive/homebrew-mootx01-ce; macOS and Linux); then wire clients with: mootx01 install",
+    "download_macos_pkg": "mootx01-<version>-macos-<arch>.pkg from the GitHub release assets (signed and notarized); the post-install setup assistant wires clients",
     "wire_clients": "mootx01 install",
     "local_build": "macOS: swift build -c release --package-path apps/aria-mcp-server; Linux: cd apps/aria-mcp-server/rust && cargo build --release",
     "uninstall": "mootx01 uninstall"

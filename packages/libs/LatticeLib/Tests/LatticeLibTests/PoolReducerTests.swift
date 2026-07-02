@@ -107,7 +107,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             // Check result counts.
@@ -128,6 +129,40 @@ struct PoolReducerTests {
         }
     }
 
+    // MARK: - 2b. Batch cap bounds the drain (bounded near-realtime backlog drain)
+
+    @Test("batch cap drains oldest-first over multiple runs; backlog never wedges")
+    func batchCapDrainsOldestFirstOverMultipleRuns() throws {
+        try withTempDir("batchcap") { poolDir, tableFile in
+            // Three submissions; filename order (pool_a < pool_b < pool_c) is the
+            // chronological order the reducer sorts by (oldest wins).
+            func sub(_ token: String) -> PoolSubmission {
+                PoolSubmission(tableVersion: "1.0.0", platform: "apple", taggerVersion: "15.0.0",
+                               entries: [PoolEntry(token: token, tag: "NOUN")])
+            }
+            try writeSubmission(sub("alpha"), to: poolDir, name: "pool_a.json")
+            try writeSubmission(sub("bravo"), to: poolDir, name: "pool_b.json")
+            try writeSubmission(sub("charlie"), to: poolDir, name: "pool_c.json")
+
+            // First run drains only the two oldest.
+            let r1 = try PoolReducer.reduce(
+                poolDirectory: poolDir, tableArtifactURL: tableFile, now: fixtureNow, maxFiles: 2)
+            #expect(r1.consumed == 2, "batch cap must bound the drain to 2 files")
+            #expect(FileManager.default.fileExists(atPath: poolDir.appendingPathComponent("pool_c.json").path),
+                    "the newest submission stays for the next run")
+            let mid = try readTable(at: tableFile)
+            #expect(mid.nouns.contains("alpha"))
+            #expect(mid.nouns.contains("bravo"))
+            #expect(!mid.nouns.contains("charlie"), "the deferred file's token is not yet merged")
+
+            // Second run drains the remainder — no backlog can wedge the drainer.
+            let r2 = try PoolReducer.reduce(
+                poolDirectory: poolDir, tableArtifactURL: tableFile, now: fixtureNow, maxFiles: 2)
+            #expect(r2.consumed == 1, "the remaining file drains on the next run")
+            #expect(try readTable(at: tableFile).nouns.contains("charlie"))
+        }
+    }
+
     // MARK: - 2. Idempotent re-run (drained pool is a no-op)
 
     @Test("idempotent: re-run on drained pool is no-op")
@@ -137,7 +172,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.isNoop, "empty pool must be a no-op")
@@ -160,7 +196,8 @@ struct PoolReducerTests {
             let result2 = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
             #expect(result2.consumed == 1)
             #expect(result2.nounsAdded == 1)
@@ -169,7 +206,8 @@ struct PoolReducerTests {
             let result3 = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
             #expect(result3.isNoop, "second run on drained pool must be no-op")
             #expect(result3.nounsAdded == 0, "no tokens added on re-run")
@@ -197,7 +235,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             // Bad file quarantined, good file consumed.
@@ -246,7 +285,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.consumed == 2, "both files consumed")
@@ -277,7 +317,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.consumed == 0, "stale submission must not be consumed")
@@ -310,7 +351,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.nounsAdded == 1, "only NOUN tag merges")
@@ -346,7 +388,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.nounsAdded == 1, "only meteor added; dog already resident")
@@ -376,7 +419,8 @@ struct PoolReducerTests {
             _ = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             let table = try readTable(at: tableFile)
@@ -416,7 +460,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             // Both files consumed; "spark" added exactly once as a NOUN.
@@ -460,7 +505,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.consumed == 1, "single file consumed")
@@ -504,7 +550,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.consumed == 2, "both files consumed")
@@ -540,7 +587,8 @@ struct PoolReducerTests {
             let result = try PoolReducer.reduce(
                 poolDirectory: poolDir,
                 tableArtifactURL: tableFile,
-                now: fixtureNow
+                now: fixtureNow,
+                maxFiles: .max
             )
 
             #expect(result.nounsAdded == 1, "only meteor added")
@@ -574,7 +622,8 @@ struct PoolReducerTests {
         let result = try PoolReducer.reduce(
             poolDirectory: poolDir,
             tableArtifactURL: tableFile,
-            now: fixtureNow
+            now: fixtureNow,
+            maxFiles: .max
         )
         #expect(result.isNoop, "absent pool dir must be a no-op")
     }

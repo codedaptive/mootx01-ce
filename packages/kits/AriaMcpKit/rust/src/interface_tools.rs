@@ -431,17 +431,17 @@ fn run_file_memory(
             .unwrap_or_else(|| DEFAULT_WING_NAME.to_string()),
     );
     // Optional back-dated event time. When supplied, the drawer's event_time
-    // is set to the caller's ISO8601 instant (epoch seconds) instead of the
-    // ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory which
-    // parses event_time to Date and passes it as eventTime on the CaptureFrame.
+    // is set to the caller's ISO8601 instant (epoch milliseconds, ADR-023)
+    // instead of the ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory
+    // which parses event_time to Date and passes it as eventTime on the CaptureFrame.
     if let Some(raw) = optional_string(args, "event_time")? {
-        let secs = parse_iso8601_to_secs(&raw).ok_or_else(|| {
+        let ms = parse_iso8601_to_ms(&raw).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
                 format!("event_time is not a valid ISO8601 instant: {raw}"),
             )
         })?;
-        frame.event_time = Some(secs);
+        frame.event_time = Some(ms);
     }
 
     // D-A: `impatient` is an execution option on the write verb (Dual-Path
@@ -703,10 +703,11 @@ fn note_usage(
 ) {
     if let Some(entry) = ledger.get(id) {
         let now = wall_now();
-        // Retention window: 30 days in seconds (mirrors Swift traceRetentionSeconds).
-        let since_secs = entry.surfaced_at_secs - 30 * 24 * 60 * 60;
-        let since = unix_epoch_secs_to_iso8601(since_secs);
-        let now_str = unix_epoch_secs_to_iso8601(now);
+        // Retention window: 30 days. `surfaced_at_secs` and `now` are epoch-ms
+        // (ADR-023; the `_secs` suffix is legacy naming), so the window is in ms.
+        let since_ms = entry.surfaced_at_secs - 30 * 24 * 60 * 60 * 1000;
+        let since = unix_epoch_ms_to_iso8601(since_ms);
+        let now_str = unix_epoch_ms_to_iso8601(now);
         if let Ok(coord) = estate.coord.lock() {
             // Silently ignore errors — reward marking is best-effort.
             let _ = coord.mark_recall_used(&estate.handle, id, &since, &now_str);
@@ -714,13 +715,14 @@ fn note_usage(
     }
 }
 
-/// Convert Unix epoch seconds to an ISO 8601 string (UTC, no sub-second
-/// precision). Used for the `since` and `now` parameters of
+/// Convert Unix epoch MILLISECONDS (ADR-023) to an ISO 8601 string (UTC,
+/// second precision — the reward window spans 30 days, so sub-second precision
+/// is immaterial here). Used for the `since` and `now` parameters of
 /// `mark_recall_used` which expects TEXT ISO8601 dates (fleet date rule).
-fn unix_epoch_secs_to_iso8601(secs: i64) -> String {
+fn unix_epoch_ms_to_iso8601(ms: i64) -> String {
     // Manual conversion — no external crate (zero-dep rule).
     // Gregorian calendar arithmetic for the range 1970–2106.
-    let s = secs.max(0) as u64;
+    let s = ms.max(0) as u64 / 1000;
     let days_since_epoch = s / 86400;
     let time_of_day = s % 86400;
     let hh = time_of_day / 3600;
@@ -1296,20 +1298,26 @@ pub(crate) fn epoch_to_iso8601(epoch_secs: i64) -> String {
 /// Minimal ISO8601 UTC parser — handles the subset the ARIA MCP server accepts.
 ///
 /// Accepts "YYYY-MM-DDTHH:MM:SSZ", "YYYY-MM-DDTHH:MM:SS.mmmZ", and
-/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch seconds (not milliseconds).
-/// Used to decode the optional `event_time` argument in `run_file_memory`,
-/// mirroring Swift's `ISO8601DateFormatter().date(from:)` in `runFileMemory`.
-fn parse_iso8601_to_secs(s: &str) -> Option<i64> {
-    // Strip timezone suffix and milliseconds fraction before splitting on T.
+/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch MILLISECONDS (ADR-023) — the
+/// fractional-seconds field is retained as the millisecond component, matching
+/// Swift's `ISO8601DateFormatter().date(from:)` in `runFileMemory`.
+fn parse_iso8601_to_ms(s: &str) -> Option<i64> {
+    // Strip timezone suffix before splitting on T.
     let s = s
         .trim_end_matches('Z')
         .trim_end_matches("+00:00")
         .trim_end_matches("+0000");
-    // Drop optional fractional seconds (.mmm) — we only need whole-second precision.
-    let s = if let Some(dot_pos) = s.rfind('.') {
-        &s[..dot_pos]
+    // Split optional fractional seconds (.mmm…) → milliseconds (3 digits,
+    // padded/truncated).
+    let (s, millis) = if let Some(dot_pos) = s.rfind('.') {
+        let frac: String = s[dot_pos + 1..].chars().take(3).collect();
+        let mut ms: i64 = frac.parse().ok()?;
+        for _ in frac.len()..3 {
+            ms *= 10;
+        }
+        (&s[..dot_pos], ms)
     } else {
-        s
+        (s, 0)
     };
     let parts: Vec<&str> = s.split('T').collect();
     if parts.len() != 2 {
@@ -1324,7 +1332,7 @@ fn parse_iso8601_to_secs(s: &str) -> Option<i64> {
     let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
     // Days since Unix epoch via Howard Hinnant's algorithm (same as lens_tools).
     let days = days_from_ymd_interface(y, m, d)?;
-    Some(days * 86400 + h * 3600 + min * 60 + sec)
+    Some((days * 86400 + h * 3600 + min * 60 + sec) * 1000 + millis)
 }
 
 fn days_from_ymd_interface(y: i64, m: i64, d: i64) -> Option<i64> {
@@ -1787,33 +1795,68 @@ fn run_reindex_responsive(
     handle: &genius_locus_kit::handle::EstateHandle,
     now: i64,
 ) -> Result<usize, String> {
-    let (corpus, jobs) = {
-        let mut c = coord_arc
-            .lock()
-            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
-        match c
-            .collect_reindex_jobs(handle)
-            .map_err(|e| describe_verb_dispatch_error(&e))?
-        {
-            Some(plan) => plan,
-            None => return Ok(0), // no Corpus registered — nothing to reindex
-        }
-    };
-    // Lock-free: enqueue on the Corpus's own queue (independent of the coord
-    // Mutex), so concurrent HTTP handlers acquire the coord lock between calls
-    // instead of blocking for the whole enqueue. Batch-enqueue in chunks so the
-    // filesystem backend fsyncs new/ ONCE per chunk instead of per job (the
-    // per-job fsync was the last full-core bottleneck of a bulk import), while
-    // the chunk bounds the brief queue-lock / fsync window against concurrent
-    // live captures.
+    // Lock-free enqueue on the Corpus's own queue (independent of the coord
+    // Mutex), chunked so the filesystem backend fsyncs new/ ONCE per chunk
+    // instead of per job (the per-job fsync was the last full-core bottleneck of
+    // a bulk import), while the chunk bounds the brief queue-lock / fsync window
+    // against concurrent live captures.
     const ENQUEUE_CHUNK: usize = 1024;
-    let mut enqueued = 0usize;
-    for chunk in jobs.chunks(ENQUEUE_CHUNK) {
-        if corpus.enqueue_ingest_batch(chunk).is_ok() {
-            enqueued += chunk.len();
+    let mut total = 0usize;
+    // Auto-continuation loop: collect_reindex_jobs caps each pass at
+    // REINDEX_MAX_JOBS. Enqueue the pass LOCK-FREE, poll its drain to idle
+    // (lock-free — the Corpus queue is independent of the coord Mutex, so
+    // concurrent HTTP handlers are never blocked while a pass encodes), then
+    // re-collect: the drained pass is now indexed, so the next collect returns
+    // only the remainder. Repeat until no unindexed drawer remains — a large
+    // import reaches FULL coverage with no operator follow-up, at any corpus
+    // size, while each pass stays bounded. The 1000-pass ceiling is a backstop
+    // against a drawer that never indexes (e.g. an encode error) spinning
+    // forever (covers 10M drawers at the 10k cap).
+    for _pass in 0..1000 {
+        let (corpus, jobs) = {
+            let mut c = coord_arc
+                .lock()
+                .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+            match c
+                .collect_reindex_jobs(handle)
+                .map_err(|e| describe_verb_dispatch_error(&e))?
+            {
+                Some(plan) => plan,
+                None => return Ok(total), // no Corpus registered — nothing to reindex
+            }
+        };
+        if jobs.is_empty() {
+            break; // every active drawer is indexed — done
+        }
+        for chunk in jobs.chunks(ENQUEUE_CHUNK) {
+            if corpus.enqueue_ingest_batch(chunk).is_ok() {
+                total += chunk.len();
+            }
+        }
+        // Wait for THIS pass to reach TRUE idle before re-collecting, so the next
+        // collect sees the batch's chunks as indexed and does NOT re-enqueue
+        // still-in-flight jobs (that duplicate-enqueue was the encode stall).
+        //
+        // POLL, do not pump. The corpus mounts a single lease-holding background
+        // drain worker (corpus-ingest-drain) that owns the write connection AND
+        // the deferred-index publish. Calling await_ingest_drain here would spin a
+        // SECOND in-process drainer on that same shared SQLite connection — two
+        // concurrent ingest_batch BEGINs on one connection is a "cannot start a
+        // transaction within a transaction" fault that forces the slow per-job
+        // fallback. So the loop only observes ingest_queue_depth (a read-only
+        // frontier probe) and lets the single worker do all draining and
+        // publishing. collect_reindex_jobs keys on chunk presence (written inside
+        // the drain, BEFORE publish), so (0, 0) depth means the pass is fully
+        // indexed and the next collect returns only the remainder.
+        loop {
+            match corpus.ingest_queue_depth() {
+                Ok((0, 0)) => break,
+                Ok(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(_) => break, // depth probe fault — stop rather than spin
+            }
         }
     }
-    // Brief re-lock for the deferred Merkle full-tree rollup.
+    // Brief re-lock for the deferred Merkle full-tree rollup, once, after coverage.
     {
         let mut c = coord_arc
             .lock()
@@ -1821,7 +1864,7 @@ fn run_reindex_responsive(
         c.rollup_after_reindex(handle, now)
             .map_err(|e| describe_verb_dispatch_error(&e))?;
     }
-    Ok(enqueued)
+    Ok(total)
 }
 
 fn run_reindex(
@@ -1830,11 +1873,28 @@ fn run_reindex(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let now = wall_now();
-    // Responsive (lock-free enqueue) so a large reindex does not freeze the daemon.
-    match run_reindex_responsive(&estate.coord, &estate.handle, now) {
-        Ok(enqueued) => Ok(text_result(&format!("reindex: enqueued {enqueued} drawers for encoding"))),
-        Err(e) => Ok(error_result(&e)),
-    }
+    // reindex now AUTO-CONTINUES (enqueue a pass → await its drain → re-collect)
+    // to FULL coverage, which can take minutes on a large estate. Run it on a
+    // detached worker so the HTTP handler returns immediately; the resident
+    // daemon's encode-drain converges in the background. Poll moot_drain_status
+    // to watch it finish. (Mirrors the palace-import background-processing model —
+    // no repeated moot_reindex calls are needed, at any corpus size.)
+    let bg_coord = std::sync::Arc::clone(&estate.coord);
+    let bg_handle = estate.handle;
+    std::thread::Builder::new()
+        .name("reindex-backfill".into())
+        .spawn(move || {
+            match run_reindex_responsive(&bg_coord, &bg_handle, now) {
+                Ok(n) => eprintln!(
+                    "reindex: background backfill complete — {n} drawers indexed to full coverage"
+                ),
+                Err(e) => eprintln!("reindex: background backfill failed: {e}"),
+            }
+        })
+        .ok();
+    Ok(text_result(
+        "reindex started: backfilling every unindexed drawer to full coverage in the background — poll moot_drain_status to watch the encode queue converge",
+    ))
 }
 
 /// `moot_drain_status` — report every long-running background drain the estate
@@ -1943,7 +2003,7 @@ fn run_palace_import(
             // calls during this 49k-drawer reindex (see run_reindex_responsive).
             match run_reindex_responsive(&bg_coord, &bg_handle, now) {
                 Ok(n) => eprintln!(
-                    "palace import: background processing complete — {n} drawers queued for encode/index, Merkle rolled up"
+                    "palace import: background processing complete — {n} drawers indexed to full coverage (auto-continued reindex), Merkle rolled up"
                 ),
                 Err(e) => eprintln!("palace import: background reindex failed: {e}"),
             }

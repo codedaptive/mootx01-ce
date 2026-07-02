@@ -20,12 +20,12 @@ These are the source of truth. The copies that land in the community
 
 The GitHub release workflow (`.github/workflows/release.yml`) builds the
 Inno Setup EXE for both architectures and publishes them as release assets,
-alongside a `SHA256SUMS` file and a minisign signature. For a release tagged
+alongside a `checksums.txt` file and a minisign signature. For a release tagged
 `vX.Y.Z-beta` the relevant assets are:
 
 - `mootx01-X.Y.Z-windows-x86_64-setup.exe`
 - `mootx01-X.Y.Z-windows-arm64-setup.exe`
-- `SHA256SUMS` (contains the SHA-256 for every asset)
+- `checksums.txt` (contains the SHA-256 for every asset)
 
 No extra CI is needed to *produce* the installer — the winget work is purely
 authoring the manifest and submitting it.
@@ -55,7 +55,7 @@ authoring the manifest and submitting it.
    (Get-FileHash setup.exe -Algorithm SHA256).Hash
    ```
 
-   or read it straight out of the release's `SHA256SUMS`. Winget wants the
+   or read it straight out of the release's `checksums.txt`. Winget wants the
    hash uppercase; the manifest accepts either case. The placeholder in the
    committed manifest is 64 zeros — winget validation rejects it, which is
    deliberate: a submission that skipped this step fails loudly instead of
@@ -95,7 +95,8 @@ authoring the manifest and submitting it.
 
 - **Pre-release / beta.** The community winget-pkgs repo does not list
   pre-release versions. While MOOTx01 is in `-beta`, the standalone EXE and
-  the `install.ps1` one-liner are the Windows distribution channels; the
+  the `install.ps1` script (download-then-run) are the Windows distribution
+  channels; the
   manifests here are staged and validated so the winget submission is a
   single clean step the moment a non-beta `X.Y.Z` release ships. Keep the
   manifests current against the latest beta so the eventual submission is

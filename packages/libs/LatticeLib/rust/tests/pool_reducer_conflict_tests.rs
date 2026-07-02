@@ -114,7 +114,7 @@ fn same_token_noun_and_verb_across_files() {
     write_submission(&file_a, &pool_dir, "pool_a.json");
     write_submission(&file_b, &pool_dir, "pool_b.json");
 
-    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce must not error");
+    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce must not error");
 
     // Same outcomes as the Swift test (parity).
     assert_eq!(result.consumed, 2, "both files consumed");
@@ -165,7 +165,7 @@ fn same_token_twice_in_one_file() {
     );
     write_submission(&submission, &pool_dir, "pool_intra.json");
 
-    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce must not error");
+    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce must not error");
 
     assert_eq!(result.consumed, 1, "single file consumed");
     assert_eq!(
@@ -216,7 +216,7 @@ fn older_file_wins_over_newer_file() {
     write_submission(&older, &pool_dir, "pool_2026-06-10_001.json");
     write_submission(&newer, &pool_dir, "pool_2026-06-11_001.json");
 
-    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce must not error");
+    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce must not error");
 
     assert_eq!(result.consumed, 2, "both files consumed");
     assert_eq!(
@@ -259,7 +259,7 @@ fn table_resident_token_cannot_be_reclassified() {
     );
     write_submission(&submission, &pool_dir, "pool_reclassify.json");
 
-    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce must not error");
+    let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce must not error");
 
     // Only the genuinely-novel "meteor" expands the table.
     assert_eq!(result.nouns_added, 1, "only meteor added");

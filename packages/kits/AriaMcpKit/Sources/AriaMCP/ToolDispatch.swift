@@ -2050,13 +2050,25 @@ extension ToolDispatcher {
     /// Callers can poll `moot_drain_status` for encode-queue depth or simply
     /// wait for the background drain worker to settle.
     ///
-    /// Returns a summary: how many drawers were enqueued and how many were
-    /// already indexed.
+    /// reindexMissing now AUTO-CONTINUES to FULL coverage (enqueue a pass → await
+    /// its drain → re-collect), so this runs it on a detached task and returns
+    /// immediately; the resident daemon's encode-drain converges in the
+    /// background regardless of estate size. Poll `moot_drain_status` to watch it
+    /// finish. (Mirrors the palace-import background-processing model — no
+    /// repeated calls are needed.)
     func runReindex(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let now = Date()
-        let enqueued = try await kit.reindexMissing(handle: handle, now: now)
-        return Self.textResult("reindex: enqueued \(enqueued) drawers for encoding")
+        Task.detached { [kit] in
+            do {
+                let n = try await kit.reindexMissing(handle: handle, now: now)
+                fputs("reindex: background backfill complete — \(n) drawers indexed to full coverage\n", stderr)
+            } catch {
+                fputs("reindex: background backfill failed: \(error)\n", stderr)
+            }
+        }
+        return Self.textResult(
+            "reindex started: backfilling every unindexed drawer to full coverage in the background — poll moot_drain_status to watch the encode queue converge")
     }
 
     /// `moot_drain_status` — report every long-running background drain the
@@ -2157,8 +2169,8 @@ extension ToolDispatcher {
         // finish must keep the connection open — the resident HTTP daemon is the host.)
         Task.detached { [kit] in
             do {
-                _ = try await kit.reindexMissing(handle: handle, now: now)
-                fputs("palace import: background processing complete (encode queued, Merkle rolled up)\n", stderr)
+                let n = try await kit.reindexMissing(handle: handle, now: now)
+                fputs("palace import: background processing complete — \(n) drawers indexed to full coverage (auto-continued reindex), Merkle rolled up\n", stderr)
             } catch {
                 fputs("palace import: background reindex failed: \(error)\n", stderr)
             }

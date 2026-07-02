@@ -400,22 +400,23 @@ fn burst_with_transient_ingest_failure_still_reaches_100_percent() {
 
 // MARK: - Part 6: reindexMissing hard cap (secfix/c-glk-remaining)
 
-/// Verify that REINDEX_MAX_JOBS is the documented constant 10,000.
+/// Verify that REINDEX_MAX_JOBS is the documented per-pass bound 10,000.
 ///
-/// This test locks the DoS-hardening constant value (secfix/c-glk-remaining
-/// Part 6). If someone accidentally lowers this to a value that would break
-/// normal import flows, or raises it to a value that reinstates the unbounded
-/// fan-out, this test catches it.
+/// This locks the PER-PASS reindex bound. `run_reindex_responsive` loops
+/// internally (enqueue a pass → drain it to idle → re-collect) to full coverage,
+/// so this cap only bounds each pass, not the total — bounded passes drain
+/// cleanly, whereas enqueuing the whole corpus at once stalled the encode. This
+/// test catches an accidental change to the bound.
 ///
 /// Swift parity: `reindexMissing_maxJobsCap_constantIs10000` in EncodeIntakeTests.swift.
 #[test]
 fn reindex_missing_max_jobs_constant_is_10000() {
-    // EstateCoordinator::REINDEX_MAX_JOBS is the security-hardening constant
-    // from Part 6 of secfix/c-glk-remaining. Swift parity: reindexMaxJobs = 10_000.
+    // EstateCoordinator::REINDEX_MAX_JOBS is the per-pass reindex bound.
+    // Swift parity: reindexMaxJobs = 10_000.
     assert_eq!(
         EstateCoordinator::REINDEX_MAX_JOBS,
         10_000,
-        "REINDEX_MAX_JOBS must equal 10,000 (DoS hardening constant, Part 6)"
+        "REINDEX_MAX_JOBS must equal 10,000 (per-pass reindex bound)"
     );
 }
 

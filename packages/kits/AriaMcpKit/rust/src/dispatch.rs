@@ -635,12 +635,16 @@ pub(crate) fn describe_glk_error(e: &genius_locus_kit::GeniusLocusKitError) -> S
     }
 }
 
-/// Wall-clock seconds at the time of dispatch. Lenses that take `now: i64`
-/// call this. Tests inject fixed values through `dispatch_tool_at` below.
+/// Wall-clock MILLISECONDS at the time of dispatch — the deterministic `now`
+/// token threaded through the verb/recall/reward stack. The substrate's time
+/// fields (`filed_at`, `event_time`) and every temporal interval are epoch-ms,
+/// matching the sub-second precision Swift's `Date` carries, so the two ports
+/// store and score byte-identically. Lenses that take `now: i64` call this;
+/// tests inject fixed values through `dispatch_tool_at` below.
 pub fn wall_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_millis() as i64
 }

@@ -109,7 +109,7 @@ impl NodeStore {
 
         // No active match — create.
         let id = Uuid::new_v4();
-        let now_ms = now * 1000;
+        let now_ms = now; // `now` is already epoch-ms (ADR-023)
         let created_hlc = self.hlc.lock().unwrap().send(now_ms);
 
         // Schema declares id/parent_id as text columns, so store as
@@ -161,7 +161,7 @@ impl NodeStore {
 
         let lookup_name = Node::normalize_lookup_name(display_name);
         let id = Uuid::new_v4();
-        let now_ms = now * 1000;
+        let now_ms = now; // `now` is already epoch-ms (ADR-023)
         let created_hlc = self.hlc.lock().unwrap().send(now_ms);
 
         let mut values = BTreeMap::new();
@@ -272,7 +272,7 @@ impl NodeStore {
             return Ok(Some(node));
         }
 
-        let now_ms = now * 1000;
+        let now_ms = now; // `now` is already epoch-ms (ADR-023)
         let t_hlc = self.hlc.lock().unwrap().send(now_ms);
 
         let mut values = BTreeMap::new();

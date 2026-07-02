@@ -320,10 +320,11 @@ struct EncodeIntakeTests {
     @Test
     func reindexMissing_maxJobsCap_constantIs10000() {
         // reindexMaxJobs is a static let on GeniusLocusKit — accessible via
-        // @testable import. The value 10,000 is the security-hardening constant
-        // from Part 6 of secfix/c-glk-remaining. Rust parity: REINDEX_MAX_JOBS.
+        // @testable import. 10,000 is the PER-PASS reindex bound; reindexMissing
+        // loops internally (drain each pass to idle → re-collect) to full
+        // coverage, so this cap only bounds each pass. Rust parity: REINDEX_MAX_JOBS.
         #expect(GeniusLocusKit.reindexMaxJobs == 10_000,
-            "reindexMaxJobs must equal 10,000 (DoS hardening constant, Part 6)")
+            "reindexMaxJobs must equal 10,000 (per-pass reindex bound)")
     }
 
     /// Verify `reindexMissing` enqueues at most `reindexMaxJobs` drawers when

@@ -304,6 +304,8 @@ fn corrupt_audit_event_id_returns_error_not_nil_uuid() {
             after_provenance: 3,
             before_lattice_anchor: None,
             after_lattice_anchor: 0,
+            before_lattice_qid: None,
+            after_lattice_qid: 0,
             actor: "test".to_string(),
             reason: None,
         };

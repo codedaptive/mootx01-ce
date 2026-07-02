@@ -1715,32 +1715,91 @@ impl EstateCoordinator {
         // the normal capture path: classifiable sentinel frames are anchored
         // before storage so latticeSubtree grants never authorize them under
         // the wrong UDC scope. Explicit non-sentinel anchors are preserved.
-        let classified: Vec<CaptureFrame> = frames
-            .into_iter()
-            .map(|frame| {
-                if frame.lattice_anchor.udc_code == crate::intake::UNCLASSIFIED_SENTINEL
-                    && !frame.content.is_empty()
-                {
-                    let (code_opt, qid_opt) =
-                        lattice_lib::fdc_runtime::Fdc::encode_anchor(&frame.content);
-                    match code_opt {
-                        Some(code) if !code.is_empty() => {
-                            let mut f = frame;
-                            f.lattice_anchor = LatticeAnchor {
-                                udc_code: code,
-                                udc_facets: None,
-                                wikidata_qid: qid_opt,
-                                wikidata_qids_secondary: None,
-                            };
-                            f
-                        }
-                        _ => frame,
+
+        // Parallel FDC classify — Pattern B (encode-perf #31, Phase 1).
+        //
+        // 49k-drawer palace import pegged one core for many minutes because this
+        // classify loop was purely serial and string/hashmap bound. Fan it across
+        // cap workers: each frame is independent, and
+        // Fdc::encode_anchor_no_record is a pure read over the immutable pinned
+        // codebook — concurrent calls are safe (OnceLock + RwLock<Arc<…>>).
+        //
+        // secfix/fdc-pool: use encode_anchor_no_record (not encode_anchor) so novel
+        // tokens from batch import content are NOT accumulated into
+        // SHARED_NOVEL_CACHE and do NOT flush to plaintext pool files — same
+        // guarantee as capture_with_mode in intake.rs. Result is byte-identical.
+        //
+        // Results gathered by index, giving byte-identical output to the serial
+        // version. Serial fast-path for small batches avoids thread spawn overhead.
+        // Shape mirrors CorpusKit's embed_concurrency_cap + thread::scope fan-out.
+
+        // Nested classify helper — pure over the pinned codebook, no capture needed.
+        // Uses encode_anchor_no_record (secfix/fdc-pool).
+        fn classify_one_frame_for_batch(frame: CaptureFrame) -> CaptureFrame {
+            if frame.lattice_anchor.udc_code == crate::intake::UNCLASSIFIED_SENTINEL
+                && !frame.content.is_empty()
+            {
+                // encode_anchor_no_record: batch import content must not leak novel
+                // tokens into the plaintext pool pipeline (secfix/fdc-pool, same
+                // rationale as capture_with_mode in intake.rs). Result is
+                // byte-identical to encode_anchor.
+                let (code_opt, qid_opt) =
+                    lattice_lib::fdc_runtime::Fdc::encode_anchor_no_record(&frame.content);
+                match code_opt {
+                    Some(code) if !code.is_empty() => {
+                        let mut f = frame;
+                        f.lattice_anchor = LatticeAnchor {
+                            udc_code: code,
+                            udc_facets: None,
+                            wikidata_qid: qid_opt,
+                            wikidata_qids_secondary: None,
+                        };
+                        f
                     }
-                } else {
-                    frame
+                    _ => frame,
                 }
-            })
-            .collect();
+            } else {
+                frame
+            }
+        }
+
+        let cap = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let classified: Vec<CaptureFrame> = if frames.len() <= cap {
+            // Serial fast-path: avoid thread spawn overhead for small batches.
+            frames.into_iter().map(classify_one_frame_for_batch).collect()
+        } else {
+            // Fan-out across cap workers, chunked. Chunk size == cap keeps exactly
+            // cap threads in flight per barrier — same shape as CorpusKit's Rust
+            // embed fan-out. thread::scope borrows from the current stack; no Arc.
+            // Results gathered by index for byte-identical output order.
+            let mut frames_opt: Vec<Option<CaptureFrame>> =
+                frames.into_iter().map(Some).collect();
+            let n = frames_opt.len();
+            let mut results: Vec<Option<CaptureFrame>> = (0..n).map(|_| None).collect();
+            let mut start = 0;
+            while start < n {
+                let end = (start + cap).min(n);
+                std::thread::scope(|s| {
+                    let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, CaptureFrame>)> =
+                        Vec::with_capacity(end - start);
+                    for i in start..end {
+                        let frame = frames_opt[i]
+                            .take()
+                            .expect("each frame taken exactly once");
+                        handles.push((i, s.spawn(move || classify_one_frame_for_batch(frame))));
+                    }
+                    for (i, handle) in handles {
+                        results[i] =
+                            Some(handle.join().expect("FDC classify thread panicked"));
+                    }
+                });
+                start = end;
+            }
+            results.into_iter().map(|r| r.unwrap()).collect()
+        };
 
         // Quiesce check BEFORE opening the transaction. `estate_for_verb`
         // returns `EstateQuiesced` when the mount state is Quiesced or
@@ -2088,13 +2147,9 @@ impl EstateCoordinator {
         };
 
         // HLC stamp: physical time is epoch-ms (HLC substrate convention). The `now`
-        // parameter throughout recall_scored is epoch-seconds (wall_now() from dispatch).
-        // Convert at the HLC boundary so the rest of the recall path retains its
-        // epoch-seconds contract. Without this conversion the HLC would see a
-        // physical time ~1000x too small, producing timestamps far in the past and
-        // breaking any ordering assertion downstream.
-        let now_ms = now.saturating_mul(1_000);
-        let submitted_at = hlc.send(now_ms);
+        // parameter throughout recall_scored is epoch-ms too (ADR-023, wall_now()
+        // from dispatch), so it stamps the HLC directly with no conversion.
+        let submitted_at = hlc.send(now);
         let job = queuekit::Job {
             id: queuekit::JobId(uuid::Uuid::new_v4().simple().to_string()),
             stream_id: queuekit::StreamId("dreaming".to_string()),
@@ -2273,8 +2328,8 @@ impl EstateCoordinator {
     /// so re-running the sweep skips items whose UUID already appears as a
     /// `lineage_id` in `_distilled` drawers.
     ///
-    /// `now` is epoch seconds — deterministic clock, mirrors Swift's `Date`
-    /// parameter. `limit` caps the number of factoids produced this sweep
+    /// `now` is epoch milliseconds (ADR-023) — deterministic clock, mirrors
+    /// Swift's `Date` parameter. `limit` caps the number of factoids produced this sweep
     /// (`None` = all eligible items, matching the Swift `limit: Int? = nil`).
     ///
     /// # Errors
@@ -3084,8 +3139,8 @@ impl EstateCoordinator {
     /// callers can retain the generated id. Mirrors the Swift
     /// `GeniusLocusKit.captureKGFact(_:subject:predicate:object:sourceDrawerID:now:)`.
     ///
-    /// `now` is epoch-seconds. Always pass the current time from the caller;
-    /// never call time inside this method — keeps the coordinator deterministic.
+    /// `now` is epoch milliseconds (ADR-023). Always pass the current time from
+    /// the caller; never call time inside this method — keeps the coordinator deterministic.
     pub fn add_kg_fact(
         &self,
         handle: &EstateHandle,
@@ -3135,8 +3190,8 @@ impl EstateCoordinator {
     /// substitute `"no-embedding"` so the non-empty model-id contract is
     /// satisfied. Mirrors the Swift `GeniusLocusKit.addDiaryEntry(in:_:)`.
     ///
-    /// `now` is epoch-seconds. `topic` and `embedding_model_id` are caller-
-    /// supplied; callers that have no topic may pass `""`.
+    /// `now` is epoch milliseconds (ADR-023). `topic` and `embedding_model_id` are
+    /// caller-supplied; callers that have no topic may pass `""`.
     pub fn add_diary_entry(
         &self,
         handle: &EstateHandle,
@@ -3335,8 +3390,8 @@ impl EstateCoordinator {
     // MARK: - glk_fingerprints_captured
 
     /// Fingerprints of every non-tombstoned drawer captured in the closed
-    /// epoch-seconds window `[start_epoch, end_epoch]`, in HLC-ascending order
-    /// within the window.
+    /// epoch-milliseconds window `[start_epoch, end_epoch]` (ADR-023), in
+    /// HLC-ascending order within the window.
     ///
     /// The Moment lens (CognitionKit) folds these into an OR-reduced window
     /// signature and ranks comparison windows by Hamming proximity. Delegates
@@ -3360,8 +3415,9 @@ impl EstateCoordinator {
     // MARK: - fingerprint_bit_series
 
     /// Time-bucketed fingerprint bit-activity series for `bit` over the most
-    /// recent `bucket_count` buckets of width `bucket_seconds`, ending at
-    /// `ending_at` (epoch seconds — deterministic clock, never read system time).
+    /// recent `bucket_count` buckets of width `bucket_seconds` (a SECONDS width;
+    /// the store scales it to ms internally), ending at `ending_at` (epoch
+    /// milliseconds, ADR-023 — deterministic clock, never read system time).
     ///
     /// Top-level GLK surface for the Rhythm recipe. Delegates to
     /// `Estate::fingerprint_bit_series`, which passes through to
@@ -3611,12 +3667,42 @@ impl EstateCoordinator {
         self.feed_audit_log(handle)?;
         let log = self.audit_log(handle)?;
 
+        // Build the event_time map (audit row_id → authored-in-world epoch ms) so
+        // the temporal (T) matrix pass keys off event_time, not the capture HLC —
+        // ADR-004: all temporal-cognition primitives key off eventTime. A bulk
+        // historical import stamps every capture with one HLC, so hlc-based lags
+        // are all 0 and no causality pairs form; the real ordering lives in each
+        // drawer's event_time. event_time and the fold's physical_time are both
+        // epoch-ms (ADR-023), so it flows through directly. The row_id key mirrors
+        // bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
+        let event_times: std::collections::HashMap<crate::audit::EntryUUID, i64> = {
+            let estate = self.estate_for_verb(handle)?;
+            let drawers = estate.all_drawers().map_err(|e| {
+                VerbDispatchError::from(remap(
+                    "rebuild_derived_accelerators",
+                    &uuid_to_str(&handle.estate_uuid),
+                    e,
+                ))
+            })?;
+            drawers
+                .iter()
+                .filter_map(|d| {
+                    uuid::Uuid::parse_str(&d.id).ok().map(|u| {
+                        (
+                            crate::audit::EntryUUID(u.as_u128().to_be_bytes()),
+                            d.event_time,
+                        )
+                    })
+                })
+                .collect()
+        };
+
         // The matrix snapshot store needs a durable backing storage. In-memory
         // estates don't retain one (storages holds only DrawerStore-backed
         // storages); they full-rebuild without persistence, as in Swift's
         // .inMemory mode.
         let Some(storage) = self.storages.get(handle).cloned() else {
-            let tier = crate::matrix::MatrixTier::full_rebuild(&log);
+            let tier = crate::matrix::MatrixTier::full_rebuild(&log, &event_times);
             self.register_matrix_tier(handle, tier);
             return Ok(());
         };
@@ -3645,10 +3731,10 @@ impl EstateCoordinator {
                 // including cross-cursor expunge/withdraw and temporal
                 // window-boundary pairs — exact, not an approximation.
                 let mut loaded = snapshot.tier;
-                loaded.incremental_update(&log);
+                loaded.incremental_update(&log, &event_times);
                 loaded
             }
-            None => crate::matrix::MatrixTier::full_rebuild(&log),
+            None => crate::matrix::MatrixTier::full_rebuild(&log, &event_times),
         };
 
         // Step 3 — install so the matrixAware recall lane is live.
@@ -5075,8 +5161,8 @@ impl EstateCoordinator {
         //     enforced inside `enqueue_dreaming_item`; zero cost if < 2.
         //
         // The enqueue is non-fatal: `enqueue_dreaming_item` catches and logs all
-        // failures. `now` here is epoch-seconds (same unit as the rest of recall_scored).
-        // enqueue_dreaming_item converts to epoch-ms at the HLC boundary internally.
+        // failures. `now` here is epoch-milliseconds (ADR-023, same unit as the rest
+        // of recall_scored); enqueue_dreaming_item stamps the HLC with it directly.
         // No SystemTime::now() inside this engine — determinism rule.
         if request.origin == RecallOrigin::External {
             let drawers: Vec<Drawer> = result.hits.iter()
@@ -5395,7 +5481,10 @@ impl EstateCoordinator {
         // Internal-origin: traced_frame.trace_limit stays None — no trace writes.
 
         let locus_list: Vec<(String, f32)>;
-        let drawer_index: HashMap<String, Drawer>;
+        // Mutable: after the candidate set is assembled below, the semantic-lane
+        // (BM25/vector/dense) source_ids that the locus lane did not return are
+        // pool-loaded into this index through the SAME frame (Swift-parity fix).
+        let mut drawer_index: HashMap<String, Drawer>;
 
         let include_locus = matches!(
             request.mode,
@@ -5761,6 +5850,43 @@ impl EstateCoordinator {
         for (id, _) in &bm25_list   { all_ids.insert(id.clone()); }
         for (id, _) in &vector_list { all_ids.insert(id.clone()); }
         for (id, _) in &dense_list  { all_ids.insert(id.clone()); }
+
+        // Pool-load the semantic-lane candidates the locus lane did not return, so
+        // they can be scored AND hydrated (Swift-parity fix — recallUnionBest step
+        // 5.5 / recallHybrid extra-id load). The locus lane is capped at frontier_k
+        // and ordered ByCaptureTimeDesc, so `drawer_index` currently holds only the
+        // most-recently-captured frontier_k drawers. When many drawers share a
+        // capture instant — a bulk palace import files tens of thousands at the same
+        // ms — a valid ACTIVE drawer surfaced ONLY by BM25/vector/dense is absent
+        // from `drawer_index`, and the active-state hydration filter below would drop
+        // it as if it were withdrawn. Load those ids THROUGH THE SAME frame: a truly
+        // withdrawn/tombstoned/non-matching drawer stays out of `admissible` and is
+        // still correctly dropped, while a valid semantic hit outside the locus
+        // window becomes hydratable. (The Rust port previously built `drawer_index`
+        // from the locus lane alone; the Swift director always pool-loaded the full
+        // candidate set by id — this closes that drift, which otherwise dark-holes
+        // all semantic recall over a large single-instant import.)
+        let extra_ids: Vec<String> = all_ids
+            .iter()
+            .filter(|id| !drawer_index.contains_key(*id))
+            .cloned()
+            .collect();
+        if !extra_ids.is_empty() {
+            match estate.get_drawers_matching_frame(&extra_ids, &request.frame) {
+                Ok(filtered) => {
+                    for d in filtered.admissible {
+                        drawer_index.insert(d.id.clone(), d);
+                    }
+                }
+                Err(_) => {
+                    // Supplemental frame-aware load failed — DEGRADE: semantic-only
+                    // hits stay unhydratable and fall out of the result, while
+                    // locus-indexed hits survive. Mirrors Swift's pool.getDrawers
+                    // degraded stage.
+                    degraded_stages.push("locus.poolHydrate".to_string());
+                }
+            }
+        }
 
         // Build per-id score maps (raw score and rank) for each lane.
         let locus_score_map: HashMap<String, (usize, f32)> = locus_list
@@ -6265,20 +6391,19 @@ impl EstateCoordinator {
 
         // Build RecallHits from the fused_scored list.
         //
-        // ACTIVE-STATE FILTER (withdrawn/tombstoned must not surface): when the
-        // locus lane participates (Hybrid / UnionBest), `drawer_index` is the
-        // frame-filtered active set — `estate.recall(frame)` already excluded
-        // withdrawn/tombstoned/non-matching drawers. A BM25- or vector-lane
-        // candidate whose drawer is therefore ABSENT from `drawer_index` failed
-        // that active filter (e.g. it was withdrawn) and must NOT be surfaced as
-        // an unhydrated hit — dropping it is the parity of the Swift
-        // RecallDirector hydration, which filters non-active drawers from the
-        // fused frontier. (Surfaced before this filter, a withdrawn drawer's
-        // corpus chunk would still appear in search once the encode worker has
-        // ingested it — the near-realtime drain now makes that the common case.)
-        // CorpusOnly (locus lane not included for scoring) keeps its prior
-        // behaviour: drawer_index there is the frame-filtered hydration set too,
-        // so the same drop rule holds.
+        // ACTIVE-STATE FILTER (withdrawn/tombstoned must not surface): `drawer_index`
+        // is the frame-admissible set — the locus lane came from `estate.recall(frame)`
+        // and every semantic-lane candidate was pool-loaded above through the SAME
+        // frame (`get_drawers_matching_frame`), which excludes withdrawn/tombstoned/
+        // non-matching drawers. A BM25/vector/dense candidate therefore ABSENT from
+        // `drawer_index` failed that frame filter (e.g. it was withdrawn) and must NOT
+        // be surfaced as an unhydrated hit — dropping it mirrors the Swift
+        // RecallDirector, which pool-loads the full candidate set by id and drops the
+        // frame-filtered ids. (Because the pool load now covers every candidate, this
+        // drop is a genuine frame decision, NOT the old locus-frontier truncation that
+        // dark-holed valid semantic hits outside the capture-time window.) CorpusOnly
+        // (locus lane not scored) keeps its prior behaviour: its drawer_index is the
+        // frame-filtered hydration set too, so the same drop rule holds.
         let hits: Vec<RecallHit> = fused_scored
             .into_iter()
             .filter(|(id, ..)| drawer_index.contains_key(id))

@@ -131,7 +131,7 @@ fn end_to_end_novel_token_learned() {
         );
 
         // Reduce: seeds artifact + merges tokens.
-        let result = pool_reduce(&pool_dir, &artifact_path, "2026-06-12")
+        let result = pool_reduce(&pool_dir, &artifact_path, "2026-06-12", usize::MAX)
             .expect("pool_reduce must not error");
 
         assert_eq!(result.consumed, 1, "file consumed");
@@ -193,7 +193,7 @@ fn seed_if_absent_creates_artifact() {
         // Confirm artifact is absent before reduce.
         assert!(!artifact_path.exists(), "precondition: no artifact before reduce");
 
-        let result = pool_reduce(&pool_dir, &artifact_path, "2026-06-12")
+        let result = pool_reduce(&pool_dir, &artifact_path, "2026-06-12", usize::MAX)
             .expect("reduce must not error (seed-if-absent must succeed)");
 
         // Must not have returned TableReadFailed.
@@ -292,14 +292,14 @@ fn idempotent_re_reduce() {
 
         // First reduce: seeds + merges.
         write_pool_file(&pool_dir, "pool_idem.json", vec![("pulsar", "NOUN")], &tv);
-        let r1 = pool_reduce(&pool_dir, &artifact_path, "2026-06-12").expect("reduce");
+        let r1 = pool_reduce(&pool_dir, &artifact_path, "2026-06-12", usize::MAX).expect("reduce");
         assert_eq!(r1.consumed, 1, "first reduce: file consumed");
 
         let after_first = read_table(&artifact_path);
         assert!(after_first.nouns.contains(&"pulsar".to_string()), "pulsar in table");
 
         // Second reduce on drained pool must be no-op.
-        let r2 = pool_reduce(&pool_dir, &artifact_path, "2026-06-12").expect("reduce");
+        let r2 = pool_reduce(&pool_dir, &artifact_path, "2026-06-12", usize::MAX).expect("reduce");
         assert!(r2.is_noop(), "second reduce on drained pool must be no-op");
 
         // Artifact must still contain prior learning.
@@ -339,7 +339,7 @@ fn word_class_via_fresh_table_load() {
             &tv,
         );
 
-        pool_reduce(&pool_dir, &artifact_path, "2026-06-12")
+        pool_reduce(&pool_dir, &artifact_path, "2026-06-12", usize::MAX)
             .expect("reduce must succeed");
 
         // Simulate NEXT PROCESS LOAD: load merged table via load_with_precedence.

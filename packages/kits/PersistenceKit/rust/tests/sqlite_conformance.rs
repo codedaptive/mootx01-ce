@@ -68,6 +68,8 @@ fn sqlite_audit_reason_some_round_trips() {
         after_provenance: 3,
         before_lattice_anchor: None,
         after_lattice_anchor: 0,
+        before_lattice_qid: None,
+        after_lattice_qid: 0,
         actor: "test-actor".into(),
         reason: Some("GDPR erasure request #42".into()),
     };
@@ -100,6 +102,8 @@ fn sqlite_audit_reason_none_round_trips() {
         after_provenance: 6,
         before_lattice_anchor: None,
         after_lattice_anchor: 0,
+        before_lattice_qid: None,
+        after_lattice_qid: 0,
         actor: "test-actor".into(),
         reason: None,
     };

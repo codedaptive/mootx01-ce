@@ -1,7 +1,9 @@
 ; mootx01-setup.iss — Inno Setup script for MOOTx01 on Windows.
 ;
 ; Produces a single mootx01-setup.exe that:
-;   1. Places mootx01.exe and moot-mgr.exe into {userappdata}\.mootx01\bin
+;   1. Places mootx01.exe and moot-mgr.exe into {%USERPROFILE}\.mootx01\bin
+;      (the product-wide binary contract shared with install.ps1 and
+;      `mootx01 upgrade` — NOT {userappdata}, which is Roaming AppData)
 ;   2. Adds that directory to the user PATH
 ;   3. Runs `mootx01 install` as a post-install step so the user can
 ;      select which AI clients to wire (interactive terminal picker)
@@ -29,7 +31,11 @@ AppVersion={#MyAppVersion}
 AppPublisher=Codedaptive LLC
 AppPublisherURL=https://github.com/codedaptive/mootx01-ce
 AppSupportURL=https://github.com/codedaptive/mootx01-ce/issues
-DefaultDirName={userappdata}\.mootx01\bin
+DefaultDirName={%USERPROFILE}\.mootx01\bin
+; Do not reuse a remembered install dir: pre-1.0.6 betas installed to
+; {userappdata} (Roaming) by mistake; upgrades must migrate to the
+; contract path or `mootx01 upgrade` writes where PATH doesn't point.
+UsePreviousAppDir=no
 DisableProgramGroupPage=yes
 DisableDirPage=yes
 ; User-scoped install — no admin elevation required.
@@ -49,6 +55,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "{#BinDir}\mootx01.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+[InstallDelete]
+; Migrate pre-1.0.6 beta installs that landed in Roaming AppData: remove
+; the stray binaries so PATH cannot resolve a stale copy. The leftover
+; Roaming PATH entry (if any) is harmless once these are gone.
+Type: files; Name: "{userappdata}\.mootx01\bin\mootx01.exe"
+Type: files; Name: "{userappdata}\.mootx01\bin\moot-mgr.exe"
 
 [Registry]
 ; Add the install dir to the user PATH (same effect as install.ps1).

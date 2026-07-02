@@ -60,6 +60,7 @@
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use crate::term_document_counts::TermDocumentCounts;
+use crate::reduced_vocab::{select_reduced_vocabulary, DEFAULT_REDUCED_VOCAB_CAP};
 use corpus_kit::default_keyword_tokens;
 use engram_lib::Engram;
 use std::collections::HashMap;
@@ -153,6 +154,14 @@ pub struct NmfProvider {
 
     /// Effective NMF rank after finalize().
     effective_rank: usize,
+
+    /// Reduced-vocabulary cap K for the dense factorization (ADR-022).
+    reduced_vocab_cap: usize,
+
+    /// The frozen reduced vocabulary (term → reduced row) the basis was trained
+    /// on (ADR-022). Projection + serialization key on THIS, not the full
+    /// `counts.vocab`. Empty until `finalize()`.
+    basis_vocab: HashMap<String, usize>,
 }
 
 impl NmfProvider {
@@ -176,6 +185,8 @@ impl NmfProvider {
             h: Vec::new(),
             doc_embeddings: Vec::new(),
             effective_rank: 0,
+            reduced_vocab_cap: DEFAULT_REDUCED_VOCAB_CAP,
+            basis_vocab: HashMap::new(),
         }
     }
 
@@ -216,23 +227,43 @@ impl NmfProvider {
     /// is always false, so the loop runs exactly `max_iterations` iterations.
     pub fn finalize(&mut self) {
         let num_docs = self.counts.document_count();
-        let vocab_size = self.counts.vocabulary_size();
-        if num_docs == 0 || vocab_size == 0 {
+        if num_docs == 0 || self.counts.vocabulary_size() == 0 {
             return;
         }
 
-        // V is vocabSize × numDocs: V[term][doc] = ln(1 + tf[doc][term]).
-        // Built from the shared builder's TF counts.
-        // This matches the Swift layout: V[termIdx][docIdx].
-        let mut v: Vec<Vec<f32>> = vec![vec![0.0_f32; num_docs]; vocab_size];
-        for (doc_idx, doc_tf) in self.counts.tf_counts.iter().enumerate() {
-            for (&term_idx, &count) in doc_tf {
-                // f32::ln matches Swift's log() on f32 — both are logf.
-                v[term_idx][doc_idx] = (1.0 + count as f32).ln();
-            }
+        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // dense NMF is `K × numDocs` (feasible) instead of `full-vocab × numDocs`
+        // (infeasible). Shared with LSA; frozen here; drives query projection.
+        // `vocab_size` below is the REDUCED row count — the factorize + fold-in
+        // key on it.
+        let reduced = select_reduced_vocabulary(
+            &self.counts.vocab,
+            &self.counts.df_counts,
+            num_docs,
+            self.reduced_vocab_cap,
+        );
+        let vocab_size = reduced.size();
+        if vocab_size == 0 {
+            self.w = Vec::new();
+            self.doc_embeddings = Vec::new();
+            return;
         }
 
-        // Effective rank: min(requested, min(vocabSize, numDocs)).
+        // V is K × numDocs: V[reducedRow][doc] = ln(1 + tf[doc][term]). Map each
+        // doc's TF entries whose term is in the reduced vocab to its reduced row;
+        // full-vocab terms outside the reduced set are dropped.
+        let mut v: Vec<Vec<f32>> = vec![vec![0.0_f32; num_docs]; vocab_size];
+        for (doc_idx, doc_tf) in self.counts.tf_counts.iter().enumerate() {
+            for (&full_idx, &count) in doc_tf {
+                if let Some(&row) = reduced.full_index_to_column.get(&full_idx) {
+                    // f32::ln matches Swift's log() on f32 — both are logf.
+                    v[row][doc_idx] = (1.0 + count as f32).ln();
+                }
+            }
+        }
+        self.basis_vocab = reduced.term_to_column;
+
+        // Effective rank: min(requested, min(K, numDocs)).
         let effective_rank = self.rank.min(vocab_size.min(num_docs));
 
         // Run SubstrateML NMF with tolerance=0.0 (fixed iteration count).
@@ -348,7 +379,9 @@ impl NmfProvider {
         w.write_u64(self.projection_seed);
         w.write_u32(self.counts.document_count() as u32);
         w.write_u32(self.effective_rank as u32);
-        w.write_string_u32_map(&self.counts.vocab);
+        // ADR-022: persist the REDUCED basis vocab; projection keys on it. The
+        // full counts vocab is persisted by serialize_counts as the drift anchor.
+        w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_matrix(&self.w);
         w.write_f32_matrix(&self.h);
         w.into_bytes()
@@ -394,11 +427,13 @@ impl NmfProvider {
             max_iterations: max_iterations.max(1),
             seed,
             projection_seed,
-            counts: TermDocumentCounts::from_restored(vocab, document_count),
+            counts: TermDocumentCounts::from_restored(vocab.clone(), document_count),
             w: w_factor,
             h: h_factor,
             doc_embeddings,
             effective_rank,
+            reduced_vocab_cap: DEFAULT_REDUCED_VOCAB_CAP,
+            basis_vocab: vocab,
         })
     }
 
@@ -419,7 +454,9 @@ impl NmfProvider {
             return None;
         }
 
-        let vocab_size = self.counts.vocabulary_size();
+        // Projection keys on the REDUCED basis vocab (ADR-022); OOV terms
+        // outside top-K contribute nothing (covered by RI).
+        let vocab_size = self.basis_vocab.len();
         let k = self.effective_rank;
         let eps: f32 = 1e-9;
 
@@ -427,7 +464,7 @@ impl NmfProvider {
         let mut raw_counts: HashMap<usize, usize> = HashMap::new();
         let mut has_in_vocab = false;
         for term in &terms {
-            if let Some(&idx) = self.counts.vocab.get(term.as_str()) {
+            if let Some(&idx) = self.basis_vocab.get(term.as_str()) {
                 *raw_counts.entry(idx).or_insert(0) += 1;
                 has_in_vocab = true;
             }
@@ -517,7 +554,7 @@ impl EmbeddingProvider for NmfProvider {
     /// - Degenerate projection (all-zero result): returns `Ok(vec![])`.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         // No finalized basis: structural opt-out, not vocabMiss.
-        if !self.is_finalized() || self.counts.vocabulary_size() == 0 {
+        if !self.is_finalized() || self.basis_vocab.is_empty() {
             return Ok(vec![]);
         }
         if text.is_empty() {
@@ -528,11 +565,11 @@ impl EmbeddingProvider for NmfProvider {
             return Ok(vec![]);
         }
         // OOV check before full NMF fold-in projection.
-        let has_in_vocab = terms.iter().any(|t| self.counts.vocab.contains_key(t.as_str()));
+        let has_in_vocab = terms.iter().any(|t| self.basis_vocab.contains_key(t.as_str()));
         if !has_in_vocab {
             return Err(VectorKitError::EmbedFloatVocabMiss(format!(
-                "nmf: vocab size {}, but 0 of {} query token(s) matched",
-                self.counts.vocabulary_size(),
+                "nmf: reduced vocab size {}, but 0 of {} query token(s) matched",
+                self.basis_vocab.len(),
                 terms.len()
             )));
         }

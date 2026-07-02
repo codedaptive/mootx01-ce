@@ -11,8 +11,9 @@
 //! (B-6, I-6). No write verb, `now` passed in, deterministic.
 //!
 //! Swift peer: `Moment.run` in `Moment.swift` — same flow, same `kit.
-//! glkFingerprintsCaptured(in:window:)` reads. Windows are epoch-seconds
-//! `(start, end)` pairs here where Swift uses `ClosedRange<Date>`.
+//! glkFingerprintsCaptured(in:window:)` reads. Windows are epoch-milliseconds
+//! (ADR-023) `(start, end)` pairs here where Swift uses `ClosedRange<Date>`
+//! (the same instants — Swift's `Date` already carries ms precision).
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
@@ -47,7 +48,7 @@ pub struct MomentOutput {
 /// - `coord`: open GeniusLocusKit coordinator.
 /// - `handle`: open estate handle.
 /// - `window`: primary window as `(start_epoch, end_epoch)` (closed, epoch
-///   seconds); the OR-reduced signature characterises this moment.
+///   milliseconds, ADR-023); the OR-reduced signature characterises this moment.
 /// - `comparison_windows`: windows to rank against the primary signature.
 ///   Windows with no fingerprints contribute no candidate (counted, skipped).
 /// - `now`: current clock tick passed in for determinism (I-6). Not used in the
@@ -123,8 +124,9 @@ mod tests {
         (coord, h)
     }
 
-    /// Capture one drawer at capture-time `now` (epoch seconds). The window
-    /// reads filter on this capture time.
+    /// Capture one drawer at capture-time `now` (epoch milliseconds, ADR-023).
+    /// The window reads filter on this capture time. Fixture values are
+    /// self-consistent within this test, not wall-clock-realistic.
     fn capture_at(coord: &mut EstateCoordinator, h: &GLKHandle, content: &str, now: i64) {
         let frame = CaptureFrame::new(
             content,

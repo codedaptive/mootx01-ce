@@ -1,4 +1,4 @@
-# install.ps1 — mootx01 Windows installer
+﻿# install.ps1 — mootx01 Windows installer
 #
 # Downloads a prebuilt mootx01.exe from GitHub Releases and places it on your
 # PATH. No compiler or build tools required. Wiring mootx01 into your AI clients

@@ -100,29 +100,52 @@ fn reset_intellectus() {
 
 // ── Test helper ──────────────────────────────────────────────────────────────
 
+/// Per-call isolated pool paths so a governor's reducer never reads or writes the
+/// real user pool (ce-fdcpool test isolation). Unique per call via a PID + atomic
+/// counter — no `LATTICE_POOL_DIR` mutation, which would race across parallel test
+/// threads, and no per-test serialization lock (the pool is private).
+fn hermetic_pool_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("mootx01-testpool-{}-{}", std::process::id(), n));
+    let pool_dir = base.join("pool");
+    std::fs::create_dir_all(&pool_dir).unwrap();
+    (pool_dir, base.join("WordClassTable.json"))
+}
+
 /// Build an `AutonomicGovernor` wired to a fresh in-memory estate.
 ///
 /// Returns `(governor, registry)` so tests that want to inspect the live store
-/// after a tick can access `registry.default.store`.
+/// after a tick can access `registry.default.store`. The 300_000 ms topology and
+/// 0 ms pool-reduce cadences mirror `new`'s production defaults; the pool reducer
+/// targets a private temp dir so a tick never touches the real user pool.
 fn make_governor() -> (AutonomicGovernor, EstateRegistry) {
     let registry = EstateRegistry::new_inmemory();
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    let governor = AutonomicGovernor::new(coord, handle, store);
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, store, 300_000, None, 0, pool_dir, artifact,
+    );
     (governor, registry)
 }
 
 /// Build a governor with a caller-supplied stop flag and an explicit base tick
 /// (for the run_loop test). The tick is passed directly rather than via
 /// `MOOTX01_BRAIN_TICK_MS`, so this helper never sets a process-global env var
-/// that would race sibling tests constructing governors in parallel.
+/// that would race sibling tests constructing governors in parallel. The pool
+/// reducer targets a private temp dir (ce-fdcpool test isolation).
 fn make_governor_with_flag(flag: Arc<AtomicBool>, base_tick_ms: u64) -> AutonomicGovernor {
     let registry = EstateRegistry::new_inmemory();
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    AutonomicGovernor::with_stop_flag_and_tick(coord, handle, store, flag, base_tick_ms)
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    AutonomicGovernor::with_stop_flag_tick_and_pool(
+        coord, handle, store, flag, base_tick_ms, pool_dir, artifact,
+    )
 }
 
 // ── Dreaming-queue seed helper ───────────────────────────────────────────────
@@ -559,7 +582,11 @@ fn dreaming_pump_emits_think_events() {
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    let mut governor = AutonomicGovernor::new(coord, handle, store);
+    // ce-fdcpool test isolation: private temp pool, production-default cadences.
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, store, 300_000, None, 0, pool_dir, artifact,
+    );
 
     // ── Install CapturingSink, enable monitoring ──────────────────────────────
     let sink = Arc::new(CapturingSink::new());
@@ -619,7 +646,9 @@ fn ag11_topology_snapshot_fired_on_first_tick() {
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    let mut governor = AutonomicGovernor::new_for_testing(coord, handle, store, 0, None);
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, store, 0, None, 0, pool_dir, artifact);
 
     let report = governor.tick(UNIX_EPOCH + Duration::from_secs(8_000_000));
     assert!(
@@ -639,7 +668,9 @@ fn ag12_topology_snapshot_respects_interval() {
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    let mut governor = AutonomicGovernor::new_for_testing(coord, handle, store, 300_000, None);
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, store, 300_000, None, 0, pool_dir, artifact);
 
     let t0 = UNIX_EPOCH + Duration::from_secs(9_000_000);
     let first = governor.tick(t0);
@@ -673,12 +704,16 @@ fn ag13_topology_snapshot_duty_writes_to_store() {
     // cadence=0 so the snapshot fires immediately on every tick.
     let sink: Box<dyn GovernorTopologySink> =
         Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
-    let mut governor = AutonomicGovernor::new_for_testing(
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
         coord,
         handle,
         drawer_store,
         0,
         Some(sink),
+        0,
+        pool_dir,
+        artifact,
     );
 
     // The duty is gated on the LIVE monitoring flag — enable it first
@@ -730,8 +765,9 @@ fn ag14_monitoring_off_gates_topology_duty() {
 
     let sink: Box<dyn GovernorTopologySink> =
         Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
-    let mut governor = AutonomicGovernor::new_for_testing(
-        coord, handle, drawer_store, 0, Some(sink));
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, drawer_store, 0, Some(sink), 0, pool_dir, artifact);
 
     // Monitoring defaults OFF on a fresh store — the duty must not write.
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(11_000_000));
@@ -770,8 +806,9 @@ fn ag15_unchanged_estate_skips_recompute() {
 
     let sink: Box<dyn GovernorTopologySink> =
         Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
-    let mut governor = AutonomicGovernor::new_for_testing(
-        coord, handle, drawer_store, 0, Some(sink));
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, drawer_store, 0, Some(sink), 0, pool_dir, artifact);
 
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(12_000_000));
     let first = stats_store_arc
@@ -815,8 +852,9 @@ fn ag15b_fingerprint_persisted_but_excluded_from_payload() {
 
     let sink: Box<dyn GovernorTopologySink> =
         Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
-    let mut governor = AutonomicGovernor::new_for_testing(
-        coord, handle, drawer_store, 0, Some(sink));
+    let (pool_dir, artifact) = hermetic_pool_paths();
+    let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, drawer_store, 0, Some(sink), 0, pool_dir, artifact);
 
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(15_000_000));
     let payload = stats_store_arc
@@ -869,8 +907,9 @@ fn ag15c_restart_loads_fingerprint_and_skips_recompute() {
     {
         let sink: Box<dyn GovernorTopologySink> =
             Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
-        let mut governor = AutonomicGovernor::new_for_testing(
-            Arc::clone(&coord), handle, Arc::clone(&drawer_store), 0, Some(sink));
+        let (pool_dir, artifact) = hermetic_pool_paths();
+        let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+            Arc::clone(&coord), handle, Arc::clone(&drawer_store), 0, Some(sink), 0, pool_dir, artifact);
         let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(16_000_000));
     }
     let first = stats_store_arc
@@ -884,8 +923,9 @@ fn ag15c_restart_loads_fingerprint_and_skips_recompute() {
     {
         let sink: Box<dyn GovernorTopologySink> =
             Box::new(StatsStoreTopologySink::new(Arc::clone(&stats_store_arc)));
-        let mut governor = AutonomicGovernor::new_for_testing(
-            coord, handle, drawer_store, 0, Some(sink));
+        let (pool_dir, artifact) = hermetic_pool_paths();
+        let mut governor = AutonomicGovernor::new_for_testing_with_pool(
+            coord, handle, drawer_store, 0, Some(sink), 0, pool_dir, artifact);
         let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(16_000_600));
     }
     let second = stats_store_arc

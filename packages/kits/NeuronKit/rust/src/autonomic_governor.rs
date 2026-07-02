@@ -206,14 +206,15 @@ const DEFAULT_POOL_REDUCE_CADENCE_MS: u64 = 0;
 /// in AutonomicGovernor.swift.
 pub const GRAPH_CENTRALITY_SCAN_NODE_CAP: usize = 10_000;
 
-/// Maximum number of pending files in the pool directory before the
-/// pool-reduce duty defers for this tick.
+/// Maximum number of pool submissions the pool-reduce duty drains per tick.
 ///
-/// Planned hardening: if the pool directory already holds more files than this
-/// cap, the drainer is falling behind under load. Deferring — without advancing
-/// `last_pool_reduce_secs` — causes the next tick to retry immediately,
-/// providing near-realtime back-pressure without dropping any file. Parity:
-/// matches `poolReduceFileCap` in AutonomicGovernor.swift.
+/// The reduce runs synchronously on the governor tick, so it processes at most
+/// this many of the OLDEST submissions per run; a larger backlog drains over
+/// successive ticks (bounded near-realtime drain). This replaced an earlier
+/// "defer the reduce when the pool exceeds this cap" behaviour, which deadlocked:
+/// over cap, the very reduce that would shrink the pool was skipped, so the pool
+/// grew without bound. Parity: matches `poolReduceFileCap` in
+/// AutonomicGovernor.swift.
 pub const POOL_REDUCE_FILE_CAP: usize = 500;
 
 // ── ISO8601 helpers ───────────────────────────────────────────────────────────
@@ -622,6 +623,28 @@ impl AutonomicGovernor {
             base_tick_ms, parse_topology_cadence_ms(),
             parse_pool_reduce_cadence_ms(), lattice_lib::default_pool_dir(),
             lattice_lib::default_table_artifact(),
+        )
+    }
+
+    /// Test-support: like `with_stop_flag_and_tick` but the pool reducer targets
+    /// the caller-supplied `pool_dir`/`pool_table_artifact` instead of the real
+    /// user pool. Keeps run-loop tests hermetic — a tick never reads or writes
+    /// the platform-default pool — without the `LATTICE_POOL_DIR` env race across
+    /// parallel test threads (ce-fdcpool test isolation). Test-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_stop_flag_tick_and_pool(
+        coord: Arc<Mutex<EstateCoordinator>>,
+        handle: EstateHandle,
+        store: Arc<dyn DrawerStore>,
+        stop_flag: Arc<AtomicBool>,
+        base_tick_ms: u64,
+        pool_dir: PathBuf,
+        pool_table_artifact: PathBuf,
+    ) -> Self {
+        Self::build_inner(
+            coord, handle, store, stop_flag, None,
+            base_tick_ms, parse_topology_cadence_ms(),
+            parse_pool_reduce_cadence_ms(), pool_dir, pool_table_artifact,
         )
     }
 
@@ -1529,52 +1552,48 @@ impl AutonomicGovernor {
         let mut pool_reduce_fired = false;
         let mut table_swapped = false;
         if pool_cadence_elapsed {
-            // Planned hardening: if the pool directory already holds more files
-            // than POOL_REDUCE_FILE_CAP, the drainer is falling behind — defer
-            // this tick to shed load. Not advancing last_pool_reduce_secs causes
-            // the next tick to retry immediately (near-realtime back-pressure;
-            // no file is dropped). Parity: mirrors poolReduceFileCap in
-            // AutonomicGovernor.swift.
-            let pool_file_count = std::fs::read_dir(&self.pool_dir)
-                .map(|rd| rd.count())
-                .unwrap_or(0);
-            if pool_file_count > POOL_REDUCE_FILE_CAP {
-                eprintln!(
-                    "AutonomicGovernor: pool has {} files (cap {}); deferring reduce (planned hardening)",
-                    pool_file_count, POOL_REDUCE_FILE_CAP
-                );
-                // Do NOT advance last_pool_reduce_secs — retry next tick.
-            } else {
-                self.last_pool_reduce_secs = Some(now_epoch_secs);
-                pool_reduce_fired = true;
-                // The reducer's `now` is the calendar date (YYYY-MM-DD) for the
-                // artifact's snapshot_date. Slice the date prefix off the full
-                // ISO8601 instant (`YYYY-MM-DDTHH:MM:SSZ`).
-                let now_date = &now_str[..now_str.len().min(10)];
-                match lattice_lib::pool_reduce(&self.pool_dir, &self.pool_table_artifact, now_date) {
-                    Ok(result) => {
-                        if !result.is_noop() {
-                            eprintln!(
-                                "AutonomicGovernor: pool reduce merged {} nouns + {} verbs (consumed {}, quarantined {})",
-                                result.nouns_added, result.verbs_added, result.consumed, result.quarantined
-                            );
-                            // Live atomic swap at the safe point: adopt the
-                            // just-merged table in-session. Only on a non-noop reduce
-                            // — a noop wrote nothing new. Re-resolves writable-first
-                            // from the same artifact path the reducer wrote.
-                            if let Some(v) = lattice_lib::swap_global_table_from_precedence(
-                                &self.pool_table_artifact,
-                            ) {
-                                table_swapped = true;
-                                eprintln!("AutonomicGovernor: live word-class table swap → version {v}");
-                            }
+            // Bounded near-realtime drain: reduce at most POOL_REDUCE_FILE_CAP of
+            // the OLDEST submissions this tick. A backlog larger than the cap
+            // drains over successive ticks. The reduce runs synchronously on the
+            // tick, so an unbounded pass would stall it — but SKIPPING the reduce
+            // when over cap (the prior "planned hardening" behaviour) deadlocked:
+            // over cap, the very reduce that shrinks the pool never ran, so the
+            // pool grew without bound. The batch cap keeps each tick bounded AND
+            // always makes progress. Parity: mirrors AutonomicGovernor.swift.
+            self.last_pool_reduce_secs = Some(now_epoch_secs);
+            pool_reduce_fired = true;
+            // The reducer's `now` is the calendar date (YYYY-MM-DD) for the
+            // artifact's snapshot_date. Slice the date prefix off the full
+            // ISO8601 instant (`YYYY-MM-DDTHH:MM:SSZ`).
+            let now_date = &now_str[..now_str.len().min(10)];
+            match lattice_lib::pool_reduce(
+                &self.pool_dir,
+                &self.pool_table_artifact,
+                now_date,
+                POOL_REDUCE_FILE_CAP,
+            ) {
+                Ok(result) => {
+                    if !result.is_noop() {
+                        eprintln!(
+                            "AutonomicGovernor: pool reduce merged {} nouns + {} verbs (consumed {}, quarantined {})",
+                            result.nouns_added, result.verbs_added, result.consumed, result.quarantined
+                        );
+                        // Live atomic swap at the safe point: adopt the
+                        // just-merged table in-session. Only on a non-noop reduce
+                        // — a noop wrote nothing new. Re-resolves writable-first
+                        // from the same artifact path the reducer wrote.
+                        if let Some(v) = lattice_lib::swap_global_table_from_precedence(
+                            &self.pool_table_artifact,
+                        ) {
+                            table_swapped = true;
+                            eprintln!("AutonomicGovernor: live word-class table swap → version {v}");
                         }
                     }
-                    Err(e) => {
-                        // A missing/unwritable table artifact is the expected state
-                        // until a writable table is provisioned; log, never crash.
-                        eprintln!("AutonomicGovernor: pool reduce skipped: {e:?}");
-                    }
+                }
+                Err(e) => {
+                    // A missing/unwritable table artifact is the expected state
+                    // until a writable table is provisioned; log, never crash.
+                    eprintln!("AutonomicGovernor: pool reduce skipped: {e:?}");
                 }
             }
         }

@@ -579,40 +579,37 @@ public actor AutonomicGovernor {
         var poolReduceFired = false
         var tableSwapped = false
         if poolReduceElapsed, let poolDir = poolDirectory, let tableURL = poolTableArtifactURL {
-            // Planned hardening: if the pool directory already holds more files
-            // than poolReduceFileCap, the drainer is falling behind — skip this
-            // cycle to shed load. NOT advancing lastPoolReduceFired means the
-            // next tick retries immediately (near-realtime back-pressure; no file
-            // is dropped). Parity: mirrors POOL_REDUCE_FILE_CAP in autonomic_governor.rs.
-            let poolFileCount = (try? FileManager.default
-                .contentsOfDirectory(atPath: poolDir.path).count) ?? 0
-            if poolFileCount > AutonomicGovernor.poolReduceFileCap {
-                logger.warning(
-                    "AutonomicGovernor: pool has \(poolFileCount) files (cap \(AutonomicGovernor.poolReduceFileCap)); deferring reduce (planned hardening)")
-            } else {
-                lastPoolReduceFired = now
-                poolReduceFired = true
-                do {
-                    let result = try PoolReducer.reduce(
-                        poolDirectory: poolDir,
-                        tableArtifactURL: tableURL,
-                        now: now)
-                    if !result.isNoop {
-                        logger.info("AutonomicGovernor: pool reduce merged \(result.nounsAdded) nouns + \(result.verbsAdded) verbs (consumed \(result.consumed), quarantined \(result.quarantined))")
-                        // Live atomic swap at the safe point: adopt the just-merged
-                        // table in-session. Only on a non-noop reduce — a noop wrote
-                        // nothing new, so the running table is already current. Swap
-                        // from the SAME artifact path the reducer just wrote
-                        // (`tableURL`), so the running tagger learns the merged tokens.
-                        let newVersion = WordClassTableCache.reload(fromArtifact: tableURL)
-                        tableSwapped = true
-                        logger.info("AutonomicGovernor: live word-class table swap → version \(newVersion)")
-                    }
-                } catch {
-                    // A missing/unwritable table artifact is the expected state until
-                    // a writable table is provisioned; log once per fire, never crash.
-                    logger.error("AutonomicGovernor: pool reduce skipped (\(error))")
+            // Bounded near-realtime drain: reduce at most poolReduceFileCap of the
+            // OLDEST submissions this tick. A larger backlog drains over successive
+            // ticks. The reduce runs synchronously on the tick, so an unbounded
+            // pass would stall it — but SKIPPING the reduce when over cap (the prior
+            // "planned hardening" behaviour) deadlocked: over cap, the very reduce
+            // that shrinks the pool never ran, so the pool grew without bound. The
+            // batch cap keeps each tick bounded AND always makes progress. Parity:
+            // mirrors autonomic_governor.rs.
+            lastPoolReduceFired = now
+            poolReduceFired = true
+            do {
+                let result = try PoolReducer.reduce(
+                    poolDirectory: poolDir,
+                    tableArtifactURL: tableURL,
+                    now: now,
+                    maxFiles: AutonomicGovernor.poolReduceFileCap)
+                if !result.isNoop {
+                    logger.info("AutonomicGovernor: pool reduce merged \(result.nounsAdded) nouns + \(result.verbsAdded) verbs (consumed \(result.consumed), quarantined \(result.quarantined))")
+                    // Live atomic swap at the safe point: adopt the just-merged
+                    // table in-session. Only on a non-noop reduce — a noop wrote
+                    // nothing new, so the running table is already current. Swap
+                    // from the SAME artifact path the reducer just wrote
+                    // (`tableURL`), so the running tagger learns the merged tokens.
+                    let newVersion = WordClassTableCache.reload(fromArtifact: tableURL)
+                    tableSwapped = true
+                    logger.info("AutonomicGovernor: live word-class table swap → version \(newVersion)")
                 }
+            } catch {
+                // A missing/unwritable table artifact is the expected state until
+                // a writable table is provisioned; log once per fire, never crash.
+                logger.error("AutonomicGovernor: pool reduce skipped (\(error))")
             }
         }
 
@@ -672,14 +669,15 @@ public actor AutonomicGovernor {
     /// in autonomic_governor.rs.
     private static let graphCentralityScanNodeCap = 10_000
 
-    /// Maximum number of pending files in the pool directory before the
-    /// PoolReducer duty defers.
+    /// Maximum number of pool submissions the PoolReducer duty drains per tick.
     ///
-    /// Planned hardening: if the pool directory has more than this many files,
-    /// the drainer is falling behind. Deferring — without advancing
-    /// `lastPoolReduceFired` — lets the next tick retry immediately, providing
-    /// near-realtime back-pressure instead of running an unbounded reduce under
-    /// load. Parity: matches `POOL_REDUCE_FILE_CAP` in autonomic_governor.rs.
+    /// The reduce runs synchronously on the tick, so it processes at most this
+    /// many of the OLDEST submissions per run; a larger backlog drains over
+    /// successive ticks (bounded near-realtime drain). This replaced an earlier
+    /// "defer the reduce when the pool exceeds this cap" behaviour, which
+    /// deadlocked: over cap, the very reduce that would shrink the pool was
+    /// skipped, so the pool grew without bound. Parity: matches
+    /// `POOL_REDUCE_FILE_CAP` in autonomic_governor.rs.
     private static let poolReduceFileCap = 500
 
     // MARK: - Graph-centrality producer duty

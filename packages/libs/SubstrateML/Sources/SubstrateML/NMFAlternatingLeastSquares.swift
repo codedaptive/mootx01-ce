@@ -248,11 +248,16 @@ public enum NMFAlternatingLeastSquares {
                                         m: Int, n: Int, rank: Int) -> Float32 {
         let R = matMulFlat(W, m: m, k: rank, B: H, n: n)
         var err: Float32 = 0
-        for i in 0..<m {
-            for j in 0..<n {
-                let idx = i * n + j
-                let d = V[idx] - R[idx]
-                err += d * d
+        // SAFETY: idx = i*n+j < m*n == V.count == R.count by loop bounds.
+        V.withUnsafeBufferPointer { vp in
+            R.withUnsafeBufferPointer { rp in
+                for i in 0..<m {
+                    for j in 0..<n {
+                        let idx = i * n + j
+                        let d = vp[idx] - rp[idx]
+                        err += d * d
+                    }
+                }
             }
         }
         return (err / Float32(m * n)).squareRoot()
@@ -265,15 +270,34 @@ public enum NMFAlternatingLeastSquares {
     // matches, and Float32 lowest-bit rounding stays identical.
     // The change is purely the storage layout: flat [Float32]
     // with explicit (rows × cols) instead of [[Float32]].
+    //
+    // PERF: these three matMuls plus reconstructionErrorFlat are the entire
+    // per-iteration cost of a dense NMF factorization — the dominant term in
+    // an encode-drain reindex. Indexing the flat arrays through bounds-checked
+    // `[Float32]` subscripts blocks LLVM auto-vectorization, leaving Swift
+    // ~100× behind the Rust port (whose `Vec<f32>` release build vectorizes
+    // freely) and stalling the drain on a large corpus. Each helper takes
+    // unsafe buffer pointers over its operands so the inner products vectorize.
+    // SAFETY: every subscript is a statically-derived row-major offset bounded
+    // by the (rows × cols) the buffer was sized to — i*k+kk < m*k, kk*n+j <
+    // k*n or rank*n, i*n+j < m*n, all by loop-bound construction. No index
+    // comes from input data, so the bounds are provably in range and the
+    // elided checks are pure overhead.
 
     /// C = A × B; A is m×k, B is k×n, result is m×n (flat row-major).
     static func matMulFlat(_ A: [Float32], m: Int, k: Int, B: [Float32], n: Int) -> [Float32] {
         var C = [Float32](repeating: 0, count: m * n)
-        for i in 0..<m {
-            for kk in 0..<k {
-                let aik = A[i * k + kk]
-                for j in 0..<n {
-                    C[i * n + j] += aik * B[kk * n + j]
+        A.withUnsafeBufferPointer { ap in
+            B.withUnsafeBufferPointer { bp in
+                C.withUnsafeMutableBufferPointer { cp in
+                    for i in 0..<m {
+                        for kk in 0..<k {
+                            let aik = ap[i * k + kk]
+                            for j in 0..<n {
+                                cp[i * n + j] += aik * bp[kk * n + j]
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -284,11 +308,17 @@ public enum NMFAlternatingLeastSquares {
     /// result C is k×n stored row-major.
     static func matMulAtBFlat(_ A: [Float32], m: Int, k: Int, B: [Float32], n: Int) -> [Float32] {
         var C = [Float32](repeating: 0, count: k * n)
-        for i in 0..<m {
-            for kk in 0..<k {
-                let aik = A[i * k + kk]
-                for j in 0..<n {
-                    C[kk * n + j] += aik * B[i * n + j]
+        A.withUnsafeBufferPointer { ap in
+            B.withUnsafeBufferPointer { bp in
+                C.withUnsafeMutableBufferPointer { cp in
+                    for i in 0..<m {
+                        for kk in 0..<k {
+                            let aik = ap[i * k + kk]
+                            for j in 0..<n {
+                                cp[kk * n + j] += aik * bp[i * n + j]
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -298,13 +328,19 @@ public enum NMFAlternatingLeastSquares {
     /// C = A × Bᵀ; A is m×k, B is n×k (both row-major), result C is m×n.
     static func matMulABtFlat(_ A: [Float32], m: Int, k: Int, B: [Float32], n: Int) -> [Float32] {
         var C = [Float32](repeating: 0, count: m * n)
-        for i in 0..<m {
-            for j in 0..<n {
-                var sum: Float32 = 0
-                for kk in 0..<k {
-                    sum += A[i * k + kk] * B[j * k + kk]
+        A.withUnsafeBufferPointer { ap in
+            B.withUnsafeBufferPointer { bp in
+                C.withUnsafeMutableBufferPointer { cp in
+                    for i in 0..<m {
+                        for j in 0..<n {
+                            var sum: Float32 = 0
+                            for kk in 0..<k {
+                                sum += ap[i * k + kk] * bp[j * k + kk]
+                            }
+                            cp[i * n + j] = sum
+                        }
+                    }
                 }
-                C[i * n + j] = sum
             }
         }
         return C

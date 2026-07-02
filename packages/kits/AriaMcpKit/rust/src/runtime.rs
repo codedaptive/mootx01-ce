@@ -197,6 +197,49 @@ pub fn run(banner: &str) {
             governor.run_loop();
         });
 
+        // Load the derived accelerators (matrix tier) once at launch so the
+        // matrix-aware recall lane is live from the first query — parity with
+        // Swift's ServeCommand, which kicks `rebuildDerivedAccelerators` in a
+        // background Task on the resident daemon (and aria-mcp-server's
+        // post-open rebuild). Runs in a detached thread so the HTTP transport
+        // starts accepting calls immediately; matrix recall degrades to zeros
+        // until the load finishes — correct degradation, not a stall.
+        //
+        // `rebuild_derived_accelerators` LOADS the persisted on-disk matrix
+        // snapshot (MatrixSnapshotStore) and folds only the audit tail past its
+        // watermark forward — it does NOT recompute the whole matrix from the
+        // audit log on every launch. The first launch on a fresh estate
+        // full-rebuilds once and persists; every launch after that is a cheap
+        // load + tail fold. Without this the tier stays nil until the first
+        // dreaming cycle, so a freshly-launched daemon scores every matrix
+        // column 0.0 and the persisted snapshot is never read back.
+        //
+        // RESIDENT ONLY: the matrix tier is a long-lived brain-layer structure
+        // only the resident daemon's recall scoring + dreaming consume. This
+        // branch is the resident-HTTP path; the stdio one-shot path below does
+        // not build it, matching ServeCommand's `residentPort != nil` gate — a
+        // one-shot query must not pay the load cost or persist a snapshot it
+        // will never reuse.
+        //
+        // The coordinator is shared with the governor behind a Mutex, so a
+        // concurrent dream rebuild is serialized, not a race.
+        let accel_coord = Arc::clone(&config.registry.coord);
+        let accel_handle = config.registry.default.handle;
+        std::thread::spawn(move || {
+            let now = crate::dispatch::wall_now();
+            match accel_coord
+                .lock()
+                .unwrap()
+                .rebuild_derived_accelerators(&accel_handle, now)
+            {
+                Ok(()) => eprintln!("derived accelerators rebuilt (background)"),
+                Err(e) => eprintln!(
+                    "warning: derived accelerator rebuild failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            }
+        });
+
         // Server-metrics task: emit transport counters via Intellectus every 30
         // seconds when monitoring is on (mirrors Swift AriaResident's
         // serverMetricsTask). Only spawned when telemetry is wired; "off is free"

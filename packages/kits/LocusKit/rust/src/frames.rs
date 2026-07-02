@@ -109,7 +109,7 @@ pub struct CaptureFrame {
     /// When the content happened or was authored in the world. For
     /// streaming capture leave as `None` — the substrate stamps it from
     /// `now`. For bulk historical ingestion supply the original
-    /// authorship date as epoch seconds. Mirrors Swift
+    /// authorship date as epoch milliseconds. Mirrors Swift
     /// `CaptureFrame.eventTime: Date?`. (ING-01)
     pub event_time: Option<i64>,
 

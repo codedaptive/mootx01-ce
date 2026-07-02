@@ -24,9 +24,11 @@
 //!
 //! ## Time convention
 //!
-//! `now` is milliseconds-since-epoch (the bridge convention).
-//! Internal calls that expect epoch-seconds divide by 1000 (matching the
-//! VaultBridge / DrawerMapping convention, e.g. `now / 1000`).
+//! `now` is epoch-MILLISECONDS (from `wall_now`, ADR-023), which is exactly what
+//! every sink here — capture / capture_batch, add_kg_fact, and the diary receipt
+//! — expects, so it is passed DIRECTLY. The palace's `filed_at` metadata is also
+//! milliseconds (`iso8601_to_ms`), so an imported drawer's `event_time` flows
+//! through with no unit conversion and the source's sub-second precision is kept.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -46,7 +48,7 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::EncodeSpeed;
 use genius_locus_kit::handle::EstateHandle;
 use locus_kit::{
-    adjectives::AdjectiveSensitivity,
+    adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     diary_entry::DiaryEntry,
     diary_operational::{DiaryActorClass, DiaryEventClass, DiarySeverity},
     drawer_operational::{CaptureChannel, ContentKind},
@@ -219,8 +221,11 @@ impl<'a> PalaceBridge<'a> {
                 }
                 if !batch_frames.is_empty() {
                     let frames: Vec<CaptureFrame> = batch_frames.iter().map(|(f, _)| f.clone()).collect();
+                    // `now` (wall_now, ADR-023) is epoch-MILLISECONDS — the same
+                    // unit capture, the stream path, and the KG paths all expect —
+                    // so it is passed directly with no conversion.
                     self.coordinator
-                        .capture_batch(handle, frames, now / 1000)
+                        .capture_batch(handle, frames, now)
                         .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
                     for (_, is_update) in &batch_frames {
                         if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
@@ -450,8 +455,14 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = floored;
+        frame.exportability =
+            import_exportability(metadata.get("exportability").map(String::as_str), floored);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
+        // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
+        // CaptureFrame.event_time is now epoch-MILLISECONDS too (ADR-023), as is
+        // `now` (wall_now), so it flows straight through with no unit conversion
+        // — the source's sub-second precision is preserved end to end.
         frame.event_time = Some(event_time_ms.unwrap_or(now));
         frame.wing = wing;
         let is_update = existing_lineage_ids.contains(&lineage_id);
@@ -537,8 +548,14 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = floored;
+        frame.exportability =
+            import_exportability(metadata.get("exportability").map(String::as_str), floored);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
+        // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
+        // CaptureFrame.event_time is now epoch-MILLISECONDS too (ADR-023), as is
+        // `now` (wall_now), so it flows straight through with no unit conversion
+        // — the source's sub-second precision is preserved end to end.
         frame.event_time = Some(event_time_ms.unwrap_or(now));
         frame.wing = wing;
 
@@ -659,8 +676,13 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = sensitivity;
+        frame.exportability = import_exportability(None, sensitivity);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
+        // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
+        // CaptureFrame.event_time is now epoch-MILLISECONDS too (ADR-023), as is
+        // `now` (wall_now), so it flows straight through with no unit conversion
+        // — the source's sub-second precision is preserved end to end.
         frame.event_time = Some(event_time_ms.unwrap_or(now));
         frame.wing = Some("knowledge_graph".to_owned());
 
@@ -752,7 +774,7 @@ impl<'a> PalaceBridge<'a> {
         }
 
         self.coordinator
-            .add_kg_fact(handle, subject, predicate, object, effective_src, now / 1000)
+            .add_kg_fact(handle, subject, predicate, object, effective_src, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         // Record the signature so within-call duplicates are caught on subsequent
         // iterations without a round-trip to the estate.
@@ -763,12 +785,12 @@ impl<'a> PalaceBridge<'a> {
         // stored columns for.
         if let Some(vf) = valid_from.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_from", vf, effective_src, now / 1000)
+                .add_kg_fact(handle, id, "temporal:valid_from", vf, effective_src, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(vt) = valid_to.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_to", vt, effective_src, now / 1000)
+                .add_kg_fact(handle, id, "temporal:valid_to", vt, effective_src, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(conf) = confidence_text.and_then(|s| s.parse::<f64>().ok()) {
@@ -779,7 +801,7 @@ impl<'a> PalaceBridge<'a> {
                     "temporal:confidence",
                     &conf.to_string(),
                     effective_src,
-                    now / 1000,
+                    now,
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -942,7 +964,7 @@ impl<'a> PalaceBridge<'a> {
             "vault-receipt".to_string(),
             "wing_vaultkit".to_string(),
             "receipts".to_string(),
-            now / 1000,
+            now,
             "no-embedding".to_string(),
         );
         entry.operational_bitmap = bitmap;
@@ -959,6 +981,24 @@ impl<'a> PalaceBridge<'a> {
 // MARK: - Module-level helpers
 
 /// Resolve room from palace metadata. Priority order mirrors Swift PalaceBridge.
+/// Exportability adjective for imported palace content. Palace/markdown sources
+/// are already-public material, so the policy default is `Public` (a `Private`
+/// default would wrongly wall off content that was never protected). A
+/// frontmatter `exportability:` label overrides. Clamped to `Private` when
+/// sensitivity is `Secret`: the capture gate rejects a secret+public row
+/// (invariant I-22). Mirrors Swift `PalaceBridge.importExportability`.
+fn import_exportability(
+    label: Option<&str>,
+    sensitivity: AdjectiveSensitivity,
+) -> AdjectiveExportability {
+    if sensitivity == AdjectiveSensitivity::Secret {
+        return AdjectiveExportability::Private;
+    }
+    label
+        .and_then(DrawerMapping::exportability_from_label)
+        .unwrap_or(AdjectiveExportability::Public)
+}
+
 fn resolve_room(metadata: &HashMap<String, String>, wing_key: Option<&str>) -> String {
     if let Some(explicit) = metadata.get("room").filter(|s| !s.is_empty()) {
         return explicit.clone();

@@ -183,11 +183,10 @@ impl Dispatcher for CoordinatorDispatcher {
     /// `propose` verb.
     ///
     /// `now_nanos` is the drain-loop nanosecond timestamp. The coordinator stores
-    /// `filed_at` in epoch-seconds (ISO8601 TEXT column), so `now_nanos` is
-    /// converted to seconds by dividing by `1_000_000_000` before the verb call.
-    /// This matches the Swift path where `dispatchPropose` calls `kit.propose`
-    /// without a timestamp and the Swift actor reads `Date()` (seconds-precision
-    /// for storage purposes).
+    /// `filed_at` in epoch-milliseconds (ADR-023), so `now_nanos` is converted to
+    /// milliseconds by dividing by `1_000_000` before the verb call. This matches
+    /// the Swift path where `dispatchPropose` calls `kit.propose` without a
+    /// timestamp and the Swift actor reads `Date()`.
     fn dispatch_propose(
         &self,
         handle_id: &EstateHandleID,
@@ -204,9 +203,9 @@ impl Dispatcher for CoordinatorDispatcher {
                  coordinator handle={expected_id}"
             ));
         }
-        // Convert nanoseconds → epoch-seconds for the coordinator's ISO8601-backed
-        // `filed_at` column.
-        let now_sec = now_nanos / 1_000_000_000;
+        // Convert nanoseconds → epoch-milliseconds for the coordinator's
+        // ISO8601-backed `filed_at` column (ADR-023).
+        let now_ms = now_nanos / 1_000_000;
         let verb_frame = VerbProposeFrame {
             target: frame.target.clone(),
             kind: frame.kind.clone(),
@@ -216,7 +215,7 @@ impl Dispatcher for CoordinatorDispatcher {
             .coordinator
             .lock()
             .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-        match coordinator.propose(&self.handle, verb_frame, now_sec) {
+        match coordinator.propose(&self.handle, verb_frame, now_ms) {
             Ok(_) => Ok(true),
             Err(VerbDispatchError::Verb(VerbError::NotSupportedByEstate { .. })) => Ok(false),
             Err(e) => Err(format!("{e:?}")),
@@ -226,9 +225,9 @@ impl Dispatcher for CoordinatorDispatcher {
     /// Route an `associate` emission from the scheduler to the coordinator's
     /// `associate` verb.
     ///
-    /// `now_nanos` is converted to epoch-seconds before the call for the same
-    /// reason as `dispatch_propose` — the coordinator's `filed_at` column is
-    /// ISO8601 TEXT (seconds precision).
+    /// `now_nanos` is converted to epoch-milliseconds before the call for the
+    /// same reason as `dispatch_propose` — the coordinator's `filed_at` column is
+    /// epoch-ms (ADR-023).
     fn dispatch_associate(
         &self,
         handle_id: &EstateHandleID,
@@ -242,7 +241,7 @@ impl Dispatcher for CoordinatorDispatcher {
                  coordinator handle={expected_id}"
             ));
         }
-        let now_sec = now_nanos / 1_000_000_000;
+        let now_ms = now_nanos / 1_000_000;
         let verb_frame = VerbAssociateFrame {
             a: frame.a.clone(),
             b: frame.b.clone(),
@@ -252,7 +251,7 @@ impl Dispatcher for CoordinatorDispatcher {
             .coordinator
             .lock()
             .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-        match coordinator.associate(&self.handle, verb_frame, now_sec) {
+        match coordinator.associate(&self.handle, verb_frame, now_ms) {
             Ok(_) => Ok(true),
             Err(VerbDispatchError::Verb(VerbError::NotSupportedByEstate { .. })) => Ok(false),
             Err(e) => Err(format!("{e:?}")),

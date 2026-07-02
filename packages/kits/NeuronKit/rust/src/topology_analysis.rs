@@ -162,13 +162,16 @@ pub struct GraphTopology {
 
 // MARK: epoch → ISO-8601
 
-/// Format epoch seconds as "YYYY-MM-DDTHH:MM:SSZ" (UTC, second precision).
-/// Hand-rolled civil-from-days (Howard Hinnant's algorithm) — no chrono, per
-/// the no-external-deps constraint. 400-year leap cycles are exact; negative
-/// (pre-1970) seconds split via Euclidean division so the time-of-day
-/// components are always in range. Relocated from the ARIA Rust handler —
-/// the formatter belongs with the analysis whose output it shapes.
-pub fn epoch_to_iso8601(secs: i64) -> String {
+/// Format epoch MILLISECONDS (ADR-023) as "YYYY-MM-DDTHH:MM:SSZ" (UTC, second
+/// precision — topology timestamps are display values). Hand-rolled
+/// civil-from-days (Howard Hinnant's algorithm) — no chrono, per the
+/// no-external-deps constraint. 400-year leap cycles are exact; negative
+/// (pre-1970) values split via Euclidean division so the time-of-day components
+/// are always in range. Relocated from the ARIA Rust handler — the formatter
+/// belongs with the analysis whose output it shapes.
+pub fn epoch_to_iso8601(epoch_ms: i64) -> String {
+    // The civil-from-days math is seconds-based; reduce ms → seconds here.
+    let secs = epoch_ms.div_euclid(1000);
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -487,12 +490,13 @@ mod tests {
     // Euclidean splits, century non-leap (1900) and 400-year leap (2000).
     #[test]
     fn epoch_to_iso8601_known_vectors() {
+        // Inputs are epoch MILLISECONDS (ADR-023); ×1000 the seconds vectors.
         assert_eq!(epoch_to_iso8601(0), "1970-01-01T00:00:00Z");
-        assert_eq!(epoch_to_iso8601(86_399), "1970-01-01T23:59:59Z");
-        assert_eq!(epoch_to_iso8601(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(epoch_to_iso8601(1_717_200_000), "2024-06-01T00:00:00Z");
-        assert_eq!(epoch_to_iso8601(-1), "1969-12-31T23:59:59Z");
-        assert_eq!(epoch_to_iso8601(-2_208_988_800), "1900-01-01T00:00:00Z");
+        assert_eq!(epoch_to_iso8601(86_399_000), "1970-01-01T23:59:59Z");
+        assert_eq!(epoch_to_iso8601(951_782_400_000), "2000-02-29T00:00:00Z");
+        assert_eq!(epoch_to_iso8601(1_717_200_000_000), "2024-06-01T00:00:00Z");
+        assert_eq!(epoch_to_iso8601(-1_000), "1969-12-31T23:59:59Z");
+        assert_eq!(epoch_to_iso8601(-2_208_988_800_000), "1900-01-01T00:00:00Z");
     }
 
     #[test]

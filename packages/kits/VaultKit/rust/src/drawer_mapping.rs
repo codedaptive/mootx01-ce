@@ -33,7 +33,7 @@ use crate::note_ir::{NoteIR, OccurredAt, WikiLink};
 use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, intake::WriteMode};
 use locus_kit::{
-    adjectives::AdjectiveSensitivity,
+    adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
@@ -504,10 +504,10 @@ impl DrawerMapping {
         frontmatter.insert("moot_id".to_owned(), drawer.lineage_id.to_string());
         // Origin date rides frontmatter (no substrate origin-date column).
         // `created:` is the Obsidian key the adapter reads back.
-        // drawer.event_time is epoch SECONDS (not milliseconds) — use
-        // secs_to_iso8601 to avoid the ÷1000 double-conversion that
-        // produced 1970-01-21 dates for typical second-range timestamps.
-        let event_iso = secs_to_iso8601(drawer.event_time);
+        // drawer.event_time is epoch MILLISECONDS (ADR-023) — format it with
+        // ms_to_iso8601 so the exported `created:` date carries the same
+        // sub-second precision Swift's OccurredAt writes.
+        let event_iso = ms_to_iso8601(drawer.event_time);
         frontmatter.insert("created".to_owned(), event_iso.clone());
 
         if let Some(qid) = &drawer.wikidata_qid {
@@ -816,13 +816,10 @@ impl DrawerMapping {
         // is an illegal belief-state transition). This is expected for idempotent
         // re-imports and must not abort the whole batch. Gracefully skip the note
         // and continue. Other errors (storage failures, I/O) propagate.
-        // `now` is epoch-MILLISECONDS at the bridge boundary; the coordinator
-        // capture path stores it directly into the drawer's epoch-SECONDS
-        // `filed_at`/`event_time` columns, so divide by 1000 here — matching the
-        // tunnel/fact writes below (which all do `now / 1000` for the same reason).
-        // Without this, imported drawers carry a millisecond magnitude that
-        // PersistenceKit's iso8601() clamps to the RFC-3339 max year (9999).
-        let drawer = match coordinator.capture_with_mode(handle, frame, now / 1000, WriteMode::Regular) {
+        // `now` is epoch-MILLISECONDS at the bridge boundary and the drawer's
+        // `filed_at`/`event_time` columns are epoch-milliseconds too (ADR-023),
+        // so it flows through directly — no unit conversion, sub-second preserved.
+        let drawer = match coordinator.capture_with_mode(handle, frame, now, WriteMode::Regular) {
             Ok(d) => d,
             Err(e) => {
                 let reason = format!("{e:?}");
@@ -864,7 +861,7 @@ impl DrawerMapping {
                     &fact.predicate,
                     &fact.object,
                     &drawer.id,
-                    now / 1000, // coordinator expects epoch-seconds
+                    now, // epoch-milliseconds (ADR-023)
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -882,7 +879,7 @@ impl DrawerMapping {
                     "has_value",
                     value,
                     &drawer.id,
-                    now / 1000, // coordinator expects epoch-seconds
+                    now, // epoch-milliseconds (ADR-023)
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -901,7 +898,7 @@ impl DrawerMapping {
                     "tagged",
                     &drawer.id,
                     &drawer.id,
-                    now / 1000,
+                    now,
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -921,7 +918,7 @@ impl DrawerMapping {
                     "is",
                     &note.kind,
                     &drawer.id,
-                    now / 1000,
+                    now,
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -1313,6 +1310,27 @@ impl DrawerMapping {
         }
     }
 
+    /// Frontmatter label for a drawer's exportability adjective. Inverse of
+    /// `exportability_from_label`. Mirrors Swift `DrawerMapping.exportabilityLabel`.
+    pub fn exportability_label(e: AdjectiveExportability) -> &'static str {
+        match e {
+            AdjectiveExportability::Private => "private",
+            AdjectiveExportability::Public => "public",
+        }
+    }
+
+    /// Inverse of `exportability_label`. Returns `None` for unrecognised
+    /// labels; the import caller then applies its policy default (public for
+    /// already-public palace sources). Mirrors Swift
+    /// `DrawerMapping.exportability(fromLabel:)`.
+    pub fn exportability_from_label(label: &str) -> Option<AdjectiveExportability> {
+        match label {
+            "private" => Some(AdjectiveExportability::Private),
+            "public" => Some(AdjectiveExportability::Public),
+            _ => None,
+        }
+    }
+
     // MARK: - Batch helpers (GLK_BATCH1)
 
     /// Apply import guards and build a `CaptureFrame` for `note` without
@@ -1412,22 +1430,22 @@ impl DrawerMapping {
         // KG facts (facts, scope, tags, kind) — same logic as import_note.
         for fact in &note.facts {
             coordinator
-                .add_kg_fact(handle, &fact.subject, &fact.predicate, &fact.object, &drawer.id, now / 1000)
+                .add_kg_fact(handle, &fact.subject, &fact.predicate, &fact.object, &drawer.id, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         for (key, value) in &note.scope {
             coordinator
-                .add_kg_fact(handle, &format!("scope:{key}"), "has_value", value, &drawer.id, now / 1000)
+                .add_kg_fact(handle, &format!("scope:{key}"), "has_value", value, &drawer.id, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         for tag in &note.tags {
             coordinator
-                .add_kg_fact(handle, &format!("tag:{tag}"), "tagged", &drawer.id, &drawer.id, now / 1000)
+                .add_kg_fact(handle, &format!("tag:{tag}"), "tagged", &drawer.id, &drawer.id, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if note.kind != "note" {
             coordinator
-                .add_kg_fact(handle, "record:kind", "is", &note.kind, &drawer.id, now / 1000)
+                .add_kg_fact(handle, "record:kind", "is", &note.kind, &drawer.id, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
 
@@ -1537,20 +1555,6 @@ pub(crate) fn ms_to_iso8601(ms: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
 }
 
-/// Convert epoch SECONDS to a LocusKit-compatible ISO8601 string.
-///
-/// Use this when the input is already in seconds (e.g. `Drawer::event_time`,
-/// `filed_at`). `ms_to_iso8601` divides by 1000 first, so calling it with
-/// a seconds value yields a date ~1000× too early (1970-01-21 for a
-/// typical 2020s timestamp).
-///
-/// Format: `YYYY-MM-DDTHH:MM:SS.000Z` (zero milliseconds — seconds
-/// precision matches the substrate's filed_at/event_time resolution).
-pub(crate) fn secs_to_iso8601(secs: i64) -> String {
-    let (year, month, day, hour, min, sec) = secs_to_ymdhms(secs);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.000Z")
-}
-
 /// Parse an ISO8601 string of the form `YYYY-MM-DDTHH:MM:SS[.mmm]Z` to
 /// milliseconds-since-epoch. Returns `None` on parse failure.
 pub(crate) fn iso8601_to_ms(s: &str) -> Option<i64> {
@@ -1645,28 +1649,6 @@ mod tests {
         assert!(s.contains('.'));
         let back = iso8601_to_ms(&s).expect("should parse back");
         assert_eq!(back, ms);
-    }
-
-    #[test]
-    fn secs_to_iso8601_not_1970() {
-        // Regression for the vault export 1970 bug: drawer.event_time is epoch
-        // seconds. Feeding it directly to ms_to_iso8601 (which divides by 1000)
-        // produced 1970-01-21 for a typical 2020s timestamp.
-        // secs_to_iso8601 must produce the correct year — 2023, not 1970.
-        let secs = 1_700_000_000_i64; // 2023-11-14T22:13:20Z
-        let s = secs_to_iso8601(secs);
-        assert!(
-            s.starts_with("2023-"),
-            "expected 2023-..., got: {s}"
-        );
-        assert_eq!(s, "2023-11-14T22:13:20.000Z");
-        // Sanity-check: feeding the same value to ms_to_iso8601 (the old path)
-        // would produce 1970 — confirm the functions differ.
-        let wrong = ms_to_iso8601(secs);
-        assert!(
-            wrong.starts_with("1970-"),
-            "ms_to_iso8601 with secs input should produce 1970, got: {wrong}"
-        );
     }
 
     #[test]

@@ -522,18 +522,61 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// T counts pairs and the fold is deterministic.
     public static func rebuildTemporal(
         from log: UnifiedAuditLog,
-        startWatermark: HLC = .zero
+        startWatermark: HLC = .zero,
+        eventTimes: [UUID: Int64] = [:]
     ) -> MatrixTier {
         var tier = MatrixTier()
 
-        // Convert UnifiedAuditEntry to TemporalAuditEntry at the GeniusLocusKit
-        // boundary. Only capture and expunge verbs contribute to T (same filter
-        // as applyCapture on the hot path). Entries are taken in HLC order —
-        // orderedEntries is already HLC-ascending, meeting TemporalCausalityFold's
-        // precondition.
-        let temporalEntries: [TemporalAuditEntry] = log.orderedEntries
-            .filter { $0.verb == .capture || $0.verb == .expunge }
-            .map { entry in
+        // Temporal causality keys off the AUTHORED-IN-WORLD clock (`eventTime`),
+        // never the capture HLC — ADR-004: "all temporal-cognition primitives
+        // key off eventTime, not filedAt." A bulk historical import stamps every
+        // drawer with one capture HLC (same physicalTime), so hlc-based lags are
+        // all 0 and no pairs form; the real causal structure lives in each
+        // drawer's eventTime. We substitute eventTime (ms) into the entry's
+        // physicalTime, PRESERVING the real HLC's logicalCount/nodeID so the
+        // fold's tie-break stays deterministic and cross-port-stable, then
+        // re-sort into eventTime order (the fold requires an ascending sequence).
+        // When `eventTimes` carries no entry for a row — streaming capture, where
+        // eventTime == captureTime, and every conformance fixture — we fall back
+        // to the real HLC, so the substituted clock equals the original and
+        // output is byte-identical.
+        func temporalClock(for entry: UnifiedAuditEntry) -> HLC {
+            guard let evMs = eventTimes[entry.rowID] else { return entry.hlc }
+            return HLC(physicalTime: evMs,
+                       logicalCount: entry.hlc.logicalCount,
+                       nodeID: entry.hlc.nodeID)
+        }
+
+        // INCREMENTAL PRUNE (launch cost): drop entries older than one window
+        // before the watermark — they can never be inside a post-watermark
+        // entry's window, so they emit no delta (exact, not approximate). The
+        // watermark and the entry clock are both in eventTime space (the
+        // persisted temporalWatermarkHLC is a max over substituted clocks), so
+        // the cutoff is consistent. A full rebuild (startWatermark == .zero)
+        // keeps every entry (cutoff Int64.min); this bounds the fold's O(N)
+        // buffer scan to the tail instead of re-folding the whole log per launch.
+        let temporalCutoffMs: Int64 = startWatermark == .zero
+            ? Int64.min
+            : startWatermark.physicalTime - Int64(Self.temporalWindowMinutes) * 60_000
+        // Build (originalIndex, clock, coords); the index is a deterministic
+        // secondary sort key so two rows with an identical substituted clock
+        // (same eventTime + logical + node) order identically on both ports.
+        let built: [(idx: Int, clock: HLC, coords: [TemporalFieldCoord])] =
+            log.orderedEntries.enumerated().compactMap { (idx, entry) in
+                guard entry.verb == .capture || entry.verb == .expunge else { return nil }
+                // Exclude the wikidataQID coordinate from T. QID is the
+                // high-cardinality per-content concept the FDC classifier
+                // resolved; it is meaningful for co-occurrence (O, within-event
+                // structure) but as a temporal (T, cross-event) coordinate it
+                // pairs every distinct concept with every other, generating a
+                // unique source×target key per content pair — noise rather than
+                // causal signal, and the dominant term in the T key blow-up on a
+                // dense import window. It stays in O (rebuild()); it is dropped
+                // here only. Mirrors Rust MatrixTier::rebuild_temporal_from.
+                // See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+                guard entry.fieldPath != "wikidataQID" else { return nil }
+                let clock = temporalClock(for: entry)
+                guard clock.physicalTime >= temporalCutoffMs else { return nil }
                 let coords: [TemporalFieldCoord]
                 switch entry.afterValue {
                 case .bitmap(let v):
@@ -558,8 +601,11 @@ public struct MatrixTier: Sendable, Equatable, Codable {
                     // advances the watermark but generates no T pairs.
                     coords = []
                 }
-                return TemporalAuditEntry(hlc: entry.hlc, fieldCoords: coords)
+                return (idx, clock, coords)
             }
+        let temporalEntries: [TemporalAuditEntry] = built
+            .sorted { a, b in a.clock != b.clock ? a.clock < b.clock : a.idx < b.idx }
+            .map { TemporalAuditEntry(hlc: $0.clock, fieldCoords: $0.coords) }
 
         // Full rebuild passes `.zero` (process every entry as "new");
         // incremental hydration passes the persisted `temporalWatermarkHLC` so
@@ -682,13 +728,16 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// The result is bit-identical to calling `rebuild` and `rebuildTemporal`
     /// independently and combining their outputs — just without the
     /// external-scope restriction.
-    public static func fullRebuild(from log: UnifiedAuditLog) -> MatrixTier {
+    public static func fullRebuild(
+        from log: UnifiedAuditLog,
+        eventTimes: [UUID: Int64] = [:]
+    ) -> MatrixTier {
         // Pass 1: F, O, C, liveRowCount, lastHLC.
         var tier = rebuild(from: log)
 
-        // Pass 2: T, temporalWatermarkHLC.
-        // Construct the T-only tier then merge its entries into `tier`.
-        let tTier = rebuildTemporal(from: log)
+        // Pass 2: T, temporalWatermarkHLC. Keys off eventTime (ADR-004); the
+        // map is empty for streaming/conformance, where eventTime == captureTime.
+        let tTier = rebuildTemporal(from: log, eventTimes: eventTimes)
 
         // Merge T entries. addT is private mutating on the same type, so
         // `tier` (a var inside this static func) accepts the mutation.
@@ -718,16 +767,19 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// `fullRebuild(prefix)` then `incrementalUpdate(fullLog)` equals
     /// `fullRebuild(fullLog)` cell-for-cell — including cross-cursor
     /// expunge/withdraw and temporal window-boundary pairs.
-    public mutating func incrementalUpdate(from log: UnifiedAuditLog) {
+    public mutating func incrementalUpdate(
+        from log: UnifiedAuditLog,
+        eventTimes: [UUID: Int64] = [:]
+    ) {
         // F/O/C — replay rows past the field cursor directly onto self.
         let foCursor = lastHLC
         let newEntries = log.entriesInHLCOrder().filter { $0.hlc > foCursor }
         Self.applyCaptureEntries(into: &self, entries: newEntries)
 
-        // T — fold the full log from the persisted temporal watermark; the fold
-        // emits only new cross-pairs, which merge additively onto the loaded T.
+        // T — fold from the persisted temporal watermark (eventTime space,
+        // ADR-004); the fold emits only new cross-pairs, merged additively.
         let tDelta = MatrixTier.rebuildTemporal(
-            from: log, startWatermark: temporalWatermarkHLC)
+            from: log, startWatermark: temporalWatermarkHLC, eventTimes: eventTimes)
         for (key, count) in tDelta.temporalCausality {
             addT(key: key, delta: count)
         }

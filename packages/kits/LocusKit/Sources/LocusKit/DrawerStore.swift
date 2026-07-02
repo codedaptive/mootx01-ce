@@ -882,7 +882,9 @@ public actor DrawerStore {
             writes(for: .adjective, from: d.adjectiveBitmap) +
             writes(for: .operational, from: d.operationalBitmap) +
             writes(for: .provenance, from: d.provenance)
-        let anchor = SubstrateTypes.LatticeAnchor.udc(d.udcCode)
+        // Carry the drawer's varied Q-ID into the sealed anchor (not just the
+        // often-uniform UDC class) so the matrix O/T lanes get per-content signal.
+        let anchor = SubstrateTypes.LatticeAnchor.udcQid(d.udcCode, qid: d.wikidataQID ?? "")
         let nowTs = now.timeIntervalSince1970
         let estateTag = estate.uuidString
 
@@ -957,7 +959,9 @@ public actor DrawerStore {
                     writes(for: .adjective, from: d.adjectiveBitmap) +
                     writes(for: .operational, from: d.operationalBitmap) +
                     writes(for: .provenance, from: d.provenance)
-                let anchor = SubstrateTypes.LatticeAnchor.udc(d.udcCode)
+                // Carry the drawer's varied Q-ID into the sealed anchor (not just the
+        // often-uniform UDC class) so the matrix O/T lanes get per-content signal.
+        let anchor = SubstrateTypes.LatticeAnchor.udcQid(d.udcCode, qid: d.wikidataQID ?? "")
 
                 let result = AuditGate.admit(
                     estateUuid: estateID, rowId: rowUuid, nounType: .drawer, verb: .capture,

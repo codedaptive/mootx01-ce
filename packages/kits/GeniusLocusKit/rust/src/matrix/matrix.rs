@@ -402,7 +402,7 @@ impl MatrixTier {
     /// from a fresh MatrixTier produces a cell-equal result because T counts
     /// pairs and the fold is deterministic.
     pub fn rebuild_temporal(log: &UnifiedAuditLog) -> Self {
-        Self::rebuild_temporal_from(log, HLC::ZERO)
+        Self::rebuild_temporal_from(log, HLC::ZERO, &HashMap::new())
     }
 
     /// Rebuild T starting from a given watermark. Mirrors Swift
@@ -411,20 +411,70 @@ impl MatrixTier {
     /// persisted `temporal_watermark_hlc` so the fold emits only the new
     /// cross-pairs — including window-boundary pairs against pre-watermark
     /// entries — which merge additively onto the loaded T.
-    pub fn rebuild_temporal_from(log: &UnifiedAuditLog, start_watermark: HLC) -> Self {
+    pub fn rebuild_temporal_from(
+        log: &UnifiedAuditLog,
+        start_watermark: HLC,
+        event_times: &HashMap<EntryUUID, i64>,
+    ) -> Self {
         let mut tier = MatrixTier::new();
 
-        // Convert UnifiedAuditEntry to TemporalAuditEntry at the GeniusLocusKit
-        // boundary. Only capture and expunge verbs contribute to T (same filter
-        // as apply_capture on the hot path). ordered_entries is HLC-ascending,
-        // meeting temporal_causality_fold's precondition.
-        let temporal_entries: Vec<TemporalAuditEntry> = log
+        // Temporal causality keys off the AUTHORED-IN-WORLD clock (event_time),
+        // never the capture HLC — ADR-004: "all temporal-cognition primitives
+        // key off eventTime, not filedAt." A bulk historical import stamps every
+        // drawer with one capture HLC, so hlc-based lags are all 0 and no pairs
+        // form; the real causal structure lives in each drawer's event_time. We
+        // substitute event_time (ms) into the entry's physical_time, preserving
+        // the real HLC's logical_count/node_id for a deterministic tie-break,
+        // then re-sort into event_time order. Empty map (streaming/conformance,
+        // event_time == capture_time) -> real HLC -> byte-identical. Mirrors Swift.
+        let temporal_clock = |entry: &UnifiedAuditEntry| -> HLC {
+            match event_times.get(&entry.row_id) {
+                Some(&ev) => HLC {
+                    physical_time: ev,
+                    logical_count: entry.hlc.logical_count,
+                    node_id: entry.hlc.node_id,
+                },
+                None => entry.hlc,
+            }
+        };
+
+        // INCREMENTAL PRUNE (launch cost): drop entries older than one window
+        // before the watermark — they emit no delta. The watermark and the entry
+        // clock are both in event_time space, so the cutoff is consistent. A full
+        // rebuild (start_watermark == ZERO) keeps every entry (cutoff i64::MIN).
+        let temporal_cutoff_ms: i64 = if start_watermark == HLC::ZERO {
+            i64::MIN
+        } else {
+            start_watermark.physical_time - (Self::TEMPORAL_WINDOW_MINUTES as i64) * 60_000
+        };
+        // Build (original_index, clock, coords); the index is a deterministic
+        // secondary sort key so two rows with an identical substituted clock
+        // order identically on both ports.
+        let mut built: Vec<(usize, HLC, Vec<TemporalFieldCoord>)> = log
             .ordered_entries()
             .into_iter()
-            .filter(|e| {
-                matches!(e.verb, UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge)
-            })
-            .map(|entry| {
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                if !matches!(entry.verb, UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge) {
+                    return None;
+                }
+                // Exclude the wikidataQID coordinate from T. QID is the
+                // high-cardinality per-content concept the FDC classifier
+                // resolved; it is meaningful for co-occurrence (O, within-event
+                // structure) but as a temporal (T, cross-event) coordinate it
+                // pairs every distinct concept with every other, generating a
+                // unique source×target key per content pair — noise rather than
+                // causal signal, and the dominant term in the T key blow-up on a
+                // dense import window. It stays in O (rebuild()); it is dropped
+                // here only. Mirrors Swift MatrixTier.rebuildTemporal.
+                // See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+                if entry.field_path == "wikidataQID" {
+                    return None;
+                }
+                let clock = temporal_clock(&entry);
+                if clock.physical_time < temporal_cutoff_ms {
+                    return None;
+                }
                 let field_coords: Vec<TemporalFieldCoord> = match &entry.after_value {
                     UnifiedAuditValue::Bitmap(v) => vec![TemporalFieldCoord::new(
                         entry.field_path.clone(),
@@ -447,8 +497,13 @@ impl MatrixTier {
                     // Mirrors Swift: "case .null: coords = []"
                     UnifiedAuditValue::Null => vec![],
                 };
-                TemporalAuditEntry::new(entry.hlc, field_coords)
+                Some((idx, clock, field_coords))
             })
+            .collect();
+        built.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        let temporal_entries: Vec<TemporalAuditEntry> = built
+            .into_iter()
+            .map(|(_, clock, coords)| TemporalAuditEntry::new(clock, coords))
             .collect();
 
         // Fold from the supplied watermark: ZERO for a full rebuild (every entry
@@ -503,11 +558,12 @@ impl MatrixTier {
     ///   1. rows copied
     ///   2. audit events copied
     ///   3. matrix rebuild (both passes, in order)
-    pub fn full_rebuild(log: &UnifiedAuditLog) -> Self {
+    pub fn full_rebuild(log: &UnifiedAuditLog, event_times: &HashMap<EntryUUID, i64>) -> Self {
         // Pass 1: F, O, C, live_row_count, last_hlc.
         let mut tier = MatrixTier::rebuild(log);
-        // Pass 2: T, temporal_watermark_hlc.
-        let t_tier = MatrixTier::rebuild_temporal(log);
+        // Pass 2: T, temporal_watermark_hlc. Keys off event_time (ADR-004); the
+        // map is empty for streaming/conformance (event_time == capture_time).
+        let t_tier = MatrixTier::rebuild_temporal_from(log, HLC::ZERO, event_times);
         // Merge T into the F/O/C tier. Fields are pub in Rust so no helper needed.
         tier.temporal_causality = t_tier.temporal_causality;
         tier.temporal_watermark_hlc = t_tier.temporal_watermark_hlc;
@@ -531,7 +587,11 @@ impl MatrixTier {
     /// Invariant (conformance-tested): for any whole-HLC split point, a snapshot
     /// `full_rebuild(prefix)` then `incremental_update(full_log)` equals
     /// `full_rebuild(full_log)` cell-for-cell.
-    pub fn incremental_update(&mut self, log: &UnifiedAuditLog) {
+    pub fn incremental_update(
+        &mut self,
+        log: &UnifiedAuditLog,
+        event_times: &HashMap<EntryUUID, i64>,
+    ) {
         // F/O/C — replay rows past the field cursor directly onto self.
         let fo_cursor = self.last_hlc;
         let new_entries: Vec<UnifiedAuditEntry> = log
@@ -541,9 +601,10 @@ impl MatrixTier {
             .collect();
         Self::apply_capture_entries(self, new_entries);
 
-        // T — fold the full log from the persisted temporal watermark; the fold
-        // emits only new cross-pairs, which merge additively onto the loaded T.
-        let t_delta = MatrixTier::rebuild_temporal_from(log, self.temporal_watermark_hlc);
+        // T — fold from the persisted temporal watermark (event_time space,
+        // ADR-004); the fold emits only new cross-pairs, merged additively.
+        let t_delta =
+            MatrixTier::rebuild_temporal_from(log, self.temporal_watermark_hlc, event_times);
         for (key, count) in t_delta.temporal_causality {
             add_signed(&mut self.temporal_causality, key, count);
         }

@@ -193,14 +193,14 @@ const CAPTURE_WEEK_EPOCH_SECONDS: i64 = 1_577_836_800;
 /// The capture-week bucket: whole weeks from the 2020 epoch to the
 /// event time, modulo 256. Times before the epoch bucket at zero.
 ///
-/// `event_time` is epoch seconds (the Rust port's timestamp shape). The
-/// Swift port passes a `Date` whose `timeIntervalSince1970` is a
-/// `Double` of seconds — wire-identical for any time the substrate
-/// stores. Receives `drawer.event_time` (ING-01 two-clock ingest) so
-/// bulk historical content buckets to the authorship week, not the
-/// ingest instant.
+/// `event_time` is epoch MILLISECONDS. The Swift port computes the bucket from
+/// a `Date` via `timeIntervalSince1970` (seconds), so we convert ms→seconds at
+/// this boundary and leave the seconds constants unchanged — the bucket is
+/// bit-identical across ports for any instant. Receives `drawer.event_time`
+/// (ING-01 two-clock ingest) so bulk historical content buckets to the
+/// authorship week, not the ingest instant.
 pub fn capture_week_bucket(event_time: i64) -> u8 {
-    let seconds = event_time - CAPTURE_WEEK_EPOCH_SECONDS;
+    let seconds = event_time.div_euclid(1000) - CAPTURE_WEEK_EPOCH_SECONDS;
     if seconds <= 0 {
         return 0;
     }
@@ -286,21 +286,23 @@ mod tests {
 
     #[test]
     fn capture_week_bucket_counts_weeks_from_epoch() {
+        // Inputs are epoch MILLISECONDS (ADR-023); ×1000 the seconds arithmetic.
         // Exactly 1 week after epoch -> bucket 1.
-        let one_week = CAPTURE_WEEK_EPOCH_SECONDS + 7 * 86_400;
+        let one_week = (CAPTURE_WEEK_EPOCH_SECONDS + 7 * 86_400) * 1000;
         assert_eq!(capture_week_bucket(one_week), 1);
         // 10 weeks -> bucket 10.
-        let ten_weeks = CAPTURE_WEEK_EPOCH_SECONDS + 10 * 7 * 86_400;
+        let ten_weeks = (CAPTURE_WEEK_EPOCH_SECONDS + 10 * 7 * 86_400) * 1000;
         assert_eq!(capture_week_bucket(ten_weeks), 10);
     }
 
     #[test]
     fn capture_week_bucket_wraps_at_256() {
+        // Inputs are epoch MILLISECONDS (ADR-023); ×1000 the seconds arithmetic.
         // 256 weeks after epoch -> bucket 0 (wraps).
-        let two_fifty_six_weeks = CAPTURE_WEEK_EPOCH_SECONDS + 256 * 7 * 86_400;
+        let two_fifty_six_weeks = (CAPTURE_WEEK_EPOCH_SECONDS + 256 * 7 * 86_400) * 1000;
         assert_eq!(capture_week_bucket(two_fifty_six_weeks), 0);
         // 257 weeks -> bucket 1.
-        let two_fifty_seven_weeks = CAPTURE_WEEK_EPOCH_SECONDS + 257 * 7 * 86_400;
+        let two_fifty_seven_weeks = (CAPTURE_WEEK_EPOCH_SECONDS + 257 * 7 * 86_400) * 1000;
         assert_eq!(capture_week_bucket(two_fifty_seven_weeks), 1);
     }
 

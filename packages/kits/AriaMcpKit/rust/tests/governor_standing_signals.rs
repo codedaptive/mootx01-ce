@@ -40,6 +40,20 @@ use genius_locus_kit::{
     SchedulerSignalTrigger as SignalTrigger,
 };
 
+/// Per-call isolated pool paths so the governor's reducer never reads or writes
+/// the real user pool (ce-fdcpool test isolation). Unique per call via a PID +
+/// atomic counter — no `LATTICE_POOL_DIR` mutation, which would race across
+/// parallel test threads.
+fn isolated_pool_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("mootx01-testpool-{}-{}", std::process::id(), n));
+    let pool_dir = base.join("pool");
+    std::fs::create_dir_all(&pool_dir).unwrap();
+    (pool_dir, base.join("WordClassTable.json"))
+}
+
 /// Build a governor over a fresh in-memory estate. The registry's
 /// `new_inmemory` wires a `VectorStore` for the default estate, so
 /// `register_default_standing_signals` finds a store (the live-path
@@ -49,7 +63,14 @@ fn make_governor() -> (AutonomicGovernor, EstateRegistry) {
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
     let store = Arc::clone(&registry.default.store);
-    let governor = AutonomicGovernor::new(coord, handle, store);
+    // Test isolation (ce-fdcpool): a private empty temp pool so a governor tick's
+    // pool-reduce branch never reads or writes the real user pool. The 300_000 ms
+    // topology cadence and 0 ms pool-reduce cadence mirror `new`'s production
+    // defaults (DEFAULT_TOPOLOGY_CADENCE_MS / DEFAULT_POOL_REDUCE_CADENCE_MS).
+    let (pool_dir, artifact) = isolated_pool_paths();
+    let governor = AutonomicGovernor::new_for_testing_with_pool(
+        coord, handle, store, 300_000, None, 0, pool_dir, artifact,
+    );
     (governor, registry)
 }
 

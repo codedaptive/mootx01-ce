@@ -30,11 +30,17 @@
 // Public entry point:
 //
 //   pub fn reduce(
-//       pool_dir: &Path, table_artifact: &Path, now: &str
+//       pool_dir: &Path, table_artifact: &Path, now: &str, max_files: usize
 //   ) -> Result<PoolReduceResult, PoolReducerError>
 //
 // `now` is an ISO 8601 date string (YYYY-MM-DD) — injected for determinism,
 // matching the Swift `now: Date` parameter convention.
+//
+// `max_files` caps how many submission files this run drains — the OLDEST
+// `max_files` by filename (chronological). A backlog larger than the cap drains
+// over successive runs (bounded near-realtime drain: the governor calls this
+// synchronously on its tick, so an unbounded pass would stall the tick). Pass
+// `usize::MAX` to drain the whole pool in one pass (operator/CLI/test use).
 //
 // Current trigger host: `NeuronKit::AutonomicGovernor` or an operator CLI
 // in ARIA_MCP. Do NOT invoke from the hot word_class path.
@@ -134,6 +140,7 @@ pub fn reduce(
     pool_dir: &Path,
     table_artifact: &Path,
     now: &str,
+    max_files: usize,
 ) -> Result<PoolReduceResult, PoolReducerError> {
 
     // Step 1: Ensure the writable artifact exists. When the reducer is called
@@ -195,6 +202,14 @@ pub fn reduce(
             .unwrap_or_default()
             .cmp(b.file_name().unwrap_or_default())
     });
+
+    // Bounded drain: process at most `max_files` of the OLDEST submissions this
+    // run. A larger backlog drains over successive runs, so a burst that pushed
+    // the pool past the cap can never wedge the drainer (the prior "defer when
+    // over cap" behaviour deadlocked — over cap, the reduce that would shrink the
+    // pool was skipped, so it grew without bound). Files beyond the cap stay on
+    // disk, untouched, for the next run.
+    sorted_files.truncate(max_files);
 
     // Dedup tracker: first-occurrence wins per lowercased token.
     let mut seen: HashSet<String> = HashSet::new();
@@ -510,7 +525,7 @@ mod tests {
         );
         write_submission(&sub, &pool_dir, "pool_a.json");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW)
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX)
             .expect("reduce must not error");
 
         assert_eq!(result.consumed, 1);
@@ -536,20 +551,54 @@ mod tests {
         let (pool_dir, table_path) = setup_fixture();
 
         // First run on empty pool.
-        let r1 = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let r1 = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
         assert!(r1.is_noop(), "empty pool must be no-op");
 
         // Land one submission.
         let sub = make_submission("1.0.0", vec![("pulsar", "NOUN")]);
         write_submission(&sub, &pool_dir, "pool_b.json");
-        let r2 = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let r2 = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
         assert_eq!(r2.consumed, 1);
         assert_eq!(r2.nouns_added, 1);
 
         // Re-run on drained pool must be no-op.
-        let r3 = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let r3 = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
         assert!(r3.is_noop(), "second run on drained pool must be no-op");
         assert_eq!(r3.nouns_added, 0);
+
+        let _ = fs::remove_dir_all(&pool_dir);
+    }
+
+    // ─── 2b. Batch cap bounds the drain (bounded near-realtime backlog drain) ──
+
+    #[test]
+    fn batch_cap_drains_oldest_first_over_multiple_runs() {
+        // A backlog larger than `max_files` drains the OLDEST submissions first,
+        // `max_files` per run, leaving the rest on disk — the bounded near-realtime
+        // drain that replaced the deadlocking "defer when over cap" behaviour.
+        let (pool_dir, table_path) = setup_fixture();
+
+        // Three submissions; filename order (pool_a < pool_b < pool_c) is the
+        // chronological order the reducer sorts by (oldest wins).
+        write_submission(&make_submission("1.0.0", vec![("alpha", "NOUN")]), &pool_dir, "pool_a.json");
+        write_submission(&make_submission("1.0.0", vec![("bravo", "NOUN")]), &pool_dir, "pool_b.json");
+        write_submission(&make_submission("1.0.0", vec![("charlie", "NOUN")]), &pool_dir, "pool_c.json");
+
+        // First run drains only the two oldest.
+        let r1 = reduce(&pool_dir, &table_path, FIXTURE_NOW, 2).expect("reduce");
+        assert_eq!(r1.consumed, 2, "batch cap must bound the drain to 2 files");
+        assert!(pool_dir.join("pool_c.json").exists(), "the newest submission stays for the next run");
+        assert!(!pool_dir.join("pool_a.json").exists(), "oldest was consumed (archived)");
+        let mid = read_table(&table_path);
+        assert!(mid.nouns.contains(&"alpha".to_string()));
+        assert!(mid.nouns.contains(&"bravo".to_string()));
+        assert!(!mid.nouns.contains(&"charlie".to_string()), "the deferred file's token is not yet merged");
+
+        // Second run drains the remainder — no backlog can wedge the drainer.
+        let r2 = reduce(&pool_dir, &table_path, FIXTURE_NOW, 2).expect("reduce");
+        assert_eq!(r2.consumed, 1, "the remaining file drains on the next run");
+        assert!(!pool_dir.join("pool_c.json").exists(), "backlog fully drained");
+        assert!(read_table(&table_path).nouns.contains(&"charlie".to_string()));
 
         let _ = fs::remove_dir_all(&pool_dir);
     }
@@ -568,7 +617,7 @@ mod tests {
         let good = make_submission("1.0.0", vec![("photon", "NOUN")]);
         write_submission(&good, &pool_dir, "pool_good.json");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         assert_eq!(result.consumed, 1, "valid file consumed");
         assert_eq!(result.quarantined, 1, "malformed file quarantined");
@@ -604,7 +653,7 @@ mod tests {
         write_submission(&s1, &pool_dir, "pool_a.json");
         write_submission(&s2, &pool_dir, "pool_b.json");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         assert_eq!(result.consumed, 2);
         assert_eq!(result.nouns_added, 1, "comet added exactly once");
@@ -626,7 +675,7 @@ mod tests {
         let stale = make_submission("0.9.0", vec![("asteroid", "NOUN")]);
         write_submission(&stale, &pool_dir, "pool_stale.json");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         assert_eq!(result.consumed, 0);
         assert_eq!(result.quarantined, 1, "stale submission quarantined");
@@ -650,7 +699,7 @@ mod tests {
         );
         write_submission(&sub, &pool_dir, "pool_other.json");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         assert_eq!(result.nouns_added, 1, "only galaxy added");
         assert_eq!(result.verbs_added, 0);
@@ -677,7 +726,7 @@ mod tests {
         );
         write_submission(&sub, &pool_dir, "pool_resident.json");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         assert_eq!(result.nouns_added, 1, "only meteor added");
         assert_eq!(result.verbs_added, 0, "run already resident");
@@ -699,7 +748,7 @@ mod tests {
         let sub = make_submission("1.0.0", vec![("supernova", "NOUN")]);
         write_submission(&sub, &pool_dir, "pool_date.json");
 
-        reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         let table = read_table(&table_path);
         assert_eq!(table.snapshot_date, FIXTURE_NOW, "snapshot_date must match injected now");
@@ -719,7 +768,7 @@ mod tests {
         fs::create_dir_all(&base).expect("create base");
         fs::write(&table_path, FIXTURE_TABLE_JSON).expect("write table");
 
-        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        let result = reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
         assert!(result.is_noop(), "absent pool dir must be no-op");
 
         let _ = fs::remove_dir_all(&base);
@@ -736,7 +785,7 @@ mod tests {
         let stale = make_submission("0.0.1", vec![("comet", "NOUN")]);
         write_submission(&stale, &pool_dir, "pool_stale.json");
 
-        reduce(&pool_dir, &table_path, FIXTURE_NOW).expect("reduce");
+        reduce(&pool_dir, &table_path, FIXTURE_NOW, usize::MAX).expect("reduce");
 
         let table = read_table(&table_path);
         assert_eq!(

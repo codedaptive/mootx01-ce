@@ -1089,12 +1089,14 @@ actor SQLiteBackend {
                "before_adj", "before_op", "before_pv",
                "after_adj", "after_op", "after_pv",
                "before_udc", "before_qid", "after_udc", "after_qid",
-               "actor", "reason")
+               "actor", "reason",
+               "physical_time", "logical_count", "node_id")
             VALUES (?, ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?)
+                    ?, ?,
+                    ?, ?, ?)
             ON CONFLICT("event_id", "hlc") DO NOTHING
             """)
         defer { stmt.finalize() }
@@ -1131,6 +1133,15 @@ actor SQLiteBackend {
         } else {
             try stmt.bind(.null, at: 17)
         }
+        // Full-precision HLC columns. The packed `hlc` column (bound at 2) stays
+        // the ordering key and PK component, but it truncates physicalTime to 40
+        // bits (HLC.packed masks & 0xFF_FFFF_FFFF) — lossy for any post-2004 ms.
+        // These three columns store the HLC losslessly, mirroring the Rust port,
+        // so decodeAuditRow reconstructs the exact HLC instead of the truncated
+        // packed form (which silently dropped bit 40 on incremental hydration).
+        try stmt.bind(.int(event.hlc.physicalTime), at: 18)
+        try stmt.bind(.int(Int64(event.hlc.logicalCount)), at: 19)
+        try stmt.bind(.int(Int64(event.hlc.nodeID)), at: 20)
         _ = try stmt.step()
     }
 
@@ -1207,9 +1218,18 @@ actor SQLiteBackend {
         guard let eventID = UUID(uuidString: eventIDStr) else {
             throw StorageError.corruptStoredValue(table: table, column: "event_id", storedText: eventIDStr)
         }
-        // HLC is stored as Int64(bitPattern: hlc.packed); recover via HLC(packed:)
-        // for a bit-identical round-trip.
-        let hlc = HLC(packed: UInt64(bitPattern: stmt.columnInt64(1)))
+        // Reconstruct the HLC from the full-precision columns (physical_time,
+        // logical_count, node_id at indices 17/18/19), NOT the packed `hlc`
+        // column at index 1: HLC.packed truncates physicalTime to 40 bits, which
+        // silently drops bit 40 for any post-2004 ms and makes a cold-rebuild
+        // lastHLC disagree with the snapshot path (skipping newer tail events on
+        // incremental hydration). The packed column remains the ordering key.
+        // Mirrors the Rust port, which also stores the three columns full.
+        let hlc = HLC(
+            physicalTime: stmt.columnInt64(17),
+            logicalCount: Int32(truncatingIfNeeded: stmt.columnInt64(18)),
+            nodeID: Int32(truncatingIfNeeded: stmt.columnInt64(19))
+        )
 
         let estateUUIDStr = stmt.columnText(2) ?? ""
         guard let estateUUID = UUID(uuidString: estateUUIDStr) else {

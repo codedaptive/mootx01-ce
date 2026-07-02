@@ -608,7 +608,7 @@ fn audit_fixtures(backend: &str, factory: &Factory) {
             after_operational: 0,
             after_provenance: 0,
             before_lattice_anchor: None,
-            after_lattice_anchor: 0,
+            after_lattice_anchor: 0, before_lattice_qid: None, after_lattice_qid: 0,
             actor: "test".into(),
             reason: None,
         });

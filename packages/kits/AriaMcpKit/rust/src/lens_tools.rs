@@ -306,13 +306,13 @@ pub fn dispatch(
             // carries the same one (derived from the drawer UUID), so read it off the
             // first entry. No history => fold over the empty slice returns zero motion
             // (the EntryUUID is never displayed — the result echoes the caller's rowID
-            // string, matching the Swift port). wall_now() is epoch SECONDS while the
-            // fold's HLC time base is epoch MS — scale up.
+            // string, matching the Swift port). wall_now() and the fold's HLC
+            // time base are both epoch MS (ADR-023) — no scaling.
             let row_uuid = entries
                 .first()
                 .map(|e| e.row_id)
                 .unwrap_or(genius_locus_kit::audit::log::EntryUUID([0u8; 16]));
-            let now_ms = now * 1000;
+            let now_ms = now;
             let motion = neuron_kit::diffusion::node_motion::fold(
                 &entries,
                 row_uuid,
@@ -466,9 +466,9 @@ pub fn dispatch(
                         parts.get(1).copied().unwrap_or("")
                     ));
                     for fact in *facts {
-                        // filed_at is epoch seconds; format as ISO8601 to match
-                        // the Swift contradiction lens and substrate-wide date
-                        // conventions (Wave C filed_at ISO8601 fix, Part 4).
+                        // filed_at is epoch milliseconds (ADR-023); format as
+                        // ISO8601 to match the Swift contradiction lens and
+                        // substrate-wide date conventions.
                         lines.push(format!(
                             "    {}  object=[{}]  source={}  filed={}",
                             fact.id, fact.object, fact.source_drawer_id,
@@ -746,8 +746,8 @@ pub fn dispatch(
         }
 
         "moot_lens_moment" => {
-            // Primary window as an (start, end) epoch-seconds pair. The recipe
-            // reads the fingerprints through the GLK surface
+            // Primary window as an (start, end) epoch-milliseconds pair (ADR-023).
+            // The recipe reads the fingerprints through the GLK surface
             // (coord.glk_fingerprints_captured) — aria-mcp no longer reaches
             // estate.store directly (B-1 layer discipline), matching the Swift
             // Moment.run flow over GeniusLocusKit.glkFingerprintsCaptured.
@@ -844,18 +844,20 @@ pub fn dispatch(
             // excessively wide windows. Same guards as moot_lens_moment.
             // Parity: Swift moot_lens_precedence uses requireWindowRange.
             require_window_range(start_epoch, end_epoch)?;
-            // event_lag_pairs takes milliseconds; parse_iso8601 returns seconds.
-            let lower_ms = start_epoch * 1000;
-            let upper_ms = end_epoch * 1000;
+            // Both the eventTime pre-filter and event_lag_pairs operate in epoch
+            // milliseconds (ADR-023): require_iso8601 returns ms and drawer
+            // event_time is ms, so the bounds are used directly with no scaling.
+            let lower_ms = start_epoch;
+            let upper_ms = end_epoch;
             let target_field = require_string(args, "targetField")?;
             let target_value = require_string(args, "targetValue")?;
             let k = crate::dispatch::clamp_limit(
                 Some(opt_integer(args, "k", 5)? as i64), "k", 5, crate::dispatch::LIMIT_HARD_CEILING
             )?;
             // Option A (Bob's ruling): filter drawers by eventTime BEFORE gathering
-            // audit entries — only drawers whose event_time (epoch seconds, resolved
-            // to filed_at when no explicit back-date was supplied) falls within
-            // [lower_ms/1000, upper_ms/1000] contribute causal pairs. The causality
+            // audit entries — only drawers whose event_time (epoch milliseconds,
+            // resolved to filed_at when no explicit back-date was supplied) falls
+            // within [lower_ms, upper_ms] contribute causal pairs. The causality
             // fold (HLC ordering inside the audit log) is unchanged; we are gating
             // WHICH drawers participate, not how their entries are ordered.
             // Drawers without an explicit eventTime use filed_at as the fallback
@@ -867,13 +869,11 @@ pub fn dispatch(
                     format!("all_drawers failed: {e}"),
                 )
             })?;
-            // Pre-filter by eventTime window (epoch seconds comparison).
-            let lower_secs = start_epoch;
-            let upper_secs = end_epoch;
+            // Pre-filter by eventTime window (epoch milliseconds comparison).
             let mut unified: Vec<genius_locus_kit::UnifiedAuditEntry> = Vec::new();
             for drawer in drawers.iter().filter(|d| {
-                // event_time is epoch seconds; always set (falls back to filed_at).
-                d.event_time >= lower_secs && d.event_time <= upper_secs
+                // event_time is epoch milliseconds; always set (falls back to filed_at).
+                d.event_time >= lower_ms && d.event_time <= upper_ms
             }) {
                 let events = estate.store.audit_events_for_row(&drawer.id).map_err(|e| {
                     JSONRPCError::new(
@@ -1046,15 +1046,17 @@ fn require_iso8601(args: &BTreeMap<String, JsonValue>, key: &str) -> Result<i64,
     })
 }
 
-/// Validate a `(start, end)` epoch-seconds pair before use as a query window.
+/// Validate a `(start, end)` epoch-milliseconds pair (ADR-023) before use as a
+/// query window.
 ///
 /// Two guards are applied:
 ///   1. `start <= end` — a reversed window is a client error. Rust `RangeInclusive`
 ///      would silently produce an empty iterator on a reversed range, masking the
 ///      bug; rejecting early surfaces a proper `invalidParams` instead.
 ///   2. Max span cap — a window spanning decades can scan the entire corpus and
-///      exhaust memory. Cap is 3 years (≈ 94 608 000 s), generous for any
-///      legitimate analytical query. Matches the Swift `requireWindowRange` cap.
+///      exhaust memory. Cap is 3 years (≈ 94 608 000 000 ms), generous for any
+///      legitimate analytical query. Matches the Swift `requireWindowRange` cap
+///      (`3 * 365.25 * 24 * 60 * 60` seconds, scaled to ms here).
 fn require_window_range(start: i64, end: i64) -> Result<(i64, i64), JSONRPCError> {
     if start > end {
         return Err(JSONRPCError::new(
@@ -1062,8 +1064,11 @@ fn require_window_range(start: i64, end: i64) -> Result<(i64, i64), JSONRPCError
             format!("windowStart must be ≤ windowEnd; got start={start} end={end}"),
         ));
     }
-    const MAX_SECS: i64 = 3 * 36525 * 24 * 3600 / 100; // 3 * 365.25 days * 86400 ≈ 94_608_000
-    if end - start > MAX_SECS {
+    // 3 * 365.25 days in ms = 94_608_000 s * 1000. Matches Swift's
+    // `maxDurationSeconds` compared in Date-space (seconds); ms bounds here
+    // require the ms-scaled cap.
+    const MAX_MILLIS: i64 = 3 * 36525 * 24 * 3600 / 100 * 1000; // ≈ 94_608_000_000
+    if end - start > MAX_MILLIS {
         return Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
             "window span must not exceed 3 years; reduce the range",
@@ -1074,26 +1079,49 @@ fn require_window_range(start: i64, end: i64) -> Result<(i64, i64), JSONRPCError
 
 /// Minimal ISO8601 UTC parser — handles the subset the server accepts.
 /// Accepts "YYYY-MM-DDTHH:MM:SSZ" and "YYYY-MM-DDTHH:MM:SS+00:00".
+/// Parse an ISO8601 instant to epoch MILLISECONDS (ADR-023).
+///
+/// Every lens bound this parses (windowStart/windowEnd, endingAt, splitAt) is
+/// compared against drawer capture times, which are epoch milliseconds. The
+/// bound must therefore be milliseconds too: the `TypedValue::Timestamp` codec
+/// now interprets its i64 as ms, so feeding a seconds value would encode a
+/// 1970-era instant and silently empty every temporal window. Mirrors the
+/// Swift lens tools, which parse to `Date` (sub-second precision). Optional
+/// fractional seconds (`.mmm`) are honoured; absent, the instant lands on a
+/// whole second.
 fn parse_iso8601(s: &str) -> Option<i64> {
-    // Trim Z / +00:00 suffixes; expect "YYYY-MM-DDTHH:MM:SS".
+    // Trim Z / +00:00 suffixes; expect "YYYY-MM-DDTHH:MM:SS[.mmm]".
     let s = s
         .trim_end_matches('Z')
         .trim_end_matches("+00:00")
         .trim_end_matches("+0000");
+    // Split optional fractional seconds (.mmm…) → milliseconds (3 digits,
+    // padded/truncated) BEFORE the ':' split, which would otherwise choke on
+    // the dot embedded in the seconds field.
+    let (s, millis) = if let Some(dot_pos) = s.rfind('.') {
+        let frac: String = s[dot_pos + 1..].chars().take(3).collect();
+        let mut ms: i64 = frac.parse().ok()?;
+        for _ in frac.len()..3 {
+            ms *= 10;
+        }
+        (&s[..dot_pos], ms)
+    } else {
+        (s, 0)
+    };
     let parts: Vec<&str> = s.split('T').collect();
     if parts.len() != 2 {
         return None;
     }
-    let date_parts: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
-    let time_parts: Vec<u64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
+    let date_parts: Vec<i64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_parts: Vec<i64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
     if date_parts.len() < 3 || time_parts.len() < 3 {
         return None;
     }
     let (y, m, d) = (date_parts[0], date_parts[1], date_parts[2]);
     let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
-    // Days since 1970-01-01 via a simplified algorithm.
-    let days = days_from_ymd(y as i64, m as i64, d as i64)?;
-    Some(days * 86400 + h as i64 * 3600 + min as i64 * 60 + sec as i64)
+    // Days since 1970-01-01 via a simplified algorithm, then scale to ms.
+    let days = days_from_ymd(y, m, d)?;
+    Some((days * 86400 + h * 3600 + min * 60 + sec) * 1000 + millis)
 }
 
 fn days_from_ymd(y: i64, m: i64, d: i64) -> Option<i64> {

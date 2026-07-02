@@ -14,9 +14,9 @@
 //     by its constant and the build-centrality-graph path (a 10 000-drawer
 //     full-estate test would be too slow for a unit suite; the cap is
 //     structural and its constant is the contract).
-//   • Pool-reduce file-count back-pressure: GovernorReport.poolReduceFired
-//     is false when the pool directory already holds more than poolReduceFileCap
-//     (500) files (defer, not drop — lastPoolReduceFired is not advanced).
+//   • Pool-reduce bounded drain: over the cap the tick FIRES and drains a
+//     bounded batch (≤ poolReduceFileCap = 500) — it never defers (the prior
+//     defer-when-over-cap behaviour deadlocked, growing the pool without bound).
 
 import Foundation
 import Testing
@@ -156,7 +156,7 @@ struct GraphCentralityKGFactCapTests {
 // MARK: - Pool-reduce file-count back-pressure
 // ──────────────────────────────────────────────────────────────────────────────
 
-@Suite("AutonomicGovernor pool-reduce file-count back-pressure", .serialized)
+@Suite("AutonomicGovernor pool-reduce bounded drain", .serialized)
 struct PoolReduceBackPressureTests {
 
     // Shared governor factory — suppress all duties except the pool reducer.
@@ -191,37 +191,42 @@ struct PoolReduceBackPressureTests {
         )
     }
 
-    /// When the pool directory holds more than poolReduceFileCap (500) files,
-    /// the tick must defer — poolReduceFired must be false and lastPoolReduceFired
-    /// must NOT advance (so the next tick retries immediately).
-    @Test("pool dir with 501 files defers reduce — poolReduceFired is false")
-    func poolReduce_defers_when_overloaded() async throws {
+    /// Over the cap the tick must FIRE and drain a bounded batch (≤ cap) — never
+    /// defer. The prior "defer when > cap" behaviour deadlocked: over cap, the
+    /// very reduce that shrinks the pool never ran, so the pool grew without
+    /// bound. With 501 submissions, one tick drains exactly the cap (500),
+    /// leaving one for the next tick.
+    @Test("pool dir over cap drains a bounded batch — one tick drains the cap")
+    func poolReduce_drainsBoundedBatch_whenOverCap() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("neuronkit-pool-cap-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Create 501 files — one above the 500-file cap.
+        // 501 valid submissions (one above the cap), named so filename order is
+        // chronological — the reducer drains oldest-first.
         let fileCount = 501
         for i in 0..<fileCount {
-            let file = tmp.appendingPathComponent("token-\(i).json")
-            try Data().write(to: file)
+            let body = #"{"table_version":"1.0.0","platform":"test","tagger_version":"1","entries":[{"token":"tok\#(i)","tag":"NOUN"}]}"#
+            let name = String(format: "pool_%04d.json", i)
+            try Data(body.utf8).write(to: tmp.appendingPathComponent(name))
         }
 
-        // Verify the files are actually there before running tick.
-        let actualCount = try FileManager.default.contentsOfDirectory(
-            atPath: tmp.path).count
-        #expect(actualCount == fileCount,
-            "precondition: temp dir must contain exactly \(fileCount) files")
-
-        let tableURL = tmp.appendingPathComponent("table.json")   // nonexistent is fine
+        let tableURL = tmp.appendingPathComponent("table.json")
         let gov = try await makeGovernor(poolDir: tmp, tableURL: tableURL, poolReduceCadenceMs: 0)
 
         let report = await gov.tick(now: Date())
-        #expect(!report.poolReduceFired,
-            "poolReduceFired must be false when pool dir exceeds 500-file cap (planned hardening)")
-        #expect(!report.tableSwapped,
-            "tableSwapped must be false when reduce is deferred")
+
+        // Remaining top-level pool_*.json submissions (drained ones moved to the
+        // archive/ or quarantine/ subdirs).
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: tmp.path)
+            .filter { $0.hasPrefix("pool_") && $0.hasSuffix(".json") }
+            .count
+
+        #expect(report.poolReduceFired,
+            "over-cap must FIRE a bounded drain, not defer — the deadlock is fixed")
+        #expect(remaining == fileCount - 500,
+            "one tick drains exactly the cap (500); the remainder stays for the next tick")
     }
 
     /// When the pool directory is empty (0 files), the tick should fire the

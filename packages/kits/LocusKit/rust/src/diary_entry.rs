@@ -22,7 +22,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch seconds). Same convention
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Same convention
 //!   across the LocusKit Rust port.
 //! - `Date? tombstonedAt` → `Option<i64> tombstoned_at`.
 //! - `id: String = UUID().uuidString` Swift default → Rust callers

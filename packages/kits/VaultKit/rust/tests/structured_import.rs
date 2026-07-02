@@ -227,14 +227,13 @@ fn structured_import_hierarchy_as_full_room_path() {
     );
 }
 
-/// Regression: a vault import must store `filed_at` in epoch SECONDS, not the
-/// epoch-MILLISECONDS `now` the bridge receives. The bridge passes `NOW` (ms)
-/// into `capture_with_mode`, which stores `now` directly into the seconds-typed
-/// `filed_at` column — so the import path must divide by 1000. Before the fix the
-/// drawer carried a millisecond magnitude that PersistenceKit's `iso8601()`
-/// clamped to the RFC-3339 max year (9999), corrupting the date.
+/// Regression (ADR-023): a vault import stores `filed_at` in epoch MILLISECONDS.
+/// The bridge passes `NOW` (ms) into `capture_with_mode`, which stores it directly
+/// into the millisecond-typed `filed_at` column — no ÷1000 — so it must round-trip
+/// as the exact millisecond value, well below PersistenceKit's RFC-3339 year-9999
+/// clamp boundary.
 #[test]
-fn import_filed_at_is_epoch_seconds_not_millis() {
+fn import_filed_at_is_epoch_millis() {
     let (mut coord, handle) = open_one();
     let note = structured_note();
     let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
@@ -257,16 +256,16 @@ fn import_filed_at_is_epoch_seconds_not_millis() {
         .expect("recall");
     assert_eq!(drawers.len(), 1, "exactly one drawer must be created");
     let drawer = &drawers[0];
-    // NOW is ms (1_765_000_000_000); filed_at must be the seconds value.
+    // NOW is ms (1_765_000_000_000); filed_at must equal it exactly (no ÷1000).
     assert_eq!(
         drawer.filed_at,
-        NOW / 1000,
-        "filed_at must be epoch SECONDS (NOW/1000), not the millisecond NOW or a clamped value"
+        NOW,
+        "filed_at must be the epoch-millisecond NOW, stored without conversion"
     );
-    // And it must be well below the RFC-3339 year-9999 clamp boundary.
+    // And it must be well below the RFC-3339 year-9999 clamp boundary (ms).
     assert!(
-        drawer.filed_at < 253_402_300_799,
-        "filed_at {} must not be a clamped/millisecond magnitude",
+        drawer.filed_at < 253_402_300_799_999,
+        "filed_at {} must not be a clamped magnitude",
         drawer.filed_at
     );
 }

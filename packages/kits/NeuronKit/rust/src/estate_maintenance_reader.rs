@@ -206,7 +206,9 @@ fn build_scan(
             // Tombstoned: contribute to the expunge-candidate scan.
             // Age is measured from tombstoned_at (when the soft-delete occurred).
             let tombstone_epoch = drawer.tombstoned_at.unwrap_or(drawer.filed_at);
-            let age_seconds = (now - tombstone_epoch).max(0) as f64;
+            // `now` and the epoch are epoch-ms (ADR-023); age is reported in
+            // seconds (matching Swift's `timeIntervalSince`), so convert here.
+            let age_seconds = (now - tombstone_epoch).max(0) as f64 / 1000.0;
             aged_tombstoned.push(AgedRow { id: drawer.id.clone(), age_seconds });
         } else {
             // Live: check Cluster A membership.
@@ -218,8 +220,9 @@ fn build_scan(
                 continue;
             }
 
-            // Cluster A: contribute to the decay scan.
-            let age_seconds = (now - drawer.filed_at).max(0) as f64;
+            // Cluster A: contribute to the decay scan. `now`/`filed_at` are
+            // epoch-ms (ADR-023); age is reported in seconds, so convert here.
+            let age_seconds = (now - drawer.filed_at).max(0) as f64 / 1000.0;
             aged_active.push(AgedRow { id: drawer.id.clone(), age_seconds });
 
             // Check invariant I-3: a drawer may not be both secret and public_.
@@ -487,7 +490,8 @@ mod tests {
         let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
         let scan = reader.scan();
         assert_eq!(scan.aged_active.len(), 1);
-        assert_eq!(scan.aged_active[0].age_seconds, (NOW - FILED_AT) as f64);
+        // age_seconds is seconds; NOW/FILED_AT are epoch-ms (ADR-023).
+        assert_eq!(scan.aged_active[0].age_seconds, (NOW - FILED_AT) as f64 / 1000.0);
     }
 
     // ── MR-3: reference_drift returns empty when no references exist ──

@@ -470,6 +470,53 @@ fn rebuild_temporal_ignores_non_capture_expunge_verbs() {
     assert_eq!(tier.temporal_watermark_hlc, h1);
 }
 
+/// The wikidataQID coordinate is excluded from T but retained in O. QID is the
+/// high-cardinality per-content concept: valuable for within-event co-occurrence
+/// (O) but noise + the dominant key-explosion term as a cross-event temporal (T)
+/// coordinate. Mirrors Swift MatrixTierTests.wikidataQidExcludedFromTemporal.
+#[test]
+fn wikidata_qid_excluded_from_temporal_but_kept_in_cooccurrence() {
+    let h0 = HLC::new(0, 0, 1);
+    let h1 = HLC::new(300_000, 0, 1); // 5 minutes apart → within window
+    let row_a = EntryUUID([0x31; 16]);
+    let row_b = EntryUUID([0x32; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    // Each event carries a bitmap field AND a wikidataQID concept coordinate.
+    log.add(capture(row_a, "bm.x", UnifiedAuditValue::Bitmap(1), h0));
+    log.add(capture(row_a, "wikidataQID", UnifiedAuditValue::Integer(111), h0));
+    log.add(capture(row_b, "bm.x", UnifiedAuditValue::Bitmap(2), h1));
+    log.add(capture(row_b, "wikidataQID", UnifiedAuditValue::Integer(222), h1));
+
+    // T: no temporal key may touch the wikidataQID field, and the bitmap
+    // cross-pair must still be present (T is not empty).
+    let t = MatrixTier::rebuild_temporal(&log);
+    assert!(
+        t.temporal_causality.keys().all(|k| {
+            k.source.field_path != "wikidataQID" && k.target.field_path != "wikidataQID"
+        }),
+        "no T key may involve the wikidataQID coordinate"
+    );
+    let bm_src = MatrixValueCoord::new("bm.x", UnifiedAuditValue::Bitmap(1));
+    let bm_tgt = MatrixValueCoord::new("bm.x", UnifiedAuditValue::Bitmap(2));
+    let bm_key = MatrixTemporalKey { source: bm_src, target: bm_tgt, lag_bucket: 8 };
+    assert_eq!(
+        t.temporal_causality.get(&bm_key),
+        Some(&1),
+        "the bitmap cross-pair must survive the QID exclusion"
+    );
+
+    // O: QID is retained — the within-event (bm.x, wikidataQID) co-occurrence
+    // pair must be present.
+    let o = MatrixTier::rebuild(&log);
+    assert!(
+        o.co_occurrence.keys().any(|k| {
+            k.a.field_path == "wikidataQID" || k.b.field_path == "wikidataQID"
+        }),
+        "wikidataQID must still contribute to co-occurrence (O)"
+    );
+}
+
 // MARK: - temporal_watermark_hlc snapshot persistence (t3-temporal-watermark)
 //
 // These two tests enforce the conformance fix: the Rust MatrixSnapshot now
@@ -693,7 +740,7 @@ fn incremental_update_matches_full_rebuild_at_every_split() {
     for e in &entries {
         full_log.add(e.clone());
     }
-    let full = MatrixTier::full_rebuild(&full_log);
+    let full = MatrixTier::full_rebuild(&full_log, &std::collections::HashMap::new());
 
     let n = entries.len();
     for k in 1..=n {
@@ -705,8 +752,9 @@ fn incremental_update_matches_full_rebuild_at_every_split() {
         for e in entries.iter().take(k) {
             prefix_log.add(e.clone());
         }
-        let mut snapshot = MatrixTier::full_rebuild(&prefix_log); // persisted state
-        snapshot.incremental_update(&full_log); // load-forward
+        let mut snapshot =
+            MatrixTier::full_rebuild(&prefix_log, &std::collections::HashMap::new()); // persisted state
+        snapshot.incremental_update(&full_log, &std::collections::HashMap::new()); // load-forward
 
         assert_eq!(snapshot.field_presence, full.field_presence, "F differs at split {k}");
         assert_eq!(snapshot.co_occurrence, full.co_occurrence, "O differs at split {k}");

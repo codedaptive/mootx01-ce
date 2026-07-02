@@ -305,6 +305,23 @@ public struct PalaceBridge: Sendable {
         return report
     }
 
+    // MARK: - Exportability derivation
+
+    /// Exportability adjective for imported palace content. Palace/markdown
+    /// sources are already-public material, so the policy default is `.public_`
+    /// (a `.private_` default would wrongly wall off content that was never
+    /// protected). A frontmatter `exportability:` label overrides the default.
+    /// Clamped to `.private_` when sensitivity is `.secret`: the capture gate
+    /// rejects a secret+public row (invariant I-22), so a secret classification
+    /// always wins over the public source default.
+    private static func importExportability(
+        label: String?,
+        sensitivity: AdjectiveSensitivity
+    ) -> AdjectiveExportability {
+        if sensitivity == .secret { return .private_ }
+        return label.flatMap { DrawerMapping.exportability(fromLabel: $0) } ?? .public_
+    }
+
     // MARK: - Chroma row import
 
     private func importChromaRow(
@@ -381,6 +398,8 @@ public struct PalaceBridge: Sendable {
             kind: .prose,
             lineageID: lineageID,
             eventTime: eventTime ?? now,
+            exportability: Self.importExportability(
+                label: metadata["exportability"], sensitivity: flooredSensitivity),
             wing: wing
         )
 
@@ -459,6 +478,8 @@ public struct PalaceBridge: Sendable {
             kind: .prose,
             lineageID: lineageID,
             eventTime: eventTime ?? now,
+            exportability: Self.importExportability(
+                label: metadata["exportability"], sensitivity: flooredSensitivity),
             wing: wing
         )
         let isUpdate = existingLineageIDs.contains(lineageID)
@@ -553,6 +574,7 @@ public struct PalaceBridge: Sendable {
             kind: .prose,
             lineageID: lineageID,
             eventTime: eventTime ?? now,
+            exportability: Self.importExportability(label: nil, sensitivity: sensitivity),
             wing: "knowledge_graph"
         )
 

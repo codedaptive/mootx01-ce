@@ -665,7 +665,7 @@ impl DrawerStoreCore {
         };
         let udc = self.read_drawer_udc(drawer_id)?;
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        let stamp = self.hlc.lock().unwrap().send(now);
 
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
@@ -756,8 +756,14 @@ impl DrawerStoreCore {
             }
         }
 
-        let anchor = substrate_lib::verbs::LatticeAnchor::udc(&drawer.udc_code);
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        // Carry the drawer's varied Q-ID into the sealed anchor (not just the
+        // often-uniform UDC class) so the matrix O/T lanes get per-content signal.
+        // Mirrors Swift DrawerStore capture seal.
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc_qid(
+            &drawer.udc_code,
+            drawer.wikidata_qid.as_deref().unwrap_or(""),
+        );
+        let stamp = self.hlc.lock().unwrap().send(now);
 
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
@@ -1700,7 +1706,7 @@ impl DrawerStore for DrawerStoreCore {
             &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33],
         );
         // One tick per logical mutation.
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        let stamp = self.hlc.lock().unwrap().send(now);
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -1841,7 +1847,7 @@ impl DrawerStore for DrawerStoreCore {
         let new_flags_value = (prior_flags_value & 0b011) | 0b100;
 
         // One tick per logical mutation.
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        let stamp = self.hlc.lock().unwrap().send(now);
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -1937,7 +1943,7 @@ impl DrawerStore for DrawerStoreCore {
                 let sib_flags_value = bit_field::extract_field(sib_bitmap, 24, 3);
                 let sib_new_flags = (sib_flags_value & 0b011) | 0b100;
 
-                let sib_stamp = self.hlc.lock().unwrap().send(now * 1000);
+                let sib_stamp = self.hlc.lock().unwrap().send(now);
                 let sib_result = audit_gate::admit(
                     self.estate_uuid.as_u128(),
                     substrate_lib::verbs::RowId(sib_uuid.as_u128()),
@@ -2048,7 +2054,7 @@ impl DrawerStore for DrawerStoreCore {
         // consumers see the storage-level expunge without requiring a
         // distinct ARIA verb.
         let _ = drawer_id; // rowId is carried by success_event.row_id
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        let stamp = self.hlc.lock().unwrap().send(now);
         let event_id = substrate_lib::audit_gate::content_id(
             success_event.estate_uuid,
             success_event.row_id,
@@ -2100,7 +2106,7 @@ impl DrawerStore for DrawerStoreCore {
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
         let after_bitmaps: (i64, i64, i64) = (adj_bitmap, op_bitmap, prov_bitmap);
 
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        let stamp = self.hlc.lock().unwrap().send(now);
         let event_id = substrate_lib::audit_gate::content_id(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -2194,7 +2200,7 @@ impl DrawerStore for DrawerStoreCore {
         // Reanchor is a placement move — no FieldWrites. The gate records the
         // anchor delta via prior/after anchor and validates verb=Mutate
         // (active→active self-loop). Empty writes slice is correct here.
-        let stamp = self.hlc.lock().unwrap().send(now * 1000);
+        let stamp = self.hlc.lock().unwrap().send(now);
         let event = audit_gate::admit(
             self.estate_uuid.as_u128(),
             substrate_lib::verbs::RowId(row_uuid.as_u128()),
@@ -3892,7 +3898,13 @@ impl DrawerStore for DrawerStoreCore {
             return Ok(Vec::new());
         }
 
-        let window_start = ending_at - (bucket_count as i64) * bucket_seconds;
+        // `bucket_seconds` is a bucket WIDTH in seconds (mirrors Swift
+        // `fingerprintBitSeries(bucketSeconds:)`), while `ending_at` and the
+        // captured `event_time` values are epoch MILLISECONDS (ADR-023).
+        // Convert the width to ms so all three share one unit — Swift performs
+        // the equivalent in Date-space via `addingTimeInterval(-seconds)`.
+        let bucket_millis = bucket_seconds * 1000;
+        let window_start = ending_at - (bucket_count as i64) * bucket_millis;
         let pred = StoragePredicate::all(vec![
             StoragePredicate::any(vec![
                 StoragePredicate::And(vec![
@@ -3938,7 +3950,7 @@ impl DrawerStore for DrawerStoreCore {
 
         Ok((0..bucket_count)
             .map(|i| {
-                let bucket_lower = ending_at - (bucket_count - i) as i64 * bucket_seconds;
+                let bucket_lower = ending_at - (bucket_count - i) as i64 * bucket_millis;
                 let is_last = i == bucket_count - 1;
                 captures.iter().any(|(t, fp)| {
                     let in_bucket = if is_last {
@@ -3947,7 +3959,7 @@ impl DrawerStore for DrawerStoreCore {
                     } else {
                         // [lower, upper): exclusive upper so edge belongs to later bucket.
                         let bucket_upper =
-                            ending_at - (bucket_count - i - 1) as i64 * bucket_seconds;
+                            ending_at - (bucket_count - i - 1) as i64 * bucket_millis;
                         *t >= bucket_lower && *t < bucket_upper
                     };
                     in_bucket && temporal_bit_set(fp, bit)
@@ -5470,22 +5482,27 @@ fn map_storage_err(e: persistence_kit::error::StorageError) -> LocusKitError {
 // (`.withInternetDateTime + .withFractionalSeconds`) so a value
 // written by either side round-trips through the other.
 
-fn format_iso8601(epoch_seconds: i64) -> String {
-    // Minimal ISO8601-Z formatter. Avoids pulling in chrono / time at
-    // this layer; the manifest stores two timestamps and they only
-    // need round-trip equality with the parser below.
-    let (year, month, day, hour, minute, second) = epoch_to_components(epoch_seconds);
+fn format_iso8601(epoch_ms: i64) -> String {
+    // Minimal ISO8601-Z formatter over epoch MILLISECONDS (ADR-023). Avoids
+    // pulling in chrono / time at this layer; the manifest stores two
+    // timestamps and they only need round-trip equality with the parser below.
+    // The calendar helper is seconds-based, so split the millisecond fraction
+    // out here and emit it as the 3-digit `.SSS` field Swift's LKISO8601 uses.
+    let secs = epoch_ms.div_euclid(1000);
+    let millis = epoch_ms.rem_euclid(1000);
+    let (year, month, day, hour, minute, second) = epoch_to_components(secs);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
-        year, month, day, hour, minute, second
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hour, minute, second, millis
     )
 }
 
 fn parse_iso8601(s: &str) -> Option<i64> {
     // Accept "YYYY-MM-DDTHH:MM:SS[.fff]Z" — the shape `format_iso8601`
     // emits and the shape Swift's `ISO8601DateFormatter`
-    // `.withInternetDateTime` produces. Fractional seconds are parsed
-    // and dropped (epoch seconds, not subsecond).
+    // `.withInternetDateTime` produces. Returns epoch MILLISECONDS
+    // (ADR-023): the fractional-seconds field is parsed and retained as the
+    // millisecond component.
     let bytes = s.as_bytes();
     if bytes.len() < 20 {
         return None;
@@ -5496,7 +5513,19 @@ fn parse_iso8601(s: &str) -> Option<i64> {
     let hour: i64 = std::str::from_utf8(&bytes[11..13]).ok()?.parse().ok()?;
     let minute: i64 = std::str::from_utf8(&bytes[14..16]).ok()?.parse().ok()?;
     let second: i64 = std::str::from_utf8(&bytes[17..19]).ok()?.parse().ok()?;
-    Some(components_to_epoch(year, month, day, hour, minute, second))
+    // Optional ".fff" fractional field → milliseconds. Swift's LKISO8601
+    // always emits exactly 3 digits; accept 1–3 and left-justify to ms.
+    let millis: i64 = if bytes.len() > 20 && bytes[19] == b'.' {
+        let frac_end = 20 + bytes[20..].iter().take_while(|c| c.is_ascii_digit()).count();
+        let digits = std::str::from_utf8(&bytes[20..frac_end]).ok()?;
+        let mut ms: i64 = digits.parse().ok()?;
+        // Scale to exactly 3 fractional digits (e.g. ".4" → 400ms, ".45" → 450ms).
+        for _ in digits.len()..3 { ms *= 10; }
+        ms
+    } else {
+        0
+    };
+    Some(components_to_epoch(year, month, day, hour, minute, second) * 1000 + millis)
 }
 
 /// Days from 0000-03-01 to year-month-1. The shifted year start
@@ -5572,6 +5601,8 @@ fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
         after_provenance: e.after_bitmaps.2,
         before_lattice_anchor: e.before_lattice_anchor.map(|a| a.udc_code),
         after_lattice_anchor: e.after_lattice_anchor.udc_code,
+        before_lattice_qid: e.before_lattice_anchor.map(|a| a.qid_pointer),
+        after_lattice_qid: e.after_lattice_anchor.qid_pointer,
         actor: e.actor.clone(),
         // reason is threaded from the verb call site through the substrate
         // AuditEvent and forwarded here to PersistenceKit's flat type.
@@ -5602,10 +5633,13 @@ pub(crate) fn substrate_audit_event_from(e: &PkAuditEvent) -> substrate_lib::ver
         verb: e.verb.clone(),
         before_bitmaps: before,
         after_bitmaps: (e.after_adjective, e.after_operational, e.after_provenance),
-        before_lattice_anchor: e
-            .before_lattice_anchor
-            .map(|a| substrate_lib::verbs::LatticeAnchor::new(a, 0)),
-        after_lattice_anchor: substrate_lib::verbs::LatticeAnchor::new(e.after_lattice_anchor, 0),
+        before_lattice_anchor: e.before_lattice_anchor.map(|a| {
+            substrate_lib::verbs::LatticeAnchor::new(a, e.before_lattice_qid.unwrap_or(0))
+        }),
+        after_lattice_anchor: substrate_lib::verbs::LatticeAnchor::new(
+            e.after_lattice_anchor,
+            e.after_lattice_qid,
+        ),
         actor: e.actor.clone(),
         // reason is threaded back through the bridge for full round-trip fidelity.
         reason: e.reason.clone(),
@@ -7018,8 +7052,11 @@ mod tests {
 
     #[test]
     fn iso8601_known_epoch_components() {
-        // 2023-11-14T22:13:20.000Z (the epoch 1_700_000_000 second).
-        assert_eq!(format_iso8601(1_700_000_000), "2023-11-14T22:13:20.000Z");
+        // 2023-11-14T22:13:20.000Z (epoch 1_700_000_000_000 milliseconds, ADR-023).
+        assert_eq!(format_iso8601(1_700_000_000_000), "2023-11-14T22:13:20.000Z");
+        // A sub-second value round-trips its millisecond fraction.
+        assert_eq!(format_iso8601(1_700_000_000_437), "2023-11-14T22:13:20.437Z");
+        assert_eq!(parse_iso8601("2023-11-14T22:13:20.437Z"), Some(1_700_000_000_437));
         // 1970-01-01T00:00:00.000Z (the epoch zero).
         assert_eq!(format_iso8601(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(parse_iso8601("1970-01-01T00:00:00.000Z"), Some(0));
@@ -7277,29 +7314,29 @@ mod tests {
     // HLC unit contract — physical_time must be milliseconds
     //
     // Swift feeds HLCGenerator::send() in milliseconds (DrawerStore.swift:
-    // `let nowMillis = Int64(now.timeIntervalSince1970 * 1000)`).
-    // Rust callers pass epoch-seconds; the fix multiplies by 1000 at each
-    // send() site. These tests verify the contract post-fix so a future
-    // regression is caught at CI rather than at federation time.
+    // `let nowMillis = Int64(now.timeIntervalSince1970 * 1000)`). Under ADR-023
+    // Rust callers also pass epoch-milliseconds directly (the `now` clock is ms),
+    // so send() receives ms with no conversion. These tests verify the contract
+    // so a future regression is caught at CI rather than at federation time.
     //
     // Implementation note: we read the HLC back from the audit log via
     // `store.storage().audit_log().events_for_row(uuid)` — the same
     // pattern used by existing audit-log tests in this module.
     // -----------------------------------------------------------------
 
-    /// After add_drawer with a known `now` in epoch seconds, the HLC
-    /// physical_time in the genesis audit event must be the millisecond
-    /// magnitude (now * 1000), and physical_seconds_since_epoch() must
-    /// round-trip back to the original seconds value.
+    /// After add_drawer with a known `now` in epoch milliseconds, the HLC
+    /// physical_time in the genesis audit event must equal that millisecond
+    /// value, and physical_seconds_since_epoch() must round-trip back to the
+    /// original seconds value.
     #[test]
     fn hlc_physical_time_is_milliseconds_after_capture() {
-        // A concrete epoch-seconds value (2025-12-01 ~00:00 UTC).
-        const CAPTURE_SECS: i64 = 1_765_000_000;
-        const CAPTURE_MILLIS: i64 = CAPTURE_SECS * 1000;
+        // A concrete epoch-milliseconds value (2025-12-06 ~00:00 UTC).
+        const CAPTURE_MILLIS: i64 = 1_765_000_000_000;
+        const CAPTURE_SECS: i64 = CAPTURE_MILLIS / 1000;
 
-        let store = open_store_at(CAPTURE_SECS);
+        let store = open_store_at(CAPTURE_MILLIS);
         let d = sample_drawer("hlc-ms-d1", "wing", "room", "content");
-        store.add_drawer(&d, CAPTURE_SECS).unwrap();
+        store.add_drawer(&d, CAPTURE_MILLIS).unwrap();
 
         let row_uuid = Uuid::parse_str(&tid("hlc-ms-d1")).unwrap();
         let events = store
@@ -7338,13 +7375,14 @@ mod tests {
     /// This validates the HLC generator works correctly with millis as input.
     #[test]
     fn hlc_monotonic_within_same_second() {
-        const CAPTURE_SECS: i64 = 1_765_000_000;
+        // Epoch MILLISECONDS (ADR-023) — the `now` the store and HLC take.
+        const CAPTURE_MILLIS: i64 = 1_765_000_000_000;
 
-        let store = open_store_at(CAPTURE_SECS);
+        let store = open_store_at(CAPTURE_MILLIS);
         let d1 = sample_drawer("hlc-mono-d1", "wing", "room", "alpha");
         let d2 = sample_drawer("hlc-mono-d2", "wing", "room", "beta");
-        store.add_drawer(&d1, CAPTURE_SECS).unwrap();
-        store.add_drawer(&d2, CAPTURE_SECS).unwrap();
+        store.add_drawer(&d1, CAPTURE_MILLIS).unwrap();
+        store.add_drawer(&d2, CAPTURE_MILLIS).unwrap();
 
         let row1 = Uuid::parse_str(&tid("hlc-mono-d1")).unwrap();
         let row2 = Uuid::parse_str(&tid("hlc-mono-d2")).unwrap();
@@ -7357,8 +7395,8 @@ mod tests {
             hlc1, hlc2
         );
         // Both share the same physical ms since wall clock didn't advance.
-        assert_eq!(hlc1.physical_time, CAPTURE_SECS * 1000);
-        assert_eq!(hlc2.physical_time, CAPTURE_SECS * 1000);
+        assert_eq!(hlc1.physical_time, CAPTURE_MILLIS);
+        assert_eq!(hlc2.physical_time, CAPTURE_MILLIS);
         // Logical counter must have bumped.
         assert_eq!(hlc2.logical_count, hlc1.logical_count + 1);
     }

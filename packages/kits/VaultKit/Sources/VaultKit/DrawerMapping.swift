@@ -1309,6 +1309,26 @@ public struct DrawerMapping: Sendable {
         }
     }
 
+    /// Frontmatter label for a drawer's exportability adjective. Inverse
+    /// of `exportability(fromLabel:)`.
+    static func exportabilityLabel(_ e: AdjectiveExportability) -> String {
+        switch e {
+        case .private_: return "private"
+        case .public_: return "public"
+        }
+    }
+
+    /// Inverse of `exportabilityLabel(_:)`. Returns nil for unrecognised
+    /// labels; the import caller then applies its policy default (public
+    /// for already-public palace sources). Mirrors `sensitivity(fromLabel:)`.
+    static func exportability(fromLabel label: String) -> AdjectiveExportability? {
+        switch label {
+        case "private": return .private_
+        case "public": return .public_
+        default: return nil
+        }
+    }
+
     /// Stable signature for tunnel de-duplication. Keyed on the endpoint
     /// wing/room, the target room, the raw label, and the kind — all
     /// stable across re-imports (unlike the source drawer id, which the

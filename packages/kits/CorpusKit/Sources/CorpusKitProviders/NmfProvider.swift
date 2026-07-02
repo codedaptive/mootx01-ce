@@ -166,6 +166,11 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// NMF rank k (latent dimensionality).
     public let rank: Int
 
+    /// Reduced-vocabulary cap K for the dense factorization (ADR-022). NMF
+    /// factors a `K × numDocs` matrix over the top-K informative terms instead
+    /// of `full-vocab × numDocs`. Optimizer knob; default `defaultReducedVocabCap`.
+    public let reducedVocabCap: Int
+
     /// Fixed iteration count. tolerance=0 disables convergence stopping.
     public let maxIterations: Int
 
@@ -193,6 +198,11 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// docEmbeddings[d] = L2-normalised H[:, d] of length effectiveRank.
     private var docEmbeddings: [[Float]]
 
+    /// The frozen reduced vocabulary (term → reduced row) the basis was trained
+    /// on (ADR-022). Query projection and basis serialization key on THIS, not
+    /// the full `counts.vocab`. Empty until `finalize()`.
+    private var basisVocab: [String: Int]
+
     // MARK: Initialiser
 
     public init(
@@ -201,17 +211,20 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         rank: Int = nmfDefaultRank,
         maxIterations: Int = nmfDefaultIterations,
         seed: UInt64 = nmfFactorizationSeed,
-        projectionSeed: UInt64 = nmfProjectionSeed
+        projectionSeed: UInt64 = nmfProjectionSeed,
+        reducedVocabCap: Int = defaultReducedVocabCap
     ) {
         self.modelID = modelID
         self.modelVersion = modelVersion
         self.rank = max(1, rank)
+        self.reducedVocabCap = max(1, reducedVocabCap)
         self.maxIterations = max(1, maxIterations)
         self.seed = seed
         self.projectionSeed = projectionSeed
         self.counts = TermDocumentCounts()
         self.nmf = nil
         self.docEmbeddings = []
+        self.basisVocab = [:]
     }
 
     // MARK: Training
@@ -252,22 +265,38 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// required for bit-identical cross-port output.
     public func finalize() {
         let numDocs = counts.documentCount
-        let vocabSize = counts.vocabularySize
-        guard numDocs > 0, vocabSize > 0 else { return }
+        guard numDocs > 0, counts.vocabularySize > 0 else { return }
 
-        // V is vocabSize × numDocs: V[term][doc] = log(1 + tf[doc][term]).
-        // Built from the shared builder's TF counts.
+        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // dense NMF is `K × numDocs` (feasible) instead of `full-vocab × numDocs`
+        // (infeasible). The reduced vocab is a corpus property shared with LSA;
+        // it is frozen here and drives query projection. `vocabSize` below is the
+        // REDUCED row count — the factorization + fold-in below key on it.
+        let reduced = selectReducedVocabulary(
+            vocab: counts.vocab,
+            dfCounts: counts.dfCounts,
+            documentCount: numDocs,
+            cap: reducedVocabCap
+        )
+        basisVocab = reduced.termToColumn
+        let vocabSize = reduced.size
+        guard vocabSize > 0 else { nmf = nil; docEmbeddings = []; return }
+
+        // V is K × numDocs: V[reducedRow][doc] = log(1 + tf[doc][term]). Map each
+        // doc's TF entries whose term is in the reduced vocab to its reduced row;
+        // full-vocab terms outside the reduced set are dropped.
         var V: [[Float]] = [[Float]](
             repeating: [Float](repeating: 0, count: numDocs),
             count: vocabSize
         )
         for (docIdx, docTF) in counts.tfCounts.enumerated() {
-            for (termIdx, count) in docTF {
-                V[termIdx][docIdx] = log(1 + Float(count))
+            for (fullIdx, count) in docTF {
+                guard let row = reduced.fullIndexToColumn[fullIdx] else { continue }
+                V[row][docIdx] = log(1 + Float(count))
             }
         }
 
-        // Effective rank: min(requestedRank, min(vocabSize, numDocs)).
+        // Effective rank: min(requestedRank, min(K, numDocs)).
         let effectiveRank = min(rank, min(vocabSize, numDocs))
 
         // Run SubstrateML NMF with tolerance=0 (fixed iteration count).
@@ -316,16 +345,16 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// opt-out so `Corpus.floatNearest` maps to the correct dark-lane reason.
     public func embedFloat(_ text: String) async throws -> [Float] {
         // No finalized basis: return [] (structural no-basis → providerOptOut).
-        guard nmf != nil, counts.vocabularySize > 0 else { return [] }
+        guard nmf != nil, !basisVocab.isEmpty else { return [] }
         guard !text.isEmpty else { return [] }
         let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return [] }
-        // OOV check before full projection: throw embedFloatVocabMiss when
-        // the basis is trained but none of the query tokens hit the vocab.
-        let hasInVocab = terms.contains { counts.vocab[$0] != nil }
+        // OOV check before full projection: throw embedFloatVocabMiss when the
+        // basis is trained but none of the query tokens hit the reduced vocab.
+        let hasInVocab = terms.contains { basisVocab[$0] != nil }
         guard hasInVocab else {
             throw VectorKitError.embedFloatVocabMiss(
-                "nmf: vocab size \(counts.vocabularySize), but 0 of \(terms.count) query token(s) matched"
+                "nmf: reduced vocab size \(basisVocab.count), but 0 of \(terms.count) query token(s) matched"
             )
         }
         return nmfVector(for: text) ?? []
@@ -367,14 +396,17 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         guard !terms.isEmpty else { return nil }
 
         let k = result.rank
-        let vocabSize = counts.vocabularySize
+        // Query projection keys on the REDUCED basis vocab (ADR-022). Reduced-set
+        // terms map to their row; OOV terms (outside top-K) contribute nothing
+        // and are covered by RI.
+        let vocabSize = basisVocab.count
         let eps: Float = 1e-9
 
         // Build sparse TF query vector.
         var hasInVocab = false
         var rawCounts: [Int: Int] = [:]
         for term in terms {
-            if let idx = counts.vocab[term] {
+            if let idx = basisVocab[term] {
                 rawCounts[idx, default: 0] += 1
                 hasInVocab = true
             }
@@ -477,7 +509,10 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         w.writeU64(projectionSeed)
         w.writeU32(UInt32(counts.documentCount))
         w.writeU32(UInt32(nmf?.rank ?? 0))
-        w.writeStringU32Map(counts.vocab)
+        // ADR-022: persist the REDUCED basis vocab (term → reduced row) —
+        // projection keys on it. The full counts vocab is persisted separately
+        // by serializeCounts() as the drift-trigger anchor.
+        w.writeStringU32Map(basisVocab)
         w.writeFloatMatrix(nmf?.W ?? [])
         w.writeFloatMatrix(nmf?.H ?? [])
         return w.data
@@ -511,6 +546,11 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
                   maxIterations: maxIterations,
                   seed: seed,
                   projectionSeed: projectionSeed)
+        // The persisted map IS the reduced basis vocab (ADR-022); projection
+        // keys on `basisVocab`. counts is restored from the same map so a
+        // reconstructed provider reports the basis vocab it embeds against
+        // (round-trip). The FULL vocab lives in the counts blob, not here.
+        self.basisVocab = vocab
         self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
 
         // An empty factor section means the source provider was never

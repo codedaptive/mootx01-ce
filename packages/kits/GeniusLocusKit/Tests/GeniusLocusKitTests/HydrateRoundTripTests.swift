@@ -319,20 +319,20 @@ struct HydrateRoundTripTests {
         #expect(sourceTier.lastHLC != .zero)
         #expect(hydratedTier.lastHLC != .zero)
 
-        // Packed HLC equality: the audit table stores HLC in the packed format
-        // (low 40 bits of physicalTime + 16-bit logical + 8-bit nodeID). The
-        // in-memory source has the full-precision physicalTime; the hydrated tier
-        // has the packed form because its audit events went through SQLite.
+        // Full-precision HLC equality: lastHLC flows losslessly through the
+        // `matrix_snapshot` JSON blob (MatrixTier's synthesized Codable encodes
+        // the full Int64 physicalTime), NOT through the lossy 40-bit-packed audit
+        // `hlc` column. Hydration prefers the snapshot (rebuildDerivedAccelerators
+        // loads it and folds only the tail), so the hydrated tier's lastHLC equals
+        // the source's exactly — same contract the Rust port asserts in
+        // hydrate_parity.rs. (`HLC.packed` is the lossy compact form for the
+        // federation wire / ordering key only, never the canonical stored value.)
         //
-        // The correct invariant after F-HLC-01 (commit 3da43ff0) is that the
-        // hydrated lastHLC equals the packed round-trip of the source lastHLC:
-        // no bits are corrupted — the truncation to 40-bit physicalTime is the
-        // only difference, and it is expected (documented packed-format behaviour).
-        //
-        // A bug in the pack/unpack algorithm would produce a different value for
-        // logicalCount or nodeID, or a scrambled physicalTime — this assertion
-        // catches those regressions while correctly accounting for the 40-bit cap.
-        #expect(hydratedTier.lastHLC == HLC(packed: sourceTier.lastHLC.packed))
+        // NOTE: the Swift audit `hlc` column is genuinely lossy (40-bit
+        // physicalTime); a cold rebuild with no snapshot would truncate. The
+        // durable fix is to store the Swift audit HLC as three full-precision
+        // columns like the Rust port — tracked separately.
+        #expect(hydratedTier.lastHLC == sourceTier.lastHLC)
 
         // temporalWatermarkHLC must be non-zero on the hydrated tier.
         // This validates that MatrixTier.fullRebuild called both passes.
@@ -469,9 +469,21 @@ struct MatrixSnapshotPersistenceTests {
 
         // The registered tier must equal a from-scratch full rebuild of the whole
         // audit log — proving load+fold-forward is exact, not an approximation.
+        // The oracle must use the SAME eventTime map the hydration path builds:
+        // the temporal (T) matrix keys off eventTime, not the capture HLC
+        // (ADR-004), so a no-map fullRebuild would fold on the wrong clock and
+        // diverge by sub-ms eventTime/HLC rounding.
         let registered = await kit.matrixTiers[handle]
         let fullLog = try await kit.auditLog(for: handle)
-        let fromScratch = MatrixTier.fullRebuild(from: fullLog)
+        let oracleEstate = try await kit.estate(for: handle)
+        let oracleDrawers = try await oracleEstate.allDrawers()
+        var oracleEventTimes: [UUID: Int64] = [:]
+        for d in oracleDrawers where !d.id.isEmpty {
+            if let rowUUID = UUID(uuidString: d.id) {
+                oracleEventTimes[rowUUID] = Int64(d.eventTime.timeIntervalSince1970 * 1000)
+            }
+        }
+        let fromScratch = MatrixTier.fullRebuild(from: fullLog, eventTimes: oracleEventTimes)
         #expect(registered == fromScratch)
         #expect(registered?.liveRowCount == 5)
 

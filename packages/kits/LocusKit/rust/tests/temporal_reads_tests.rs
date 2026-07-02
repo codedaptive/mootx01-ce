@@ -2,17 +2,22 @@
 //! `DrawerStore::fingerprint_bit_series`.
 //!
 //! Mirrors the Swift `TemporalReadsTests.swift` fixture so both legs
-//! verify identical semantics against the same constants.
+//! verify identical semantics against the same instants. Swift anchors the
+//! fixture in `Date`-space (`EPOCH_NOW` seconds + `t(offset)` seconds); this
+//! Rust leg holds the SAME instants as epoch MILLISECONDS (ADR-023), so every
+//! offset is the Swift second-offset × 1000. `bucket_seconds` stays a seconds
+//! WIDTH (the store multiplies it to ms internally), matching Swift's
+//! `bucketSeconds: Int`.
 //!
-//! Shared fixture (epoch seconds relative to EPOCH_NOW = 1_700_100_000):
-//!   d1.event_time = EPOCH_NOW        (content: "temporal-fixture-alpha")
-//!   d2.event_time = EPOCH_NOW + 100  (content: "temporal-fixture-beta")
-//!   d3.event_time = EPOCH_NOW + 200  (content: "temporal-fixture-gamma")
+//! Shared fixture (epoch milliseconds relative to EPOCH_NOW = 1_700_100_000_000):
+//!   d1.event_time = EPOCH_NOW            (content: "temporal-fixture-alpha")
+//!   d2.event_time = EPOCH_NOW + 100_000  (content: "temporal-fixture-beta")  (Swift t(100))
+//!   d3.event_time = EPOCH_NOW + 200_000  (content: "temporal-fixture-gamma") (Swift t(200))
 //!
-//! Bucket boundary test — ending_at = EPOCH_NOW + 300, bucket = 100 s, 3 buckets:
-//!   bucket[0] = [EPOCH_NOW,       EPOCH_NOW+100)  → d1 only
-//!   bucket[1] = [EPOCH_NOW+100,   EPOCH_NOW+200)  → d2 only (edge → later bucket)
-//!   bucket[2] = [EPOCH_NOW+200,   EPOCH_NOW+300]  → d3 only (edge → later bucket)
+//! Bucket boundary test — ending_at = EPOCH_NOW + 300_000 ms, bucket = 100 s, 3 buckets:
+//!   bucket[0] = [EPOCH_NOW,          EPOCH_NOW+100_000)  → d1 only
+//!   bucket[1] = [EPOCH_NOW+100_000,  EPOCH_NOW+200_000)  → d2 only (edge → later bucket)
+//!   bucket[2] = [EPOCH_NOW+200_000,  EPOCH_NOW+300_000]  → d3 only (edge → later bucket)
 
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_fingerprint::EstateFingerprintFamilies;
@@ -21,7 +26,9 @@ use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::error::LocusKitError;
 use substrate_types::fingerprint256::Fingerprint256;
 
-const EPOCH_NOW: i64 = 1_700_100_000;
+// Epoch anchor in MILLISECONDS (ADR-023) — the ms-equivalent of the Swift
+// leg's `EPOCH_NOW: TimeInterval = 1_700_100_000` (seconds). Same instant.
+const EPOCH_NOW: i64 = 1_700_100_000_000;
 const CONTENT_A: &str = "temporal-fixture-alpha";
 const CONTENT_B: &str = "temporal-fixture-beta";
 const CONTENT_C: &str = "temporal-fixture-gamma";
@@ -78,8 +85,8 @@ fn temporal_drawer(id: &str, content: &str, event_time: i64) -> Drawer {
 /// Insert the three-row fixture. Returns (d1, d2, d3).
 fn build_fixture(store: &InMemoryDrawerStore) -> (Drawer, Drawer, Drawer) {
     let d1 = temporal_drawer("tr-d1", CONTENT_A, EPOCH_NOW);
-    let d2 = temporal_drawer("tr-d2", CONTENT_B, EPOCH_NOW + 100);
-    let d3 = temporal_drawer("tr-d3", CONTENT_C, EPOCH_NOW + 200);
+    let d2 = temporal_drawer("tr-d2", CONTENT_B, EPOCH_NOW + 100_000);
+    let d3 = temporal_drawer("tr-d3", CONTENT_C, EPOCH_NOW + 200_000);
     store.add_drawer(&d1, EPOCH_NOW).unwrap();
     store.add_drawer(&d2, EPOCH_NOW).unwrap();
     store.add_drawer(&d3, EPOCH_NOW).unwrap();
@@ -131,7 +138,7 @@ fn fingerprints_captured_full_window_returns_3() {
     let (d1, d2, d3) = build_fixture(&store);
 
     let result = store
-        .fingerprints_captured_in(EPOCH_NOW, EPOCH_NOW + 200)
+        .fingerprints_captured_in(EPOCH_NOW, EPOCH_NOW + 200_000)
         .unwrap();
 
     assert_eq!(result.len(), 3);
@@ -170,7 +177,7 @@ fn fingerprints_captured_narrow_window_returns_2() {
     build_fixture(&store);
 
     let result = store
-        .fingerprints_captured_in(EPOCH_NOW, EPOCH_NOW + 100)
+        .fingerprints_captured_in(EPOCH_NOW, EPOCH_NOW + 100_000)
         .unwrap();
 
     assert_eq!(result.len(), 2);
@@ -182,7 +189,7 @@ fn fingerprints_captured_single_point_returns_1() {
     let (_, d2, _) = build_fixture(&store);
 
     let result = store
-        .fingerprints_captured_in(EPOCH_NOW + 100, EPOCH_NOW + 100)
+        .fingerprints_captured_in(EPOCH_NOW + 100_000, EPOCH_NOW + 100_000)
         .unwrap();
 
     assert_eq!(result.len(), 1);
@@ -196,7 +203,7 @@ fn fingerprints_captured_empty_window_returns_empty() {
     build_fixture(&store);
 
     let result = store
-        .fingerprints_captured_in(EPOCH_NOW - 1000, EPOCH_NOW - 1)
+        .fingerprints_captured_in(EPOCH_NOW - 1_000_000, EPOCH_NOW - 1_000)
         .unwrap();
 
     assert!(result.is_empty());
@@ -212,7 +219,7 @@ fn bit_series_zero_bucket_count_returns_empty() {
     build_fixture(&store);
 
     let result = store
-        .fingerprint_bit_series(0, 100, 0, EPOCH_NOW + 300)
+        .fingerprint_bit_series(0, 100, 0, EPOCH_NOW + 300_000)
         .unwrap();
 
     assert!(result.is_empty());
@@ -223,7 +230,7 @@ fn bit_series_bit_256_returns_error() {
     let store = make_store();
 
     let err = store
-        .fingerprint_bit_series(256, 100, 3, EPOCH_NOW + 300)
+        .fingerprint_bit_series(256, 100, 3, EPOCH_NOW + 300_000)
         .unwrap_err();
 
     assert!(matches!(err, LocusKitError::InvalidContent(_)));
@@ -234,7 +241,7 @@ fn bit_series_zero_bucket_seconds_returns_error() {
     let store = make_store();
 
     let err = store
-        .fingerprint_bit_series(0, 0, 3, EPOCH_NOW + 300)
+        .fingerprint_bit_series(0, 0, 3, EPOCH_NOW + 300_000)
         .unwrap_err();
 
     assert!(matches!(err, LocusKitError::InvalidContent(_)));
@@ -245,9 +252,9 @@ fn bit_series_no_drawers_in_window_all_false() {
     let store = make_store();
     build_fixture(&store);
 
-    // ending_at is 10 000 s before the fixture — no drawers in range.
+    // ending_at is 10 000 s (10_000_000 ms) before the fixture — no drawers in range.
     let result = store
-        .fingerprint_bit_series(0, 100, 3, EPOCH_NOW - 10_000)
+        .fingerprint_bit_series(0, 100, 3, EPOCH_NOW - 10_000_000)
         .unwrap();
 
     assert_eq!(result, vec![false, false, false]);
@@ -257,17 +264,17 @@ fn bit_series_no_drawers_in_window_all_false() {
 fn bit_series_bucket_edge_semantics() {
     // A capture exactly on a bucket edge belongs to the later (higher-time) bucket.
     //
-    // 3 buckets × 100 s, ending_at = EPOCH_NOW + 300:
-    //   bucket[0] = [EPOCH_NOW,       EPOCH_NOW+100)  → contains d1 only
-    //   bucket[1] = [EPOCH_NOW+100,   EPOCH_NOW+200)  → contains d2 (edge → later bucket)
-    //   bucket[2] = [EPOCH_NOW+200,   EPOCH_NOW+300]  → contains d3 (edge → later bucket)
+    // 3 buckets × 100 s (100_000 ms), ending_at = EPOCH_NOW + 300_000 ms:
+    //   bucket[0] = [EPOCH_NOW,          EPOCH_NOW+100_000)  → contains d1 only
+    //   bucket[1] = [EPOCH_NOW+100_000,  EPOCH_NOW+200_000)  → contains d2 (edge → later bucket)
+    //   bucket[2] = [EPOCH_NOW+200_000,  EPOCH_NOW+300_000]  → contains d3 (edge → later bucket)
     let store = make_store();
     let (d1, d2, d3) = build_fixture(&store);
     let families = EstateFingerprintFamilies::new(estate_uuid(&store));
     let fp1 = families.fingerprint(&d1);
     let fp2 = families.fingerprint(&d2);
     let fp3 = families.fingerprint(&d3);
-    let ending_at = EPOCH_NOW + 300;
+    let ending_at = EPOCH_NOW + 300_000;
 
     // Query a bit set in d1 and verify per-bucket presence.
     let b1 = find_first_set_bit(&fp1);
