@@ -61,9 +61,12 @@ fn to_param(v: &TypedValue) -> PgParam {
         TypedValue::Blob(b) => Box::new(b.clone()),
         TypedValue::Json(b) => Box::new(b.clone()),
         TypedValue::Uuid(u) => Box::new(*u),
-        TypedValue::Timestamp(secs) => Box::new(
-            DateTime::<Utc>::from_timestamp(*secs, 0)
-                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap()),
+        // Timestamp is epoch MILLISECONDS (ADR-023) — bind through the
+        // millisecond constructor so the TIMESTAMPTZ carries sub-second
+        // precision, matching Swift and the SQLite backend.
+        TypedValue::Timestamp(ms) => Box::new(
+            DateTime::<Utc>::from_timestamp_millis(*ms)
+                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp_millis(0).unwrap()),
         ),
         TypedValue::Hlc(h) => Box::new(h.packed() as i64),
         // Not exercised by Phase-1 conformance.
@@ -110,7 +113,8 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
             .try_get::<_, Option<DateTime<Utc>>>(idx)
             .ok()
             .flatten()
-            .map(|dt| TypedValue::Timestamp(dt.timestamp()))
+            // Timestamp is epoch MILLISECONDS (ADR-023).
+            .map(|dt| TypedValue::Timestamp(dt.timestamp_millis()))
             .unwrap_or(TypedValue::Null),
         Some(ColumnType::Bool) => row
             .try_get::<_, Option<bool>>(idx)

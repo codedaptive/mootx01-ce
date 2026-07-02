@@ -16,9 +16,10 @@ use crate::estate_types::{LatticeAnchor, OwnerCredentials};
 use crate::frames::CaptureFrame;
 use std::sync::Arc;
 
-const NOW: i64 = 1_700_000_000;
+// Epoch MILLISECONDS (ADR-023). NOW ≈ 2023-11-14; HISTORICAL = 2021-01-01.
+const NOW: i64 = 1_700_000_000_000;
 // A historical authorship date: 2021-01-01 00:00 UTC.
-const HISTORICAL: i64 = 1_609_459_200;
+const HISTORICAL: i64 = 1_609_459_200_000;
 
 fn make_estate() -> (Estate, Arc<InMemoryDrawerStore>) {
     let store = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());

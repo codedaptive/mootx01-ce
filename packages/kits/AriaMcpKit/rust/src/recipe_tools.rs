@@ -755,19 +755,23 @@ fn run_dream_tool(
     // to delete ALL recall traces (every trace is older than a far-future minus 30 days).
     // Reject any `now` more than 24 hours (86400 seconds) in the future. Parity with
     // Swift RecipeTools.runDream.
-    let now_epoch_secs: i64 = if let Some(raw) = optional_string(args, "now")? {
+    // `now` is epoch-MILLISECONDS (ADR-023). The storage path (matrix rebuild,
+    // ISO bounds, the dreaming sink's diary/proposal writes) consumes ms; the
+    // DreamingDaemon works internally in seconds (its cadence/retention windows
+    // are tuned in seconds), so a seconds view is derived below.
+    let now_epoch_ms: i64 = if let Some(raw) = optional_string(args, "now")? {
         let parsed = parse_iso8601_to_epoch(raw).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
                 format!("now is not a valid ISO8601 instant: {raw}"),
             )
         })?;
-        // Future-now guard: reject timestamps more than 86400s (24 h) ahead of wall
-        // clock. A far-future `now` causes pruneRecallTraces(olderThan: now − 30 days)
-        // to prune recent real recall traces, corrupting the reward signal.
-        // Hard ceiling: 24 h. Parity: Swift RecipeTools.runDream applies the same guard.
+        // Future-now guard: reject timestamps more than 24 h (86_400_000 ms) ahead
+        // of the wall clock. A far-future `now` causes pruneRecallTraces(olderThan:
+        // now − 30 days) to prune recent real recall traces, corrupting the reward
+        // signal. Parity: Swift RecipeTools.runDream applies the same guard.
         let wall = crate::dispatch::wall_now();
-        if parsed.saturating_sub(wall) > 86400 {
+        if parsed.saturating_sub(wall) > 86_400_000 {
             return Err(JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
                 "now is more than 24 hours in the future; \
@@ -779,6 +783,8 @@ fn run_dream_tool(
     } else {
         crate::dispatch::wall_now()
     };
+    // Seconds view for the DreamingDaemon's seconds-based cycle clock.
+    let now_epoch_secs: i64 = now_epoch_ms / 1000;
 
     // Step 1 — Matrix rebuild.
     // Feed the estate's unified audit log and rebuild the recall-scoring
@@ -786,12 +792,12 @@ fn run_dream_tool(
     // map. The Rust parity of the Swift handler's
     // `kit.rebuildDerivedAccelerators(for:)`. The mutable borrow ends before the
     // dreaming reader takes its immutable borrow below.
-    let now_iso = epoch_to_iso8601(now_epoch_secs);
+    let now_iso = epoch_to_iso8601(now_epoch_ms);
     let mut coord = estate.coord.lock().unwrap();
     // rebuild_derived_accelerators returns VerbDispatchError (no Display impl) —
     // route through describe_verb_dispatch_error for a clean English reason.
     coord
-        .rebuild_derived_accelerators(&estate.handle, now_epoch_secs)
+        .rebuild_derived_accelerators(&estate.handle, now_epoch_ms)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -820,9 +826,10 @@ fn run_dream_tool(
 
     // EstateDreamingSink routes all writes through the GLK EstateCoordinator
     // verb surface (B-1 compliant). The coordinator stamps canonical
-    // dreaming-daemon provenance. No recall-scored calls, no trace-row writes
-    // (B-10a internal-origin proof).
-    let mut sink = EstateDreamingSink::new(&coord, estate.handle.clone(), now_epoch_secs);
+    // dreaming-daemon provenance. Its `now` stamps the diary/proposal `filed_at`,
+    // which is epoch-ms (ADR-023) — so pass `now_epoch_ms`, not the seconds view.
+    // No recall-scored calls, no trace-row writes (B-10a internal-origin proof).
+    let mut sink = EstateDreamingSink::new(&coord, estate.handle.clone(), now_epoch_ms);
 
     let reward = RecallTraceRewardSource;
     let policy = DreamingPolicy::default();
@@ -903,16 +910,18 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
     let jdn = day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
     let days_since_epoch = jdn - 2440588;
 
-    Some(days_since_epoch * 86_400 + hour * 3600 + min * 60 + sec)
+    // Return epoch MILLISECONDS (ADR-023) — second precision (the fractional
+    // field is dropped upstream), scaled to the ms the storage path expects.
+    Some((days_since_epoch * 86_400 + hour * 3600 + min * 60 + sec) * 1000)
 }
 
-/// Format Unix epoch seconds as `YYYY-MM-DDTHH:MM:SSZ`.
+/// Format Unix epoch MILLISECONDS (ADR-023) as `YYYY-MM-DDTHH:MM:SSZ`.
 ///
 /// Used to construct the `since`/`now` ISO8601 bounds for `EstateDreamingReader::new`.
-/// Delegates to the `neuron_kit::topology_analysis::epoch_to_iso8601` helper which
-/// is the conformance-tested Rust implementation of this conversion.
-fn epoch_to_iso8601(epoch_secs: i64) -> String {
-    neuron_kit::topology_analysis::epoch_to_iso8601(epoch_secs)
+/// Delegates to the `neuron_kit::topology_analysis::epoch_to_iso8601` helper (which
+/// consumes epoch-ms) — the conformance-tested Rust implementation of this conversion.
+fn epoch_to_iso8601(epoch_ms: i64) -> String {
+    neuron_kit::topology_analysis::epoch_to_iso8601(epoch_ms)
 }
 
 /// Parse an optional array of UUID strings from `args[key]`.

@@ -19,7 +19,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch seconds). Same convention
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Same convention
 //!   as `Drawer::filed_at`; the SQLite column is still TEXT ISO8601.
 //! - `Date? tombstonedAt` → `Option<i64> tombstoned_at`.
 //! - `TunnelKind = .references` Swift default → Rust callers supply

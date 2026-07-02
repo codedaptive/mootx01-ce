@@ -29,7 +29,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch seconds), the convention used
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023), the convention used
 //!   across the LocusKit Rust port. The SQLite column is still TEXT ISO8601.
 //! - `Date? tombstonedAt` → `Option<i64> tombstoned_at`.
 //! - Like the Swift type, `Association` derives `PartialEq, Eq` but **not**

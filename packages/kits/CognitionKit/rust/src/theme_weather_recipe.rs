@@ -33,7 +33,10 @@ pub fn run_theme_weather(
     let mut raw: BTreeMap<String, f64> = BTreeMap::new();
     let mut weighted: BTreeMap<String, f64> = BTreeMap::new();
     for d in &drawers {
-        let elapsed = (now - d.filed_at).max(0) as f64;
+        // `now`/`filed_at` are epoch-ms (ADR-023); `half_life_seconds` is in
+        // seconds (matching Swift's `timeIntervalSince`), so convert elapsed to
+        // seconds at the decay boundary.
+        let elapsed = (now - d.filed_at).max(0) as f64 / 1000.0;
         *raw.entry(d.parent_node_id.clone()).or_insert(0.0) += 1.0;
         *weighted.entry(d.parent_node_id.clone()).or_insert(0.0) +=
             recency_weight(elapsed, half_life_seconds);

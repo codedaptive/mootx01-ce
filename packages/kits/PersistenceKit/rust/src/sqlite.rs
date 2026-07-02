@@ -60,45 +60,48 @@ fn native_type(t: ColumnType) -> &'static str {
 /// out-of-range value — it indicates a bug in whichever layer computed
 /// the timestamp).
 ///
-/// Clamp bounds (inclusive, seconds-since-Unix-epoch):
-///   MIN_ROUND_TRIP_SECS ≈ year 0001-01-01T00:00:00Z  (−62135596800)
-///   MAX_ROUND_TRIP_SECS ≈ year 9999-12-31T23:59:59Z  (253402300799)
+/// Clamp bounds (inclusive, milliseconds-since-Unix-epoch):
+///   MIN_ROUND_TRIP_MS ≈ year 0001-01-01T00:00:00.000Z  (−62135596800000)
+///   MAX_ROUND_TRIP_MS ≈ year 9999-12-31T23:59:59.999Z  (253402300799999)
 ///
 /// Clamp is chosen over rejection because the write must not fail for
 /// callers (the upstream timestamp is wrong, but refusing to write would
 /// surface as a confusing storage error rather than a useful warning).
 /// The clamped value is wrong-but-readable; the log warning is the
 /// signal to fix the upstream source.
-const MIN_ROUND_TRIP_SECS: i64 = -62_135_596_800; // 0001-01-01T00:00:00Z
-const MAX_ROUND_TRIP_SECS: i64 = 253_402_300_799; // 9999-12-31T23:59:59Z
+const MIN_ROUND_TRIP_MS: i64 = -62_135_596_800_000; // 0001-01-01T00:00:00.000Z
+const MAX_ROUND_TRIP_MS: i64 = 253_402_300_799_999; // 9999-12-31T23:59:59.999Z
 
-fn iso8601(secs: i64) -> String {
+fn iso8601(ms: i64) -> String {
+    // The substrate's time fields are `i64` epoch MILLISECONDS (matching the
+    // sub-second precision Swift's `Date` carries), stored as canonical
+    // ISO-8601 with a 3-digit fractional part.
+    //
     // Clamp to the RFC-3339-parseable range before formatting. This
     // guarantees every value written by `to_sql` can be read back by
     // `parse_iso8601`. Out-of-range values indicate an upstream bug
-    // (e.g. a millisecond or nanosecond epoch stored where seconds were
-    // expected, or a bad Vault frontmatter date); the warning is the
-    // signal to fix it.
-    let clamped = if secs < MIN_ROUND_TRIP_SECS {
+    // (e.g. a nanosecond epoch stored where milliseconds were expected,
+    // or a bad Vault frontmatter date); the warning is the signal to fix it.
+    let clamped = if ms < MIN_ROUND_TRIP_MS {
         eprintln!(
-            "[persistence_kit] WARNING: timestamp {} is below the RFC-3339 minimum year \
+            "[persistence_kit] WARNING: timestamp {} ms is below the RFC-3339 minimum year \
              (0001); clamping to {} to preserve round-trip. Investigate the upstream \
              source of this value.",
-            secs, MIN_ROUND_TRIP_SECS
+            ms, MIN_ROUND_TRIP_MS
         );
-        MIN_ROUND_TRIP_SECS
-    } else if secs > MAX_ROUND_TRIP_SECS {
+        MIN_ROUND_TRIP_MS
+    } else if ms > MAX_ROUND_TRIP_MS {
         eprintln!(
-            "[persistence_kit] WARNING: timestamp {} exceeds the RFC-3339 maximum year \
+            "[persistence_kit] WARNING: timestamp {} ms exceeds the RFC-3339 maximum year \
              (9999); clamping to {} to preserve round-trip. Investigate the upstream \
              source of this value.",
-            secs, MAX_ROUND_TRIP_SECS
+            ms, MAX_ROUND_TRIP_MS
         );
-        MAX_ROUND_TRIP_SECS
+        MAX_ROUND_TRIP_MS
     } else {
-        secs
+        ms
     };
-    chrono::DateTime::from_timestamp(clamped, 0)
+    chrono::DateTime::from_timestamp_millis(clamped)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_default()
 }
@@ -126,18 +129,17 @@ fn iso8601(secs: i64) -> String {
 /// (≈80% of CPU in a sampled import); Swift hand-parses the canonical shape
 /// instead (see `ISO8601.fastParseCanonicalUTC`).
 ///
-/// Granularity: returns whole epoch SECONDS — `TypedValue::Timestamp` and the
+/// Granularity: returns epoch MILLISECONDS. `TypedValue::Timestamp` and the
 /// substrate's drawer time fields (`filed_at`, `event_time`) are `i64` epoch
-/// seconds, so sub-second precision is dropped here by design. The Swift port
-/// retains sub-second precision in its `Date`. Reconciling the two ports to a
-/// shared sub-second ("super fine") representation is a substrate-wide
-/// time-granularity change, not a parser-local one, and is deferred to v1.1 by
-/// ruling (see the maintainer KNOWN_ISSUES log, KI-003). Do not partially migrate
-/// this to milliseconds in isolation — the unit must change everywhere at once.
+/// milliseconds, matching the sub-second precision the Swift port carries in its
+/// `Date`, so the two ports store byte-identical ISO-8601 for the same instant.
+/// (This reverses the earlier seconds-granularity port convention — formerly
+/// deferred to v1.1 as KI-003 — per the Swift/Rust bit-identity mandate; the
+/// unit was migrated everywhere at once, never partially.)
 fn parse_iso8601(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
-        .map(|dt| dt.timestamp())
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// Serialize a `TypedValue` array into a JSON byte vector.
@@ -180,7 +182,7 @@ fn typed_value_to_json_pair(v: &TypedValue) -> (&'static str, String) {
         TypedValue::Text(s) => ("text", s.clone()),
         TypedValue::Blob(b) => ("blob", base64_encode(b)),
         TypedValue::Uuid(u) => ("uuid", u.to_string().to_uppercase()),
-        TypedValue::Timestamp(secs) => ("timestamp", iso8601(*secs)),
+        TypedValue::Timestamp(ms) => ("timestamp", iso8601(*ms)),
         TypedValue::Json(b) => ("json", String::from_utf8_lossy(b).into_owned()),
         TypedValue::Hlc(h) => ("hlc", h.packed().to_string()),
         TypedValue::Fingerprint(fp) => (
@@ -226,7 +228,7 @@ fn to_sql(value: &TypedValue) -> SqlValue {
         TypedValue::Blob(b) => SqlValue::Blob(b.clone()),
         TypedValue::Json(b) => SqlValue::Blob(b.clone()),
         TypedValue::Uuid(u) => SqlValue::Text(u.to_string().to_uppercase()),
-        TypedValue::Timestamp(secs) => SqlValue::Text(iso8601(*secs)),
+        TypedValue::Timestamp(ms) => SqlValue::Text(iso8601(*ms)),
         TypedValue::Hlc(h) => SqlValue::Integer(h.packed() as i64),
         TypedValue::Fingerprint(fp) => {
             // Store as 32-byte little-endian wire encoding matching Fingerprint256::wire_bytes.
@@ -3358,53 +3360,53 @@ mod timestamp_clamp_and_skip_corrupt_tests {
     // 1. Write-boundary clamp: iso8601 must NOT produce unparseable strings
     // ─────────────────────────────────────────────────────────────────
 
-    /// A timestamp value corresponding to year 58432 (the poison value seen in
-    /// production: millisecond epoch treated as second epoch). When stored via
-    /// `TypedValue::Timestamp`, the write seam must clamp it to the RFC-3339
-    /// maximum (year 9999) rather than writing a "+58432-..." string that
-    /// `parse_iso8601` cannot read back.
+    /// A timestamp value beyond year 9999 (the ms-era poison analog: a
+    /// nanosecond epoch accidentally stored where milliseconds were expected).
+    /// When stored via `TypedValue::Timestamp`, the write seam must clamp it to
+    /// the RFC-3339 maximum (year 9999) rather than writing a "+NNNNN-..."
+    /// string that `parse_iso8601` cannot read back.
     #[test]
     fn iso8601_clamps_future_poison_and_round_trips() {
-        // A millisecond-epoch value accidentally stored as seconds:
-        // 1_747_432_465_000 ms ≈ year 58432.
-        let poison_secs: i64 = 1_747_432_465_000;
+        // A nanosecond-epoch value accidentally stored as milliseconds:
+        // 1_700_000_000_000_000_000 ns ≈ year 55-million as ms.
+        let poison_ms: i64 = 1_700_000_000_000_000_000;
         assert!(
-            poison_secs > MAX_ROUND_TRIP_SECS,
+            poison_ms > MAX_ROUND_TRIP_MS,
             "precondition: poison value must exceed the max round-trip boundary"
         );
 
-        let formatted = iso8601(poison_secs);
+        let formatted = iso8601(poison_ms);
 
         // The clamped value must be parseable by parse_iso8601.
         let parsed = parse_iso8601(&formatted).expect(
             "iso8601 output must always be parseable by parse_iso8601 — the clamp invariant"
         );
         assert!(
-            parsed <= MAX_ROUND_TRIP_SECS,
+            parsed <= MAX_ROUND_TRIP_MS,
             "clamped value must not exceed the max round-trip boundary"
         );
-        // Must not contain a 5-digit year prefix like "+58432-".
+        // Must not contain a 5-digit year prefix like "+55000000-".
         assert!(
             !formatted.starts_with('+'),
             "clamped timestamp must use a 4-digit year, not a +NNNNN prefix"
         );
     }
 
-    /// Same guard for below-minimum values (year 0 or negative nanosecond epochs).
+    /// Same guard for below-minimum values (before year 0001).
     #[test]
     fn iso8601_clamps_ancient_poison_and_round_trips() {
-        let poison_secs: i64 = -100_000_000_000_i64; // Far before year 0001
+        let poison_ms: i64 = -100_000_000_000_000_i64; // Far before year 0001
         assert!(
-            poison_secs < MIN_ROUND_TRIP_SECS,
+            poison_ms < MIN_ROUND_TRIP_MS,
             "precondition: value must be below the min round-trip boundary"
         );
 
-        let formatted = iso8601(poison_secs);
+        let formatted = iso8601(poison_ms);
         let parsed = parse_iso8601(&formatted).expect(
             "iso8601 output must always be parseable — ancient value clamp invariant"
         );
         assert!(
-            parsed >= MIN_ROUND_TRIP_SECS,
+            parsed >= MIN_ROUND_TRIP_MS,
             "clamped value must not be below the min round-trip boundary"
         );
     }
@@ -3412,7 +3414,7 @@ mod timestamp_clamp_and_skip_corrupt_tests {
     /// Values inside the valid range must round-trip unchanged.
     #[test]
     fn iso8601_passes_through_in_range_value() {
-        let normal: i64 = 1_700_000_000; // ~2023-11-14
+        let normal: i64 = 1_700_000_000_000; // ~2023-11-14, epoch milliseconds
         let formatted = iso8601(normal);
         let parsed = parse_iso8601(&formatted)
             .expect("in-range iso8601 must always round-trip");

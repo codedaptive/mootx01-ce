@@ -29,7 +29,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch seconds). Same convention
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Same convention
 //!   used across the LocusKit Rust port.
 //! - `id: String = UUID().uuidString` Swift default → Rust callers
 //!   supply `id` explicitly. Tests build deterministic ids;

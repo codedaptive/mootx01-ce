@@ -1271,8 +1271,8 @@ impl Estate {
     }
 
     /// Fingerprints of every non-tombstoned drawer captured in the closed
-    /// epoch-seconds window `[start_epoch, end_epoch]`, in HLC-ascending
-    /// order within the window. Estate-level pass-through over
+    /// epoch-milliseconds window `[start_epoch, end_epoch]` (ADR-023), in
+    /// HLC-ascending order within the window. Estate-level pass-through over
     /// `DrawerStore::fingerprints_captured_in`. Used by GLK to expose the
     /// per-window fingerprint read the Moment lens needs without NeuronKit
     /// (or aria-mcp) reaching the store directly (B-1 compliance — mirrors
@@ -1298,8 +1298,9 @@ impl Estate {
     }
 
     /// Time-bucketed fingerprint bit-activity series for `bit` over the most
-    /// recent `bucket_count` buckets of width `bucket_seconds`, ending at
-    /// `ending_at` (epoch seconds — deterministic clock, never read system time).
+    /// recent `bucket_count` buckets of width `bucket_seconds` (a SECONDS width;
+    /// the store scales it to ms internally), ending at `ending_at` (epoch
+    /// milliseconds, ADR-023 — deterministic clock, never read system time).
     ///
     /// Estate-level pass-through over `DrawerStore::fingerprint_bit_series`.
     /// Used by GLK to expose the bit-series surface the Rhythm lens needs without
@@ -2398,17 +2399,20 @@ impl Estate {
 /// `recalledAt` value written here is parsed back to epoch and re-rendered via
 /// `format_iso8601` on durable-backend reads (the `.timestamp` column decodes
 /// to `TypedValue::Timestamp`); a format drift would make the read-back string
-/// differ from the written string. Fractional seconds are always `.000`
-/// because the trace clock is epoch-seconds granularity.
-fn epoch_to_iso8601(epoch_seconds: i64) -> String {
+/// differ from the written string. Input is epoch MILLISECONDS (ADR-023); the
+/// millisecond component is emitted as the 3-digit `.SSS` field.
+fn epoch_to_iso8601(epoch_ms: i64) -> String {
     // Simple Gregorian calendar conversion without external crates.
     // Accurate for dates in the range 2001–2100 (the LocusKit operational
     // window); leap-second handling matches the `drawer_store_inmemory`
-    // implementation — both ignore leap seconds.
-    let (year, month, day, hour, minute, second) = epoch_to_components(epoch_seconds);
+    // implementation — both ignore leap seconds. The calendar helper is
+    // seconds-based, so split the millisecond fraction out here.
+    let secs = epoch_ms.div_euclid(1000);
+    let millis = epoch_ms.rem_euclid(1000);
+    let (year, month, day, hour, minute, second) = epoch_to_components(secs);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
-        year, month, day, hour, minute, second
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hour, minute, second, millis
     )
 }
 
@@ -2491,7 +2495,8 @@ mod tests {
             "alice",
             "test-v1",
         );
-        estate.capture(frame, 1_700_000_001).unwrap()
+        // Epoch MILLISECONDS (ADR-023).
+        estate.capture(frame, 1_700_000_001_000).unwrap()
     }
 
     // --- capture provenance: confirmation + confidence axes ---
@@ -4085,9 +4090,10 @@ mod tests {
         let estate = make_sqlite_estate(&db);
         capture_n(&estate, 10);
 
-        // Two recalls at distinct epochs, each writing trace rows.
-        let old_epoch = 1_700_001_000;
-        let new_epoch = 1_700_005_000;
+        // Two recalls at distinct epochs (epoch MILLISECONDS, ADR-023), each
+        // writing trace rows.
+        let old_epoch = 1_700_001_000_000;
+        let new_epoch = 1_700_005_000_000;
         let mut f1 = unconfirmed_frame();
         f1.trace_limit = Some(3);
         let _ = estate.recall(f1, old_epoch).collect_all();
@@ -4101,8 +4107,8 @@ mod tests {
         assert!(deleted >= 1, "expected the old rows pruned; deleted {deleted}");
 
         // Surviving rows are all at or after the cutoff (the new session).
-        let since = epoch_to_iso8601(1_700_000_000);
-        let now = epoch_to_iso8601(1_700_006_000);
+        let since = epoch_to_iso8601(1_700_000_000_000);
+        let now = epoch_to_iso8601(1_700_006_000_000);
         let remaining = estate.recent_recall_traces(&since, &now).unwrap();
         assert!(!remaining.is_empty(), "the new session's rows must survive");
         let new_iso = epoch_to_iso8601(new_epoch);

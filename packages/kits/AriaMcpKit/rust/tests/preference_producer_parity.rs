@@ -35,7 +35,11 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::recall_trace_item::RecallTraceItem;
 
-const NOW: i64 = 1_700_000_000;
+// Epoch MILLISECONDS (ADR-023): the `now` params to capture/recall_scored are ms.
+// 1_700_000_000_000 ms == 1_700_000_000 s, so NOW_ISO is unchanged. The governor
+// tick takes a real SystemTime and derives epoch-SECONDS internally, so its tick
+// is built with `from_millis(NOW)` (below) to land on the same 2023 instant.
+const NOW: i64 = 1_700_000_000_000;
 // ISO8601 instant of NOW (2023-11-14T22:13:20Z) and the epoch-floor `since`,
 // matching the governor's epoch_secs_to_iso8601 output and the duty's window.
 const NOW_ISO: &str = "2023-11-14T22:13:20Z";
@@ -251,7 +255,7 @@ fn recall_reads_live_preference_column() {
         Arc::clone(&registry.default.store),
     );
     governor.set_preference_cadence_ms(0);
-    let report = governor.tick(UNIX_EPOCH + Duration::from_secs(NOW as u64));
+    let report = governor.tick(UNIX_EPOCH + Duration::from_millis(NOW as u64));
     assert!(report.preference_fired, "producer must fire");
 
     // The producer registered the store on the shared coordinator — recall it.

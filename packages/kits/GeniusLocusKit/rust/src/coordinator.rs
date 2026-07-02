@@ -2147,13 +2147,9 @@ impl EstateCoordinator {
         };
 
         // HLC stamp: physical time is epoch-ms (HLC substrate convention). The `now`
-        // parameter throughout recall_scored is epoch-seconds (wall_now() from dispatch).
-        // Convert at the HLC boundary so the rest of the recall path retains its
-        // epoch-seconds contract. Without this conversion the HLC would see a
-        // physical time ~1000x too small, producing timestamps far in the past and
-        // breaking any ordering assertion downstream.
-        let now_ms = now.saturating_mul(1_000);
-        let submitted_at = hlc.send(now_ms);
+        // parameter throughout recall_scored is epoch-ms too (ADR-023, wall_now()
+        // from dispatch), so it stamps the HLC directly with no conversion.
+        let submitted_at = hlc.send(now);
         let job = queuekit::Job {
             id: queuekit::JobId(uuid::Uuid::new_v4().simple().to_string()),
             stream_id: queuekit::StreamId("dreaming".to_string()),
@@ -2332,8 +2328,8 @@ impl EstateCoordinator {
     /// so re-running the sweep skips items whose UUID already appears as a
     /// `lineage_id` in `_distilled` drawers.
     ///
-    /// `now` is epoch seconds — deterministic clock, mirrors Swift's `Date`
-    /// parameter. `limit` caps the number of factoids produced this sweep
+    /// `now` is epoch milliseconds (ADR-023) — deterministic clock, mirrors
+    /// Swift's `Date` parameter. `limit` caps the number of factoids produced this sweep
     /// (`None` = all eligible items, matching the Swift `limit: Int? = nil`).
     ///
     /// # Errors
@@ -3143,8 +3139,8 @@ impl EstateCoordinator {
     /// callers can retain the generated id. Mirrors the Swift
     /// `GeniusLocusKit.captureKGFact(_:subject:predicate:object:sourceDrawerID:now:)`.
     ///
-    /// `now` is epoch-seconds. Always pass the current time from the caller;
-    /// never call time inside this method — keeps the coordinator deterministic.
+    /// `now` is epoch milliseconds (ADR-023). Always pass the current time from
+    /// the caller; never call time inside this method — keeps the coordinator deterministic.
     pub fn add_kg_fact(
         &self,
         handle: &EstateHandle,
@@ -3194,8 +3190,8 @@ impl EstateCoordinator {
     /// substitute `"no-embedding"` so the non-empty model-id contract is
     /// satisfied. Mirrors the Swift `GeniusLocusKit.addDiaryEntry(in:_:)`.
     ///
-    /// `now` is epoch-seconds. `topic` and `embedding_model_id` are caller-
-    /// supplied; callers that have no topic may pass `""`.
+    /// `now` is epoch milliseconds (ADR-023). `topic` and `embedding_model_id` are
+    /// caller-supplied; callers that have no topic may pass `""`.
     pub fn add_diary_entry(
         &self,
         handle: &EstateHandle,
@@ -3394,8 +3390,8 @@ impl EstateCoordinator {
     // MARK: - glk_fingerprints_captured
 
     /// Fingerprints of every non-tombstoned drawer captured in the closed
-    /// epoch-seconds window `[start_epoch, end_epoch]`, in HLC-ascending order
-    /// within the window.
+    /// epoch-milliseconds window `[start_epoch, end_epoch]` (ADR-023), in
+    /// HLC-ascending order within the window.
     ///
     /// The Moment lens (CognitionKit) folds these into an OR-reduced window
     /// signature and ranks comparison windows by Hamming proximity. Delegates
@@ -3419,8 +3415,9 @@ impl EstateCoordinator {
     // MARK: - fingerprint_bit_series
 
     /// Time-bucketed fingerprint bit-activity series for `bit` over the most
-    /// recent `bucket_count` buckets of width `bucket_seconds`, ending at
-    /// `ending_at` (epoch seconds — deterministic clock, never read system time).
+    /// recent `bucket_count` buckets of width `bucket_seconds` (a SECONDS width;
+    /// the store scales it to ms internally), ending at `ending_at` (epoch
+    /// milliseconds, ADR-023 — deterministic clock, never read system time).
     ///
     /// Top-level GLK surface for the Rhythm recipe. Delegates to
     /// `Estate::fingerprint_bit_series`, which passes through to
@@ -3675,8 +3672,8 @@ impl EstateCoordinator {
         // ADR-004: all temporal-cognition primitives key off eventTime. A bulk
         // historical import stamps every capture with one HLC, so hlc-based lags
         // are all 0 and no causality pairs form; the real ordering lives in each
-        // drawer's event_time. Rust holds event_time as epoch-SECONDS while the
-        // fold's physical_time is ms, so multiply by 1000. The row_id key mirrors
+        // drawer's event_time. event_time and the fold's physical_time are both
+        // epoch-ms (ADR-023), so it flows through directly. The row_id key mirrors
         // bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
         let event_times: std::collections::HashMap<crate::audit::EntryUUID, i64> = {
             let estate = self.estate_for_verb(handle)?;
@@ -3693,7 +3690,7 @@ impl EstateCoordinator {
                     uuid::Uuid::parse_str(&d.id).ok().map(|u| {
                         (
                             crate::audit::EntryUUID(u.as_u128().to_be_bytes()),
-                            d.event_time * 1000,
+                            d.event_time,
                         )
                     })
                 })
@@ -5164,8 +5161,8 @@ impl EstateCoordinator {
         //     enforced inside `enqueue_dreaming_item`; zero cost if < 2.
         //
         // The enqueue is non-fatal: `enqueue_dreaming_item` catches and logs all
-        // failures. `now` here is epoch-seconds (same unit as the rest of recall_scored).
-        // enqueue_dreaming_item converts to epoch-ms at the HLC boundary internally.
+        // failures. `now` here is epoch-milliseconds (ADR-023, same unit as the rest
+        // of recall_scored); enqueue_dreaming_item stamps the HLC with it directly.
         // No SystemTime::now() inside this engine — determinism rule.
         if request.origin == RecallOrigin::External {
             let drawers: Vec<Drawer> = result.hits.iter()

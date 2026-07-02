@@ -77,7 +77,7 @@ use uuid::Uuid;
 
 /// One row of the `vectors` table. Parallel to the Swift `StoredVector`.
 ///
-/// `filed_at` is Unix epoch seconds; `vector_index` is 0 for
+/// `filed_at` is Unix epoch milliseconds (ADR-023); `vector_index` is 0 for
 /// single-vector models.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredVector {
@@ -88,7 +88,9 @@ pub struct StoredVector {
     pub model_id: String,
     pub model_version: String,
     pub engram: Engram,
-    /// Unix epoch seconds.
+    /// Unix epoch milliseconds (ADR-023). Callers pass the drawer's
+    /// `filed_at`, which is epoch-ms; the `_unix_secs` suffix on the input
+    /// params is legacy naming, not a unit — the value is milliseconds.
     pub filed_at: i64,
 }
 
@@ -139,8 +141,8 @@ pub struct VectorPayloadInput {
     pub model_id: String,
     /// The embedding model version.
     pub model_version: String,
-    /// Wall-clock filing time as Unix epoch seconds (determinism discipline:
-    /// passed in, never read from the system clock inside the engine).
+    /// Wall-clock filing time as Unix epoch milliseconds (ADR-023; determinism
+    /// discipline: passed in, never read from the system clock inside the engine).
     pub filed_at_unix_secs: i64,
 }
 
@@ -2107,7 +2109,7 @@ fn decode_stored_vector(
         Ok(e) => e,
         Err(_) => return Ok(None),
     };
-    // filed_at is a unix-seconds i64. A timestamp column reads back as `Timestamp`
+    // filed_at is a unix-milliseconds i64 (ADR-023). A timestamp column reads back as `Timestamp`
     // on the InMemory backend and as a primitive `Int` on the SQLite backend
     // (the column stores the integer). Accept both — decoding only `Timestamp`
     // dropped every persisted vector on reopen, blanking the vector recall lane

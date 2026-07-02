@@ -455,9 +455,13 @@ pub const RECALL_TRACE_RETENTION_DAYS: f64 = 30.0;
 /// format so a lexicographic `recalledAt < cutoff` comparison is exact. The
 /// fractional part is always `.000` (the trace clock is epoch-seconds).
 fn prune_cutoff_iso(epoch_secs: i64) -> String {
-    // topology_analysis::epoch_to_iso8601 emits `...SSZ` (no fraction); splice
-    // in `.000` before the trailing `Z` to match the recalledAt format.
-    let no_frac = crate::topology_analysis::epoch_to_iso8601(epoch_secs);
+    // The dreaming daemon works internally in epoch-SECONDS (its cadence and
+    // retention windows are tuned in seconds). `topology_analysis::epoch_to_iso8601`
+    // consumes epoch-MILLISECONDS (ADR-023), so convert at this boundary. It emits
+    // `...SSZ` (no fraction); splice in `.000` before the trailing `Z` to match the
+    // recalledAt format (the ~30-day cutoff is days from any trace, so the
+    // fractional part never affects the lexicographic comparison).
+    let no_frac = crate::topology_analysis::epoch_to_iso8601(epoch_secs * 1000);
     match no_frac.strip_suffix('Z') {
         Some(prefix) => format!("{prefix}.000Z"),
         None => no_frac, // defensive: formatter always ends in Z

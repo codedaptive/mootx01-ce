@@ -4380,8 +4380,8 @@ fn file_memory_with_event_time_is_accepted() {
         is_success(&result),
         "file_memory with event_time must return success; got: {result:?}"
     );
-    // Confirm the drawer was stored with the provided event_time (epoch secs
-    // for 2020-01-01T00:00:00Z = 1577836800).
+    // Confirm the drawer was stored with the provided event_time (epoch ms
+    // for 2020-01-01T00:00:00Z = 1577836800000, ADR-023).
     let estate = registry.resolve(&BTreeMap::new(), "estateID").unwrap();
     let coord = estate.coord.lock().unwrap();
     let drawers = coord
@@ -4399,8 +4399,8 @@ fn file_memory_with_event_time_is_accepted() {
         .expect("recall must succeed");
     let drawer = drawers.first().expect("at least one drawer must exist");
     assert_eq!(
-        drawer.event_time, 1_577_836_800_i64,
-        "drawer event_time must be the back-dated epoch seconds (2020-01-01T00:00:00Z); got: {}",
+        drawer.event_time, 1_577_836_800_000_i64,
+        "drawer event_time must be the back-dated epoch ms (2020-01-01T00:00:00Z); got: {}",
         drawer.event_time
     );
 }

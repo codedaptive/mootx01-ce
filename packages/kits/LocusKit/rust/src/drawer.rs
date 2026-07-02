@@ -23,9 +23,9 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch seconds). Matches the
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Matches the
 //!   leaf-type convention documented in `audit_types.rs` / `manifest.rs`:
-//!   the Rust port stores timestamps as i64 epoch seconds and the
+//!   the Rust port stores timestamps as i64 epoch milliseconds and the
 //!   persistence-kit `TypedValue::Timestamp(i64)` carries them on the wire.
 //!   The Swift port uses `Date` because the storage layer there hands
 //!   back `Date`; both legs agree on the canonical wire shape (ISO8601

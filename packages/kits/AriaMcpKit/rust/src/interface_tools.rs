@@ -431,17 +431,17 @@ fn run_file_memory(
             .unwrap_or_else(|| DEFAULT_WING_NAME.to_string()),
     );
     // Optional back-dated event time. When supplied, the drawer's event_time
-    // is set to the caller's ISO8601 instant (epoch seconds) instead of the
-    // ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory which
-    // parses event_time to Date and passes it as eventTime on the CaptureFrame.
+    // is set to the caller's ISO8601 instant (epoch milliseconds, ADR-023)
+    // instead of the ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory
+    // which parses event_time to Date and passes it as eventTime on the CaptureFrame.
     if let Some(raw) = optional_string(args, "event_time")? {
-        let secs = parse_iso8601_to_secs(&raw).ok_or_else(|| {
+        let ms = parse_iso8601_to_ms(&raw).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
                 format!("event_time is not a valid ISO8601 instant: {raw}"),
             )
         })?;
-        frame.event_time = Some(secs);
+        frame.event_time = Some(ms);
     }
 
     // D-A: `impatient` is an execution option on the write verb (Dual-Path
@@ -703,10 +703,11 @@ fn note_usage(
 ) {
     if let Some(entry) = ledger.get(id) {
         let now = wall_now();
-        // Retention window: 30 days in seconds (mirrors Swift traceRetentionSeconds).
-        let since_secs = entry.surfaced_at_secs - 30 * 24 * 60 * 60;
-        let since = unix_epoch_secs_to_iso8601(since_secs);
-        let now_str = unix_epoch_secs_to_iso8601(now);
+        // Retention window: 30 days. `surfaced_at_secs` and `now` are epoch-ms
+        // (ADR-023; the `_secs` suffix is legacy naming), so the window is in ms.
+        let since_ms = entry.surfaced_at_secs - 30 * 24 * 60 * 60 * 1000;
+        let since = unix_epoch_ms_to_iso8601(since_ms);
+        let now_str = unix_epoch_ms_to_iso8601(now);
         if let Ok(coord) = estate.coord.lock() {
             // Silently ignore errors — reward marking is best-effort.
             let _ = coord.mark_recall_used(&estate.handle, id, &since, &now_str);
@@ -714,13 +715,14 @@ fn note_usage(
     }
 }
 
-/// Convert Unix epoch seconds to an ISO 8601 string (UTC, no sub-second
-/// precision). Used for the `since` and `now` parameters of
+/// Convert Unix epoch MILLISECONDS (ADR-023) to an ISO 8601 string (UTC,
+/// second precision — the reward window spans 30 days, so sub-second precision
+/// is immaterial here). Used for the `since` and `now` parameters of
 /// `mark_recall_used` which expects TEXT ISO8601 dates (fleet date rule).
-fn unix_epoch_secs_to_iso8601(secs: i64) -> String {
+fn unix_epoch_ms_to_iso8601(ms: i64) -> String {
     // Manual conversion — no external crate (zero-dep rule).
     // Gregorian calendar arithmetic for the range 1970–2106.
-    let s = secs.max(0) as u64;
+    let s = ms.max(0) as u64 / 1000;
     let days_since_epoch = s / 86400;
     let time_of_day = s % 86400;
     let hh = time_of_day / 3600;
@@ -1296,20 +1298,26 @@ pub(crate) fn epoch_to_iso8601(epoch_secs: i64) -> String {
 /// Minimal ISO8601 UTC parser — handles the subset the ARIA MCP server accepts.
 ///
 /// Accepts "YYYY-MM-DDTHH:MM:SSZ", "YYYY-MM-DDTHH:MM:SS.mmmZ", and
-/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch seconds (not milliseconds).
-/// Used to decode the optional `event_time` argument in `run_file_memory`,
-/// mirroring Swift's `ISO8601DateFormatter().date(from:)` in `runFileMemory`.
-fn parse_iso8601_to_secs(s: &str) -> Option<i64> {
-    // Strip timezone suffix and milliseconds fraction before splitting on T.
+/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch MILLISECONDS (ADR-023) — the
+/// fractional-seconds field is retained as the millisecond component, matching
+/// Swift's `ISO8601DateFormatter().date(from:)` in `runFileMemory`.
+fn parse_iso8601_to_ms(s: &str) -> Option<i64> {
+    // Strip timezone suffix before splitting on T.
     let s = s
         .trim_end_matches('Z')
         .trim_end_matches("+00:00")
         .trim_end_matches("+0000");
-    // Drop optional fractional seconds (.mmm) — we only need whole-second precision.
-    let s = if let Some(dot_pos) = s.rfind('.') {
-        &s[..dot_pos]
+    // Split optional fractional seconds (.mmm…) → milliseconds (3 digits,
+    // padded/truncated).
+    let (s, millis) = if let Some(dot_pos) = s.rfind('.') {
+        let frac: String = s[dot_pos + 1..].chars().take(3).collect();
+        let mut ms: i64 = frac.parse().ok()?;
+        for _ in frac.len()..3 {
+            ms *= 10;
+        }
+        (&s[..dot_pos], ms)
     } else {
-        s
+        (s, 0)
     };
     let parts: Vec<&str> = s.split('T').collect();
     if parts.len() != 2 {
@@ -1324,7 +1332,7 @@ fn parse_iso8601_to_secs(s: &str) -> Option<i64> {
     let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
     // Days since Unix epoch via Howard Hinnant's algorithm (same as lens_tools).
     let days = days_from_ymd_interface(y, m, d)?;
-    Some(days * 86400 + h * 3600 + min * 60 + sec)
+    Some((days * 86400 + h * 3600 + min * 60 + sec) * 1000 + millis)
 }
 
 fn days_from_ymd_interface(y: i64, m: i64, d: i64) -> Option<i64> {

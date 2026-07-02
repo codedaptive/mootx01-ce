@@ -32,7 +32,7 @@
 //! `Hash` (the embedded `LatticeAnchor` is not `Hash`), matching Swift.
 //!
 //! Swift-to-Rust shape changes mirror `association.rs`: `Date filedAt` →
-//! `i64 filed_at` (epoch seconds; the SQLite column is still TEXT ISO8601),
+//! `i64 filed_at` (epoch milliseconds; the SQLite column is still TEXT ISO8601),
 //! `Date? tombstonedAt` → `Option<i64> tombstoned_at`.
 
 use crate::estate_types::LatticeAnchor;
