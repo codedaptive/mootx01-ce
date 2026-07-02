@@ -193,6 +193,23 @@ public actor InvertedIndexStore {
         cachedPair = nil
     }
 
+    /// Fold worker-computed postings into the IN-MEMORY maps only — the memory
+    /// twin of the EXT-4 shard merge, which writes the durable iix_* tables via
+    /// `SQLiteStorage.mergeShard` (SQLite copies the shard rows internally; this
+    /// method folds the same postings the workers already computed, so nothing
+    /// is re-read from disk). Re-delivered items simply overwrite their prior
+    /// entries (idempotent under queue-retry). Clears the cached BM25 index once
+    /// for the batch. Rust twin: `InvertedIndexStore::fold_postings`.
+    public func foldPostings(_ items: [(itemID: String, tf: [String: Int], docLen: Int)]) {
+        for item in items {
+            for (term, freq) in item.tf {
+                termFreqs[term, default: [:]][item.itemID] = freq
+            }
+            docLengths[item.itemID] = item.docLen
+        }
+        cachedPair = nil
+    }
+
     /// Remove a document from the index.
     ///
     /// - Parameter itemID: item to remove. No-op if not present.

@@ -372,6 +372,55 @@ pub fn apply_install_encryption_to_conn(
     }
 }
 
+/// ATTACH a shard database to `conn`, applying the install key INSIDE the kit
+/// (ingest best-practices EXT-4: shard-merge key application never leaks to app
+/// code). When a sibling `db.key` exists beside `shard_path`, the shard is
+/// attached `KEY "x'<hex>'"` (raw-key SQLCipher semantics — the same key the
+/// estate and every sibling file use); without one, a plain unencrypted ATTACH.
+/// The shard path is BOUND (never interpolated); the alias and key-hex are
+/// validated to safe character sets before interpolation, so no injection
+/// surface exists. ATTACH cannot run inside a transaction — callers attach
+/// first, then open their merge transaction, then DETACH after commit.
+pub fn attach_with_install_key(
+    conn: &rusqlite::Connection,
+    shard_path: &str,
+    alias: &str,
+) -> Result<(), rusqlite::Error> {
+    // Alias whitelist: SQL identifier charset only (it is interpolated).
+    if alias.is_empty()
+        || !alias.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+        || !alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "attach alias must be a bare SQL identifier, got {alias:?}"
+        )));
+    }
+    let parent = Path::new(shard_path).parent().map(|p| p.to_path_buf());
+    let key_hex: Option<String> = parent
+        .map(|p| p.join(INSTALL_KEY_FILE))
+        .and_then(|kp| std::fs::read(kp).ok())
+        .filter(|bytes| bytes.len() == INSTALL_KEY_LEN)
+        .map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect());
+    match key_hex {
+        Some(hex) => {
+            // hex is produced from raw bytes above — [0-9a-f] only, safe to
+            // interpolate as the raw-key literal (a BOUND key parameter would
+            // take SQLCipher's passphrase-KDF path, deriving a DIFFERENT key).
+            conn.execute(
+                &format!("ATTACH DATABASE ?1 AS {alias} KEY \"x'{hex}'\""),
+                rusqlite::params![shard_path],
+            )
+            .map(|_| ())
+        }
+        None => conn
+            .execute(
+                &format!("ATTACH DATABASE ?1 AS {alias} KEY ''"),
+                rusqlite::params![shard_path],
+            )
+            .map(|_| ()),
+    }
+}
+
 /// Resolve the whole-file encryption config for an estate file at `db_path`,
 /// IF a sibling `db.key` is present. Returns `None` when the key is absent — the
 /// estate is then a normal unencrypted SQLite file (the test / pre-lockdown

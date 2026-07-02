@@ -101,6 +101,10 @@ final class SQLiteConnection: @unchecked Sendable {
     }
 
     func close() {
+        // Destroy cached statements BEFORE closing: sqlite3_close_v2 defers the
+        // real close while statements remain, leaving a zombie connection.
+        for (_, stmt) in statementCache { stmt.destroy() }
+        statementCache.removeAll()
         if let handle {
             sqlite3_close_v2(handle)
         }
@@ -142,6 +146,17 @@ final class SQLiteConnection: @unchecked Sendable {
 
     // MARK: - Prepared statements
 
+    /// Per-connection statement cache keyed by SQL text (best-practices §5:
+    /// prepared statements reused via the kit). The SQL for a given (table,
+    /// column-set / predicate-shape) is identical across a bulk loop, so parsing
+    /// per call (sqlite3_prepare_v2 → parser) was a measured hot spot on 50k-row
+    /// imports. Bounded: at capacity the whole cache is destroyed and rebuilt —
+    /// crude but O(1) amortized, and the estate schema's statement variety
+    /// (~a few per table) sits far below the cap in practice. Mirrors the Rust
+    /// port's rusqlite prepare_cached (capacity 128).
+    private var statementCache: [String: SQLiteStatement] = [:]
+    private static let statementCacheCapacity = 128
+
     func prepare(_ sql: String) throws -> SQLiteStatement {
         guard let handle else { throw StorageError.backendError(underlying: "connection closed") }
         var stmt: OpaquePointer? = nil
@@ -154,6 +169,46 @@ final class SQLiteConnection: @unchecked Sendable {
         return SQLiteStatement(stmt: stmt, connection: self)
     }
 
+    /// Cached twin of `prepare`. Returns a reusable statement for `sql`,
+    /// reset + bindings cleared, parsing it only on first use. The returned
+    /// statement's `finalize()` RETURNS it to the cache (reset) instead of
+    /// destroying it, so existing `defer { stmt.finalize() }` call sites work
+    /// unchanged. Never hold a cached statement across an await/suspension —
+    /// the storage actor serializes callers, so per-call scope is safe.
+    func prepareCached(_ sql: String) throws -> SQLiteStatement {
+        // CHECKOUT semantics (mirrors rusqlite): the statement is REMOVED from
+        // the cache while in use and returned by its finalize(). A reentrant
+        // call with the same SQL therefore misses the (empty) slot and prepares
+        // a fresh statement rather than clobbering the in-flight one mid-step.
+        if let cached = statementCache.removeValue(forKey: sql), cached.stmt != nil {
+            cached.resetForReuse()
+            return cached
+        }
+        let stmt = try prepare(sql)
+        stmt.isCached = true
+        stmt.cacheKey = sql
+        return stmt
+    }
+
+    /// Return a checked-out cached statement to the cache (called by the
+    /// statement's `finalize()`). At capacity the whole cache is destroyed and
+    /// rebuilt — crude but O(1) amortized; the estate schema's statement variety
+    /// sits far below the cap. A same-key statement already back in the slot
+    /// (reentrant duplicate) destroys the returner instead.
+    func returnToCache(_ stmt: SQLiteStatement) {
+        guard let key = stmt.cacheKey, stmt.stmt != nil else { return }
+        if statementCache[key] != nil {
+            stmt.destroy()
+            return
+        }
+        if statementCache.count >= Self.statementCacheCapacity {
+            for (_, s) in statementCache { s.destroy() }
+            statementCache.removeAll()
+        }
+        stmt.resetForReuse()
+        statementCache[key] = stmt
+    }
+
     var lastErrorMessage: String {
         guard let handle else { return "(closed)" }
         return String(cString: sqlite3_errmsg(handle))
@@ -163,6 +218,15 @@ final class SQLiteConnection: @unchecked Sendable {
 final class SQLiteStatement {
     var stmt: OpaquePointer?
     weak var connection: SQLiteConnection?
+    /// True when this statement belongs to the connection's statement cache.
+    /// `finalize()` on a cached statement RETURNS it to the cache (reset for
+    /// reuse) instead of destroying it, so call sites keep their
+    /// `defer { stmt.finalize() }` shape whether the statement came from
+    /// `prepare` or `prepareCached`.
+    var isCached = false
+    /// The cache key (the SQL text) for a cached statement — used by
+    /// `SQLiteConnection.returnToCache` on finalize.
+    var cacheKey: String?
 
     init(stmt: OpaquePointer, connection: SQLiteConnection) {
         self.stmt = stmt
@@ -172,6 +236,31 @@ final class SQLiteStatement {
     deinit { if let stmt { sqlite3_finalize(stmt) } }
 
     func finalize() {
+        if isCached {
+            // Return to the cache (or destroy if the connection is gone).
+            if let connection {
+                connection.returnToCache(self)
+            } else {
+                destroy()
+            }
+            return
+        }
+        if let stmt { sqlite3_finalize(stmt) }
+        stmt = nil
+    }
+
+    /// Reset execution state + clear bindings so the compiled statement can be
+    /// re-executed with fresh binds (the cache-reuse path).
+    func resetForReuse() {
+        guard let stmt else { return }
+        sqlite3_reset(stmt)
+        sqlite3_clear_bindings(stmt)
+    }
+
+    /// Destroy the underlying sqlite3_stmt unconditionally — used by the cache
+    /// on eviction and at connection close (a cached statement's `finalize()`
+    /// deliberately does not destroy).
+    func destroy() {
         if let stmt { sqlite3_finalize(stmt) }
         stmt = nil
     }

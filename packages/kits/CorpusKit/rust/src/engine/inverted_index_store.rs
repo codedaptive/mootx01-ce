@@ -235,6 +235,77 @@ impl InvertedIndexStore {
         Ok(())
     }
 
+    // MARK: — Shard merge (EXT-4 bulk import)
+
+    /// Merge a shard database's postings into this store's durable tables in
+    /// ONE pass — the EXT-4 "rapid clone" seam. Parallel import workers each
+    /// write their slice's postings into a private shard file (same iix_*
+    /// schema, same install key — see `IngestPostingsShard`); the single writer
+    /// then attaches each shard and copies its rows with a single
+    /// `INSERT OR REPLACE ... SELECT ... ORDER BY` per table. SQLite performs
+    /// the copy internally (no per-row statement/bind from our code), and the
+    /// ORDER BY walks the shard's primary-key b-tree so destination inserts
+    /// arrive in key order (append-locality — far fewer page writes and
+    /// SQLCipher page-crypto ops than random-order per-row upserts).
+    ///
+    /// DURABLE TABLES ONLY: the in-memory term/doc maps are NOT updated here —
+    /// the import path folds the workers' already-computed tf maps via
+    /// `fold_postings` (no re-read). OR REPLACE preserves idempotency under
+    /// queue-retry re-delivery (identical content → identical postings).
+    /// ATTACH cannot run inside a transaction, so the bracket is
+    /// attach → BEGIN IMMEDIATE → copy → COMMIT → DETACH.
+    pub fn merge_shard(&self, shard_path: &str) -> Result<(), rusqlite::Error> {
+        let state = self.state.lock().expect("mutex poisoned");
+        persistence_kit::attach_with_install_key(&state.conn, shard_path, "iixshard")?;
+        let merged = (|| -> Result<(), rusqlite::Error> {
+            state.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let res = (|| -> Result<(), rusqlite::Error> {
+                state.conn.execute_batch(
+                    "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq)
+                       SELECT term, item_id, freq FROM iixshard.iix_termfreqs
+                       ORDER BY term, item_id;
+                     INSERT OR REPLACE INTO iix_doclens (item_id, length)
+                       SELECT item_id, length FROM iixshard.iix_doclens
+                       ORDER BY item_id;",
+                )
+            })();
+            match res {
+                Ok(()) => state.conn.execute_batch("COMMIT"),
+                Err(e) => {
+                    let _ = state.conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })();
+        // Always detach, success or failure — a stuck attach wedges later merges.
+        let _ = state.conn.execute_batch("DETACH DATABASE iixshard");
+        merged
+    }
+
+    /// Fold worker-computed postings into the in-memory maps — the memory twin
+    /// of `merge_shard` (which writes only the durable tables). Items are
+    /// `(item_id, term→freq, doc_len)`; re-delivered items replace their prior
+    /// entries (same semantics as `index`'s delete-then-insert for an item that
+    /// was already present). Clears the cached BM25 index once for the batch.
+    pub fn fold_postings(
+        &self,
+        items: &[(String, HashMap<String, usize>, usize)],
+    ) -> Result<(), rusqlite::Error> {
+        let mut state = self.state.lock().expect("mutex poisoned");
+        for (item_id, tf, doc_len) in items {
+            for (term, freq) in tf {
+                state
+                    .term_freqs
+                    .entry(term.clone())
+                    .or_default()
+                    .insert(item_id.clone(), *freq);
+            }
+            state.doc_lengths.insert(item_id.clone(), *doc_len);
+        }
+        state.cached = None;
+        Ok(())
+    }
+
     /// Remove a document from the index.
     pub fn remove(&self, item_id: &str) -> Result<(), rusqlite::Error> {
         let mut state = self.state.lock().expect("mutex poisoned");
@@ -314,5 +385,107 @@ impl InvertedIndexStore {
     pub fn document_count(&self) -> usize {
         let state = self.state.lock().expect("mutex poisoned");
         state.doc_lengths.len()
+    }
+}
+
+// MARK: — IngestPostingsShard (EXT-4 bulk import)
+
+/// A parallel import worker's PRIVATE postings shard — the producer half of the
+/// EXT-4 shard-merge pattern. Each worker owns one shard file (created beside
+/// the estate so the sibling `db.key` applies — the shard is encrypted with the
+/// SAME install key as the estate, keeping tokenized user content protected at
+/// rest), accumulates its slice's postings in memory, and `finish()` writes
+/// them in ONE sorted transaction. The single writer then folds every shard
+/// into the durable index via `InvertedIndexStore::merge_shard`.
+///
+/// Sorted before insert so the shard's (term, item_id) primary-key b-tree is
+/// built append-order — the merge's `SELECT ... ORDER BY` is then a straight
+/// index scan and the DESTINATION receives key-ordered rows (append-locality).
+pub struct IngestPostingsShard {
+    path: String,
+    conn: Connection,
+    rows: Vec<(String, String, i64)>,
+    doclens: Vec<(String, i64)>,
+}
+
+impl IngestPostingsShard {
+    /// Create a fresh shard at `path` (an existing file is truncated —
+    /// shards are single-use). Applies the install key from the sibling
+    /// `db.key` (if present) before any SQL, then creates the iix_* schema.
+    pub fn create(path: &str) -> Result<Self, rusqlite::Error> {
+        // Single-use: remove any stale shard from a crashed prior import.
+        let _ = std::fs::remove_file(path);
+        let conn = Connection::open(path)?;
+        persistence_kit::apply_install_encryption_to_conn(&conn, path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS iix_termfreqs (
+                term     TEXT NOT NULL,
+                item_id  TEXT NOT NULL,
+                freq     INTEGER NOT NULL,
+                PRIMARY KEY (term, item_id)
+            );
+            CREATE TABLE IF NOT EXISTS iix_doclens (
+                item_id  TEXT NOT NULL PRIMARY KEY,
+                length   INTEGER NOT NULL
+            );",
+        )?;
+        Ok(IngestPostingsShard {
+            path: path.to_string(),
+            conn,
+            rows: Vec::new(),
+            doclens: Vec::new(),
+        })
+    }
+
+    /// Accumulate one document's postings (term→freq) and length in memory.
+    pub fn add(&mut self, item_id: &str, tf: &HashMap<String, usize>, doc_len: usize) {
+        for (term, freq) in tf {
+            self.rows
+                .push((term.clone(), item_id.to_string(), *freq as i64));
+        }
+        self.doclens.push((item_id.to_string(), doc_len as i64));
+    }
+
+    /// Sort and write every accumulated row in ONE transaction, then close the
+    /// connection. Returns the shard path for the subsequent `merge_shard`.
+    pub fn finish(mut self) -> Result<String, rusqlite::Error> {
+        self.rows.sort_unstable();
+        self.doclens.sort_unstable();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let res = (|| -> Result<(), rusqlite::Error> {
+            {
+                let mut stmt = self.conn.prepare_cached(
+                    "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
+                )?;
+                for (term, item_id, freq) in &self.rows {
+                    stmt.execute(params![term, item_id, freq])?;
+                }
+            }
+            {
+                let mut stmt = self.conn.prepare_cached(
+                    "INSERT OR REPLACE INTO iix_doclens (item_id, length) VALUES (?1, ?2)",
+                )?;
+                for (item_id, len) in &self.doclens {
+                    stmt.execute(params![item_id, len])?;
+                }
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        Ok(self.path.clone())
+    }
+
+    /// Best-effort removal of a merged (or abandoned) shard file and its WAL/SHM
+    /// sidecars.
+    pub fn remove_file(path: &str) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
     }
 }

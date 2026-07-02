@@ -93,11 +93,14 @@ pub(crate) struct IngestQueueState {
     /// Per-corpus HLC for stamping queue submissions, derived from each item's
     /// capture instant so submission stamps are deterministic.
     hlc: HLCGenerator,
-    /// Stop flag for the background poll worker. Set true at teardown; the
-    /// worker checks it each pass and exits.
+    /// Stop flag for the background poll workers (encode + import). Set true at
+    /// teardown; each worker checks it per pass and exits.
     stop: Arc<AtomicBool>,
-    /// The background worker thread handle. `take`-n and joined at teardown.
+    /// The background encode worker thread handle. `take`-n and joined at teardown.
     worker: Option<JoinHandle<()>>,
+    /// The background IMPORT worker thread handle — the discrete bulk-import
+    /// drainer (claims only `"import"` jobs). `take`-n and joined at teardown.
+    worker_import: Option<JoinHandle<()>>,
 }
 
 
@@ -106,6 +109,18 @@ pub(crate) struct IngestQueueState {
 /// this drainer claims only `"encode"` jobs via `drain_for_stream`.
 fn encode_stream_id() -> StreamId {
     StreamId("encode".to_string())
+}
+
+/// The bulk-import stream id. Same durable queue.sqlite, same job wire format,
+/// DIFFERENT stream + DIFFERENT drainer: import jobs are claimed only by the
+/// import drain worker, whose per-job work is `ingest_batch_import` (chunk +
+/// BM25 only — no bootstrap train, no embed; the import cycle trains the basis
+/// once and embeds once at the end via `Corpus::reindex`). Daily-driving live
+/// captures stay on the `"encode"` stream/drainer untouched. Because the jobs
+/// are durable queue rows, a crash mid-import cold-starts cleanly: on remount
+/// the import worker reclaims the stream's orphaned in-flight rows and resumes.
+fn import_stream_id() -> StreamId {
+    StreamId("import".to_string())
 }
 
 /// Fixed estate identity for the transient in-memory ingest-queue backend. The
@@ -152,9 +167,22 @@ impl Corpus {
         // FACADE — the Corpus drives the queue through the facade, never the raw
         // backend (mirrors Swift's `QueueKit(backend:)`). `Box<dyn QueueBackend>`
         // lets one facade type hold either backend.
-        // Single-drainer lease (T2): non-None only for a durable SQLite estate (several
-        // processes may open it); in-memory estates are single-process.
+        // Single-drainer leases (T2): non-None only for a durable SQLite estate
+        // (several processes may open it); in-memory estates are single-process.
+        // One lease per stream — "encode" for the daily-driving drainer, "import"
+        // for the discrete bulk-import drainer — so each stream has exactly one
+        // cross-process drainer, independently.
         let mut drain_lease: Option<DrainLease> = None;
+        let mut import_lease: Option<DrainLease> = None;
+        // The import drainer's OWN backend connection (SQLite estates only). Both
+        // drainers run multi-statement transactions; sharing one connection lets
+        // worker A's BEGIN land inside worker B's open transaction ("cannot start
+        // a transaction within a transaction"). A second connection to the SAME
+        // queue.sqlite moves arbitration to the file level (WAL + busy_timeout) —
+        // SQLite's native single-writer contract. None → the import worker shares
+        // the primary facade (in-memory estates: transactions are no-ops there,
+        // and a second InMemoryStorage would be a DIFFERENT queue entirely).
+        let mut import_backend: Option<Box<dyn QueueBackend>> = None;
         let backend: Box<dyn QueueBackend> = match &self.storage.configuration().backend {
             BackendConfiguration::Sqlite { path, .. } => {
                 // Derive the sibling config: same directory, same encryption key.
@@ -179,15 +207,22 @@ impl Corpus {
                 // Owner token = PID + this Corpus instance's Arc address, so a reused
                 // PID cannot impersonate a prior holder (mirrors Swift's instanceToken).
                 let owner = format!("pid-{}-{:p}", std::process::id(), Arc::as_ptr(self));
-                drain_lease = Some(DrainLease::new(&estate_dir, "encode", owner));
+                drain_lease = Some(DrainLease::new(&estate_dir, "encode", owner.clone()));
+                import_lease = Some(DrainLease::new(&estate_dir, "import", owner));
 
-                let qs = SqliteStorage::new(sibling_cfg).map_err(|e| {
+                let qs = SqliteStorage::new(sibling_cfg.clone()).map_err(|e| {
                     CorpusKitError::StoreUnavailable(format!("queue.sqlite open: {e:?}"))
                 })?;
                 let qs = Arc::new(qs);
                 PersistenceKitBackend::open_schema(qs.as_ref()).map_err(|e| {
                     CorpusKitError::StoreUnavailable(format!("queue.sqlite open_schema: {e:?}"))
                 })?;
+                // Second connection to the same queue.sqlite for the import
+                // drainer (see import_backend above). Schema already opened.
+                let import_qs = SqliteStorage::new(sibling_cfg).map_err(|e| {
+                    CorpusKitError::StoreUnavailable(format!("queue.sqlite import open: {e:?}"))
+                })?;
+                import_backend = Some(Box::new(PersistenceKitBackend::new(Arc::new(import_qs))));
                 Box::new(PersistenceKitBackend::new(qs))
             }
             _ => {
@@ -217,11 +252,31 @@ impl Corpus {
             })
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("ingest drain spawn: {e}")))?;
 
+        // Discrete IMPORT drain worker — same durable queue, own stream ("import"),
+        // own lease, own thread, and (SQLite estates) its OWN connection so its
+        // transactions arbitrate with the encode worker's at the file level
+        // instead of colliding on one connection. Claims only bulk-import jobs
+        // and processes them via ingest_batch_import (chunk + BM25, no
+        // embed/train). Daily-driving encode jobs above are untouched.
+        let import_queue = match import_backend {
+            Some(backend) => Arc::new(QueueKit::new(backend)),
+            None => Arc::clone(&queue),
+        };
+        let import_stop = Arc::clone(&stop);
+        let import_corpus = Arc::clone(self);
+        let import_handle = std::thread::Builder::new()
+            .name("corpus-import-drain".to_string())
+            .spawn(move || {
+                run_import_drain_loop(import_corpus, import_queue, import_stop, import_lease);
+            })
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("import drain spawn: {e}")))?;
+
         *guard = Some(IngestQueueState {
             queue,
             hlc: HLCGenerator::new(1),
             stop,
             worker: Some(handle),
+            worker_import: Some(import_handle),
         });
         Ok(())
     }
@@ -241,6 +296,9 @@ impl Corpus {
         if let Some(mut state) = taken {
             state.stop.store(true, Ordering::SeqCst);
             if let Some(worker) = state.worker.take() {
+                let _ = worker.join();
+            }
+            if let Some(worker) = state.worker_import.take() {
                 let _ = worker.join();
             }
         }
@@ -346,6 +404,56 @@ impl Corpus {
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("ingest enqueue batch: {e:?}")))
     }
 
+    /// Enqueue many BULK-IMPORT jobs in one pass — the import twin of
+    /// `enqueue_ingest_batch`. Identical durable job rows on the SAME
+    /// queue.sqlite, tagged with the `"import"` stream so ONLY the discrete
+    /// import drain worker claims them (chunk + BM25, no embed/train — the
+    /// import cycle retrains + embeds once at the end). Cold-start safe: a crash
+    /// mid-import leaves durable rows that the import worker reclaims and
+    /// resumes on remount. Mirrors Swift's `Corpus.enqueueIngestBatchImport`.
+    pub fn enqueue_ingest_batch_import(
+        self: &Arc<Self>,
+        items: &[(String, String, i64)],
+    ) -> CorpusKitResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mounted = self
+            .ingest_queue
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("ingest queue lock poisoned".into()))?
+            .is_some();
+        if !mounted {
+            self.mount_ingest_queue()?;
+        }
+
+        let mut guard = self
+            .ingest_queue
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("ingest queue lock poisoned".into()))?;
+        let state = match guard.as_mut() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let mut jobs = Vec::with_capacity(items.len());
+        for (text, source_id, now_millis) in items {
+            if text.is_empty() {
+                continue;
+            }
+            let submitted_at = state.hlc.send(*now_millis);
+            let job = IngestJob::new(source_id.clone(), text.clone(), *now_millis);
+            let queue_job = job
+                .to_job(import_stream_id(), submitted_at)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("import job encode: {e}")))?;
+            jobs.push(queue_job);
+        }
+        state
+            .queue
+            .send_batch(&jobs)
+            .map(|_| ())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("import enqueue batch: {e:?}")))
+    }
+
     /// Block until the corpus's ingest queue has fully drained — every enqueued
     /// job ingested and replied — then return. Returns immediately when no queue
     /// is mounted. SYNCHRONOUS PUMP barrier (runs alongside the background
@@ -418,10 +526,45 @@ impl Corpus {
         let pending = queue
             .pending_count_for_stream(&encode_stream_id())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("ingest depth pending: {e:?}")))?;
+        // Stream-scoped in-flight: the shared queue.sqlite now carries a second
+        // live stream ("import"); an UNSCOPED count would report the encode drain
+        // as busy while only import jobs are mid-ingest (the multi-stream probe
+        // bug — best-practices §2 variant C: unscoped calls are bugs in a
+        // multi-stream estate).
         let in_flight = queue
             .in_flight()
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("ingest depth in_flight: {e:?}")))?
-            .len();
+            .iter()
+            .filter(|j| j.stream_id == encode_stream_id())
+            .count();
+        Ok((pending, in_flight))
+    }
+
+    /// The bulk-IMPORT drain's outstanding work — the import-stream twin of
+    /// `ingest_queue_depth`. `(pending, in_flight)` scoped to the `"import"`
+    /// stream only (in-flight rows are filtered by stream, so a concurrent live
+    /// capture's encode job never inflates the import probe). Both zero means
+    /// every enqueued import job has been chunk+BM25-ingested and replied.
+    /// Read-only; safe to poll while the import worker runs.
+    pub fn import_queue_depth(&self) -> CorpusKitResult<(usize, usize)> {
+        let queue = {
+            let guard = self.ingest_queue.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("ingest queue lock poisoned".into())
+            })?;
+            match guard.as_ref() {
+                Some(s) => Arc::clone(&s.queue),
+                None => return Ok((0, 0)),
+            }
+        };
+        let pending = queue
+            .pending_count_for_stream(&import_stream_id())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("import depth pending: {e:?}")))?;
+        let in_flight = queue
+            .in_flight()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("import depth in_flight: {e:?}")))?
+            .iter()
+            .filter(|j| j.stream_id == import_stream_id())
+            .count();
         Ok((pending, in_flight))
     }
 
@@ -595,6 +738,98 @@ impl Corpus {
         let _ = queue.reply(&job.id, ObservationStatus::Blocked, vec![]);
     }
 
+    /// The IMPORT drain body — the discrete bulk-import twin of
+    /// `drain_with_queue`. Claims only `"import"` jobs and ingests them via
+    /// `ingest_batch_import` (chunk + BM25 + counts — no bootstrap train, no
+    /// embed, so no deferred-vector-index window and no publish). The import
+    /// cycle's tail (`Corpus::reindex`) trains the basis once on the full corpus
+    /// and embeds every chunk once. No `on_encoded` callback either: per-batch
+    /// room rollups are exactly the O(N²) the import path defers to the one
+    /// `rollup_after_reindex` pass.
+    fn drain_import_with_queue(&self, queue: &IngestQueue) -> CorpusKitResult<usize> {
+        let claimed = queue
+            .drain_for_stream(&import_stream_id(), drain_telemetry_now())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("import drain: {e:?}")))?;
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+        let batch_session = claimed[0].1.clone();
+        let batch: Vec<Job> = claimed.into_iter().map(|(job, _session)| job).collect();
+
+        // Decode the batch; undecodable → Blocked, empty-text → Done, rest ingest.
+        let mut items: Vec<(String, String, i64)> = Vec::with_capacity(batch.len());
+        let mut item_jobs: Vec<&Job> = Vec::with_capacity(batch.len());
+        for job in &batch {
+            match IngestJob::from_job(job) {
+                Err(_) => {
+                    let _ = queue.reply(&job.id, ObservationStatus::Blocked, vec![]);
+                }
+                Ok(ij) if ij.text.is_empty() => {
+                    let _ = queue.reply(&job.id, ObservationStatus::Done, vec![]);
+                }
+                Ok(ij) => {
+                    let captured = ij.captured_at_millis();
+                    items.push((ij.text, ij.source_id, captured));
+                    item_jobs.push(job);
+                }
+            }
+        }
+        if !items.is_empty() {
+            match self.ingest_batch_import(&items) {
+                Ok(()) => {
+                    // Same session-fast-path/per-job-fallback completion contract
+                    // as the encode drain.
+                    let completed = queue
+                        .reply_session(&batch_session, ObservationStatus::Done)
+                        .unwrap_or(0);
+                    if completed == 0 {
+                        let completions: Vec<(JobId, ObservationStatus)> = item_jobs
+                            .iter()
+                            .map(|j| (j.id.clone(), ObservationStatus::Done))
+                            .collect();
+                        let _ = queue.reply_batch(&completions);
+                    }
+                }
+                Err(e) => {
+                    // Batch failed — per-job at-least-once fallback (idempotent:
+                    // content-addressed chunk ids make re-ingest harmless).
+                    eprintln!(
+                        "CorpusKit: ingest_batch_import failed: {e:?} — falling back to per-job import ingest"
+                    );
+                    for job in &item_jobs {
+                        self.ingest_one_import_and_reply(queue, job);
+                    }
+                }
+            }
+        }
+        Ok(batch.len())
+    }
+
+    /// Ingest one drained IMPORT job (chunk + BM25 only) and reply terminal —
+    /// the import twin of `ingest_one_and_reply`, used by the batch-failure
+    /// fallback. AT-LEAST-ONCE with the same bounded retry budget.
+    fn ingest_one_import_and_reply(&self, queue: &IngestQueue, job: &Job) {
+        let ij = match IngestJob::from_job(job) {
+            Ok(ij) => ij,
+            Err(_) => {
+                let _ = queue.reply(&job.id, ObservationStatus::Blocked, vec![]);
+                return;
+            }
+        };
+        if ij.text.is_empty() {
+            let _ = queue.reply(&job.id, ObservationStatus::Done, vec![]);
+            return;
+        }
+        for _attempt in 0..INGEST_MAX_ATTEMPTS {
+            let item = (ij.text.clone(), ij.source_id.clone(), ij.captured_at_millis());
+            if self.ingest_batch_import(std::slice::from_ref(&item)).is_ok() {
+                let _ = queue.reply(&job.id, ObservationStatus::Done, vec![]);
+                return;
+            }
+        }
+        let _ = queue.reply(&job.id, ObservationStatus::Blocked, vec![]);
+    }
+
     // MARK: - Coordination + test seams
 
     /// Set (or replace) the `on_encoded` coordination callback. The orchestrator
@@ -745,6 +980,76 @@ fn run_ingest_drain_loop(
     }
     // Release the lease on clean exit so another process can take over without
     // waiting out the TTL.
+    if let Some(lease) = &lease {
+        lease.release();
+    }
+}
+
+/// The IMPORT poll drain loop body — the discrete bulk-import twin of
+/// `run_ingest_drain_loop`. Same shape: lease-guarded single drainer, on-mount
+/// crash-recovery reclaim, poll cadence. Differences: claims the `"import"`
+/// stream, ingests via `ingest_batch_import` (chunk + BM25 — no embed), and has
+/// NO vector-index publish step (the import drain writes no vectors; the import
+/// cycle's tail `Corpus::reindex` embeds + publishes once). Cold start: a crash
+/// mid-import leaves durable "cur" rows; the first lease acquire here reclaims
+/// them to "new" and the import resumes where it died.
+fn run_import_drain_loop(
+    corpus: Arc<Corpus>,
+    queue: Arc<IngestQueue>,
+    stop: Arc<AtomicBool>,
+    lease: Option<DrainLease>,
+) {
+    let mut held_lease_at: Option<f64> = None;
+    let mut reclaimed_on_mount = false;
+    while !stop.load(Ordering::SeqCst) {
+        if let Some(lease) = &lease {
+            let now = wall_now_secs();
+            let refresh_due = held_lease_at
+                .map(|t| now - t >= DRAIN_LEASE_HEARTBEAT_SECS)
+                .unwrap_or(true);
+            if refresh_due {
+                if lease.try_acquire(now) {
+                    held_lease_at = Some(now);
+                    if !reclaimed_on_mount {
+                        reclaimed_on_mount = true;
+                        match queue.reclaim_in_flight_for_stream(&import_stream_id()) {
+                            Ok(n) if n > 0 => {
+                                eprintln!(
+                                    "mootx01 import drain: reclaimed {} orphaned in-flight job(s) — prior import drainer died mid-ingest",
+                                    n
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "mootx01 import drain: reclaim_in_flight_for_stream failed: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    // Another process holds a fresh import lease — warm standby.
+                    held_lease_at = None;
+                    std::thread::sleep(Duration::from_secs(3));
+                    continue;
+                }
+            } else if let Some(held_at) = held_lease_at {
+                if now - held_at >= DRAIN_LEASE_HEARTBEAT_SECS {
+                    lease.heartbeat(now);
+                    held_lease_at = Some(now);
+                }
+            }
+        }
+        // Errors are non-fatal: the next pass / the import cycle reconciles.
+        match corpus.drain_import_with_queue(&queue) {
+            Ok(n) if n > 0 => {
+                continue; // spin-drain the rest of the burst
+            }
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
     if let Some(lease) = &lease {
         lease.release();
     }

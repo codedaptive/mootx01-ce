@@ -674,10 +674,25 @@ enum TeachmeGuides {
 
         Post-import (AUTOMATIC — do NOT tell the user to run reindex/dream):
         the import triggers its own indexing in the background. It enqueues the
-        encode/index work and the encode drain turns it into the BM25 + vector
-        lanes; the resident daemon's dreaming duty builds the association matrix
+        encode/index work, the encode drain turns it into the BM25 + vector
+        lanes, and then it retrains the corpus embedding-basis on the WHOLE
+        import; the resident daemon's dreaming duty builds the association matrix
         on its cadence. Poll moot_drain_status to watch the encode queue
-        converge. moot_reindex and moot_dream remain available to re-trigger on
+        converge.
+
+        RECALL LIGHTS UP IN STAGES — this matters for what you can trust right
+        after an import: keyword (exact-term) and structured (wing/room) recall
+        work almost immediately, but full SEMANTIC / vector recall (meaning-based
+        RAG search) is available only AFTER the basis retrain finishes. A
+        just-imported term that appears only in a later chunk batch reads
+        dense_lane:dark:vocabMiss until the retrain republishes the basis with
+        the full vocabulary. So on a fresh import be patient: poll
+        moot_drain_status until idle before relying on semantic search over the
+        imported memories, and tell the user that deep meaning-based recall over
+        a fresh import becomes available shortly after import (tens of seconds to
+        a few minutes on a large one), not instantly.
+
+        moot_reindex and moot_dream remain available to re-trigger on
         demand but are NOT a required follow-up step. (Running WITHOUT a resident
         daemon? Then run moot_dream yourself when you want matrix-aware recall /
         distillation — only the resident builds the matrix automatically.)
