@@ -1297,6 +1297,95 @@ impl Corpus {
     /// degenerate basis. Every subsequent batch (basis frozen) skips the bootstrap.
     ///
     /// Each item is `(text, source_id, now_millis)`.
+    /// IMPORT-ONLY ingest — the DISCRETE bulk-import drain path, kept separate
+    /// from `ingest_batch` (which the near-realtime daily-driving encode drain
+    /// uses for live single captures). This does ONLY chunk + bundle + BM25 +
+    /// source-map + maintained-counts (Windows 1 & 2 of `ingest_batch`). It does
+    /// NOT bootstrap-train the basis (Phase 1b) and does NOT embed (Phase 2 /
+    /// add_payloads): a bulk import re-trains the basis on the WHOLE corpus and
+    /// embeds every chunk ONCE at the end (`Corpus::reindex`), so the encode
+    /// drain's embed-now / bootstrap-train-as-you-go work — correct for a single
+    /// live capture — is pure repeated waste for an import. Keeping the two paths
+    /// discrete leaves daily-driving `ingest_batch` untouched.
+    pub fn ingest_batch_import(&self, items: &[(String, String, i64)]) -> CorpusKitResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // BM25 index work deferred to window 2: (chunk_id, tokens, now_secs_str).
+        let mut index_jobs: Vec<(String, Vec<String>, String)> = Vec::new();
+
+        // Window 1 — storage connection (bundle insert + source reactivation +
+        // maintained-counts fold), committed per COMMIT_CHUNK_ITEMS so the held
+        // write lock stays bounded (same rationale as ingest_batch Window 1).
+        let row_store = self.storage.row_store();
+        for item_chunk in items.chunks(COMMIT_CHUNK_ITEMS) {
+            row_store
+                .begin_transaction()
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+            let res = (|| -> CorpusKitResult<()> {
+                for (text, source_id, now_millis) in item_chunk {
+                    let chunks = chunk_with_default_hlc(
+                        text,
+                        source_id,
+                        ChunkerConfiguration::default(),
+                        *now_millis,
+                    );
+                    if !chunks.is_empty() {
+                        self.removed_source_store.clear_removed(source_id)?;
+                        let inserted_chunks = self.bundle_store.insert(&chunks)?;
+                        let now_str = format!("{}", now_millis / 1000);
+                        for chunk in &chunks {
+                            let tokens = default_keyword_tokens(&chunk.text);
+                            index_jobs.push((chunk.id.to_string(), tokens, now_str.clone()));
+                        }
+                        if let Ok(mut csm) = self.chunk_source_map.lock() {
+                            for chunk in &chunks {
+                                csm.insert(chunk.id, source_id.clone());
+                            }
+                        }
+                        self.fold_chunks_into_counts(&inserted_chunks)?;
+                    }
+                }
+                Ok(())
+            })();
+            match res {
+                Ok(()) => row_store
+                    .commit_transaction()
+                    .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?,
+                Err(e) => {
+                    let _ = row_store.rollback_transaction();
+                    return Err(e);
+                }
+            }
+        }
+
+        // Window 2 — BM25 sidecar (private connection), committed per chunk.
+        for job_chunk in index_jobs.chunks(COMMIT_CHUNK_ITEMS) {
+            self.inverted_index
+                .begin_batch()
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+            let res = (|| -> Result<(), rusqlite::Error> {
+                for (chunk_id, tokens, now_str) in job_chunk {
+                    self.inverted_index.index(chunk_id, tokens, now_str)?;
+                }
+                Ok(())
+            })();
+            match res {
+                Ok(()) => self
+                    .inverted_index
+                    .commit_batch()
+                    .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?,
+                Err(e) => {
+                    let _ = self.inverted_index.rollback_batch();
+                    return Err(CorpusKitError::StoreUnavailable(e.to_string()));
+                }
+            }
+        }
+        // NO bootstrap train, NO embed — Corpus::reindex trains on the full corpus
+        // and embeds every chunk ONCE after coverage completes.
+        Ok(())
+    }
+
     pub fn ingest_batch(&self, items: &[(String, String, i64)]) -> CorpusKitResult<()> {
         if items.is_empty() {
             return Ok(());
@@ -1654,22 +1743,46 @@ impl Corpus {
         let chunks = self.active_chunks()?;
         let filed_at_secs = now_millis / 1000;
 
-        // Fan out: refresh every held provider slot. For N=1 this loops once over
-        // the default slot — byte-identical to the pre-6a-iii reindex. Mirrors
-        // Swift's `Corpus.reindex` per-slot loop.
-        for slot_index in 0..self.slots.len() {
-            if self.slots[slot_index].fresh_basis_blob.is_some() {
-                // Train a FRESH basis on the full corpus snapshot and install the
-                // trained provider for this slot. Training fresh (not in place) is
-                // required because train_on_corpus is additive — see
-                // ProviderSlot::fresh_basis_blob.
-                self.train_and_persist_basis(slot_index, &chunks, filed_at_secs)?;
+        // Phase 1 — train every trainable slot CONCURRENTLY. The five-signal
+        // default carries FOUR trainable providers (RI / PPMI / LSA / NMF) whose
+        // trainings are independent computations over the same chunk snapshot:
+        // each touches only ITS slot's counts accumulator + serving handle (both
+        // per-slot Mutexes), and persists via single-statement upserts serialized
+        // by the storage mutex. Running them serially made a large reindex wait
+        // ΣT(train) on one core with LSA's SVD + NMF's ALS dominating; concurrent
+        // slots wait max(T) instead. Per-slot output is byte-identical to the
+        // serial loop — the fixed-sweep kernels are untouched (ADR-022) and no
+        // slot reads another's state. LSA and NMF each derive the ADR-022 reduced
+        // vocabulary with the same pure deterministic selection, so concurrent
+        // duplicate computation of it is benign (identical artifact). For N=1
+        // this spawns one thread — same work, same result as the plain call.
+        std::thread::scope(|scope| -> CorpusKitResult<()> {
+            let chunks_ref = &chunks;
+            let mut handles = Vec::new();
+            for slot_index in 0..self.slots.len() {
+                if self.slots[slot_index].fresh_basis_blob.is_some() {
+                    // Train a FRESH basis on the full corpus snapshot and install
+                    // the trained provider for this slot. Training fresh (not in
+                    // place) is required because train_on_corpus is additive — see
+                    // ProviderSlot::fresh_basis_blob.
+                    handles.push(scope.spawn(move || {
+                        self.train_and_persist_basis(slot_index, chunks_ref, filed_at_secs)
+                    }));
+                }
             }
+            for h in handles {
+                h.join().expect("slot train thread panicked")?;
+            }
+            Ok(())
+        })?;
 
-            // Re-embed every chunk under this slot's (now possibly retrained)
-            // provider, replacing stale vectors. Done whether or not a retrain
-            // occurred: for a non-trainable slot (no factory blob) reindex is a
-            // pure vector refresh under the current basis.
+        // Phase 2 — re-embed every chunk under each slot's (now possibly
+        // retrained) provider, replacing stale vectors. Done whether or not a
+        // retrain occurred: for a non-trainable slot (no factory blob) reindex is
+        // a pure vector refresh under the current basis. Serial per slot: each
+        // re-embed already fans its embed compute across all cores and funnels
+        // one bulk single-writer transaction (replace_model_vectors).
+        for slot_index in 0..self.slots.len() {
             self.reembed_chunks(slot_index, &chunks, filed_at_secs)?;
         }
 
@@ -1756,50 +1869,95 @@ impl Corpus {
         chunks: &[Chunk],
         filed_at_secs: i64,
     ) -> CorpusKitResult<()> {
+        // Batch size for the PARALLEL re-embed. Fixed (not n/cap) on purpose: it
+        // makes a corpus produce MORE batches than cores, so a slow batch cannot
+        // stall the join the way exact per-core slices can (better load balancing).
+        // ~3000 amortizes per-batch overhead while a realistic import (tens of
+        // thousands of chunks) still fans across every core. Also the natural unit
+        // for a future chunked-commit write. Thread count scales as
+        // ceil(len / REEMBED_BATCH_SIZE); this is the tuning knob.
+        const REEMBED_BATCH_SIZE: usize = 3000;
+
         let guard = self.slots[slot_index]
             .handle
             .lock()
             .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))?;
         let provider = guard.provider();
         let model_id = provider.model_id().to_string();
-        let mut batch: Vec<VectorPayloadInput> = Vec::with_capacity(chunks.len() * 2);
-        for chunk in chunks {
-            // Delete-all before re-adding so a chunk that already had vectors
-            // under a previous basis ends up with exactly the new vectors, not a
-            // mix. delete_all_vectors clears both lanes (v0 binary + v1 float).
-            // The re-adds are batched below.
-            self.vector_store
-                .delete_all_vectors(&chunk.id.to_string(), &model_id)
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-            // Single inference pass (see ingest): embed_pair returns the engram
-            // and float vector from ONE computation; compute-then-project
-            // providers override it.
-            let (engram, floats) = provider
-                .embed_pair(&chunk.text)
-                .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))?;
-            batch.push(VectorPayloadInput {
-                item_id: chunk.id.to_string(),
-                vector_index: 0,
-                payload: VectorPayload::from_engram(&engram),
-                model_id: model_id.clone(),
-                model_version: provider.model_version().to_string(),
-                filed_at_unix_secs: filed_at_secs,
-            });
-            if !floats.is_empty() {
-                batch.push(VectorPayloadInput {
-                    item_id: chunk.id.to_string(),
-                    vector_index: 1,
-                    payload: VectorPayload::from_f32(&floats),
-                    model_id: model_id.clone(),
-                    model_version: provider.model_version().to_string(),
-                    filed_at_unix_secs: filed_at_secs,
-                });
-            }
-        }
-        // Single batched write: O(1) sidecar + index rebuild for the whole
-        // re-embed, after all per-chunk deletes have cleared the old rows.
+        let model_version = provider.model_version().to_string();
+        // Shared, thread-safe refs captured by the embed workers. `provider` is
+        // `&dyn EmbeddingProvider` (Send + Sync — embed_pair is a pure function of
+        // (text, fixed basis), so concurrent &self calls are safe); the model
+        // strings are borrowed read-only. Same sharing pattern as ingest_batch's
+        // parallel embed phase.
+        let provider_ref = provider;
+        let model_id_ref = &model_id;
+        let model_version_ref = &model_version;
+
+        // Phase 1 (PARALLEL): embed each fixed-size CONTIGUOUS batch on its own
+        // scoped worker. Batches are joined in spawn order and flattened, so the
+        // resulting payload vector is byte-identical to the serial path —
+        // determinism / cross-port conformance is preserved; only the wall-clock
+        // changes (fan-out across cores instead of one core).
+        let batch_rows: Vec<Vec<VectorPayloadInput>> = std::thread::scope(
+            |scope| -> Result<Vec<Vec<VectorPayloadInput>>, CorpusKitError> {
+                let handles: Vec<_> = chunks
+                    .chunks(REEMBED_BATCH_SIZE)
+                    .map(|batch| {
+                        scope.spawn(move || -> Result<Vec<VectorPayloadInput>, CorpusKitError> {
+                            let mut rows: Vec<VectorPayloadInput> =
+                                Vec::with_capacity(batch.len() * 2);
+                            for chunk in batch {
+                                // Single inference pass: embed_pair returns the engram
+                                // and float vector from ONE computation.
+                                let (engram, floats) =
+                                    provider_ref.embed_pair(&chunk.text).map_err(|e| {
+                                        CorpusKitError::EmbeddingFailed(format!("{:?}", e))
+                                    })?;
+                                rows.push(VectorPayloadInput {
+                                    item_id: chunk.id.to_string(),
+                                    vector_index: 0,
+                                    payload: VectorPayload::from_engram(&engram),
+                                    model_id: model_id_ref.clone(),
+                                    model_version: model_version_ref.clone(),
+                                    filed_at_unix_secs: filed_at_secs,
+                                });
+                                if !floats.is_empty() {
+                                    rows.push(VectorPayloadInput {
+                                        item_id: chunk.id.to_string(),
+                                        vector_index: 1,
+                                        payload: VectorPayload::from_f32(&floats),
+                                        model_id: model_id_ref.clone(),
+                                        model_version: model_version_ref.clone(),
+                                        filed_at_unix_secs: filed_at_secs,
+                                    });
+                                }
+                            }
+                            Ok(rows)
+                        })
+                    })
+                    .collect();
+                // Join in spawn order → batches reassemble in chunk order.
+                let mut all: Vec<Vec<VectorPayloadInput>> = Vec::with_capacity(handles.len());
+                for h in handles {
+                    all.push(h.join().expect("re-embed worker thread panicked")?);
+                }
+                Ok(all)
+            },
+        )?;
+        drop(guard);
+
+        // Phase 2 (SERIAL — single-writer): clear the model's ENTIRE vector set in
+        // ONE bulk pass — one DB delete + one O(n) resident-array sweep — then add
+        // the freshly-embedded batch under a single transaction. The old per-chunk
+        // delete_all_vectors scanned the whole resident array on EVERY chunk, so
+        // re-embedding a corpus was O(n²) (the dominant cost of a large reindex);
+        // clearing the whole model once is O(n). A full clear + re-add also ends
+        // each chunk with exactly the new vectors (no stale rows from a prior basis
+        // in either lane), preserving the delete-first invariant.
+        let batch: Vec<VectorPayloadInput> = batch_rows.into_iter().flatten().collect();
         self.vector_store
-            .add_payloads(&batch)
+            .replace_model_vectors(&model_id, &batch)
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
         Ok(())
     }

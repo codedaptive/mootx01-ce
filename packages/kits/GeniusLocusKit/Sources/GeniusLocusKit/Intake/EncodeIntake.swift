@@ -414,14 +414,21 @@ public extension GeniusLocusKit {
                 ? Array(uncappedBatch.prefix(Self.reindexMaxJobs))
                 : uncappedBatch
 
-            // Batch-enqueue in chunks so the filesystem backend fsyncs new/ ONCE
-            // per chunk instead of per job (the per-job fsync was the last
-            // full-core bottleneck of a bulk import).
+            // Batch-enqueue in chunks so the backend commits new/ ONCE per chunk
+            // instead of per job. IMPORT stream, not the daily-driving encode
+            // stream: the discrete import drain worker claims these jobs and
+            // ingests them via ingestBatchImport — chunk + BM25 only, no
+            // bootstrap train, no embed. The encode drain's embed-now /
+            // train-as-you-go work is correct for a live single capture but pure
+            // repeated waste for a bulk import, whose basis is retrained on the
+            // WHOLE corpus and whose chunks are embedded ONCE at the tail below.
+            // Same durable queue.sqlite, so a crash mid-import cold-starts: the
+            // import worker reclaims orphaned rows and resumes.
             let enqueueChunk = 1024
             var offset = 0
             while offset < batch.count {
                 let end = min(offset + enqueueChunk, batch.count)
-                try await corpus.enqueueIngestBatch(Array(batch[offset..<end]))
+                try await corpus.enqueueIngestBatchImport(Array(batch[offset..<end]))
                 offset = end
             }
             total += batch.count
@@ -431,24 +438,35 @@ public extension GeniusLocusKit {
             // Wait for THIS pass to reach TRUE idle before re-collecting, so the
             // next collect sees the batch's chunks as indexed and does NOT
             // re-enqueue still-in-flight jobs (that duplicate-enqueue stalls the
-            // encode).
+            // drain).
             //
-            // POLL, do not pump. Corpus mounts a single lease-holding background
-            // drain worker (runIngestDrainLoop) that owns the write connection AND
-            // the deferred-index publish. Calling awaitIngestDrain here would spin
-            // a SECOND drainer through the same storage — redundant with the worker
-            // and, on the Rust twin, a "transaction within a transaction" fault on
-            // the shared connection. So the loop only observes ingestQueueDepth (a
-            // read-only frontier probe) and lets the single worker do all draining
-            // and publishing. indexedSourceIDs keys on chunk presence (written
-            // inside the drain, BEFORE publish), so (0, 0) depth means the pass is
-            // fully indexed and the next collect returns only the remainder.
+            // POLL, do not pump — the single lease-holding import worker
+            // (runImportDrainLoop) owns the drain; this loop only observes the
+            // read-only import-stream depth probe. indexedSourceIDs keys on chunk
+            // presence (written inside the drain), so (0, 0) depth means the pass
+            // is fully indexed and the next collect returns only the remainder.
             while true {
-                let depth = (try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0)
+                let depth = (try? await corpus.importQueueDepth()) ?? (pending: 0, inFlight: 0)
                 if depth.pending == 0 && depth.inFlight == 0 { break }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
+
+        // Full-corpus embedding-basis retrain, so the DENSE (semantic / vector /
+        // RAG) recall lane is query-ready the moment the import cycle completes.
+        //
+        // The loop above reaches full CHUNK coverage: every drawer is chunked, BM25
+        // (lexical) indexed, and embedded — but embedded against whatever basis was
+        // live when its batch drained, which for a cold import is the FIRST-batch
+        // bootstrap basis (vocabulary limited to the first pass's terms). A query
+        // term that appears only in a later batch reads dense_lane:dark:vocabMiss
+        // until the basis is retrained on the WHOLE corpus and every chunk
+        // re-embedded into that space. Corpus.reindex does exactly that (train the
+        // basis over all active chunks, then re-embed → one index rebuild). Lexical
+        // (BM25) and structured (Locus) recall are already live from chunk coverage;
+        // THIS is the step that lights up semantic recall, so it belongs at the tail
+        // of the import cycle, not on a later cadence.
+        try await corpus.reindex(now: now)
 
         // NT_R1: deferred Merkle full-tree rollup, once, after full coverage. The
         // O(N) full-tree pass is safe on an already-current tree (idempotent).

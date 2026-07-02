@@ -322,6 +322,16 @@ impl EstateCoordinator {
         Ok(Some((corpus, jobs)))
     }
 
+    /// The estate's registered `Corpus` — the semantic lane handle (BM25 + vector),
+    /// or `None` for a locus-only estate. Exposed for the import cycle's tail-end
+    /// full-corpus basis retrain (`run_reindex_responsive`), which calls
+    /// `Corpus::reindex` on the shared `Arc` OUTSIDE the coordinator lock so the
+    /// long full re-embed does not block other verbs while it runs. A thin public
+    /// wrapper over the crate-internal `corpus_for`.
+    pub fn corpus_handle(&self, handle: &EstateHandle) -> Option<Arc<Corpus>> {
+        self.corpus_for(handle)
+    }
+
     /// The deferred Merkle full-tree rollup that follows a reindex (NT_R1).
     /// Batch-capture paths (e.g. moot_palace_import) skip per-drawer rollup to
     /// avoid O(N²) work; this O(N) full-tree pass runs once and is idempotent on
