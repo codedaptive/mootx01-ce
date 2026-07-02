@@ -26,6 +26,7 @@ import Foundation
 import IntellectusLib
 import OSLog
 import PersistenceKit
+import PersistenceKitSQLite
 import QueueKit
 import SubstrateLib
 import SubstrateML
@@ -1208,6 +1209,169 @@ public actor Corpus {
     /// repeated waste for an import. Rust twin: `Corpus::ingest_batch_import`.
     func ingestBatchImport(_ items: [(text: String, sourceID: String, now: Date)]) async throws {
         guard !items.isEmpty else { return }
+        // EXT-4 SHARDED PIPELINE (durable SQLite estates): parallelize the
+        // compute AND the postings writes, serialize only the estate writer.
+        // Workers chunk + tokenize their slice OFF the actor and write its BM25
+        // postings into a PRIVATE shard file beside the estate (same install
+        // key — SQLiteShard applies it from the estate configuration, inside
+        // the kit); the single writer then bundles rows as usual and folds each
+        // shard in with ONE attach + sorted INSERT..SELECT (SQLiteStorage.mergeShard).
+        // The serial per-item path remains for non-SQLite estates.
+        if let sqlite = storage as? SQLiteStorage,
+           let estateURL = sqlite.configuration.backend.sqliteURLForShards {
+            try await ingestBatchImportSharded(items, sqlite: sqlite, estateURL: estateURL)
+            return
+        }
+        try await ingestBatchImportSerial(items)
+    }
+
+    /// Items per import shard worker. Fixed (not count/cores) so a 10k pass
+    /// yields more shards than cores — better load balancing (same rationale as
+    /// the re-embed batch size). Rust twin: `IMPORT_SHARD_ITEMS`.
+    private static let importShardItems = 2500
+
+    /// The EXT-4 sharded import body — see `ingestBatchImport`.
+    private func ingestBatchImportSharded(
+        _ items: [(text: String, sourceID: String, now: Date)],
+        sqlite: SQLiteStorage,
+        estateURL: URL
+    ) async throws {
+        let estateDir = estateURL.deletingLastPathComponent()
+        let configuration = sqlite.configuration
+
+        // Phase P — parallel workers: chunk + tokenize + shard-write per slice.
+        // Chunking uses a FRESH per-item HLC generator (matching the Rust import
+        // path's chunk_with_default_hlc): chunk ids are content-addressed v5
+        // UUIDs, so per-item parallel output is identical regardless of worker
+        // layout. Each worker owns one shard file.
+        var slices: [[(text: String, sourceID: String, now: Date)]] = []
+        var start = 0
+        while start < items.count {
+            let end = min(start + Self.importShardItems, items.count)
+            slices.append(Array(items[start..<end]))
+            start = end
+        }
+        typealias WorkerOut = (
+            index: Int,
+            shardURL: URL?,
+            perItem: [(sourceID: String, chunks: [Chunk])],
+            postings: [(itemID: String, tf: [String: Int], docLen: Int)]
+        )
+        let outs: [WorkerOut] = try await withThrowingTaskGroup(of: WorkerOut.self) { group in
+            for (i, slice) in slices.enumerated() {
+                group.addTask {
+                    let shardURL = estateDir.appendingPathComponent("import-shard-\(i).sqlite")
+                    let shard = try SQLiteShard(url: shardURL, configuration: configuration)
+                    try shard.exec(
+                        """
+                        CREATE TABLE IF NOT EXISTS iix_termfreqs (
+                            term     TEXT NOT NULL,
+                            item_id  TEXT NOT NULL,
+                            freq     INTEGER NOT NULL,
+                            PRIMARY KEY (term, item_id)
+                        );
+                        CREATE TABLE IF NOT EXISTS iix_doclens (
+                            item_id  TEXT NOT NULL PRIMARY KEY,
+                            length   INTEGER NOT NULL
+                        );
+                        """)
+                    var perItem: [(sourceID: String, chunks: [Chunk])] = []
+                    var postings: [(itemID: String, tf: [String: Int], docLen: Int)] = []
+                    var tfRows: [(term: String, itemID: String, freq: Int64)] = []
+                    var lenRows: [(itemID: String, len: Int64)] = []
+                    let tokenizer = CorpusDefaultTokenizer()
+                    for item in slice {
+                        var gen = HLCGenerator(nodeID: 1)
+                        let chunks = Chunker.chunk(
+                            text: item.text, sourceID: item.sourceID, hlcGenerator: &gen)
+                        for chunk in chunks {
+                            let tokens = tokenizer.keywordTokens(chunk.text)
+                            guard !tokens.isEmpty else { continue }
+                            var tf = [String: Int]()
+                            for t in tokens { tf[t, default: 0] += 1 }
+                            let itemID = chunk.id.uuidString
+                            for (term, freq) in tf {
+                                tfRows.append((term, itemID, Int64(freq)))
+                            }
+                            lenRows.append((itemID, Int64(tokens.count)))
+                            postings.append((itemID, tf, tokens.count))
+                        }
+                        perItem.append((item.sourceID, chunks))
+                    }
+                    // Sorted before insert so the shard b-tree builds in append
+                    // order and the merge's ORDER BY is a straight index scan.
+                    tfRows.sort { ($0.term, $0.itemID) < ($1.term, $1.itemID) }
+                    lenRows.sort { $0.itemID < $1.itemID }
+                    try shard.insert(
+                        table: "iix_termfreqs",
+                        columns: ["term", "item_id", "freq"],
+                        rows: tfRows.map { [.text($0.term), .text($0.itemID), .int($0.freq)] })
+                    try shard.insert(
+                        table: "iix_doclens",
+                        columns: ["item_id", "length"],
+                        rows: lenRows.map { [.text($0.itemID), .int($0.len)] })
+                    shard.close()
+                    return (i, shardURL, perItem, postings)
+                }
+            }
+            var collected: [WorkerOut] = []
+            for try await out in group { collected.append(out) }
+            return collected.sorted { $0.index < $1.index }
+        }
+
+        // Phase S — single writer. Window 1: bundle rows through the estate
+        // connection, committed per commitChunkItems (same bracket + same
+        // side-effects as the serial path: reactivation, source map, counts).
+        let rowStore = storage.rowStore
+        let allItems: [(sourceID: String, chunks: [Chunk])] = outs.flatMap { $0.perItem }
+        var offset = 0
+        while offset < allItems.count {
+            let end = min(offset + Self.commitChunkItems, allItems.count)
+            try await rowStore.beginTransaction()
+            do {
+                for (sourceID, chunks) in allItems[offset..<end] {
+                    guard !chunks.isEmpty else { continue }
+                    try await removedSourceStore.clearRemoved(sourceID)
+                    let insertedChunks = try await bundleStore.insert(chunks)
+                    for chunk in chunks {
+                        chunkSourceMap[chunk.id] = chunk.sourceID
+                    }
+                    foldChunksIntoCounts(insertedChunks)
+                }
+                try await rowStore.commitTransaction()
+            } catch {
+                try? await rowStore.rollbackTransaction()
+                throw error
+            }
+            offset = end
+        }
+
+        // Shard merges: one attach + sorted INSERT..SELECT per shard (durable
+        // tables), then one in-memory fold of the worker-computed postings.
+        for out in outs {
+            if let shardURL = out.shardURL {
+                try await sqlite.mergeShard(url: shardURL, copySQL: [
+                    """
+                    INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq)
+                      SELECT term, item_id, freq FROM shard.iix_termfreqs
+                      ORDER BY term, item_id
+                    """,
+                    """
+                    INSERT OR REPLACE INTO iix_doclens (item_id, length)
+                      SELECT item_id, length FROM shard.iix_doclens
+                      ORDER BY item_id
+                    """
+                ])
+                SQLiteShard.removeFile(at: shardURL)
+            }
+            await invertedIndex.foldPostings(out.postings)
+        }
+        // NO bootstrap train, NO embed — `reindex` trains on the full corpus and
+        // embeds every chunk ONCE after coverage completes.
+    }
+
+    /// The serial import body — non-SQLite estates only.
+    private func ingestBatchImportSerial(_ items: [(text: String, sourceID: String, now: Date)]) async throws {
         let rowStore = storage.rowStore
         var offset = 0
         while offset < items.count {
@@ -2663,5 +2827,18 @@ private struct CorpusTextProvider: EmbeddingProvider {
         let tokens = tokenizer.tokenize(text)
         let floats = try await inference(tokens)
         return (FloatSimHash.project(vector: floats, seed: projectionSeed), floats)
+    }
+}
+
+// MARK: - BackendConfiguration shard helper (EXT-4)
+
+extension BackendConfiguration {
+    /// Extract the SQLite URL for import-shard placement (the shard files live
+    /// beside the estate so the install-key discipline applies uniformly).
+    /// Returns nil for non-SQLite backends — the import then takes the serial
+    /// path. Internal twin of the file-private helper in CorpusIngestQueue.swift.
+    var sqliteURLForShards: URL? {
+        if case let .sqlite(url, _) = self { return url }
+        return nil
     }
 }
