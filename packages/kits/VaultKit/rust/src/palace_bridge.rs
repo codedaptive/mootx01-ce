@@ -24,9 +24,13 @@
 //!
 //! ## Time convention
 //!
-//! `now` is milliseconds-since-epoch (the bridge convention).
-//! Internal calls that expect epoch-seconds divide by 1000 (matching the
-//! VaultBridge / DrawerMapping convention, e.g. `now / 1000`).
+//! `now` is epoch-SECONDS (from `wall_now`), which is exactly what every sink
+//! here — capture / capture_batch, add_kg_fact, and the diary receipt — expects,
+//! so it is passed DIRECTLY, never divided. A prior version wrongly assumed `now`
+//! was milliseconds and divided by 1000, landing every imported drawer's filed_at
+//! and every KG-fact/receipt timestamp in 1970. (event_time from the palace's
+//! `filed_at` IS milliseconds — `iso8601_to_ms` — so it, and only it, divides by
+//! 1000 to reach the seconds-typed `CaptureFrame.event_time`.)
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -219,8 +223,13 @@ impl<'a> PalaceBridge<'a> {
                 }
                 if !batch_frames.is_empty() {
                     let frames: Vec<CaptureFrame> = batch_frames.iter().map(|(f, _)| f.clone()).collect();
+                    // `now` (wall_now) is already epoch-SECONDS, which is exactly
+                    // what capture expects (it multiplies by 1000 for the HLC).
+                    // The stream and KG paths pass `now` directly and are correct;
+                    // the earlier `now / 1000` here double-divided → filed_at landed
+                    // in 1970. Pass `now` directly for parity with those paths.
                     self.coordinator
-                        .capture_batch(handle, frames, now / 1000)
+                        .capture_batch(handle, frames, now)
                         .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
                     for (_, is_update) in &batch_frames {
                         if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
@@ -454,7 +463,11 @@ impl<'a> PalaceBridge<'a> {
             import_exportability(metadata.get("exportability").map(String::as_str), floored);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
-        frame.event_time = Some(event_time_ms.unwrap_or(now));
+        // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms); CaptureFrame.event_time
+        // is epoch-SECONDS (ADR-004), so convert ms→s. `now` is already seconds
+        // (wall_now). Without the /1000 the ms magnitude overflows the year field
+        // (→ 9999-12-31) when the drawer store serializes it as seconds.
+        frame.event_time = Some(event_time_ms.map(|ms| ms / 1000).unwrap_or(now));
         frame.wing = wing;
         let is_update = existing_lineage_ids.contains(&lineage_id);
         Some((frame, is_update))
@@ -543,7 +556,11 @@ impl<'a> PalaceBridge<'a> {
             import_exportability(metadata.get("exportability").map(String::as_str), floored);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
-        frame.event_time = Some(event_time_ms.unwrap_or(now));
+        // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms); CaptureFrame.event_time
+        // is epoch-SECONDS (ADR-004), so convert ms→s. `now` is already seconds
+        // (wall_now). Without the /1000 the ms magnitude overflows the year field
+        // (→ 9999-12-31) when the drawer store serializes it as seconds.
+        frame.event_time = Some(event_time_ms.map(|ms| ms / 1000).unwrap_or(now));
         frame.wing = wing;
 
         let is_update = existing_lineage_ids.contains(&lineage_id);
@@ -666,7 +683,11 @@ impl<'a> PalaceBridge<'a> {
         frame.exportability = import_exportability(None, sensitivity);
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
-        frame.event_time = Some(event_time_ms.unwrap_or(now));
+        // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms); CaptureFrame.event_time
+        // is epoch-SECONDS (ADR-004), so convert ms→s. `now` is already seconds
+        // (wall_now). Without the /1000 the ms magnitude overflows the year field
+        // (→ 9999-12-31) when the drawer store serializes it as seconds.
+        frame.event_time = Some(event_time_ms.map(|ms| ms / 1000).unwrap_or(now));
         frame.wing = Some("knowledge_graph".to_owned());
 
         let is_update = existing_lineage_ids.contains(&lineage_id);
@@ -757,7 +778,7 @@ impl<'a> PalaceBridge<'a> {
         }
 
         self.coordinator
-            .add_kg_fact(handle, subject, predicate, object, effective_src, now / 1000)
+            .add_kg_fact(handle, subject, predicate, object, effective_src, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         // Record the signature so within-call duplicates are caught on subsequent
         // iterations without a round-trip to the estate.
@@ -768,12 +789,12 @@ impl<'a> PalaceBridge<'a> {
         // stored columns for.
         if let Some(vf) = valid_from.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_from", vf, effective_src, now / 1000)
+                .add_kg_fact(handle, id, "temporal:valid_from", vf, effective_src, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(vt) = valid_to.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_to", vt, effective_src, now / 1000)
+                .add_kg_fact(handle, id, "temporal:valid_to", vt, effective_src, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(conf) = confidence_text.and_then(|s| s.parse::<f64>().ok()) {
@@ -784,7 +805,7 @@ impl<'a> PalaceBridge<'a> {
                     "temporal:confidence",
                     &conf.to_string(),
                     effective_src,
-                    now / 1000,
+                    now,
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -947,7 +968,7 @@ impl<'a> PalaceBridge<'a> {
             "vault-receipt".to_string(),
             "wing_vaultkit".to_string(),
             "receipts".to_string(),
-            now / 1000,
+            now,
             "no-embedding".to_string(),
         );
         entry.operational_bitmap = bitmap;
