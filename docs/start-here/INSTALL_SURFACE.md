@@ -62,6 +62,8 @@ tools are installed but whose AI does not instinctively reach for them.
 | Platform | Product Route | Notes |
 |---|---|---|
 | macOS | Swift product install | Full local product path; launchd may be used for background services. |
+| macOS (.pkg) | Installer package from the release assets | `mootx01-<version>-macos-<arch>.pkg`; signed + notarized in CI. Post-install setup assistant handles client wiring. |
+| macOS / Linux (Homebrew) | `brew install codedaptive/mootx01-ce/mootx01` | Tap: `codedaptive/homebrew-mootx01-ce`. Installs prebuilt release binaries; run `mootx01 install` afterward to wire clients. |
 | Linux | Rust product route where provided | Use the Rust/Linux release lane. Service behavior may use user-level systemd when implemented. |
 | Windows | Rust/PowerShell route where provided | Use the repository's Windows install script and current Rust binary if available. |
 | Source build | Developer route | Use package-specific build instructions; do not assume product install behavior. |
