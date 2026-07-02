@@ -1795,33 +1795,68 @@ fn run_reindex_responsive(
     handle: &genius_locus_kit::handle::EstateHandle,
     now: i64,
 ) -> Result<usize, String> {
-    let (corpus, jobs) = {
-        let mut c = coord_arc
-            .lock()
-            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
-        match c
-            .collect_reindex_jobs(handle)
-            .map_err(|e| describe_verb_dispatch_error(&e))?
-        {
-            Some(plan) => plan,
-            None => return Ok(0), // no Corpus registered — nothing to reindex
-        }
-    };
-    // Lock-free: enqueue on the Corpus's own queue (independent of the coord
-    // Mutex), so concurrent HTTP handlers acquire the coord lock between calls
-    // instead of blocking for the whole enqueue. Batch-enqueue in chunks so the
-    // filesystem backend fsyncs new/ ONCE per chunk instead of per job (the
-    // per-job fsync was the last full-core bottleneck of a bulk import), while
-    // the chunk bounds the brief queue-lock / fsync window against concurrent
-    // live captures.
+    // Lock-free enqueue on the Corpus's own queue (independent of the coord
+    // Mutex), chunked so the filesystem backend fsyncs new/ ONCE per chunk
+    // instead of per job (the per-job fsync was the last full-core bottleneck of
+    // a bulk import), while the chunk bounds the brief queue-lock / fsync window
+    // against concurrent live captures.
     const ENQUEUE_CHUNK: usize = 1024;
-    let mut enqueued = 0usize;
-    for chunk in jobs.chunks(ENQUEUE_CHUNK) {
-        if corpus.enqueue_ingest_batch(chunk).is_ok() {
-            enqueued += chunk.len();
+    let mut total = 0usize;
+    // Auto-continuation loop: collect_reindex_jobs caps each pass at
+    // REINDEX_MAX_JOBS. Enqueue the pass LOCK-FREE, poll its drain to idle
+    // (lock-free — the Corpus queue is independent of the coord Mutex, so
+    // concurrent HTTP handlers are never blocked while a pass encodes), then
+    // re-collect: the drained pass is now indexed, so the next collect returns
+    // only the remainder. Repeat until no unindexed drawer remains — a large
+    // import reaches FULL coverage with no operator follow-up, at any corpus
+    // size, while each pass stays bounded. The 1000-pass ceiling is a backstop
+    // against a drawer that never indexes (e.g. an encode error) spinning
+    // forever (covers 10M drawers at the 10k cap).
+    for _pass in 0..1000 {
+        let (corpus, jobs) = {
+            let mut c = coord_arc
+                .lock()
+                .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+            match c
+                .collect_reindex_jobs(handle)
+                .map_err(|e| describe_verb_dispatch_error(&e))?
+            {
+                Some(plan) => plan,
+                None => return Ok(total), // no Corpus registered — nothing to reindex
+            }
+        };
+        if jobs.is_empty() {
+            break; // every active drawer is indexed — done
+        }
+        for chunk in jobs.chunks(ENQUEUE_CHUNK) {
+            if corpus.enqueue_ingest_batch(chunk).is_ok() {
+                total += chunk.len();
+            }
+        }
+        // Wait for THIS pass to reach TRUE idle before re-collecting, so the next
+        // collect sees the batch's chunks as indexed and does NOT re-enqueue
+        // still-in-flight jobs (that duplicate-enqueue was the encode stall).
+        //
+        // POLL, do not pump. The corpus mounts a single lease-holding background
+        // drain worker (corpus-ingest-drain) that owns the write connection AND
+        // the deferred-index publish. Calling await_ingest_drain here would spin a
+        // SECOND in-process drainer on that same shared SQLite connection — two
+        // concurrent ingest_batch BEGINs on one connection is a "cannot start a
+        // transaction within a transaction" fault that forces the slow per-job
+        // fallback. So the loop only observes ingest_queue_depth (a read-only
+        // frontier probe) and lets the single worker do all draining and
+        // publishing. collect_reindex_jobs keys on chunk presence (written inside
+        // the drain, BEFORE publish), so (0, 0) depth means the pass is fully
+        // indexed and the next collect returns only the remainder.
+        loop {
+            match corpus.ingest_queue_depth() {
+                Ok((0, 0)) => break,
+                Ok(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(_) => break, // depth probe fault — stop rather than spin
+            }
         }
     }
-    // Brief re-lock for the deferred Merkle full-tree rollup.
+    // Brief re-lock for the deferred Merkle full-tree rollup, once, after coverage.
     {
         let mut c = coord_arc
             .lock()
@@ -1829,7 +1864,7 @@ fn run_reindex_responsive(
         c.rollup_after_reindex(handle, now)
             .map_err(|e| describe_verb_dispatch_error(&e))?;
     }
-    Ok(enqueued)
+    Ok(total)
 }
 
 fn run_reindex(
@@ -1838,11 +1873,28 @@ fn run_reindex(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let now = wall_now();
-    // Responsive (lock-free enqueue) so a large reindex does not freeze the daemon.
-    match run_reindex_responsive(&estate.coord, &estate.handle, now) {
-        Ok(enqueued) => Ok(text_result(&format!("reindex: enqueued {enqueued} drawers for encoding"))),
-        Err(e) => Ok(error_result(&e)),
-    }
+    // reindex now AUTO-CONTINUES (enqueue a pass → await its drain → re-collect)
+    // to FULL coverage, which can take minutes on a large estate. Run it on a
+    // detached worker so the HTTP handler returns immediately; the resident
+    // daemon's encode-drain converges in the background. Poll moot_drain_status
+    // to watch it finish. (Mirrors the palace-import background-processing model —
+    // no repeated moot_reindex calls are needed, at any corpus size.)
+    let bg_coord = std::sync::Arc::clone(&estate.coord);
+    let bg_handle = estate.handle;
+    std::thread::Builder::new()
+        .name("reindex-backfill".into())
+        .spawn(move || {
+            match run_reindex_responsive(&bg_coord, &bg_handle, now) {
+                Ok(n) => eprintln!(
+                    "reindex: background backfill complete — {n} drawers indexed to full coverage"
+                ),
+                Err(e) => eprintln!("reindex: background backfill failed: {e}"),
+            }
+        })
+        .ok();
+    Ok(text_result(
+        "reindex started: backfilling every unindexed drawer to full coverage in the background — poll moot_drain_status to watch the encode queue converge",
+    ))
 }
 
 /// `moot_drain_status` — report every long-running background drain the estate
@@ -1951,7 +2003,7 @@ fn run_palace_import(
             // calls during this 49k-drawer reindex (see run_reindex_responsive).
             match run_reindex_responsive(&bg_coord, &bg_handle, now) {
                 Ok(n) => eprintln!(
-                    "palace import: background processing complete — {n} drawers queued for encode/index, Merkle rolled up"
+                    "palace import: background processing complete — {n} drawers indexed to full coverage (auto-continued reindex), Merkle rolled up"
                 ),
                 Err(e) => eprintln!("palace import: background reindex failed: {e}"),
             }

@@ -325,9 +325,11 @@ public extension GeniusLocusKit {
     ///
     /// Rust parity: `REINDEX_MAX_JOBS` in GeniusLocusKit/rust/src/intake.rs.
     ///
-    /// Callers that need to reindex more than 10,000 drawers call `reindexMissing`
-    /// multiple times; each call skips already-indexed drawers (idempotent), so
-    /// repeated calls converge to full coverage without a single unbounded burst.
+    /// `reindexMissing` loops internally (enqueue a pass → drain it to idle →
+    /// re-collect) to reach FULL coverage in a single call at any corpus size —
+    /// this cap only bounds each pass, not the total. 10,000 keeps each pass's
+    /// drain bounded (no memory blow-up from an unpublished vector window);
+    /// enqueuing the whole corpus at once instead stalled the encode.
     ///
     /// `static` because Swift extension properties must be static or computed;
     /// `internal` (not `private`) so the security-hardening tests can assert the
@@ -348,11 +350,12 @@ public extension GeniusLocusKit {
     /// `Corpus.indexedSourceIDs()`) are skipped. Calling this multiple times is
     /// safe — already-indexed drawers are never double-enqueued.
     ///
-    /// **Cap:** at most `reindexMaxJobs` (10,000) drawers are enqueued per call.
-    /// When truncation occurs, a structured warning is logged with the total
-    /// missing count so the caller knows to repeat the call. The cap prevents
-    /// a single large backfill from starving live captures of encode capacity
-    /// (secfix/c-glk-remaining Part 6 — local DoS hardening).
+    /// **Bounded per pass, auto-continued:** at most `reindexMaxJobs` (10,000)
+    /// drawers are enqueued per pass; the internal loop drains each pass to idle
+    /// and re-collects until every drawer is indexed, so ONE call reaches full
+    /// coverage regardless of estate size. The per-pass cap prevents a single
+    /// pass from starving live captures of encode capacity (secfix/c-glk-remaining
+    /// Part 6 — local DoS hardening).
     ///
     /// **No Corpus, no-op:** if no Corpus is registered for the estate (e.g. a
     /// `.locusOnly` estate), the call returns 0 immediately.
@@ -372,67 +375,86 @@ public extension GeniusLocusKit {
     ) async throws -> Int {
         // No Corpus → no semantic lane to feed. Return immediately.
         guard let corpus = corpusKits[handle] else { return 0 }
-
-        // Fetch the set of source IDs already indexed in the BundleStore.
-        // These are the drawer IDs that already have chunks and can be skipped.
-        let indexedIDs = try await corpus.indexedSourceIDs()
-
-        // Recall all active (non-tombstoned) drawers from the estate.
-        // .full hydration is required because we need the drawer content to
-        // enqueue the ingest payload. (.structured returns content = "")
         let estate = try estate(for: handle)
-        let allDrawers = try await estate.allDrawers()
-        let activeDrawers = allDrawers.filter { $0.tombstonedAt == nil }
 
-        // Collect the active, not-yet-indexed, non-empty drawers.
-        // The drawer's filedAt is the capture instant so vector filing timestamps
-        // are deterministic (not now). Hint drawers (AI_Charter_Hint room) are
-        // normal drawers — they encode like any other.
-        var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
-        for drawer in activeDrawers {
-            guard !drawer.content.isEmpty else { continue }          // nothing to encode
-            guard !indexedIDs.contains(drawer.id) else { continue }  // already indexed (idempotent)
-            uncappedBatch.append((text: drawer.content, sourceID: drawer.id, now: drawer.filedAt))
+        // Auto-continuation loop: each pass collects at most reindexMaxJobs
+        // missing drawers, enqueues them, then POLLS their drain to idle so the
+        // next pass sees them as indexed and moves to the remainder — repeating
+        // until none remain. A large import reaches FULL coverage with no operator
+        // follow-up, at any corpus size, while each pass stays bounded. The actor
+        // interleaves awaits, so the daemon stays responsive during the (possibly
+        // long) drain. The 1000-pass ceiling is a backstop against a drawer that
+        // never indexes (e.g. an encode error) spinning forever (covers 10M
+        // drawers at the 10k cap).
+        var total = 0
+        for _ in 0..<1000 {
+            // Fetch the set of source IDs already indexed in the BundleStore — the
+            // drawer IDs that already have chunks and can be skipped.
+            let indexedIDs = try await corpus.indexedSourceIDs()
+
+            // Recall all active (non-tombstoned) drawers. .full hydration is
+            // required because we need the content to enqueue the ingest payload.
+            let allDrawers = try await estate.allDrawers()
+            let activeDrawers = allDrawers.filter { $0.tombstonedAt == nil }
+
+            // Collect the active, not-yet-indexed, non-empty drawers. The drawer's
+            // filedAt is the capture instant so vector filing timestamps are
+            // deterministic (not now). Hint drawers encode like any other.
+            var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
+            for drawer in activeDrawers {
+                guard !drawer.content.isEmpty else { continue }          // nothing to encode
+                guard !indexedIDs.contains(drawer.id) else { continue }  // already indexed (idempotent)
+                uncappedBatch.append((text: drawer.content, sourceID: drawer.id, now: drawer.filedAt))
+            }
+            if uncappedBatch.isEmpty { break }  // every active drawer is indexed — done
+
+            // Cap this pass to reindexMaxJobs so a single pass cannot flood the
+            // encode queue and starve live captures (Part 6 DoS bound).
+            let batch = uncappedBatch.count > Self.reindexMaxJobs
+                ? Array(uncappedBatch.prefix(Self.reindexMaxJobs))
+                : uncappedBatch
+
+            // Batch-enqueue in chunks so the filesystem backend fsyncs new/ ONCE
+            // per chunk instead of per job (the per-job fsync was the last
+            // full-core bottleneck of a bulk import).
+            let enqueueChunk = 1024
+            var offset = 0
+            while offset < batch.count {
+                let end = min(offset + enqueueChunk, batch.count)
+                try await corpus.enqueueIngestBatch(Array(batch[offset..<end]))
+                offset = end
+            }
+            total += batch.count
+            Self.intakeLog.info(
+                "reindexMissing: enqueued \(batch.count, privacy: .public) drawers for estate \(handle.estateUUID, privacy: .public) (\(activeDrawers.count, privacy: .public) active, \(indexedIDs.count, privacy: .public) already indexed)")
+
+            // Wait for THIS pass to reach TRUE idle before re-collecting, so the
+            // next collect sees the batch's chunks as indexed and does NOT
+            // re-enqueue still-in-flight jobs (that duplicate-enqueue stalls the
+            // encode).
+            //
+            // POLL, do not pump. Corpus mounts a single lease-holding background
+            // drain worker (runIngestDrainLoop) that owns the write connection AND
+            // the deferred-index publish. Calling awaitIngestDrain here would spin
+            // a SECOND drainer through the same storage — redundant with the worker
+            // and, on the Rust twin, a "transaction within a transaction" fault on
+            // the shared connection. So the loop only observes ingestQueueDepth (a
+            // read-only frontier probe) and lets the single worker do all draining
+            // and publishing. indexedSourceIDs keys on chunk presence (written
+            // inside the drain, BEFORE publish), so (0, 0) depth means the pass is
+            // fully indexed and the next collect returns only the remainder.
+            while true {
+                let depth = (try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0)
+                if depth.pending == 0 && depth.inFlight == 0 { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
         }
 
-        // Cap the batch to reindexMaxJobs to prevent a single large estate from
-        // flooding the encode queue and starving live captures (Part 6 DoS fix).
-        // Log a warning when truncation occurs so the caller knows to repeat.
-        let totalMissing = uncappedBatch.count
-        let batch: [(text: String, sourceID: String, now: Date)]
-        if totalMissing > Self.reindexMaxJobs {
-            batch = Array(uncappedBatch.prefix(Self.reindexMaxJobs))
-            Self.intakeLog.warning(
-                "reindexMissing: truncated to reindexMaxJobs=\(Self.reindexMaxJobs, privacy: .public); \(totalMissing, privacy: .public) unindexed drawers remain — call again to continue backfill for estate \(handle.estateUUID, privacy: .public)")
-        } else {
-            batch = uncappedBatch
-        }
-
-        // Batch-enqueue in chunks so the filesystem backend fsyncs new/ ONCE per
-        // chunk instead of per job (the per-job fsync was the last full-core
-        // bottleneck of a bulk import), while the chunk bounds the single fsync
-        // window against concurrent live captures.
-        // NOTE: enqueueChunk (1024) is the per-batch fsync unit, NOT the total
-        // ceiling — that ceiling is reindexMaxJobs applied above.
-        let enqueueChunk = 1024
-        var enqueued = 0
-        var offset = 0
-        while offset < batch.count {
-            let end = min(offset + enqueueChunk, batch.count)
-            try await corpus.enqueueIngestBatch(Array(batch[offset..<end]))
-            enqueued += end - offset
-            offset = end
-        }
-        Self.intakeLog.info(
-            "reindexMissing: enqueued \(enqueued, privacy: .public) drawers for estate \(handle.estateUUID, privacy: .public) (\(activeDrawers.count, privacy: .public) active, \(indexedIDs.count, privacy: .public) already indexed)")
-
-        // NT_R1: deferred Merkle rollup. Batch-capture paths (e.g. moot_palace_import)
-        // skip per-drawer rollupMerkleRoots to avoid O(N²) work. The full-tree pass
-        // here is O(N) and runs once regardless of whether this reindex triggered any
-        // new encode jobs — it is safe to call on an already-current tree (idempotent).
+        // NT_R1: deferred Merkle full-tree rollup, once, after full coverage. The
+        // O(N) full-tree pass is safe on an already-current tree (idempotent).
         try await estate.rollupAllMerkleRoots(now: now)
 
-        return enqueued
+        return total
     }
 
     // MARK: - Internals

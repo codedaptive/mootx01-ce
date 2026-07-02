@@ -180,9 +180,10 @@ impl EstateCoordinator {
                 if !drawer.content.is_empty() {
                     if let Some(corpus) = self.corpus_for(handle) {
                         // Corpus::ingest/enqueue_ingest expect now_millis
-                        // (MILLISECONDS); drawer.filed_at is epoch SECONDS, so ×1000.
+                        // (MILLISECONDS); drawer.filed_at is epoch MILLISECONDS
+                        // (ADR-023), so it is passed directly.
                         corpus
-                            .enqueue_ingest(&drawer.content, &drawer.id, drawer.filed_at * 1000)
+                            .enqueue_ingest(&drawer.content, &drawer.id, drawer.filed_at)
                             .map_err(|e| verb_fail(format!("corpus enqueue_ingest failed: {e:?}")))?;
                     }
                 }
@@ -209,21 +210,28 @@ impl EstateCoordinator {
 
     // MARK: - reindexMissing
 
-    /// Hard cap on the total number of drawers `collect_reindex_jobs` will
-    /// collect in a single call (secfix/c-glk-remaining Part 6).
+    /// Per-pass cap on the number of drawers `collect_reindex_jobs` collects in
+    /// a single call (secfix/c-glk-remaining Part 6).
     ///
-    /// Without this cap, a sufficiently large estate causes `collect_reindex_jobs`
-    /// to collect all missing drawers atomically, flooding the encode queue and
-    /// starving live captures of encode capacity for minutes. 10,000 drawers
-    /// ≈ 10 MiB of typical content — enough to make a meaningful dent in a
-    /// backfill while keeping the queue drain bounded.
+    /// This bounds one enqueue pass so a large estate cannot flood the encode
+    /// queue and starve live captures in a single burst. The reindex INVOKER
+    /// (`run_reindex_responsive`) loops — enqueue a pass, drain it to idle,
+    /// re-collect — so full coverage is reached automatically at ANY corpus size
+    /// without an operator repeating the call; the cap only bounds each pass.
+    /// 10,000 keeps each pass's drain bounded (empirically ~90s and no memory
+    /// blow-up from an unpublished vector window) — enqueuing the whole corpus at
+    /// once instead stalled the encode; bounded passes drain cleanly.
     ///
     /// Swift parity: `reindexMaxJobs` in GeniusLocusKit/Sources/.../EncodeIntake.swift.
-    ///
-    /// Callers that need to reindex more than 10,000 drawers call the reindex
-    /// flow multiple times; each call skips already-indexed drawers (idempotent),
-    /// so repeated calls converge to full coverage without a single unbounded burst.
+    #[cfg(not(feature = "test-seams"))]
     const REINDEX_MAX_JOBS: usize = 10_000;
+
+    /// Test-seam visibility twin of `REINDEX_MAX_JOBS`: `pub` so the parity
+    /// integration test (a separate crate) can assert the 10k cap. Private in
+    /// normal builds — mirrors Swift's internal `reindexMaxJobs` reached through
+    /// `@testable import`.
+    #[cfg(feature = "test-seams")]
+    pub const REINDEX_MAX_JOBS: usize = 10_000;
 
     /// Enqueue ingest jobs for every active drawer that is not yet present in
     /// the estate's Corpus (BM25/vector index). Returns the count enqueued.
@@ -289,9 +297,9 @@ impl EstateCoordinator {
                 continue;
             }
             // G4: source_id = drawer.id so BM25/vector hits hydrate back to the
-            // Drawer row. drawer.filed_at is epoch SECONDS; enqueue_ingest expects
-            // MILLIS.
-            jobs.push((drawer.content, drawer.id, drawer.filed_at * 1000));
+            // Drawer row. drawer.filed_at is epoch MILLISECONDS (ADR-023) —
+            // exactly the now_millis enqueue_ingest expects — so pass it directly.
+            jobs.push((drawer.content, drawer.id, drawer.filed_at));
         }
 
         // Cap the collected jobs to REINDEX_MAX_JOBS to prevent a single large
@@ -355,9 +363,9 @@ impl EstateCoordinator {
         }
         corpus
             // `Corpus::ingest` expects `now_millis` (MILLISECONDS — it divides by
-            // 1000 internally); `drawer.filed_at` is epoch SECONDS, so ×1000.
-            // Without this the inline (impatient) path files vectors at 1970.
-            .ingest(&drawer.content, &drawer.id, drawer.filed_at * 1000)
+            // 1000 internally); `drawer.filed_at` is epoch MILLISECONDS (ADR-023),
+            // so it is passed directly.
+            .ingest(&drawer.content, &drawer.id, drawer.filed_at)
             .map_err(|e| verb_fail(format!("corpus ingest failed: {e:?}")))?;
         Ok(())
     }
