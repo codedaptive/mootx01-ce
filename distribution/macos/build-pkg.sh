@@ -118,16 +118,28 @@ productbuild \
 
 echo "Unsigned package: $(du -h "$UNSIGNED" | cut -f1)"
 
-# 5. Sign the package (if INSTALLER_IDENTITY is set).
+# 5. Sign the package.
+#
+# The .pkg is a root-authorized installer, so a RELEASE build must fail
+# closed rather than ship unsigned (SECURITY 927f38c4). CI sets
+# REQUIRE_SIGNING=1 on tag pushes; without an installer identity there, the
+# build aborts. LOCAL builds (`make pkg`, the CE installer harness) leave
+# REQUIRE_SIGNING unset and are allowed to produce an unsigned, clearly
+# labeled package for layout testing — those artifacts are never published.
 if [ -n "${INSTALLER_IDENTITY:-}" ]; then
     productsign \
         --sign "$INSTALLER_IDENTITY" \
         "$UNSIGNED" \
         "$ASSET"
     echo "Signed: $ASSET ($(du -h "$ASSET" | cut -f1))"
+elif [ -n "${REQUIRE_SIGNING:-}" ]; then
+    echo "ERROR: INSTALLER_IDENTITY is empty but REQUIRE_SIGNING is set — refusing to" >&2
+    echo "       publish an unsigned root-authorized .pkg. Configure the installer" >&2
+    echo "       signing identity/secret, or unset REQUIRE_SIGNING for a local build." >&2
+    exit 1
 else
     cp "$UNSIGNED" "$ASSET"
-    echo "WARNING: unsigned package (INSTALLER_IDENTITY not set): $ASSET"
+    echo "WARNING: unsigned package (local build, INSTALLER_IDENTITY not set): $ASSET"
 fi
 
 echo "Done: $(pwd)/$ASSET"
