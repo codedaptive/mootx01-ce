@@ -5481,7 +5481,10 @@ impl EstateCoordinator {
         // Internal-origin: traced_frame.trace_limit stays None — no trace writes.
 
         let locus_list: Vec<(String, f32)>;
-        let drawer_index: HashMap<String, Drawer>;
+        // Mutable: after the candidate set is assembled below, the semantic-lane
+        // (BM25/vector/dense) source_ids that the locus lane did not return are
+        // pool-loaded into this index through the SAME frame (Swift-parity fix).
+        let mut drawer_index: HashMap<String, Drawer>;
 
         let include_locus = matches!(
             request.mode,
@@ -5847,6 +5850,43 @@ impl EstateCoordinator {
         for (id, _) in &bm25_list   { all_ids.insert(id.clone()); }
         for (id, _) in &vector_list { all_ids.insert(id.clone()); }
         for (id, _) in &dense_list  { all_ids.insert(id.clone()); }
+
+        // Pool-load the semantic-lane candidates the locus lane did not return, so
+        // they can be scored AND hydrated (Swift-parity fix — recallUnionBest step
+        // 5.5 / recallHybrid extra-id load). The locus lane is capped at frontier_k
+        // and ordered ByCaptureTimeDesc, so `drawer_index` currently holds only the
+        // most-recently-captured frontier_k drawers. When many drawers share a
+        // capture instant — a bulk palace import files tens of thousands at the same
+        // ms — a valid ACTIVE drawer surfaced ONLY by BM25/vector/dense is absent
+        // from `drawer_index`, and the active-state hydration filter below would drop
+        // it as if it were withdrawn. Load those ids THROUGH THE SAME frame: a truly
+        // withdrawn/tombstoned/non-matching drawer stays out of `admissible` and is
+        // still correctly dropped, while a valid semantic hit outside the locus
+        // window becomes hydratable. (The Rust port previously built `drawer_index`
+        // from the locus lane alone; the Swift director always pool-loaded the full
+        // candidate set by id — this closes that drift, which otherwise dark-holes
+        // all semantic recall over a large single-instant import.)
+        let extra_ids: Vec<String> = all_ids
+            .iter()
+            .filter(|id| !drawer_index.contains_key(*id))
+            .cloned()
+            .collect();
+        if !extra_ids.is_empty() {
+            match estate.get_drawers_matching_frame(&extra_ids, &request.frame) {
+                Ok(filtered) => {
+                    for d in filtered.admissible {
+                        drawer_index.insert(d.id.clone(), d);
+                    }
+                }
+                Err(_) => {
+                    // Supplemental frame-aware load failed — DEGRADE: semantic-only
+                    // hits stay unhydratable and fall out of the result, while
+                    // locus-indexed hits survive. Mirrors Swift's pool.getDrawers
+                    // degraded stage.
+                    degraded_stages.push("locus.poolHydrate".to_string());
+                }
+            }
+        }
 
         // Build per-id score maps (raw score and rank) for each lane.
         let locus_score_map: HashMap<String, (usize, f32)> = locus_list
@@ -6351,20 +6391,19 @@ impl EstateCoordinator {
 
         // Build RecallHits from the fused_scored list.
         //
-        // ACTIVE-STATE FILTER (withdrawn/tombstoned must not surface): when the
-        // locus lane participates (Hybrid / UnionBest), `drawer_index` is the
-        // frame-filtered active set — `estate.recall(frame)` already excluded
-        // withdrawn/tombstoned/non-matching drawers. A BM25- or vector-lane
-        // candidate whose drawer is therefore ABSENT from `drawer_index` failed
-        // that active filter (e.g. it was withdrawn) and must NOT be surfaced as
-        // an unhydrated hit — dropping it is the parity of the Swift
-        // RecallDirector hydration, which filters non-active drawers from the
-        // fused frontier. (Surfaced before this filter, a withdrawn drawer's
-        // corpus chunk would still appear in search once the encode worker has
-        // ingested it — the near-realtime drain now makes that the common case.)
-        // CorpusOnly (locus lane not included for scoring) keeps its prior
-        // behaviour: drawer_index there is the frame-filtered hydration set too,
-        // so the same drop rule holds.
+        // ACTIVE-STATE FILTER (withdrawn/tombstoned must not surface): `drawer_index`
+        // is the frame-admissible set — the locus lane came from `estate.recall(frame)`
+        // and every semantic-lane candidate was pool-loaded above through the SAME
+        // frame (`get_drawers_matching_frame`), which excludes withdrawn/tombstoned/
+        // non-matching drawers. A BM25/vector/dense candidate therefore ABSENT from
+        // `drawer_index` failed that frame filter (e.g. it was withdrawn) and must NOT
+        // be surfaced as an unhydrated hit — dropping it mirrors the Swift
+        // RecallDirector, which pool-loads the full candidate set by id and drops the
+        // frame-filtered ids. (Because the pool load now covers every candidate, this
+        // drop is a genuine frame decision, NOT the old locus-frontier truncation that
+        // dark-holed valid semantic hits outside the capture-time window.) CorpusOnly
+        // (locus lane not scored) keeps its prior behaviour: its drawer_index is the
+        // frame-filtered hydration set too, so the same drop rule holds.
         let hits: Vec<RecallHit> = fused_scored
             .into_iter()
             .filter(|(id, ..)| drawer_index.contains_key(id))
