@@ -5,6 +5,52 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.7-beta — 2026-07-02
+
+Eighth beta of the 1.0 line. Bulk-import throughput and a release-signing
+security fix.
+
+- **Bulk-import pipeline** — discrete import path with its own drain stream
+  that trains and embeds once at the tail rather than per item; the streamed
+  per-item path is retired so bulk is the sole route.
+- **Persistence throughput** — sharded parallel postings writes with a keyed
+  sorted shard merge (EXT-4), and prepared-statement reuse in both SQLite
+  backends.
+- **Security (927f38c4)** — the release pipeline now fails closed rather than
+  publishing an unsigned macOS `.pkg` (a root-authorized installer) or unsigned
+  checksums: `build-pkg.sh` gained a `REQUIRE_SIGNING` gate that CI sets on tag
+  pushes, and the minisign step aborts a release when the signing key is
+  absent. Local/test builds keep their clearly-labeled unsigned path. Windows
+  Authenticode signing remains a documented accepted risk pending a
+  code-signing certificate.
+
+## v1.0.6-beta — 2026-07-02
+
+Seventh beta of the 1.0 line. Installer correctness across platforms, the
+contribution/CLA surface, the three-branch release model, and a batch of
+substrate temporal-correctness and performance fixes.
+
+- **Windows installers** — the Inno setup EXE now installs to the
+  `%USERPROFILE%\.mootx01\bin` contract path (was Roaming AppData, which left
+  `mootx01 upgrade` writing where PATH did not point); `install.ps1` gained a
+  UTF-8 BOM so Windows PowerShell 5.1 parses it instead of failing on an
+  em-dash byte. Both found by the installer validation harness on real arm64
+  hardware.
+- **Release security (734e9908)** — the `workflow_dispatch` debug picker can no
+  longer reach the macOS Developer ID signing pipeline; signing, notarization,
+  and upload are gated to tag pushes, so a branch named like a version cannot
+  produce signed artifacts.
+- **Contribution** — pull requests are open, gated on a Contributor License
+  Agreement (`CLA.md`) enforced by a CLA Assistant workflow; `make pkg` builds
+  the macOS `.pkg` locally.
+- **Release model** — permanent `develop → candidate → stable` branch triad
+  documented in `VERSIONING.md`; installers validated on `candidate` before
+  promotion.
+- **Substrate correctness / performance** — instants migrated to epoch
+  milliseconds (ADR-023); temporal matrix folds keyed on event time with
+  full-precision HLC; shared IDF-reduced vocabulary for LSA/NMF (ADR-022);
+  FDC term interning and SVD/NMF hot-loop tightening.
+
 ## v1.0.5-beta — 2026-06-29
 
 Sixth beta of the 1.0 line. A security-remediation campaign across the Swift
