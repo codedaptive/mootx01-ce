@@ -776,6 +776,12 @@ impl SqliteStorage {
         .map_err(|e| StorageError::BackendError {
             underlying: format!("sqlite pragmas: {e}"),
         })?;
+        // Statement cache sized for the estate schema's statement variety (one
+        // cached statement per distinct SQL text: per-table insert/upsert/update/
+        // delete/select shapes). rusqlite's default of 16 evicts constantly on a
+        // 20+-table schema; 128 keeps the working set resident so bulk loops
+        // parse each statement once (best-practices §5 prepared-statement reuse).
+        conn.set_prepared_statement_cache_capacity(128);
         Ok(SqliteStorage {
             config,
             inner: Arc::new(Mutex::new(Inner { conn, schema: None })),
@@ -1291,7 +1297,10 @@ fn fetch_matching_keys(
         Err(_) => return Vec::new(),
     };
     let sql = format!("SELECT \"{pk_col}\" FROM \"{table}\" WHERE {where_sql}");
-    let mut stmt = match conn.prepare(&sql) {
+    // prepare_cached: this SELECT runs once per upsert/update, so a bulk loop
+    // re-parsed the identical statement tens of thousands of times (a measured
+    // hot spot — sqlite3Prepare/RunParser per row on 50k-row imports).
+    let mut stmt = match conn.prepare_cached(&sql) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -1376,9 +1385,16 @@ impl RowStore for SqliteRowStore {
         let ph = vec!["?"; keys.len()].join(", ");
         let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
+        // prepare_cached: the SQL text for a given (table, column-set) shape is
+        // identical across a bulk loop, so the statement parses ONCE and replays
+        // from rusqlite's per-connection LRU cache — sqlite3Prepare/RunParser per
+        // row was a measured hot spot on 50k-row imports (best-practices §5:
+        // prepared statements reused via the kit).
         guard
             .conn
-            .execute(&sql, params_from_iter(binds))
+            .prepare_cached(&sql)
+            .map_err(|e| map_sql_err(e, table))?
+            .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
         self.observers.emit(&TableChange {
@@ -1444,9 +1460,16 @@ impl RowStore for SqliteRowStore {
             }
         }
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
+        // prepare_cached: the SQL text for a given (table, column-set) shape is
+        // identical across a bulk loop, so the statement parses ONCE and replays
+        // from rusqlite's per-connection LRU cache — sqlite3Prepare/RunParser per
+        // row was a measured hot spot on 50k-row imports (best-practices §5:
+        // prepared statements reused via the kit).
         guard
             .conn
-            .execute(&sql, params_from_iter(binds))
+            .prepare_cached(&sql)
+            .map_err(|e| map_sql_err(e, table))?
+            .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
         self.observers.emit(&TableChange {
@@ -1496,9 +1519,12 @@ impl RowStore for SqliteRowStore {
         // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
         let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
+        // prepare_cached: same statement-reuse rationale as insert/upsert above.
         let changed = guard
             .conn
-            .execute(&sql, params_from_iter(binds))
+            .prepare_cached(&sql)
+            .map_err(|e| map_sql_err(e, table))?
+            .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         for key in matched_keys {
             self.observers.emit(&TableChange {
@@ -1526,9 +1552,12 @@ impl RowStore for SqliteRowStore {
         // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
         let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
+        // prepare_cached: same statement-reuse rationale as insert/upsert above.
         let changed = guard
             .conn
-            .execute(&sql, params_from_iter(binds))
+            .prepare_cached(&sql)
+            .map_err(|e| map_sql_err(e, table))?
+            .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         for key in matched_keys {
             self.observers.emit(&TableChange {
@@ -1595,9 +1624,12 @@ impl RowStore for SqliteRowStore {
             }
         }
 
+        // prepare_cached: query SQL for a given (table, predicate-shape) is
+        // identical across repeated calls — parse once, replay from the
+        // per-connection statement cache (best-practices §5).
         let mut stmt = guard
             .conn
-            .prepare(&sql)
+            .prepare_cached(&sql)
             .map_err(|e| map_sql_err(e, table))?;
         let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let mut rows = stmt
@@ -1694,9 +1726,12 @@ impl RowStore for SqliteRowStore {
             }
         }
 
+        // prepare_cached: query SQL for a given (table, predicate-shape) is
+        // identical across repeated calls — parse once, replay from the
+        // per-connection statement cache (best-practices §5).
         let mut stmt = guard
             .conn
-            .prepare(&sql)
+            .prepare_cached(&sql)
             .map_err(|e| map_sql_err(e, table))?;
         let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let mut rows = stmt
@@ -1809,9 +1844,12 @@ impl RowStore for SqliteRowStore {
             }
         }
 
+        // prepare_cached: query SQL for a given (table, predicate-shape) is
+        // identical across repeated calls — parse once, replay from the
+        // per-connection statement cache (best-practices §5).
         let mut stmt = guard
             .conn
-            .prepare(&sql)
+            .prepare_cached(&sql)
             .map_err(|e| map_sql_err(e, table))?;
         let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let mut rows = stmt
@@ -1935,9 +1973,12 @@ impl RowStore for SqliteRowStore {
             }
         }
 
+        // prepare_cached: query SQL for a given (table, predicate-shape) is
+        // identical across repeated calls — parse once, replay from the
+        // per-connection statement cache (best-practices §5).
         let mut stmt = guard
             .conn
-            .prepare(&sql)
+            .prepare_cached(&sql)
             .map_err(|e| map_sql_err(e, table))?;
         let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let mut rows = stmt
