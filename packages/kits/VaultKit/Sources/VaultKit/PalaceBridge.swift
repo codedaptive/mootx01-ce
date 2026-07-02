@@ -155,14 +155,35 @@ public struct PalaceBridge: Sendable {
             }
             total = allRows.count
 
-            // Size gate (automatic — NOT user-controlled), single-sourced in
-            // ImportPolicy so every gate uses the same boundary: a source at or
-            // below the threshold is written in one bulk transaction; a larger one
-            // streams per-item so no single transaction holds the write lock
-            // across hundreds of thousands of rows. The user's `mode` sets encode
-            // SPEED (set above), never this.
-            let useBulk = ImportPolicy.useBulk(itemCount: total)
-            if useBulk {
+            // STREAMED IMPORT PATH — DISABLED (2026-07-02). We believe the per-item
+            // streaming write path is no longer necessary and should be REMOVED at
+            // the 1.1 release gate if this holds true. Rationale: the bulk
+            // captureBatch path below handles every realistic import; the old stream
+            // branch engaged ONLY above ImportPolicy.streamThreshold (250_000 items
+            // in ONE source), which no real import reaches. So the bulk path now runs
+            // UNCONDITIONALLY. The `useBulk` size gate and the per-item `else` branch
+            // are preserved verbatim below, commented, for the 1.1 review — not
+            // deleted:
+            //
+            //   let useBulk = ImportPolicy.useBulk(itemCount: total)
+            //   if useBulk { /* bulk path — now the sole path, below */ } else {
+            //       // Stream write: per-item capture; one transaction per row so no
+            //       // single transaction holds the write lock across hundreds of
+            //       // thousands of rows.
+            //       for row in allRows {
+            //           try await importChromaRow(
+            //               embeddingID: row.embeddingID, metadata: row.metadata,
+            //               isCloset: row.isCloset, handle: handle,
+            //               existingLineageIDs: existingLineageIDs,
+            //               existingSensitivityByLineage: existingSensitivityByLineage,
+            //               tombstonedLineageIDs: tombstonedLineageIDs,
+            //               existingContentByLineage: existingContentByLineage,
+            //               now: now, report: &report)
+            //           processed += 1
+            //           if processed % 10 == 0 { progress?(processed, total) }
+            //       }
+            //   }
+            do {
                 // Bulk write: collect all frames, then captureBatch for one transaction.
                 var batchFrames: [CaptureFrame] = []
                 for row in allRows {
@@ -186,25 +207,6 @@ public struct PalaceBridge: Sendable {
                 }
                 if !batchFrames.isEmpty {
                     _ = try await kit.captureBatch(handle, batchFrames)
-                }
-            } else {
-                // Stream write: per-item capture (inline classification + encode
-                // enqueue per row). Selected automatically for large sources.
-                for row in allRows {
-                    try await importChromaRow(
-                        embeddingID: row.embeddingID,
-                        metadata: row.metadata,
-                        isCloset: row.isCloset,
-                        handle: handle,
-                        existingLineageIDs: existingLineageIDs,
-                        existingSensitivityByLineage: existingSensitivityByLineage,
-                        tombstonedLineageIDs: tombstonedLineageIDs,
-                        existingContentByLineage: existingContentByLineage,
-                        now: now,
-                        report: &report
-                    )
-                    processed += 1
-                    if processed % 10 == 0 { progress?(processed, total) }
                 }
             }
         }

@@ -1431,6 +1431,82 @@ public actor VectorStore {
         }
     }
 
+    /// Replace a model's ENTIRE vector set — the BATCH reindex re-embed path,
+    /// deliberately SEPARATE from the shared 1-off `addPayloads` / `deleteAllVectors`
+    /// (which live captures use unchanged). Those mutate the resident index PER key,
+    /// and every BruteForceIndex remove/add rebuilds all partitions (O(n)), so tens
+    /// of thousands of them — a full re-embed — is O(n²). This path writes the
+    /// durable table in ONE transaction (bulk delete + plain insert → a single
+    /// fsync, no per-row existence SELECT) and rebuilds the resident binary index
+    /// ONCE from the table (O(n)). Mirrors Rust `VectorStore::replace_model_vectors`.
+    public func replaceModelVectors(modelID: String, _ batch: [VectorPayloadInput]) async throws {
+        // Flush any in-flight deferred burst so the table is the single source of
+        // truth before the resident index is rebuilt from it below.
+        if deferredIndexDirty { try await publishResidentIndex() }
+
+        // 1. Durable table writes in ONE transaction: bulk-delete every row for the
+        //    model, then plain-INSERT the fresh batch. One begin/commit → a single
+        //    fsync for the whole re-embed; INSERT skips the per-row existence SELECT
+        //    (after the bulk delete nothing conflicts). NO resident-index mutation
+        //    here — it is rebuilt once in step 2.
+        try await storage.rowStore.beginTransaction()
+        do {
+            _ = try await storage.rowStore.delete(
+                table: "vectors",
+                where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
+            )
+            for input in batch {
+                let values: [String: TypedValue] = [
+                    "id":           .uuid(UUID()),
+                    "item_id":      .text(input.itemID),
+                    "vector_index": .int(Int64(input.vectorIndex)),
+                    "model_id":     .text(input.modelID),
+                    "model_version":.text(input.modelVersion),
+                    "kind":         .int(Int64(input.payload.kind.rawValue)),
+                    "dim":          .int(Int64(input.payload.dim)),
+                    "payload":      .blob(Data(input.payload.bytes)),
+                    "scale":        input.payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
+                    "filed_at":     .timestamp(input.filedAt)
+                ]
+                _ = try await storage.rowStore.insert(table: "vectors", values: values)
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+
+        // 2. Rebuild the resident binary index ONCE from the durable table (O(n)),
+        //    and drop this model's Lane D float index so it lazily rebuilds too.
+        floatIndices.removeValue(forKey: modelID)
+        try await _rebuildBinaryIndexFromTable()
+    }
+
+    /// Rebuild the resident BINARY index (sidecar array + BruteForce + MIH) from
+    /// the durable `vectors` table in ONE pass. Used only by the batch re-embed.
+    /// Unlike `_ensureIndexBuilt` it does NOT trust the sidecar live-count (a
+    /// re-embed replaces every vector with the SAME row count, so a count check
+    /// would wrongly keep the stale sidecar) — it always reads the table.
+    private func _rebuildBinaryIndexFromTable() async throws {
+        let records = try await _fetchAllBinaryRecords()
+        let arr: ResidentVectorArray
+        if let store = arrayStore {
+            try await store.rebuild(from: records)
+            arr = await store.snapshot()
+        } else {
+            arr = ResidentArrayStore.buildArray(from: records, kind: .binary, stride: 32)
+        }
+        await bruteForceIndex.build(from: arr)
+        await mihIndex.build(from: arr)
+        var liveCount: UInt32 = 0
+        for i in 0..<Int(arr.count) where !arr.isTombstoned(i) {
+            liveCount += 1
+        }
+        liveBinaryCount = liveCount
+        indexBuilt = true
+        await _selectIndex()
+    }
+
     // MARK: - Lifecycle (GLK_PROVISION_001)
 
     /// Destroy all vector rows in this store.

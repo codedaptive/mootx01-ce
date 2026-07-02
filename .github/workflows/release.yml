@@ -209,6 +209,8 @@ jobs:
           # Application identity seals the bundled Mootx01Setup.app (hardened
           # runtime) inside the .pkg so the package passes notarization.
           APP_IDENTITY: "Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          # Fail closed: a published .pkg must be signed (SECURITY 927f38c4).
+          REQUIRE_SIGNING: "1"
         run: |
           # Strip leading 'v' from tag (build-pkg.sh uses version in filename).
           VERSION_NUM="${VERSION#v}"
@@ -410,6 +412,8 @@ jobs:
           # Application identity seals the bundled Mootx01Setup.app (hardened
           # runtime) inside the .pkg so the package passes notarization.
           APP_IDENTITY: "Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          # Fail closed: a published .pkg must be signed (SECURITY 927f38c4).
+          REQUIRE_SIGNING: "1"
         run: |
           VERSION_NUM="${VERSION#v}"
           bash distribution/macos/build-pkg.sh \
@@ -814,10 +818,11 @@ jobs:
       #        MINISIGN_SECRET_KEY          — contents of /path/to/minisign.sec
       #        MINISIGN_SECRET_KEY_PASSWORD — passphrase (empty string if none)
       #
-      # Until these secrets are populated, this step is skipped (the `if:` guard
-      # below checks for secret presence). Installers will fail closed when they
-      # encounter a missing .minisig — this is expected until the operator
-      # completes the steps above.
+      # These secrets ARE populated (the project ships signed releases). This
+      # step now FAILS CLOSED (SECURITY 927f38c4): a release that reaches the
+      # publish job without a configured signing key aborts rather than
+      # shipping unsigned checksums, since Linux/POSIX installers fail closed
+      # on a missing .minisig and would break for every user.
       - name: Sign checksums with minisign (CAND-004)
         # NOTE: GitHub Actions forbids referencing `secrets` in a step-level
         # `if:` conditional, so the secret-present check is done INSIDE the
@@ -832,11 +837,13 @@ jobs:
           MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
         run: |
           # Secret-present gate (in-script, since `secrets` is not allowed in
-          # step `if:`). Without a configured signing key, skip cleanly — the
-          # release publishes unsigned and Linux/POSIX installers fail-closed.
+          # step `if:`). This job only runs on a real tag push (release), so a
+          # missing key here means an unsigned public release — fail closed
+          # rather than ship checksums the installers will reject.
           if [ -z "${MINISIGN_SECRET_KEY}" ]; then
-            echo "MINISIGN_SECRET_KEY not set — skipping signing (release will be unsigned)."
-            exit 0
+            echo "::error::MINISIGN_SECRET_KEY not set — refusing to publish an unsigned release." >&2
+            echo "Configure MINISIGN_SECRET_KEY (+ _PASSWORD) or this release cannot be signed." >&2
+            exit 1
           fi
 
           # Install minisign on the runner (ubuntu-24.04; the release job).

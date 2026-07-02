@@ -731,7 +731,12 @@ impl VectorStore {
 
         let start = std::time::Instant::now();
 
-        // 1. Upsert every row to the table (durable source of truth).
+        // 1. Upsert every row to the table (durable source of truth). Callers that
+        //    write in bulk (the reindex re-embed) wrap this in an OUTER transaction
+        //    so the whole batch commits with a single fsync instead of one per row;
+        //    add_payloads itself does NOT open a transaction, because the ingest
+        //    drain already calls it inside its own open transaction and a nested
+        //    BEGIN is an error ("transaction within a transaction").
         let row_store = self.storage.row_store();
         for input in batch {
             let mut values = BTreeMap::new();
@@ -1673,6 +1678,130 @@ impl VectorStore {
         }
         state.live_binary_count = state.live_binary_count.saturating_sub(removed_count);
         Self::select_index(&mut state);
+        Ok(())
+    }
+
+    /// Replace a model's ENTIRE vector set — the BATCH reindex re-embed path,
+    /// deliberately SEPARATE from the shared 1-off `add_payloads` /
+    /// `delete_all_vectors` (which live captures use unchanged). Those mutate the
+    /// resident index PER key, and every `BruteForceIndex::remove`/`add` rebuilds
+    /// all partitions (O(n)), so doing tens of thousands of them — a full re-embed —
+    /// is O(n²). This path instead writes the durable table in ONE transaction
+    /// (bulk delete + plain insert → a single fsync, no per-row existence SELECT)
+    /// and rebuilds the resident binary index ONCE from the table (O(n)). Mirrors
+    /// Swift `VectorStore.replaceModelVectors`.
+    pub fn replace_model_vectors(
+        &self,
+        model_id: &str,
+        batch: &[VectorPayloadInput],
+    ) -> Result<(), VectorKitError> {
+        // Reject int8 fail-closed — same precondition as add_payloads.
+        if let Some(bad) = batch.iter().find(|i| i.payload.kind == VectorKind::Int8) {
+            return Err(VectorKitError::Int8QuantizationPolicyUndefined(format!(
+                "int8 writes are rejected: quantization policy is unspecified. \
+                 Offending item: {}. See VECTORKIT_SPEC §I-4a.",
+                bad.item_id
+            )));
+        }
+        // Flush any in-flight deferred burst so the table is the single source of
+        // truth before the resident index is rebuilt from it below.
+        self.publish_if_deferred_dirty()?;
+
+        // 1. Durable table writes in ONE transaction: bulk-delete every row for the
+        //    model, then plain-INSERT the fresh batch. One BEGIN/COMMIT → a single
+        //    fsync for the whole re-embed (per-row autocommit was minutes of
+        //    per-row durability syncs). INSERT (not upsert) skips the per-row
+        //    existence SELECT — after the bulk delete nothing conflicts. NO
+        //    resident-index mutation here; it is rebuilt once in step 2.
+        let row_store = self.storage.row_store();
+        row_store
+            .begin_transaction()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let db_result = (|| -> Result<(), VectorKitError> {
+            row_store
+                .delete(
+                    "vectors",
+                    &StoragePredicate::Eq(
+                        Column::new("vectors", "model_id"),
+                        TypedValue::Text(model_id.to_string()),
+                    ),
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            for input in batch {
+                let mut values = BTreeMap::new();
+                values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
+                values.insert("item_id".to_string(), TypedValue::Text(input.item_id.clone()));
+                values.insert("vector_index".to_string(), TypedValue::Int(input.vector_index as i64));
+                values.insert("model_id".to_string(), TypedValue::Text(input.model_id.clone()));
+                values.insert("model_version".to_string(), TypedValue::Text(input.model_version.clone()));
+                values.insert("kind".to_string(), TypedValue::Int(input.payload.kind.raw()));
+                values.insert("dim".to_string(), TypedValue::Int(input.payload.dim as i64));
+                values.insert("payload".to_string(), TypedValue::Blob(input.payload.bytes.clone()));
+                match input.payload.scale {
+                    Some(s) => { values.insert("scale".to_string(), TypedValue::Float(s as f64)); }
+                    None => { values.insert("scale".to_string(), TypedValue::Null); }
+                }
+                values.insert("filed_at".to_string(), TypedValue::Timestamp(input.filed_at_unix_secs));
+                row_store
+                    .insert("vectors", values)
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            }
+            Ok(())
+        })();
+        match db_result {
+            Ok(()) => row_store
+                .commit_transaction()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?,
+            Err(e) => {
+                let _ = row_store.rollback_transaction();
+                return Err(e);
+            }
+        }
+
+        // 2. Rebuild the resident binary index ONCE from the durable table (O(n)),
+        //    and drop this model's Lane D float index so it lazily rebuilds too.
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        state.float_indices.remove(model_id);
+        self.rebuild_binary_index_from_table_locked(&mut state)?;
+        Ok(())
+    }
+
+    /// Rebuild the resident BINARY index (sidecar array + BruteForce + MIH) from
+    /// the durable `vectors` table in ONE pass. Used only by the batch re-embed
+    /// path. Unlike `ensure_index_built_locked` it does NOT trust the sidecar
+    /// live-count (a re-embed replaces every vector with the SAME row count, so a
+    /// count check would wrongly keep the stale sidecar) — it always reads the
+    /// table. Must be called with the state mutex held.
+    fn rebuild_binary_index_from_table_locked(
+        &self,
+        state: &mut HotState,
+    ) -> Result<(), VectorKitError> {
+        let records = self.fetch_all_binary_records()?;
+        state.live_binary_count = records.len() as u32;
+        if let Some(ref mut store) = state.array_store {
+            store.rebuild_from(&records)?;
+            let rebuilt = store.snapshot();
+            let (payloads, keys) = Self::array_to_payloads_keys(&rebuilt);
+            state.brute_force_index.build(&payloads, &keys)?;
+            state.mih_index.build(&payloads, &keys)?;
+        } else {
+            let payloads: Vec<VectorPayload> = records
+                .iter()
+                .map(|(_, bytes)| VectorPayload {
+                    kind: VectorKind::Binary,
+                    dim: 256,
+                    bytes: bytes.clone(),
+                    scale: None,
+                })
+                .collect();
+            let keys: Vec<VectorRecordKey> = records.into_iter().map(|(k, _)| k).collect();
+            state.brute_force_index.build(&payloads, &keys)?;
+            state.mih_index.build(&payloads, &keys)?;
+        }
+        state.index_built = true;
+        Self::select_index(state);
         Ok(())
     }
 

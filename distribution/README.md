@@ -40,3 +40,15 @@ the estate data directory.
 
 No Authenticode code signing — Windows SmartScreen will show a warning on first
 download. The project website carries a disclaimer about this.
+
+This is a deliberate, documented accepted risk (SECURITY 927f38c4), not an
+oversight. Windows Authenticode signing requires an EV/OV code-signing
+certificate (annual cost, and EV needs a hardware token or cloud HSM that
+complicates CI). Until install volume justifies that recurring expense, Windows
+installers ship unsigned; integrity is provided out-of-band via `checksums.txt`
+and its minisign signature (`checksums.txt.minisig`, verified against
+`distribution/minisign.pub`). When a certificate is acquired, add a fail-closed
+`signtool sign` step to the two Windows build jobs in
+`.github/workflows/release.yml` and update this note. macOS `.pkg` installers,
+by contrast, ARE signed (Developer ID Installer) and notarized, and the release
+fails closed if that identity is absent.

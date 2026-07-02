@@ -88,6 +88,20 @@ public extension Corpus {
                 stream: "encode",
                 instanceToken: "\(ObjectIdentifier(self))"
             )
+            // Import-stream twin lease — one cross-process drainer per stream,
+            // independently (see importStreamID).
+            importDrainLease = DrainLease(
+                directory: estateDir,
+                stream: "import",
+                instanceToken: "\(ObjectIdentifier(self))"
+            )
+            // The import drainer's OWN connection to the same queue.sqlite (see
+            // the `importQueue` property doc). Schema already opened above.
+            let importQS = try SQLiteStorage(configuration: siblingCfg)
+            let importBackend = PersistenceKitBackend(storage: importQS)
+            let iq = QueueKit(backend: importBackend)
+            iq.estateTag = "corpus_import"
+            importQueue = iq
         } else {
             // In-memory estate: transient queue, no crash recovery, no cross-process
             // lease. A fixed estate UUID keeps the engine deterministic (no UUID()).
@@ -113,6 +127,16 @@ public extension Corpus {
             await self.runIngestDrainLoop()
         }
         ingestDrainWorker = worker
+
+        // Discrete IMPORT drain worker — same queue, own stream ("import"), own
+        // lease, own task. Claims only bulk-import jobs and processes them via
+        // ingestBatchImport (chunk + BM25, no embed/train). Daily-driving encode
+        // jobs above are untouched.
+        let importWorker = Task { [weak self] in
+            guard let self else { return }
+            await self.runImportDrainLoop()
+        }
+        importDrainWorker = importWorker
     }
 
     /// Tear down the corpus's ingest queue and drain worker.
@@ -123,11 +147,16 @@ public extension Corpus {
     func dropIngestQueue() {
         ingestDrainWorker?.cancel()
         ingestDrainWorker = nil
-        // Release the lease so another process can take over without waiting out
-        // the TTL. No-op if we do not hold it (or there is no lease).
+        importDrainWorker?.cancel()
+        importDrainWorker = nil
+        // Release the leases so another process can take over without waiting out
+        // the TTL. No-op if we do not hold them (or there is no lease).
         drainLease?.release()
         drainLease = nil
+        importDrainLease?.release()
+        importDrainLease = nil
         ingestQueue = nil
+        importQueue = nil
     }
 
     /// Set (or clear) the `onEncoded` coordination callback. An actor's property
@@ -199,6 +228,29 @@ public extension Corpus {
         _ = try await queue.send(batch: jobs)
     }
 
+    /// Enqueue many BULK-IMPORT jobs in one pass — the import twin of
+    /// `enqueueIngestBatch`. Identical durable job rows on the SAME queue.sqlite,
+    /// tagged with the `"import"` stream so ONLY the discrete import drain worker
+    /// claims them (chunk + BM25, no embed/train — the import cycle retrains +
+    /// embeds once at the end). Cold-start safe: a crash mid-import leaves durable
+    /// rows the import worker reclaims and resumes on remount. Rust twin:
+    /// `Corpus::enqueue_ingest_batch_import`.
+    func enqueueIngestBatchImport(_ items: [(text: String, sourceID: String, now: Date)]) async throws {
+        guard !items.isEmpty else { return }
+        if ingestQueue == nil { try await mountIngestQueue() }
+        guard let queue = ingestQueue else { return }
+
+        var jobs: [Job] = []
+        jobs.reserveCapacity(items.count)
+        for item in items where !item.text.isEmpty {
+            let job = IngestJob(sourceID: item.sourceID, text: item.text, capturedAt: item.now)
+            let physMillis = Int64((item.now.timeIntervalSince1970 * 1000).rounded())
+            let submittedAt = ingestHLC.send(now: physMillis)
+            jobs.append(try job.toJob(streamID: Self.importStreamID, submittedAt: submittedAt))
+        }
+        _ = try await queue.send(batch: jobs)
+    }
+
     /// Block until the corpus's ingest queue has fully drained — every enqueued
     /// job ingested and replied — then return. Returns promptly on an empty
     /// queue and immediately when no queue is mounted (nothing to drain). The
@@ -239,8 +291,29 @@ public extension Corpus {
         guard let queue = ingestQueue else { return (0, 0) }
         // Use stream-scoped pending count (T1) — counts only encode jobs.
         let pending = try await queue.pendingCount(stream: Self.encodeStreamID)
-        // in-flight across ALL streams (encode jobs already claimed are "cur" rows)
-        let inFlight = try await queue.inFlight().count
+        // Stream-scoped in-flight: the shared queue.sqlite now carries a second
+        // live stream ("import"); an UNSCOPED count would report the encode drain
+        // as busy while only import jobs are mid-ingest (the multi-stream probe
+        // bug — best-practices §2 variant C: unscoped calls are bugs in a
+        // multi-stream estate).
+        let inFlight = try await queue.inFlight()
+            .filter { $0.streamID == Self.encodeStreamID }
+            .count
+        return (pending, inFlight)
+    }
+
+    /// The bulk-IMPORT drain's outstanding work — the import-stream twin of
+    /// `ingestQueueDepth`. `(pending, inFlight)` scoped to the `"import"` stream
+    /// only (in-flight rows are filtered by stream, so a concurrent live capture's
+    /// encode job never inflates the import probe). Both zero means every enqueued
+    /// import job has been chunk+BM25-ingested and replied. Read-only; safe to
+    /// poll while the import worker runs. Rust twin: `import_queue_depth`.
+    func importQueueDepth() async throws -> (pending: Int, inFlight: Int) {
+        guard let queue = ingestQueue else { return (0, 0) }
+        let pending = try await queue.pendingCount(stream: Self.importStreamID)
+        let inFlight = try await queue.inFlight()
+            .filter { $0.streamID == Self.importStreamID }
+            .count
         return (pending, inFlight)
     }
 
@@ -468,6 +541,145 @@ public extension Corpus {
         try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
     }
 
+    // MARK: - Import drain (discrete bulk-import worker)
+
+    /// Drain the IMPORT stream once — the discrete bulk-import twin of
+    /// `drainIngestQueueOnce`. Claims only `"import"` jobs and ingests them via
+    /// `ingestBatchImport` (chunk + BM25 + counts — no bootstrap train, no embed,
+    /// so no deferred-vector-index window and no publish). No `onEncoded`
+    /// callback either: per-batch room rollups are exactly the O(N²) the import
+    /// path defers to the one `rollupAllMerkleRoots` pass at the import tail.
+    /// Rust twin: `drain_import_with_queue`.
+    @discardableResult
+    func drainImportQueueOnce() async throws -> Int {
+        // Drain through the import worker's OWN connection (file-level
+        // arbitration with the encode worker); fall back to the shared facade
+        // only for in-memory estates (no real transactions there).
+        guard let queue = importQueue ?? ingestQueue else { return 0 }
+        let batch = try await queue.drain(stream: Self.importStreamID)
+        guard !batch.isEmpty else { return 0 }
+        let batchSession = batch[0].sessionID
+
+        var items: [(text: String, sourceID: String, now: Date)] = []
+        var itemJobs: [Job] = []
+        items.reserveCapacity(batch.count)
+        itemJobs.reserveCapacity(batch.count)
+        for (job, _) in batch {
+            guard let ij = try? IngestJob.from(job: job) else {
+                try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
+                continue
+            }
+            guard !ij.text.isEmpty else {
+                try? await queue.reply(to: job.id, status: .done, artifacts: [])
+                continue
+            }
+            items.append((ij.text, ij.sourceID, ij.capturedAt))
+            itemJobs.append(job)
+        }
+        if !items.isEmpty {
+            do {
+                try await ingestBatchImport(items)
+                // Same session-fast-path/per-job-fallback completion contract as
+                // the encode drain.
+                let completed = try await queue.reply(session: batchSession, status: .done)
+                if completed == 0 {
+                    let completions = itemJobs.map {
+                        (jobID: $0.id, status: ObservationStatus.done)
+                    }
+                    _ = try? await queue.reply(batch: completions)
+                }
+            } catch {
+                // Batch failed — per-job at-least-once fallback (idempotent:
+                // content-addressed chunk ids make re-ingest harmless).
+                corpusIngestLog.error(
+                    "ingestBatchImport failed: \(error, privacy: .public) — falling back to per-job import ingest")
+                for job in itemJobs {
+                    await ingestOneImportAndReply(job: job, on: queue)
+                }
+            }
+        }
+        return batch.count
+    }
+
+    /// The IMPORT poll drain loop — the discrete bulk-import twin of
+    /// `runIngestDrainLoop`. Same shape: lease-guarded single drainer, on-mount
+    /// crash-recovery reclaim, poll cadence. Differences: claims the `"import"`
+    /// stream, ingests via `ingestBatchImport` (chunk + BM25 — no embed), and has
+    /// NO vector-index publish step (the import drain writes no vectors; the
+    /// import cycle's tail `reindex` embeds + publishes once). Cold start: a
+    /// crash mid-import leaves durable "cur" rows; the first lease acquire here
+    /// reclaims them to "new" and the import resumes where it died.
+    private func runImportDrainLoop() async {
+        var heldLeaseAt: Date? = nil
+        var reclaimedOnMount = false
+        while !Task.isCancelled {
+            if let lease = importDrainLease {
+                let now = Date()
+                let refreshDue = heldLeaseAt.map {
+                    now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
+                } ?? true
+                if refreshDue {
+                    if lease.tryAcquire(now: now) {
+                        heldLeaseAt = now
+                        if !reclaimedOnMount, let queue = importQueue ?? ingestQueue {
+                            do {
+                                let n = try await queue.reclaimInFlight(stream: Self.importStreamID)
+                                if n > 0 {
+                                    corpusIngestLog.info(
+                                        "import drain mount: reclaimed \(n) orphaned in-flight job(s) — prior import drainer died mid-ingest")
+                                }
+                            } catch {
+                                corpusIngestLog.error(
+                                    "import drain mount: reclaimInFlight failed: \(error, privacy: .public)")
+                            }
+                            reclaimedOnMount = true
+                        }
+                    } else {
+                        // Another process holds a fresh import lease — warm standby.
+                        heldLeaseAt = nil
+                        try? await Task.sleep(for: .seconds(3))
+                        continue
+                    }
+                } else if let held = heldLeaseAt, now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
+                    lease.heartbeat(now: now)
+                    heldLeaseAt = now
+                }
+            }
+            do {
+                let drained = try await drainImportQueueOnce()
+                if drained > 0 { continue }  // spin-drain the rest of the burst
+            } catch {
+                corpusIngestLog.error("import drain loop error: \(error, privacy: .public)")
+            }
+            try? await Task.sleep(for: .milliseconds(15))
+        }
+    }
+
+    /// Ingest one drained IMPORT job (chunk + BM25 only) and reply terminal —
+    /// the import twin of `ingestOneAndReply`, used by the batch-failure
+    /// fallback. AT-LEAST-ONCE with the same bounded retry budget.
+    private func ingestOneImportAndReply(job: Job, on queue: QueueKit) async {
+        guard let ij = try? IngestJob.from(job: job) else {
+            try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
+            return
+        }
+        guard !ij.text.isEmpty else {
+            try? await queue.reply(to: job.id, status: .done, artifacts: [])
+            return
+        }
+        for attempt in 1...Self.ingestMaxAttempts {
+            do {
+                try await ingestBatchImport([(ij.text, ij.sourceID, ij.capturedAt)])
+                try? await queue.reply(to: job.id, status: .done, artifacts: [])
+                return
+            } catch {
+                corpusIngestLog.error(
+                    "import ingest attempt \(attempt, privacy: .public)/\(Self.ingestMaxAttempts, privacy: .public) failed for \(ij.sourceID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+        try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
+    }
+
     // MARK: - Test seam
 
     /// Arm (or clear) the test-only ingest failure hook. Never called in
@@ -490,6 +702,13 @@ public extension Corpus {
     /// drain; the queue.sqlite can host other streams (e.g. "dreaming") alongside
     /// without cross-contamination — each consumer drains only its own stream_id.
     static var encodeStreamID: StreamID { StreamID(rawValue: "encode") }
+
+    /// The bulk-import stream id. Same durable queue.sqlite, same job wire
+    /// format, DIFFERENT stream + DIFFERENT drainer: import jobs are claimed only
+    /// by the import drain worker (`ingestBatchImport` — chunk + BM25, no
+    /// embed/train). Daily-driving live captures stay on `"encode"` untouched.
+    /// Rust twin: `import_stream_id()`.
+    static var importStreamID: StreamID { StreamID(rawValue: "import") }
 
     /// Fixed estate identity for the transient in-memory ingest-queue backend.
     /// The backend is per-Corpus and never shared, so the id is cosmetic; a

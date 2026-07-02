@@ -2170,7 +2170,7 @@ extension ToolDispatcher {
         Task.detached { [kit] in
             do {
                 let n = try await kit.reindexMissing(handle: handle, now: now)
-                fputs("palace import: background processing complete — \(n) drawers indexed to full coverage (auto-continued reindex), Merkle rolled up\n", stderr)
+                fputs("palace import: background processing complete — \(n) drawers indexed to full coverage (auto-continued reindex), corpus embedding-basis retrained on the full import, Merkle rolled up; semantic/vector recall now live\n", stderr)
             } catch {
                 fputs("palace import: background reindex failed: \(error)\n", stderr)
             }
@@ -2182,8 +2182,11 @@ extension ToolDispatcher {
             "\(report.drawersSkippedUnchanged) unchanged, " +
             "\(report.drawersSkippedTombstoned) tombstoned, " +
             "\(report.tunnelsCreated) tunnels, " +
-            "\(report.itemsSkipped) skipped; background processing started asynchronously " +
-            "(encode/index + Merkle rollup + matrix dreaming run on the resident daemon — no follow-up call needed)"
+            "\(report.itemsSkipped) skipped. " +
+            "Rows are durable NOW, but recall lights up in stages — background indexing has started and is not yet finished (no follow-up call is needed). " +
+            "Keyword (exact-term) and structured (wing/room) recall work almost immediately. " +
+            "Full SEMANTIC / vector recall — meaning-based RAG search — becomes available only AFTER background indexing completes: every drawer is chunked and embedded, then the corpus embedding-basis is retrained on the whole import and republished, so recently-imported terms enter the semantic vocabulary. On a large import that takes tens of seconds to a few minutes. " +
+            "BE PATIENT: poll moot_drain_status until it reports idle before relying on semantic search over the imported memories, and tell the user that deep meaning-based recall over a fresh import becomes available shortly after import, not instantly."
         )
     }
 }

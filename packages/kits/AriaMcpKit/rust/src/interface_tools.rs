@@ -1828,8 +1828,17 @@ fn run_reindex_responsive(
         if jobs.is_empty() {
             break; // every active drawer is indexed — done
         }
+        // IMPORT stream, not the daily-driving encode stream: the discrete
+        // corpus-import-drain worker claims these jobs and ingests them via
+        // ingest_batch_import — chunk + BM25 only, no bootstrap train, no embed.
+        // The encode drain's embed-now / train-as-you-go work is correct for a
+        // live single capture but pure repeated waste for a bulk import, whose
+        // basis is retrained on the WHOLE corpus and whose chunks are embedded
+        // ONCE at the tail below. Same durable queue.sqlite, so a crash
+        // mid-import cold-starts: the import worker reclaims orphaned rows and
+        // resumes.
         for chunk in jobs.chunks(ENQUEUE_CHUNK) {
-            if corpus.enqueue_ingest_batch(chunk).is_ok() {
+            if corpus.enqueue_ingest_batch_import(chunk).is_ok() {
                 total += chunk.len();
             }
         }
@@ -1837,24 +1846,44 @@ fn run_reindex_responsive(
         // collect sees the batch's chunks as indexed and does NOT re-enqueue
         // still-in-flight jobs (that duplicate-enqueue was the encode stall).
         //
-        // POLL, do not pump. The corpus mounts a single lease-holding background
-        // drain worker (corpus-ingest-drain) that owns the write connection AND
-        // the deferred-index publish. Calling await_ingest_drain here would spin a
-        // SECOND in-process drainer on that same shared SQLite connection — two
-        // concurrent ingest_batch BEGINs on one connection is a "cannot start a
-        // transaction within a transaction" fault that forces the slow per-job
-        // fallback. So the loop only observes ingest_queue_depth (a read-only
-        // frontier probe) and lets the single worker do all draining and
-        // publishing. collect_reindex_jobs keys on chunk presence (written inside
-        // the drain, BEFORE publish), so (0, 0) depth means the pass is fully
-        // indexed and the next collect returns only the remainder.
+        // POLL, do not pump — the single lease-holding import worker owns the
+        // drain; this loop only observes the read-only import-stream depth probe.
+        // collect_reindex_jobs keys on chunk presence (written inside the drain),
+        // so (0, 0) depth means the pass is fully indexed and the next collect
+        // returns only the remainder.
         loop {
-            match corpus.ingest_queue_depth() {
+            match corpus.import_queue_depth() {
                 Ok((0, 0)) => break,
                 Ok(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
                 Err(_) => break, // depth probe fault — stop rather than spin
             }
         }
+    }
+    // Full-corpus embedding-basis retrain, so the DENSE (semantic / vector / RAG)
+    // recall lane is query-ready the moment the import cycle reports complete.
+    //
+    // The loop above reaches full CHUNK coverage: every drawer is chunked, BM25
+    // (lexical) indexed, and embedded — but embedded against whatever basis was
+    // live when its batch drained, which for a cold import is the FIRST-batch
+    // bootstrap basis (its vocabulary is only the first pass's terms). A query term
+    // that appears only in a later batch therefore reads dense_lane:dark:vocabMiss
+    // until the basis is retrained on the WHOLE corpus and every chunk re-embedded
+    // into that space. Corpus::reindex does exactly that (train_and_persist_basis
+    // over all active chunks, then reembed_chunks → one index rebuild). Lexical
+    // (BM25) and structured (Locus) recall are already live from chunk coverage;
+    // THIS is the step that lights up semantic recall — so it belongs at the tail
+    // of the import cycle, not on a later cadence. Run on the Arc<Corpus> OUTSIDE
+    // the coord lock (a full re-embed is long; the lock must not be held across it).
+    let corpus_for_retrain = {
+        let c = coord_arc
+            .lock()
+            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+        c.corpus_handle(handle)
+    };
+    if let Some(corpus) = corpus_for_retrain {
+        corpus
+            .reindex(now)
+            .map_err(|e| format!("corpus basis retrain failed: {e:?}"))?;
     }
     // Brief re-lock for the deferred Merkle full-tree rollup, once, after coverage.
     {
@@ -2003,14 +2032,18 @@ fn run_palace_import(
             // calls during this 49k-drawer reindex (see run_reindex_responsive).
             match run_reindex_responsive(&bg_coord, &bg_handle, now) {
                 Ok(n) => eprintln!(
-                    "palace import: background processing complete — {n} drawers indexed to full coverage (auto-continued reindex), Merkle rolled up"
+                    "palace import: background processing complete — {n} drawers indexed to full coverage (auto-continued reindex), corpus embedding-basis retrained on the full import, Merkle rolled up; semantic/vector recall now live"
                 ),
                 Err(e) => eprintln!("palace import: background reindex failed: {e}"),
             }
         })
         .ok();
     Ok(text_result(&format!(
-        "palace import complete: {} written, {} updated, {} unchanged, {} tombstoned, {} tunnels, {} skipped; background processing started asynchronously (encode/index + Merkle rollup + matrix dreaming run on the resident daemon — no follow-up call needed)",
+        "palace import complete: {} written, {} updated, {} unchanged, {} tombstoned, {} tunnels, {} skipped. \
+         Rows are durable NOW, but recall lights up in stages — background indexing has started and is not yet finished (no follow-up call is needed). \
+         Keyword (exact-term) and structured (wing/room) recall work almost immediately. \
+         Full SEMANTIC / vector recall — meaning-based RAG search — becomes available only AFTER background indexing completes: every drawer is chunked and embedded, then the corpus embedding-basis is retrained on the whole import and republished, so recently-imported terms enter the semantic vocabulary. On a large import that takes tens of seconds to a few minutes. \
+         BE PATIENT: poll moot_drain_status until it reports idle before relying on semantic search over the imported memories, and tell the user that deep meaning-based recall over a fresh import becomes available shortly after import, not instantly.",
         report.drawers_written,
         report.drawers_updated,
         report.drawers_skipped_unchanged,

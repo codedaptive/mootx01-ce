@@ -194,14 +194,33 @@ impl<'a> PalaceBridge<'a> {
             }
             total = all_rows.len();
 
-            // Size gate (automatic — NOT user-controlled), single-sourced in
-            // import_policy so every gate uses the same boundary: a source at or
-            // below the threshold is written in one bulk transaction; a larger one
-            // streams per-item so no single transaction holds the write lock across
-            // hundreds of thousands of rows. The user's `mode` sets encode SPEED
-            // (set above), never this.
-            let use_bulk = crate::import_policy::use_bulk(total);
-            if use_bulk {
+            // STREAMED IMPORT PATH — DISABLED (2026-07-02). We believe the
+            // per-item streaming write path is no longer necessary and should be
+            // REMOVED at the 1.1 release gate if this holds true. Rationale: the
+            // bulk `capture_batch` path below handles every realistic import; the
+            // old stream branch engaged ONLY above import_policy::STREAM_THRESHOLD
+            // (250_000 items in ONE source), which no real import reaches. So the
+            // bulk path now runs UNCONDITIONALLY. The `use_bulk` size gate and the
+            // per-item `else` branch are preserved verbatim below, commented, for
+            // the 1.1 review — not deleted:
+            //
+            //   let use_bulk = crate::import_policy::use_bulk(total);
+            //   if use_bulk { /* bulk path — now the sole path, below */ } else {
+            //       // Stream path: one transaction per row so no single
+            //       // transaction holds the write lock across hundreds of
+            //       // thousands of rows.
+            //       for (embedding_id, metadata, is_closet) in &all_rows {
+            //           self.import_chroma_row(
+            //               embedding_id, metadata, *is_closet, handle,
+            //               &existing_lineage_ids, &existing_sensitivity,
+            //               &tombstoned_lineage_ids, &existing_content_by_lineage,
+            //               now, &mut report,
+            //           )?;
+            //           processed += 1;
+            //           if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
+            //       }
+            //   }
+            {
                 // Bulk path: collect all frames, then submit in one transaction.
                 let mut batch_frames: Vec<(CaptureFrame, bool /* is_update */)> = Vec::new();
                 for (embedding_id, metadata, is_closet) in &all_rows {
@@ -233,23 +252,6 @@ impl<'a> PalaceBridge<'a> {
                         processed += 1;
                         if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
                     }
-                }
-            } else {
-                for (embedding_id, metadata, is_closet) in &all_rows {
-                    self.import_chroma_row(
-                        embedding_id,
-                        metadata,
-                        *is_closet,
-                        handle,
-                        &existing_lineage_ids,
-                        &existing_sensitivity,
-                        &tombstoned_lineage_ids,
-                        &existing_content_by_lineage,
-                        now,
-                        &mut report,
-                    )?;
-                    processed += 1;
-                    if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
                 }
             }
         }
@@ -471,6 +473,13 @@ impl<'a> PalaceBridge<'a> {
 
     // MARK: - Chroma row import
 
+    // DISABLED (2026-07-02): the sole caller was the per-item STREAMED import
+    // branch in `import_palace`, now commented out (the bulk `capture_batch` path
+    // handles every realistic import; streaming only engaged above the 250_000-item
+    // STREAM_THRESHOLD). Kept, not deleted, pending the 1.1 release gate — remove
+    // this method together with the commented stream branch and import_policy's
+    // `use_bulk`/`STREAM_THRESHOLD` if the streamed path is confirmed unnecessary.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn import_chroma_row(
         &mut self,
