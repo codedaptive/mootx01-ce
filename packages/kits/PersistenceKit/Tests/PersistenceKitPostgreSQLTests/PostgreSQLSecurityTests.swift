@@ -184,3 +184,54 @@ private func validateIdentifierPublic(_ name: String) throws -> String {
     }
     return name
 }
+
+// MARK: - SECFIX-C-PG-SWIFT-TLS-SSLMODE (codex: PostgreSQL TLS disabled)
+
+@testable import PersistenceKitPostgreSQL
+
+/// The TLS decision must honor the DSN `sslmode` and fail closed: the env may
+/// raise but never lower the DSN's requirement; unknown DSN values require TLS;
+/// only an explicit disable (with no stronger source) yields plaintext.
+@Suite("PostgreSQL DSN sslmode TLS decision")
+struct PostgreSQLTLSDecisionTests {
+    typealias D = PostgreSQLPool.TLSDecision
+    private func decide(dsn: String?, env: String?) -> D {
+        PostgreSQLPool.effectiveTLSDecision(dsnSSLMode: dsn, envValue: env)
+    }
+
+    @Test("DSN sslmode=require yields require even with no env")
+    func requireDSN() { #expect(decide(dsn: "require", env: nil) == .require) }
+
+    @Test("DSN sslmode=verify-full yields require")
+    func verifyFullDSN() { #expect(decide(dsn: "verify-full", env: nil) == .require) }
+
+    @Test("DSN sslmode=verify-ca yields require")
+    func verifyCaDSN() { #expect(decide(dsn: "verify-ca", env: nil) == .require) }
+
+    @Test("Unknown DSN sslmode fails closed to require (never plaintext)")
+    func unknownDSNFailsClosed() { #expect(decide(dsn: "bogus", env: nil) == .require) }
+
+    @Test("DSN sslmode=disable alone is RAISED to prefer by the safe env default (never less secure)")
+    func disableDSNRaisedByDefault() { #expect(decide(dsn: "disable", env: nil) == .prefer) }
+
+    @Test("Explicit env=disable + DSN disable yields plaintext (the only path to disable)")
+    func explicitDisable() { #expect(decide(dsn: "disable", env: "disable") == .disable) }
+
+    @Test("Env=disable + absent DSN yields plaintext")
+    func envDisableNoDSN() { #expect(decide(dsn: nil, env: "disable") == .disable) }
+
+    @Test("Env require RAISES a disable DSN to require (env may raise)")
+    func envRaisesDisableDSN() { #expect(decide(dsn: "disable", env: "require") == .require) }
+
+    @Test("Env disable does NOT lower a require DSN (env may not lower)")
+    func envCannotLowerRequireDSN() { #expect(decide(dsn: "require", env: "disable") == .require) }
+
+    @Test("Absent DSN + absent env defaults to prefer (libpq default)")
+    func defaultsToPrefer() { #expect(decide(dsn: nil, env: nil) == .prefer) }
+
+    @Test("Absent DSN + env require yields require")
+    func envOnlyRequire() { #expect(decide(dsn: nil, env: "require") == .require) }
+
+    @Test("sslmode=prefer yields prefer")
+    func preferDSN() { #expect(decide(dsn: "prefer", env: nil) == .prefer) }
+}
