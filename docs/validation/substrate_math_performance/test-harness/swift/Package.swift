@@ -69,6 +69,11 @@ let package = Package(
             name: "NTP0Bakeoff",
             dependencies: [
                 "PlatformCryptoCandidate",
+                // The bakeoff Merkle contract lives in Harness
+                // (MerkleCommitmentSpike.swift — recovered from the deleted
+                // SubstrateKernel spike, a7ee72763; the substrate's
+                // production Merkle is SubstrateLib/MerkleHash, NT-F2).
+                "Harness",
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
             ]
@@ -82,6 +87,11 @@ let package = Package(
             dependencies: [
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                // Explicit (not just transitive via SubstrateML):
+                // MerkleCommitmentSpike.swift uses MerkleRoot/ContentHash
+                // and SHA256/GrantHKDF directly.
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
             ]
         ),
         .testTarget(

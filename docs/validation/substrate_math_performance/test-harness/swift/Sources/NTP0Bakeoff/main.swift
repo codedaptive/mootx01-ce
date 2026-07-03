@@ -6,6 +6,7 @@
 // Merkle root APIs.
 
 import Foundation
+import Harness
 import PlatformCryptoCandidate
 import SubstrateKernel
 import SubstrateTypes
