@@ -315,7 +315,7 @@ struct InstallCommand: AsyncParsableCommand {
         }
         #endif
 
-        // If ~/.local/bin is not on PATH, the symlink won't resolve as a
+        // If ~/.local/bin is not on PATH, the wrapper won't resolve as a
         // bare `mootx01` command — print a PATH advisory. (MCP clients use
         // the absolute config path regardless, so this only affects running
         // `mootx01` by name in a shell.)

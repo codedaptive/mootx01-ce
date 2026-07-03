@@ -172,8 +172,21 @@ release:
 	swift build -c release --package-path apps/moot-mgr --product moot-mgr
 	@cp apps/mootx01/.build/release/mootx01 "$(DIST)/mootx01"
 	@cp apps/moot-mgr/.build/release/moot-mgr "$(DIST)/moot-mgr"
+	# SPM resource bundles MUST ship beside the Swift binaries: each
+	# Bundle.module target (LatticeLib, EideticLib, swift-crypto) fatalErrors
+	# on its first resource touch when its <Target>_<Target>.bundle is not
+	# co-located with the executable — v1.0.9 shipped without them and the
+	# installed CLI crashed on any classify/search path. Union of both
+	# products' bundles; the cp glob failing loudly (no bundles built) is
+	# deliberate. install.sh places every *.bundle it finds in the archive.
+	@rm -rf "$(DIST)"/*.bundle
+	@cp -R apps/mootx01/.build/release/*.bundle "$(DIST)/"
+	@for b in apps/moot-mgr/.build/release/*.bundle; do \
+		bn=$$(basename "$$b"); \
+		[ -e "$(DIST)/$$bn" ] || cp -R "$$b" "$(DIST)/"; \
+	done
 	@arch=$$(uname -m); asset="mootx01-local-macos-$$arch.tar.gz"; \
-	 ( cd "$(DIST)" && tar -czf "$$asset" mootx01 moot-mgr && shasum -a 256 "$$asset" ); \
+	 ( cd "$(DIST)" && tar -czf "$$asset" mootx01 moot-mgr *.bundle && shasum -a 256 "$$asset" ); \
 	 echo "✓ release archive written to $(DIST)/"
 
 # ── macOS .pkg (local) ──────────────────────────────────────────────────

@@ -127,8 +127,10 @@ final class LaunchAgentTests: XCTestCase {
         XCTAssertNil(result)
     }
 
-    /// A real source binary is copied into place and symlinked onto PATH.
-    func testPlaceMgrBinaryPlacesAndSymlinks() throws {
+    /// A real source binary is copied into place and put onto PATH via the
+    /// exec wrapper (a symlinked PATH entry breaks SPM resource-bundle
+    /// lookup — see Installer.writePathWrapper).
+    func testPlaceMgrBinaryPlacesAndWraps() throws {
         let fm = FileManager.default
         let home = try makeTempHome()
         defer { try? fm.removeItem(at: home) }
@@ -141,11 +143,15 @@ final class LaunchAgentTests: XCTestCase {
 
         let placed = try Installer.placeMgrBinary(sourceMgrPath: src.path, homeDirectory: home)
         let dest = MootPaths.installedMgrBinaryURL(homeDirectory: home)
-        let link = MootPaths.mgrSymlinkURL(homeDirectory: home)
+        let entry = MootPaths.mgrSymlinkURL(homeDirectory: home)
 
         XCTAssertEqual(placed, dest.path)
         XCTAssertTrue(fm.fileExists(atPath: dest.path))
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: link.path), dest.path)
+        XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: entry.path),
+                     "PATH entry must be a wrapper script, not a symlink")
+        let wrapper = try String(contentsOfFile: entry.path, encoding: .utf8)
+        XCTAssertTrue(wrapper.contains("exec \"\(dest.path)\" \"$@\""),
+                      "wrapper must exec the placed moot-mgr")
 
         // Re-running is overwrite-safe (idempotent).
         XCTAssertNoThrow(try Installer.placeMgrBinary(sourceMgrPath: src.path, homeDirectory: home))

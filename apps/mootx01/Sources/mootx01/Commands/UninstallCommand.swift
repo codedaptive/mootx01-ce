@@ -88,12 +88,12 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✓ Stopped and removed the resident mootx01 daemon (launchd).")
             #endif
 
-            // Remove the placed binaries (~/.mootx01) and the PATH symlinks
+            // Remove the placed binaries (~/.mootx01) and the PATH wrappers
             // (~/.local/bin/mootx01, ~/.local/bin/moot-mgr). Inverse of install's
             // placeBinary/placeMgrBinary.
             do {
                 try Installer.removePlacedBinary(homeDirectory: home)
-                print("  ✓ Removed placed binaries and PATH symlinks.")
+                print("  ✓ Removed placed binaries and PATH entries.")
             } catch {
                 print("  ✗ Could not remove placed binary: \(error)")
             }
