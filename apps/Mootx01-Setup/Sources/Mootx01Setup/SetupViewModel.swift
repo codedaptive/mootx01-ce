@@ -37,6 +37,12 @@ final class SetupViewModel {
     var results: [String] = []
     var skipped: [String] = []
 
+    /// Integration depth the user picks (Server only / Skills / Full plugin).
+    /// Passed to `mootx01 install --mode`. Defaults to the fullest integration,
+    /// but the user chooses — silently forcing one depth produced installs the
+    /// user did not ask for.
+    var depth: InstallDepth = .default
+
     // MARK: - Derived
 
     /// At least one client is selected and not yet wired.
@@ -121,87 +127,37 @@ final class SetupViewModel {
         skipped = []
 
         let selected = clients.filter(\.isSelected)
-        let workingDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        guard !selected.isEmpty else { phase = .complete; return }
 
-        for item in selected {
-            do {
-                try Installer.install(
-                    client: item.client,
-                    binaryPath: binaryPath,
-                    daemonURL: daemonURL,
-                    homeDirectory: home,
-                    workingDirectory: workingDir,
-                    local: false
-                )
-                results.append(item.client.displayName)
-            } catch {
-                skipped.append("\(item.client.displayName): \(error.localizedDescription)")
+        // Run the REAL `mootx01 install` for the selected clients. It is the
+        // single source of truth for a complete install — client wiring, the
+        // plugin/skill depth, AND the resident daemon + management console. The
+        // GUI must NOT reimplement those steps: doing so silently skipped the
+        // daemon (clients wired to a dead 127.0.0.1:4242) and the plugin. This
+        // makes the setup assistant a true projection of the CLI.
+        let ids = selected.map(\.client.id).joined(separator: ",")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: binaryPath)
+        proc.arguments = ["install", "--target", ids, "--mode", depth.rawValue, "--yes"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+
+        do {
+            try proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            if proc.terminationStatus == 0 {
+                results = selected.map(\.client.displayName)
+            } else {
+                skipped = ["mootx01 install exited \(proc.terminationStatus)"]
+                    + output.split(separator: "\n").suffix(6).map(String.init)
             }
+        } catch {
+            skipped = ["Could not run mootx01 install: \(error.localizedDescription)"]
         }
-
-        // Apply integration depth (default = plugin) for wired clients.
-        for name in results {
-            if let client = selected.first(where: { $0.client.displayName == name }) {
-                _ = try? DepthInstaller.apply(
-                    clientID: client.client.id,
-                    depth: .default,
-                    homeDirectory: home,
-                    binaryPath: binaryPath
-                )
-            }
-        }
-
-        // Register the background services. WITHOUT this the wired clients point
-        // at http://127.0.0.1:4242 with nothing behind it — the .pkg install
-        // used to wire clients but never start the daemon, so every client hit
-        // ConnectionRefused. This mirrors the CLI `mootx01 install`, which is
-        // what the setup assistant is meant to be a GUI projection of.
-        #if os(macOS)
-        registerBackgroundServices()
-        #endif
 
         phase = .complete
     }
-
-    #if os(macOS)
-    /// Register + start the resident daemon and the management console as
-    /// launchd LaunchAgents — the same two services `mootx01 install` sets up
-    /// (InstallCommand). Failures are surfaced in `skipped` rather than thrown:
-    /// client wiring already succeeded, and the user can start a service by
-    /// hand, but the install must not silently omit the daemon the clients need.
-    private func registerBackgroundServices() {
-        // Management console (moot-mgr → dashboard on 4200). Its binary ships
-        // beside mootx01 in the install dir.
-        let mgrSource = URL(fileURLWithPath: binaryPath)
-            .resolvingSymlinksInPath()
-            .deletingLastPathComponent()
-            .appendingPathComponent("moot-mgr")
-            .path
-        if let mgrPath = try? Installer.placeMgrBinary(sourceMgrPath: mgrSource, homeDirectory: home) {
-            switch LaunchAgent.install(mgrBinaryPath: mgrPath, homeDirectory: home) {
-            case .installed:               results.append("Management console (moot-mgr)")
-            case let .launchctlFailed(m):  skipped.append("Management console: \(m)")
-            case .binaryNotFound:          skipped.append("Management console: binary missing")
-            }
-        }
-
-        // Resident MCP daemon (HTTP server on 4242) — the endpoint the wired
-        // clients connect to. Same environment the CLI sets on the LaunchAgent.
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let daemonEnv = [
-            "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
-            "MOOTX01_DATA_DIR": dataDir.path,
-            "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
-            "MOOTX01_VAULT": "1",   // vault-on default (ADR-015 §1)
-        ]
-        switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
-        case .installed:               results.append("Resident MCP daemon (127.0.0.1:4242)")
-        case let .launchctlFailed(m):  skipped.append("Resident daemon: \(m)")
-        case .binaryNotFound:          skipped.append("Resident daemon: binary missing")
-        }
-    }
-    #endif
 }

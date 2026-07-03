@@ -277,7 +277,69 @@ public enum DepthInstaller {
             }
             try safeContents.write(to: fileURL, atomically: true, encoding: .utf8)
         }
+
+        // Claude Code does NOT auto-discover a loose plugin directory — it only
+        // loads plugins registered via a marketplace in settings. So write a
+        // directory-marketplace manifest and register + enable it. Without this
+        // the plugin files land but `/plugin` never lists or loads mootx01.
+        // (Other hosts — Gemini, Cursor, Codex — carry their own registration in
+        // their package payloads; this step is Claude Code specific.)
+        if host.id == "claude-code" {
+            try registerClaudeCodeMarketplace(pluginDir: dest)
+        }
+
         return .plugin(path: dest.path)
+    }
+
+    /// Register the just-materialised plugin dir as a local (directory-source)
+    /// marketplace in `~/.claude/settings.json` and enable it, so Claude Code
+    /// discovers and loads it. Writes `.claude-plugin/marketplace.json` in the
+    /// plugin dir and MERGES the two settings keys (never clobbering the user's
+    /// other marketplaces/plugins). Takes effect after a Claude Code restart.
+    private static func registerClaudeCodeMarketplace(pluginDir: URL) throws {
+        let market = "mootx01"
+        let plugin = "mootx01"
+        let fm = FileManager.default
+
+        // 1. marketplace.json beside the plugin's plugin.json.
+        let mpDir = pluginDir.appendingPathComponent(".claude-plugin", isDirectory: true)
+        try fm.createDirectory(at: mpDir, withIntermediateDirectories: true)
+        let marketplace: [String: Any] = [
+            "name": market,
+            "owner": ["name": "Codedaptive", "url": "https://mootx01.ai"],
+            "plugins": [[
+                "name": plugin,
+                "source": "./",
+                "description": "MOOTx01 — active long-term memory and a low-token reasoning substrate.",
+            ]],
+        ]
+        let mpData = try JSONSerialization.data(
+            withJSONObject: marketplace, options: [.prettyPrinted, .sortedKeys])
+        try mpData.write(to: mpDir.appendingPathComponent("marketplace.json"), options: .atomic)
+
+        // 2. Merge into ~/.claude/settings.json (the plugin dir's parent is the
+        //    Claude Code home). Back up first; preserve every existing key.
+        let settingsURL = pluginDir.deletingLastPathComponent()
+            .appendingPathComponent("settings.json", isDirectory: false)
+        var root: [String: Any] = [:]
+        if fm.fileExists(atPath: settingsURL.path) {
+            try Installer.backupExisting(at: settingsURL)
+            if let data = try? Data(contentsOf: settingsURL),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                root = obj
+            }
+        }
+        var markets = root["extraKnownMarketplaces"] as? [String: Any] ?? [:]
+        markets[market] = ["source": ["source": "directory", "path": pluginDir.path]]
+        root["extraKnownMarketplaces"] = markets
+
+        var enabled = root["enabledPlugins"] as? [String: Any] ?? [:]
+        enabled["\(plugin)@\(market)"] = true
+        root["enabledPlugins"] = enabled
+
+        let out = try JSONSerialization.data(
+            withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try out.write(to: settingsURL, options: .atomic)
     }
 
     /// Inject `env.MOOTX01_VAULT=0` into the `mcpServers.mootx01` entry of an

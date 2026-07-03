@@ -167,7 +167,37 @@ struct InstallCommand: AsyncParsableCommand {
                     )
                     switch outcome {
                     case .server:
-                        print("  ⓘ \(client.displayName): server only (no skill/plugin payload for this client)")
+                        // Claude Desktop's "plugin" is a Desktop extension, not
+                        // a file-drop payload. At plugin depth, install it
+                        // programmatically (same registry writes a .mcpb
+                        // double-click makes) so the .pkg wires Desktop with no
+                        // manual step. Other MCP-only hosts (continue, kiro)
+                        // genuinely have no plugin surface.
+                        if client.id == "claude-desktop" {
+                            #if os(macOS)
+                            if depth == .plugin {
+                                do {
+                                    let installed = try ClaudeDesktopExtension.install(
+                                        binaryPath: binaryPath,
+                                        version: Mootx01.currentVersion,
+                                        homeDirectory: home)
+                                    if installed {
+                                        print("  ✓ \(client.displayName): extension installed → restart Claude Desktop to load it")
+                                    } else {
+                                        print("  ⓘ \(client.displayName): MCP server wired (Claude Desktop not detected — skipped extension)")
+                                    }
+                                } catch {
+                                    print("  ⚠ \(client.displayName): MCP server wired; extension install failed: \(error)")
+                                }
+                            } else {
+                                print("  ⓘ \(client.displayName): MCP server wired.")
+                            }
+                            #else
+                            print("  ⓘ \(client.displayName): MCP server wired.")
+                            #endif
+                        } else {
+                            print("  ⓘ \(client.displayName): server only (no skill/plugin payload for this client)")
+                        }
                     case let .skills(path):
                         print("  ✓ \(client.displayName): skill installed → \(path)")
                     case let .plugin(path):
