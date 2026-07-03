@@ -15,7 +15,10 @@ import LocusKit
 /// 1. **Tombstone protection** — lineages that were withdrawn or erased
 ///    are never resurrected by a re-import.
 /// 2. **Content-idempotent dedup** — a drawer whose lineageID is already
-///    active and whose content is unchanged is counted as `drawersSkippedUnchanged`.
+///    active and whose content, sensitivity, and exportability are all unchanged
+///    is counted as `drawersSkippedUnchanged`. An exportability change (e.g.
+///    public → private) on otherwise-identical content is a meaningful update
+///    that must NOT be suppressed by the skip guard.
 /// 3. **Sensitivity floor** — the import never lowers an existing drawer's
 ///    sensitivity tier.
 /// 4. **Tunnel signature dedup** — a tunnel already present is not recreated.
@@ -107,6 +110,13 @@ public struct PalaceBridge: Sendable {
             try await existingDrawerState(handle: handle)
         let existingSensitivityByLineage =
             try await existingSensitivityByLineage(handle: handle)
+        // Exportability snapshot: compared against the would-be exportability
+        // BEFORE the content-idempotent skip so a public→private label change
+        // on unchanged content is not silently suppressed (security fix codex
+        // 7c952932). Ordered newest-first; first-wins gives the most recently
+        // imported exportability per lineage — the value a reimport would supersede.
+        let existingExportabilityByLineage =
+            try await existingExportabilityByLineage(handle: handle)
         let tombstonedLineageIDs =
             try await existingTombstonedLineageIDs(handle: handle)
         // Include tunnel source wings in the signature scan: tunnels created by
@@ -195,6 +205,7 @@ public struct PalaceBridge: Sendable {
                         existingSensitivityByLineage: existingSensitivityByLineage,
                         tombstonedLineageIDs: tombstonedLineageIDs,
                         existingContentByLineage: existingContentByLineage,
+                        existingExportabilityByLineage: existingExportabilityByLineage,
                         now: now,
                         report: &report
                     ) {
@@ -346,6 +357,7 @@ public struct PalaceBridge: Sendable {
         existingSensitivityByLineage: [UUID: AdjectiveSensitivity],
         tombstonedLineageIDs: Set<UUID>,
         existingContentByLineage: [UUID: String],
+        existingExportabilityByLineage: [UUID: AdjectiveExportability],
         now: Date,
         report: inout ImportReport
     ) async throws {
@@ -379,13 +391,26 @@ public struct PalaceBridge: Sendable {
             flooredSensitivity = requestedSensitivity
         }
 
-        // Guard 2: content-idempotent dedup — skip only when BOTH the content is
-        // unchanged AND no sensitivity upgrade is pending. An upgrade from (say)
-        // .normal → .elevated on unchanged content is a legitimate write that must
-        // not be suppressed.
+        // Derive exportability BEFORE the content-idempotent skip so a
+        // public→private label change on unchanged content is not suppressed
+        // (security fix codex 7c952932: exportability-only changes bypassed
+        // the skip guard because exportability was derived only after the skip).
+        let wouldBeExportability = Self.importExportability(
+            label: metadata["exportability"], sensitivity: flooredSensitivity)
+
+        // Guard 2: content-idempotent dedup — skip only when ALL of the
+        // following hold: content is unchanged, no sensitivity upgrade is
+        // pending, AND exportability is unchanged. An exportability change (e.g.
+        // public → private) on otherwise-identical content is a meaningful write
+        // that must not be suppressed — failing to apply it leaves the stale
+        // public bit in place and breaks default bulk-export policy.
         let existingTierRaw = existingSensitivityByLineage[lineageID]?.rawValue
         let isSensitivityUpgrade = existingTierRaw.map { flooredSensitivity.rawValue > $0 } ?? false
-        if existingContentByLineage[lineageID] == content, !isSensitivityUpgrade {
+        let isExportabilityChange = existingExportabilityByLineage[lineageID]
+            .map { $0 != wouldBeExportability } ?? false
+        if existingContentByLineage[lineageID] == content,
+           !isSensitivityUpgrade,
+           !isExportabilityChange {
             report.drawersSkippedUnchanged += 1
             return
         }
@@ -411,8 +436,9 @@ public struct PalaceBridge: Sendable {
             kind: .prose,
             lineageID: lineageID,
             eventTime: eventTime ?? now,
-            exportability: Self.importExportability(
-                label: metadata["exportability"], sensitivity: flooredSensitivity),
+            // Re-use the exportability derived above (before the skip check) so
+            // the frame carries the correct label without a redundant derivation.
+            exportability: wouldBeExportability,
             wing: wing
         )
 
@@ -445,6 +471,7 @@ public struct PalaceBridge: Sendable {
         existingSensitivityByLineage: [UUID: AdjectiveSensitivity],
         tombstonedLineageIDs: Set<UUID>,
         existingContentByLineage: [UUID: String],
+        existingExportabilityByLineage: [UUID: AdjectiveExportability],
         now: Date,
         report: inout ImportReport
     ) -> (CaptureFrame, isUpdate: Bool)? {
@@ -469,9 +496,18 @@ public struct PalaceBridge: Sendable {
         } else {
             flooredSensitivity = requestedSensitivity
         }
+        // Derive exportability BEFORE the skip check — mirrors importChromaRow.
+        // A public→private label change on unchanged content must NOT be skipped
+        // (security fix codex 7c952932).
+        let wouldBeExportability = Self.importExportability(
+            label: metadata["exportability"], sensitivity: flooredSensitivity)
         let existingTierRaw = existingSensitivityByLineage[lineageID]?.rawValue
         let isSensitivityUpgrade = existingTierRaw.map { flooredSensitivity.rawValue > $0 } ?? false
-        if existingContentByLineage[lineageID] == content, !isSensitivityUpgrade {
+        let isExportabilityChange = existingExportabilityByLineage[lineageID]
+            .map { $0 != wouldBeExportability } ?? false
+        if existingContentByLineage[lineageID] == content,
+           !isSensitivityUpgrade,
+           !isExportabilityChange {
             report.drawersSkippedUnchanged += 1
             return nil
         }
@@ -491,8 +527,8 @@ public struct PalaceBridge: Sendable {
             kind: .prose,
             lineageID: lineageID,
             eventTime: eventTime ?? now,
-            exportability: Self.importExportability(
-                label: metadata["exportability"], sensitivity: flooredSensitivity),
+            // Re-use the exportability derived above (before the skip check).
+            exportability: wouldBeExportability,
             wing: wing
         )
         let isUpdate = existingLineageIDs.contains(lineageID)
@@ -801,6 +837,42 @@ public struct PalaceBridge: Sendable {
                 if tier.rawValue > current.rawValue { map[drawer.lineageID] = tier }
             } else {
                 map[drawer.lineageID] = tier
+            }
+        }
+        return map
+    }
+
+    /// Snapshot of the most recently imported exportability per lineage, used by
+    /// the content-idempotent skip guard to detect exportability-only changes
+    /// (e.g. public → private) that must not be suppressed.
+    ///
+    /// Uses the same recall frame as `existingSensitivityByLineage`. Ordered
+    /// newest-first (`byCaptureTimeDesc`); first-wins gives the most recent
+    /// exportability per lineage — the value a reimport would supersede.
+    private func existingExportabilityByLineage(
+        handle: EstateHandle
+    ) async throws -> [UUID: AdjectiveExportability] {
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(
+                filterChain: [
+                    .currentlyBelieve,
+                    .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                    .any([.trustworthy, .requiresConfirmation]),
+                    // Explicit ceiling so restricted/secret drawers are visible;
+                    // without it the evaluator's implicit floor hides them.
+                    .sensitivityAtMost(.secret),
+                ],
+                hydrationLevel: .structured,
+                limit: 10_000_000
+            )
+        )
+        var map: [UUID: AdjectiveExportability] = [:]
+        for drawer in drawers {
+            // First-wins (newest-first ordering) captures the most recent
+            // exportability per lineage — the value a reimport would supersede.
+            if map[drawer.lineageID] == nil {
+                map[drawer.lineageID] = drawer.exportability
             }
         }
         return map
