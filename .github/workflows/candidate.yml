@@ -1,0 +1,253 @@
+# Candidate — test builds from candidate/1.0.x, published as GitHub pre-releases.
+#
+# Branch model: develop (default, active work) → candidate (this: test builds /
+# pre-release) → stable (last-known-good; release tags cut from there).
+#
+# Triggers: every push to candidate/1.0.x (i.e. each promotion) and a weekly
+# schedule. Runs the `make test` gate, then builds UNSIGNED artifacts for every
+# platform and publishes them as a GitHub *pre-release* (kept: last 4). Nothing
+# here uses the Apple Developer ID or Windows signing paths — those are for real
+# releases only (see release.yml). Integrity is the minisign-signed checksums,
+# best-effort (a candidate must not fail the whole build just because the key is
+# absent — unlike the fail-closed stable release).
+#
+# Testers install a candidate with the pre-release tag, e.g.
+#   MOOTX01_VERSION=candidate-1.0.10-42 sh install.sh
+# (the normal `releases/latest` path deliberately skips pre-releases).
+
+name: candidate
+
+on:
+  push:
+    branches: ["candidate/1.0.x"]
+  schedule:
+    # Weekly dev build, Monday 09:00 UTC. Scheduled runs fire from the DEFAULT
+    # branch (develop), so every job pins `ref: candidate/1.0.x` to build the
+    # candidate line regardless of what triggered the run.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the pre-release + prune old ones
+
+concurrency:
+  group: candidate-build
+  cancel-in-progress: true
+
+jobs:
+  # ── Derive the candidate version/tag (fast; not gated behind the test job) ──
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - id: v
+        run: |
+          # Source version constant (matches Swift Mootx01.currentVersion).
+          version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          # Tag is NOT vX.Y.Z on purpose — a v* tag would trigger release.yml and
+          # a signed public release. `candidate-` keeps it clear of that trigger.
+          tag="candidate-${version}-${{ github.run_number }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Candidate build: $tag"
+
+  # ── The quality gate: the project's canonical test target ───────────────────
+  test:
+    name: make test (gate)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - run: make test
+
+  # ── Unsigned macOS builds (arm64 + x86_64) ──────────────────────────────────
+  macos:
+    needs: [meta, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - name: Build (unsigned)
+        run: |
+          # x86_64 cross-compiles from the arm64 runner; arm64 is native.
+          archflag=""
+          [ "${{ matrix.arch }}" = "x86_64" ] && archflag="--arch x86_64"
+          swift build -c release --package-path apps/mootx01  --product mootx01  $archflag
+          swift build -c release --package-path apps/moot-mgr --product moot-mgr $archflag
+          MOOT_BIN="$(find apps/mootx01/.build  -name mootx01  -path '*/release/mootx01'  | head -1)"
+          MGR_BIN="$(find apps/moot-mgr/.build  -name moot-mgr -path '*/release/moot-mgr' | head -1)"
+          cp "$MOOT_BIN" mootx01
+          cp "$MGR_BIN"  moot-mgr
+          asset="mootx01-${{ needs.meta.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz"
+          tar -czf "$asset" mootx01 moot-mgr
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: ${{ env.ASSET }}
+
+  # ── Unsigned Linux builds (x86_64 + arm64) ──────────────────────────────────
+  linux:
+    needs: [meta, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Build
+        run: |
+          cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
+          cp apps/mootx01/rust/target/release/mootx01  mootx01
+          cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
+          asset="mootx01-${{ needs.meta.outputs.tag }}-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$asset" mootx01 moot-mgr
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: ${{ env.ASSET }}
+
+  # ── Unsigned Windows builds (x86_64 + arm64): zip archive + Inno setup.exe ───
+  windows:
+    needs: [meta, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build + zip
+        shell: pwsh
+        run: |
+          cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target ${{ matrix.target }}
+          cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target ${{ matrix.target }}
+          Copy-Item "apps/mootx01/rust/target/${{ matrix.target }}/release/mootx01.exe"  "mootx01.exe"
+          Copy-Item "apps/moot-mgr/rust/target/${{ matrix.target }}/release/moot-mgr.exe" "moot-mgr.exe"
+          $asset = "mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}.zip"
+          Compress-Archive -Path "mootx01.exe","moot-mgr.exe" -DestinationPath $asset
+          "ARCHIVE=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Install Inno Setup
+        # windows-11-arm ships Chocolatey; Inno 6 is x86 and runs under emulation.
+        run: choco install innosetup -y --no-progress
+      - name: Build setup.exe (unsigned)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          # BinDir must be absolute — ISCC resolves /DBinDir relative to the .iss
+          # SourceDir (distribution\windows\), not the caller's CWD.
+          & $iscc `
+            "/DMyAppVersion=${{ needs.meta.outputs.tag }}" `
+            "/DArch=${{ matrix.arch }}" `
+            "/DBinDir=$($PWD.Path)" `
+            "/O." `
+            "distribution/windows/mootx01-setup.iss"
+          "SETUP=mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.SETUP }}
+
+  # ── Publish the pre-release + prune to the last 4 ───────────────────────────
+  prerelease:
+    needs: [meta, macos, linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+      - name: Assemble checksums (+ best-effort minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
+        run: |
+          mkdir -p flat
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \) \
+            -exec cp {} flat/ \;
+          ( cd flat && sha256sum * > ../checksums.txt )
+          cp checksums.txt flat/
+          # Best-effort minisign (stable release fails closed; a candidate does
+          # not). Without it, install.sh on Linux fail-closes for this candidate.
+          if [ -n "${MINISIGN_SECRET_KEY}" ]; then
+            sudo apt-get update && sudo apt-get install -y minisign
+            keyfile="$(mktemp)"; chmod 600 "$keyfile"
+            printf '%s' "${MINISIGN_SECRET_KEY}" > "$keyfile"
+            echo "${MINISIGN_SECRET_KEY_PASSWORD}" | minisign -S -s "$keyfile" -m flat/checksums.txt
+            rm -f "$keyfile"
+          else
+            echo "::warning::MINISIGN_SECRET_KEY not set — candidate checksums unsigned; install.sh on Linux will fail-closed for this candidate."
+          fi
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          notes="Automated **candidate/test build** from \`candidate/1.0.x\` at \`${{ github.sha }}\`.
+
+          NOT a release. Binaries are **unsigned** (no Apple Developer ID / Windows Authenticode). For testing only.
+
+          Install this build:
+          \`\`\`
+          MOOTX01_VERSION=${TAG} sh install.sh
+          \`\`\`"
+          gh release create "$TAG" \
+            --prerelease \
+            --title "Candidate ${TAG}" \
+            --notes "$notes" \
+            flat/*
+      - name: Prune to the last 4 candidate pre-releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName|startswith("candidate-")))]
+                  | sort_by(.createdAt) | reverse | .[4:] | .[].tagName' \
+          | while read -r old; do
+              [ -n "$old" ] || continue
+              echo "pruning old candidate: $old"
+              gh release delete "$old" --cleanup-tag --yes
+            done
