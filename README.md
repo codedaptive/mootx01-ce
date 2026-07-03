@@ -229,7 +229,14 @@ Installing the runtime gives the AI the tools. The next step teaches the client 
 | **Skills** | a `SKILL.md` adapter that teaches the AI when to use memory | clients with a skills surface |
 | **Plugin** | a native plugin package for the client | clients with a plugin format (Claude Code, Cursor, …) |
 
-`install` picks the deepest available and falls back automatically (plugin → skills → server). Why the plugin depth is worth having: [`apps/moot-agent-skills/PLUGIN.MD`](apps/moot-agent-skills/PLUGIN.MD). The per-client adapters and plugin sources live in:
+`install` picks the deepest available and falls back automatically (plugin → skills → server). Why the plugin depth is worth having: [`apps/moot-agent-skills/PLUGIN.MD`](apps/moot-agent-skills/PLUGIN.MD).
+
+The plugin is also installable straight from your client's marketplace — in Claude Code:
+
+```
+claude plugin marketplace add codedaptive/mootx01-plugin
+claude plugin install mootx01@mootx01
+``` The per-client adapters and plugin sources live in:
 
 ```text
 apps/moot-agent-skills/        # claude · cursor · codex · continue · cline · roo · openai-agents · generic
