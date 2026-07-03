@@ -132,18 +132,22 @@ struct GLK03_AuditIntegrationTests {
         #expect(report.entryCount > 0)
     }
 
-    // MARK: - Test 4 — C-12 invariant (corrupted entry)
+    // MARK: - Test 4 — C-12 invariant (corrupted entry rejection at ingress)
 
-    /// Corrupting an entry's stored id (flipping a byte) breaks the
-    /// content-hash check: the report is invalid and firstBrokenAt is
-    /// set. NEURONKIT_SPEC invariant C-12.
+    /// A corrupted entry (stored id does not match SHA-256 of wire encoding)
+    /// is rejected at the add boundary — the verify-on-ingress defence in
+    /// `UnifiedAuditLog` (codex a477800) catches the mismatch before the
+    /// entry reaches the log. The chain verifier therefore sees an empty log
+    /// and reports vacuously valid. This is the correct outcome: the
+    /// defence happens at ingress rather than post-hoc. The chain verifier
+    /// remains defence-in-depth for any entry that might bypass `add` in the
+    /// future. NEURONKIT_SPEC invariant C-12.
     @Test
-    func corruptedEntryFailsVerification() {
+    func corruptedEntryRejectedAtAddBoundary() {
         let good = entry(time: 1_000, row: rowA)
-        // Flip one byte of the stored id while keeping the 32-byte
-        // SHA-256 width the explicit-id initializer requires. The
-        // recomputed hash over the fields no longer matches the stored
-        // id, so the verifier must flag the break.
+        // Flip one byte of the stored id so it no longer matches the
+        // SHA-256 of the entry's wire encoding. The verify-on-ingress
+        // check in add / init(entries:) will reject this entry.
         var corruptedID = good.id
         corruptedID[0] ^= 0xFF
         let corrupted = UnifiedAuditEntry(
@@ -157,10 +161,19 @@ struct GLK03_AuditIntegrationTests {
             afterValue: good.afterValue,
             originRowID: good.originRowID
         )
+        // The log rejects the corrupted entry at the init(entries:) / add
+        // boundary — it never reaches the verifier.
         let log = UnifiedAuditLog(entries: [corrupted])
+        #expect(log.count == 0,
+                "corrupted entry rejected at add boundary (codex a477800)")
+
+        // The chain verifier (defence-in-depth) reports vacuously valid on
+        // the empty log — consistent with the ingress defence.
         let report = AuditChainVerifier.verify(log)
-        #expect(!report.valid, "a corrupted id must fail verification")
-        #expect(report.firstBrokenAt != nil, "firstBrokenAt set on break (C-12)")
+        #expect(report.valid,
+                "empty log after corrupted-entry rejection is vacuously valid")
+        #expect(report.firstBrokenAt == nil)
+        #expect(report.entryCount == 0)
     }
 
     // MARK: - Test 5 — asOf projection

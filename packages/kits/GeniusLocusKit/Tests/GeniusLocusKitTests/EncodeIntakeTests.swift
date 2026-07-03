@@ -15,6 +15,16 @@
 //     worker has ingested, then recall returns the drawer via .corpusBM25.
 //   • IMPATIENT: capture ingests inline, so recall returns the drawer via
 //     .corpusBM25 immediately, with NO drain wait.
+//
+// GATED BEHIND GLK_LATENCY_TESTS=1 (skipped by default): the drain barriers
+// here ride the default 30 s awaitEncodeDrain cap over CPU-bound embed work.
+// Under a bare `swift test`, the package's 117 suites run in parallel and
+// saturate every core — a single claimed chunk can sit mid-embed past the cap
+// and the suite false-fails with `.drainTimeout(pending: 0, inFlight: 1)`
+// while passing in seconds alone. `make test` runs this suite in a dedicated
+// isolated pass (GLK_LATENCY_TESTS=1 swift test --no-parallel --filter …), so
+// the acceptance line is still enforced — on a quiet machine. See the twin
+// note in EncodeDrainNearRealtimeTests.swift.
 
 import Testing
 import Foundation
@@ -27,7 +37,11 @@ import SubstrateTypes
 import QueueKit
 @testable import GeniusLocusKit
 
-@Suite("Dual-Path Intake — semantic recall is lit for captured content")
+@Suite(
+    "Dual-Path Intake — semantic recall is lit for captured content",
+    .enabled(
+        if: ProcessInfo.processInfo.environment["GLK_LATENCY_TESTS"] == "1",
+        "Latency-assertion suite — meaningless under parallel-suite CPU saturation; run via make test's isolated pass or GLK_LATENCY_TESTS=1 swift test --filter EncodeIntakeTests (see file header)"))
 struct EncodeIntakeTests {
 
     // MARK: - Helpers

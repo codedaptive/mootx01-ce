@@ -183,3 +183,66 @@ fn await_drain_times_out_on_stuck_pending() {
         other => panic!("expected DrainTimeout, got {other:?}"),
     }
 }
+
+// Progress resets the no-progress deadline. A slow-but-progressing drain must
+// NOT time out even when the TOTAL wait exceeds `timeout`: the deadline resets
+// each time the outstanding count (pending + in-flight) drops below its lowest
+// observed value. Regression test for the GLK full-suite drainTimeout
+// fragility, where CPU-starved encode workers drained slowly but steadily and
+// a wall-clock cap false-timed-out a correct drain. Swift twin:
+// awaitDrainProgressResetsDeadline.
+#[test]
+fn await_drain_progress_resets_deadline() {
+    let (backend, _dir) = make_backend();
+    let backend = Arc::new(backend);
+    for tag in ["a", "b", "c", "d"] {
+        backend.write(&make_job(tag)).unwrap();
+    }
+
+    // Worker: claim all four up front (pending → in-flight), then complete
+    // one every 200 ms. Total drain ≈ 800 ms — double the 400 ms timeout —
+    // but every completion lands well inside a fresh 400 ms window.
+    let worker = {
+        let b = Arc::clone(&backend);
+        std::thread::spawn(move || {
+            let batch = b.drain_available().unwrap();
+            for (job, _) in &batch {
+                std::thread::sleep(Duration::from_millis(200));
+                b.complete(&job.id, ObservationStatus::Done, vec![]).unwrap();
+            }
+        })
+    };
+
+    // A wall-clock cap would fail at 400 ms with jobs still in flight; the
+    // progress-based deadline must ride the resets to completion.
+    backend
+        .await_drain(Duration::from_millis(10), Duration::from_millis(400))
+        .expect("progressing drain must not false-time-out");
+    worker.join().unwrap();
+    assert_eq!(backend.completed(None).unwrap().len(), 4);
+}
+
+// Partial progress then a stall must STILL time out: completing one of three
+// jobs resets the deadline once, but the remaining two never move, so the
+// no-progress deadline fires. Proves progress-based ≠ never-times-out.
+// Swift twin: awaitDrainTimesOutWhenProgressStalls.
+#[test]
+fn await_drain_times_out_when_progress_stalls() {
+    let (backend, _dir) = make_backend();
+    for tag in ["a", "b", "c"] {
+        backend.write(&make_job(tag)).unwrap();
+    }
+    // Claim all three (new/ → cur/), complete exactly ONE, then stall.
+    let batch = backend.drain_available().unwrap();
+    backend
+        .complete(&batch[0].0.id, ObservationStatus::Done, vec![])
+        .unwrap();
+
+    match backend.await_drain(Duration::from_millis(10), Duration::from_millis(150)) {
+        Err(QueueError::DrainTimeout { pending, in_flight }) => {
+            assert_eq!(pending, 0);
+            assert_eq!(in_flight, 2);
+        }
+        other => panic!("expected DrainTimeout, got {other:?}"),
+    }
+}

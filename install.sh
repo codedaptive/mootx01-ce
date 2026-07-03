@@ -160,7 +160,14 @@ if [ -z "$version" ]; then
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
 fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
-case "$version" in v*) ;; *) version="v$version" ;; esac
+# Normalize a bare release version to its v-prefixed tag (1.0.10 -> v1.0.10),
+# but leave anything already tag-shaped untouched: v-prefixed tags, and
+# pre-release tags carrying a `-` suffix (e.g. 1.0.10-prerelease.4 from the
+# candidate pipeline, whose real tag has no leading v).
+case "$version" in
+  v* | *-*) ;;
+  *) version="v$version" ;;
+esac
 
 # 3. Download the archive, checksums.txt, and the detached minisign signature.
 #    Verification order (fail closed at each step before proceeding to the next):
@@ -214,23 +221,60 @@ fi
 tar -xzf "$tmp/mootx01.tar.gz" -C "$tmp"
 [ -f "$tmp/mootx01" ] || { echo "mootx01: archive did not contain the expected binary." >&2; exit 1; }
 
-# 4. Place the binaries and symlink them onto PATH (same layout `mootx01
-#    install` uses, so curl-install and source-install converge).
+# 4. Place the binaries and put wrapper scripts for them onto PATH (same
+#    layout `mootx01 install` uses, so curl-install and source-install
+#    converge).
+#
+# The PATH entry is an exec WRAPPER, not a symlink: the Swift runtime
+# resolves each Bundle.module target's SPM resource bundle
+# (<Target>_<Target>.bundle) from the directory of the path the binary was
+# INVOKED as, without following a symlink at that path. A symlinked
+# ~/.local/bin/mootx01 therefore looks for the bundles in ~/.local/bin,
+# finds nothing, and fatalErrors on the first resource touch (the v1.0.9
+# installed-CLI crash: `serve` booted, any classify/search path died).
+# `exec` of the real path makes the install dir the lookup root. Mirrors
+# Installer.writePathWrapper in MootInstallerCore — keep the two in step.
+write_path_wrapper() {
+  _target="$1"; _entry="$2"
+  rm -f "$_entry"
+  cat > "$_entry" <<WRAP
+#!/bin/sh
+# mootx01 PATH wrapper — exec the real binary from its install dir so
+# SPM resource bundles (<Target>_<Target>.bundle) resolve beside the
+# executable. A symlink here breaks that lookup. Written by install.sh;
+# Installer.writePathWrapper writes the same shape.
+exec "$_target" "\$@"
+WRAP
+  chmod 0755 "$_entry"
+}
+
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/mootx01" "$INSTALL_DIR/mootx01"
 mkdir -p "$BIN_DIR"
-ln -sf "$INSTALL_DIR/mootx01" "$BIN_DIR/mootx01"
+write_path_wrapper "$INSTALL_DIR/mootx01" "$BIN_DIR/mootx01"
 echo "Installed  $INSTALL_DIR/mootx01"
-echo "Linked     $BIN_DIR/mootx01"
+echo "Wrapped    $BIN_DIR/mootx01"
+
+# SPM resource bundles ship in the macOS (Swift) archives beside the
+# binaries; place every one of them next to the installed binaries. A
+# missing bundle is a hard crash on first resource use, not a degraded
+# mode. The Rust (linux/windows) archives carry none — the loop is a no-op.
+for _bundle in "$tmp"/*.bundle; do
+  [ -e "$_bundle" ] || continue
+  _bname="$(basename "$_bundle")"
+  rm -rf "${INSTALL_DIR:?}/$_bname"
+  cp -R "$_bundle" "$INSTALL_DIR/$_bname"
+  echo "Installed  $INSTALL_DIR/$_bname"
+done
 
 # moot-mgr (the management & monitoring console) ships in the macOS and Linux
 # archives; place it the same way whenever the extracted tree carries it.
 mgr_installed=0
 if [ -f "$tmp/moot-mgr" ]; then
   install -m 0755 "$tmp/moot-mgr" "$INSTALL_DIR/moot-mgr"
-  ln -sf "$INSTALL_DIR/moot-mgr" "$BIN_DIR/moot-mgr"
+  write_path_wrapper "$INSTALL_DIR/moot-mgr" "$BIN_DIR/moot-mgr"
   echo "Installed  $INSTALL_DIR/moot-mgr"
-  echo "Linked     $BIN_DIR/moot-mgr"
+  echo "Wrapped    $BIN_DIR/moot-mgr"
   mgr_installed=1
 fi
 

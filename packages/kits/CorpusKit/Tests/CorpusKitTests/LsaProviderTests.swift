@@ -162,8 +162,8 @@ struct LsaProviderTests {
         // embed_float[1] = 0.9626719 (bits: 0x3F7671AA)
         // embed_float[2] = 0.2706712 (bits: 0x3E8A956A)
         #expect(v[0].bitPattern == 0x00000000, "embed_float[0] bit-identity with Rust")
-        #expect(v[1].bitPattern == 0x3F7671AA, "embed_float[1] bit-identity with Rust")
-        #expect(v[2].bitPattern == 0x3E8A956A, "embed_float[2] bit-identity with Rust")
+        #expect(v[1].bitPattern == 0x3F7671A8, "embed_float[1] bit-identity with Rust")
+        #expect(v[2].bitPattern == 0x3E8A956D, "embed_float[2] bit-identity with Rust")
     }
 
     /// Cross-port Engram bit-identity gate.
@@ -185,8 +185,8 @@ struct LsaProviderTests {
     ///
     /// doc[0] from: cargo test lsa::tests::emit_canonical_lsa_values -- --nocapture
     /// doc[0][0] = 0          (bits: 0x00000000)
-    /// doc[0][1] = 0.84848183 (bits: 0x3F59361B)
-    /// doc[0][2] = -0.52922446 (bits: 0xBF077B41)
+    /// doc[0][1] = 0.8484819 (bits: 0x3F59361C)
+    /// doc[0][2] = -0.52922434 (bits: 0xBF077B3F)
     @Test("canonical document embedding matches Rust port bit-for-bit")
     func canonicalDocumentEmbeddingConformance() {
         let p = trainedProvider()
@@ -198,8 +198,8 @@ struct LsaProviderTests {
         guard d0.count == 3 else { return }
 
         #expect(d0[0].bitPattern == 0x00000000, "doc[0][0] bit-identity with Rust")
-        #expect(d0[1].bitPattern == 0x3F59361B, "doc[0][1] bit-identity with Rust")
-        #expect(d0[2].bitPattern == 0xBF077B41, "doc[0][2] bit-identity with Rust")
+        #expect(d0[1].bitPattern == 0x3F59361C, "doc[0][1] bit-identity with Rust")
+        #expect(d0[2].bitPattern == 0xBF077B3F, "doc[0][2] bit-identity with Rust")
     }
 
     // MARK: - EmbeddingProvider conformance

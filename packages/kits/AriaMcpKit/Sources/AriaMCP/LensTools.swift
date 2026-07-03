@@ -485,14 +485,38 @@ enum LensTools {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
                     && $0.adjectiveSensitivity.isBulkExportable
             }
+            // Source-ID gate: an exportable tunnel may still point at a
+            // Restricted/Secret drawer. getDrawers with the default frame returns
+            // admissible (within ceiling) + loadedIDs (all existing); the
+            // difference is the blocked set. Wing-fallback strings are not drawer
+            // ids, never load, and pass through. Parity with runFactSearch.
+            let emittedTunnels = Array(contradictsTunnels.prefix(50))
+            let endpointIDs = Set(emittedTunnels.flatMap {
+                [$0.sourceDrawerId, $0.targetDrawerId].compactMap { $0 }
+            })
+            let hiddenTunnelEndpointIDs: Set<String>
+            if endpointIDs.isEmpty {
+                hiddenTunnelEndpointIDs = []
+            } else {
+                let result = try await estate.getDrawers(
+                    ids: Array(endpointIDs),
+                    matchingFrame: RecallFrame(filterChain: []),
+                    hydrationLevel: .structured)
+                let admissibleIDs = Set(result.admissible.map { $0.id })
+                hiddenTunnelEndpointIDs = result.loadedIDs.subtracting(admissibleIDs)
+            }
             var lines: [String] = []
             if contradictsTunnels.isEmpty {
                 lines.append("contradicts_tunnels: none")
             } else {
                 lines.append("contradicts_tunnels: \(contradictsTunnels.count)")
-                for t in contradictsTunnels.prefix(50) {
-                    let src = t.sourceDrawerId ?? "\(t.sourceWing)/\(t.sourceRoom)"
-                    let tgt = t.targetDrawerId ?? "\(t.targetWing)/\(t.targetRoom)"
+                for t in emittedTunnels {
+                    let src = t.sourceDrawerId.map {
+                        hiddenTunnelEndpointIDs.contains($0) ? "<hidden>" : $0
+                    } ?? "\(t.sourceWing)/\(t.sourceRoom)"
+                    let tgt = t.targetDrawerId.map {
+                        hiddenTunnelEndpointIDs.contains($0) ? "<hidden>" : $0
+                    } ?? "\(t.targetWing)/\(t.targetRoom)"
                     lines.append("  \(src) contradicts \(tgt) (tunnel \(t.id))")
                 }
             }
@@ -513,6 +537,19 @@ enum LensTools {
             let conflicting = factsByKey.filter { _, facts in
                 Set(facts.map { $0.object.lowercased() }).count > 1
             }
+            // Source-ID gate for fact sources — same ceiling-difference method.
+            let factSourceIDs = Set(allFacts.map { $0.sourceDrawerID })
+            let hiddenFactSourceIDs: Set<String>
+            if factSourceIDs.isEmpty {
+                hiddenFactSourceIDs = []
+            } else {
+                let result = try await estate.getDrawers(
+                    ids: Array(factSourceIDs),
+                    matchingFrame: RecallFrame(filterChain: []),
+                    hydrationLevel: .structured)
+                let admissibleIDs = Set(result.admissible.map { $0.id })
+                hiddenFactSourceIDs = result.loadedIDs.subtracting(admissibleIDs)
+            }
             if conflicting.isEmpty {
                 lines.append("conflicting_facts: none")
             } else {
@@ -523,9 +560,11 @@ enum LensTools {
                     lines.append("  [\(parts.first ?? "")] \(parts.last ?? "")")
                     for fact in facts {
                         let filed = formatter.string(from: fact.filedAt)
+                        let source = hiddenFactSourceIDs.contains(fact.sourceDrawerID)
+                            ? "<hidden>" : fact.sourceDrawerID
                         lines.append(
                             "    \(fact.id)  object=[\(fact.object)]  "
-                            + "source=\(fact.sourceDrawerID)  filed=\(filed)"
+                            + "source=\(source)  filed=\(filed)"
                         )
                     }
                 }

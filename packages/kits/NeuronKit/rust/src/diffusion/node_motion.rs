@@ -64,7 +64,15 @@ pub fn fold(
     const PHYSICAL_MASK: i64 = (1 << 40) - 1;
     let now_ms_masked = now_ms & PHYSICAL_MASK;
 
-    let mut seen_physical: HashSet<i64> = HashSet::new();
+    // Dedup key is the FULL HLC identity (physical, logical, node) — not the
+    // physical millisecond alone. HLC identity/order is lexicographic over the
+    // triple, so two mutations in the same millisecond (bulk import, bursty
+    // writes) are distinct HLCs differing only in logical_count and must each
+    // contribute one volatility tick / event count. Keying on physical alone
+    // collapsed same-ms events into one. The key uses the RAW (untruncated)
+    // physical for identity; the 40-bit mask below is only for the age math.
+    // secfix/ce-node-motion-hlc-dedup.
+    let mut seen_hlc: HashSet<(i64, i32, i32)> = HashSet::new();
     let mut volatility = 0.0_f64;
     let mut event_count = 0usize;
     let mut last_ms: Option<i64> = None;
@@ -75,7 +83,11 @@ pub fn fold(
 
         // Distinct mutation moment -> one decay-weighted contribution. One drawer
         // write emits several field entries sharing one HLC.
-        if seen_physical.insert(physical) {
+        if seen_hlc.insert((
+            entry.hlc.physical_time,
+            entry.hlc.logical_count,
+            entry.hlc.node_id,
+        )) {
             let mut dt = now_ms_masked - physical;
             if dt < 0 {
                 dt += PHYSICAL_MASK + 1; // 40-bit wrap
@@ -158,6 +170,42 @@ mod tests {
         assert!(m.anchor_trajectory.is_empty());
         assert_eq!(m.current_anchor(), None);
         assert!(!m.reanchored());
+    }
+
+    // Regression for secfix/ce-node-motion-hlc-dedup: two mutations in the SAME
+    // physical millisecond are distinct HLCs (logical_count differs) and must
+    // each count as a mutation moment. The physical-only dedup key collapsed
+    // them into one event. Field entries sharing ONE full HLC (one write, many
+    // fields) must still collapse to a single event.
+    #[test]
+    fn same_millisecond_distinct_hlcs_are_distinct_events() {
+        let entry_lc = |ms: i64, lc: i32, field: &str| {
+            UnifiedAuditEntry::new(
+                AuditTier::Locus,
+                HLC { physical_time: ms, logical_count: lc, node_id: 1 },
+                UnifiedAuditVerb::Mutate,
+                ROW,
+                field.to_string(),
+                UnifiedAuditValue::Null,
+                UnifiedAuditValue::Bitmap(1),
+                None,
+            )
+        };
+        let entries = vec![
+            // Write A: two field entries sharing one HLC → ONE event.
+            entry_lc(8 * DAY, 0, "operational"),
+            entry_lc(8 * DAY, 0, "adjective"),
+            // Write B: same millisecond, logical_count bumped → a SECOND event.
+            entry_lc(8 * DAY, 1, "operational"),
+        ];
+        let m = fold(&entries, ROW, 8 * DAY, 0.5);
+        assert_eq!(
+            m.event_count, 2,
+            "same-ms writes with distinct logical_count must count separately; \
+             intra-write field entries sharing one HLC must still collapse"
+        );
+        // Both events are zero-age → volatility = 2.0 exactly.
+        assert!((m.volatility - 2.0).abs() < 1e-9);
     }
 
     #[test]

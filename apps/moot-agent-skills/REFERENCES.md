@@ -9,8 +9,13 @@ configuration surfaces below as of 2026-06-12.
 - `.claude/rules/*.md` modular rules.
 - `.claude/skills/*/SKILL.md` skills.
 - `.claude/commands/*.md` slash command prompts.
+- `.claude/settings.json` lifecycle hooks (`SessionStart`, `UserPromptSubmit`,
+  `PreCompact`, `Stop`).
 
-Reference: https://code.claude.com/docs/en/memory
+References:
+
+- https://code.claude.com/docs/en/memory
+- https://code.claude.com/docs/en/hooks
 
 ## Codex
 
@@ -31,6 +36,14 @@ References:
 - `.cursorrules` legacy fallback.
 
 Reference: https://cursor.com/docs
+
+## Gemini CLI
+
+- `GEMINI.md` project or user-level context file.
+- Lifecycle hooks exist (enabled by default since v0.26.0) but are not yet
+  used by this kit.
+
+Reference: https://geminicli.com/docs
 
 ## Cline
 

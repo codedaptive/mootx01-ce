@@ -157,6 +157,15 @@ public struct GSetAuditLog: Sendable, Codable {
 
     private enum CodingKeys: String, CodingKey { case entries }
 
+    // SECURITY NOTE (codex a477800): This scaffold has NO production
+    // consumer and the `AuditEntry` type has no wire-bytes encoder or
+    // SHA-256 hash function, so it cannot self-verify its content id
+    // here. When this type is wired (federation v1.1), the peer-ingest
+    // boundary MUST recompute the SHA-256 content id from the entry's
+    // wire encoding and reject same-id/different-content collisions —
+    // the same defence now applied to the live `GeniusLocusKit`
+    // `UnifiedAuditLog` (codex a477800). Do not add wiring without
+    // also adding content-id verification on every ingress path.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let entryArray = try container.decode([AuditEntry].self, forKey: .entries)
@@ -177,6 +186,13 @@ public struct GSetAuditLog: Sendable, Codable {
 
     /// Add a single entry. Idempotent: re-adding an entry with
     /// the same content hash is a no-op.
+    ///
+    /// SECURITY NOTE (codex a477800): This scaffold has no production
+    /// consumer and `AuditEntry` has no wire-bytes encoder, so content-id
+    /// verification is not possible here. When wired for federation, this
+    /// method MUST recompute the SHA-256 content id and reject
+    /// same-id/different-content collisions — the same defence applied
+    /// to the live `UnifiedAuditLog` in GeniusLocusKit.
     public mutating func add(_ entry: AuditEntry) {
         entries[entry.id] = entry
     }
@@ -184,6 +200,13 @@ public struct GSetAuditLog: Sendable, Codable {
     /// CRDT join. Merging two G-Sets is set union of entries.
     /// Commutative, associative, idempotent — the three CRDT
     /// properties that guarantee convergence.
+    ///
+    /// SECURITY NOTE (codex a477800): This scaffold has no production
+    /// consumer and `AuditEntry` has no wire-bytes encoder, so content-id
+    /// verification is not possible here. When wired for federation, this
+    /// method MUST recompute the SHA-256 content id on every ingress entry
+    /// and reject same-id/different-content collisions — the same defence
+    /// applied to the live `UnifiedAuditLog` in GeniusLocusKit.
     public mutating func merge(_ other: GSetAuditLog) {
         for (id, entry) in other.entries {
             entries[id] = entry

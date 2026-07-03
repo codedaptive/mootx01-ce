@@ -40,10 +40,13 @@ struct InstallerTests {
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let servers = obj?["mcpServers"] as? [String: Any]
         let entry = servers?[client.serverName] as? [String: Any]
-        // Claude Code uses a command entry so it does not trust a fixed unauthenticated loopback URL.
-        #expect(entry?["command"] as? String == binaryPath)
-        #expect(entry?["args"] as? [String] == [])
-        #expect(entry?["url"] == nil, "default client wiring must not trust a fixed HTTP url")
+        // Accepted CE posture (docs(secfix/ce-loopback-impersonation),
+        // b913ca4a): HTTP-capable clients are wired to the resident daemon's
+        // fixed loopback endpoint. The command/stdio assertions this test
+        // once made encoded an unauthorized flip that was reverted (5c035e6).
+        #expect(entry?["url"] as? String == MootPaths.residentEndpointURL,
+                "default client wiring targets the resident daemon endpoint")
+        #expect(entry?["command"] == nil, "HTTP-wired client carries no command entry")
     }
 
     @Test("Claude Desktop gets a stdio command entry (no native local-HTTP)")
@@ -178,8 +181,8 @@ struct InstallerTests {
         #expect(perms & 0o111 != 0, "placed binary must be executable")
     }
 
-    @Test("placeBinary creates a PATH symlink that resolves to the placed binary")
-    func placeBinaryCreatesResolvingSymlink() throws {
+    @Test("placeBinary creates a PATH wrapper that execs the placed binary")
+    func placeBinaryCreatesExecWrapper() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
@@ -188,9 +191,45 @@ struct InstallerTests {
 
         let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
 
-        let symlink = home.appendingPathComponent(".local/bin/mootx01")
-        let dest = try FileManager.default.destinationOfSymbolicLink(atPath: symlink.path)
-        #expect(dest == placed, "symlink must resolve to the placed binary")
+        // The PATH entry must be an exec WRAPPER SCRIPT, not a symlink: the
+        // runtime resolves SPM resource bundles from the invoked path's
+        // directory without following a symlink there, so a symlinked entry
+        // crashes every Bundle.module target on first resource touch (the
+        // v1.0.9 installed-CLI crash).
+        let entry = home.appendingPathComponent(".local/bin/mootx01")
+        let fm = FileManager.default
+        #expect((try? fm.destinationOfSymbolicLink(atPath: entry.path)) == nil,
+                "PATH entry must not be a symlink")
+        let script = try String(contentsOfFile: entry.path, encoding: .utf8)
+        #expect(script.hasPrefix("#!/bin/sh"), "wrapper must be a shell script")
+        #expect(script.contains("exec \"\(placed)\" \"$@\""),
+                "wrapper must exec the placed binary, forwarding all args")
+        let attrs = try fm.attributesOfItem(atPath: entry.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        #expect(perms & 0o111 != 0, "wrapper must be executable")
+    }
+
+    @Test("placeBinary replaces a legacy PATH symlink with the wrapper")
+    func placeBinaryReplacesLegacySymlink() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        let fm = FileManager.default
+
+        // Simulate a pre-wrapper install: a symlink at the PATH entry.
+        let localBin = home.appendingPathComponent(".local/bin")
+        try fm.createDirectory(at: localBin, withIntermediateDirectories: true)
+        let entry = localBin.appendingPathComponent("mootx01")
+        try fm.createSymbolicLink(
+            at: entry, withDestinationURL: home.appendingPathComponent(".mootx01/bin/mootx01"))
+
+        let source = try makeFakeBinary()
+        defer { try? fm.removeItem(at: source) }
+        let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        #expect((try? fm.destinationOfSymbolicLink(atPath: entry.path)) == nil,
+                "legacy symlink must be replaced by the wrapper")
+        let script = try String(contentsOfFile: entry.path, encoding: .utf8)
+        #expect(script.contains("exec \"\(placed)\" \"$@\""))
     }
 
     @Test("placeBinary overwrites an existing install (re-install is safe)")
@@ -210,7 +249,7 @@ struct InstallerTests {
         #expect(content == "v2", "re-install must overwrite the prior binary")
     }
 
-    @Test("placeBinary re-run from the installed binary does not create a self-symlink loop")
+    @Test("placeBinary re-run from the PATH entry does not clobber the real binary")
     func placeBinaryReinstallFromPlacedBinaryDoesNotLoop() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
@@ -220,24 +259,26 @@ struct InstallerTests {
         let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
 
         let fm = FileManager.default
-        let symlink = home.appendingPathComponent(".local/bin/mootx01").path
+        let pathEntry = home.appendingPathComponent(".local/bin/mootx01").path
 
         // Regression: `mootx01 install` run from the installed binary arrives
-        // here with sourcePath = the ~/.local/bin/mootx01 symlink (or the
-        // resolved installed path). Previously copyItem copied the LINK and,
-        // after removing dest, produced a self-referential symlink (ELOOP)
-        // that broke every subsequent install.
-        _ = try Installer.placeBinary(sourcePath: symlink, homeDirectory: home)
+        // here with sourcePath = the ~/.local/bin/mootx01 PATH entry (or the
+        // resolved installed path). In the symlink era copyItem copied the
+        // LINK and produced a self-referential symlink (ELOOP); in the
+        // wrapper era a naive copy would land the SHELL SCRIPT over the real
+        // binary. resolvePathWrapper must see through the wrapper.
+        _ = try Installer.placeBinary(sourcePath: pathEntry, homeDirectory: home)
         _ = try Installer.placeBinary(sourcePath: placed, homeDirectory: home)
 
-        // Dest must stay a REGULAR FILE — never a symlink, let alone a loop.
+        // Dest must stay the REAL binary — never a symlink, loop, or wrapper.
         #expect((try? fm.destinationOfSymbolicLink(atPath: placed)) == nil,
                 "placed binary must remain a regular file, not a symlink")
         #expect(fm.fileExists(atPath: placed), "placed binary must still exist")
         #expect(try String(contentsOfFile: placed, encoding: .utf8) == "real",
                 "the real binary content must survive re-install from itself")
-        #expect(try fm.destinationOfSymbolicLink(atPath: symlink) == placed,
-                "PATH symlink still resolves to the real placed binary")
+        let wrapper = try String(contentsOfFile: pathEntry, encoding: .utf8)
+        #expect(wrapper.contains("exec \"\(placed)\" \"$@\""),
+                "PATH wrapper still execs the real placed binary")
     }
 
     @Test("placeBinary carries every .bundle sibling into the install bin dir")
@@ -491,11 +532,22 @@ struct InstallerTests {
                 "useProxyBridge: true → not headless")
     }
 
-    @Test("supported clients do not trust fixed unauthenticated loopback URLs")
-    func supportedClientsDoNotUseDirectHTTP() {
-        let offenders = MCPClients.supported.filter(\.supportsLocalHTTP).map(\.id)
-        #expect(offenders.isEmpty,
-                "supported clients must not be wired to direct HTTP by default: \(offenders)")
+    @Test("HTTP-capable clients are wired to the resident daemon (accepted loopback posture)")
+    func supportedClientsUseResidentDaemonHTTP() {
+        // The fixed unauthenticated loopback endpoint is the ACCEPTED CE
+        // posture — Bob-ruled, recorded in docs(secfix/ce-loopback-impersonation)
+        // (b913ca4a): launchd owns the port continuously, SO_REUSEADDR (not
+        // REUSEPORT) prevents live theft, and a same-user attacker already
+        // reads the estate files directly. Endpoint auth arrives with EE v1.1
+        // off-localhost hosting. The inverse assertion this test used to make
+        // ("no client may be wired to direct HTTP") encoded an unauthorized
+        // stdio flip that was reverted (5c035e6) — do not resurrect it.
+        // claude-desktop is the deliberate exception: no native local-HTTP
+        // support, so it rides the proxy bridge (covered by its own test).
+        let httpWired = Set(MCPClients.supported.filter(\.supportsLocalHTTP).map(\.id))
+        let expected = Set(MCPClients.supported.map(\.id)).subtracting(["claude-desktop"])
+        #expect(httpWired == expected,
+                "HTTP-capable clients must ride the resident daemon endpoint; got \(httpWired.sorted())")
     }
 
     // MARK: - Continue YAML
@@ -517,7 +569,9 @@ struct InstallerTests {
 
         let configURL = home.appendingPathComponent(client.configPath)
         let content = try String(contentsOf: configURL, encoding: .utf8)
-        #expect(content == "command: \(binaryPath)\nargs: []\n")
+        // Continue rides the resident daemon over streamable-http (accepted
+        // loopback posture, b913ca4a).
+        #expect(content == "type: streamable-http\nurl: \(MootPaths.residentEndpointURL)\n")
     }
 
     // MARK: - Claude Code --local mode
@@ -736,7 +790,7 @@ struct InstallerTests {
         #expect(entry?["url"] == nil, "proxy-bridge entry must not have a url field")
     }
 
-    @Test("mergeIntoJSONConfig writes command entry for default supported client")
+    @Test("mergeIntoJSONConfig writes resident-daemon url entry for default supported client")
     func mergeIntoJSONConfigDefaultCommand() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
@@ -751,9 +805,10 @@ struct InstallerTests {
 
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
-        #expect(entry?["command"] as? String == "/usr/local/bin/mootx01")
-        #expect(entry?["args"] as? [String] == [])
-        #expect(entry?["url"] == nil, "default JSON wiring must not trust a fixed HTTP url")
+        // Accepted loopback posture (b913ca4a): HTTP-capable clients target
+        // the resident daemon endpoint, not a per-call stdio spawn.
+        #expect(entry?["url"] as? String == MootPaths.residentEndpointURL)
+        #expect(entry?["command"] == nil, "HTTP-wired entry carries no command")
     }
 
     @Test("mergeIntoJSONConfig is idempotent: second call produces identical file content")
@@ -829,7 +884,7 @@ struct InstallerTests {
 
     // MARK: - mergeIntoTOMLConfig (Codex)
 
-    @Test("mergeIntoTOMLConfig writes a fresh [mcp_servers.mootx01] command table")
+    @Test("mergeIntoTOMLConfig writes a fresh [mcp_servers.mootx01] url table")
     func mergeIntoTOMLFreshCommand() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
@@ -844,9 +899,11 @@ struct InstallerTests {
 
         let text = try String(contentsOf: configURL, encoding: .utf8)
         #expect(text.contains("[mcp_servers.mootx01]"), "TOML server table must be present")
-        // Codex uses a command entry — does not trust a fixed unauthenticated loopback URL.
-        #expect(text.contains("command = \"/usr/local/bin/mootx01\""), "command entry must be set")
-        #expect(text.contains("args = []"), "args entry must be present")
+        // Codex rides the resident daemon endpoint (accepted loopback
+        // posture, b913ca4a) — a url table, not a command/stdio one.
+        #expect(text.contains("url = \"\(MootPaths.residentEndpointURL)\""),
+                "url entry must target the resident daemon")
+        #expect(!text.contains("command = "), "HTTP-wired table carries no command entry")
         #expect(text.first != "{", "must be TOML, not JSON")
     }
 
@@ -1103,7 +1160,7 @@ struct InstallerTests {
 
     // MARK: - opencode (schema: top-level "mcp", type:"remote", .jsonc preference)
 
-    @Test("opencode writes command entry under top-level mcp key (no fixed loopback URL)")
+    @Test("opencode writes a remote url entry under the top-level mcp key")
     func opencodeUsesMcpKeyAndCommandEntry() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
@@ -1119,11 +1176,11 @@ struct InstallerTests {
         // Opencode config uses the top-level "mcp" key (not "mcpServers").
         #expect(obj?["mcpServers"] == nil)
         let entry = (obj?["mcp"] as? [String: Any])?["mootx01"] as? [String: Any]
-        // Default install uses a command entry so opencode does not trust a fixed
-        // unauthenticated loopback URL (ADR-LOOPBACKHTTP-001).
-        #expect(entry?["command"] as? String == "/b")
-        #expect(entry?["args"] as? [String] == [])
-        #expect(entry?["url"] == nil, "command entry must not carry a url field")
+        // Opencode's schema-verified remote shape targeting the resident
+        // daemon (accepted loopback posture, b913ca4a).
+        #expect(entry?["type"] as? String == "remote")
+        #expect(entry?["url"] as? String == "http://127.0.0.1:4242")
+        #expect(entry?["command"] == nil, "remote entry carries no command field")
         #expect(client.wired(homeDirectory: home))
 
         try Installer.uninstall(
@@ -1172,8 +1229,9 @@ struct InstallerTests {
             homeDirectory: home, workingDirectory: home, local: false)
 
         let got = try String(contentsOf: configURL, encoding: .utf8)
-        // Hermes now gets a command entry (no fixed loopback URL).
-        #expect(got == "model:\n  default: \"x\"\n\nmcp_servers:\n  mootx01:\n    command: /b\n    args: []\n")
+        // Hermes rides the resident daemon url (accepted loopback posture,
+        // b913ca4a).
+        #expect(got == "model:\n  default: \"x\"\n\nmcp_servers:\n  mootx01:\n    url: http://127.0.0.1:4242\n")
         #expect(client.wired(homeDirectory: home))
     }
 
@@ -1259,8 +1317,9 @@ struct InstallerTests {
 
         let configURL = home.appendingPathComponent(client.configPath)
         let text = try String(contentsOf: configURL, encoding: .utf8)
-        // Continue now gets a command entry (no fixed loopback URL); trailing newline is POSIX.
-        #expect(text == "command: /b\nargs: []\n")
+        // Continue rides the resident daemon over streamable-http (accepted
+        // loopback posture, b913ca4a); trailing newline is POSIX.
+        #expect(text == "type: streamable-http\nurl: http://127.0.0.1:4242\n")
     }
 
     private func makeSandboxHome() throws -> URL {

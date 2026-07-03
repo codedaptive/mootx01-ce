@@ -5561,3 +5561,120 @@ fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     }
     (y, mo, days + 1)
 }
+
+// ---------------------------------------------------------------------------
+// SECFIX (codex: MCP fact tools leak restricted/secret KG data) — the
+// contradiction lens must redact source/endpoint drawer IDs that point at
+// Restricted/Secret drawers even when the emitted fact/tunnel is exportable.
+// (fact_search/fact_timeline source gating already covered elsewhere; this is
+// the lens residual the finding flagged.)
+// ---------------------------------------------------------------------------
+
+/// A conflicting fact pair whose SOURCE drawer is Secret: the facts themselves
+/// are Normal (pass the fact ceiling) but their source id must be redacted.
+#[test]
+fn lens_contradiction_hides_secret_fact_source() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    let registry = EstateRegistry::new_inmemory();
+    let secret_source = capture_with_sensitivity(
+        &registry,
+        "secret provenance drawer",
+        "policy-gate/secret-source",
+        AdjectiveSensitivity::Secret,
+    );
+    for object in ["green", "red"] {
+        dispatch_tool(
+            "moot_file_fact",
+            &args![
+                "subject" => "Project Aardvark",
+                "predicate" => "status",
+                "object" => object,
+                "source_id" => secret_source.as_str()
+            ],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("file_fact must succeed");
+    }
+    let result = dispatch_tool(
+        "moot_lens_contradiction",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("lens_contradiction must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains("source=<hidden>"),
+        "secret fact source must be redacted; got: {text}"
+    );
+    assert!(
+        !text.contains(&secret_source),
+        "secret source drawer id must not leak; got: {text}"
+    );
+}
+
+/// A contradicts tunnel whose target endpoint is Secret: the tunnel is
+/// exportable but the secret endpoint id must be redacted.
+#[test]
+fn lens_contradiction_hides_secret_tunnel_endpoint() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    let registry = EstateRegistry::new_inmemory();
+    let visible = capture_with_sensitivity(
+        &registry,
+        "visible endpoint drawer",
+        "policy-gate/visible-endpoint",
+        AdjectiveSensitivity::Normal,
+    );
+    let secret = capture_with_sensitivity(
+        &registry,
+        "secret endpoint drawer",
+        "policy-gate/secret-endpoint",
+        AdjectiveSensitivity::Secret,
+    );
+    // Seed the contradicts tunnel directly at the store: link_memories'
+    // existence lookup is sensitivity-blind and cannot resolve a Secret target
+    // (a separate finding), so the lens redaction is tested in isolation here.
+    use locus_kit::tunnel::Tunnel;
+    use locus_kit::tunnel_operational::TunnelKind;
+    let mut tunnel = Tunnel::new(
+        "redact-endpoint-tunnel".to_string(),
+        "policy-gate".to_string(),
+        "visible-endpoint".to_string(),
+        "policy-gate".to_string(),
+        "secret-endpoint".to_string(),
+        "contradicts".to_string(),
+        "policy-gate-test".to_string(),
+        aria_mcp::dispatch::wall_now(),
+    );
+    tunnel.kind = TunnelKind::Contradicts;
+    tunnel.source_drawer_id = Some(visible.clone());
+    tunnel.target_drawer_id = Some(secret.clone());
+    registry
+        .default
+        .store
+        .add_tunnel(&tunnel)
+        .expect("add_tunnel must succeed");
+    let result = dispatch_tool(
+        "moot_lens_contradiction",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("lens_contradiction must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(&visible),
+        "normal endpoint should remain visible; got: {text}"
+    );
+    assert!(
+        text.contains("contradicts <hidden>"),
+        "secret endpoint must be redacted; got: {text}"
+    );
+    assert!(
+        !text.contains(&secret),
+        "secret endpoint drawer id must not leak; got: {text}"
+    );
+}

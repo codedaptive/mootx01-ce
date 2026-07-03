@@ -26,7 +26,8 @@ fn main() -> ExitCode {
 
     match command {
         Command::Version => {
-            println!("{}", mootx01_cli::CURRENT_VERSION);
+            // Must print an identical line to the Swift port's `versionDisplay`.
+            println!("{} ({})", mootx01_cli::CURRENT_VERSION, mootx01_cli::RELEASE_DATE);
             ExitCode::from(exit::OK)
         }
         Command::Help => {

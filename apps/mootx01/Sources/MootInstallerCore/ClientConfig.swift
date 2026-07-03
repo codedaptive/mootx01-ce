@@ -66,6 +66,16 @@ public struct MCPClient: Sendable, Equatable {
     /// `false` → stdio command entry (e.g. Claude Desktop, whose config schema
     /// requires a command/args entry — the proxy bridge handles daemon routing).
     /// See ADR-LOOPBACKHTTP-001.
+    ///
+    /// SECURITY AUDIT DISPOSITION — a `true` here makes the installer write the
+    /// fixed unauthenticated `http://127.0.0.1:4242` into the client config
+    /// (codex 7a245e3e, MEDIUM: a same-user process pre-binding the port could
+    /// impersonate the daemon). This is the intended shared-resident-daemon
+    /// design (the stdio alternative was the unauthorized flip reverted in
+    /// 5c035e6), ACCEPTED for CE — the mitigation and rationale live in the
+    /// transport's disposition note in `AriaMCP/HTTPServer.swift`. Endpoint
+    /// authentication arrives with EE v1.1 (auth scheme + off-localhost hosting);
+    /// do not re-flip these to stdio to "fix" the finding.
     public let supportsLocalHTTP: Bool
 
     /// For JSON HTTP clients, whether the entry carries an explicit

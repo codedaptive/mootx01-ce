@@ -65,6 +65,16 @@ build-rust:
 # ── Test ────────────────────────────────────────────────────────────────
 test: test-swift test-rust check-static-assets check-edition-boundary
 
+# GLK latency suites: gated behind GLK_LATENCY_TESTS=1 (self-skip on a bare
+# `swift test`) because their near-realtime assertions are CPU-bound embed
+# work that false-fails when the package's 117 suites run in parallel and
+# saturate every core. The isolated pass below runs them alone, serially, on
+# a quiet machine — where a latency number means what it claims. See the
+# file headers in Tests/GeniusLocusKitTests/EncodeDrainNearRealtimeTests.swift
+# and EncodeIntakeTests.swift.
+GLK_PKG := ./packages/kits/GeniusLocusKit
+GLK_LATENCY_FILTERS := --filter EncodeDrainNearRealtimeTests --filter EncodeIntakeTests
+
 test-swift:
 	@for d in $(SWIFT_PKGS); do \
 		if [ -d "$$d/Tests" ]; then \
@@ -74,6 +84,9 @@ test-swift:
 			echo "── skip (no Tests/): $$d"; \
 		fi; \
 	done
+	@echo "── swift test (GLK latency suites, isolated): $(GLK_PKG)"
+	@( cd "$(GLK_PKG)" && GLK_LATENCY_TESTS=1 swift test --no-parallel $(GLK_LATENCY_FILTERS) ) \
+		|| { echo "FAILED (GLK latency suites, isolated): $(GLK_PKG)"; exit 1; }
 	@echo "✓ all Swift tests passed"
 
 test-rust:
@@ -159,8 +172,21 @@ release:
 	swift build -c release --package-path apps/moot-mgr --product moot-mgr
 	@cp apps/mootx01/.build/release/mootx01 "$(DIST)/mootx01"
 	@cp apps/moot-mgr/.build/release/moot-mgr "$(DIST)/moot-mgr"
+	# SPM resource bundles MUST ship beside the Swift binaries: each
+	# Bundle.module target (LatticeLib, EideticLib, swift-crypto) fatalErrors
+	# on its first resource touch when its <Target>_<Target>.bundle is not
+	# co-located with the executable — v1.0.9 shipped without them and the
+	# installed CLI crashed on any classify/search path. Union of both
+	# products' bundles; the cp glob failing loudly (no bundles built) is
+	# deliberate. install.sh places every *.bundle it finds in the archive.
+	@rm -rf "$(DIST)"/*.bundle
+	@cp -R apps/mootx01/.build/release/*.bundle "$(DIST)/"
+	@for b in apps/moot-mgr/.build/release/*.bundle; do \
+		bn=$$(basename "$$b"); \
+		[ -e "$(DIST)/$$bn" ] || cp -R "$$b" "$(DIST)/"; \
+	done
 	@arch=$$(uname -m); asset="mootx01-local-macos-$$arch.tar.gz"; \
-	 ( cd "$(DIST)" && tar -czf "$$asset" mootx01 moot-mgr && shasum -a 256 "$$asset" ); \
+	 ( cd "$(DIST)" && tar -czf "$$asset" mootx01 moot-mgr *.bundle && shasum -a 256 "$$asset" ); \
 	 echo "✓ release archive written to $(DIST)/"
 
 # ── macOS .pkg (local) ──────────────────────────────────────────────────

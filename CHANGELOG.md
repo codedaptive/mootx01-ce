@@ -5,6 +5,175 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.10 — 2026-07-03
+
+First non-beta release of the 1.0 line. Security-fix sweep from the codex audit (import
+isolation, at-rest fail-closed, resource caps), recall/lens correctness fixes,
+and the candidate-branch CI pipeline.
+
+- **Security — import shard isolation (MEDIUM)** — bulk-import shard files are
+  now estate-stamped and created exclusive-create instead of remove-and-open,
+  so two estates sharing a directory (or a racing import) can no longer
+  delete or contaminate each other's live shards; stale shards from a crashed
+  import are swept by estate prefix at import entry. Rust additionally bounds
+  the import fan-out to the machine's parallelism — one worker, one shard —
+  instead of one thread + one shard file per 2,500-item slice. Both ports.
+- **Security — encryption key fail-closed (MEDIUM, Rust)** — a present but
+  wrong-length `db.key` now fails closed when opening private sidecar stores
+  (BM25 index, import shards). Previously the malformed key was silently
+  ignored and a FRESH sidecar was created plaintext — tokenized user content
+  at rest without encryption.
+- **Security — bulk import windowing (MEDIUM)** — palace bulk import now
+  submits capture batches in 125,000-row transaction windows instead of one
+  unbounded BEGIN..COMMIT over the entire source, bounding memory and SQLite
+  write-lock hold time on very large palaces. At or under the window is
+  byte-identical to prior behavior. Both ports.
+- **Security — reembed thread cap (MEDIUM, Rust)** — `reembed_chunks` (the
+  post-import reindex tail) now runs at most `embed_concurrency_cap` persistent
+  workers instead of one OS thread per 3,000-chunk batch; output stays
+  byte-identical to the serial path.
+- **Security — distilled recall hydration (Rust)** — distilled recall now
+  hydrates NN matches by id through the policy-enforcing frame path instead of
+  intersecting with a newest-N recall window, so an older distilled factoid
+  can no longer be pushed out of results by newer benign rows. Sensitivity
+  ceilings unchanged.
+- **Security — audit-log entry forgery (codex a477800)** — the unified audit
+  log now recomputes every entry's SHA-256 content id from its wire encoding
+  on every ingress path (add, merge, decode) and rejects entries whose id
+  does not match — a forged (same-id, different-content) entry supplied by a
+  peer can no longer overwrite an honest entry in the CRDT G-Set. Both
+  ports, with forged-entry regression tests; the dormant federation
+  `GSetAuditLog` scaffold carries boundary notes requiring the same defence
+  when it is wired.
+- **Security — fact-search probe trace writes (LOW, Swift)** — the dense-lane
+  status probe inside `moot_fact_search` is now internal-origin: a read-only
+  fact search no longer persists recall-trace rows for the probe's incidental
+  hits.
+- **Security — loopback MCP impersonation: accepted (documented)** — the
+  fixed unauthenticated `127.0.0.1:4242` endpoint is a recorded, accepted CE
+  limitation (launchd owns the port continuously; a same-user attacker can
+  already read estate files directly). Real endpoint auth lands with EE v1.1
+  off-localhost hosting. Disposition comments at the transport and installer
+  seams, both ports; no behavior change.
+- **Temporal matrix incremental correctness** — two fixes restoring the
+  "incremental update == full rebuild, cell for cell" invariant for the
+  temporal recall-scoring matrix: the incremental prune boundary no longer
+  drops sources the fold would legitimately pair, and a backdated eventTime
+  (the bulk-historical-import case) now falls back to a full temporal rebuild
+  instead of silently emitting no deltas. Both ports, bit-identical.
+- **Import — exportability relabel honored** — reimporting unchanged content
+  whose exportability changed (e.g. public → private) now supersedes the
+  drawer instead of being skipped as idempotent, so private-relabeled content
+  stops riding the default public-only vault export scope. Both ports.
+- **Audit write atomicity (Rust)** — single-item capture, mutation, and gated
+  column writes now wrap the projection write and the sealed audit append in
+  one transaction (rollback on any error), closing the unaudited-state gap the
+  bulk path had already closed. Swift already wrapped; regression tests added
+  both ports.
+- **Node-motion HLC dedup** — mutation moments now dedup on the full HLC
+  identity (physical, logical, node) rather than physical milliseconds alone,
+  so same-millisecond writes under bulk import no longer collapse into one
+  volatility event and skew `moot_lens_node_motion` verdicts. Both ports.
+- **NMF empty-reduction reset (Rust)** — finalizing into an empty reduced
+  vocabulary now fully resets prior factor state, fixing a serialize →
+  deserialize panic on the stale basis.
+- **CI — candidate pre-release builds** — pushes to `candidate/1.0.x` now
+  build unsigned artifacts for all six platform targets behind a `make test`
+  gate and publish a `candidate-<version>-<run>` GitHub pre-release (last 4
+  kept). Stable release builds still cut only from `v*` tags. Plus: the CLA
+  signing secret renamed to `CLA_BOT_TOKEN`, and stale `audit-flags` /
+  `audit-clear` Make targets removed.
+- **QueueKit — progress-based drain deadline** — `awaitDrain` (global and
+  stream-scoped, both ports) now times out on *no progress* rather than total
+  wall-clock: the deadline resets whenever the outstanding count drops below
+  its lowest observed value, so an incrementally-progressing drain never
+  false-times-out while a genuinely stuck worker still fails within the
+  timeout. (`QUEUEKIT_INTERFACE.md` 1.4.0.)
+- **Install — macOS artifacts now ship the SPM resource bundles (crash)** —
+  the v1.0.9 macOS tarballs carried only the binaries, but the Swift
+  binaries hard-crash on their first resource touch (any classify/search
+  path) without the `LatticeLib`/`EideticLib`/`swift-crypto` resource
+  bundles beside them. All tarball paths (local `make release`, candidate
+  and release CI) now package the bundles, and `install.sh` places them
+  next to the installed binaries. The `.pkg` installer already carried
+  them.
+- **Install — PATH entries are exec wrappers, not symlinks (crash)** — the
+  runtime resolves resource bundles from the directory of the path the
+  binary was *invoked* as, without following a symlink there, so the
+  `~/.local/bin` symlinks crashed the CLI even with bundles correctly
+  installed. `install.sh` and `mootx01 install`/`upgrade` now write a
+  two-line `exec` wrapper instead; legacy symlinks are replaced on the
+  next install or upgrade.
+- **Test harness — NT-P0 Merkle contract recovered into the harness** — the
+  bakeoff's Merkle/commitment byte contract was deleted from
+  SubstrateKernel as a spike (correctly — the production Merkle is
+  SubstrateLib's NT-F2 implementation) but its two harness consumers were
+  never chased, leaving the validation-harness package uncompilable since
+  June 21 in both editions. The contract is recovered from history as
+  harness-local support code, mirroring the Rust harness's layout, with
+  minimal adaptation to the current `MerkleRoot`/`ContentHash` API.
+- **Test suite — assertions realigned with shipped decisions** — seven
+  installer tests still asserted the reverted stdio client wiring (the
+  unauthorized flip) instead of the accepted resident-daemon loopback
+  posture; the moot-bridge live acceptance "skipped" by throwing (a
+  failure in Swift Testing) and its binary probe never resolved under the
+  modern test runner; a host-matrix count test froze at nine after the
+  matrix grew to ten. All updated to assert current, ruled behavior.
+- **QueueKit — telemetry data race (Swift, crash)** — the drain-latency
+  telemetry window was mutated without a lock under a stale single-drainer
+  assumption; two concurrent stream drainers (a live capture's encode racing
+  a bulk import, with monitoring enabled) could corrupt it and crash the
+  process. The window is now lock-guarded, matching the Rust port, with a
+  concurrent-hammer regression test.
+- **Test harness — GLK latency suites isolated** — the encode near-realtime
+  acceptance suites assert wall-clock latency bounds over CPU-bound embed
+  work; they false-failed whenever the full GeniusLocusKit suite ran in
+  parallel and saturated the cores. They now self-skip on a bare `swift test`
+  and run in a dedicated serial pass inside `make test`
+  (`GLK_LATENCY_TESTS=1`), where their latency assertions are measured on a
+  quiet machine. Full-suite runs are green at every entry point; the
+  acceptance line is still enforced by the gate.
+- `--version` now reports `1.0.10 (2026-07-03)` identically from both ports.
+
+## v1.0.9-beta — 2026-07-02
+
+Tenth beta of the 1.0 line. Import correctness + speed to semantic-live, a
+parallel SVD kernel, and two HIGH security fixes.
+
+- **Import → semantic-live, end to end** — the post-import basis retrain now
+  runs at the tail of the import cycle (dense/RAG recall is query-ready on
+  completion, no re-serve), the reindex loop drains through a single
+  lease-holding worker (no synchronous-pump nested-transaction stall), and
+  bulk-imported semantic hits now hydrate through the full candidate frame
+  instead of a capture-time-capped locus window. Measured on a 50k MemPalace
+  import: ~17.7 min → ~6.4 min import→semantic-live.
+- **Parallel tournament Jacobi SVD** — LSA's basis retrain factorization now
+  walks a round-robin tournament schedule whose column-disjoint rounds fan
+  across all cores with bit-identical output (thread-count-independent; the
+  n=512 schedule is pinned by a shared cross-port hash). The retrain's serial
+  single-core wall drops ~8.5 min → ~4.5 min. Kernels and all conformance
+  fixtures regenerated and cross-port verified byte-for-byte.
+- **Security — contradiction lens (HIGH)** — `moot_lens_contradiction` no
+  longer prints source-drawer or tunnel-endpoint IDs that point at
+  Restricted/Secret drawers, matching the existing `moot_fact_search` /
+  `moot_fact_timeline` source gating. Both ports.
+- **Security — PostgreSQL TLS (HIGH)** — the Swift PostgreSQL backend now
+  honors the DSN `sslmode=` parameter and fails closed: the effective TLS is
+  the stronger of the DSN value and `ARIA_MCP_POSTGRES_TLS`, so
+  `?sslmode=require` / `verify-ca` / `verify-full` can no longer open a
+  plaintext connection (Rust already enforced this).
+
+## v1.0.8-beta — 2026-07-02
+
+Ninth beta of the 1.0 line. Agent-skills adapter surface and lifecycle hooks.
+
+- **Claude Code lifecycle hooks** — context meter, compaction-recovery, and a
+  writeback gate, plus an update-availability check hook.
+- **Gemini CLI adapter** — added to the agent-skills adapter surface; install
+  map and hook/reference docs trued up across adapters.
+- **Codex Stop hook** — emits a JSON `systemMessage` (plain stdout is ignored
+  on Stop).
+
 ## v1.0.7-beta — 2026-07-02
 
 Eighth beta of the 1.0 line. Bulk-import throughput and a release-signing

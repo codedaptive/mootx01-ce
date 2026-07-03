@@ -15,30 +15,38 @@ import Testing
 // SAFETY: scratch backends only — temp palace + temp MOOTX01_DATA_DIR under
 // /tmp, torn down per run. Never the real palace or real mootx01 data dir.
 //
-// This suite is SKIPPED automatically when the `mempalace-mcp` / `mootx01`
-// binaries are not on PATH (e.g. CI without them installed), so the pure-logic
-// suite still runs everywhere. The mission requires it to actually run here,
-// where both binaries are installed.
+// This suite is SKIPPED (via the `.enabled(if:)` trait — Swift Testing has no
+// runtime skip, so a thrown "skip" error records as a FAILURE; that broke the
+// first CI `make test` gate) when the `mempalace-mcp` / `mootx01` binaries are
+// not on PATH or the moot-bridge binary is not built (e.g. CI without them
+// installed), so the pure-logic suites still run everywhere. The mission
+// requires it to actually run on the dev machine, where both are installed.
 
-@Suite("moot-bridge live acceptance", .serialized)
+/// Absolute path to the mempalace-mcp binary, or nil when unavailable.
+private let mempalaceMCPPath: String? = whichBinary("mempalace-mcp")
+/// Absolute path to the mootx01 binary, or nil when unavailable.
+private let mootx01BinPath: String? = whichBinary("mootx01")
+/// Absolute path to the moot-bridge binary built in this SPM package, or nil
+/// when not yet built.  The test runner and the binary land in the same
+/// .build/<config>/ directory under SPM, so a bundle-sibling lookup is the
+/// canonical strategy; no machine-specific fallback path.
+private let mootBridgeBinPath: String? = bridgeBinaryPath()
+
+@Suite(
+    "moot-bridge live acceptance",
+    .serialized,
+    // One trait per probe so a skip names exactly which prerequisite is
+    // missing — a combined condition hides the failing probe and turns
+    // every unexpected skip into a debugging session.
+    .enabled(if: mempalaceMCPPath != nil, "mempalace-mcp not on PATH — live acceptance needs it; pure-logic suites still run"),
+    .enabled(if: mootx01BinPath != nil, "mootx01 not on PATH — live acceptance needs it; pure-logic suites still run"),
+    .enabled(if: mootBridgeBinPath != nil, "moot-bridge binary not found in the package .build products dir — build it (swift build) before the live acceptance"))
 struct BridgeAcceptanceTests {
-
-    /// Absolute path to the mempalace-mcp binary, or nil when unavailable.
-    private static let mempalaceMCP: String? = which("mempalace-mcp")
-    /// Absolute path to the mootx01 binary, or nil when unavailable.
-    private static let mootx01Bin: String? = which("mootx01")
-    /// Absolute path to the moot-bridge binary built in this SPM package, or nil
-    /// when not yet built.  The test runner and the binary land in the same
-    /// .build/<config>/ directory under SPM, so a bundle-sibling lookup is the
-    /// canonical strategy; no machine-specific fallback path.
-    private static let mootBridgeBin: String? = bridgeBinaryPath()
 
     /// The full scripted live session. One test so the ordered sequence (write
     /// then read then swap then read) runs against one shared pair of scratch
     /// backends, exactly as a real client would drive it.
     @Test func fullBridgeSession() async throws {
-        try requireBinaries()
-
         // --- Scratch backends + config -------------------------------------
         let tmp = try makeScratchDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -123,21 +131,6 @@ struct BridgeAcceptanceTests {
 
     // MARK: - Harness
 
-    private func requireBinaries() throws {
-        guard Self.mempalaceMCP != nil, Self.mootx01Bin != nil else {
-            // Skip gracefully where the live backends are not installed.
-            Issue.record("live backends (mempalace-mcp / mootx01) not on PATH — skipping live acceptance")
-            throw SkipLive()
-        }
-        guard Self.mootBridgeBin != nil else {
-            // Skip gracefully when moot-bridge has not been built yet.
-            Issue.record("moot-bridge binary not found next to test bundle — run swift build first")
-            throw SkipLive()
-        }
-    }
-
-    private struct SkipLive: Error {}
-
     /// Builds the acceptance config JSON pinned to the given scratch dirs.
     private func writeConfig(mpDir: String, mootDir: String) -> String {
         """
@@ -171,7 +164,7 @@ struct BridgeAcceptanceTests {
     /// returns the response lines parsed as JSONValue.
     private func runBridgeBinary(configPath: String, statsPath: String,
                                requests: [String]) throws -> [JSONValue] {
-        let bin = try #require(Self.mootBridgeBin)
+        let bin = try #require(mootBridgeBinPath)
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bin)
         proc.arguments = ["--config", configPath, "--stats-store", statsPath]
@@ -231,7 +224,7 @@ struct BridgeAcceptanceTests {
     /// Queries MemPalace directly (not through the bridge) for the token.
     private func directMemPalaceHasToken(_ token: String, palaceDir: String) throws -> Bool {
         let out = try driveBackend(
-            command: Self.mempalaceMCP!,
+            command: mempalaceMCPPath!,
             args: ["--palace", palaceDir],
             env: nil,
             queryTool: "mempalace_search",
@@ -242,7 +235,7 @@ struct BridgeAcceptanceTests {
     /// Queries mootx01 directly (not through the bridge) for the token.
     private func directMootx01HasToken(_ token: String, dataDir: String) throws -> Bool {
         let out = try driveBackend(
-            command: Self.mootx01Bin!,
+            command: mootx01BinPath!,
             args: ["serve"],
             env: ["MOOTX01_DATA_DIR": dataDir],
             queryTool: "moot_memory_search",
@@ -315,31 +308,50 @@ struct BridgeAcceptanceTests {
         return dir
     }
 
-    /// Locates the built moot-bridge binary next to the test bundle, or returns
-    /// nil when it has not been built.  Under SPM, `swift test` places both the
-    /// test runner and all executable products in the same .build/<config>/
-    /// directory, so a bundle-sibling lookup is the canonical strategy.  No
-    /// machine-specific absolute path is used as a fallback — the caller
-    /// (requireBinaries) skips the suite gracefully when nil.
-    private static func bridgeBinaryPath() -> String? {
-        let testBundleDir = Bundle.main.bundleURL.deletingLastPathComponent()
-        let candidate = testBundleDir.appendingPathComponent("moot-bridge").path
-        guard FileManager.default.isExecutableFile(atPath: candidate) else { return nil }
-        return candidate
-    }
+}
 
-    /// Resolves a binary on PATH (plus the standard local bin dir derived from
-    /// HOME), or nil.  HOME-relative expansion avoids machine-specific absolute
-    /// paths while still finding binaries installed by standard packaging helpers
-    /// (brew install --user, pip install --user, etc.).
-    private static func which(_ name: String) -> String? {
-        let env = ProcessInfo.processInfo.environment
-        let localBin = (env["HOME"] ?? "") + "/.local/bin"
-        let dirs = ([localBin] + (env["PATH"]?.split(separator: ":").map(String.init) ?? []))
-        for d in dirs {
-            let p = d + "/" + name
-            if FileManager.default.isExecutableFile(atPath: p) { return p }
+/// Locates the built moot-bridge binary in this package's .build products
+/// directory, or returns nil when it has not been built.
+///
+/// Resolution is `#filePath`-anchored: this source file sits at
+/// `<pkg>/Tests/moot-bridgeTests/`, so the package root is two levels up and
+/// the executable lands in `<pkg>/.build/<config>/moot-bridge`. Bundle-based
+/// lookups do NOT work under the swift-testing runner: `Bundle.main` is the
+/// swiftpm-testing-helper in the TOOLCHAIN directory, and the dlopened
+/// .xctest bundle does not appear in `Bundle.allBundles` — both silently
+/// resolve nowhere, the probe returns nil, and the suite skips everywhere,
+/// which defeats the live acceptance. `#filePath` is compile-time and always
+/// points at the package checkout that `swift test` is building from.
+/// No machine-specific absolute path — the suite's `.enabled(if:)` trait
+/// skips gracefully when nil (e.g. CI without the backends).
+private func bridgeBinaryPath() -> String? {
+    let pkgRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // moot-bridgeTests/
+        .deletingLastPathComponent()   // Tests/
+        .deletingLastPathComponent()   // package root
+    for config in ["debug", "release"] {
+        let candidate = pkgRoot
+            .appendingPathComponent(".build/\(config)/moot-bridge").path
+        if FileManager.default.isExecutableFile(atPath: candidate) {
+            return candidate
         }
-        return nil
     }
+    return nil
+}
+
+/// Resolves a binary on PATH (plus the standard local bin dir derived from
+/// HOME), or nil.  HOME-relative expansion avoids machine-specific absolute
+/// paths while still finding binaries installed by standard packaging helpers
+/// (brew install --user, pip install --user, etc.). File-scope so the
+/// suite-availability globals above can evaluate it for the `.enabled(if:)`
+/// trait.
+private func whichBinary(_ name: String) -> String? {
+    let env = ProcessInfo.processInfo.environment
+    let localBin = (env["HOME"] ?? "") + "/.local/bin"
+    let dirs = ([localBin] + (env["PATH"]?.split(separator: ":").map(String.init) ?? []))
+    for d in dirs {
+        let p = d + "/" + name
+        if FileManager.default.isExecutableFile(atPath: p) { return p }
+    }
+    return nil
 }
