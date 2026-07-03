@@ -16,10 +16,16 @@ pub mod cli;
 pub mod commands;
 pub mod core;
 
-/// Semver for the installed binary. Reported by `--version`; compared by the
-/// online upgrade path against the latest release tag. The Swift equivalent
-/// is `Mootx01.currentVersion` in the Swift CLI entrypoint.
-pub const CURRENT_VERSION: &str = "1.0.9";
+/// Bare semver for the installed binary. Compared numerically by the online
+/// upgrade path against the latest release tag, so it stays a pure semver;
+/// `--version` prints it alongside `RELEASE_DATE`. The Swift equivalent is
+/// `Mootx01.currentVersion` in the Swift CLI entrypoint.
+pub const CURRENT_VERSION: &str = "1.0.10";
+
+/// Release date stamp printed next to the version by `--version`. Must match
+/// the Swift port's `Mootx01.releaseDate` so both binaries print an identical
+/// `--version` line.
+pub const RELEASE_DATE: &str = "2026-07-02";
 
 /// Exit codes per spec §5.
 pub mod exit {

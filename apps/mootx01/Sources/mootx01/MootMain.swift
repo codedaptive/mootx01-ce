@@ -35,9 +35,17 @@ enum MootEntry {
 
 struct Mootx01: AsyncParsableCommand {
 
-    /// Semver string for the installed binary. Reported by --version and
-    /// used by --check to compare against the latest release tag.
-    static let currentVersion = "1.0.9"
+    /// Bare semver for the installed binary. Compared numerically by --check /
+    /// upgrade against the latest release tag, so it must stay a pure semver.
+    /// The human-facing --version string adds the date via `versionDisplay`.
+    static let currentVersion = "1.0.10"
+
+    /// Release date stamp shown alongside the version by --version.
+    static let releaseDate = "2026-07-02"
+
+    /// The exact string --version prints. The Rust port must print an identical
+    /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).
+    static let versionDisplay = "\(currentVersion) (\(releaseDate))"
 
     static var configuration: CommandConfiguration {
         #if os(macOS)
@@ -50,7 +58,7 @@ struct Mootx01: AsyncParsableCommand {
             Use `mootx01 upgrade` to replace the binary from a local build and
             restart background services.
             """,
-            version: currentVersion,
+            version: versionDisplay,
             subcommands: [
                 ServeCommand.self,
                 ProxyCommand.self,
@@ -68,7 +76,7 @@ struct Mootx01: AsyncParsableCommand {
         return CommandConfiguration(
             commandName: "mootx01",
             abstract: "ARIA MCP estate management tool (Linux: serve requires macOS).",
-            version: currentVersion,
+            version: versionDisplay,
             subcommands: [
                 InstallCommand.self,
                 UninstallCommand.self,
