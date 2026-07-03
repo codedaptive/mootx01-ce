@@ -122,13 +122,13 @@ impl<'a> PalaceBridge<'a> {
     ///
     /// `mode`: the encode SPEED (drain QoS) for the import's background encoding —
     /// `EncodeSpeed::Foreground` (drain hard) or `EncodeSpeed::Background` (yield
-    /// for very large imports). SPEED only — the WRITE strategy is chosen
-    /// automatically by source size (see `import_policy`): a source at or below
-    /// the threshold is written in one bulk `capture_batch` transaction; a larger
-    /// source streams via per-item capture so no single transaction holds the
-    /// write lock across hundreds of thousands of rows. KG entities, triples, and
-    /// tunnels are always imported per-item (they require individual post-capture
-    /// work).
+    /// for very large imports). SPEED only — the WRITE strategy is fixed (not
+    /// caller-chosen): every source is written bulk via `capture_batch`, in
+    /// `import_policy::BULK_WINDOW`-sized transaction windows so no single
+    /// transaction holds the write lock across an arbitrarily large source (the
+    /// per-item stream path is disabled — see the marker in the body). KG
+    /// entities, triples, and tunnels are always imported per-item (they require
+    /// individual post-capture work).
     pub fn import_palace(
         &mut self,
         palace_root: &Path,
@@ -221,7 +221,8 @@ impl<'a> PalaceBridge<'a> {
             //       }
             //   }
             {
-                // Bulk path: collect all frames, then submit in one transaction.
+                // Bulk path: collect all frames, then submit in
+                // import_policy::BULK_WINDOW-sized transaction windows.
                 let mut batch_frames: Vec<(CaptureFrame, bool /* is_update */)> = Vec::new();
                 for (embedding_id, metadata, is_closet) in &all_rows {
                     if let Some((frame, is_update)) = self.build_chroma_frame(
@@ -239,18 +240,29 @@ impl<'a> PalaceBridge<'a> {
                     }
                 }
                 if !batch_frames.is_empty() {
-                    let frames: Vec<CaptureFrame> = batch_frames.iter().map(|(f, _)| f.clone()).collect();
-                    // `now` (wall_now, ADR-023) is epoch-MILLISECONDS — the same
-                    // unit capture, the stream path, and the KG paths all expect —
-                    // so it is passed directly with no conversion.
-                    self.coordinator
-                        .capture_batch(handle, frames, now)
-                        .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
-                    for (_, is_update) in &batch_frames {
-                        if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
-                        report.fdc_unclassified += 1;
-                        processed += 1;
-                        if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
+                    // Submit in BULK_WINDOW-sized windows — one transaction per
+                    // window — so no single transaction holds the write lock (or
+                    // the classified in-memory batch) across an arbitrarily large
+                    // source (codex 26c7a364). A source at or under the window is
+                    // exactly one transaction, byte-identical to the pre-window
+                    // behavior. Report/progress bookkeeping advances per committed
+                    // window, so a mid-import failure reports only rows that
+                    // actually landed.
+                    for window in batch_frames.chunks(crate::import_policy::BULK_WINDOW) {
+                        let frames: Vec<CaptureFrame> =
+                            window.iter().map(|(f, _)| f.clone()).collect();
+                        // `now` (wall_now, ADR-023) is epoch-MILLISECONDS — the same
+                        // unit capture, the stream path, and the KG paths all expect —
+                        // so it is passed directly with no conversion.
+                        self.coordinator
+                            .capture_batch(handle, frames, now)
+                            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                        for (_, is_update) in window {
+                            if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
+                            report.fdc_unclassified += 1;
+                            processed += 1;
+                            if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
+                        }
                     }
                 }
             }

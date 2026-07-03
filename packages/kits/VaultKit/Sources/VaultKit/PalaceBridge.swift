@@ -70,12 +70,11 @@ public struct PalaceBridge: Sendable {
     ///   - mode: The encode SPEED (drain QoS) for the import's background
     ///     encoding: `.foreground` (default) drains hard on the performance
     ///     cores; `.background` yields for very large imports. SPEED only — the
-    ///     WRITE strategy is chosen automatically by source size (see
-    ///     `streamThreshold`): a source at or below the threshold is written in
-    ///     one bulk transaction (`captureBatch`; post-import `reindex` enqueues
-    ///     the encoding); a larger source streams via per-item `capture()`
-    ///     (inline classification, encoding enqueued per row) so no single
-    ///     transaction holds the write lock across hundreds of thousands of rows.
+    ///     WRITE strategy is fixed (not caller-chosen): every source is written
+    ///     bulk via `captureBatch` in `ImportPolicy.bulkWindow`-sized transaction
+    ///     windows (post-import `reindex` enqueues the encoding), so no single
+    ///     transaction holds the write lock across an arbitrarily large source.
+    ///     The per-item stream path is disabled — see the marker in the body.
     public func importPalace(
         at palaceRoot: URL,
         into handle: EstateHandle,
@@ -184,7 +183,8 @@ public struct PalaceBridge: Sendable {
             //       }
             //   }
             do {
-                // Bulk write: collect all frames, then captureBatch for one transaction.
+                // Bulk write: collect all frames, then captureBatch in
+                // ImportPolicy.bulkWindow-sized transaction windows.
                 var batchFrames: [CaptureFrame] = []
                 for row in allRows {
                     if let (frame, isUpdate) = buildChromaFrame(
@@ -206,7 +206,18 @@ public struct PalaceBridge: Sendable {
                     }
                 }
                 if !batchFrames.isEmpty {
-                    _ = try await kit.captureBatch(handle, batchFrames)
+                    // Submit in bulkWindow-sized windows — one transaction per
+                    // window — so no single transaction holds the write lock (or
+                    // the classified in-memory batch) across an arbitrarily large
+                    // source (codex 26c7a364). A source at or under the window is
+                    // exactly one transaction, byte-identical to the pre-window
+                    // behavior. Mirrors the Rust palace_bridge window.
+                    var start = 0
+                    while start < batchFrames.count {
+                        let end = min(start + ImportPolicy.bulkWindow, batchFrames.count)
+                        _ = try await kit.captureBatch(handle, Array(batchFrames[start..<end]))
+                        start = end
+                    }
                 }
             }
         }

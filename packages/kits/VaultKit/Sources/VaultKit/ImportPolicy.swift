@@ -15,16 +15,29 @@
 /// (bulk transaction vs per-item stream) is chosen automatically by source size
 /// via `streamThreshold` — never by the caller.
 enum ImportPolicy {
-    /// Source-size gate for write strategy (NOT user-controlled). A source with
-    /// this many items or fewer is written in one bulk `captureBatch` transaction
-    /// (fast, one fsync); a larger source streams via per-item `capture()` so no
-    /// single transaction holds the write lock across hundreds of thousands of
-    /// rows. 250k mirrors the ">250k records" boundary at which a single bulk
-    /// transaction stops being safe; tune here (one place, all gates) if it moves.
+    /// Rows per bulk `captureBatch` transaction (NOT user-controlled). The palace
+    /// bulk path submits frames in windows of this size — one transaction per
+    /// window — so no single transaction materializes an unbounded classified
+    /// batch in memory or holds the SQLite write lock across an arbitrarily
+    /// large source (codex 26c7a364). A source at or under the window is one
+    /// transaction, identical to the pre-window behavior; larger sources split
+    /// into ceil(n / 125_000) sequential transactions. Atomicity is per WINDOW:
+    /// a failure rolls back the current window only (earlier windows stay
+    /// committed — acceptable for import, which is lineage-idempotent and
+    /// re-runnable). Mirrors Rust `import_policy::BULK_WINDOW`.
+    static let bulkWindow = 125_000
+
+    /// Source-size gate for the RETIRED per-item streaming write strategy. The
+    /// stream branch is disabled (2026-07-02, see PalaceBridge) and queued for
+    /// removal at the 1.1 release gate; this constant and `useBulk` are kept so
+    /// the preserved-verbatim disabled branch still reads true at the 1.1
+    /// review. The ACTIVE large-source safety valve is `bulkWindow` above. The
+    /// Obsidian / OKF gate (VaultBridge) still consults `useBulk` live.
     static let streamThreshold = 250_000
 
-    /// Whether a source of `itemCount` items should be written in one bulk
-    /// transaction (`true`) or streamed per-item (`false`).
+    /// Whether a source of `itemCount` items should be written bulk (`true`) or
+    /// streamed per-item (`false`). Live for VaultBridge; PalaceBridge's copy of
+    /// this gate is disabled (bulk unconditional, windowed by `bulkWindow`).
     static func useBulk(itemCount: Int) -> Bool {
         itemCount <= streamThreshold
     }
