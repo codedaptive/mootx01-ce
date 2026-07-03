@@ -97,3 +97,10 @@ coverage.html
 
 # EE dev-tooling — never ship to CE
 .worktreeinclude
+
+# Exception: the moot-agent-skills adapter kit ships literal client config
+# files (.claude/, CLAUDE.md) as product content, not local config.
+# Re-include them so new adapter files are not silently dropped.
+!apps/moot-agent-skills/**/.claude/
+!apps/moot-agent-skills/**/.claude/**
+!apps/moot-agent-skills/**/CLAUDE.md
