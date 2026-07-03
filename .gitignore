@@ -104,3 +104,5 @@ coverage.html
 !apps/moot-agent-skills/**/.claude/
 !apps/moot-agent-skills/**/.claude/**
 !apps/moot-agent-skills/**/CLAUDE.md
+# ...but never Python bytecode inside the adapter kit
+apps/moot-agent-skills/**/__pycache__/
