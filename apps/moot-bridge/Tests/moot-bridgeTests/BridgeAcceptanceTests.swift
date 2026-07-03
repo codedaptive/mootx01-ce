@@ -33,11 +33,23 @@ struct BridgeAcceptanceTests {
     /// canonical strategy; no machine-specific fallback path.
     private static let mootBridgeBin: String? = bridgeBinaryPath()
 
+    /// True only where the live environment exists: both backend binaries on
+    /// PATH and the moot-bridge binary built next to the test bundle. Drives
+    /// the `.enabled(if:)` trait below — swift-testing's actual skip
+    /// mechanism. (`Issue.record` + throw, the previous approach, FAILS the
+    /// test; swift-testing has no graceful-skip via recording an issue.)
+    private static var liveEnvironmentAvailable: Bool {
+        mempalaceMCP != nil && mootx01Bin != nil && mootBridgeBin != nil
+    }
+
     /// The full scripted live session. One test so the ordered sequence (write
     /// then read then swap then read) runs against one shared pair of scratch
     /// backends, exactly as a real client would drive it.
-    @Test func fullBridgeSession() async throws {
-        try requireBinaries()
+    @Test(.enabled(
+        if: BridgeAcceptanceTests.liveEnvironmentAvailable,
+        "live backends (mempalace-mcp / mootx01) on PATH + built moot-bridge required — skips on bare CI runners"
+    ))
+    func fullBridgeSession() async throws {
 
         // --- Scratch backends + config -------------------------------------
         let tmp = try makeScratchDir()
@@ -122,21 +134,6 @@ struct BridgeAcceptanceTests {
     }
 
     // MARK: - Harness
-
-    private func requireBinaries() throws {
-        guard Self.mempalaceMCP != nil, Self.mootx01Bin != nil else {
-            // Skip gracefully where the live backends are not installed.
-            Issue.record("live backends (mempalace-mcp / mootx01) not on PATH — skipping live acceptance")
-            throw SkipLive()
-        }
-        guard Self.mootBridgeBin != nil else {
-            // Skip gracefully when moot-bridge has not been built yet.
-            Issue.record("moot-bridge binary not found next to test bundle — run swift build first")
-            throw SkipLive()
-        }
-    }
-
-    private struct SkipLive: Error {}
 
     /// Builds the acceptance config JSON pinned to the given scratch dirs.
     private func writeConfig(mpDir: String, mootDir: String) -> String {
@@ -319,8 +316,8 @@ struct BridgeAcceptanceTests {
     /// nil when it has not been built.  Under SPM, `swift test` places both the
     /// test runner and all executable products in the same .build/<config>/
     /// directory, so a bundle-sibling lookup is the canonical strategy.  No
-    /// machine-specific absolute path is used as a fallback — the caller
-    /// (requireBinaries) skips the suite gracefully when nil.
+    /// machine-specific absolute path is used as a fallback — when nil, the
+    /// `.enabled(if:)` trait on the test skips the suite gracefully.
     private static func bridgeBinaryPath() -> String? {
         let testBundleDir = Bundle.main.bundleURL.deletingLastPathComponent()
         let candidate = testBundleDir.appendingPathComponent("moot-bridge").path
