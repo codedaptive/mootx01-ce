@@ -336,7 +336,11 @@ if (-not $Version) {
         exit 1
     }
 }
-if (-not $Version.StartsWith("v")) { $Version = "v$Version" }
+# Normalize a bare release version to its v-prefixed tag (1.0.10 -> v1.0.10),
+# but leave tag-shaped inputs untouched: already v-prefixed, and pre-release
+# tags carrying a `-` suffix (e.g. 1.0.10-prerelease.4 from the candidate
+# pipeline, whose real tag has no leading v).
+if (-not $Version.StartsWith("v") -and $Version -notmatch '-') { $Version = "v$Version" }
 
 # 2. Download (arch-aware: a real arm64 artifact ships alongside x86_64).
 #    PROCESSOR_ARCHITEW6432 catches an x86-emulated shell on an ARM64 machine.
