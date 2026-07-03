@@ -177,14 +177,16 @@ struct InstallCommand: AsyncParsableCommand {
                             #if os(macOS)
                             if depth == .plugin {
                                 do {
-                                    let installed = try ClaudeDesktopExtension.install(
+                                    let written = try ClaudeDesktopExtension.install(
                                         binaryPath: binaryPath,
                                         version: Mootx01.currentVersion,
                                         homeDirectory: home)
-                                    if installed {
+                                    if written.isEmpty {
+                                        print("  ⓘ \(client.displayName): MCP server wired (Claude Desktop not detected — skipped extension)")
+                                    } else if written.count == 1 {
                                         print("  ✓ \(client.displayName): extension installed → restart Claude Desktop to load it")
                                     } else {
-                                        print("  ⓘ \(client.displayName): MCP server wired (Claude Desktop not detected — skipped extension)")
+                                        print("  ✓ \(client.displayName): extension installed (main + \(written.count - 1) Parall instance\(written.count == 2 ? "" : "s")) → restart Claude Desktop to load it")
                                     }
                                 } catch {
                                     print("  ⚠ \(client.displayName): MCP server wired; extension install failed: \(error)")
