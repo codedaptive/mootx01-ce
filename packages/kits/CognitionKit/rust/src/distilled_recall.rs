@@ -150,7 +150,8 @@ pub struct DistilledRecallOutput {
 ///   1. Feature-extract the query into a structural fingerprint using
 ///      `DistillationPipeline::default_extractor` — no embedding model inference.
 ///   2. Dispatch to `EstateCoordinator::find_nearest_distilled`.
-///   3. Policy-enforcing coord.recall(frame) → factoid body map (SensitivityAtMost(Elevated)).
+///   3. Policy-enforcing by-ids hydration of the NN matches → factoid body map
+///      (SensitivityAtMost(Elevated), no capture-time window).
 ///   4. Parse `DistilledHeader` per match, build `DistilledMatch` array.
 ///   5. Classify discrimination over confidence scores.
 ///
@@ -166,7 +167,10 @@ pub fn run_distilled_recall(
     input: &DistilledRecallInput,
     coord: &EstateCoordinator,
     handle: &EstateHandle,
-    now: i64,
+    // Accepted for API/caller parity. The by-ids hydration path (step 3) is scoped to
+    // the NN match ids and needs no current-clock token; liveness/state filtering is
+    // driven by the frame's default chain, not a wall-clock argument.
+    _now: i64,
 ) -> Result<DistilledRecallOutput, VerbDispatchError> {
     // 1. Feature-extract the query into a structural fingerprint.
     //    default_extractor is the capitalization-heuristic stub (deterministic,
@@ -189,14 +193,28 @@ pub fn run_distilled_recall(
         });
     }
 
-    // 3. Hydrate matched drawers through the policy-enforcing recall path.
+    // 3. Hydrate the NN match ids through the bounded, policy-enforcing by-ids path.
     //
     //    Parity with Swift DistilledRecall.run step 3:
-    //      `kit.hydrate(estate, ids:, matchingFrame: RecallFrame(filterChain: [input.filter]))`
-    //    which routes through BitmapEvaluator::insert_defaults and enforces the
+    //      `kit.hydrate(estate, ids: matches.map(\.itemID),
+    //                   matchingFrame: RecallFrame(filterChain: [input.filter],
+    //                                              hydrationLevel: .full))`
+    //    Swift hydrates the explicit NN candidate ids; the frame's filter chain routes
+    //    through BitmapEvaluator::insert_defaults and enforces the
     //    SensitivityAtMost(Elevated) ceiling (ADR-007 Decision 2 / VK-TIER-01).
-    //    Restricted and secret factoids are excluded before their body reaches
-    //    the MCP boundary — secfix/punt-g2 part 2.
+    //    Restricted and secret factoids are excluded before their body reaches the MCP
+    //    boundary — secfix/punt-g2 part 2.
+    //
+    //    get_drawers_matching_frame is scoped to the ids slice (the NN candidate set),
+    //    so there is NO capture-time recall window: an older admissible factoid is
+    //    hydrated whenever its id is among the NN matches, independent of estate size.
+    //    The earlier coord.recall(frame.limit = pool) approach returned only the newest
+    //    `pool` admissible drawers by capture-time-desc and intersected that with the
+    //    match ids — on estates with more admissible currently-believe rows than `pool`
+    //    (default max(limit*5, 50)), an NN match older than that window silently
+    //    disappeared, degrading recall integrity/availability. The id-scoped hydration
+    //    path (identical to Recollect steps 1 and 4) removes the window entirely.
+    //    secfix/ce-distill-recall-window.
     //
     //    `input.filter` is the caller's ARIA adjective filter, composed into the
     //    RecallFrame alongside the sensitivity ceiling. insert_defaults enforces
@@ -208,19 +226,14 @@ pub fn run_distilled_recall(
     //    Without Full, content is empty at Structured level and DistilledHeader::parse
     //    returns None for all rows, making every hit a spurious miss.
     //
-    //    `now` is required by the BitmapEvaluator for liveness/state checks.
-    //    B-1 compliant — no raw store access.
-    //
-    //    frame.limit = Some(input.pool): parity with Swift's
-    //      `RecallFrame(filterChain: [input.filter], hydrationLevel: .full, limit: input.limit)`
-    //    which uses a per-call limit so recall covers all NN candidates regardless of
-    //    estate size. The pool value (≥ input.limit * 5, min 50) bounds the lookup.
-    //    Without an explicit limit, coord.recall() caps at 50 (the frame.limit default),
-    //    which silently misses factoid bodies on estates with >50 drawers.
+    //    No .limit is set: the call is bounded by the ids slice, not a full-estate
+    //    scan (parity with Recollect steps 1/4). B-1 compliant — no raw store access.
+    let match_id_list: Vec<String> = matches.iter().map(|m| m.item_id.clone()).collect();
     let mut frame = RecallFrame::new(vec![input.filter.clone()]);
     frame.hydration_level = HydrationLevel::Full;
-    frame.limit = Some(input.pool);
-    let policy_drawers = coord.recall(handle, frame, now).unwrap_or_default();
+    let policy_drawers = coord
+        .get_drawers_matching_frame(handle, &match_id_list, &frame)
+        .unwrap_or_default();
     let match_ids: std::collections::HashSet<&str> =
         matches.iter().map(|m| m.item_id.as_str()).collect();
     let factoid_map: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> = policy_drawers
@@ -431,13 +444,13 @@ mod tests {
     // the complementary read-path gate: a factoid with secret sensitivity is
     // excluded by run_distilled_recall's policy-enforcing recall path.
     //
-    // Implementation note: run_distilled_recall routes through coord.recall()
-    // which applies BitmapEvaluator::insert_defaults (SensitivityAtMost(Elevated)).
-    // A Secret factoid captured directly is above that ceiling and is excluded.
-    // This test exercises the path without a VectorStore (find_nearest_distilled
-    // returns an error) so we verify the policy gate is in place for the
-    // hydration step by confirming that a secret factoid would be absent from
-    // the policy-filtered candidate pool.
+    // Implementation note: run_distilled_recall hydrates the NN match ids through
+    // coord.get_drawers_matching_frame(), which applies BitmapEvaluator::insert_defaults
+    // (SensitivityAtMost(Elevated)) per id. A Secret factoid is above that ceiling and is
+    // excluded. This test exercises the sensitivity gate through the full-estate recall
+    // path (coord.recall shares the same insert_defaults chain) without a VectorStore,
+    // confirming a secret factoid is absent from the admissible set the by-ids hydration
+    // would draw from.
     #[test]
     fn ck_dr9_secret_factoid_excluded_by_sensitivity_gate() {
         use std::sync::Arc;
@@ -588,6 +601,100 @@ mod tests {
             has_factoid_in_cb,
             "CurrentlyBelieve filter must include the unconfirmed factoid; \
              sanity check for CK-DR-10 failed — the drawer may not have captured correctly"
+        );
+    }
+
+    // CK-DR-11 (Rust): the by-ids hydration path used by run_distilled_recall step 3
+    //                   has NO capture-time recall window — an older admissible factoid
+    //                   is hydrated even when many newer admissible rows exist.
+    //
+    // Regression for secfix/ce-distill-recall-window: the prior implementation called
+    // coord.recall(frame.limit = pool) then intersected the newest-`pool` admissible
+    // drawers (capture-time-desc) with the NN match ids. On an estate with more
+    // admissible currently-believe rows than `pool`, an older NN-matched factoid fell
+    // outside the window and silently disappeared. This test pins the exact behavioral
+    // difference the fix depends on:
+    //   - get_drawers_matching_frame(&[old_id]) hydrates the old factoid regardless of
+    //     how many newer rows exist (the fixed path).
+    //   - coord.recall(frame.limit = 50) excludes it once 50 newer rows crowd it out
+    //     (the buggy path), proving the window was real and is now bypassed.
+    #[test]
+    fn ck_dr11_by_ids_hydration_has_no_capture_time_window() {
+        use std::sync::Arc;
+        use genius_locus_kit::coordinator::EstateCoordinator;
+        use locus_kit::{
+            drawer_operational::CaptureChannel,
+            drawer_store::DrawerStore,
+            drawer_store_inmemory::InMemoryDrawerStore,
+            estate_types::{LatticeAnchor, OwnerCredentials},
+            filter::{Filter, HydrationLevel, RecallFrame},
+            frames::CaptureFrame,
+        };
+
+        const NOW: i64 = 1_700_000_000;
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            InMemoryDrawerStore::new(NOW, None).expect("store"),
+        );
+        let handle = coord
+            .open(store, OwnerCredentials::new("test"), 0, i64::MAX)
+            .expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        // Capture the OLD admissible distilled factoid first (oldest capture time).
+        let old_content = "[DIST|conf=0.85|src=1|snr=3.0] Old admissible factoid prose.";
+        let old_frame = CaptureFrame::new(
+            old_content,
+            CaptureChannel::Actuator,
+            "_distilled",
+            LatticeAnchor::udc("001"),
+            "distillation-daemon",
+            "distillation-features-v1",
+        );
+        let old_id = coord.capture(&handle, old_frame, NOW).expect("capture old factoid").id;
+
+        // Capture 60 NEWER admissible rows (> the default pool of 50), each with a
+        // strictly later capture time so capture-time-desc ordering ranks them ahead
+        // of the old factoid.
+        for i in 1..=60_i64 {
+            let content = format!("[DIST|conf=0.80|src=1|snr=2.0] Newer factoid {i}.");
+            let frame = CaptureFrame::new(
+                &content,
+                CaptureChannel::Actuator,
+                "_distilled",
+                LatticeAnchor::udc("001"),
+                "distillation-daemon",
+                "distillation-features-v1",
+            );
+            coord.capture(&handle, frame, NOW + i).expect("capture newer factoid");
+        }
+
+        // Fixed path: hydrate the old factoid by id (the frame run_distilled_recall
+        // builds). It must be present despite 60 newer rows — no window.
+        let mut frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+        frame.hydration_level = HydrationLevel::Full;
+        let hydrated = coord
+            .get_drawers_matching_frame(&handle, &[old_id.clone()], &frame)
+            .expect("by-ids hydration must not fail");
+        assert!(
+            hydrated.iter().any(|d| d.id == old_id),
+            "by-ids hydration must return the old admissible factoid regardless of \
+             how many newer rows exist — the capture-time window must be gone"
+        );
+
+        // Buggy path (documented, not used): the old capture-time-windowed recall would
+        // have dropped the old factoid once 50 newer admissible rows exist. Prove the
+        // window was real so the fix is not a no-op.
+        let mut windowed = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
+        windowed.hydration_level = HydrationLevel::Full;
+        windowed.limit = Some(50);
+        let newest_fifty = coord
+            .recall(&handle, windowed, NOW + 60)
+            .expect("windowed recall must not fail");
+        assert!(
+            !newest_fifty.iter().any(|d| d.id == old_id),
+            "sanity: the newest-50 recall window must exclude the old factoid — if it \
+             does not, this regression test no longer exercises the window it guards"
         );
     }
 }
