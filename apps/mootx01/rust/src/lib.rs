@@ -25,7 +25,7 @@ pub const CURRENT_VERSION: &str = "1.0.10";
 /// Release date stamp printed next to the version by `--version`. Must match
 /// the Swift port's `Mootx01.releaseDate` so both binaries print an identical
 /// `--version` line.
-pub const RELEASE_DATE: &str = "2026-07-02";
+pub const RELEASE_DATE: &str = "2026-07-03";
 
 /// Exit codes per spec §5.
 pub mod exit {
