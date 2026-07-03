@@ -5,6 +5,35 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.11 — 2026-07-03
+
+Installer correctness release. The v1.0.10 macOS `.pkg` was pulled because it
+half-installed (wired MCP clients to a daemon it never registered). This
+release makes every install path produce a working install and adds native
+plugin/extension registration per client.
+
+- **macOS `.pkg` installs a working daemon** — the GUI setup assistant now runs
+  `mootx01 install` (the single source of truth) instead of reimplementing it,
+  so the resident daemon and management console are registered, not just the
+  clients wired.
+- **`moot-mgr` placement fixed** — `copyResourceBundles` self-destructed when
+  the source and destination were the same dir (the `.pkg` layout); the console
+  now installs.
+- **`mootx01 status` is honest** — added a TCP port-liveness fallback so it no
+  longer reports "not running" while the daemon is serving 4242.
+- **Integration-depth choice in the GUI** — Server only / Skills / Full plugin,
+  matching the CLI's `--mode`.
+- **Claude Code plugin is registered as a local marketplace** — `installPlugin`
+  writes `.claude-plugin/marketplace.json` and merges `extraKnownMarketplaces`
+  + `enabledPlugins` into `~/.claude/settings.json`, so `/plugin` lists it.
+- **Claude Desktop extension** — `mootx01 install` now registers mootx01 as a
+  Desktop extension (unpacked manifest + registry entry + enabled flag), macOS
+  (Swift) and Windows (Rust). Shares the extension name so it dedups with the
+  raw MCP wiring.
+- **Candidate CI hardening** — builds the unsigned `.pkg` as a testable
+  pre-release artifact and `install-verify` now runs `mootx01 install` and
+  asserts the daemon/console register (not just `--version`).
+
 ## v1.0.10 — 2026-07-03
 
 First non-beta release of the 1.0 line. Security-fix sweep from the codex audit (import

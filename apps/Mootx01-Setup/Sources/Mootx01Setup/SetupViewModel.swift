@@ -27,6 +27,7 @@ struct ClientItem: Identifiable {
     var id: String { client.id }
 }
 
+@MainActor
 @Observable
 final class SetupViewModel {
 
@@ -36,6 +37,12 @@ final class SetupViewModel {
     var clients: [ClientItem] = []
     var results: [String] = []
     var skipped: [String] = []
+
+    /// Integration depth the user picks (Server only / Skills / Full plugin).
+    /// Passed to `mootx01 install --mode`. Defaults to the fullest integration,
+    /// but the user chooses — silently forcing one depth produced installs the
+    /// user did not ask for.
+    var depth: InstallDepth = .default
 
     // MARK: - Derived
 
@@ -121,36 +128,57 @@ final class SetupViewModel {
         skipped = []
 
         let selected = clients.filter(\.isSelected)
-        let workingDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        guard !selected.isEmpty else { phase = .complete; return }
 
-        for item in selected {
-            do {
-                try Installer.install(
-                    client: item.client,
-                    binaryPath: binaryPath,
-                    daemonURL: daemonURL,
-                    homeDirectory: home,
-                    workingDirectory: workingDir,
-                    local: false
-                )
-                results.append(item.client.displayName)
-            } catch {
-                skipped.append("\(item.client.displayName): \(error.localizedDescription)")
-            }
+        // Run the REAL `mootx01 install` for the selected clients. It is the
+        // single source of truth for a complete install — client wiring, the
+        // plugin/skill depth, AND the resident daemon + management console. The
+        // GUI must NOT reimplement those steps: doing so silently skipped the
+        // daemon (clients wired to a dead 127.0.0.1:4242) and the plugin. This
+        // makes the setup assistant a true projection of the CLI.
+        //
+        // The subprocess runs OFF the main thread: waitUntilExit on the main
+        // actor froze the UI (beachball) for the several seconds the install
+        // takes, hiding the .installing progress view.
+        let ids = selected.map(\.client.id).joined(separator: ",")
+        let names = selected.map(\.client.displayName)
+        let launchPath = binaryPath
+        let mode = depth.rawValue
+
+        Task {
+            let (results, skipped) = await Self.runInstall(
+                launchPath: launchPath, ids: ids, mode: mode, names: names)
+            self.results = results
+            self.skipped = skipped
+            self.phase = .complete
         }
+    }
 
-        // Apply integration depth (default = plugin) for wired clients.
-        for name in results {
-            if let client = selected.first(where: { $0.client.displayName == name }) {
-                _ = try? DepthInstaller.apply(
-                    clientID: client.client.id,
-                    depth: .default,
-                    homeDirectory: home,
-                    binaryPath: binaryPath
-                )
+    /// Run the CLI install off the main actor and return (results, skipped).
+    private nonisolated static func runInstall(
+        launchPath: String, ids: String, mode: String, names: [String]
+    ) async -> ([String], [String]) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: launchPath)
+        proc.arguments = ["install", "--target", ids, "--mode", mode, "--yes"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+
+        do {
+            try proc.run()
+            // Drain the pipe BEFORE waitUntilExit — a full pipe buffer would
+            // deadlock the child.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            if proc.terminationStatus == 0 {
+                return (names, [])
             }
+            let tail = output.split(separator: "\n").suffix(6).map(String.init)
+            return ([], ["mootx01 install exited \(proc.terminationStatus)"] + tail)
+        } catch {
+            return ([], ["Could not run mootx01 install: \(error.localizedDescription)"])
         }
-
-        phase = .complete
     }
 }

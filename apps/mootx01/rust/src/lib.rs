@@ -20,7 +20,11 @@ pub mod core;
 /// upgrade path against the latest release tag, so it stays a pure semver;
 /// `--version` prints it alongside `RELEASE_DATE`. The Swift equivalent is
 /// `Mootx01.currentVersion` in the Swift CLI entrypoint.
-pub const CURRENT_VERSION: &str = "1.0.10";
+///
+/// Derived from Cargo.toml at compile time — Cargo.toml is the single source
+/// (CI's candidate/release meta reads it too). A hand-bumped literal here once
+/// lagged a release bump and shipped a binary reporting the prior version.
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Release date stamp printed next to the version by `--version`. Must match
 /// the Swift port's `Mootx01.releaseDate` so both binaries print an identical

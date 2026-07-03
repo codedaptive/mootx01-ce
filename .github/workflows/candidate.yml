@@ -109,10 +109,24 @@ jobs:
           # only — x86_64 is cross-built and won't execute on the arm runner).
           tar -tzf "$asset" | grep -qx 'mootx01' || { echo "no mootx01 in archive"; exit 1; }
           [ "${{ matrix.arch }}" = "arm64" ] && ./mootx01 --version || true
+
+          # Build the UNSIGNED .pkg installer too, so the .pkg path is a testable
+          # pre-release artifact — not first built (signed) at release time and
+          # shipped to users untested (which is how a broken .pkg shipped).
+          # build-pkg.sh warns-and-proceeds without signing identities.
+          swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup $archflag
+          SETUP_BIN="$(find apps/Mootx01-Setup/.build -name Mootx01Setup -path '*/release/Mootx01Setup' | head -1)"
+          bash distribution/macos/build-pkg.sh \
+            "${{ needs.meta.outputs.tag }}" "${{ matrix.arch }}" "$MOOT_BIN" "$MGR_BIN" "$SETUP_BIN"
+          pkg="mootx01-${{ needs.meta.outputs.tag }}-macos-${{ matrix.arch }}.pkg"
+          [ -f "$pkg" ] || { echo "✗ .pkg not produced"; exit 1; }
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-${{ matrix.arch }}
-          path: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.PKG }}
 
   # ── Unsigned Linux builds (x86_64 + arm64) ──────────────────────────────────
   linux:
@@ -220,7 +234,7 @@ jobs:
           MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
         run: |
           mkdir -p flat
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \) \
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' \) \
             -exec cp {} flat/ \;
           ( cd flat && sha256sum * > ../checksums.txt )
           cp checksums.txt flat/
@@ -304,6 +318,30 @@ jobs:
             "$VERSION"*) echo "✓ installer works (version matches)";;
             *) echo "✗ unexpected --version: $out (want $VERSION*)"; exit 1;;
           esac
+
+          # A binary that runs is not a working install. On macOS, run the wiring
+          # step (mootx01 install) and assert — from its OUTPUT, which is
+          # home-agnostic (the CLI resolves the real user home, not $HOME) — that
+          # it produces a REAL install: moot-mgr PLACES (no self-copy crash), and
+          # both the resident daemon and the management console are registered.
+          # This is the check that catches the moot-mgr self-copy crash and a
+          # regression where the daemon is never registered (the .pkg symptom).
+          # (launchctl bootstrap fails on a headless runner, so we assert the
+          # registration was ATTEMPTED, not that the service is live — daemon
+          # liveness needs a login session, i.e. the operator VM/machine.)
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            # --target claude-code: a bare runner detects no clients, and
+            # install exits at "No clients selected" BEFORE the daemon/console
+            # registration this gate exists to verify. Pin one client so the
+            # run is deterministic.
+            out="$("$HOME/.mootx01/bin/mootx01" install --target claude-code --yes 2>&1)"; echo "$out"
+            echo "$out" | grep -qi 'could not place moot-mgr' && { echo "✗ moot-mgr placement crashed"; exit 1; }
+            echo "$out" | grep -qi 'resident.*daemon'   || { echo "✗ install never registered the resident daemon"; exit 1; }
+            echo "$out" | grep -qi 'management console'  || { echo "✗ install never registered the moot-mgr console"; exit 1; }
+            echo "✓ macOS: moot-mgr places; daemon + console registered"
+            "$HOME/.mootx01/bin/mootx01" uninstall --yes >/dev/null 2>&1 || true
+          fi
+
           sh install.sh --uninstall
           [ ! -e "$HOME/.mootx01" ] || { echo "✗ uninstall left ~/.mootx01"; exit 1; }
-          echo "✓ ${{ matrix.os }} install → run → uninstall clean"
+          echo "✓ ${{ matrix.os }} install → wire → run → uninstall clean"

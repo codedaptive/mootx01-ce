@@ -31,6 +31,9 @@ AppVersion={#MyAppVersion}
 AppPublisher=Codedaptive LLC
 AppPublisherURL=https://github.com/codedaptive/mootx01-ce
 AppSupportURL=https://github.com/codedaptive/mootx01-ce/issues
+; Show the license agreement page (FSL-1.1-ALv2), matching the macOS .pkg's
+; license pane. Path resolves relative to this .iss (repo-root LICENSE).
+LicenseFile=..\..\LICENSE
 DefaultDirName={%USERPROFILE}\.mootx01\bin
 ; Do not reuse a remembered install dir: pre-1.0.6 betas installed to
 ; {userappdata} (Roaming) by mistake; upgrades must migrate to the
@@ -72,7 +75,11 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; After files are placed, launch the interactive client wiring in a
 ; terminal window. The user sees the same numbered picker that
 ; `mootx01 install` shows in PowerShell — detection, selection, wiring.
-Filename: "{app}\mootx01.exe"; Parameters: "install"; \
+; Launched via `cmd /c start` so the console opens FOREGROUND: spawning
+; the exe directly under `nowait` created the window without focus and it
+; landed as a pop-under behind the closing wizard, invisibly parked at
+; the install prompt.
+Filename: "{cmd}"; Parameters: "/c start ""MOOTx01 Setup"" ""{app}\mootx01.exe"" install"; \
   Description: "Run MOOTx01 setup now to connect your AI clients - required (opens a terminal)"; \
   Flags: postinstall nowait skipifsilent runasoriginaluser
 
@@ -108,6 +115,25 @@ begin
   // Look for the path both with and without trailing backslash.
   Result := (Pos(';' + Param + ';', ';' + OrigPath + ';') = 0) and
             (Pos(';' + Param + '\;', ';' + OrigPath + ';') = 0);
+end;
+
+// When the user clicks Finish with "Run MOOTx01 setup now" checked, warn
+// them a terminal is about to open: console windows spawned at wizard close
+// get no foreground activation on some Windows builds and land BEHIND other
+// windows (observed pop-under even via `cmd /c start`), invisibly parked at
+// the interactive client picker. The modal makes the user go find it.
+// Gated on WizardSilent so /SILENT and /VERYSILENT never hang on a MsgBox
+// (a Winget validation-VM requirement) — skipifsilent skips the run anyway.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpFinished) and (not WizardSilent) and
+     (WizardForm.RunList.Items.Count > 0) and WizardForm.RunList.Checked[0] then
+    MsgBox('A terminal window will now open to finish MOOTx01 setup ' +
+           '(connect your AI clients).' + #13#10 + #13#10 +
+           'Continue in the terminal - it may open BEHIND other windows; ' +
+           'check the taskbar for a new terminal.',
+           mbInformation, MB_OK);
 end;
 
 // On uninstall, notify the user their data was preserved — but only in

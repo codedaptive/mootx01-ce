@@ -5,9 +5,18 @@
 // screen. Designed to feel native and minimal — one screen, one action.
 
 import SwiftUI
+import MootInstallerCore
 
 struct SetupView: View {
     @State private var viewModel = SetupViewModel()
+
+    private var depthHint: String {
+        switch viewModel.depth {
+        case .server: return "MCP server only — tools available to clients."
+        case .skills: return "Server + the mootx01-memory skill."
+        case .plugin: return "Server + native plugin (skill + commands) — fullest integration."
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -84,6 +93,27 @@ struct SetupView: View {
                 .padding(.horizontal, 24)
                 .padding(.vertical, 16)
             }
+
+            Divider()
+
+            // Integration depth — the user chooses; don't silently force one.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Integration")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Integration", selection: $viewModel.depth) {
+                    Text("Server only").tag(InstallDepth.server)
+                    Text("Skills").tag(InstallDepth.skills)
+                    Text("Full plugin").tag(InstallDepth.plugin)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(depthHint)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
 
             Divider()
 

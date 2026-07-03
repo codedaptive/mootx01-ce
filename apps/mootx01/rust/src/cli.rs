@@ -24,8 +24,8 @@ pub enum Command {
         target: Option<Vec<String>>,
         location: Location,
         yes: bool,
-        /// Opt-in flag: write ARIA tool permissions to settings.json. Off by default
-        /// so the installer does not silently grant broad MCP tool approval.
+        /// Write EVERY tool to permissions.allow (full auto-approval). Without it
+        /// the install writes TIERED defaults (allow/ask/deny by capability).
         grant_permissions: bool,
         no_permissions: bool,
         no_mgr: bool,
@@ -484,8 +484,8 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --location <scope>      Config scope: 'global' (default) or 'local' (project .mcp.json for Claude Code).\n\
             \x20 --mode <depth>          Integration depth for every selected client: 'server' (MCP only), 'skills' (server + mootx01-memory skill), or 'plugin' (server + native plugin). Default: prompt when interactive, else 'plugin'. Plugin falls back to skills on hosts without a plugin format.\n\
             \x20 -y, --yes               Skip prompts; auto-detect and install all present clients.\n\
-            \x20 --grant-permissions     Opt in to settings.json permissions.allow grants.\n\
-            \x20 --no-permissions        Do not grant tool permissions (default; retained for scripts).\n\
+            \x20 --grant-permissions     Write EVERY tool to permissions.allow (full auto-approval). Default is tiered: diagnostics allow, reads/writes ask, destructive deny.\n\
+            \x20 --no-permissions        Do not write tool permissions at all (skips the tiered default).\n\
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
             \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background service.\n\
             \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\

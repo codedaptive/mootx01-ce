@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use crate::cli::{InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::depth::{self, DepthOutcome, InstallDepth};
+use crate::core::desktop_ext;
 use crate::core::{merge, paths, permissions};
 use crate::exit;
 
@@ -102,10 +103,41 @@ pub fn run(
             // vault_off = !vault_on: thread the vault posture into the plugin
             // installer so plugin-spawned stdio servers inherit the correct env.
             match depth::apply(client.id, depth, &home, !vault_on) {
-                Ok(DepthOutcome::Server) => println!(
-                    "  ⓘ {}: server only (no skill/plugin payload for this client)",
-                    client.display_name
-                ),
+                Ok(DepthOutcome::Server) => {
+                    // Claude Desktop's "plugin" is a Desktop extension, not a
+                    // file-drop payload. At plugin depth, install it
+                    // programmatically (the same registry writes a .mcpb
+                    // double-click makes). Other MCP-only hosts (continue, kiro)
+                    // genuinely have no plugin surface.
+                    if client.id == "claude-desktop" && depth == InstallDepth::Plugin {
+                        match desktop_ext::install(
+                            client,
+                            &home,
+                            &binary_path,
+                            env!("CARGO_PKG_VERSION"),
+                        ) {
+                            Ok(true) => println!(
+                                "  ✓ {}: extension installed → restart Claude Desktop to load it",
+                                client.display_name
+                            ),
+                            Ok(false) => println!(
+                                "  ⓘ {}: MCP server wired (Claude Desktop not detected — skipped extension)",
+                                client.display_name
+                            ),
+                            Err(e) => eprintln!(
+                                "  ⚠ {}: MCP server wired; extension install failed: {e}",
+                                client.display_name
+                            ),
+                        }
+                    } else if client.id == "claude-desktop" {
+                        println!("  ⓘ {}: MCP server wired.", client.display_name);
+                    } else {
+                        println!(
+                            "  ⓘ {}: server only (no skill/plugin payload for this client)",
+                            client.display_name
+                        );
+                    }
+                }
                 Ok(DepthOutcome::Skills(path)) => {
                     println!("  ✓ {}: skill installed → {path}", client.display_name)
                 }
@@ -121,12 +153,16 @@ pub fn run(
         }
     }
 
-    // Permissions grant (Claude Code settings) — §4.2, AIRA-INSTALL-P3 key.
-    // Only written when the user explicitly passes --grant-permissions; the flag
-    // is off by default so a fresh install does not silently grant broad MCP
-    // tool approval. --no-permissions overrides --grant-permissions for scripts
-    // that want a guaranteed no-write path regardless of other flags.
-    if grant_permissions && !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
+    // Permissions (Claude Code settings) — §4.2, AIRA-INSTALL-P3 key.
+    //
+    //   default              → TIERED: diagnostics allow, reads/writes ask,
+    //                          destructive purges deny. Without this every tool
+    //                          is unapproved and nothing works out of the box;
+    //                          with it nothing destructive is silently
+    //                          auto-approved.
+    //   --grant-permissions  → every tool into allow (explicit opt-in).
+    //   --no-permissions     → write nothing (guaranteed no-write for scripts).
+    if !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
         // join_rel produces native separators on every platform (backslash on
         // Windows, forward-slash on POSIX) — home.join(".claude/settings.json")
         // would leave a mixed path on Windows.
@@ -134,15 +170,29 @@ pub fn run(
             Location::Global => join_rel(&home, ".claude/settings.json"),
             Location::Local => PathBuf::from(".claude").join("settings.json"),
         };
-        match merge::backup_existing(&settings)
-            .map_err(merge::MergeError::from)
-            .and_then(|_| permissions::grant(&settings))
-        {
-            Ok(added) if added > 0 => {
-                println!("  ✓ granted {added} tool permissions ({})", settings.display())
+        if grant_permissions {
+            match merge::backup_existing(&settings)
+                .map_err(merge::MergeError::from)
+                .and_then(|_| permissions::grant(&settings))
+            {
+                Ok(added) if added > 0 => {
+                    println!("  ✓ granted {added} tool permissions ({})", settings.display())
+                }
+                Ok(_) => println!("  ✓ tool permissions already granted"),
+                Err(e) => eprintln!("  ✗ permissions: {e}"),
             }
-            Ok(_) => println!("  ✓ tool permissions already granted"),
-            Err(e) => eprintln!("  ✗ permissions: {e}"),
+        } else {
+            match merge::backup_existing(&settings)
+                .map_err(merge::MergeError::from)
+                .and_then(|_| permissions::grant_tiered(&settings))
+            {
+                Ok((a, k, d)) if a + k + d > 0 => println!(
+                    "  ✓ Claude Code tool permissions: {a} allowed (diagnostics), {k} ask, {d} denied (destructive) — edit in {}",
+                    settings.display()
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("  ✗ permissions: {e}"),
+            }
         }
     }
 
@@ -439,9 +489,9 @@ pub(crate) fn home_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    /// Verifies the permissions gate: settings.json is only written when
-    /// `grant_permissions` is explicitly true. The default (false) must not
-    /// silently grant broad MCP tool approval on a fresh install.
+    /// Verifies the permissions gate: --no-permissions is a guaranteed
+    /// no-write; the default writes the TIERED lists (allow/ask/deny — full
+    /// broad approval still requires --grant-permissions, which fills allow).
     #[test]
     fn grant_permissions_flag_gates_settings_write() {
         use crate::core::permissions;
@@ -451,28 +501,44 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let settings = tmp.join("settings.json");
 
-        // Mirrors the gate condition in run(): permissions written only when
-        // grant_permissions=true AND no_permissions=false.
-        let no_permissions = false;
-
-        // Without --grant-permissions: no write.
-        let grant_permissions = false;
-        if grant_permissions && !no_permissions {
-            permissions::grant(&settings).unwrap();
+        // Mirrors the gate condition in run(): --no-permissions blocks any
+        // write regardless of other flags.
+        let no_permissions = true;
+        if !no_permissions {
+            permissions::grant_tiered(&settings).unwrap();
         }
         assert!(
             !settings.exists(),
-            "settings.json must not be written when grant_permissions=false"
+            "settings.json must not be written under --no-permissions"
         );
 
-        // With --grant-permissions: write occurs.
-        let grant_permissions = true;
-        if grant_permissions && !no_permissions {
-            permissions::grant(&settings).unwrap();
+        // Default (no flags): tiered write occurs, and destructive tools land
+        // in deny — NOT allow. The old default (write nothing) left every tool
+        // unapproved and the install non-functional out of the box.
+        let no_permissions = false;
+        if !no_permissions {
+            permissions::grant_tiered(&settings).unwrap();
         }
         assert!(
             settings.exists(),
-            "settings.json must be written when grant_permissions=true"
+            "settings.json must get the tiered defaults on a plain install"
+        );
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        let deny: Vec<&str> = root["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            deny.iter().any(|e| e.contains("erase")),
+            "destructive tools must default to deny, got deny={deny:?}"
+        );
+        let allow = root["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allow.iter().any(|v| v.as_str().unwrap().ends_with("_ping")),
+            "diagnostics must default to allow"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
