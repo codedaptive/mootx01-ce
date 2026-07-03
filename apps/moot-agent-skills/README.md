@@ -60,7 +60,7 @@ Copy into a project root for one project, or into the client's user-level config
 
 | Client | Destination files |
 |---|---|
-| `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md`, `.claude/hooks/moot_hooks.py`, `.claude/settings.json` (merge the `hooks` block if a settings file exists) |
+| `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md`, `.claude/hooks/moot_hooks.py`, `.claude/hooks/moot_update_check.py`, `.claude/settings.json` (merge the `hooks` block if a settings file exists) |
 | `codex/` | `AGENTS.md`, `.agents/skills/mootx01-memory/{SKILL.md, agents/openai.yaml}`, `.codex/hooks.json` |
 | `gemini/` | `GEMINI.md` (project root or `~/.gemini/GEMINI.md`) |
 | `cursor/` | `.cursor/rules/*.mdc` or legacy `.cursorrules` |

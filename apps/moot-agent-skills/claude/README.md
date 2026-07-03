@@ -10,6 +10,8 @@ adapter covers all six surfaces:
 - `.claude/commands/mootx01-start.md` - optional slash command prompt.
 - `.claude/hooks/moot_hooks.py` - hook script (context meter, compaction
   recovery, writeback check).
+- `.claude/hooks/moot_update_check.py` - optional update-availability check
+  (the one hook that touches the network; see below).
 - `.claude/settings.json` - hook wiring.
 
 Copy the contents of this directory into a repository root or user-level
@@ -52,10 +54,14 @@ make memory behavior happen at the moments instruction files cannot see:
    never wrote anything durable back, Claude is asked — once per session,
    at the moment it tries to finish — to file memories and a journal entry
    or state plainly that nothing durable happened.
+5. **Update check** (`SessionStart`, separate script) — at most once per
+   24 hours, asks the GitHub releases API whether a newer MOOTx01 exists
+   than the installed `mootx01 --version`. If so, Claude mentions it to
+   you once per new version. See the trust boundary note below.
 
 ## Hook Safety Properties
 
-The hook script is deliberately auditable:
+The core hook script (`moot_hooks.py`) is deliberately auditable:
 
 - Python standard library only; no third-party dependencies.
 - No network access.
@@ -65,6 +71,25 @@ The hook script is deliberately auditable:
 - Every failure path exits 0 silently — a broken hook never breaks a session.
 
 Read `moot_hooks.py` before enabling it. It is short on purpose.
+
+## Update Check — The One Hook That Touches The Network
+
+`moot_update_check.py` is kept in its own file precisely so the statement
+above stays true of the core script. Its full behavior:
+
+- One HTTPS GET to `api.github.com` (releases metadata for
+  `codedaptive/mootx01-ce`), at most once per 24 hours, 3-second timeout.
+- Sends no identifiers, telemetry, or user data — only an honest
+  `User-Agent`. Downloads nothing, installs nothing, executes nothing; it
+  prints one sentence when a newer version exists.
+- Notifies once per new version, not once per session.
+- Every failure path (offline, rate-limited, CLI missing, repo
+  unreachable) is silent.
+
+To disable it: `export MOOTX01_NO_UPDATE_CHECK=1`, or delete its block
+from `.claude/settings.json`. Self-hosted builds can point
+`MOOTX01_UPDATE_URL` at their own release endpoint (any JSON with a
+`tag_name` field).
 
 ## Configuration
 
