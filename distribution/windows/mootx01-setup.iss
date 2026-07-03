@@ -72,7 +72,11 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; After files are placed, launch the interactive client wiring in a
 ; terminal window. The user sees the same numbered picker that
 ; `mootx01 install` shows in PowerShell — detection, selection, wiring.
-Filename: "{app}\mootx01.exe"; Parameters: "install"; \
+; Launched via `cmd /c start` so the console opens FOREGROUND: spawning
+; the exe directly under `nowait` created the window without focus and it
+; landed as a pop-under behind the closing wizard, invisibly parked at
+; the install prompt.
+Filename: "{cmd}"; Parameters: "/c start ""MOOTx01 Setup"" ""{app}\mootx01.exe"" install"; \
   Description: "Run MOOTx01 setup now to connect your AI clients - required (opens a terminal)"; \
   Flags: postinstall nowait skipifsilent runasoriginaluser
 
