@@ -1239,11 +1239,30 @@ public actor Corpus {
         let estateDir = estateURL.deletingLastPathComponent()
         let configuration = sqlite.configuration
 
+        // Estate db stem stamps every shard name so two estates sharing one
+        // directory can never collide on a shard path (codex b92be5bc).
+        let estateStem = estateURL.deletingPathExtension().lastPathComponent
+        let shardPrefix = "import-shard-\(estateStem)-"
+
+        // Sweep stale shards from a CRASHED prior import of THIS estate (the
+        // prefix carries the estate stem, so other estates' live shards in a
+        // shared directory are never touched). Safe under the import drain
+        // lease, which serializes imports per estate; a concurrent same-estate
+        // import is a caller bug that SQLiteShard's exclusive create surfaces.
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: estateDir, includingPropertiesForKeys: nil) {
+            for file in entries where file.lastPathComponent.hasPrefix(shardPrefix) {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+
         // Phase P — parallel workers: chunk + tokenize + shard-write per slice.
         // Chunking uses a FRESH per-item HLC generator (matching the Rust import
         // path's chunk_with_default_hlc): chunk ids are content-addressed v5
         // UUIDs, so per-item parallel output is identical regardless of worker
-        // layout. Each worker owns one shard file.
+        // layout. Each task owns one estate-stamped shard file (exclusive
+        // create); live task width is bounded by the cooperative thread pool,
+        // so thread count never scales with import size.
         var slices: [[(text: String, sourceID: String, now: Date)]] = []
         var start = 0
         while start < items.count {
@@ -1260,7 +1279,7 @@ public actor Corpus {
         let outs: [WorkerOut] = try await withThrowingTaskGroup(of: WorkerOut.self) { group in
             for (i, slice) in slices.enumerated() {
                 group.addTask {
-                    let shardURL = estateDir.appendingPathComponent("import-shard-\(i).sqlite")
+                    let shardURL = estateDir.appendingPathComponent("\(shardPrefix)s\(i).sqlite")
                     let shard = try SQLiteShard(url: shardURL, configuration: configuration)
                     try shard.exec(
                         """

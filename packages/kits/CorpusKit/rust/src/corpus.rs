@@ -1328,99 +1328,198 @@ impl Corpus {
         //
         // The serial per-item path remains for in-memory estates (no shard files;
         // the IIX connection is ephemeral :memory: and cannot ATTACH across).
-        let shard_dir = match &self.storage.configuration().backend {
+        let shard_target = match &self.storage.configuration().backend {
             persistence_kit::BackendConfiguration::Sqlite { path, .. } => {
-                std::path::Path::new(path).parent().map(|p| p.to_path_buf())
+                let p = std::path::Path::new(path);
+                match (p.parent(), p.file_stem()) {
+                    // Estate db stem stamps every shard name so two estates
+                    // sharing one directory can never collide on a shard path
+                    // (codex b92be5bc).
+                    (Some(dir), Some(stem)) => {
+                        Some((dir.to_path_buf(), stem.to_string_lossy().to_string()))
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         };
-        if let Some(dir) = shard_dir {
-            return self.ingest_batch_import_sharded(items, &dir);
+        if let Some((dir, stem)) = shard_target {
+            return self.ingest_batch_import_sharded(items, &dir, &stem);
         }
         self.ingest_batch_import_serial(items)
     }
 
-    /// Items per import shard worker. Fixed (not n/cores) so a 10k pass yields
-    /// more shards than cores — better load balancing, same rationale as
-    /// REEMBED_BATCH_SIZE.
+    /// Items per import work slice. Fixed (not n/cores) so a 10k pass yields
+    /// more slices than workers — better load balancing, same rationale as
+    /// REEMBED_BATCH_SIZE. Slice COUNT scales with import size; worker/thread
+    /// count does NOT — it is capped at available_parallelism() in
+    /// `ingest_batch_import_sharded` (each worker owns ONE shard file and pulls
+    /// slices from a shared counter).
     const IMPORT_SHARD_ITEMS: usize = 2500;
 
     /// The EXT-4 sharded import body — see `ingest_batch_import`.
+    /// `estate_stem` is the estate db filename stem; it stamps shard names.
     fn ingest_batch_import_sharded(
         &self,
         items: &[(String, String, i64)],
         shard_dir: &std::path::Path,
+        estate_stem: &str,
     ) -> CorpusKitResult<()> {
         use crate::engine::inverted_index_store::IngestPostingsShard;
 
-        // Phase P — parallel: chunk + tokenize + shard-write per slice. Each
-        // worker returns (shard_path, per-item chunks, per-chunk postings).
-        // chunk_with_default_hlc is a pure function of its arguments (fresh HLC
-        // generator per call), so per-item parallel output is byte-identical to
-        // the serial loop.
-        type WorkerOut = (Option<String>, Vec<Vec<Chunk>>, Vec<(String, std::collections::HashMap<String, usize>, usize)>);
+        // Sweep stale shards from a CRASHED prior import of THIS estate (name
+        // prefix carries the estate stem, so other estates' live shards in a
+        // shared directory are never touched). Safe under the import drain
+        // lease, which serializes imports per estate; a concurrent same-estate
+        // import is a caller bug that the exclusive create below surfaces.
+        let stale_prefix = format!("import-shard-{estate_stem}-");
+        if let Ok(entries) = std::fs::read_dir(shard_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&stale_prefix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        // Phase P — parallel, BOUNDED: chunk + tokenize + shard-write on a pool
+        // of at most available_parallelism() workers (full width — import is a
+        // batch job). Each worker owns ONE estate-stamped shard file, created
+        // with exclusive semantics, and pulls slice INDICES from a shared atomic
+        // counter (work-stealing). The earlier shape spawned one thread AND one
+        // shard file per 2500-item slice — thread count scaled with import size
+        // (unbounded, same local-DoS class as codex 3399b904) and shard names
+        // were `import-shard-{i}.sqlite`, predictable and estate-agnostic
+        // (codex b92be5bc). Slice outputs carry their index and are reassembled
+        // in slice order, so bundle rows and postings folds are byte-identical
+        // to the serial loop (chunk_with_default_hlc is a pure function of its
+        // arguments — fresh HLC generator per call).
+        type SlicePostings = Vec<(String, std::collections::HashMap<String, usize>, usize)>;
+        type SliceOut = (usize, Vec<Vec<Chunk>>, SlicePostings);
+        type WorkerOut = (Option<String>, Vec<SliceOut>);
         let slices: Vec<&[(String, String, i64)]> =
             items.chunks(Self::IMPORT_SHARD_ITEMS).collect();
+        let n_slices = slices.len();
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(n_slices.max(1));
+        let slices_ref = &slices;
+        let next_slice = std::sync::atomic::AtomicUsize::new(0);
+        let next_ref = &next_slice;
         let worker_outs: Vec<WorkerOut> = std::thread::scope(
             |scope| -> CorpusKitResult<Vec<WorkerOut>> {
-                let handles: Vec<_> = slices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, slice)| {
+                let handles: Vec<_> = (0..workers)
+                    .map(|w| {
                         let shard_path = shard_dir
-                            .join(format!("import-shard-{i}.sqlite"))
+                            .join(format!("import-shard-{estate_stem}-w{w}.sqlite"))
                             .to_string_lossy()
                             .to_string();
                         scope.spawn(move || -> Result<WorkerOut, rusqlite::Error> {
-                            let mut shard = IngestPostingsShard::create(&shard_path)?;
-                            let mut per_item: Vec<Vec<Chunk>> = Vec::with_capacity(slice.len());
-                            let mut postings: Vec<(String, std::collections::HashMap<String, usize>, usize)> =
-                                Vec::new();
-                            for (text, source_id, now_millis) in slice.iter() {
-                                let chunks = chunk_with_default_hlc(
-                                    text,
-                                    source_id,
-                                    ChunkerConfiguration::default(),
-                                    *now_millis,
-                                );
-                                for chunk in &chunks {
-                                    let tokens = default_keyword_tokens(&chunk.text);
-                                    if tokens.is_empty() {
-                                        continue;
-                                    }
-                                    let mut tf: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-                                    for t in &tokens {
-                                        *tf.entry(t.clone()).or_insert(0) += 1;
-                                    }
-                                    let chunk_id = chunk.id.to_string();
-                                    shard.add(&chunk_id, &tf, tokens.len());
-                                    postings.push((chunk_id, tf, tokens.len()));
+                            // Lazy shard creation: a worker that never claims a
+                            // slice leaves no file behind.
+                            let mut shard: Option<IngestPostingsShard> = None;
+                            let mut outs: Vec<SliceOut> = Vec::new();
+                            loop {
+                                let i = next_ref
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if i >= slices_ref.len() {
+                                    break;
                                 }
-                                per_item.push(chunks);
+                                if shard.is_none() {
+                                    shard = Some(IngestPostingsShard::create(&shard_path)?);
+                                }
+                                let slice = slices_ref[i];
+                                let mut per_item: Vec<Vec<Chunk>> =
+                                    Vec::with_capacity(slice.len());
+                                let mut postings: SlicePostings = Vec::new();
+                                for (text, source_id, now_millis) in slice.iter() {
+                                    let chunks = chunk_with_default_hlc(
+                                        text,
+                                        source_id,
+                                        ChunkerConfiguration::default(),
+                                        *now_millis,
+                                    );
+                                    for chunk in &chunks {
+                                        let tokens = default_keyword_tokens(&chunk.text);
+                                        if tokens.is_empty() {
+                                            continue;
+                                        }
+                                        let mut tf: std::collections::HashMap<String, usize> =
+                                            std::collections::HashMap::new();
+                                        for t in &tokens {
+                                            *tf.entry(t.clone()).or_insert(0) += 1;
+                                        }
+                                        let chunk_id = chunk.id.to_string();
+                                        shard
+                                            .as_mut()
+                                            .expect("shard created on first claimed slice")
+                                            .add(&chunk_id, &tf, tokens.len());
+                                        postings.push((chunk_id, tf, tokens.len()));
+                                    }
+                                    per_item.push(chunks);
+                                }
+                                outs.push((i, per_item, postings));
                             }
-                            let path = shard.finish()?;
-                            Ok((Some(path), per_item, postings))
+                            let finished = match shard {
+                                Some(s) => Some(s.finish()?),
+                                None => None,
+                            };
+                            Ok((finished, outs))
                         })
                     })
                     .collect();
                 let mut outs = Vec::with_capacity(handles.len());
                 for h in handles {
-                    outs.push(h.join().expect("import shard worker panicked").map_err(
-                        |e| CorpusKitError::StoreUnavailable(format!("import shard: {e:?}")),
-                    )?);
+                    match h.join() {
+                        Ok(res) => outs.push(res.map_err(|e| {
+                            CorpusKitError::StoreUnavailable(format!("import shard: {e:?}"))
+                        })?),
+                        Err(_) => {
+                            return Err(CorpusKitError::StoreUnavailable(
+                                "import shard worker panicked".into(),
+                            ))
+                        }
+                    }
                 }
                 Ok(outs)
             },
         )?;
 
+        // Reassemble slice outputs in slice order (workers claim slices in
+        // arbitrary interleave; the index restores the serial-loop order) and
+        // collect the per-worker shard paths for the merge pass.
+        let mut shard_paths: Vec<String> = Vec::new();
+        let mut slice_slots: Vec<Option<(Vec<Vec<Chunk>>, SlicePostings)>> =
+            (0..n_slices).map(|_| None).collect();
+        for (path, outs) in worker_outs {
+            if let Some(p) = path {
+                shard_paths.push(p);
+            }
+            for (i, per_item, postings) in outs {
+                slice_slots[i] = Some((per_item, postings));
+            }
+        }
+        let slice_outs: Vec<(Vec<Vec<Chunk>>, SlicePostings)> = slice_slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.ok_or_else(|| {
+                    CorpusKitError::StoreUnavailable(format!(
+                        "import slice {i} was never produced (worker exited early)"
+                    ))
+                })
+            })
+            .collect::<CorpusKitResult<_>>()?;
+
         // Phase S — single writer. Window 1: bundle rows through the estate
         // connection, committed per COMMIT_CHUNK_ITEMS (same bracket + same
         // side-effects as the serial path: reactivation, source map, counts).
         let row_store = self.storage.row_store();
-        let all_chunks: Vec<(&str, &Vec<Chunk>)> = worker_outs
+        let all_chunks: Vec<(&str, &Vec<Chunk>)> = slice_outs
             .iter()
             .zip(slices.iter())
-            .flat_map(|((_, per_item, _), slice)| {
+            .flat_map(|((per_item, _), slice)| {
                 slice
                     .iter()
                     .map(|(_, source_id, _)| source_id.as_str())
@@ -1458,15 +1557,18 @@ impl Corpus {
             }
         }
 
-        // Shard merges: one attach + sorted INSERT..SELECT per shard (durable
-        // tables), then one in-memory fold of the worker-computed postings.
-        for (shard_path, _, postings) in &worker_outs {
-            if let Some(path) = shard_path {
-                self.inverted_index
-                    .merge_shard(path)
-                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("shard merge: {e:?}")))?;
-                IngestPostingsShard::remove_file(path);
-            }
+        // Shard merges: one attach + sorted INSERT..SELECT per worker shard
+        // (durable tables), then one in-memory fold of the worker-computed
+        // postings in slice order. Merge order does not affect the durable
+        // tables (keyed INSERT OR REPLACE); the fold is per-chunk keyed, folded
+        // in slice order for exact serial-path equivalence.
+        for path in &shard_paths {
+            self.inverted_index
+                .merge_shard(path)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("shard merge: {e:?}")))?;
+            IngestPostingsShard::remove_file(path);
+        }
+        for (_, postings) in &slice_outs {
             self.inverted_index
                 .fold_postings(postings)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("postings fold: {e:?}")))?;
