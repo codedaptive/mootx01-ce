@@ -156,7 +156,9 @@ struct JacobiSVDTests {
     ///
     ///   cargo test emit_canonical_svd_values -- --nocapture
     ///
-    /// If this test fails, the Swift arithmetic has diverged from Rust.
+    /// Pins encode the TOURNAMENT rotation order (parallel Jacobi — see
+    /// tournamentRounds). If this test fails, the Swift arithmetic or
+    /// schedule has diverged from Rust.
     /// Regenerate from Rust, paste here, re-verify both ports pass.
     @Test("canonical conformance vectors match Rust port bit-for-bit")
     func canonicalConformanceVectors() {
@@ -165,42 +167,93 @@ struct JacobiSVDTests {
         // ── Singular values (bits from Rust emit_canonical_svd_values) ──
         // sv[0] = 16.92688  sv[1] = 1.7014122  sv[2] = 0.7654766
         #expect(result.singularValues[0].bitPattern == 0x41876A40, "sv[0] bit-identity with Rust")
-        #expect(result.singularValues[1].bitPattern == 0x3FD9C7E0, "sv[1] bit-identity with Rust")
-        #expect(result.singularValues[2].bitPattern == 0x3F43F646, "sv[2] bit-identity with Rust")
+        #expect(result.singularValues[1].bitPattern == 0x3FD9C7DE, "sv[1] bit-identity with Rust")
+        #expect(result.singularValues[2].bitPattern == 0x3F43F642, "sv[2] bit-identity with Rust")
 
         // ── U row 0: [0.21353085, -0.45331436, 0.76304907] ──
-        #expect(result.U[0][0].bitPattern == 0x3E5AA7D5, "U[0][0] bit-identity with Rust")
-        #expect(result.U[0][1].bitPattern == 0xBEE818D2, "U[0][1] bit-identity with Rust")
+        #expect(result.U[0][0].bitPattern == 0x3E5AA7D6, "U[0][0] bit-identity with Rust")
+        #expect(result.U[0][1].bitPattern == 0xBEE818D4, "U[0][1] bit-identity with Rust")
         #expect(result.U[0][2].bitPattern == 0x3F43572F, "U[0][2] bit-identity with Rust")
 
         // ── U row 1: [0.51806062, -0.16642670, 0.19299927] ──
         #expect(result.U[1][0].bitPattern == 0x3F049F9F, "U[1][0] bit-identity with Rust")
-        #expect(result.U[1][1].bitPattern == 0xBE2A6BC3, "U[1][1] bit-identity with Rust")
-        #expect(result.U[1][2].bitPattern == 0x3E45A19A, "U[1][2] bit-identity with Rust")
+        #expect(result.U[1][1].bitPattern == 0xBE2A6BC4, "U[1][1] bit-identity with Rust")
+        #expect(result.U[1][2].bitPattern == 0x3E45A194, "U[1][2] bit-identity with Rust")
 
         // ── U row 2: [0.82259047, 0.12046091, -0.37705109] ──
-        #expect(result.U[2][0].bitPattern == 0x3F52954A, "U[2][0] bit-identity with Rust")
-        #expect(result.U[2][1].bitPattern == 0x3DF6B436, "U[2][1] bit-identity with Rust")
-        #expect(result.U[2][2].bitPattern == 0xBEC10CD7, "U[2][2] bit-identity with Rust")
+        #expect(result.U[2][0].bitPattern == 0x3F529549, "U[2][0] bit-identity with Rust")
+        #expect(result.U[2][1].bitPattern == 0x3DF6B43B, "U[2][1] bit-identity with Rust")
+        #expect(result.U[2][2].bitPattern == 0xBEC10CD6, "U[2][2] bit-identity with Rust")
 
         // ── U row 3: [0.09676100, 0.86735082, 0.48820063] ──
         #expect(result.U[3][0].bitPattern == 0x3DC62AA1, "U[3][0] bit-identity with Rust")
-        #expect(result.U[3][1].bitPattern == 0x3F5E0AB4, "U[3][1] bit-identity with Rust")
-        #expect(result.U[3][2].bitPattern == 0x3EF9F56F, "U[3][2] bit-identity with Rust")
+        #expect(result.U[3][1].bitPattern == 0x3F5E0AB3, "U[3][1] bit-identity with Rust")
+        #expect(result.U[3][2].bitPattern == 0x3EF9F572, "U[3][2] bit-identity with Rust")
 
         // ── Vt row 0: [0.48664778, 0.56703234, 0.66456622] ──
         #expect(result.Vt[0][0].bitPattern == 0x3EF929E6, "Vt[0][0] bit-identity with Rust")
         #expect(result.Vt[0][1].bitPattern == 0x3F112908, "Vt[0][1] bit-identity with Rust")
-        #expect(result.Vt[0][2].bitPattern == 0x3F2A2103, "Vt[0][2] bit-identity with Rust")
+        #expect(result.Vt[0][2].bitPattern == 0x3F2A2102, "Vt[0][2] bit-identity with Rust")
 
         // ── Vt row 1: [0.85746837, -0.45554805, -0.23921554] ──
-        #expect(result.Vt[1][0].bitPattern == 0x3F5B830C, "Vt[1][0] bit-identity with Rust")
-        #expect(result.Vt[1][1].bitPattern == 0xBEE93D98, "Vt[1][1] bit-identity with Rust")
-        #expect(result.Vt[1][2].bitPattern == 0xBE74F4EB, "Vt[1][2] bit-identity with Rust")
+        #expect(result.Vt[1][0].bitPattern == 0x3F5B830A, "Vt[1][0] bit-identity with Rust")
+        #expect(result.Vt[1][1].bitPattern == 0xBEE93D95, "Vt[1][1] bit-identity with Rust")
+        #expect(result.Vt[1][2].bitPattern == 0xBE74F4F1, "Vt[1][2] bit-identity with Rust")
 
         // ── Vt row 2: [-0.16709879, -0.68625814, 0.70790368] ──
-        #expect(result.Vt[2][0].bitPattern == 0xBE2B1BF2, "Vt[2][0] bit-identity with Rust")
-        #expect(result.Vt[2][1].bitPattern == 0xBF2FAE9D, "Vt[2][1] bit-identity with Rust")
+        #expect(result.Vt[2][0].bitPattern == 0xBE2B1BF1, "Vt[2][0] bit-identity with Rust")
+        #expect(result.Vt[2][1].bitPattern == 0xBF2FAE9E, "Vt[2][1] bit-identity with Rust")
         #expect(result.Vt[2][2].bitPattern == 0x3F35392D, "Vt[2][2] bit-identity with Rust")
+    }
+
+
+    // MARK: - Tournament schedule (the parallel-Jacobi contract)
+
+    /// Every unordered pair appears exactly once per cycle, and pairs within a
+    /// round are column-disjoint — the coverage + aliasing-safety halves of the
+    /// schedule contract (Rust twin: tournament_covers_every_pair_exactly_once
+    /// / tournament_rounds_are_column_disjoint).
+    @Test("tournament schedule: exactly-once coverage + in-round disjointness")
+    func tournamentScheduleContract() {
+        for n in [2, 3, 4, 5, 7, 8, 16, 33, 64, 512] {
+            let rounds = JacobiSVD.tournamentRounds(n)
+            var seen = Set<Int>()
+            for round in rounds {
+                var cols = Set<Int>()
+                for pair in round {
+                    #expect(pair.p < pair.q && pair.q < n, "n=\(n): invalid pair")
+                    #expect(cols.insert(pair.p).inserted, "n=\(n): column reused in round")
+                    #expect(cols.insert(pair.q).inserted, "n=\(n): column reused in round")
+                    #expect(seen.insert(pair.p * n + pair.q).inserted, "n=\(n): pair repeated")
+                }
+            }
+            #expect(seen.count == n * (n - 1) / 2, "n=\(n): coverage incomplete")
+        }
+    }
+
+    /// Cross-port schedule pin: FNV-1a over the canonical serialization of the
+    /// n=512 (production vocab cap) schedule must equal the Rust twin's hash
+    /// (cargo test emit_schedule_hash -- --nocapture). Pure integer arithmetic
+    /// — identical on both ports by construction.
+    @Test("tournament schedule: n=512 hash matches Rust pin")
+    func tournamentScheduleHashMatchesRust() {
+        var h: UInt64 = 0xcbf29ce484222325
+        func eat(_ x: Int) {
+            var v = UInt64(x).littleEndian
+            withUnsafeBytes(of: &v) { raw in
+                for b in raw {
+                    h ^= UInt64(b)
+                    h = h &* 0x100000001b3
+                }
+            }
+        }
+        for round in JacobiSVD.tournamentRounds(512) {
+            eat(round.count)
+            for pair in round {
+                eat(pair.p)
+                eat(pair.q)
+            }
+        }
+        #expect(h == 0x14155E8815784E0A, "schedule hash must match the Rust pin")
     }
 }
