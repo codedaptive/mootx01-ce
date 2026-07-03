@@ -5,6 +5,45 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.9-beta — 2026-07-02
+
+Tenth beta of the 1.0 line. Import correctness + speed to semantic-live, a
+parallel SVD kernel, and two HIGH security fixes.
+
+- **Import → semantic-live, end to end** — the post-import basis retrain now
+  runs at the tail of the import cycle (dense/RAG recall is query-ready on
+  completion, no re-serve), the reindex loop drains through a single
+  lease-holding worker (no synchronous-pump nested-transaction stall), and
+  bulk-imported semantic hits now hydrate through the full candidate frame
+  instead of a capture-time-capped locus window. Measured on a 50k MemPalace
+  import: ~17.7 min → ~6.4 min import→semantic-live.
+- **Parallel tournament Jacobi SVD** — LSA's basis retrain factorization now
+  walks a round-robin tournament schedule whose column-disjoint rounds fan
+  across all cores with bit-identical output (thread-count-independent; the
+  n=512 schedule is pinned by a shared cross-port hash). The retrain's serial
+  single-core wall drops ~8.5 min → ~4.5 min. Kernels and all conformance
+  fixtures regenerated and cross-port verified byte-for-byte.
+- **Security — contradiction lens (HIGH)** — `moot_lens_contradiction` no
+  longer prints source-drawer or tunnel-endpoint IDs that point at
+  Restricted/Secret drawers, matching the existing `moot_fact_search` /
+  `moot_fact_timeline` source gating. Both ports.
+- **Security — PostgreSQL TLS (HIGH)** — the Swift PostgreSQL backend now
+  honors the DSN `sslmode=` parameter and fails closed: the effective TLS is
+  the stronger of the DSN value and `ARIA_MCP_POSTGRES_TLS`, so
+  `?sslmode=require` / `verify-ca` / `verify-full` can no longer open a
+  plaintext connection (Rust already enforced this).
+
+## v1.0.8-beta — 2026-07-02
+
+Ninth beta of the 1.0 line. Agent-skills adapter surface and lifecycle hooks.
+
+- **Claude Code lifecycle hooks** — context meter, compaction-recovery, and a
+  writeback gate, plus an update-availability check hook.
+- **Gemini CLI adapter** — added to the agent-skills adapter surface; install
+  map and hook/reference docs trued up across adapters.
+- **Codex Stop hook** — emits a JSON `systemMessage` (plain stdout is ignored
+  on Stop).
+
 ## v1.0.7-beta — 2026-07-02
 
 Eighth beta of the 1.0 line. Bulk-import throughput and a release-signing

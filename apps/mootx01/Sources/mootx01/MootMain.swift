@@ -37,7 +37,7 @@ struct Mootx01: AsyncParsableCommand {
 
     /// Semver string for the installed binary. Reported by --version and
     /// used by --check to compare against the latest release tag.
-    static let currentVersion = "1.0.5"
+    static let currentVersion = "1.0.9"
 
     static var configuration: CommandConfiguration {
         #if os(macOS)
