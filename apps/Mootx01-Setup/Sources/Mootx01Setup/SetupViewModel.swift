@@ -37,6 +37,12 @@ final class SetupViewModel {
     var results: [String] = []
     var skipped: [String] = []
 
+    /// Integration depth the user picks (Server only / Skills / Full plugin).
+    /// Passed to `mootx01 install --mode`. Defaults to the fullest integration,
+    /// but the user chooses — silently forcing one depth produced installs the
+    /// user did not ask for.
+    var depth: InstallDepth = .default
+
     // MARK: - Derived
 
     /// At least one client is selected and not yet wired.
@@ -132,7 +138,7 @@ final class SetupViewModel {
         let ids = selected.map(\.client.id).joined(separator: ",")
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = ["install", "--target", ids, "--yes"]
+        proc.arguments = ["install", "--target", ids, "--mode", depth.rawValue, "--yes"]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
