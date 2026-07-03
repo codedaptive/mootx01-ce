@@ -1,0 +1,10 @@
+{
+  "servers" : {
+    "mootx01" : {
+      "args" : [
+        "serve"
+      ],
+      "command" : "mootx01"
+    }
+  }
+}
