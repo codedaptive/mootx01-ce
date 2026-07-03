@@ -31,6 +31,9 @@ AppVersion={#MyAppVersion}
 AppPublisher=Codedaptive LLC
 AppPublisherURL=https://github.com/codedaptive/mootx01-ce
 AppSupportURL=https://github.com/codedaptive/mootx01-ce/issues
+; Show the license agreement page (FSL-1.1-ALv2), matching the macOS .pkg's
+; license pane. Path resolves relative to this .iss (repo-root LICENSE).
+LicenseFile=..\..\LICENSE
 DefaultDirName={%USERPROFILE}\.mootx01\bin
 ; Do not reuse a remembered install dir: pre-1.0.6 betas installed to
 ; {userappdata} (Roaming) by mistake; upgrades must migrate to the
