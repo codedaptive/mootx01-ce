@@ -23,7 +23,9 @@
 import Foundation
 
 #if os(macOS)
-import Crypto
+// CryptoKit (system framework), not swift-crypto: this file also builds inside
+// the Mootx01-Setup package, whose dependency tree does not carry swift-crypto.
+import CryptoKit
 
 public enum ClaudeDesktopExtension {
 
