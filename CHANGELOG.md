@@ -89,6 +89,36 @@ and the candidate-branch CI pipeline.
   its lowest observed value, so an incrementally-progressing drain never
   false-times-out while a genuinely stuck worker still fails within the
   timeout. (`QUEUEKIT_INTERFACE.md` 1.4.0.)
+- **Install — macOS artifacts now ship the SPM resource bundles (crash)** —
+  the v1.0.9 macOS tarballs carried only the binaries, but the Swift
+  binaries hard-crash on their first resource touch (any classify/search
+  path) without the `LatticeLib`/`EideticLib`/`swift-crypto` resource
+  bundles beside them. All tarball paths (local `make release`, candidate
+  and release CI) now package the bundles, and `install.sh` places them
+  next to the installed binaries. The `.pkg` installer already carried
+  them.
+- **Install — PATH entries are exec wrappers, not symlinks (crash)** — the
+  runtime resolves resource bundles from the directory of the path the
+  binary was *invoked* as, without following a symlink there, so the
+  `~/.local/bin` symlinks crashed the CLI even with bundles correctly
+  installed. `install.sh` and `mootx01 install`/`upgrade` now write a
+  two-line `exec` wrapper instead; legacy symlinks are replaced on the
+  next install or upgrade.
+- **Test harness — NT-P0 Merkle contract recovered into the harness** — the
+  bakeoff's Merkle/commitment byte contract was deleted from
+  SubstrateKernel as a spike (correctly — the production Merkle is
+  SubstrateLib's NT-F2 implementation) but its two harness consumers were
+  never chased, leaving the validation-harness package uncompilable since
+  June 21 in both editions. The contract is recovered from history as
+  harness-local support code, mirroring the Rust harness's layout, with
+  minimal adaptation to the current `MerkleRoot`/`ContentHash` API.
+- **Test suite — assertions realigned with shipped decisions** — seven
+  installer tests still asserted the reverted stdio client wiring (the
+  unauthorized flip) instead of the accepted resident-daemon loopback
+  posture; the moot-bridge live acceptance "skipped" by throwing (a
+  failure in Swift Testing) and its binary probe never resolved under the
+  modern test runner; a host-matrix count test froze at nine after the
+  matrix grew to ten. All updated to assert current, ruled behavior.
 - **QueueKit — telemetry data race (Swift, crash)** — the drain-latency
   telemetry window was mutated without a lock under a stale single-drainer
   assumption; two concurrent stream drainers (a live capture's encode racing

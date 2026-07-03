@@ -96,8 +96,20 @@ jobs:
           MGR_BIN="$(find apps/moot-mgr/.build  -name moot-mgr -path '*/release/moot-mgr' | head -1)"
           cp "$MOOT_BIN" mootx01
           cp "$MGR_BIN"  moot-mgr
+          # SPM resource bundles MUST ship beside the Swift binaries — each
+          # Bundle.module target fatalErrors on first resource touch without
+          # its <Target>_<Target>.bundle sibling (v1.0.9 shipped without them;
+          # the installed CLI crashed on any classify/search path). Union of
+          # both products' bundles; a failing glob (no bundles built) fails
+          # the job loudly, which is correct.
+          rm -rf ./*.bundle
+          cp -R "$(dirname "$MOOT_BIN")"/*.bundle .
+          for b in "$(dirname "$MGR_BIN")"/*.bundle; do
+            bn="$(basename "$b")"
+            [ -e "./$bn" ] || cp -R "$b" .
+          done
           asset="mootx01-${{ needs.meta.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz"
-          tar -czf "$asset" mootx01 moot-mgr
+          tar -czf "$asset" mootx01 moot-mgr ./*.bundle
           echo "ASSET=$asset" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

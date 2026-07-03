@@ -35,9 +35,12 @@ private let mootBridgeBinPath: String? = bridgeBinaryPath()
 @Suite(
     "moot-bridge live acceptance",
     .serialized,
-    .enabled(
-        if: mempalaceMCPPath != nil && mootx01BinPath != nil && mootBridgeBinPath != nil,
-        "live backends (mempalace-mcp / mootx01) not on PATH or moot-bridge not built — pure-logic suites still run"))
+    // One trait per probe so a skip names exactly which prerequisite is
+    // missing — a combined condition hides the failing probe and turns
+    // every unexpected skip into a debugging session.
+    .enabled(if: mempalaceMCPPath != nil, "mempalace-mcp not on PATH — live acceptance needs it; pure-logic suites still run"),
+    .enabled(if: mootx01BinPath != nil, "mootx01 not on PATH — live acceptance needs it; pure-logic suites still run"),
+    .enabled(if: mootBridgeBinPath != nil, "moot-bridge binary not found in the package .build products dir — build it (swift build) before the live acceptance"))
 struct BridgeAcceptanceTests {
 
     /// The full scripted live session. One test so the ordered sequence (write
@@ -307,17 +310,33 @@ struct BridgeAcceptanceTests {
 
 }
 
-/// Locates the built moot-bridge binary next to the test bundle, or returns
-/// nil when it has not been built.  Under SPM, `swift test` places both the
-/// test runner and all executable products in the same .build/<config>/
-/// directory, so a bundle-sibling lookup is the canonical strategy.  No
-/// machine-specific absolute path is used as a fallback — the suite's
-/// `.enabled(if:)` trait skips it gracefully when nil.
+/// Locates the built moot-bridge binary in this package's .build products
+/// directory, or returns nil when it has not been built.
+///
+/// Resolution is `#filePath`-anchored: this source file sits at
+/// `<pkg>/Tests/moot-bridgeTests/`, so the package root is two levels up and
+/// the executable lands in `<pkg>/.build/<config>/moot-bridge`. Bundle-based
+/// lookups do NOT work under the swift-testing runner: `Bundle.main` is the
+/// swiftpm-testing-helper in the TOOLCHAIN directory, and the dlopened
+/// .xctest bundle does not appear in `Bundle.allBundles` — both silently
+/// resolve nowhere, the probe returns nil, and the suite skips everywhere,
+/// which defeats the live acceptance. `#filePath` is compile-time and always
+/// points at the package checkout that `swift test` is building from.
+/// No machine-specific absolute path — the suite's `.enabled(if:)` trait
+/// skips gracefully when nil (e.g. CI without the backends).
 private func bridgeBinaryPath() -> String? {
-    let testBundleDir = Bundle.main.bundleURL.deletingLastPathComponent()
-    let candidate = testBundleDir.appendingPathComponent("moot-bridge").path
-    guard FileManager.default.isExecutableFile(atPath: candidate) else { return nil }
-    return candidate
+    let pkgRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // moot-bridgeTests/
+        .deletingLastPathComponent()   // Tests/
+        .deletingLastPathComponent()   // package root
+    for config in ["debug", "release"] {
+        let candidate = pkgRoot
+            .appendingPathComponent(".build/\(config)/moot-bridge").path
+        if FileManager.default.isExecutableFile(atPath: candidate) {
+            return candidate
+        }
+    }
+    return nil
 }
 
 /// Resolves a binary on PATH (plus the standard local bin dir derived from

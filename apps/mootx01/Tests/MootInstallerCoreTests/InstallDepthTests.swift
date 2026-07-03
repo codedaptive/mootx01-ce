@@ -29,14 +29,17 @@ struct InstallDepthTests {
 
     // MARK: - Embedded bundle
 
-    @Test("embedded bundle decodes and carries the canonical skill + nine hosts")
+    @Test("embedded bundle decodes and carries the canonical skill + ten hosts")
     func bundleDecodes() {
         let b = InstallBundle.embedded
         #expect(b.skillMarkdown.contains("name: mootx01-memory"))
-        // Nine matrix hosts.
-        #expect(b.hosts.count == 9)
-        #expect(b.host(forClientID: "claude-code") != nil)
-        #expect(b.host(forClientID: "antigravity") != nil)
+        // Ten matrix hosts — assert the exact set, not a bare count, so a
+        // failure names the drifted host when one is added or removed.
+        let expected: Set<String> = [
+            "antigravity", "claude-code", "cline", "codex", "cursor",
+            "gemini-cli", "github-copilot", "hermes", "opencode", "xcode",
+        ]
+        #expect(Set(b.hosts.keys) == expected)
         // MCP-only installer clients have no matrix row.
         #expect(b.host(forClientID: "claude-desktop") == nil)
         #expect(b.host(forClientID: "continue") == nil)

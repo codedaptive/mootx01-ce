@@ -42,10 +42,10 @@ public enum Installer {
     // MARK: - Binary placement
 
     /// Copy the running `mootx01` binary into the standard install
-    /// directory and symlink it onto PATH. Mirrors codegraph's
+    /// directory and put a wrapper for it onto PATH. Mirrors codegraph's
     /// install.sh: a self-contained executable lands at
     /// `<home>/.mootx01/bin/mootx01`, and `<home>/.local/bin/mootx01`
-    /// symlinks to it so the command resolves from any shell.
+    /// exec-wrappers to it so the command resolves from any shell.
     ///
     /// This is the fix for the core installer bug: previously the
     /// installer wrote `command: <wherever the binary was run from>`
@@ -55,7 +55,7 @@ public enum Installer {
     /// or deleting the source binary.
     ///
     /// Re-install is overwrite-safe: an existing placed binary is
-    /// replaced and an existing symlink is repointed.
+    /// replaced and an existing PATH entry is rewritten.
     ///
     /// - Parameters:
     ///   - sourcePath: absolute path of the binary to copy (the running
@@ -74,7 +74,7 @@ public enum Installer {
     /// - Returns: the absolute path of the placed binary
     ///   (`installedBinaryURL`) — feed this into `install(...)` as the
     ///   client config `command`.
-    /// - Throws: filesystem errors (copy, chmod, or symlink failure).
+    /// - Throws: filesystem errors (copy, chmod, or PATH-wrapper write failure).
     @discardableResult
     public static func placeBinary(
         sourcePath: String,
@@ -89,18 +89,20 @@ public enum Installer {
 
         // 1. Resolve the source to its REAL path first. When `mootx01 install`
         //    is run from the already-installed binary, it was launched via the
-        //    ~/.local/bin/mootx01 symlink, and `copyItem` on a symlink copies
-        //    the LINK (not its target) — which, after removing the real dest,
-        //    lands a self-referential symlink at dest (ELOOP) that breaks every
-        //    subsequent install. Resolving guarantees we copy a regular file.
-        let realSource = URL(fileURLWithPath: sourcePath).resolvingSymlinksInPath()
+        //    ~/.local/bin/mootx01 PATH entry, and copying that entry verbatim
+        //    would land the PATH shim (historically a self-referential symlink
+        //    → ELOOP; today the wrapper script) at dest, breaking every
+        //    subsequent install. Resolve symlinks AND the wrapper script so we
+        //    always copy the real Mach-O binary.
+        let realSource = resolvePathWrapper(
+            URL(fileURLWithPath: sourcePath).resolvingSymlinksInPath())
         try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
 
         // When force is false (default install path), skip the copy if the source
         // already IS the installed binary — removing dest would delete the source
         // itself. When force is true (upgrade path), always copy regardless of
         // path equality so a newly built binary replaces the installed one.
-        // Skip straight to (re)perms + symlink when the copy is skipped.
+        // Skip straight to (re)perms + PATH wrapper when the copy is skipped.
         if force || realSource.standardizedFileURL.path != destURL.standardizedFileURL.path {
             // Remove any prior placed binary OR stale/looped symlink at dest so
             // the fresh copy lands cleanly (removeItem on a symlink unlinks it,
@@ -137,22 +139,16 @@ public enum Installer {
             ofItemAtPath: destURL.path
         )
 
-        // 3. Repoint the PATH symlink. Remove any existing entry first
-        //    (file OR dangling symlink) so ln -sf semantics hold.
+        // 3. (Re)write the PATH wrapper. Remove any existing entry first
+        //    (regular file, prior wrapper, OR dangling legacy symlink).
         try fm.createDirectory(at: localBinDir, withIntermediateDirectories: true)
-        // symlinkExists must use lstat semantics: a dangling symlink would
-        // report false from fileExists but still block createSymbolicLink.
-        if (try? fm.destinationOfSymbolicLink(atPath: symlinkURL.path)) != nil
-            || fm.fileExists(atPath: symlinkURL.path) {
-            try fm.removeItem(at: symlinkURL)
-        }
-        try fm.createSymbolicLink(at: symlinkURL, withDestinationURL: destURL)
+        try writePathWrapper(at: symlinkURL, execTarget: destURL)
 
         return destURL.path
     }
 
     /// Copy the `moot-mgr` console binary into the install directory beside
-    /// `mootx01` and symlink it onto PATH. Same overwrite-safe contract as
+    /// `mootx01` and put a wrapper for it onto PATH. Same overwrite-safe contract as
     /// `placeBinary`. moot-mgr ships next to mootx01 in the macOS release
     /// archive, so its source is the sibling of the running executable.
     ///
@@ -166,7 +162,7 @@ public enum Installer {
     ///     (the sibling of the running `mootx01`), or `nil` if unknown.
     ///   - homeDirectory: user's home directory. Inject in tests.
     /// - Returns: the placed binary path, or `nil` when nothing was installed.
-    /// - Throws: filesystem errors (copy, chmod, or symlink failure).
+    /// - Throws: filesystem errors (copy, chmod, or PATH-wrapper write failure).
     @discardableResult
     public static func placeMgrBinary(
         sourceMgrPath: String?,
@@ -204,11 +200,7 @@ public enum Installer {
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destURL.path)
 
         try fm.createDirectory(at: localBinDir, withIntermediateDirectories: true)
-        if (try? fm.destinationOfSymbolicLink(atPath: symlinkURL.path)) != nil
-            || fm.fileExists(atPath: symlinkURL.path) {
-            try fm.removeItem(at: symlinkURL)
-        }
-        try fm.createSymbolicLink(at: symlinkURL, withDestinationURL: destURL)
+        try writePathWrapper(at: symlinkURL, execTarget: destURL)
 
         // Carry moot-mgr's SPM resource bundles into the install dir alongside
         // the binary. moot-mgr links LatticeLib/EideticLib (and swift-crypto),
@@ -260,10 +252,70 @@ public enum Installer {
         }
     }
 
-    /// Remove the placed binary and its PATH symlink. Inverse of
+    /// Marker comment embedded in every PATH wrapper this installer writes.
+    /// `resolvePathWrapper` keys on it to distinguish our wrapper from an
+    /// arbitrary user script that happens to sit at the PATH entry.
+    static let pathWrapperMarker = "mootx01 PATH wrapper"
+
+    /// Write the PATH entry as a tiny `exec` wrapper script rather than a
+    /// symlink.
+    ///
+    /// A symlink here is broken by construction: `Bundle.main` derives the
+    /// executable's directory from the path it was INVOKED as, without
+    /// resolving a symlink at that path — so a
+    /// `~/.local/bin/mootx01 → ~/.mootx01/bin/mootx01` symlink makes every
+    /// `Bundle.module` target (LatticeLib, EideticLib, swift-crypto) look for
+    /// its `<Target>_<Target>.bundle` in `~/.local/bin`, where nothing is
+    /// installed, and fatalError on the first resource touch (the v1.0.9
+    /// installed-CLI crash: `serve` booted, any classify/search path died).
+    /// `exec "<real>" "$@"` re-launches with argv[0] = the install dir, so
+    /// the bundles co-located by `copyResourceBundles` resolve correctly.
+    ///
+    /// Replaces whatever sits at `path` (prior wrapper, legacy symlink —
+    /// including a dangling one — or stray file), preserving the ln -sf
+    /// overwrite semantics the symlink had.
+    static func writePathWrapper(at path: URL, execTarget: URL) throws {
+        let fm = FileManager.default
+        // lstat semantics: a dangling legacy symlink reports false from
+        // fileExists but still blocks the write.
+        if (try? fm.destinationOfSymbolicLink(atPath: path.path)) != nil
+            || fm.fileExists(atPath: path.path) {
+            try fm.removeItem(at: path)
+        }
+        let script = """
+        #!/bin/sh
+        # \(pathWrapperMarker) — exec the real binary from its install dir so
+        # SPM resource bundles (<Target>_<Target>.bundle) resolve beside the
+        # executable. A symlink here breaks that lookup. Written by
+        # Installer.writePathWrapper; install.sh writes the same shape.
+        exec "\(execTarget.path)" "$@"
+        """
+        try script.write(to: path, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+    }
+
+    /// If `url` is a PATH wrapper written by `writePathWrapper` (or
+    /// install.sh's identical shape), return the exec target it points at;
+    /// otherwise return `url` unchanged. Symlink resolution handles the
+    /// legacy layout; this handles the wrapper layout — without it, an
+    /// install run with `sourcePath` = the PATH entry would copy the shell
+    /// script over the real binary.
+    static func resolvePathWrapper(_ url: URL) -> URL {
+        guard let handle = try? FileHandle(forReadingFrom: url),
+              let head = try? handle.read(upToCount: 512),
+              let text = String(data: head, encoding: .utf8),
+              text.hasPrefix("#!"),
+              text.contains(pathWrapperMarker),
+              let execLine = text.split(separator: "\n").last(where: { $0.hasPrefix("exec \"") }),
+              let target = execLine.split(separator: "\"").dropFirst().first
+        else { return url }
+        return URL(fileURLWithPath: String(target))
+    }
+
+    /// Remove the placed binary and its PATH wrapper. Inverse of
     /// `placeBinary`. Safe to call when nothing was installed.
     ///
-    /// Removes `<home>/.local/bin/mootx01` (the symlink) and the whole
+    /// Removes `<home>/.local/bin/mootx01` (the PATH wrapper) and the whole
     /// `<home>/.mootx01` directory (matching codegraph's
     /// `rm -rf "$INSTALL_DIR"`). Leaves `~/.local/bin` itself intact —
     /// other tools may live there.
@@ -276,8 +328,9 @@ public enum Installer {
         let mgrSymlinkURL = MootPaths.mgrSymlinkURL(homeDirectory: homeDirectory)
         let installRoot = homeDirectory.appendingPathComponent(".mootx01", isDirectory: true)
 
-        // Remove both PATH symlinks (mootx01 + moot-mgr). The install root
-        // rmrf below takes the binaries and logs; the symlinks live under
+        // Remove both PATH wrappers (mootx01 + moot-mgr; removeItem also
+        // clears a legacy symlink). The install root
+        // rmrf below takes the binaries and logs; the PATH entries live under
         // ~/.local/bin and must be unlinked separately.
         for link in [symlinkURL, mgrSymlinkURL] {
             if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil
@@ -543,8 +596,9 @@ public enum Installer {
             // Schema-verified (https://opencode.ai/config.json, McpRemoteConfig):
             // remote servers are { "type": "remote", "url": … } under the
             // top-level "mcp" key — not the mcpServers/"http" convention.
-            // Only use this when explicitly enabled; default installs avoid
-            // trusting a fixed unauthenticated loopback URL.
+            // The fixed loopback endpoint is the accepted CE posture (see
+            // docs(secfix/ce-loopback-impersonation)); endpoint auth lands
+            // with EE v1.1 off-localhost hosting.
             entry = ["type": "remote", "url": daemonURL]
         } else if client.supportsLocalHTTP {
             entry = client.httpEntryIncludesType
