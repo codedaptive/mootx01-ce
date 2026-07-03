@@ -4,6 +4,7 @@
 // Mirrors the install surface of popular MCP server CLIs (e.g. @modelcontextprotocol).
 
 import ArgumentParser
+import AriaMCP
 import Foundation
 import MootInstallerCore
 
@@ -25,10 +26,10 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Skip prompts; auto-detect and install all present clients.")
     var yes: Bool = false
 
-    @Flag(name: .long, help: "Opt in to writing ARIA MCP tools to settings.json permissions.allow. This auto-approves high-impact tools; use only if you trust all prompts/documents processed by Claude Code.")
+    @Flag(name: .long, help: "Write EVERY ARIA MCP tool to settings.json permissions.allow (full auto-approval, including destructive tools). Default is a tiered write: diagnostics allowed, reads/writes ask, destructive purges denied.")
     var grantPermissions: Bool = false
 
-    @Flag(name: .long, help: "Do not write to settings.json. This is the default; retained for script compatibility.")
+    @Flag(name: .long, help: "Do not write to settings.json at all (skips the default tiered permissions).")
     var noPermissions: Bool = false
 
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
@@ -116,16 +117,35 @@ struct InstallCommand: AsyncParsableCommand {
             }
         }
 
-        // Write tool permissions into Claude Code settings.json only when the
-        // user explicitly opted in with --grant-permissions. Permissions are not
-        // granted silently; the user must acknowledge the high-impact surface.
-        if grantPermissions && !noPermissions {
+        // Write tool permissions into Claude Code settings.json.
+        //
+        //   default              → TIERED: diagnostics allow, reads/writes ask,
+        //                          destructive purges deny. Without this every
+        //                          tool is unapproved and nothing works out of
+        //                          the box; with it nothing destructive is
+        //                          silently auto-approved.
+        //   --grant-permissions  → every tool into allow (explicit opt-in to
+        //                          full auto-approval of the high-impact surface).
+        //   --no-permissions     → write nothing.
+        //
+        // Tool names come from the linked server surface (ToolProjection), not
+        // a hardcoded table — the old static list went stale when the tool
+        // surface was renamed and granted 53 tools that no longer existed.
+        if !noPermissions, clients.contains(where: { $0.id == "claude-code" }) {
             let settingsURL = local
                 ? MootPaths.localClaudeSettingsURL(workingDirectory: cwd)
                 : MootPaths.globalClaudeSettingsURL(homeDirectory: home)
+            let toolNames = ToolProjection.tools().map(\.name)
             do {
-                try PermissionsWriter.merge(into: settingsURL)
-                print("  ✓ Granted \(PermissionsWriter.permissionEntries.count) ARIA tool permissions in \(settingsURL.path)")
+                if grantPermissions {
+                    try PermissionsWriter.merge(into: settingsURL, toolNames: toolNames)
+                    print("  ✓ Granted \(toolNames.count) ARIA tool permissions (allow) in \(settingsURL.path)")
+                } else {
+                    let added = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+                    if added.allow + added.ask + added.deny > 0 {
+                        print("  ✓ Claude Code tool permissions: \(added.allow) allowed (diagnostics), \(added.ask) ask, \(added.deny) denied (destructive) — edit in \(settingsURL.path)")
+                    }
+                }
             } catch {
                 print("  ✗ Could not write permissions: \(error)")
             }

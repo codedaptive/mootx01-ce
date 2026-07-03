@@ -1,7 +1,10 @@
 // PermissionsWriterTests.swift
 //
-// Tests for PermissionsWriter: additive merge, idempotency, removal,
-// and the tool-name count. All I/O uses sandbox directories.
+// Tests for PermissionsWriter: tier classification, tiered merge, allow-all
+// merge, idempotency, user-placement precedence, and prefix-based removal.
+// Tool names are injected (the real caller derives them from the linked
+// AriaMCP ToolProjection at runtime), so tests use a fixed fixture list.
+// All I/O uses sandbox directories.
 
 import Testing
 import Foundation
@@ -10,102 +13,133 @@ import Foundation
 @Suite("PermissionsWriter")
 struct PermissionsWriterTests {
 
-    // MARK: - Tool name list
+    /// Fixture surface exercising all three tiers.
+    private let toolNames = [
+        "moot_estate_ping",      // allow (diagnostic)
+        "moot_estate_status",    // allow (diagnostic)
+        "moot_list_lenses",      // allow (pure listing)
+        "moot_memory_search",    // ask (read)
+        "moot_file_memory",      // ask (write)
+        "moot_erase_memory",     // deny (destructive)
+    ]
 
-    @Test("ariaToolNames has exactly 53 entries")
-    func toolNameCount() {
-        #expect(PermissionsWriter.ariaToolNames.count == 53)
+    // MARK: - Classification
+
+    @Test("classify: diagnostics allow, reads/writes ask, destructive deny")
+    func classifyTiers() {
+        #expect(PermissionsWriter.classify("moot_estate_ping") == .allow)
+        #expect(PermissionsWriter.classify("moot_drain_status") == .allow)
+        #expect(PermissionsWriter.classify("moot_list_recipes") == .allow)
+        #expect(PermissionsWriter.classify("moot_memory_search") == .ask)
+        #expect(PermissionsWriter.classify("moot_file_memory") == .ask)
+        #expect(PermissionsWriter.classify("moot_withdraw_memory") == .ask, "withdraw is reversible — ask, not deny")
+        #expect(PermissionsWriter.classify("moot_erase_memory") == .deny)
+        #expect(PermissionsWriter.classify("moot_expunge_drawer") == .deny)
+        // A brand-new unknown tool must land in the safe middle.
+        #expect(PermissionsWriter.classify("moot_future_tool") == .ask)
     }
 
     @Test("permissionEntries all carry the mcp__mootx01__ prefix")
     func permissionEntryPrefix() {
-        for entry in PermissionsWriter.permissionEntries {
+        for entry in PermissionsWriter.permissionEntries(toolNames: toolNames) {
             #expect(entry.hasPrefix("mcp__mootx01__"))
         }
     }
 
-    @Test("permissionEntries has exactly 53 entries matching ariaToolNames")
-    func permissionEntryCount() {
-        #expect(PermissionsWriter.permissionEntries.count == 53)
-        for (tool, entry) in zip(PermissionsWriter.ariaToolNames, PermissionsWriter.permissionEntries) {
-            #expect(entry == "mcp__mootx01__\(tool)")
-        }
+    // MARK: - mergeTiered (the install default)
+
+    @Test("mergeTiered writes each tool into its tier")
+    func mergeTieredWritesTiers() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        let added = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+        #expect(added.allow == 3 && added.ask == 2 && added.deny == 1)
+
+        let perms = try readPermissions(settingsURL)
+        #expect((perms["allow"] as? [String])?.contains("mcp__mootx01__moot_estate_ping") == true)
+        #expect((perms["ask"] as? [String])?.contains("mcp__mootx01__moot_memory_search") == true)
+        #expect((perms["deny"] as? [String])?.contains("mcp__mootx01__moot_erase_memory") == true)
     }
 
-    // MARK: - merge
+    @Test("mergeTiered is idempotent")
+    func mergeTieredIdempotent() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
 
-    @Test("merge creates settings.json when absent")
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+        let second = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+        #expect(second.allow == 0 && second.ask == 0 && second.deny == 0)
+
+        let perms = try readPermissions(settingsURL)
+        #expect((perms["allow"] as? [String])?.count == 3)
+        #expect((perms["ask"] as? [String])?.count == 2)
+        #expect((perms["deny"] as? [String])?.count == 1)
+    }
+
+    @Test("mergeTiered respects the user's existing placement over our default")
+    func mergeTieredRespectsUserPlacement() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // The user already allowed a tool we default to ask, and already
+        // allowed one we default to deny. Their placement must survive.
+        let existing: [String: Any] = [
+            "permissions": ["allow": [
+                "mcp__mootx01__moot_memory_search",
+                "mcp__mootx01__moot_erase_memory",
+            ]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        #expect(allow.contains("mcp__mootx01__moot_memory_search"), "user's allow must survive")
+        #expect(allow.contains("mcp__mootx01__moot_erase_memory"), "user's allow must survive even for deny-default tools")
+        #expect((perms["ask"] as? [String])?.contains("mcp__mootx01__moot_memory_search") != true, "must not duplicate into ask")
+        #expect((perms["deny"] as? [String])?.contains("mcp__mootx01__moot_erase_memory") != true, "must not duplicate into deny")
+    }
+
+    // MARK: - merge (allow-all opt-in)
+
+    @Test("merge creates settings.json and allows every tool")
     func mergeCreatesFile() throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
 
         let settingsURL = dir.appendingPathComponent("settings.json")
-        try PermissionsWriter.merge(into: settingsURL)
+        try PermissionsWriter.merge(into: settingsURL, toolNames: toolNames)
 
-        #expect(FileManager.default.fileExists(atPath: settingsURL.path))
-
-        let data = try Data(contentsOf: settingsURL)
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let perms = obj?["permissions"] as? [String: Any]
-        let allow = perms?["allow"] as? [String] ?? []
-        #expect(allow.count == 53)
+        let perms = try readPermissions(settingsURL)
+        #expect((perms["allow"] as? [String])?.count == toolNames.count)
     }
 
-    @Test("merge is idempotent: second call does not duplicate entries")
-    func mergeIdempotent() throws {
+    @Test("merge is idempotent and preserves existing + other keys")
+    func mergeIdempotentPreserving() throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
 
-        let settingsURL = dir.appendingPathComponent("settings.json")
-        try PermissionsWriter.merge(into: settingsURL)
-        try PermissionsWriter.merge(into: settingsURL)
-
-        let data = try Data(contentsOf: settingsURL)
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let perms = obj?["permissions"] as? [String: Any]
-        let allow = perms?["allow"] as? [String] ?? []
-        #expect(allow.count == 53)
-    }
-
-    @Test("merge preserves existing permissions.allow entries")
-    func mergePreservesExistingEntries() throws {
-        let dir = try makeSandboxDir()
-        defer { cleanupSandbox(dir) }
-
-        // Pre-existing settings with a custom entry.
         let existing: [String: Any] = [
-            "permissions": ["allow": ["mcp__other__tool"]]
+            "theme": "dark",
+            "permissions": ["allow": ["mcp__other__tool"]],
         ]
         let settingsURL = dir.appendingPathComponent("settings.json")
-        let data = try JSONSerialization.data(withJSONObject: existing, options: [])
-        try data.write(to: settingsURL)
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
 
-        try PermissionsWriter.merge(into: settingsURL)
+        try PermissionsWriter.merge(into: settingsURL, toolNames: toolNames)
+        try PermissionsWriter.merge(into: settingsURL, toolNames: toolNames)
 
-        let updated = try Data(contentsOf: settingsURL)
-        let obj = try JSONSerialization.jsonObject(with: updated) as? [String: Any]
-        let perms = obj?["permissions"] as? [String: Any]
-        let allow = perms?["allow"] as? [String] ?? []
-        #expect(allow.contains("mcp__other__tool"), "existing entry must be preserved")
-        #expect(allow.count == 54) // 53 new + 1 existing
-    }
-
-    @Test("merge preserves other top-level keys in settings.json")
-    func mergePreservesOtherKeys() throws {
-        let dir = try makeSandboxDir()
-        defer { cleanupSandbox(dir) }
-
-        let existing: [String: Any] = ["theme": "dark", "fontSize": 14]
-        let settingsURL = dir.appendingPathComponent("settings.json")
-        let data = try JSONSerialization.data(withJSONObject: existing, options: [])
-        try data.write(to: settingsURL)
-
-        try PermissionsWriter.merge(into: settingsURL)
-
-        let updated = try Data(contentsOf: settingsURL)
-        let obj = try JSONSerialization.jsonObject(with: updated) as? [String: Any]
+        let data = try Data(contentsOf: settingsURL)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(obj?["theme"] as? String == "dark")
-        #expect(obj?["fontSize"] as? Int == 14)
+        let allow = (obj?["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
+        #expect(allow.contains("mcp__other__tool"), "existing entry must be preserved")
+        #expect(allow.count == toolNames.count + 1)
     }
 
     @Test("merge tolerates a leading UTF-8 BOM and preserves existing settings")
@@ -123,7 +157,7 @@ struct PermissionsWriterTests {
         bytes.append(try JSONSerialization.data(withJSONObject: body, options: []))
         try bytes.write(to: settingsURL)
 
-        try PermissionsWriter.merge(into: settingsURL)
+        try PermissionsWriter.merge(into: settingsURL, toolNames: toolNames)
 
         let updated = try Data(contentsOf: settingsURL)
         #expect(Array(updated.prefix(3)) != [0xEF, 0xBB, 0xBF], "BOM should be gone after rewrite")
@@ -131,25 +165,48 @@ struct PermissionsWriterTests {
         #expect(obj?["theme"] as? String == "dark", "existing top-level keys must survive")
         let allow = (obj?["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
         #expect(allow.contains("mcp__other__tool"), "existing allow entry must survive")
-        #expect(allow.count == 54) // 53 new + 1 existing
     }
 
     // MARK: - remove
 
-    @Test("remove eliminates ARIA permission entries from allow list")
-    func removeEliminatesEntries() throws {
+    @Test("remove strips mcp__mootx01__ entries from all three tiers")
+    func removeStripsAllTiers() throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
 
         let settingsURL = dir.appendingPathComponent("settings.json")
-        try PermissionsWriter.merge(into: settingsURL)
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
         try PermissionsWriter.remove(from: settingsURL)
 
         let data = try Data(contentsOf: settingsURL)
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let perms = obj?["permissions"] as? [String: Any]
-        let allow = perms?["allow"] as? [String] ?? []
-        #expect(allow.isEmpty)
+        let perms = obj?["permissions"] as? [String: Any] ?? [:]
+        for key in ["allow", "ask", "deny"] {
+            let list = perms[key] as? [String] ?? []
+            #expect(!list.contains { $0.hasPrefix("mcp__mootx01__") }, "\(key) must hold none of ours")
+        }
+    }
+
+    @Test("remove is prefix-based: cleans renamed/stale tools too")
+    func removeCleansStaleNames() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // A tool name granted by an OLD version (renamed since) must still be
+        // removed — removal keys on the mcp__mootx01__ prefix, not a name list.
+        let existing: [String: Any] = [
+            "permissions": ["allow": ["mcp__mootx01__moot_capture_drawer", "mcp__other__tool"]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        try PermissionsWriter.remove(from: settingsURL)
+
+        let data = try Data(contentsOf: settingsURL)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let allow = (obj?["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
+        #expect(allow.contains("mcp__other__tool"), "non-ARIA entry must be preserved")
+        #expect(!allow.contains("mcp__mootx01__moot_capture_drawer"), "stale ARIA entry must be removed")
     }
 
     @Test("remove is a no-op when settings.json does not exist")
@@ -162,29 +219,13 @@ struct PermissionsWriterTests {
         try PermissionsWriter.remove(from: settingsURL)
     }
 
-    @Test("remove preserves non-ARIA entries in allow list")
-    func removePreservesOtherAllowEntries() throws {
-        let dir = try makeSandboxDir()
-        defer { cleanupSandbox(dir) }
-
-        let existing: [String: Any] = [
-            "permissions": ["allow": ["mcp__mootx01__moot_capture_drawer", "mcp__other__tool"]]
-        ]
-        let settingsURL = dir.appendingPathComponent("settings.json")
-        let data = try JSONSerialization.data(withJSONObject: existing, options: [])
-        try data.write(to: settingsURL)
-
-        try PermissionsWriter.remove(from: settingsURL)
-
-        let updated = try Data(contentsOf: settingsURL)
-        let obj = try JSONSerialization.jsonObject(with: updated) as? [String: Any]
-        let perms = obj?["permissions"] as? [String: Any]
-        let allow = perms?["allow"] as? [String] ?? []
-        #expect(allow.contains("mcp__other__tool"), "non-ARIA entry must be preserved")
-        #expect(!allow.contains("mcp__mootx01__moot_capture_drawer"), "ARIA entry must be removed")
-    }
-
     // MARK: - Helpers
+
+    private func readPermissions(_ settingsURL: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: settingsURL)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return obj?["permissions"] as? [String: Any] ?? [:]
+    }
 
     private func makeSandboxDir() throws -> URL {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())

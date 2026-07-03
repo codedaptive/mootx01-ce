@@ -76,26 +76,128 @@ pub fn grant(settings_path: &Path) -> Result<usize, MergeError> {
     Ok(added)
 }
 
-/// Remove every `mcp__mootx01__` entry from `permissions.allow`. Absent file
-/// is a no-op. Returns the number of entries removed.
+/// Default permission tier for a tool, by capability pattern. Mirrors the
+/// Swift `PermissionsWriter.classify` exactly — both verticals must place the
+/// same tool in the same tier.
+///
+/// Pattern-based on purpose: a new tool lands in `ask` (the safe middle)
+/// unless its name marks it as a diagnostic (allow) or a destructive purge
+/// (deny), so the tiers cannot go stale as the surface grows.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Tier {
+    Allow,
+    Ask,
+    Deny,
+}
+
+pub fn classify(tool: &str) -> Tier {
+    // Destructive, irreversible: hard-deletes content from the estate.
+    if tool.contains("erase") || tool.contains("expunge") || tool.contains("purge") {
+        return Tier::Deny;
+    }
+    // Diagnostics and pure listings: no estate content read or written.
+    if tool.ends_with("_ping") || tool.ends_with("_status") || tool.contains("_list_") {
+        return Tier::Allow;
+    }
+    // Everything else — reads and writes — prompts the user.
+    Tier::Ask
+}
+
+/// Merge every tool into its tier: `permissions.allow` / `.ask` / `.deny`
+/// (the install DEFAULT — diagnostics allowed, reads/writes ask, destructive
+/// purges denied). A tool the user already placed in ANY tier is left exactly
+/// where it is. Returns (allow, ask, deny) counts added.
+pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), MergeError> {
+    let mut root = read_settings(settings_path)?;
+    let obj = root.as_object_mut().expect("root object");
+    let perms = obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    if !perms.is_object() {
+        return Err(MergeError::MalformedConfig {
+            path: settings_path.to_path_buf(),
+            detail: "'permissions' exists but is not an object; refusing to overwrite it.".into(),
+        });
+    }
+    let perms = perms.as_object_mut().unwrap();
+    for key in ["allow", "ask", "deny"] {
+        let list = perms.entry(key).or_insert_with(|| serde_json::json!([]));
+        if !list.is_array() {
+            return Err(MergeError::MalformedConfig {
+                path: settings_path.to_path_buf(),
+                detail: format!(
+                    "'permissions.{key}' exists but is not an array; refusing to overwrite it."
+                ),
+            });
+        }
+    }
+
+    // The user's existing placement (any tier) wins over our default.
+    let existing: std::collections::HashSet<String> = ["allow", "ask", "deny"]
+        .iter()
+        .flat_map(|k| perms[*k].as_array().unwrap().iter())
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let list = aria_mcp::tool_list::build_tool_list();
+    let names: Vec<String> = list
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut added = (0usize, 0usize, 0usize);
+    for name in names {
+        let entry = format!("{PREFIX}{name}");
+        if existing.contains(&entry) {
+            continue;
+        }
+        let (key, slot) = match classify(&name) {
+            Tier::Allow => ("allow", &mut added.0),
+            Tier::Ask => ("ask", &mut added.1),
+            Tier::Deny => ("deny", &mut added.2),
+        };
+        perms[key]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::String(entry));
+        *slot += 1;
+    }
+
+    if added != (0, 0, 0) {
+        write_settings(settings_path, &root)?;
+    }
+    Ok(added)
+}
+
+/// Remove every `mcp__mootx01__` entry from `permissions.allow` / `.ask` /
+/// `.deny`. Prefix-based, so tools renamed or removed since being granted are
+/// cleaned too. Absent file is a no-op. Returns the number removed.
 pub fn revoke(settings_path: &Path) -> Result<usize, MergeError> {
     if !settings_path.exists() {
         return Ok(0);
     }
     let mut root = read_settings(settings_path)?;
     let mut removed = 0;
-    if let Some(arr) = root
-        .get_mut("permissions")
-        .and_then(|p| p.get_mut("allow"))
-        .and_then(|a| a.as_array_mut())
-    {
-        let before = arr.len();
-        arr.retain(|v| {
-            v.as_str()
-                .map(|s| !s.starts_with(PREFIX))
-                .unwrap_or(true)
-        });
-        removed = before - arr.len();
+    for key in ["allow", "ask", "deny"] {
+        if let Some(arr) = root
+            .get_mut("permissions")
+            .and_then(|p| p.get_mut(key))
+            .and_then(|a| a.as_array_mut())
+        {
+            let before = arr.len();
+            arr.retain(|v| {
+                v.as_str()
+                    .map(|s| !s.starts_with(PREFIX))
+                    .unwrap_or(true)
+            });
+            removed += before - arr.len();
+        }
     }
     if removed > 0 {
         write_settings(settings_path, &root)?;
