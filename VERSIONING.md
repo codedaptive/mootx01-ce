@@ -1,5 +1,5 @@
 ---
-version: 2.1.0
+version: 1.2.0
 status: active
 date: 2026-07-03
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
@@ -277,7 +277,7 @@ Any mission that modifies a document governed by this standard must comply with 
 
 ## Changelog
 
-### 2.1.0 -- 2026-07-03
+### 1.2.0 -- 2026-07-03
 Documented the branch model as actually operated: `develop` is the repository
 default branch; `candidate` auto-builds unsigned pre-releases
 (`X.Y.Z-prerelease.<run>`) and verifies the installers in CI; `stable` stages
@@ -285,12 +285,11 @@ inertly until a `vX.Y.Z` tag cuts the signed release; daily `make test` runs on
 `develop`; `stable` is merged back to `develop` after each release; and `v*`
 tag creation is restricted to organization admins. Additive (2.1, 2.3, 2.5).
 
-### 2.0.0 -- 2026-07-02
-Added `candidate/X.Y.x` branch and documented the three-branch release
-promotion flow (develop -> candidate -> stable). MAJOR bump per section
-3.3: redefines the prior promotion flow -- release-line branches are now
-permanent (the old flow deleted `develop/X.Y.x` after promotion).
-Line promotion and tagging renumbered to 2.4 and 2.5.
+### 1.1.0 -- 2026-07-02
+Added the `candidate/X.Y.x` branch and documented the three-branch
+develop -> candidate -> stable promotion flow, with the release-line branches
+now permanent. Additive per section 3.3 (adds the candidate tier). Line
+promotion and tagging renumbered to 2.4 and 2.5.
 
 ### 1.0.0 -- 2026-06-14
 Initial release.
