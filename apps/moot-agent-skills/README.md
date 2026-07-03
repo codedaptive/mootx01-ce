@@ -42,8 +42,10 @@ Do not install the adapter before the runtime works.
 ## Contents
 
 - `shared/` - source language used across adapters.
-- `claude/` - Claude Code files.
-- `codex/` - Codex files.
+- `claude/` - Claude Code files, including lifecycle hooks (context meter,
+  compaction recovery, writeback check).
+- `codex/` - Codex files, including lifecycle hooks.
+- `gemini/` - Gemini CLI context files.
 - `cursor/` - Cursor rules.
 - `cline/` - Cline rules.
 - `roo/` - Roo Code rules.
@@ -58,8 +60,9 @@ Copy into a project root for one project, or into the client's user-level config
 
 | Client | Destination files |
 |---|---|
-| `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md` |
+| `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md`, `.claude/hooks/moot_hooks.py`, `.claude/settings.json` (merge the `hooks` block if a settings file exists) |
 | `codex/` | `AGENTS.md`, `.agents/skills/mootx01-memory/{SKILL.md, agents/openai.yaml}`, `.codex/hooks.json` |
+| `gemini/` | `GEMINI.md` (project root or `~/.gemini/GEMINI.md`) |
 | `cursor/` | `.cursor/rules/*.mdc` or legacy `.cursorrules` |
 | `cline/` | `.clinerules/*.md` |
 | `roo/` | `.roo/rules/*.md` or legacy `.roorules` |
@@ -85,6 +88,10 @@ What did we decide last time about the importer?
 ```
 
 ```text
+Where were we?
+```
+
+```text
 Summarize what we know about this project from memory.
 ```
 
@@ -92,9 +99,10 @@ Summarize what we know about this project from memory.
 We decided X; remember that and link it to the earlier Y decision.
 ```
 
-A working setup should show three behaviors:
+A working setup should show four behaviors:
 
 - recall old memory,
+- resume continuity without being handed context,
 - summarize from memory,
 - write a new linked memory.
 
@@ -115,7 +123,6 @@ These adapters assume the MOOTx01 MCP surface exposes tools with these meanings:
 - federated search where available.
 
 If a harness namespaces MCP tools, use the matching namespaced tool.
-  reference, not as bulk context.
 
 ## Tool Name Assumptions
 
