@@ -191,6 +191,37 @@ struct TraceRewardTests {
         #expect(count > 0, "external search must write recall-trace rows; got count=\(count)")
     }
 
+    /// SECFIX (codex: "Fact search probe writes unintended recall traces"):
+    /// `moot_fact_search` with a query runs a dense-lane STATUS probe. That probe
+    /// must be internal-origin — it must NOT write recall-trace rows for its
+    /// incidental locus hits. A read-only fact search mutating reward/audit
+    /// history is the bug. (Rust never had it — it uses has_corpus.)
+    @Test func factSearchProbeWritesZeroTraceRows() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle, dispatcher) = try await openSQLiteEstate(url: url)
+
+        // A recallable memory so the probe's locus lane returns a hit, plus a
+        // fact so fact_search has something to emit.
+        _ = try await fileMemory(dispatcher, content: "probe target content", location: "test-room")
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_fact",
+            arguments: .object([
+                "subject": .string("Berlin"),
+                "predicate": .string("capital_of"),
+                "object": .string("Germany"),
+            ]))
+
+        // fact_search WITH a query triggers the dense-lane probe.
+        let result = try await dispatcher.dispatch(
+            name: "moot_fact_search", arguments: .object(["query": .string("Berlin")]))
+        #expect(result.objectValue?["isError"]?.boolValue == false)
+
+        let count = try await kit.countRecallTraces(handle)
+        #expect(count == 0,
+                "fact_search's dense-lane probe must write zero trace rows; got count=\(count)")
+    }
+
     // MARK: - Test 2: internal lens/recipe path writes zero traces
 
     /// Internal recall (lens/recipe tools) must NOT write recall-trace rows.
