@@ -383,6 +383,28 @@ public let globalSSEConcurrencyGate: ConcurrencyGate = {
 /// is rejected (403) before dispatch (`bearerToken` is read for logging only).
 /// The Enterprise OAuth layer composes ABOVE this transport in v2, never inside it.
 ///
+/// SECURITY AUDIT DISPOSITION — fixed-port loopback impersonation (codex
+/// 7a245e3e, MEDIUM): the client configs the installer writes point at a fixed
+/// `http://127.0.0.1:4242`, and this transport does not authenticate endpoint
+/// ownership — so a same-user local process that binds the port before the
+/// daemon could impersonate it to MCP clients. ACCEPTED for CE, by design, not
+/// unmitigated: (1) the daemon owns the port continuously via launchd
+/// `RunAtLoad` + `KeepAlive` (auto-restart), closing the pre-start race in
+/// normal use; (2) the listener sets `SO_REUSEADDR` only, NOT `SO_REUSEPORT`, so
+/// the port cannot be stolen while the daemon is live-listening; (3) the
+/// residual attacker (same-user code-exec who kills the daemon and wins a
+/// sub-second rebind) already has direct filesystem read of the estate — CE is
+/// single-user local-first — so impersonation grants ~nothing beyond existing
+/// access. A real fix needs the CLIENT to verify the SERVER's identity, which
+/// third-party MCP clients (Cursor, Claude Code, …) do not support and we do not
+/// control; a client→server token does NOT help (the client would hand the
+/// secret to whoever holds the port). This is addressed in EE v1.1, which adds
+/// an authentication scheme compatible with the auths the system supports AND
+/// off-localhost MCP hosting — the context where endpoint authentication becomes
+/// both necessary and enforceable. Do not "fix" by reverting HTTP clients to
+/// stdio: that is the unauthorized flip already reverted in commit 5c035e6, and
+/// it undoes the shared-resident-daemon architecture mandate.
+///
 /// HARDENING: bounded concurrency via `globalConcurrencyGate` (default 64
 /// concurrent / 256 queued). The accept loop uses a two-phase gate protocol:
 /// `tryEnqueue()` (non-blocking depth check, runs on the accept thread) is

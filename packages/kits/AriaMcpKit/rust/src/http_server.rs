@@ -39,6 +39,26 @@
 //! Binds loopback only (`127.0.0.1`), never `0.0.0.0`. No authentication on the
 //! Community-Edition transport (ADR-LOOPBACKHTTP-001); the Enterprise OAuth layer
 //! composes above the transport in v2.
+//!
+//! SECURITY AUDIT DISPOSITION — fixed-port loopback impersonation (codex
+//! 7a245e3e, MEDIUM): the installer wires MCP clients to a fixed
+//! `http://127.0.0.1:4242`, and this transport does not authenticate endpoint
+//! ownership — a same-user local process that binds the port before the daemon
+//! could impersonate it. ACCEPTED for CE, by design, not unmitigated: (1) the
+//! daemon owns the port continuously via launchd `RunAtLoad` + `KeepAlive`,
+//! closing the pre-start race in normal use; (2) `SO_REUSEADDR`-not-
+//! `SO_REUSEPORT` means the port cannot be stolen while the daemon is
+//! live-listening; (3) the residual attacker (same-user code-exec killing the
+//! daemon and winning a rebind race) already reads the estate files directly
+//! (CE is single-user local-first), so impersonation grants ~nothing more. A
+//! real fix needs the CLIENT to verify the SERVER's identity, which third-party
+//! MCP clients do not support and we do not control (a client→server token does
+//! NOT help — the client hands the secret to whoever holds the port). Addressed
+//! in EE v1.1, which adds an authentication scheme compatible with the auths the
+//! system supports AND off-localhost MCP hosting — where endpoint authentication
+//! becomes necessary and enforceable. Do NOT revert HTTP clients to stdio: that
+//! is the unauthorized flip reverted in 5c035e6 and undoes the shared-resident-
+//! daemon mandate.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
