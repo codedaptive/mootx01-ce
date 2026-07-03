@@ -414,7 +414,7 @@ mod tests {
     fn embedded_bundle_decodes() {
         let b = InstallBundle::embedded();
         assert!(b.skill_markdown.contains("name: mootx01-memory"));
-        assert_eq!(b.host_count(), 9);
+        assert_eq!(b.host_count(), 10); // 10th host: xcode (EE packager sync 0b632002)
         assert!(b.host("claude-code").is_some());
         // MCP-only clients have no matrix row.
         assert!(b.host("claude-desktop").is_none());
