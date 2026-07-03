@@ -22,12 +22,19 @@ struct StatusCommand: AsyncParsableCommand {
         print("mootx01 status")
         print("─────────────────────────────────")
 
-        // PID file check.
+        // Server liveness. Prefer the PID file, but the launchd resident daemon
+        // serves the HTTP port WITHOUT owning that PID file — so fall back to a
+        // direct TCP connection to the resident endpoint, the transport-level
+        // truth. Without this, `status` reported "not running" while the daemon
+        // was live on 4242, which read as a broken install.
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
+        let residentPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
         if let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            let pid = Int32(pidString),
            processIsRunning(pid: pid) {
             print("Server: running (PID \(pid))")
+        } else if portIsListening(port: residentPort) {
+            print("Server: running (HTTP on 127.0.0.1:\(residentPort))")
         } else {
             print("Server: not running")
             // Remove stale PID file if the process is gone.
@@ -76,6 +83,27 @@ struct StatusCommand: AsyncParsableCommand {
         // kill(pid, 0) returns 0 if the process exists and the caller may signal
         // it, or -1 (ESRCH: no such process; EPERM: exists but not signallable).
         return kill(pid, 0) == 0
+    }
+
+    /// True if something accepts a TCP connection on 127.0.0.1:port. Used as the
+    /// authoritative liveness signal for the resident HTTP daemon, which runs
+    /// under launchd and does not own the CLI PID file.
+    private func portIsListening(port: Int, timeoutMs: Int = 400) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var tv = timeval(tv_sec: 0, tv_usec: Int32(timeoutMs * 1000))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return rc == 0
     }
 
     private func formatBytes(_ bytes: Int) -> String {

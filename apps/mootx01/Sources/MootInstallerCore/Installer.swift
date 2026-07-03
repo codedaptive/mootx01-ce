@@ -235,6 +235,13 @@ public enum Installer {
     static func copyResourceBundles(besideSource source: URL, toDir destDir: URL) throws {
         let fm = FileManager.default
         let sourceDir = source.deletingLastPathComponent()
+        // Already co-located — e.g. the macOS .pkg placed the binary AND its
+        // bundles into the install dir, and we're "placing" onto that same dir.
+        // A per-bundle remove-then-copy would delete the bundle and then fail to
+        // copy it from itself ("no such file"), which aborted moot-mgr install.
+        if sourceDir.standardizedFileURL.path == destDir.standardizedFileURL.path {
+            return
+        }
         guard let siblings = try? fm.contentsOfDirectory(
             at: sourceDir,
             includingPropertiesForKeys: nil,

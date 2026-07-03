@@ -151,6 +151,57 @@ final class SetupViewModel {
             }
         }
 
+        // Register the background services. WITHOUT this the wired clients point
+        // at http://127.0.0.1:4242 with nothing behind it — the .pkg install
+        // used to wire clients but never start the daemon, so every client hit
+        // ConnectionRefused. This mirrors the CLI `mootx01 install`, which is
+        // what the setup assistant is meant to be a GUI projection of.
+        #if os(macOS)
+        registerBackgroundServices()
+        #endif
+
         phase = .complete
     }
+
+    #if os(macOS)
+    /// Register + start the resident daemon and the management console as
+    /// launchd LaunchAgents — the same two services `mootx01 install` sets up
+    /// (InstallCommand). Failures are surfaced in `skipped` rather than thrown:
+    /// client wiring already succeeded, and the user can start a service by
+    /// hand, but the install must not silently omit the daemon the clients need.
+    private func registerBackgroundServices() {
+        // Management console (moot-mgr → dashboard on 4200). Its binary ships
+        // beside mootx01 in the install dir.
+        let mgrSource = URL(fileURLWithPath: binaryPath)
+            .resolvingSymlinksInPath()
+            .deletingLastPathComponent()
+            .appendingPathComponent("moot-mgr")
+            .path
+        if let mgrPath = try? Installer.placeMgrBinary(sourceMgrPath: mgrSource, homeDirectory: home) {
+            switch LaunchAgent.install(mgrBinaryPath: mgrPath, homeDirectory: home) {
+            case .installed:               results.append("Management console (moot-mgr)")
+            case let .launchctlFailed(m):  skipped.append("Management console: \(m)")
+            case .binaryNotFound:          skipped.append("Management console: binary missing")
+            }
+        }
+
+        // Resident MCP daemon (HTTP server on 4242) — the endpoint the wired
+        // clients connect to. Same environment the CLI sets on the LaunchAgent.
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment,
+            homeDirectory: home
+        )
+        let daemonEnv = [
+            "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
+            "MOOTX01_DATA_DIR": dataDir.path,
+            "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
+            "MOOTX01_VAULT": "1",   // vault-on default (ADR-015 §1)
+        ]
+        switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
+        case .installed:               results.append("Resident MCP daemon (127.0.0.1:4242)")
+        case let .launchctlFailed(m):  skipped.append("Resident daemon: \(m)")
+        case .binaryNotFound:          skipped.append("Resident daemon: binary missing")
+        }
+    }
+    #endif
 }
