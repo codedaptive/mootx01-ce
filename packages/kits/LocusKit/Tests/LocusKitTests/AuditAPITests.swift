@@ -140,4 +140,52 @@ struct AuditAPITests {
             _ = try await estate.bitmapState(rowID: drawer.id, asOf: beforeAny)
         }
     }
+
+    // MARK: - Audit-write atomicity (codex 016fcb23)
+    //
+    // The Swift gatedCapture and mutateState paths wrap projection-row
+    // write + audit-append in a single storage.transaction(). These tests
+    // verify the success case: both the drawer projection row and the
+    // sealed audit event are present after each write. The failure-injection
+    // case (audit append throws inside the transaction) is not feasible to
+    // unit-test directly because StorageTransaction.auditLog.append never
+    // throws in test; the transaction rollback semantics are exercised at
+    // the PersistenceKit layer (PersistenceKitSQLiteTests). This test
+    // proves the success path commits both writes atomically.
+
+    @Test("capture: projection row and audit event both present after transactional capture")
+    func capture_atomic_projectionRowAndAuditEvent_bothPresent() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await estate.capture(sampleFrame())
+
+        // Both the projection row (via getDrawers) and the audit event
+        // (via auditTrail) must be present — they land in one transaction.
+        let loaded = try await estate.getDrawers(ids: [drawer.id]).first
+        #expect(loaded != nil, "drawer projection row must be present after capture")
+
+        let events = try await estate.auditTrail(rowID: drawer.id)
+        #expect(events.count == 1, "exactly one audit event (genesis) must be present")
+        #expect(events.first?.verb == "capture")
+    }
+
+    @Test("mutate: projection row update and audit event both present after transactional mutation")
+    func mutate_atomic_projectionRowUpdateAndAuditEvent_bothPresent() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await estate.capture(sampleFrame())
+        try await estate.withdraw(rowID: drawer.id, reason: "atomicity test")
+
+        // The updated projection row (Withdrawn state) and the new audit
+        // event (verb=retract) must both be present — they land in one
+        // transaction (mutateState wraps update + auditLog.append).
+        let loaded = try await estate.getDrawers(ids: [drawer.id]).first
+        #expect(loaded != nil, "drawer projection row must be present after mutation")
+        // Low 6 bits of adjectiveBitmap encode State. State.withdrawn.rawValue = 18.
+        let stateRaw = (loaded?.adjectiveBitmap ?? 0) & 0x3F
+        #expect(stateRaw == Int64(State.withdrawn.rawValue),
+                "projection row must reflect the Withdrawn state after mutation")
+
+        let events = try await estate.auditTrail(rowID: drawer.id)
+        #expect(events.count == 2, "capture + retract events must both be present")
+        #expect(events.last?.verb == "retract")
+    }
 }
