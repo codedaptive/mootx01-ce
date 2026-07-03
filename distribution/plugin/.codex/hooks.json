@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '%s\\n' 'MOOTx01 reminder: if this task depends on prior context, call moot_estate_ping, moot_estate_status, and moot_read_journal before answering.'",
+            "timeout": 5,
+            "statusMessage": "MOOTx01 session reminder"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '%s' '{\"systemMessage\": \"MOOTx01 reminder: if durable knowledge changed this session, write memories, facts, links, and a journal entry before finalizing.\"}'",
+            "timeout": 5,
+            "statusMessage": "MOOTx01 writeback reminder"
+          }
+        ]
+      }
+    ]
+  }
+}

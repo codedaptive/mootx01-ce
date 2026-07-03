@@ -1,0 +1,15 @@
+{
+  "description" : "MOOTx01 plugins distributed by Codedaptive.",
+  "name" : "mootx01",
+  "owner" : {
+    "name" : "Codedaptive",
+    "url" : "https://mootx01.ai"
+  },
+  "plugins" : [
+    {
+      "description" : "Long-term memory for your AI: recall, analyze, contradiction-check, and write back durable knowledge. Requires the mootx01 binary (brew install codedaptive/mootx01-ce/mootx01).",
+      "name" : "mootx01",
+      "source" : "."
+    }
+  ]
+}

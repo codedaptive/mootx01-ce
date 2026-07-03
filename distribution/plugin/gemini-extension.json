@@ -1,0 +1,28 @@
+{
+  "author" : {
+    "name" : "Codedaptive",
+    "url" : "https://mootx01.ai"
+  },
+  "description" : "Long-term memory for your AI: recall, analyze, contradiction-check, and write back durable knowledge. Requires the mootx01 binary (brew install codedaptive/mootx01-ce/mootx01).",
+  "displayName" : "MOOTx01 Memory",
+  "homepage" : "https://mootx01.ai",
+  "keywords" : [
+    "memory",
+    "mcp",
+    "agent",
+    "long-term-memory",
+    "knowledge-graph"
+  ],
+  "license" : "AGPL-3.0",
+  "mcpServers" : {
+    "mootx01" : {
+      "args" : [
+        "serve"
+      ],
+      "command" : "mootx01"
+    }
+  },
+  "name" : "mootx01",
+  "repository" : "https://github.com/codedaptive/mootx01-ce",
+  "version" : "1.0.11"
+}
