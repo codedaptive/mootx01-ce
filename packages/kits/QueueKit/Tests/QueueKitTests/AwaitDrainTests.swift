@@ -171,4 +171,60 @@ final class AwaitDrainTests {
         }
         #expect(threwTimeout)
     }
+
+    // MARK: - Progress resets the no-progress deadline (GLK full-suite fix)
+
+    // A slow-but-progressing drain must NOT time out even when the TOTAL wait
+    // exceeds `timeout`: the deadline resets each time the outstanding count
+    // (pending + in-flight) drops below its lowest observed value. This is the
+    // regression test for the GLK full-suite drainTimeout fragility, where
+    // CPU-starved encode workers drained slowly but steadily and a wall-clock
+    // cap false-timed-out a correct drain. Rust twin:
+    // await_drain_progress_resets_deadline.
+    @Test func awaitDrainProgressResetsDeadline() async throws {
+        let kit = try makeKit()
+        for tag in ["a", "b", "c", "d"] { try await kit.send(makeJob(tag)) }
+
+        // Worker: claim all four up front (pending → in-flight), then reply
+        // one every 200 ms. Total drain ≈ 800 ms — double the 400 ms timeout —
+        // but every completion lands well inside a fresh 400 ms window.
+        let worker = Task {
+            let batch = try await kit.drain()
+            for pair in batch {
+                try await Task.sleep(for: .milliseconds(200))
+                try await kit.reply(
+                    to: pair.job.id, status: .done, artifacts: [])
+            }
+        }
+
+        // A wall-clock cap would throw at 400 ms with jobs still in flight;
+        // the progress-based deadline must ride the resets to completion.
+        try await kit.awaitDrain(
+            pollInterval: .milliseconds(10), timeout: .milliseconds(400))
+        try await worker.value
+        #expect(try await kit.completed().count == 4)
+    }
+
+    // Partial progress then a stall must STILL time out: replying one of three
+    // jobs resets the deadline once, but the remaining two never move, so the
+    // no-progress deadline fires. Proves progress-based ≠ never-times-out.
+    // Rust twin: await_drain_times_out_when_progress_stalls.
+    @Test func awaitDrainTimesOutWhenProgressStalls() async throws {
+        let kit = try makeKit()
+        for tag in ["a", "b", "c"] { try await kit.send(makeJob(tag)) }
+        // Claim all three (new/ → cur/), reply exactly ONE, then stall.
+        let batch = try await kit.drain()
+        try await kit.reply(to: batch[0].job.id, status: .done, artifacts: [])
+
+        var threwTimeout = false
+        do {
+            try await kit.awaitDrain(
+                pollInterval: .milliseconds(10), timeout: .milliseconds(150))
+        } catch QueueError.drainTimeout(let pending, let inFlight) {
+            threwTimeout = true
+            #expect(pending == 0)
+            #expect(inFlight == 2)
+        }
+        #expect(threwTimeout)
+    }
 }

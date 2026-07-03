@@ -16,6 +16,18 @@
 //     the queue did not wedge.
 //   • SEQUENCE: interleaved captures arrive and all become recallable; no
 //     caller-side ordering requirement.
+//
+// GATED BEHIND GLK_LATENCY_TESTS=1 (skipped by default): these are LATENCY
+// assertions (recallable in ~1 s; drain barriers with tight caps) over
+// CPU-bound embed work. Swift Testing runs the whole package's 117 suites in
+// parallel, so a bare `swift test` saturates every core and the latency bounds
+// are physically unmeetable — the suite false-failed with
+// `.drainTimeout(pending: 0, inFlight: N)` (all jobs claimed, embeds mid-work,
+// nothing stuck) while passing in ~6 s alone. `.serialized` cannot fix this:
+// the starvation is CROSS-suite. `make test` runs this suite in a dedicated
+// isolated pass (GLK_LATENCY_TESTS=1 swift test --no-parallel --filter …), so
+// the gate still enforces it — on a quiet machine, where a latency number
+// means what it claims.
 
 import Testing
 import Foundation
@@ -47,7 +59,11 @@ private final class FirstAttemptFailureSet: @unchecked Sendable {
     }
 }
 
-@Suite("Encode drain — near-realtime, load- and sequence-robust")
+@Suite(
+    "Encode drain — near-realtime, load- and sequence-robust",
+    .enabled(
+        if: ProcessInfo.processInfo.environment["GLK_LATENCY_TESTS"] == "1",
+        "Latency-assertion suite — meaningless under parallel-suite CPU saturation; run via make test's isolated pass or GLK_LATENCY_TESTS=1 swift test --filter EncodeDrainNearRealtimeTests (see file header)"))
 struct EncodeDrainNearRealtimeTests {
 
     private func provisionGLKEstate() async throws -> (GeniusLocusKit, EstateHandle) {

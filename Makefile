@@ -65,6 +65,16 @@ build-rust:
 # ── Test ────────────────────────────────────────────────────────────────
 test: test-swift test-rust check-static-assets check-edition-boundary
 
+# GLK latency suites: gated behind GLK_LATENCY_TESTS=1 (self-skip on a bare
+# `swift test`) because their near-realtime assertions are CPU-bound embed
+# work that false-fails when the package's 117 suites run in parallel and
+# saturate every core. The isolated pass below runs them alone, serially, on
+# a quiet machine — where a latency number means what it claims. See the
+# file headers in Tests/GeniusLocusKitTests/EncodeDrainNearRealtimeTests.swift
+# and EncodeIntakeTests.swift.
+GLK_PKG := ./packages/kits/GeniusLocusKit
+GLK_LATENCY_FILTERS := --filter EncodeDrainNearRealtimeTests --filter EncodeIntakeTests
+
 test-swift:
 	@for d in $(SWIFT_PKGS); do \
 		if [ -d "$$d/Tests" ]; then \
@@ -74,6 +84,9 @@ test-swift:
 			echo "── skip (no Tests/): $$d"; \
 		fi; \
 	done
+	@echo "── swift test (GLK latency suites, isolated): $(GLK_PKG)"
+	@( cd "$(GLK_PKG)" && GLK_LATENCY_TESTS=1 swift test --no-parallel $(GLK_LATENCY_FILTERS) ) \
+		|| { echo "FAILED (GLK latency suites, isolated): $(GLK_PKG)"; exit 1; }
 	@echo "✓ all Swift tests passed"
 
 test-rust:

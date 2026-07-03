@@ -303,8 +303,14 @@ public extension GeniusLocusKit {
     ///
     /// - Parameters:
     ///   - handle: The estate whose encode queue to await.
-    ///   - timeout: Upper bound on the wait. Defaults to 30 s.
-    /// - Throws: `QueueError.drainTimeout` if the queue does not empty in time.
+    ///   - timeout: Upper bound on the wait WITHOUT observed progress — the
+    ///     underlying QueueKit barrier resets the deadline each time the encode
+    ///     stream's outstanding count decreases, so a slow-but-progressing
+    ///     drain (CPU-starved by a fully parallel test suite) never
+    ///     false-times-out while a genuine hang still fails fast. Defaults
+    ///     to 30 s.
+    /// - Throws: `QueueError.drainTimeout` if the queue makes no progress in
+    ///   time.
     func awaitEncodeDrain(
         for handle: EstateHandle,
         timeout: Duration = .seconds(30)

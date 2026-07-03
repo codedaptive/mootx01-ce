@@ -60,7 +60,7 @@ struct QueueKitTelemetryFailClosedTests {
             Intellectus.install(sink: NoOpSink.shared)
         }
 
-        var window = QueueLatencyWindow(capacity: 16)
+        let window = QueueLatencyWindowBox(capacity: 16)
         let backend = PendingFaultBackend(failPending: failPending, pending: 3)
         await reportQueueStats(
             backend: backend,
@@ -68,7 +68,7 @@ struct QueueKitTelemetryFailClosedTests {
             drainStart: 1000.0,
             now: 1000.5,
             estateTag: "test-estate",
-            window: &window
+            window: window
         )
 
         return sink.snapshot().compactMap { sample in

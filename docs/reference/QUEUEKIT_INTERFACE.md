@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-25
-version: 1.3.1
+date: 2026-07-03
+version: 1.4.0
 description: Public API surface for QueueKit in both the Swift and Rust ports.
 spec_type: kit
 package: QueueKit
@@ -406,6 +406,9 @@ extension QueueKit {
     public func completed(streamID: StreamID? = nil) async throws -> [Job]   // SPEC B-5
     public func awaitDrain(pollInterval: Duration = .milliseconds(20),
                            timeout: Duration = .seconds(30)) async throws    // await-empty latch
+    public func awaitDrain(stream: StreamID,
+                           pollInterval: Duration = .milliseconds(20),
+                           timeout: Duration = .seconds(30)) async throws    // stream-scoped twin (ADR-021 D7)
 }
 ```
 
@@ -429,16 +432,30 @@ in `new/`) AND `inFlight().isEmpty` (nothing claimed-but-unreplied in
 has drained it and called `reply(...)` (moving it to `done/`), so the
 latch releases only after every enqueued job has been fully processed.
 It returns PROMPTLY on an already-empty queue (first poll returns without
-sleeping) and never hangs: if both frontiers have not cleared by
-`timeout` it throws `QueueError.drainTimeout(pending:inFlight:)`. The
+sleeping) and never hangs. The `timeout` is a PROGRESS-BASED deadline,
+not a total wall-clock cap: it resets each time the outstanding count
+(pending + in-flight) drops below its lowest observed value, and
+`QueueError.drainTimeout(pending:inFlight:)` is thrown only when no
+progress is observed for `timeout`. A slow-but-progressing drain (e.g.
+CPU-bound encode workers starved by a fully parallel test suite) never
+false-times-out; a genuinely stuck worker still fails within `timeout`.
+Tracking the lowest observed count — not the last — means concurrent
+enqueues cannot extend the deadline; only real completions do. The
 maildir backend has no native completion event, so the latch polls the
 two depth probes on `pollInterval`; a concurrent drain worker's progress
 is observed on the next poll. This is the signal bulk callers (importer,
 gauntlet) use to know a batch of enqueued work has finished.
 
-Rust parity: the Rust `QueueKit` twin does not yet have an `await_drain`
-equivalent. The await-empty contract is expressible over the existing
-`pending_count`/`in_flight` Rust surface.
+`awaitDrain(stream:pollInterval:timeout:)` is the stream-scoped twin
+(ADR-021 Decision 7 / T1): on a shared per-estate queue a single drainer
+processes only its own stream, so the barrier counts
+`pendingCount(stream:)` plus the stream's slice of `inFlight()` and never
+blocks on other streams' jobs (the post-T4/T6 encode-stall). Same
+progress-based deadline, scoped to the stream's outstanding count.
+
+Rust parity: `QueueBackend::await_drain` / `await_drain_for_stream`
+(trait default impls surfaced on the `QueueKit` facade) implement the
+identical contract, including the progress-based deadline.
 
 ### `QueueBackend` protocol methods
 
@@ -501,15 +518,16 @@ public enum QueueError: Error, Sendable {
     case staleTmpFile(path: String, age: TimeInterval)
     case backendUnavailable(detail: String)
     case invalidTerminalStatus(ObservationStatus)
-    case drainTimeout(pending: Int, inFlight: Int)   // awaitDrain exceeded its timeout
+    case drainTimeout(pending: Int, inFlight: Int)   // awaitDrain made no progress within its timeout
 }
 ```
 
-`drainTimeout` is thrown by `awaitDrain(...)` when both frontiers have not
-cleared within the timeout; it carries the last-observed depths (a
-non-zero `inFlight` points at a stalled drain worker, a non-zero
-`pending` at a worker that never claimed). The Rust `QueueError` does not
-yet carry a `DrainTimeout` variant.
+`drainTimeout` is thrown by `awaitDrain(...)` when the outstanding count
+has neither cleared nor decreased within the timeout (the progress-based
+deadline, § 3); it carries the last-observed depths (a non-zero
+`inFlight` points at a stalled drain worker, a non-zero `pending` at a
+worker that never claimed). Rust carries the matching
+`DrainTimeout { pending, in_flight }` variant.
 
 **Rust:**
 
@@ -525,10 +543,11 @@ pub enum QueueError {
     StaleTmpFile { path: String, age_secs: f64 },
     BackendUnavailable(String),
     InvalidTerminalStatus(String),
+    DrainTimeout { pending: usize, in_flight: usize },
 }
 ```
 
-The Rust enum carries all ten categories one-to-one with the Swift
+The Rust enum carries all eleven categories one-to-one with the Swift
 cases; it collapses each Swift associated `Error`/path value into a
 single `String` message (and `ToolName`/`JobID`/`ObservationStatus`
 payloads into their raw `String`), and renames the stale-tmp age field
@@ -724,13 +743,35 @@ These types are present in the Swift port only. They are legitimately one-langua
 |---|---|---|
 | `MissionContext` | `Sources/QueueKit/Job.swift` | Carries Apple/CI worktree orchestration metadata (missionPath, worktree, branch, autonomyProfile, riskClass, baseCommit, priorTrajectoryID, inheritedSkills). This is a CI/dispatch layer concern embedded in the job extension field; the Rust port has no dispatch-layer concept and does not need to parse it. |
 | `WireFormat` | `Sources/QueueKit/Job.swift` | Caseless-enum namespace for filename construction (`filename(for:)`, `sortableHLC(_:)`) and canonical JSON encoder/decoder. Rust provides equivalent free functions (`filename_for_job`, `sortable_hlc`, `encode_job`, `decode_job`) not as a namespace type; the audit regex does not match free functions by default. |
-| `QueueLatencyWindow` | `Sources/QueueKit/QueueKitTelemetry.swift` | Rolling latency-sample window for percentile telemetry. Swift-only telemetry helper; the Rust port has no IntellectusLib telemetry surface for QueueKit at this time. |
+| `QueueLatencyWindow` | `Sources/QueueKit/QueueKitTelemetry.swift` / `rust/src/facade.rs` | Rolling latency-sample window for percentile telemetry, in both ports. Concurrent drainers on one queue are legitimate, so access is lock-guarded: Swift wraps it in `QueueLatencyWindowBox` (a `Mutex`-guarded box passed to `reportQueueStats`), Rust holds `Mutex<QueueLatencyWindow>` on the facade. |
 
 ---
 
 *End of QueueKit Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-03
+`awaitDrain` / `await_drain` (global and stream-scoped, both ports) now use a
+PROGRESS-BASED deadline: `timeout` bounds the wait without observed progress
+(the outstanding pending + in-flight count dropping below its lowest observed
+value resets the deadline), not the total wall-clock wait. Fixes the GLK
+full-suite drainTimeout fragility — CPU-starved encode workers draining slowly
+but steadily blew the 30 s wall-clock cap under suite-wide core saturation
+while the same drain finished in seconds isolated; a genuinely stuck worker
+still fails within `timeout`. Also brought the doc up to shipped reality:
+listed `awaitDrain(stream:pollInterval:timeout:)` in the Interface surface,
+and corrected the stale Rust-parity notes (Rust has carried
+`await_drain`/`await_drain_for_stream` and the `DrainTimeout` error variant
+since the Dual-Path Intake wiring; the enum is eleven categories).
+Also fixed a Swift-only telemetry data race: the drain-latency window was an
+unguarded `nonisolated(unsafe) var` on `QueueKit` under a stale
+single-drainer assumption; concurrent stream drainers (encode + import on
+the shared per-estate queue) corrupted its sample array (SIGSEGV in
+`Array.append`). Now lock-guarded via `QueueLatencyWindowBox`
+(`reportQueueStats`'s `window` parameter changed from
+`inout QueueLatencyWindow` to the box), matching the Rust facade's
+always-guarded `Mutex<QueueLatencyWindow>`.
 
 ### 1.3.1 -- 2026-06-25
 Additive `DrainLease` (ADR-021 Decision 7, T2): a stream-keyed heartbeat-TTL

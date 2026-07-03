@@ -32,12 +32,13 @@ public final class QueueKit: Sendable {
     public let backend: any QueueBackend
     public let root: URL?
 
-    /// Rolling latency window for drain percentile telemetry.
-    /// nonisolated(unsafe): drain() is always called from a single serialised
-    /// context (the GLK scheduler is an actor; test callers are serial). Marking
-    /// unsafe here documents that the caller owns exclusivity; Swift cannot verify
-    /// it statically because QueueKit is not an actor.
-    nonisolated(unsafe) private var latencyWindow = QueueLatencyWindow()
+    /// Rolling latency window for drain percentile telemetry, guarded by a
+    /// lock (`QueueLatencyWindowBox`). Concurrent drain() calls on one
+    /// QueueKit instance are legitimate — the encode worker and the discrete
+    /// import worker drain their streams on the shared per-estate queue
+    /// concurrently — so the window must be thread-safe. Rust twin:
+    /// `facade.rs` `latency_window: Mutex<QueueLatencyWindow>`.
+    private let latencyWindow = QueueLatencyWindowBox()
 
     /// Estate tag for queue.* telemetry metrics. Set to the estate UUID string
     /// by the composition layer (e.g. GeniusLocusKit when mounting QueueKit for
@@ -93,7 +94,7 @@ public final class QueueKit: Sendable {
             drainStart: start,
             now: now,
             estateTag: estateTag,
-            window: &latencyWindow
+            window: latencyWindow
         )
         return result
     }
@@ -116,7 +117,7 @@ public final class QueueKit: Sendable {
             drainStart: start,
             now: now,
             estateTag: estateTag,
-            window: &latencyWindow
+            window: latencyWindow
         )
         return result
     }
@@ -249,29 +250,50 @@ public final class QueueKit: Sendable {
     /// drain worker runs concurrently; each poll re-reads the live frontier
     /// counts, so progress made between polls is observed on the next tick.
     ///
+    /// PROGRESS-BASED deadline, not a total wall-clock cap: the timeout resets
+    /// every time the outstanding count (pending + in-flight) drops below its
+    /// lowest observed value. A slow-but-progressing drain (e.g. CPU-bound
+    /// encode workers starved by a fully parallel test suite — the GLK
+    /// full-suite drainTimeout fragility, where the same drain finished in 6 s
+    /// isolated and blew a 30 s wall-clock cap under suite-wide core
+    /// saturation) therefore never false-times-out; a genuinely stuck worker
+    /// (no frontier movement for `timeout`) still fails fast. Tracking the
+    /// LOWEST observed outstanding — not the last — means concurrent enqueues
+    /// (which raise the count) cannot extend the deadline; only real
+    /// completions do.
+    ///
     /// - Parameters:
     ///   - pollInterval: Sleep between frontier polls. Defaults to 20 ms — short
     ///     enough that the latch releases promptly after the last `reply`, long
     ///     enough that the poll loop does not spin a core.
-    ///   - timeout: Upper bound on total wait. Defaults to 30 s. If both
-    ///     frontiers have not cleared by then, throws
-    ///     `QueueError.drainTimeout` rather than blocking forever — a stuck or
-    ///     crashed drain worker surfaces as an error, never a hang.
-    /// - Throws: `QueueError.drainTimeout` if the queue does not empty within
-    ///   `timeout`; any backend error from the frontier probes; or
+    ///   - timeout: Upper bound on the wait WITHOUT observed progress. Defaults
+    ///     to 30 s. If the outstanding count has neither cleared nor decreased
+    ///     for this long, throws `QueueError.drainTimeout` rather than blocking
+    ///     forever — a stuck or crashed drain worker surfaces as an error,
+    ///     never a hang.
+    /// - Throws: `QueueError.drainTimeout` if the queue makes no progress
+    ///   within `timeout`; any backend error from the frontier probes; or
     ///   `CancellationError` if the task is cancelled while sleeping.
     public func awaitDrain(
         pollInterval: Duration = .milliseconds(20),
         timeout: Duration = .seconds(30)
     ) async throws {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
+        var deadline = ContinuousClock.now.advanced(by: timeout)
+        var lowestOutstanding = Int.max
         while true {
             // Re-read both frontiers each iteration so concurrent drain-worker
             // progress (a job moving new/ → cur/ → done/) is observed live.
             let pending = try await backend.pendingCount()
             let inFlightCount = try await backend.inFlight().count
-            if pending == 0 && inFlightCount == 0 {
+            let outstanding = pending + inFlightCount
+            if outstanding == 0 {
                 return
+            }
+            if outstanding < lowestOutstanding {
+                // Progress: a job left the frontiers since the last low-water
+                // mark. Reset the no-progress deadline (see doc comment).
+                lowestOutstanding = outstanding
+                deadline = ContinuousClock.now.advanced(by: timeout)
             }
             if ContinuousClock.now >= deadline {
                 throw QueueError.drainTimeout(
@@ -291,19 +313,32 @@ public final class QueueKit: Sendable {
     /// as `drain(stream:)` scopes the claim. Counts `pendingCount(stream:)` plus
     /// the stream's slice of `inFlight()`; every job carries `streamID` so the
     /// filter is exact. Rust twin: `QueueKit::await_drain_for_stream`.
+    ///
+    /// PROGRESS-BASED deadline, exactly as the global `awaitDrain`: `timeout`
+    /// bounds the wait WITHOUT observed progress (the stream's outstanding
+    /// count dropping below its lowest observed value), not the total wait —
+    /// see the global overload's doc comment for the rationale.
     public func awaitDrain(
         stream: StreamID,
         pollInterval: Duration = .milliseconds(20),
         timeout: Duration = .seconds(30)
     ) async throws {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
+        var deadline = ContinuousClock.now.advanced(by: timeout)
+        var lowestOutstanding = Int.max
         while true {
             // Re-read both frontiers each iteration; count only THIS stream.
             let pending = try await backend.pendingCount(stream: stream)
             let inFlightCount = try await backend.inFlight()
                 .filter { $0.streamID == stream }.count
-            if pending == 0 && inFlightCount == 0 {
+            let outstanding = pending + inFlightCount
+            if outstanding == 0 {
                 return
+            }
+            if outstanding < lowestOutstanding {
+                // Progress: a job left this stream's frontiers. Reset the
+                // no-progress deadline (see the global overload's doc comment).
+                lowestOutstanding = outstanding
+                deadline = ContinuousClock.now.advanced(by: timeout)
             }
             if ContinuousClock.now >= deadline {
                 throw QueueError.drainTimeout(
