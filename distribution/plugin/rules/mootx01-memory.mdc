@@ -1,0 +1,47 @@
+---
+description: Use MOOTx01 automatically for long-term memory, prior decisions, project continuity, source-backed recall, substrate analysis, and durable writeback.
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# MOOTx01 Automatic Memory
+
+Use MOOTx01 as an active memory and reasoning substrate, not as a passive wiki.
+
+## MOOT Reflex
+
+Before answering any request that may depend on prior context, user preferences,
+project history, past decisions, continuity, or remembered source material, query
+MOOTx01 first.
+
+After durable decisions, corrections, preferences, milestones, or useful project
+facts, write them back with the appropriate MOOTx01 tool.
+
+If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
+happened unless you actually queried it.
+
+## Automatic Triggers
+
+Reach for MOOTx01 when the user asks about prior decisions, preferences,
+history, source material, continuity, summaries, comparisons, contradictions,
+or durable memory.
+
+## Required Behavior
+
+- Check availability with `moot_estate_ping` and orient with `moot_estate_status` when memory may matter.
+- Use `moot_read_journal` to resume prior work.
+- Use `moot_memory_search` for broad recall.
+- Use `moot_recall_precise` for exact paths, versions, names, dates, numbers, and near-duplicates.
+- Use `moot_recall_shaped` for associative, conceptual, or other fusion-steered recall.
+- Use `moot_recall_distilled` for compact factoid answers from the distilled tier.
+- Use `moot_fact_search` for structured facts.
+- Use `moot_list_lenses`, relevant `moot_lens_*` tools, or `moot_synthesize` for analysis.
+- File durable decisions with `moot_file_memory`.
+- File stable triples with `moot_file_fact`.
+- Link related memories with `moot_link_memories`.
+- Write session continuity with `moot_write_journal`.
+- Correct memory with confirm/update/withdraw/retire tools.
+- Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+
+If MOOTx01 is unavailable, disclose that and answer only from current context.

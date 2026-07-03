@@ -821,6 +821,19 @@ jobs:
           mkdir -p flat
           find . \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pkg' -o -name '*.exe' \) \
             | xargs -I{} cp {} flat/
+          # Stable version-less aliases for the website: asset names embed the
+          # version, so a hardcoded link breaks every release. These copies
+          # make .../releases/latest/download/mootx01-<platform>.<ext> a
+          # permanent URL. Added BEFORE checksum generation so the aliases are
+          # sealed by checksums.txt + the minisign signature like any other
+          # asset. Windows: winget is the primary web route, but the direct
+          # setup.exe link covers machines without App Installer (note: the
+          # exe is unsigned, so direct download trips SmartScreen; winget
+          # installs don't).
+          for f in flat/mootx01-*-macos-arm64.pkg;          do cp "$f" flat/mootx01-macos-arm64.pkg;          done
+          for f in flat/mootx01-*-macos-x86_64.pkg;         do cp "$f" flat/mootx01-macos-x86_64.pkg;         done
+          for f in flat/mootx01-*-windows-arm64-setup.exe;  do cp "$f" flat/mootx01-windows-arm64-setup.exe;  done
+          for f in flat/mootx01-*-windows-x86_64-setup.exe; do cp "$f" flat/mootx01-windows-x86_64-setup.exe; done
           cd flat
           sha256sum * > ../checksums.txt
 

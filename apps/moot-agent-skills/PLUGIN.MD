@@ -88,6 +88,26 @@ depends on it always being there.
 
 ---
 
+## Get It From a Marketplace
+
+You don't need this repo to install the plugin. It's published at
+[codedaptive/mootx01-plugin](https://github.com/codedaptive/mootx01-plugin):
+
+```
+claude plugin marketplace add codedaptive/mootx01-plugin
+claude plugin install mootx01@mootx01
+```
+
+Gemini CLI:
+
+```
+gemini extensions install https://github.com/codedaptive/mootx01-plugin
+```
+
+One thing to know: the plugin ships the configuration, not the program.
+Install the `mootx01` binary first (`brew install codedaptive/mootx01-ce/mootx01`
+or `winget install Codedaptive.MOOTx01`), or the memory server won't start.
+
 ## Quick Reference
 
 | | Mode 1: Server | Mode 2: Skills | Mode 3: Plugin |
