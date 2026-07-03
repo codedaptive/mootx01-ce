@@ -118,8 +118,20 @@ public enum NodeMotionLens {
         let nowMs = Int64((now.timeIntervalSince1970 * 1000.0).rounded()) & physicalMask
 
         // One drawer write emits several field entries sharing one HLC; volatility
-        // counts MUTATION MOMENTS, so fold over distinct HLCs.
-        var seenPhysical = Set<Int64>()
+        // counts MUTATION MOMENTS, so fold over distinct HLCs. The dedup key is
+        // the FULL HLC identity (physical, logical, node) — not the physical
+        // millisecond alone. Two mutations in the same millisecond (bulk import,
+        // bursty writes) are distinct HLCs differing only in logicalCount and must
+        // each contribute one volatility tick / event count; keying on physical
+        // alone collapsed same-ms events into one. The key uses the RAW
+        // (untruncated) physicalTime for identity; the 40-bit mask is only for
+        // the age math. secfix/ce-node-motion-hlc-dedup.
+        struct HLCKey: Hashable {
+            let physical: Int64
+            let logical: Int32
+            let node: Int32
+        }
+        var seenHLC = Set<HLCKey>()
         var volatility = 0.0
         var eventCount = 0
         var lastMs: Int64? = nil
@@ -127,7 +139,11 @@ public enum NodeMotionLens {
 
         for entry in entries where entry.rowID == rowID {
             let physical = entry.hlc.physicalTime & physicalMask
-            if seenPhysical.insert(physical).inserted {
+            if seenHLC.insert(HLCKey(
+                physical: entry.hlc.physicalTime,
+                logical: entry.hlc.logicalCount,
+                node: entry.hlc.nodeID
+            )).inserted {
                 var dtMs = nowMs - physical
                 if dtMs < 0 { dtMs += physicalMask + 1 }  // 40-bit wrap
                 let ageDays = Double(dtMs) / msPerDay
