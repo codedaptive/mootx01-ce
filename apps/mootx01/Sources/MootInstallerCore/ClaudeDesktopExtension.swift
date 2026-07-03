@@ -32,6 +32,12 @@ public enum ClaudeDesktopExtension {
     /// Stable extension id. Every install path (this installer, a .mcpb
     /// double-click, the marketplace) MUST use the same id/name so Desktop
     /// collapses them to a single entry rather than showing duplicates.
+    ///
+    /// NOT arbitrary: Desktop derives sideloaded ids as
+    /// `local.mcpb.<sanitized author.name>.<sanitized manifest.name>` and its
+    /// install-from-file path rejects a mismatch — so the manifest's
+    /// author/name below must never change without re-deriving this id
+    /// (verified against the Desktop app's own install code, 2026-07-03).
     public static let id = "local.mcpb.codedaptive.mootx01"
 
     /// Install (or refresh) the Desktop extension. Returns false if Claude

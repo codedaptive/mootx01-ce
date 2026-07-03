@@ -24,6 +24,14 @@ use std::path::Path;
 /// Stable extension id. Every install path (this installer, a `.mcpb`
 /// double-click, the marketplace) MUST use the same id/name so Desktop
 /// collapses them to a single entry rather than showing duplicates.
+///
+/// NOT arbitrary: Desktop derives ids for sideloaded bundles as
+/// `local.mcpb.<sanitized author.name>.<sanitized manifest.name>` (lowercased,
+/// spaces→dashes) and its install-from-file path REJECTS an id that doesn't
+/// match ("Extension identity mismatch"). author.name "Codedaptive" + name
+/// "mootx01" derive exactly this constant — so the manifest's author/name
+/// below must never change without re-deriving this id (verified against the
+/// Desktop app's own install code, Windows 1.14271, 2026-07-03).
 pub const EXTENSION_ID: &str = "local.mcpb.codedaptive.mootx01";
 
 /// Install (or refresh) the Desktop extension for `client` (claude-desktop).
@@ -36,7 +44,10 @@ pub fn install(
     version: &str,
 ) -> std::io::Result<bool> {
     // The Claude data dir is the directory that holds claude_desktop_config.json
-    // — the same dir Desktop keeps its extension registry in.
+    // — the same dir Desktop keeps its extension registry in. On Windows this
+    // resolution reads %LOCALAPPDATA% (MSIX Store layout), NOT `home` — which is
+    // why the unit test calls `install_into` with an explicit dir instead of
+    // this resolver (a temp `home` would not stop a write to the live registry).
     let config = match client.config_path(home) {
         Some(c) => c,
         None => return Ok(false),
@@ -48,6 +59,14 @@ pub fn install(
     if !claude_dir.exists() {
         return Ok(false);
     }
+    install_into(&claude_dir, binary_path, version)?;
+    Ok(true)
+}
+
+/// The three writes, into an explicit Claude data dir. Split from `install` so
+/// the writes are testable hermetically on every platform (no env-dependent
+/// path resolution).
+fn install_into(claude_dir: &Path, binary_path: &str, version: &str) -> std::io::Result<()> {
 
     // Manifest — display_name matches `name` ("mootx01") so this collapses with
     // the raw mcpServers entry install also writes.
@@ -118,7 +137,7 @@ pub fn install(
         serde_json::to_vec(&json!({ "isEnabled": true }))?,
     )?;
 
-    Ok(true)
+    Ok(())
 }
 
 /// ISO8601 UTC timestamp `yyyy-mm-ddTHH:MM:SS.000Z`, dependency-free (the crate
@@ -148,13 +167,15 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::clients;
 
     #[test]
     fn writes_manifest_registry_and_enabled_flag_preserving_others() {
+        // Hermetic: call install_into with an explicit temp dir. Do NOT go
+        // through install() here — its Windows resolver reads %LOCALAPPDATA%,
+        // and on a Windows machine with Claude Desktop installed the test would
+        // write a bogus entry into the user's LIVE extension registry.
         let tmp = std::env::temp_dir().join(format!("moot-ext-{}", std::process::id()));
-        // Mirror the macOS Claude data-dir layout config_path() resolves to.
-        let claude = tmp.join("Library").join("Application Support").join("Claude");
+        let claude = tmp.join("Claude");
         std::fs::create_dir_all(&claude).unwrap();
         // A pre-existing extension MUST survive the merge.
         std::fs::write(
@@ -163,12 +184,7 @@ mod tests {
         )
         .unwrap();
 
-        let client = clients::supported()
-            .into_iter()
-            .find(|c| c.id == "claude-desktop")
-            .expect("claude-desktop client");
-        let wrote = install(&client, &tmp, "/opt/mootx01/bin/mootx01", "1.0.11").unwrap();
-        assert!(wrote, "should write when the Claude dir exists");
+        install_into(&claude, "/opt/mootx01/bin/mootx01", "1.0.11").unwrap();
 
         // 1. manifest — real command path, name collapses with raw wiring.
         let mpath = claude
