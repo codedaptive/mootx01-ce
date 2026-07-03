@@ -117,6 +117,25 @@ begin
             (Pos(';' + Param + '\;', ';' + OrigPath + ';') = 0);
 end;
 
+// When the user clicks Finish with "Run MOOTx01 setup now" checked, warn
+// them a terminal is about to open: console windows spawned at wizard close
+// get no foreground activation on some Windows builds and land BEHIND other
+// windows (observed pop-under even via `cmd /c start`), invisibly parked at
+// the interactive client picker. The modal makes the user go find it.
+// Gated on WizardSilent so /SILENT and /VERYSILENT never hang on a MsgBox
+// (a Winget validation-VM requirement) — skipifsilent skips the run anyway.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpFinished) and (not WizardSilent) and
+     (WizardForm.RunList.Items.Count > 0) and WizardForm.RunList.Checked[0] then
+    MsgBox('A terminal window will now open to finish MOOTx01 setup ' +
+           '(connect your AI clients).' + #13#10 + #13#10 +
+           'Continue in the terminal - it may open BEHIND other windows; ' +
+           'check the taskbar for a new terminal.',
+           mbInformation, MB_OK);
+end;
+
 // On uninstall, notify the user their data was preserved — but only in
 // interactive mode. UninstallSilent (NOT WizardSilent, which per the Inno
 // docs reports whether *Setup* ran silently) is the documented function for
