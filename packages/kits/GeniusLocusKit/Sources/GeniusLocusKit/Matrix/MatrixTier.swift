@@ -547,17 +547,26 @@ public struct MatrixTier: Sendable, Equatable, Codable {
                        nodeID: entry.hlc.nodeID)
         }
 
-        // INCREMENTAL PRUNE (launch cost): drop entries older than one window
-        // before the watermark — they can never be inside a post-watermark
-        // entry's window, so they emit no delta (exact, not approximate). The
-        // watermark and the entry clock are both in eventTime space (the
-        // persisted temporalWatermarkHLC is a max over substituted clocks), so
-        // the cutoff is consistent. A full rebuild (startWatermark == .zero)
-        // keeps every entry (cutoff Int64.min); this bounds the fold's O(N)
-        // buffer scan to the tail instead of re-folding the whole log per launch.
+        // INCREMENTAL PRUNE (launch cost): drop entries that cannot pair with
+        // any post-watermark entry inside the fold window. The fold keeps an
+        // earlier entry S as a source for a later entry T whenever
+        //   floor((T.clock − S.clock) / 60_000) <= windowMinutes
+        // i.e. the clock delta is at most windowMinutes*60_000 + 59_999 ms
+        // (the last ms before the integer division exceeds the window).
+        // Therefore S can legitimately be as early as
+        //   watermark.physicalTime − windowMinutes*60_000 − 59_999
+        // which equals watermark − ((windowMinutes+1)*60_000 − 1).
+        //
+        // The previous cutoff (watermark − windowMinutes*60_000) was too strict
+        // by up to 59_999 ms, silently dropping sources the fold would keep and
+        // missing T-matrix cells — breaking the incremental == fullRebuild
+        // invariant. This is Finding #4 in the conformance audit (codex 98a790c2).
+        //
+        // A full rebuild (startWatermark == .zero) keeps every entry
+        // (cutoff Int64.min) so the O(N) buffer scan covers the whole log.
         let temporalCutoffMs: Int64 = startWatermark == .zero
             ? Int64.min
-            : startWatermark.physicalTime - Int64(Self.temporalWindowMinutes) * 60_000
+            : startWatermark.physicalTime - ((Int64(Self.temporalWindowMinutes) + 1) * 60_000 - 1)
         // Build (originalIndex, clock, coords); the index is a deterministic
         // secondary sort key so two rows with an identical substituted clock
         // (same eventTime + logical + node) order identically on both ports.
@@ -777,11 +786,48 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         Self.applyCaptureEntries(into: &self, entries: newEntries)
 
         // T — fold from the persisted temporal watermark (eventTime space,
-        // ADR-004); the fold emits only new cross-pairs, merged additively.
+        // ADR-004), but first check for backdated eventTime entries among the
+        // new-since-snapshot rows. A "new" row (capture HLC > foCursor, i.e. the
+        // field cursor captured above) can carry an eventTime before the persisted
+        // temporalWatermarkHLC — a common pattern in bulk historical imports.
+        // The incremental fold identifies "new" entries by their substituted clock
+        // > temporalWatermarkHLC, so a backdated row would be wrongly skipped as
+        // a "pre-watermark" entry, producing no deltas and diverging from the full
+        // rebuild. This is Finding #3 in the conformance audit (codex 7af07c48).
+        //
+        // Conservative fix: if any new capture/expunge entry has a substituted
+        // temporal clock <= temporalWatermarkHLC, fall back to a full temporal
+        // rebuild (startWatermark = .zero) and REPLACE temporalCausality with
+        // the result. Otherwise (the streaming case, where eventTime ≈ captureTime
+        // and entry ordering is monotonic) keep the fast incremental fold.
+        let tWatermark = temporalWatermarkHLC
+        let newCaptureRows = newEntries.filter {
+            $0.verb == .capture || $0.verb == .expunge
+        }
+        let hasBackdated = newCaptureRows.contains { entry in
+            let subClock: HLC
+            if let evMs = eventTimes[entry.rowID] {
+                subClock = HLC(physicalTime: evMs,
+                               logicalCount: entry.hlc.logicalCount,
+                               nodeID: entry.hlc.nodeID)
+            } else {
+                subClock = entry.hlc
+            }
+            return subClock <= tWatermark
+        }
+        let tStartWatermark: HLC = hasBackdated ? .zero : tWatermark
         let tDelta = MatrixTier.rebuildTemporal(
-            from: log, startWatermark: temporalWatermarkHLC, eventTimes: eventTimes)
-        for (key, count) in tDelta.temporalCausality {
-            addT(key: key, delta: count)
+            from: log, startWatermark: tStartWatermark, eventTimes: eventTimes)
+        if hasBackdated {
+            // Full T rebuild: replace all existing T cells rather than merging,
+            // because the rebuild result already encodes every cross-pair from
+            // the complete log (including pairs the snapshot had accumulated).
+            temporalCausality = tDelta.temporalCausality
+        } else {
+            // Incremental fold: merge only the new cross-pairs additively.
+            for (key, count) in tDelta.temporalCausality {
+                addT(key: key, delta: count)
+            }
         }
         if tDelta.temporalWatermarkHLC > temporalWatermarkHLC {
             temporalWatermarkHLC = tDelta.temporalWatermarkHLC

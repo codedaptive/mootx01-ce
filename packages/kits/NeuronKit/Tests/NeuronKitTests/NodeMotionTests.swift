@@ -62,6 +62,37 @@ struct NodeMotionFoldTests {
         #expect(m.reanchored == false)
     }
 
+    // Regression for secfix/ce-node-motion-hlc-dedup: two mutations in the SAME
+    // physical millisecond are distinct HLCs (logicalCount differs) and must each
+    // count as a mutation moment. The physical-only dedup key collapsed them into
+    // one event. Field entries sharing ONE full HLC (one write, many fields) must
+    // still collapse to a single event. Mirrors Rust
+    // `same_millisecond_distinct_hlcs_are_distinct_events`.
+    @Test("same-millisecond distinct HLCs are distinct mutation moments")
+    func sameMillisecondDistinctHLCs() {
+        let day: Int64 = 86_400_000
+        let now = Date(timeIntervalSince1970: Double(8 * day) / 1000.0)
+        func entryLC(ms: Int64, lc: Int32, fieldPath: String) -> UnifiedAuditEntry {
+            UnifiedAuditEntry(
+                tier: .locus,
+                hlc: HLC(physicalTime: ms, logicalCount: lc, nodeID: 1),
+                verb: .mutate, rowID: row, fieldPath: fieldPath,
+                beforeValue: .null, afterValue: .bitmap(1), originRowID: nil)
+        }
+        let entries = [
+            // Write A: two field entries sharing one HLC → ONE event.
+            entryLC(ms: 8 * day, lc: 0, fieldPath: "operational"),
+            entryLC(ms: 8 * day, lc: 0, fieldPath: "adjective"),
+            // Write B: same millisecond, logicalCount bumped → a SECOND event.
+            entryLC(ms: 8 * day, lc: 1, fieldPath: "operational"),
+        ]
+        let m = NodeMotionLens.fold(entries: entries, rowID: row, now: now, lambdaPerDay: 0.5)
+        #expect(m.eventCount == 2,
+                "same-ms writes with distinct logicalCount must count separately; intra-write field entries sharing one HLC must still collapse")
+        // Both events are zero-age → volatility = 2.0 exactly.
+        #expect(abs(m.volatility - 2.0) < 1e-9)
+    }
+
     @Test("a node that never reanchors reports reanchored = false")
     func stableTopic() {
         let day: Int64 = 86_400_000

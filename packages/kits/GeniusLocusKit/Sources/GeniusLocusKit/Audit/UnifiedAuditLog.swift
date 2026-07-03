@@ -286,6 +286,23 @@ public struct UnifiedAuditEntry: Hashable, Sendable, Codable {
         )
         return UnifiedAuditSHA256.hash(bytes)
     }
+
+    /// Returns true if this entry's `id` matches the SHA-256 of its
+    /// wire encoding — i.e., the entry is self-consistent. A legitimate
+    /// locally-produced entry always passes; an externally-supplied entry
+    /// whose id was crafted to collide with a different entry fails.
+    ///
+    /// Used by `UnifiedAuditLog` on every ingress path (add, merge,
+    /// decode) as the structural defence against same-id/different-content
+    /// CRDT forgery (codex a477800).
+    fileprivate func contentIDMatches() -> Bool {
+        let expected = Self.computeID(
+            tier: tier, hlc: hlc, verb: verb, rowID: rowID,
+            fieldPath: fieldPath, beforeValue: beforeValue,
+            afterValue: afterValue, originRowID: originRowID
+        )
+        return expected == id
+    }
 }
 
 // MARK: - G-Set log
@@ -302,37 +319,67 @@ public struct UnifiedAuditEntry: Hashable, Sendable, Codable {
 /// The log is a value type (struct) so callers may store it inside an
 /// actor or hand snapshots across actor boundaries cheaply. Mutation
 /// goes through `add` / `merge` only; reads are pure projections.
-public struct UnifiedAuditLog: Sendable, Codable, Equatable {
+public struct UnifiedAuditLog: Sendable, Equatable {
 
     /// Backing store keyed by entry content hash for O(1) dedupe.
     /// `[UInt8]` keys are wrapped through `HashKey` for use in a
     /// dictionary; the dictionary is the canonical G-Set.
     public private(set) var entries: [UnifiedAuditEntryKey: UnifiedAuditEntry]
 
+    /// Initialise from an array of entries. Each entry is validated via
+    /// `add`; forged entries (id does not match SHA-256 of wire encoding)
+    /// are silently dropped. Honest locally-constructed entries always
+    /// pass because `UnifiedAuditEntry.init` computes the id itself.
     public init(entries: [UnifiedAuditEntry] = []) {
-        var store: [UnifiedAuditEntryKey: UnifiedAuditEntry] = [:]
-        for e in entries {
-            store[UnifiedAuditEntryKey(id: e.id)] = e
-        }
-        self.entries = store
+        self.entries = [:]
+        for e in entries { add(e) }
     }
 
     public var count: Int { entries.count }
     public var isEmpty: Bool { entries.isEmpty }
 
-    /// Add a single entry. Idempotent.
+    /// Add a single entry. Idempotent for honest entries.
+    ///
+    /// Security (codex a477800): the entry's content id is recomputed
+    /// from its wire encoding on every call. If the recomputed id does
+    /// not match `entry.id`, the entry is rejected with an error-level
+    /// log and not inserted. This prevents a peer supplying a forged
+    /// (same-id, different-content) entry from overwriting an honest
+    /// one in the G-Set, which would break CRDT convergence and
+    /// constitute audit forgery. Federation peer-log merge relies on
+    /// this defence; any future non-local audit ingress must route
+    /// through `add` or `merge` to obtain it.
     public mutating func add(_ entry: UnifiedAuditEntry) {
+        guard entry.contentIDMatches() else {
+            Self.logger.error(
+                "audit entry rejected on add: id does not match SHA-256 of wire encoding (codex a477800)"
+            )
+            return
+        }
         entries[UnifiedAuditEntryKey(id: entry.id)] = entry
     }
 
-    /// Add many entries. Equivalent to repeated `add`.
+    /// Add many entries. Equivalent to repeated `add`; each entry is
+    /// individually validated.
     public mutating func add<S: Sequence>(contentsOf seq: S) where S.Element == UnifiedAuditEntry {
         for e in seq { add(e) }
     }
 
     /// CRDT join. Merging two G-Sets is set union over entry IDs.
+    ///
+    /// FEDERATION BOUNDARY NOTE: This method is the structural gate
+    /// that future federation peer-log merge relies on. Every entry
+    /// from a peer-supplied log must route through `merge` (or `add`)
+    /// to obtain the content-id verification below. Do not add
+    /// alternative ingress paths that bypass this check.
+    ///
+    /// Each entry's SHA-256 content id is recomputed before insertion.
+    /// Forged or corrupted entries are rejected, preserving CRDT
+    /// convergence and audit integrity (codex a477800).
     public mutating func merge(_ other: UnifiedAuditLog) {
-        for (k, v) in other.entries { entries[k] = v }
+        for (_, v) in other.entries {
+            add(v)  // validated ingress — forged entries dropped
+        }
     }
 
     /// All entries in HLC order, regardless of tier. Stable secondary
@@ -410,6 +457,44 @@ public struct UnifiedAuditEntryKey: Hashable, Sendable, Codable {
 enum UnifiedAuditSHA256 {
     static func hash(_ bytes: [UInt8]) -> [UInt8] {
         return SHA256.hash(bytes)
+    }
+}
+
+// MARK: - Codable (custom — validates entry content IDs on every path)
+//
+// The synthesised `Codable` for `[UnifiedAuditEntryKey: UnifiedAuditEntry]`
+// (a non-String-keyed dictionary) encodes as alternating-key-value pairs and
+// decodes directly into the backing store, bypassing `add`. Custom encode /
+// decode is therefore required so the security verification in `add` runs for
+// any entry that enters the log via the serialisation path as well (codex a477800).
+//
+// Wire format: `{"entries": [<UnifiedAuditEntry>, ...]}` — array sorted by
+// entry id (byte-lexicographic) for determinism. Mirrors the `GSetAuditLog`
+// wire shape in SubstrateTypes.
+
+extension UnifiedAuditLog: Codable {
+
+    private enum CodingKeys: String, CodingKey { case entries }
+
+    /// Decode a log from the wire format, validating every entry's
+    /// SHA-256 content id on ingress. Forged or corrupted entries are
+    /// silently dropped; the caller receives only honest entries.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let entryArray = try container.decode([UnifiedAuditEntry].self, forKey: .entries)
+        self.entries = [:]
+        for e in entryArray {
+            add(e)  // each entry verified via content-id check
+        }
+    }
+
+    /// Encode the log as a sorted array of entries for determinism and
+    /// human readability. The backing dictionary's iteration order is
+    /// unspecified; sorting by id gives a stable wire encoding.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        let sorted = entries.values.sorted { Self.compareBytes($0.id, $1.id) }
+        try container.encode(sorted, forKey: .entries)
     }
 }
 

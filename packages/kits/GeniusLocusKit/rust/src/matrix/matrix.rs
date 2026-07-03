@@ -438,14 +438,26 @@ impl MatrixTier {
             }
         };
 
-        // INCREMENTAL PRUNE (launch cost): drop entries older than one window
-        // before the watermark — they emit no delta. The watermark and the entry
-        // clock are both in event_time space, so the cutoff is consistent. A full
-        // rebuild (start_watermark == ZERO) keeps every entry (cutoff i64::MIN).
+        // INCREMENTAL PRUNE (launch cost): drop entries that cannot pair with
+        // any post-watermark entry inside the fold window. The fold keeps an
+        // earlier entry S as a source for a later entry T whenever
+        //   (T.clock − S.clock) / 60_000 <= window_minutes (integer division)
+        // i.e. the clock delta is at most window_minutes*60_000 + 59_999 ms.
+        // Therefore S can legitimately be as early as
+        //   watermark.physical_time − window_minutes*60_000 − 59_999
+        // which equals watermark − ((window_minutes+1)*60_000 − 1).
+        //
+        // The previous cutoff (watermark − window_minutes*60_000) was too strict
+        // by up to 59_999 ms, silently dropping sources the fold would keep and
+        // missing T-matrix cells — breaking the incremental == full_rebuild
+        // invariant. This is Finding #4 in the conformance audit (codex 98a790c2).
+        //
+        // A full rebuild (start_watermark == ZERO) keeps every entry (i64::MIN).
         let temporal_cutoff_ms: i64 = if start_watermark == HLC::ZERO {
             i64::MIN
         } else {
-            start_watermark.physical_time - (Self::TEMPORAL_WINDOW_MINUTES as i64) * 60_000
+            start_watermark.physical_time
+                - ((Self::TEMPORAL_WINDOW_MINUTES as i64 + 1) * 60_000 - 1)
         };
         // Build (original_index, clock, coords); the index is a deterministic
         // secondary sort key so two rows with an identical substituted clock
@@ -602,11 +614,51 @@ impl MatrixTier {
         Self::apply_capture_entries(self, new_entries);
 
         // T — fold from the persisted temporal watermark (event_time space,
-        // ADR-004); the fold emits only new cross-pairs, merged additively.
-        let t_delta =
-            MatrixTier::rebuild_temporal_from(log, self.temporal_watermark_hlc, event_times);
-        for (key, count) in t_delta.temporal_causality {
-            add_signed(&mut self.temporal_causality, key, count);
+        // ADR-004), but first check for backdated event_time entries among the
+        // new-since-snapshot rows. A "new" row (capture HLC > fo_cursor) can
+        // carry an event_time before the persisted temporal_watermark_hlc — a
+        // common pattern in bulk historical imports. The incremental fold
+        // identifies "new" entries by their substituted clock > watermark, so a
+        // backdated row would be wrongly skipped and no T delta emitted, diverging
+        // from the full rebuild. This is Finding #3 in the conformance audit
+        // (codex 7af07c48).
+        //
+        // Conservative fix: if any new capture/expunge entry has a substituted
+        // temporal clock <= temporal_watermark_hlc, fall back to a full temporal
+        // rebuild (start_watermark = ZERO) and REPLACE temporal_causality with
+        // the result. Otherwise (the streaming case, monotonic event_time) keep
+        // the fast incremental fold and merge additively.
+        let t_watermark = self.temporal_watermark_hlc;
+        let has_backdated = log
+            .ordered_entries()
+            .into_iter()
+            .filter(|e| e.hlc > fo_cursor)
+            .filter(|e| {
+                matches!(e.verb, UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge)
+            })
+            .any(|e| {
+                let sub_clock = match event_times.get(&e.row_id) {
+                    Some(&ev) => HLC {
+                        physical_time: ev,
+                        logical_count: e.hlc.logical_count,
+                        node_id: e.hlc.node_id,
+                    },
+                    None => e.hlc,
+                };
+                sub_clock <= t_watermark
+            });
+        let t_start = if has_backdated { HLC::ZERO } else { t_watermark };
+        let t_delta = MatrixTier::rebuild_temporal_from(log, t_start, event_times);
+        if has_backdated {
+            // Full T rebuild: replace all existing T cells rather than merging,
+            // because the rebuild result already encodes every cross-pair from
+            // the complete log (including pairs the snapshot had accumulated).
+            self.temporal_causality = t_delta.temporal_causality;
+        } else {
+            // Incremental fold: merge only the new cross-pairs additively.
+            for (key, count) in t_delta.temporal_causality {
+                add_signed(&mut self.temporal_causality, key, count);
+            }
         }
         if t_delta.temporal_watermark_hlc > self.temporal_watermark_hlc {
             self.temporal_watermark_hlc = t_delta.temporal_watermark_hlc;

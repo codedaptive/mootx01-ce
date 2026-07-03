@@ -122,13 +122,13 @@ impl<'a> PalaceBridge<'a> {
     ///
     /// `mode`: the encode SPEED (drain QoS) for the import's background encoding —
     /// `EncodeSpeed::Foreground` (drain hard) or `EncodeSpeed::Background` (yield
-    /// for very large imports). SPEED only — the WRITE strategy is chosen
-    /// automatically by source size (see `import_policy`): a source at or below
-    /// the threshold is written in one bulk `capture_batch` transaction; a larger
-    /// source streams via per-item capture so no single transaction holds the
-    /// write lock across hundreds of thousands of rows. KG entities, triples, and
-    /// tunnels are always imported per-item (they require individual post-capture
-    /// work).
+    /// for very large imports). SPEED only — the WRITE strategy is fixed (not
+    /// caller-chosen): every source is written bulk via `capture_batch`, in
+    /// `import_policy::BULK_WINDOW`-sized transaction windows so no single
+    /// transaction holds the write lock across an arbitrarily large source (the
+    /// per-item stream path is disabled — see the marker in the body). KG
+    /// entities, triples, and tunnels are always imported per-item (they require
+    /// individual post-capture work).
     pub fn import_palace(
         &mut self,
         palace_root: &Path,
@@ -149,6 +149,12 @@ impl<'a> PalaceBridge<'a> {
         let (existing_lineage_ids, existing_wings, existing_content_by_lineage) =
             self.existing_drawer_state(handle, now)?;
         let existing_sensitivity = self.existing_sensitivity_by_lineage(handle, now)?;
+        // Exportability snapshot: compared against the would-be exportability
+        // BEFORE the content-idempotent skip so a public→private label change
+        // on unchanged content is not silently suppressed (security fix codex
+        // 7c952932). Ordered newest-first; first-wins gives the most recently
+        // imported exportability per lineage — the value a reimport would supersede.
+        let existing_exportability = self.existing_exportability_by_lineage(handle, now)?;
         let tombstoned_lineage_ids = self.existing_tombstoned_lineage_ids(handle, now)?;
         // Include tunnel source wings in the signature scan so re-imports
         // correctly detect tunnels created by a prior import.
@@ -221,7 +227,8 @@ impl<'a> PalaceBridge<'a> {
             //       }
             //   }
             {
-                // Bulk path: collect all frames, then submit in one transaction.
+                // Bulk path: collect all frames, then submit in
+                // import_policy::BULK_WINDOW-sized transaction windows.
                 let mut batch_frames: Vec<(CaptureFrame, bool /* is_update */)> = Vec::new();
                 for (embedding_id, metadata, is_closet) in &all_rows {
                     if let Some((frame, is_update)) = self.build_chroma_frame(
@@ -232,6 +239,7 @@ impl<'a> PalaceBridge<'a> {
                         &existing_sensitivity,
                         &tombstoned_lineage_ids,
                         &existing_content_by_lineage,
+                        &existing_exportability,
                         now,
                         &mut report,
                     ) {
@@ -239,18 +247,29 @@ impl<'a> PalaceBridge<'a> {
                     }
                 }
                 if !batch_frames.is_empty() {
-                    let frames: Vec<CaptureFrame> = batch_frames.iter().map(|(f, _)| f.clone()).collect();
-                    // `now` (wall_now, ADR-023) is epoch-MILLISECONDS — the same
-                    // unit capture, the stream path, and the KG paths all expect —
-                    // so it is passed directly with no conversion.
-                    self.coordinator
-                        .capture_batch(handle, frames, now)
-                        .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
-                    for (_, is_update) in &batch_frames {
-                        if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
-                        report.fdc_unclassified += 1;
-                        processed += 1;
-                        if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
+                    // Submit in BULK_WINDOW-sized windows — one transaction per
+                    // window — so no single transaction holds the write lock (or
+                    // the classified in-memory batch) across an arbitrarily large
+                    // source (codex 26c7a364). A source at or under the window is
+                    // exactly one transaction, byte-identical to the pre-window
+                    // behavior. Report/progress bookkeeping advances per committed
+                    // window, so a mid-import failure reports only rows that
+                    // actually landed.
+                    for window in batch_frames.chunks(crate::import_policy::BULK_WINDOW) {
+                        let frames: Vec<CaptureFrame> =
+                            window.iter().map(|(f, _)| f.clone()).collect();
+                        // `now` (wall_now, ADR-023) is epoch-MILLISECONDS — the same
+                        // unit capture, the stream path, and the KG paths all expect —
+                        // so it is passed directly with no conversion.
+                        self.coordinator
+                            .capture_batch(handle, frames, now)
+                            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                        for (_, is_update) in window {
+                            if *is_update { report.drawers_updated += 1; } else { report.drawers_written += 1; }
+                            report.fdc_unclassified += 1;
+                            processed += 1;
+                            if processed % 10 == 0 { if let Some(p) = &progress { p(processed, total); } }
+                        }
                     }
                 }
             }
@@ -410,6 +429,7 @@ impl<'a> PalaceBridge<'a> {
         existing_sensitivity: &HashMap<Uuid, AdjectiveSensitivity>,
         tombstoned_lineage_ids: &HashSet<Uuid>,
         existing_content_by_lineage: &HashMap<Uuid, String>,
+        existing_exportability: &HashMap<Uuid, AdjectiveExportability>,
         now: i64,
         report: &mut ImportReport,
     ) -> Option<(CaptureFrame, bool /* is_update */)> {
@@ -432,12 +452,26 @@ impl<'a> PalaceBridge<'a> {
         } else {
             requested
         };
-        // Content-idempotent dedup: skip only when content is unchanged AND no
-        // sensitivity upgrade is pending.
+        // Derive exportability BEFORE the content-idempotent skip so a
+        // public→private label change on unchanged content is not suppressed
+        // (security fix codex 7c952932: exportability was previously derived
+        // only after the skip, so an exportability-only change was invisible
+        // to the guard and the stale public bit remained in the estate).
+        let would_be_exportability =
+            import_exportability(metadata.get("exportability").map(String::as_str), floored);
+        // Content-idempotent dedup: skip only when content is unchanged, no
+        // sensitivity upgrade is pending, AND exportability is unchanged. A
+        // public→private change must not be suppressed — it leaves stale public
+        // bits that bypass the default bulk-export policy.
         let existing_tier_raw = existing_sensitivity.get(&lineage_id).map(|s| s.raw_value());
         let is_sensitivity_upgrade = existing_tier_raw.map(|r| floored.raw_value() > r).unwrap_or(false);
+        let is_exportability_change = existing_exportability
+            .get(&lineage_id)
+            .map(|e| *e != would_be_exportability)
+            .unwrap_or(false);
         if existing_content_by_lineage.get(&lineage_id).map(|s| s.as_str()) == Some(content)
             && !is_sensitivity_upgrade
+            && !is_exportability_change
         {
             report.drawers_skipped_unchanged += 1;
             return None;
@@ -457,8 +491,8 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = floored;
-        frame.exportability =
-            import_exportability(metadata.get("exportability").map(String::as_str), floored);
+        // Re-use the exportability derived above (before the skip check).
+        frame.exportability = would_be_exportability;
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
@@ -491,6 +525,7 @@ impl<'a> PalaceBridge<'a> {
         existing_sensitivity: &HashMap<Uuid, AdjectiveSensitivity>,
         tombstoned_lineage_ids: &HashSet<Uuid>,
         existing_content_by_lineage: &HashMap<Uuid, String>,
+        existing_exportability: &HashMap<Uuid, AdjectiveExportability>,
         now: i64,
         report: &mut ImportReport,
     ) -> Result<(), VaultKitError> {
@@ -525,12 +560,25 @@ impl<'a> PalaceBridge<'a> {
             requested
         };
 
-        // Guard 2: content-idempotent dedup — skip only when BOTH the content is
-        // unchanged AND no sensitivity upgrade is pending.
+        // Derive exportability BEFORE the content-idempotent skip so a
+        // public→private label change on unchanged content is not suppressed
+        // (security fix codex 7c952932). Mirrors build_chroma_frame.
+        let would_be_exportability =
+            import_exportability(metadata.get("exportability").map(String::as_str), floored);
+
+        // Guard 2: content-idempotent dedup — skip only when content is unchanged,
+        // no sensitivity upgrade is pending, AND exportability is unchanged. A
+        // public→private change must not be suppressed — it leaves stale public
+        // bits that bypass the default bulk-export policy.
         let existing_tier_raw = existing_sensitivity.get(&lineage_id).map(|s| s.raw_value());
         let is_sensitivity_upgrade = existing_tier_raw.map(|r| floored.raw_value() > r).unwrap_or(false);
+        let is_exportability_change = existing_exportability
+            .get(&lineage_id)
+            .map(|e| *e != would_be_exportability)
+            .unwrap_or(false);
         if existing_content_by_lineage.get(&lineage_id).map(|s| s.as_str()) == Some(content)
             && !is_sensitivity_upgrade
+            && !is_exportability_change
         {
             report.drawers_skipped_unchanged += 1;
             return Ok(());
@@ -557,8 +605,8 @@ impl<'a> PalaceBridge<'a> {
             EMBEDDING_MODEL_ID,
         );
         frame.sensitivity = floored;
-        frame.exportability =
-            import_exportability(metadata.get("exportability").map(String::as_str), floored);
+        // Re-use the exportability derived above (before the skip check).
+        frame.exportability = would_be_exportability;
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
@@ -931,6 +979,51 @@ impl<'a> PalaceBridge<'a> {
         Ok(map)
     }
 
+    /// Snapshot of the most recently imported exportability per lineage, used by
+    /// the content-idempotent skip guard to detect exportability-only changes
+    /// (e.g. public → private) that must not be suppressed.
+    ///
+    /// Uses the same recall frame as `existing_sensitivity_by_lineage`. Ordered
+    /// newest-first (`ByCaptureTimeDesc`); first-wins (via `entry().or_insert`)
+    /// gives the most recent exportability per lineage — the value a reimport
+    /// would supersede. Mirrors Swift `PalaceBridge.existingExportabilityByLineage`.
+    fn existing_exportability_by_lineage(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<HashMap<Uuid, AdjectiveExportability>, VaultKitError> {
+        let frame = RecallFrame {
+            filter_chain: vec![
+                Filter::CurrentlyBelieve,
+                Filter::Any(vec![
+                    Filter::UserConfirmed,
+                    Filter::Unconfirmed,
+                    Filter::AutomatedConfirmedOnly,
+                ]),
+                Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+                // Explicit ceiling so restricted/secret drawers are visible;
+                // without it the evaluator's implicit floor hides them.
+                Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
+            ],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(10_000_000),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = self
+            .coordinator
+            .recall(handle, frame, now)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let mut map: HashMap<Uuid, AdjectiveExportability> = HashMap::new();
+        for d in drawers {
+            // First-wins (newest-first ordering) gives the most recent
+            // exportability per lineage — the value a reimport would supersede.
+            map.entry(d.lineage_id).or_insert_with(|| d.exportability());
+        }
+        Ok(map)
+    }
+
     fn existing_tunnel_signatures(
         &self,
         handle: &EstateHandle,
@@ -1255,5 +1348,214 @@ mod tests {
             count_after_first,
             count_after_second
         );
+    }
+
+    // MARK: - Security regression: codex 7c952932 — exportability-only changes
+    // must not be suppressed by the content-idempotent skip guard.
+
+    /// Write a minimal chroma.sqlite3 at `<dir>/palace/chroma.sqlite3` with one
+    /// row. The content is constant across calls; only `exportability_label`
+    /// changes so the test can exercise the exportability-change detection path.
+    fn make_exportability_chroma(dir: &std::path::Path, exportability_label: &str) {
+        let palace_dir = dir.join("palace");
+        std::fs::create_dir_all(&palace_dir).unwrap();
+        let chroma_path = palace_dir.join("chroma.sqlite3");
+        // Drop the file first so re-calls produce a fresh schema (SQLite doesn't
+        // support DROP TABLE + re-INSERT idioms cleanly across reconnects here).
+        let _ = std::fs::remove_file(&chroma_path);
+        let conn = Connection::open(&chroma_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE collections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                dimension INTEGER,
+                database_id TEXT NOT NULL,
+                config_json_str TEXT,
+                schema_str TEXT
+            );
+            CREATE TABLE segments (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                collection TEXT NOT NULL
+            );
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY,
+                segment_id TEXT NOT NULL,
+                embedding_id TEXT NOT NULL,
+                seq_id BLOB NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (segment_id, embedding_id)
+            );
+            CREATE TABLE embedding_metadata (
+                id INTEGER REFERENCES embeddings(id),
+                key TEXT NOT NULL,
+                string_value TEXT,
+                int_value INTEGER,
+                float_value REAL,
+                bool_value INTEGER,
+                PRIMARY KEY (id, key)
+            );
+            INSERT INTO collections (id, name, database_id)
+            VALUES ('col-1', 'mempalace_drawers', 'db-1');
+            INSERT INTO segments (id, type, scope, collection)
+            VALUES ('seg-1', 'urn:chroma:segment/sqlite-metadata', 'METADATA', 'col-1');
+            INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+            VALUES (1, 'seg-1', 'exportability-regression-doc-001', x'00');",
+        )
+        .unwrap();
+        // The content is intentionally identical across imports; only exportability
+        // varies so the test isolates the exportability-change detection path.
+        conn.execute(
+            "INSERT INTO embedding_metadata (id, key, string_value)
+             VALUES (1, 'chroma:document', 'Stable content that never changes between imports.')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO embedding_metadata (id, key, string_value) VALUES (1, 'exportability', ?1)",
+            [exportability_label],
+        )
+        .unwrap();
+    }
+
+    /// Recall currently-believed drawers (cluster A), with sensitivity ceiling
+    /// extended to Secret so all tiers are visible.
+    fn current_drawers_all(
+        coord: &EstateCoordinator,
+        handle: &EstateHandle,
+    ) -> Vec<locus_kit::drawer::Drawer> {
+        let frame = RecallFrame {
+            filter_chain: vec![
+                Filter::CurrentlyBelieve,
+                Filter::Any(vec![
+                    Filter::UserConfirmed,
+                    Filter::Unconfirmed,
+                    Filter::AutomatedConfirmedOnly,
+                ]),
+                Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+                Filter::SensitivityAtMost(locus_kit::adjectives::AdjectiveSensitivity::Secret),
+            ],
+            hydration_level: HydrationLevel::Full,
+            limit: Some(10_000_000),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        coord.recall(handle, frame, NOW).expect("recall")
+    }
+
+    /// Security regression (codex 7c952932): a public→private exportability change
+    /// on otherwise-unchanged content must NOT be suppressed by the
+    /// content-idempotent skip guard.
+    ///
+    /// Scenario:
+    ///   1. Import with exportability=public  → drawer written, exportability=Public.
+    ///   2. Re-import, same body, exportability=private → must NOT skip; must update
+    ///      the drawer and flip its exportability bit to Private.
+    ///
+    /// Mirrors Swift `PalaceBridgeTests.exportabilityChangeNotSkipped`.
+    #[test]
+    fn exportability_change_not_skipped() {
+        let temp = std::env::temp_dir()
+            .join(format!("vaultkit-exportability-skip-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let (mut coordinator, handle) = open_estate();
+
+        // Step 1: first import — content with exportability=public.
+        make_exportability_chroma(&temp, "public");
+        let first = PalaceBridge::new(&mut coordinator)
+            .import_palace(&temp, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        assert_eq!(first.drawers_written, 1, "first import must write the drawer");
+        assert_eq!(first.drawers_skipped_unchanged, 0);
+
+        let drawers = current_drawers_all(&coordinator, &handle);
+        assert_eq!(drawers.len(), 1, "one drawer in estate after first import");
+        assert_eq!(
+            drawers[0].exportability(),
+            AdjectiveExportability::Public,
+            "drawer must be Public after first import"
+        );
+
+        // Step 2: re-import with same content but exportability=private.
+        // The skip guard must NOT suppress this update.
+        make_exportability_chroma(&temp, "private");
+        let second = PalaceBridge::new(&mut coordinator)
+            .import_palace(&temp, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        assert_eq!(
+            second.drawers_skipped_unchanged,
+            0,
+            "exportability public→private must NOT be skipped (codex 7c952932): \
+             drawers_skipped_unchanged={} drawers_updated={}",
+            second.drawers_skipped_unchanged,
+            second.drawers_updated
+        );
+        assert_eq!(
+            second.drawers_updated,
+            1,
+            "exportability-only change must produce drawers_updated=1"
+        );
+
+        // Verify the exportability bit flipped to Private.
+        let after_second = current_drawers_all(&coordinator, &handle);
+        assert_eq!(after_second.len(), 1);
+        assert_eq!(
+            after_second[0].exportability(),
+            AdjectiveExportability::Private,
+            "drawer exportability must be Private after re-import with exportability:private"
+        );
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    /// Idempotency companion to `exportability_change_not_skipped`: when both
+    /// content and exportability are truly unchanged on re-import the skip guard
+    /// must fire.
+    ///
+    /// This test uses a fresh two-step estate (no superseded predecessors) so the
+    /// tombstone set is empty and `drawers_skipped_unchanged` is the only path that
+    /// can absorb the row.
+    ///
+    /// Mirrors Swift `PalaceBridgeTests.unchangedExportabilitySkipped`.
+    #[test]
+    fn unchanged_exportability_skipped() {
+        let temp = std::env::temp_dir()
+            .join(format!("vaultkit-exportability-idempotent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let (mut coordinator, handle) = open_estate();
+
+        // Step 1: first import with exportability=private.
+        make_exportability_chroma(&temp, "private");
+        let first = PalaceBridge::new(&mut coordinator)
+            .import_palace(&temp, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        assert_eq!(first.drawers_written, 1, "first import must write the drawer");
+
+        // Step 2: re-import with the same content and the same exportability=private.
+        // Nothing changed — the skip guard must fire. The estate has exactly one
+        // active drawer and no superseded predecessors, so the tombstone set is
+        // empty and the unchanged guard is the only matching path.
+        let second = PalaceBridge::new(&mut coordinator)
+            .import_palace(&temp, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        assert_eq!(
+            second.drawers_skipped_unchanged,
+            1,
+            "truly-unchanged re-import (same content + same exportability=private) \
+             must be counted as skipped-unchanged: written={} updated={} \
+             skipped_unchanged={} skipped_tombstoned={} items_skipped={}",
+            second.drawers_written,
+            second.drawers_updated,
+            second.drawers_skipped_unchanged,
+            second.drawers_skipped_tombstoned,
+            second.items_skipped
+        );
+        assert_eq!(second.drawers_updated, 0);
+
+        std::fs::remove_dir_all(&temp).ok();
     }
 }

@@ -19,11 +19,15 @@
 
 import Foundation
 import IntellectusLib
+import Synchronization
 
 // MARK: - Latency window
 
 /// A rolling window of drain-latency samples for percentile computation.
 /// Maintained by the QueueKit caller across drain calls.
+///
+/// The struct itself is NOT synchronised — concurrent access goes through
+/// `QueueLatencyWindowBox` below.
 public struct QueueLatencyWindow: Sendable {
     private var samples: [Double] = []
     private let capacity: Int
@@ -50,6 +54,36 @@ public struct QueueLatencyWindow: Sendable {
     }
 }
 
+/// Thread-safe holder for the rolling drain-latency window.
+///
+/// Concurrent drainers on one `QueueKit` instance are LEGITIMATE — the
+/// encode worker and the discrete import worker share the per-estate
+/// queue, and each `drain(stream:)` call reports into the same window.
+/// An unguarded `var` window under that concurrency corrupts the sample
+/// array's heap buffer (observed as a SIGSEGV in `Array.append` from
+/// `reportQueueStats` under full-suite test load). Rust twin already
+/// guards: `facade.rs` `latency_window: Mutex<QueueLatencyWindow>`.
+///
+/// `sample(_:)` appends and reads both percentiles under ONE lock
+/// acquisition so a pair of concurrent drains cannot interleave between
+/// the append and its percentile reads.
+public final class QueueLatencyWindowBox: Sendable {
+    private let inner: Mutex<QueueLatencyWindow>
+
+    public init(capacity: Int = 100) {
+        inner = Mutex(QueueLatencyWindow(capacity: capacity))
+    }
+
+    /// Append a latency sample and return the updated (p50, p95)
+    /// percentiles atomically.
+    public func sample(_ ms: Double) -> (p50: Double, p95: Double) {
+        inner.withLock { w in
+            w.append(ms)
+            return (w.percentile(50), w.percentile(95))
+        }
+    }
+}
+
 // MARK: - Report entry point
 
 /// Emit queue-state metrics after a drain call completes.
@@ -64,14 +98,15 @@ public struct QueueLatencyWindow: Sendable {
 ///   - drainStart: Epoch-seconds when the drain call started.
 ///   - now:        Epoch-seconds at drain completion (caller-supplied).
 ///   - estateTag:  The estate UUID string for metric tagging.
-///   - window:     The running latency window (maintained by the caller).
+///   - window:     The running latency window (thread-safe box maintained by
+///     the caller; see `QueueLatencyWindowBox` for why it must be guarded).
 public func reportQueueStats(
     backend: any QueueBackend,
     drained: [(job: Job, sessionID: SessionID)],
     drainStart: Double,
     now: Double,
     estateTag: String,
-    window: inout QueueLatencyWindow
+    window: QueueLatencyWindowBox
 ) async {
     // Off-path gate: single atomic load + branch. ~1 ns when disabled.
     guard Intellectus.isEnabled else { return }
@@ -130,17 +165,18 @@ public func reportQueueStats(
         ))
     }
 
-    // Latency percentiles from the rolling window.
-    window.append(drainLatencyMs)
+    // Latency percentiles from the rolling window — append + both reads
+    // happen atomically inside the box (concurrent drainers share it).
+    let (p50, p95) = window.sample(drainLatencyMs)
     Intellectus.report(.metric(
         name: "queue.latency_p50_ms",
-        value: window.percentile(50),
+        value: p50,
         tags: tags,
         ts: now
     ))
     Intellectus.report(.metric(
         name: "queue.latency_p95_ms",
-        value: window.percentile(95),
+        value: p95,
         tags: tags,
         ts: now
     ))

@@ -186,20 +186,41 @@ mod tests {
         assert!(report.first_broken_at_millis.is_none());
     }
 
-    // AV-3: a tampered entry (stored id ≠ recomputed hash) breaks the chain at
-    // its HLC. We mutate a field after minting so the stored id no longer
-    // matches the content.
+    // AV-3: a tampered entry (stored id ≠ recomputed hash) is rejected at
+    // the add boundary — the verify-on-ingress defence in UnifiedAuditLog::add
+    // (codex a477800) catches the mismatch before the entry reaches the log.
+    // The chain verifier therefore sees only honest entries and reports valid.
+    // The verifier's content-hash check remains defence-in-depth for entries
+    // that might enter via an unexpected path in the future.
     #[test]
-    fn av3_tampered_entry_breaks_chain() {
+    fn av3_tampered_entry_rejected_at_add_boundary() {
         let mut log = UnifiedAuditLog::new();
         log.add(entry_at(1000, "adjective"));
+
         let mut tampered = entry_at(2000, "operational");
-        // Alter a field WITHOUT recomputing the id — simulates corruption.
+        // Alter a field WITHOUT recomputing the id — simulates the forgery
+        // a hostile peer might supply. The stored id no longer matches the
+        // wire encoding of the mutated entry.
         tampered.field_path = "provenance".to_string();
         log.add(tampered);
 
+        // add rejects the tampered entry; only the honest entry at t=1000 remains.
+        assert_eq!(
+            log.ordered_entries().len(),
+            1,
+            "tampered entry must be rejected at the add boundary (codex a477800)"
+        );
+
+        // The chain verifier reports valid: it sees only honest entries.
+        // This validates that the verify-on-ingress defence and the
+        // verifier's own defence-in-depth check are consistent.
         let report = AuditChainVerifier::verify(&log);
-        assert!(!report.valid, "tampered entry must fail verification");
-        assert_eq!(report.first_broken_at_millis, Some(2000));
+        assert!(
+            report.valid,
+            "chain is valid when only honest entries are present"
+        );
+        assert_eq!(report.entry_count, 1);
+        assert_eq!(report.first_entry_at_millis, 1000);
+        assert!(report.first_broken_at_millis.is_none());
     }
 }

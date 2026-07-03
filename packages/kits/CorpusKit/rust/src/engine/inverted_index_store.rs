@@ -409,12 +409,32 @@ pub struct IngestPostingsShard {
 }
 
 impl IngestPostingsShard {
-    /// Create a fresh shard at `path` (an existing file is truncated —
-    /// shards are single-use). Applies the install key from the sibling
+    /// Create a fresh shard at `path` with EXCLUSIVE-create semantics: the call
+    /// FAILS if a file already exists at `path` rather than deleting or reusing
+    /// it (codex b92be5bc — remove-and-open let a concurrent import's live shard
+    /// be destroyed/replaced at a predictable path). Shard names carry the
+    /// estate's db stem, so a collision means a concurrent import of the SAME
+    /// estate — a caller bug (the import drain lease serializes those) that must
+    /// surface loudly, never be silently absorbed. Stale shards from a CRASHED
+    /// prior import are swept by `ingest_batch_import_sharded` at entry (safe
+    /// under the lease), not here. Applies the install key from the sibling
     /// `db.key` (if present) before any SQL, then creates the iix_* schema.
     pub fn create(path: &str) -> Result<Self, rusqlite::Error> {
-        // Single-use: remove any stale shard from a crashed prior import.
-        let _ = std::fs::remove_file(path);
+        // Claim the name atomically (O_CREAT|O_EXCL). SQLite treats the
+        // resulting zero-byte file as a fresh database.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                    Some(format!(
+                        "import shard exclusive-create failed at {path}: {e} \
+                         (existing file = concurrent import collision, not reused)"
+                    )),
+                )
+            })?;
         let conn = Connection::open(path)?;
         persistence_kit::apply_install_encryption_to_conn(&conn, path)?;
         conn.execute_batch(

@@ -9,12 +9,14 @@ name: CLA
 # blocked by a failing status check until the author has signed.
 #
 # One-time setup required before this works:
-#   1. Create a repository secret named PERSONAL_ACCESS_TOKEN — a fine-grained
-#      or classic PAT with `repo` scope. It is used to write the signature
-#      file to the `cla-signatures` branch. GITHUB_TOKEN is not used for that
-#      write on purpose: a commit made with GITHUB_TOKEN does not trigger the
-#      recheck, and a PAT keeps the signature store auditable under a real
-#      account.
+#   1. Create a repository secret named CLA_BOT_TOKEN — a fine-grained or
+#      classic PAT with `repo` scope (fine-grained: Contents + Pull requests
+#      read/write on this repo). It is used to write the signature file to the
+#      `cla-signatures` branch. GITHUB_TOKEN is not used for that write on
+#      purpose: a commit made with GITHUB_TOKEN does not trigger the recheck,
+#      and a PAT keeps the signature store auditable under a real account.
+#      (The action reads it from the fixed env var PERSONAL_ACCESS_TOKEN,
+#      which is mapped from the CLA_BOT_TOKEN secret below.)
 #   2. Make the CLA status check required for merge in branch protection.
 # The `cla-signatures` branch is created automatically on the first signature.
 
@@ -41,7 +43,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PAT used only to store signatures on the cla-signatures branch.
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          # Env var name is the action's fixed interface; secret name is ours.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
         with:
           # The exact phrase a contributor comments to sign.
           custom-notsigned-prcomment: >-

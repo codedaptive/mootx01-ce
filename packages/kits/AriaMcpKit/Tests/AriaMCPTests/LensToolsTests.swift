@@ -249,6 +249,39 @@ struct LensToolsTests {
         #expect(body.contains("none"))
     }
 
+    /// SECFIX (codex: MCP fact tools leak restricted/secret KG data): the
+    /// contradiction lens must redact a fact's SOURCE drawer id when that source
+    /// is Restricted/Secret, even though the emitted (Normal) facts pass the fact
+    /// ceiling. Parity with the Rust `lens_contradiction_hides_secret_fact_source`.
+    @Test func contradictionLensHidesSecretFactSource() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ctrd-redact"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        // A Secret source drawer; two conflicting Normal facts cite it.
+        let secret = try await captureWithSensitivity(
+            kit, handle, content: "secret provenance drawer",
+            room: "policy-gate/secret-source", sensitivity: .secret)
+        for object in ["green", "red"] {
+            let filed = try await dispatcher.dispatch(
+                name: "moot_file_fact",
+                arguments: .object([
+                    "subject": .string("Project Aardvark"),
+                    "predicate": .string("status"),
+                    "object": .string(object),
+                    "source_id": .string(secret.id),
+                ]))
+            #expect(filed.objectValue?["isError"]?.boolValue == false)
+        }
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_contradiction", arguments: .object([:]))
+        let body = try text(result)
+        #expect(body.contains("source=<hidden>"),
+                "secret fact source must be redacted; got: \(body)")
+        #expect(!body.contains(secret.id),
+                "secret source drawer id must not leak; got: \(body)")
+    }
+
     // MARK: - Sensitivity policy gate (ce-recall-policy-gate)
 
     /// Helper: capture a drawer with an explicit sensitivity tier.

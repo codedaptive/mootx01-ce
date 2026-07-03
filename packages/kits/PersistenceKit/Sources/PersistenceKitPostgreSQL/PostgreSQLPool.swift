@@ -139,7 +139,8 @@ actor PostgreSQLPool {
         let user = url.user ?? "postgres"
         let password = url.password
         let database = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let tls = try parseTLSMode(host: host)
+        let dsnSSLMode = Self.sslMode(from: url)
+        let tls = try parseTLSMode(host: host, dsnSSLMode: dsnSSLMode)
         return PostgresConnection.Configuration(
             host: host,
             port: port,
@@ -150,35 +151,107 @@ actor PostgreSQLPool {
         )
     }
 
-    /// Resolve the TLS mode for a PostgreSQL connection from the
-    /// `ARIA_MCP_POSTGRES_TLS` environment variable (SECFIX-WS2-PK F3 — CAND-029).
+    /// Resolve the TLS mode for a PostgreSQL connection from BOTH the DSN's
+    /// `sslmode=` query parameter AND the `ARIA_MCP_POSTGRES_TLS` environment
+    /// variable (SECFIX-C-PG-SWIFT-TLS-SSLMODE; parity with the Rust
+    /// `postgres_tls::effective_sslmode` module).
     ///
-    /// | Value      | Behaviour                                                      |
+    /// The effective mode is the STRONGER (`max`) of the two sources — the env
+    /// var may RAISE security above the DSN but must never lower what the
+    /// operator's DSN explicitly requested. Previously the DSN `sslmode` was
+    /// ignored entirely, so `?sslmode=require` / `verify-ca` / `verify-full`
+    /// could still open a plaintext connection — credential + estate-data
+    /// disclosure over the wire. Mapping to PostgresNIO's three TLS cases
+    /// (`.disable` / `.prefer` / `.require`; certificate/hostname verification
+    /// lives in the NIOSSLContext, so verify-ca/verify-full both map to
+    /// `.require`):
+    ///
+    /// | effective sslmode        | PostgresNIO TLS        |
     /// |---|---|
-    /// | `disable`  | No TLS. Safe only for loopback / Unix-socket connections.      |
-    /// | `require`  | TLS mandatory; refuse if the server does not offer it.         |
-    /// | `prefer`   | TLS if offered; fall back to plaintext (default).              |
-    /// | *(absent)* | Defaults to `prefer`.                                          |
-    /// | *(unknown)*| Defaults to `prefer` (unknown ≠ `disable`; safe default).     |
+    /// | `disable`                | `.disable` (plaintext) |
+    /// | `allow` / `prefer`       | `.prefer`              |
+    /// | `require` / `verify-ca` / `verify-full` / unknown | `.require` (fail closed) |
     ///
-    /// Loopback check: when the resolved host is `127.0.0.1`, `::1`, or
-    /// `localhost` and the env var is absent, we still default to `prefer`
-    /// (not `disable`). Callers that want plaintext on loopback must set
-    /// `ARIA_MCP_POSTGRES_TLS=disable` explicitly.
-    private func parseTLSMode(host: String) throws -> PostgresConnection.Configuration.TLS {
-        let raw = ProcessInfo.processInfo.environment["ARIA_MCP_POSTGRES_TLS"]?
+    /// An UNKNOWN DSN sslmode is treated as require-TLS (fail closed), never as
+    /// disable — a typo must not silently drop to plaintext. An absent DSN
+    /// sslmode + absent env var defaults to `.prefer` (the libpq default).
+    private func parseTLSMode(host: String, dsnSSLMode: String?) throws
+        -> PostgresConnection.Configuration.TLS
+    {
+        _ = host // reserved for future hostname-specific TLS policy
+        let envValue = ProcessInfo.processInfo.environment["ARIA_MCP_POSTGRES_TLS"]?
             .trimmingCharacters(in: .whitespaces)
-            .lowercased()
-        switch raw {
-        case "disable":
+        switch Self.effectiveTLSDecision(dsnSSLMode: dsnSSLMode, envValue: envValue) {
+        case .disable:
             return .disable
-        case "require":
-            let context = try makeTLSContext()
-            return .require(context)
-        default:
-            // "prefer" or absent or unrecognised → safe default (prefer).
-            let context = try makeTLSContext()
-            return .prefer(context)
+        case .prefer:
+            return .prefer(try makeTLSContext())
+        case .require:
+            return .require(try makeTLSContext())
+        }
+    }
+
+    /// The three PostgresNIO TLS outcomes. Extracted so the security decision
+    /// (max-of-DSN-and-env, fail-closed on unknown) is unit-testable without a
+    /// live server or a NIOSSLContext.
+    enum TLSDecision: Equatable { case disable, prefer, require }
+
+    /// Pure security decision: the stronger of the DSN `sslmode` and the
+    /// `ARIA_MCP_POSTGRES_TLS` env value, mapped to a PostgresNIO outcome.
+    /// The env may RAISE but never LOWER the DSN's requirement; an unknown DSN
+    /// value fails closed to `.require`. Rust twin: `postgres_tls::effective_sslmode`.
+    static func effectiveTLSDecision(dsnSSLMode: String?, envValue: String?) -> TLSDecision {
+        let envMode = TLSModeRank(envValue) ?? .prefer
+        let effective: TLSModeRank
+        if let dsnSSLMode {
+            effective = max(TLSModeRank(dsnSSLMode) ?? .unknownRequireTLS, envMode)
+        } else {
+            effective = envMode
+        }
+        switch effective {
+        case .disable: return .disable
+        case .allow, .prefer: return .prefer
+        case .require, .verifyCA, .verifyFull, .unknownRequireTLS: return .require
+        }
+    }
+
+    /// Extract the `sslmode=` value from a `postgres://` URL's query, if present.
+    private static func sslMode(from url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first { $0.name.lowercased() == "sslmode" }?
+            .value?
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Security ranking for libpq `sslmode` values (weakest → strongest),
+    /// matching the Rust `SslModeRank`. `unknownRequireTLS` is the conservative
+    /// bucket for an unrecognised DSN value — ranked above the real modes so a
+    /// typo fails closed to require-TLS.
+    private enum TLSModeRank: Int, Comparable {
+        case disable = 0
+        case allow = 1
+        case prefer = 2
+        case require = 3
+        case verifyCA = 4
+        case verifyFull = 5
+        case unknownRequireTLS = 6
+
+        init?(_ raw: String?) {
+            guard let raw = raw?.lowercased(), !raw.isEmpty else { return nil }
+            switch raw {
+            case "disable": self = .disable
+            case "allow": self = .allow
+            case "prefer": self = .prefer
+            case "require": self = .require
+            case "verify-ca": self = .verifyCA
+            case "verify-full": self = .verifyFull
+            default: return nil
+            }
+        }
+
+        static func < (lhs: TLSModeRank, rhs: TLSModeRank) -> Bool {
+            lhs.rawValue < rhs.rawValue
         }
     }
 

@@ -244,8 +244,28 @@ impl NmfProvider {
         );
         let vocab_size = reduced.size();
         if vocab_size == 0 {
+            // Full state reset required to match the Swift empty-reduction path.
+            //
+            // Swift sets `basisVocab = reduced.termToColumn` (empty) BEFORE the
+            // guard that clears `nmf` and `docEmbeddings`, so Swift automatically
+            // clears basisVocab in the zero-vocab case. Rust's early return fires
+            // BEFORE the `self.basis_vocab = reduced.term_to_column` assignment at
+            // the non-zero path, so without this explicit reset, `h`,
+            // `effective_rank`, and `basis_vocab` from a prior successful
+            // `finalize()` remain stale.
+            //
+            // If left stale, `serialize_basis()` writes the new (larger)
+            // `document_count` together with the stale `effective_rank` and stale
+            // `h`. `from_serialized_basis()` then drives a per-document rebuild
+            // loop that indexes `h_factor[rr][d]` for every serialized document,
+            // causing an out-of-bounds panic when the stale `h` has fewer rows or
+            // columns than the new `document_count`. The full reset makes the
+            // serialized basis self-consistent (empty) so the round-trip is safe.
             self.w = Vec::new();
+            self.h = Vec::new();
             self.doc_embeddings = Vec::new();
+            self.effective_rank = 0;
+            self.basis_vocab = HashMap::new();
             return;
         }
 
@@ -814,6 +834,100 @@ mod tests {
             "NMF and RI projection seeds must differ");
         assert_ne!(NMF_PROJECTION_SEED, crate::ppmi::PPMI_PROJECTION_SEED,
             "NMF and PPMI projection seeds must differ");
+    }
+
+    /// Regression test for codex e25c03fd — Rust-only parity gap vs Swift.
+    ///
+    /// ADR-022 empty-vocabulary reduction (corpus vocab above `reduced_vocab_cap`
+    /// AND all terms are hapax, df < 2) must fully reset finalized state so that
+    /// a subsequent `serialize_basis()` + `from_serialized_basis()` round-trip is
+    /// self-consistent and OOB-safe.
+    ///
+    /// Before the fix: the zero-vocab branch of `finalize()` cleared only `w` and
+    /// `doc_embeddings`, leaving `h`, `effective_rank`, and `basis_vocab` stale
+    /// from the prior successful `finalize()`. `serialize_basis()` then emitted the
+    /// new (larger) `document_count` paired with the stale `effective_rank` and
+    /// stale `h`. `from_serialized_basis()` indexed `h_factor[rr][d]` for every
+    /// `document_count` document — out of bounds when the stale `h` had fewer
+    /// columns than the new document count → OOB panic on reload.
+    ///
+    /// Scenario that triggers the panic:
+    ///   Phase 1 (cap=2, 2 docs with unique terms):
+    ///     full_size=2 <= cap=2 → no-op reduced-vocab path → vocab_size=2
+    ///     → finalize() produces a valid 2-doc basis (h is rank×2).
+    ///   Phase 2 (add 1 more doc with another unique term):
+    ///     full_size=3 > cap=2 → above-cap path; all three terms are hapax
+    ///     (df=1 < 2) → candidates empty → vocab_size=0 → zero-vocab branch.
+    ///     Without the fix: h stays rank×2 (stale from phase 1),
+    ///     effective_rank stays >0; serialize_basis() writes document_count=3
+    ///     but effective_rank=stale and h=stale; from_serialized_basis()
+    ///     indexes h_factor[rr][2] on a matrix with only 2 columns → PANIC.
+    ///     With the fix: full reset → serialize emits an empty-rank, empty-h
+    ///     blob; round-trip is OOB-safe.
+    #[test]
+    fn empty_reduced_vocab_second_finalize_round_trips_without_panic() {
+        // Set reduced_vocab_cap = 2 to control the reduction threshold.
+        // Private field access from this child module is valid in Rust.
+        let mut p = NmfProvider {
+            reduced_vocab_cap: 2,
+            ..NmfProvider::new(3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED)
+        };
+
+        // Phase 1: two documents, each with a unique term (both hapax, but
+        // full_size=2 <= cap=2 → no-op reduced-vocab path → vocab_size=2).
+        // finalize() produces a valid non-empty basis (h is rank×2).
+        p.train("alpha");
+        p.train("beta");
+        p.finalize();
+        assert!(
+            p.is_finalized(),
+            "phase 1: basis must be non-empty after first finalize"
+        );
+        assert!(
+            p.effective_rank() > 0,
+            "phase 1: effective_rank must be > 0 after first finalize"
+        );
+
+        // Phase 2: add one more document with a third unique term. Now
+        // full_size=3 > cap=2 → above-cap path; all three terms have df=1
+        // (hapax, df < 2) → candidates empty → vocab_size=0 → zero-vocab branch.
+        p.train("gamma");
+        p.finalize();
+
+        // After the empty-reduction finalize the provider must not be finalized.
+        assert!(
+            !p.is_finalized(),
+            "phase 2 empty-reduction: must not be finalized"
+        );
+        assert_eq!(
+            p.effective_rank(),
+            0,
+            "phase 2: effective_rank must be 0 after empty-reduction finalize"
+        );
+
+        // Critical check: serialize_basis() + from_serialized_basis() must not
+        // panic. Before the fix, stale h (rank×2 from phase 1) + stale
+        // effective_rank (>0) + new document_count (3) caused h_factor[rr][2]
+        // to index a matrix with only 2 columns → OOB panic.
+        let blob = p.serialize_basis();
+        let reloaded = NmfProvider::from_serialized_basis(&blob)
+            .expect("from_serialized_basis must not fail on an empty-reduction basis");
+
+        // Reloaded provider must also be non-finalized (empty basis round-trips).
+        assert!(
+            !reloaded.is_finalized(),
+            "reloaded: empty-reduction basis must not be finalized"
+        );
+        assert_eq!(
+            reloaded.effective_rank(),
+            0,
+            "reloaded: effective_rank must be 0 for empty-reduction basis"
+        );
+        // Embed on a non-finalized provider must return None — no OOB.
+        assert!(
+            reloaded.embed_float_nmf("alpha").is_none(),
+            "reloaded: embed on non-finalized provider must return None"
+        );
     }
 
     /// Emit canonical bit patterns for cross-port conformance.

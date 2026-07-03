@@ -19,16 +19,25 @@ import PersistenceKit
 
 /// A parallel worker's private shard database: create → exec DDL → bulk
 /// insert (one transaction, prepared statement, caller pre-sorts rows for
-/// b-tree append order) → close. Single-use; creating over an existing file
-/// truncates it (a stale shard from a crashed import is dead weight).
+/// b-tree append order) → close. Single-use with EXCLUSIVE-create semantics:
+/// init THROWS if a file already exists at `url` rather than deleting or
+/// reusing it (codex b92be5bc — remove-and-open let a concurrent import's live
+/// shard be destroyed/replaced at a predictable path). Shard names carry the
+/// estate's db stem, so a collision means a concurrent import of the SAME
+/// estate — a caller bug (the import drain lease serializes those) that must
+/// surface loudly. Stale shards from a CRASHED prior import are swept by the
+/// importer at entry (safe under the lease), not here.
 public final class SQLiteShard {
     let connection: SQLiteConnection
     public let url: URL
 
     /// Open a fresh shard at `url`, keyed with the estate configuration's
-    /// full-database key (no-op for unencrypted estates).
+    /// full-database key (no-op for unencrypted estates). Throws if a file
+    /// already exists at `url` (exclusive create — see the type comment).
     public init(url: URL, configuration: EstateConfiguration) throws {
-        try? FileManager.default.removeItem(at: url)
+        // Claim the name atomically (.withoutOverwriting = O_EXCL). SQLite
+        // treats the resulting zero-byte file as a fresh database.
+        try Data().write(to: url, options: .withoutOverwriting)
         self.url = url
         self.connection = try SQLiteConnection(
             url: url,

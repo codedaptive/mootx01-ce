@@ -138,29 +138,50 @@ pub trait QueueBackend: Send + Sync {
     /// The determinism rule (pass `now` in) applies to computation engines, not
     /// to a real-time await primitive whose entire job is to wait on wall time.
     ///
+    /// PROGRESS-BASED deadline, not a total wall-clock cap: the timeout resets
+    /// every time the outstanding count (pending + in-flight) drops below its
+    /// lowest observed value. A slow-but-progressing drain (e.g. CPU-bound
+    /// encode workers starved by a fully parallel test suite — the GLK
+    /// full-suite drainTimeout fragility, where the same drain finished in 6 s
+    /// isolated and blew a 30 s wall-clock cap under suite-wide core
+    /// saturation) therefore never false-times-out; a genuinely stuck worker
+    /// (no frontier movement for `timeout`) still fails fast. Tracking the
+    /// LOWEST observed outstanding — not the last — means concurrent enqueues
+    /// (which raise the count) cannot extend the deadline; only real
+    /// completions do. Swift twin behaves identically.
+    ///
     /// - Parameters:
     ///   - `poll_interval`: Sleep between frontier polls. 20 ms in Swift — short
     ///     enough that the latch releases promptly after the last `complete`,
     ///     long enough that the poll loop does not spin a core.
-    ///   - `timeout`: Upper bound on total wait. 30 s in Swift. If both frontiers
-    ///     have not cleared by then, returns `QueueError::DrainTimeout` rather
-    ///     than blocking forever — a stuck drain worker surfaces as an error,
-    ///     never a hang.
+    ///   - `timeout`: Upper bound on the wait WITHOUT observed progress. 30 s
+    ///     in Swift. If the outstanding count has neither cleared nor decreased
+    ///     for this long, returns `QueueError::DrainTimeout` rather than
+    ///     blocking forever — a stuck drain worker surfaces as an error, never
+    ///     a hang.
     /// - Returns: `Ok(())` once both frontiers clear; `Err(DrainTimeout {..})`
-    ///   on timeout; any backend error from the frontier probes.
+    ///   on no-progress timeout; any backend error from the frontier probes.
     fn await_drain(
         &self,
         poll_interval: Duration,
         timeout: Duration,
     ) -> Result<(), QueueError> {
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        let mut lowest_outstanding = usize::MAX;
         loop {
             // Re-read both frontiers each iteration so concurrent drain-worker
             // progress (a job moving new/ → cur/ → done/) is observed live.
             let pending = self.pending_count()?;
             let in_flight = self.in_flight()?.len();
-            if pending == 0 && in_flight == 0 {
+            let outstanding = pending + in_flight;
+            if outstanding == 0 {
                 return Ok(());
+            }
+            if outstanding < lowest_outstanding {
+                // Progress: a job left the frontiers since the last low-water
+                // mark. Reset the no-progress deadline (see doc comment).
+                lowest_outstanding = outstanding;
+                deadline = Instant::now() + timeout;
             }
             if Instant::now() >= deadline {
                 return Err(QueueError::DrainTimeout { pending, in_flight });
@@ -180,13 +201,19 @@ pub trait QueueBackend: Send + Sync {
     /// `pending_count_for_stream` plus the stream's slice of `in_flight`; both
     /// backends carry `stream_id` on every job so the filter is exact. Swift
     /// twin: `QueueKit.awaitDrain(stream:pollInterval:timeout:)`.
+    ///
+    /// PROGRESS-BASED deadline, exactly as the global `await_drain`: `timeout`
+    /// bounds the wait WITHOUT observed progress (the stream's outstanding
+    /// count dropping below its lowest observed value), not the total wait —
+    /// see the global default's doc comment for the rationale.
     fn await_drain_for_stream(
         &self,
         stream: &StreamId,
         poll_interval: Duration,
         timeout: Duration,
     ) -> Result<(), QueueError> {
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        let mut lowest_outstanding = usize::MAX;
         loop {
             // Re-read both frontiers each iteration so concurrent drain-worker
             // progress is observed live. Count only THIS stream's jobs.
@@ -196,8 +223,15 @@ pub trait QueueBackend: Send + Sync {
                 .iter()
                 .filter(|j| &j.stream_id == stream)
                 .count();
-            if pending == 0 && in_flight == 0 {
+            let outstanding = pending + in_flight;
+            if outstanding == 0 {
                 return Ok(());
+            }
+            if outstanding < lowest_outstanding {
+                // Progress: a job left this stream's frontiers. Reset the
+                // no-progress deadline (see the global default's doc comment).
+                lowest_outstanding = outstanding;
+                deadline = Instant::now() + timeout;
             }
             if Instant::now() >= deadline {
                 return Err(QueueError::DrainTimeout { pending, in_flight });

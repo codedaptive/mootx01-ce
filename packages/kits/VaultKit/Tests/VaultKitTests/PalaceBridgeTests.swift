@@ -248,6 +248,179 @@ struct PalaceBridgeTests {
             "CAND-049 regression: re-import must not duplicate KG facts (count must be stable)")
     }
 
+    // MARK: - Exportability-change security regression (codex 7c952932)
+
+    /// Build a minimal synthetic palace containing a single chroma document with
+    /// the given exportability label. The document body is intentionally stable
+    /// across calls; only the label changes, isolating the exportability-change
+    /// detection path under test.
+    private func makePalaceDir(exportabilityLabel: String) throws -> URL {
+        let palace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vaultkit-exportability-\(UUID().uuidString)")
+        let palaceSubdir = palace.appendingPathComponent("palace")
+        try FileManager.default.createDirectory(
+            at: palaceSubdir, withIntermediateDirectories: true)
+        let chromaPath = palaceSubdir.appendingPathComponent("chroma.sqlite3").path
+
+        var db: OpaquePointer?
+        guard sqlite3_open(chromaPath, &db) == SQLITE_OK else {
+            throw NSError(domain: "PalaceBridgeTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot open temp chroma db"])
+        }
+        defer { sqlite3_close(db) }
+
+        // Schema mirrors the real MemPalace chroma.sqlite3 structure.
+        let schema = """
+            CREATE TABLE collections (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, dimension INTEGER,
+                database_id TEXT NOT NULL, config_json_str TEXT, schema_str TEXT
+            );
+            CREATE TABLE segments (
+                id TEXT PRIMARY KEY, type TEXT NOT NULL,
+                scope TEXT NOT NULL, collection TEXT NOT NULL
+            );
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY, segment_id TEXT NOT NULL,
+                embedding_id TEXT NOT NULL, seq_id BLOB NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (segment_id, embedding_id)
+            );
+            CREATE TABLE embedding_metadata (
+                id INTEGER REFERENCES embeddings(id), key TEXT NOT NULL,
+                string_value TEXT, int_value INTEGER, float_value REAL,
+                bool_value INTEGER, PRIMARY KEY (id, key)
+            );
+            INSERT INTO collections (id, name, database_id)
+            VALUES ('col-1', 'mempalace_drawers', 'db-1');
+            INSERT INTO segments (id, type, scope, collection)
+            VALUES ('seg-1', 'urn:chroma:segment/sqlite-metadata', 'METADATA', 'col-1');
+            INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+            VALUES (1, 'seg-1', 'exportability-regression-doc-001', x'00');
+            INSERT INTO embedding_metadata (id, key, string_value)
+            VALUES (1, 'chroma:document',
+                    'Stable content that never changes between imports.');
+            """
+        sqlite3_exec(db, schema, nil, nil, nil)
+
+        // Insert the exportability label as a separate statement so it can vary
+        // per call without affecting the schema setup above.
+        let labelSQL = """
+            INSERT INTO embedding_metadata (id, key, string_value)
+            VALUES (1, 'exportability', '\(exportabilityLabel)');
+            """
+        sqlite3_exec(db, labelSQL, nil, nil, nil)
+
+        return palace
+    }
+
+    /// Recall all currently-believed drawers (cluster A), sensitivity ceiling
+    /// extended to Secret so all tiers are visible. Mirrors `current_drawers_all`
+    /// in the Rust test suite.
+    private func currentDrawersAll(
+        kit: GeniusLocusKit, handle: EstateHandle
+    ) async throws -> [LocusKit.Drawer] {
+        try await kit.recall(
+            handle,
+            RecallFrame(
+                filterChain: [
+                    .currentlyBelieve,
+                    .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                    .any([.trustworthy, .requiresConfirmation]),
+                    .sensitivityAtMost(.secret),
+                ],
+                hydrationLevel: .full,
+                limit: 10_000_000
+            )
+        )
+    }
+
+    /// Security regression (codex 7c952932): a public→private exportability change
+    /// on otherwise-unchanged content must NOT be suppressed by the
+    /// content-idempotent skip guard.
+    ///
+    /// Step 1: Import with exportability=public → drawer written, exportability=public_.
+    /// Step 2: Re-import, same body, exportability=private → must NOT skip; must
+    ///         update the drawer and flip its exportability bit to private_.
+    ///
+    /// Mirrors Rust `palace_bridge::tests::exportability_change_not_skipped`.
+    @Test("exportability public→private change on unchanged content is not skipped (codex 7c952932)")
+    func exportabilityChangeNotSkipped() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = PalaceBridge(kit: kit)
+        let now = Date()
+
+        // Step 1: import with exportability=public.
+        let publicPalace = try makePalaceDir(exportabilityLabel: "public")
+        defer { try? FileManager.default.removeItem(at: publicPalace) }
+
+        let first = try await bridge.importPalace(at: publicPalace, into: handle, now: now)
+        #expect(first.drawersWritten == 1, "first import must write the drawer")
+        #expect(first.drawersSkippedUnchanged == 0)
+
+        let drawersAfterFirst = try await currentDrawersAll(kit: kit, handle: handle)
+        #expect(drawersAfterFirst.count == 1)
+        #expect(
+            drawersAfterFirst[0].exportability == .public_,
+            "drawer must be public_ after first import (exportability:public)"
+        )
+
+        // Step 2: re-import with same content but exportability=private.
+        // The skip guard must NOT suppress this update.
+        let privatePalace = try makePalaceDir(exportabilityLabel: "private")
+        defer { try? FileManager.default.removeItem(at: privatePalace) }
+
+        let second = try await bridge.importPalace(at: privatePalace, into: handle, now: now)
+        #expect(
+            second.drawersSkippedUnchanged == 0,
+            "exportability public→private must NOT be skipped: \(second)"
+        )
+        #expect(
+            second.drawersUpdated == 1,
+            "exportability-only change must produce drawersUpdated=1"
+        )
+
+        // Verify the exportability bit flipped to private_.
+        let drawersAfterSecond = try await currentDrawersAll(kit: kit, handle: handle)
+        #expect(drawersAfterSecond.count == 1)
+        #expect(
+            drawersAfterSecond[0].exportability == .private_,
+            "drawer must be private_ after re-import with exportability:private"
+        )
+    }
+
+    /// Idempotency companion to `exportabilityChangeNotSkipped`: when both content
+    /// and exportability are truly unchanged on re-import the skip guard must fire.
+    ///
+    /// This test uses a fresh two-step estate (no superseded predecessors) so the
+    /// tombstone set is empty and `drawersSkippedUnchanged` is the only path that
+    /// can absorb the row.
+    ///
+    /// Mirrors Rust `palace_bridge::tests::unchanged_exportability_skipped`.
+    @Test("re-import with unchanged exportability is counted as skipped-unchanged")
+    func unchangedExportabilitySkipped() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = PalaceBridge(kit: kit)
+        let now = Date()
+
+        // Step 1: import with exportability=private.
+        let palace = try makePalaceDir(exportabilityLabel: "private")
+        defer { try? FileManager.default.removeItem(at: palace) }
+
+        let first = try await bridge.importPalace(at: palace, into: handle, now: now)
+        #expect(first.drawersWritten == 1, "first import must write the drawer")
+
+        // Step 2: re-import same palace (same content, same exportability=private).
+        // Nothing changed — the skip guard must fire. The estate has exactly one
+        // active drawer and no superseded predecessors, so the tombstone set is
+        // empty and the unchanged guard is the only matching path.
+        let second = try await bridge.importPalace(at: palace, into: handle, now: now)
+        #expect(
+            second.drawersSkippedUnchanged == 1,
+            "truly-unchanged re-import must be counted as skipped-unchanged: \(second)"
+        )
+        #expect(second.drawersUpdated == 0)
+    }
+
     // MARK: - Report receipt
 
     @Test("importPalace files a diary receipt entry under VaultBridge.receiptAgentName")

@@ -400,6 +400,31 @@ pub fn dispatch(
                 })
                 .collect();
 
+            // Source-ID gate: an exportable tunnel may still point at a
+            // Restricted/Secret drawer. For each endpoint id we are about to
+            // emit, hide it if it references a drawer OUTSIDE the sensitivity
+            // ceiling. Non-drawer strings (wing fallbacks) are never in the
+            // store and pass through. Parity with the fact_search/timeline
+            // source gating and the Swift contradiction lens.
+            let hidden_tunnel_endpoint_ids: std::collections::HashSet<String> = {
+                let mut seen = std::collections::HashSet::new();
+                let mut hidden = std::collections::HashSet::new();
+                for id in contradicts_tunnels
+                    .iter()
+                    .take(50)
+                    .flat_map(|t| [t.source_drawer_id.as_ref(), t.target_drawer_id.as_ref()])
+                    .flatten()
+                    .filter(|id| seen.insert((*id).clone()))
+                {
+                    if let Ok(Some(drawer)) = estate.store.get_drawer(id) {
+                        if !drawer.adjective_sensitivity().is_bulk_exportable() {
+                            hidden.insert(id.clone());
+                        }
+                    }
+                }
+                hidden
+            };
+
             let mut lines: Vec<String> = Vec::new();
             if contradicts_tunnels.is_empty() {
                 lines.push("contradicts_tunnels: none".to_string());
@@ -408,14 +433,16 @@ pub fn dispatch(
                 // ADR-017 §3 bridge consumer: source_wing/target_wing used as
                 // display fallback when drawer IDs are absent on tunnel metadata.
                 for t in contradicts_tunnels.iter().take(50) {
-                    let src = t
-                        .source_drawer_id
-                        .as_deref()
-                        .unwrap_or_else(|| t.source_wing.as_str());
-                    let tgt = t
-                        .target_drawer_id
-                        .as_deref()
-                        .unwrap_or_else(|| t.target_wing.as_str());
+                    let src = match t.source_drawer_id.as_deref() {
+                        Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>",
+                        Some(id) => id,
+                        None => t.source_wing.as_str(),
+                    };
+                    let tgt = match t.target_drawer_id.as_deref() {
+                        Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>",
+                        Some(id) => id,
+                        None => t.target_wing.as_str(),
+                    };
                     lines.push(format!("  {} contradicts {} (tunnel {})", src, tgt, t.id));
                 }
             }
@@ -451,6 +478,26 @@ pub fn dispatch(
                 })
                 .collect();
 
+            // Source-ID gate: an exportable fact may still cite a
+            // Restricted/Secret source drawer. Hide those source ids at the
+            // boundary. Parity with fact_search/timeline source gating.
+            let hidden_fact_source_ids: std::collections::HashSet<String> = {
+                let mut seen = std::collections::HashSet::new();
+                let mut hidden = std::collections::HashSet::new();
+                for id in all_facts
+                    .iter()
+                    .map(|f| &f.source_drawer_id)
+                    .filter(|id| seen.insert((*id).clone()))
+                {
+                    if let Ok(Some(drawer)) = estate.store.get_drawer(id) {
+                        if !drawer.adjective_sensitivity().is_bulk_exportable() {
+                            hidden.insert(id.clone());
+                        }
+                    }
+                }
+                hidden
+            };
+
             if conflicting.is_empty() {
                 lines.push("conflicting_facts: none".to_string());
             } else {
@@ -469,9 +516,14 @@ pub fn dispatch(
                         // filed_at is epoch milliseconds (ADR-023); format as
                         // ISO8601 to match the Swift contradiction lens and
                         // substrate-wide date conventions.
+                        let source_field = if hidden_fact_source_ids.contains(&fact.source_drawer_id) {
+                            "<hidden>".to_string()
+                        } else {
+                            fact.source_drawer_id.clone()
+                        };
                         lines.push(format!(
                             "    {}  object=[{}]  source={}  filed={}",
-                            fact.id, fact.object, fact.source_drawer_id,
+                            fact.id, fact.object, source_field,
                             epoch_to_iso8601(fact.filed_at)
                         ));
                     }

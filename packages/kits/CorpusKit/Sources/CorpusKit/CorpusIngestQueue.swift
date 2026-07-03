@@ -257,8 +257,12 @@ public extension Corpus {
     /// signal a bulk caller (importer, acceptance test) uses to know a batch of
     /// enqueued writes has become semantically searchable.
     ///
-    /// - Parameter timeout: Upper bound on the wait. Defaults to 30 s.
-    /// - Throws: `QueueError.drainTimeout` if the queue does not empty in time.
+    /// - Parameter timeout: Upper bound on the wait WITHOUT observed progress
+    ///   (QueueKit's drain barrier resets the deadline each time the encode
+    ///   stream's outstanding count decreases — a slow-but-progressing drain
+    ///   under CPU contention never false-times-out). Defaults to 30 s.
+    /// - Throws: `QueueError.drainTimeout` if the encode stream makes no
+    ///   progress in time.
     func awaitIngestDrain(timeout: Duration = .seconds(30)) async throws {
         guard let queue = ingestQueue else { return }
         // Stream-scoped barrier: OBSERVE only the ENCODE stream's frontiers

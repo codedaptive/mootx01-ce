@@ -1675,6 +1675,14 @@ extension ToolDispatcher {
             // use denseLaneStatus from the result, not the hits themselves.
             // queryText is the raw (non-lowercased) form so the embedding path
             // sees unaltered text.
+            // origin: .internal — this probe reads ONLY denseLaneStatus; it must
+            // NOT participate in the reward cycle. An external origin makes
+            // RecallDirector set traceLimit, so LocusKit would persist recall-trace
+            // rows for the probe's incidental locus hits — durable reward/audit
+            // pollution from an ostensibly read-only fact search (the Rust
+            // run_fact_search avoids this entirely by checking has_corpus instead
+            // of issuing a recall). Internal origin leaves traceLimit nil → zero
+            // trace writes, while denseLaneStatus is still populated.
             let probeRequest = GLKRecallRequest(
                 frame: RecallFrame(filterChain: [], hydrationLevel: .bitmapOnly,
                                    limit: 1, ordering: .byCaptureTimeDesc),
@@ -1683,7 +1691,7 @@ extension ToolDispatcher {
                 limit: 1,
                 fallback: .allowDegraded,
                 queryText: queryRaw,  // pass original (not lowercased) for embedding
-                origin: .external
+                origin: .internal
             )
             let probeResult = try await kit.recall(handle, probeRequest)
             if let darkReason = probeResult.denseLaneStatus {

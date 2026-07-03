@@ -42,14 +42,13 @@
 //!   every mutation method, threading the deterministic-clock rule
 //!   explicitly.
 //! - Swift `storage.transaction(isolation: .serializable) { txn in
-//!   ... }` → sequential `row_store.insert/update/query` calls. The
-//!   InMemory backend's `State` mutex serialises operations; no
-//!   formal `transaction()` exists on the Rust persistence-kit yet (its
-//!   `storage.rs` doc defers transaction support to when the SQLite
-//!   backend lands). Each multi-step path carries an explicit
-//!   comment noting the Swift transaction it mirrors. When
-//!   persistence-kit grows transactions, the wrapper drops in with no
-//!   behaviour change.
+//!   ... }` → Rust `storage.transaction(IsolationLevel::Serializable,
+//!   &mut |txn| { ... })`. The persistence-kit `Storage` trait exposes a
+//!   `transaction()` method implemented by every backend (InMemory uses a
+//!   state-snapshot rollback; SQLite uses `BEGIN IMMEDIATE`). All
+//!   projection-write + audit-append pairs in this module are wrapped in
+//!   `storage.transaction()` so an audit failure rolls back the row write
+//!   (codex 016fcb23 — single-item write atomicity).
 //! - Audit-row id assignment: SQLite assigns the rowid to omitted
 //!   `id` columns. The InMemory persistence-kit backend keys rows by an
 //!   internal UUID and does not surface a public auto-id. Audit ids
@@ -94,7 +93,7 @@ use crate::tunnel::Tunnel;
 use crate::tunnel_operational::TunnelKind;
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
-use persistence_kit::storage::Storage;
+use persistence_kit::storage::{IsolationLevel, Storage};
 use persistence_kit::types::{Column, StorageRow, TypedValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -691,34 +690,39 @@ impl DrawerStoreCore {
             ))
         })?;
 
-        // Materialized projection: write the merged column back.
+        // Materialized projection + sealed audit event — both writes are
+        // atomic in one transaction (codex 016fcb23). If the audit append
+        // fails the projection update is rolled back: no unaudited state.
         let (col_name, merged) = match column {
             audit_gate::Column::Adjective => ("adjectiveBitmap", event.after_bitmaps.0),
             audit_gate::Column::Operational => ("operationalBitmap", event.after_bitmaps.1),
             audit_gate::Column::Provenance => ("provenance", event.after_bitmaps.2),
         };
-        let row_store = self.storage.row_store();
         let mut update_vals = BTreeMap::new();
         update_vals.insert(col_name.to_string(), TypedValue::Bitmap(merged));
-        row_store
-            .update(
-                T_DRAWERS,
-                update_vals,
-                &StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(drawer_id.to_string()),
-                ),
-            )
-            .map_err(map_storage_err)?;
+        let update_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
         // Thread the caller-supplied reason into the event so it is
         // persisted in the audit table's `reason` column.
         let event = substrate_lib::verbs::AuditEvent {
             reason: reason.map(|s| s.to_string()),
             ..event
         };
+        // Precompute the serialised audit row outside the FnMut closure;
+        // `pk_audit_event_from` borrows `event` by reference.
+        let audit_row = pk_audit_event_from(&event);
+        // The closure returns StorageResult<()>; errors are converted to
+        // LocusKitError by map_storage_err on the outer transaction() call.
         self.storage
-            .audit_log()
-            .append(pk_audit_event_from(&event))
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.row_store()
+                    .update(T_DRAWERS, update_vals.clone(), &update_pred)?;
+                txn.audit_log()
+                    .append(audit_row.clone())?;
+                Ok(())
+            })
             .map_err(map_storage_err)?;
         Ok(())
     }
@@ -782,14 +786,21 @@ impl DrawerStoreCore {
         // Rust type names never reach user-visible error messages.
         .map_err(|v| LocusKitError::InvalidContent(format!("capture rejected by gate: {}", v)))?;
 
-        // Materialized projection row + sealed genesis event.
+        // Materialized projection row + sealed genesis event — both writes
+        // are atomic in one transaction (codex 016fcb23). If the audit
+        // append fails the drawer insert is rolled back: no unaudited state.
+        let drawer_row = drawer_values(drawer);
+        let audit_row = pk_audit_event_from(&event);
+        // The closure returns StorageResult<()>; errors are converted to
+        // LocusKitError by map_storage_err on the outer transaction() call.
         self.storage
-            .row_store()
-            .insert(T_DRAWERS, drawer_values(drawer))
-            .map_err(map_storage_err)?;
-        self.storage
-            .audit_log()
-            .append(pk_audit_event_from(&event))
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.row_store()
+                    .insert(T_DRAWERS, drawer_row.clone())?;
+                txn.audit_log()
+                    .append(audit_row.clone())?;
+                Ok(())
+            })
             .map_err(map_storage_err)?;
         Ok(())
     }
@@ -1730,33 +1741,35 @@ impl DrawerStore for DrawerStoreCore {
             LocusKitError::InvalidContent(format!("state mutation rejected by gate: {}", v))
         })?;
 
-        // Materialized projection: write the merged snapshot to the live
-        // drawers row. Append the sealed event to the audit log (truth).
-        let row_store = self.storage.row_store();
+        // Materialized projection + sealed event — both writes are atomic
+        // in one transaction (codex 016fcb23). If the audit append fails
+        // the bitmap update is rolled back: no unaudited state change.
         let mut update_vals = BTreeMap::new();
         update_vals.insert(
             "adjectiveBitmap".to_string(),
             TypedValue::Bitmap(event.after_bitmaps.0),
         );
-        row_store
-            .update(
-                T_DRAWERS,
-                update_vals,
-                &StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(drawer_id.to_string()),
-                ),
-            )
-            .map_err(map_storage_err)?;
+        let update_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
         // Thread the caller-supplied reason into the event so it is
         // persisted in the audit table's `reason` column.
         let event = substrate_lib::verbs::AuditEvent {
             reason: reason.map(|s| s.to_string()),
             ..event
         };
+        let audit_row = pk_audit_event_from(&event);
+        // The closure returns StorageResult<()>; errors are converted to
+        // LocusKitError by map_storage_err on the outer transaction() call.
         self.storage
-            .audit_log()
-            .append(pk_audit_event_from(&event))
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.row_store()
+                    .update(T_DRAWERS, update_vals.clone(), &update_pred)?;
+                txn.audit_log()
+                    .append(audit_row.clone())?;
+                Ok(())
+            })
             .map_err(map_storage_err)?;
         Ok(())
     }
@@ -7404,5 +7417,136 @@ mod tests {
     // Helper: open a store seeded with a specific `now`.
     fn open_store_at(now: i64) -> InMemoryDrawerStore {
         InMemoryDrawerStore::new(now, None).unwrap()
+    }
+
+    // -----------------------------------------------------------------
+    // Audit-write atomicity regression tests (codex 016fcb23)
+    //
+    // The single-item capture and single-item mutation paths now wrap
+    // the projection-row write + audit-append in one
+    // `storage.transaction()`. Two classes of tests cover this:
+    //
+    //   1. Success-path atomicity: both the drawer projection row and
+    //      the audit event must be present after a successful write.
+    //      Verifies that the transaction commits both writes together.
+    //
+    //   2. InMemory rollback semantics: directly exercises the storage
+    //      transaction rollback path by returning Err from a transaction
+    //      block that has already inserted a row. Proves that a failure
+    //      inside the block (which gated_capture and mutate_state both
+    //      now use) leaves no orphaned row.
+    //
+    // Failure-injection note: InMemoryAuditLog never returns Err from
+    // `append()` (it appends to an in-memory Vec and cannot be made to
+    // fail without mocking). Test class 2 therefore injects the failure
+    // via an explicit `Err(...)` return from the transaction block after
+    // the row insert, which is the same rollback path the real code
+    // would take if the audit append ever failed.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn capture_atomic_both_projection_row_and_audit_event_land_on_success() {
+        // Regression: gated_capture now wraps insert + audit in one
+        // transaction. On success both writes must be committed.
+        let store = open_store();
+        let d = sample_drawer("atomcap-d1", "w", "r", "content");
+        store.add_drawer(&d, NOW).unwrap();
+
+        let row_uuid = Uuid::parse_str(&tid("atomcap-d1")).unwrap();
+        let events = store
+            .storage()
+            .audit_log()
+            .events_for_row(row_uuid)
+            .unwrap();
+        assert!(
+            !events.is_empty(),
+            "audit event must be present after transactional capture"
+        );
+        assert!(
+            store.get_drawer(&tid("atomcap-d1")).unwrap().is_some(),
+            "drawer projection row must be present after transactional capture"
+        );
+    }
+
+    #[test]
+    fn mutate_state_atomic_both_projection_update_and_audit_event_land_on_success() {
+        // Regression: mutate_state now wraps the bitmap update + audit in
+        // one transaction. On success both writes must be committed.
+        let store = open_store();
+        let d = sample_drawer("atommt-d1", "w", "r", "content");
+        store.add_drawer(&d, NOW).unwrap();
+        // Withdraw: Active → Withdrawn.  Verb is Retract per estate_verbs.rs.
+        store
+            .mutate_state(
+                &tid("atommt-d1"),
+                State::Withdrawn,
+                RowVerb::Retract,
+                "alice",
+                None,
+                NOW + 1,
+            )
+            .unwrap();
+
+        let row_uuid = Uuid::parse_str(&tid("atommt-d1")).unwrap();
+        let events = store
+            .storage()
+            .audit_log()
+            .events_for_row(row_uuid)
+            .unwrap();
+        // Genesis (capture) + retract = 2 events.
+        assert_eq!(
+            events.len(),
+            2,
+            "capture event + mutation event must both be present"
+        );
+        // The updated projection row must reflect the new state.
+        let row = store.get_drawer(&tid("atommt-d1")).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(bit_field::extract_field(row.adjective_bitmap, 0, 6)),
+            State::Withdrawn,
+            "drawer projection row must reflect the mutated state"
+        );
+    }
+
+    #[test]
+    fn inmemory_transaction_rollback_prevents_orphaned_drawer_row() {
+        // Directly exercises the rollback path that the fixed
+        // gated_capture and mutate_state now rely on. An Err() return
+        // from inside storage.transaction() must restore the pre-block
+        // state — no inserted rows survive a rolled-back block.
+        //
+        // This is the structural proof that the transaction semantics
+        // backing the fix work correctly. InMemoryAuditLog itself never
+        // fails (see failure-injection note above), so we inject the
+        // failure by explicitly returning Err from the block.
+        let storage = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+        storage.open(&schema::schema()).unwrap();
+
+        // Attempt to insert a drawers row, then roll back by returning Err.
+        let mut minimal_row = BTreeMap::new();
+        let fake_id = uuid::Uuid::new_v4().to_string();
+        minimal_row.insert("id".to_string(), TypedValue::Text(fake_id.clone()));
+        let _ = storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            txn.row_store()
+                .insert(T_DRAWERS, minimal_row.clone())?;
+            // Simulate an audit-append failure by returning Err.
+            Err(persistence_kit::error::StorageError::BackendUnavailable {
+                reason: "injected rollback for atomicity test".to_string(),
+            })
+        });
+
+        // The rollback must have reverted the insert — no row survives.
+        let rows = storage
+            .row_store()
+            .query(T_DRAWERS, None, &[], None, None)
+            .unwrap();
+        // Filter to the fake id we attempted to insert.
+        let found = rows.iter().any(|r| {
+            string_value_of(r.get("id")) == fake_id
+        });
+        assert!(
+            !found,
+            "rolled-back insert must leave no orphaned drawer row in storage"
+        );
     }
 }

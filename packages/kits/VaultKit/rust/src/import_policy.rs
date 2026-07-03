@@ -6,16 +6,28 @@
 //! they share, so a new gate never re-invents the write strategy ("the ingest
 //! module is just a different gate"). Mirrors Swift `ImportPolicy`.
 
-/// Source-size gate for write strategy (NOT user-controlled). A source with this
-/// many items or fewer is written in one bulk `capture_batch` transaction (fast,
-/// one fsync); a larger one streams via per-item capture so no single
-/// transaction holds the write lock across hundreds of thousands of rows. 250k
-/// mirrors the ">250k records" boundary at which a single bulk transaction stops
-/// being safe; tune here (one place, all gates) if it moves.
+/// Rows per bulk `capture_batch` transaction (NOT user-controlled). The palace
+/// bulk path submits frames in windows of this size — one transaction per
+/// window — so no single transaction materializes an unbounded classified batch
+/// in memory or holds the SQLite write lock across an arbitrarily large source
+/// (codex 26c7a364). A source at or under the window is one transaction,
+/// identical to the pre-window behavior; larger sources split into
+/// ceil(n / 125_000) sequential transactions. Atomicity is per WINDOW: a
+/// failure rolls back the current window only (earlier windows stay committed
+/// — acceptable for import, which is lineage-idempotent and re-runnable).
+pub const BULK_WINDOW: usize = 125_000;
+
+/// Source-size gate for the RETIRED per-item streaming write strategy. The
+/// stream branch is disabled (2026-07-02, see palace_bridge) and queued for
+/// removal at the 1.1 release gate; this constant and `use_bulk` are kept so
+/// the preserved-verbatim disabled branch still reads true at the 1.1 review.
+/// The ACTIVE large-source safety valve is `BULK_WINDOW` above. The Obsidian /
+/// OKF gate (vault_bridge) still consults `use_bulk` live.
 pub const STREAM_THRESHOLD: usize = 250_000;
 
-/// Whether a source of `item_count` items should be written in one bulk
-/// transaction (`true`) or streamed per-item (`false`).
+/// Whether a source of `item_count` items should be written bulk (`true`) or
+/// streamed per-item (`false`). Live for vault_bridge; palace_bridge's copy of
+/// this gate is disabled (bulk unconditional, windowed by `BULK_WINDOW`).
 pub fn use_bulk(item_count: usize) -> bool {
     item_count <= STREAM_THRESHOLD
 }

@@ -184,6 +184,30 @@ struct SupportingTypeTests {
                 "p50 of capacity-evicted window [2,3,100] must be 3.0; got \(w.percentile(50))")
     }
 
+    // Regression: concurrent drainers (encode + import workers on the shared
+    // per-estate queue) report into ONE latency window. The unguarded `var`
+    // window corrupted its array's heap buffer under concurrent append
+    // (SIGSEGV in Array.append via reportQueueStats — killed the GLK test
+    // runner intermittently). QueueLatencyWindowBox serialises access; this
+    // hammer proves concurrent sampling neither crashes nor loses invariants.
+    // Rust twin needs no test: its window was always Mutex-guarded.
+    @Test func latencyWindowBoxSafeUnderConcurrentSampling() async {
+        let box = QueueLatencyWindowBox(capacity: 100)
+        await withTaskGroup(of: Void.self) { group in
+            for worker in 0..<8 {
+                group.addTask {
+                    for i in 0..<1_000 {
+                        _ = box.sample(Double(worker * 1_000 + i))
+                    }
+                }
+            }
+        }
+        // Percentiles remain ordered and finite after 8k concurrent samples.
+        let (p50, p95) = box.sample(1.0)
+        #expect(p50.isFinite && p95.isFinite)
+        #expect(p95 >= p50, "p95 must dominate p50 after concurrent sampling")
+    }
+
     // P7-secfix: NaN / infinity / out-of-range p must return 0 without trapping.
     @Test func latencyWindowNaNAndInfinityReturnZero() {
         var w = QueueLatencyWindow()

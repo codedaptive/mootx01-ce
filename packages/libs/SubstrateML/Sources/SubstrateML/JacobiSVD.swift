@@ -166,90 +166,55 @@ public enum JacobiSVD {
         // float ops that might diverge on edge cases.
         let eps: Float = 1e-9
 
-        // One-sided cyclic Jacobi: sweep over all column pairs in
-        // fixed lexicographic order (p, q) with 0 ≤ p < q < n.
-        // Each sweep visits every pair exactly once.
-        // Fixed `sweeps` count ensures identical iteration counts on both
-        // ports regardless of how quickly the matrix converges.
+        // One-sided TOURNAMENT Jacobi: fixed `sweeps` passes; each sweep walks
+        // the round-robin tournament schedule (circle method) instead of the
+        // old lexicographic (p, q) nest. Within a round every pair is COLUMN-
+        // DISJOINT, so the round's rotations commute exactly — each reads and
+        // writes only its own two columns of W and V — and can execute on any
+        // number of threads with BIT-IDENTICAL output (thread-count-independent
+        // determinism; serial == parallel). Rounds are barriers
+        // (`concurrentPerform` returns only when every iteration finishes), so
+        // round r+1 sees every rotation of round r. The schedule is a pure
+        // integer function of n, twin-implemented in Rust
+        // (`JacobiSvd::tournament_rounds`) and pinned by the shared schedule
+        // hash — both ports rotate the same pairs in the same round order, so
+        // cross-port bit-identity holds exactly as it did for the
+        // lexicographic order.
         //
-        // PERF: the three inner loops below are the dominant cost of a dense
-        // reindex (O(sweeps · n² · m) float ops). Accessing `W`/`V` through
-        // bounds-checked `[Float]` subscripts prevents LLVM from
-        // auto-vectorizing these loops, leaving Swift ~100× behind the Rust
-        // port (whose `Vec<f32>` release build vectorizes freely) — enough to
-        // stall the encode drain on a large corpus. We take unsafe buffer
-        // pointers over W and V for the sweep so the arithmetic vectorizes.
-        // SAFETY: every index below is statically derived from the buffer
-        // dimensions the pointers were taken over — pBase/qBase ∈ {0,m,…,(n-1)m}
-        // with i ∈ 0..<m keeps pBase+i < n·m == W.count; vpBase/vqBase ∈
-        // {0,n,…,(n-1)n} with j ∈ 0..<n keeps vpBase+j < n·n == V.count. No
-        // index is derived from input data, so the bounds are provably in
-        // range and the checks the compiler would insert are pure overhead.
+        // WHY: the lexicographic nest is inherently serial (consecutive pairs
+        // share a column), so a 512-column reindex factorization pinned one
+        // core for minutes while the retrain's other phases fanned out. The
+        // tournament order runs up to n/2 rotations concurrently.
+        //
+        // PERF + SAFETY of the pointer access: unchanged from the previous
+        // implementation — unsafe buffer pointers over W and V so the inner
+        // loops vectorize; every index is statically derived from the buffer
+        // dimensions (pBase/qBase ∈ {0,m,…,(n-1)m}, i ∈ 0..<m). The ALIASING
+        // safety of the parallel fan-out is the schedule's column-
+        // disjointness, unit-asserted in JacobiSVDTests.
+        let rounds = tournamentRounds(n)
+        let workers = ProcessInfo.processInfo.activeProcessorCount
         W.withUnsafeMutableBufferPointer { wBuf in
             V.withUnsafeMutableBufferPointer { vBuf in
+                let mats = MatPtr(w: wBuf.baseAddress!, v: vBuf.baseAddress!)
                 for _ in 0..<sweeps {
-                    for p in 0..<(n - 1) {
-                        for q in (p + 1)..<n {
-                            // Compute inner products for columns p and q.
-                            // alpha = <W[:,p], W[:,p]>, beta = <W[:,q], W[:,q]>
-                            // gamma = <W[:,p], W[:,q]>
-                            // All three use the same loop nest order as NMF's
-                            // matMulFlat so cross-port accumulation order matches.
-                            var alpha: Float = 0
-                            var beta:  Float = 0
-                            var gamma: Float = 0
-                            let pBase = p * m
-                            let qBase = q * m
-                            for i in 0..<m {
-                                let wp = wBuf[pBase + i]
-                                let wq = wBuf[qBase + i]
-                                alpha = alpha + wp * wp
-                                beta  = beta  + wq * wq
-                                gamma = gamma + wp * wq
+                    for round in rounds {
+                        if workers <= 1 || round.count < 2 {
+                            for pair in round {
+                                rotatePair(mats, m: m, n: n, p: pair.p, q: pair.q, eps: eps)
                             }
-
-                            // Check orthogonality: if gamma² ≤ eps² × alpha × beta
-                            // the columns are already orthogonal enough — skip the
-                            // rotation. This test is purely multiplicative, not
-                            // transcendental, so it diverges identically on both ports.
-                            let gammaAbs = gamma < 0 ? -gamma : gamma
-                            let threshold: Float = eps * (alpha < 0 ? -alpha : alpha).squareRoot() *
-                                                         (beta  < 0 ? -beta  : beta ).squareRoot()
-                            if gammaAbs <= threshold { continue }
-
-                            // Compute the Jacobi rotation (c, s) that annihilates
-                            // the (p,q) off-diagonal entry of Wᵀ W.
-                            //
-                            //   ζ = (β − α) / (2γ)
-                            //   t = sign(ζ) / (|ζ| + sqrt(1 + ζ²))
-                            //   c = 1 / sqrt(1 + t²)
-                            //   s = c * t
-                            //
-                            // Using Float32 arithmetic throughout. Expression tree
-                            // is identical in Rust. Parenthesisation is explicit to
-                            // prevent compiler reordering.
-                            let (c, s) = jacobiCS(alpha: alpha, beta: beta, gamma: gamma)
-
-                            // Apply the rotation to columns p and q of W:
-                            //   W'[:,p] = c * W[:,p] - s * W[:,q]
-                            //   W'[:,q] = s * W[:,p] + c * W[:,q]
-                            // In-place: compute new W[:,p] first using a temp, then W[:,q].
-                            for i in 0..<m {
-                                let wp = wBuf[pBase + i]
-                                let wq = wBuf[qBase + i]
-                                wBuf[pBase + i] = c * wp - s * wq
-                                wBuf[qBase + i] = s * wp + c * wq
-                            }
-
-                            // Apply the same rotation to V (accumulates Vᵀ row-by-row
-                            // but stored column-major here, so V[:,p] and V[:,q]).
-                            let vpBase = p * n
-                            let vqBase = q * n
-                            for j in 0..<n {
-                                let vp = vBuf[vpBase + j]
-                                let vq = vBuf[vqBase + j]
-                                vBuf[vpBase + j] = c * vp - s * vq
-                                vBuf[vqBase + j] = s * vp + c * vq
+                        } else {
+                            // Chunk the round's disjoint pairs across the cores;
+                            // concurrentPerform is a synchronous barrier.
+                            let chunkCount = min(workers, round.count)
+                            let per = (round.count + chunkCount - 1) / chunkCount
+                            DispatchQueue.concurrentPerform(iterations: chunkCount) { ci in
+                                let lo = ci * per
+                                let hi = min(lo + per, round.count)
+                                for idx in lo..<hi {
+                                    let pair = round[idx]
+                                    rotatePair(mats, m: m, n: n, p: pair.p, q: pair.q, eps: eps)
+                                }
                             }
                         }
                     }
@@ -350,6 +315,110 @@ public enum JacobiSVD {
     }
 
     // MARK: - Jacobi rotation helper
+
+
+    // MARK: - Tournament schedule (the parallel-Jacobi contract)
+
+    /// Round-robin tournament schedule for `n` columns (the classic circle
+    /// method). Returns `t-1` rounds (t = n rounded up to even); each round is
+    /// a set of COLUMN-DISJOINT (p, q) pairs with p < q, and across a full
+    /// cycle every unordered pair appears EXACTLY once. Pure integer function
+    /// of `n` — no floats, nothing that can drift — twin-implemented in Rust
+    /// (`JacobiSvd::tournament_rounds`) and pinned by the shared schedule
+    /// hash, so both ports walk the identical rotation order by construction.
+    /// Pairs within a round are sorted (deterministic serial-order definition;
+    /// execution order within a round is irrelevant — the pairs are disjoint).
+    public static func tournamentRounds(_ n: Int) -> [[(p: Int, q: Int)]] {
+        guard n >= 2 else { return [] }
+        // Odd n: add a phantom "bye" column at index t-1; pairs touching it
+        // are skipped, leaving that column idle for the round.
+        let t = n % 2 == 0 ? n : n + 1
+        let roundCount = t - 1
+        let half = t / 2
+        var out: [[(p: Int, q: Int)]] = []
+        out.reserveCapacity(roundCount)
+        for r in 0..<roundCount {
+            var pairs: [(p: Int, q: Int)] = []
+            pairs.reserveCapacity(half)
+            for k in 0..<half {
+                let a: Int
+                let b: Int
+                if k == 0 {
+                    // The fixed pivot (t-1) plays the rotating index.
+                    a = t - 1
+                    b = r % (t - 1)
+                } else {
+                    a = (r + k) % (t - 1)
+                    b = ((r + t - 1) - k) % (t - 1)
+                }
+                if a >= n || b >= n { continue }  // bye pair (odd n)
+                pairs.append(a < b ? (a, b) : (b, a))
+            }
+            pairs.sort { $0.p != $1.p ? $0.p < $1.p : $0.q < $1.q }
+            out.append(pairs)
+        }
+        return out
+    }
+
+    /// Raw pointers to the working matrices, passable into the per-round
+    /// parallel closure. SAFETY INVARIANT: a round's pairs are column-disjoint
+    /// (`tournamentRounds` construction, unit-asserted), and each
+    /// `concurrentPerform` iteration owns a disjoint chunk of pairs — no two
+    /// threads ever touch the same Float.
+    private struct MatPtr: @unchecked Sendable {
+        let w: UnsafeMutablePointer<Float>
+        let v: UnsafeMutablePointer<Float>
+    }
+
+    /// One Jacobi rotation on columns (p, q) of W (m rows) and V (n rows) —
+    /// byte-for-byte the arithmetic of the pre-tournament serial body (same
+    /// accumulation order, same expression trees, same skip threshold).
+    private static func rotatePair(_ mats: MatPtr, m: Int, n: Int, p: Int, q: Int, eps: Float) {
+        let w = mats.w
+        let v = mats.v
+        // Compute inner products for columns p and q.
+        // alpha = <W[:,p], W[:,p]>, beta = <W[:,q], W[:,q]>,
+        // gamma = <W[:,p], W[:,q]>. Same loop nest order as NMF's matMulFlat
+        // so cross-port accumulation order matches.
+        var alpha: Float = 0
+        var beta:  Float = 0
+        var gamma: Float = 0
+        let pBase = p * m
+        let qBase = q * m
+        for i in 0..<m {
+            let wp = w[pBase + i]
+            let wq = w[qBase + i]
+            alpha = alpha + wp * wp
+            beta  = beta  + wq * wq
+            gamma = gamma + wp * wq
+        }
+
+        // Check orthogonality: skip if the pair is already orthogonal enough.
+        let gammaAbs = gamma < 0 ? -gamma : gamma
+        let threshold: Float = eps * (alpha < 0 ? -alpha : alpha).squareRoot() *
+                                     (beta  < 0 ? -beta  : beta ).squareRoot()
+        if gammaAbs <= threshold { return }
+
+        let (c, s) = jacobiCS(alpha: alpha, beta: beta, gamma: gamma)
+
+        // Apply the rotation to columns p and q of W.
+        for i in 0..<m {
+            let wp = w[pBase + i]
+            let wq = w[qBase + i]
+            w[pBase + i] = c * wp - s * wq
+            w[qBase + i] = s * wp + c * wq
+        }
+
+        // Apply the same rotation to V.
+        let vpBase = p * n
+        let vqBase = q * n
+        for j in 0..<n {
+            let vp = v[vpBase + j]
+            let vq = v[vqBase + j]
+            v[vpBase + j] = c * vp - s * vq
+            v[vqBase + j] = s * vp + c * vq
+        }
+    }
 
     /// Compute (c, s) for the Jacobi rotation that annihilates the
     /// off-diagonal entry of the 2×2 symmetric matrix
