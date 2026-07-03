@@ -304,6 +304,25 @@ jobs:
             "$VERSION"*) echo "✓ installer works (version matches)";;
             *) echo "✗ unexpected --version: $out (want $VERSION*)"; exit 1;;
           esac
+
+          # A binary that runs is not a working install. Run the wiring step
+          # (mootx01 install) and assert it produces a REAL install: the
+          # background services register and moot-mgr places. This is the check
+          # that would have caught the .pkg half-install (clients wired to a
+          # daemon that was never registered) and the moot-mgr self-copy crash.
+          MB="$HOME/.mootx01/bin/mootx01"
+          out="$("$MB" install --yes 2>&1)"; echo "$out"
+          echo "$out" | grep -qi 'Could not place moot-mgr' && { echo "✗ moot-mgr placement failed"; exit 1; }
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            # launchd may not start user agents on a headless runner, but the
+            # LaunchAgent plists MUST be written — their absence is exactly the
+            # daemon-not-registered bug.
+            [ -f "$HOME/Library/LaunchAgents/com.mootx01.daemon.plist" ] || { echo "✗ resident daemon LaunchAgent not registered"; exit 1; }
+            [ -f "$HOME/Library/LaunchAgents/com.mootx01.mgr.plist" ]    || { echo "✗ moot-mgr LaunchAgent not registered"; exit 1; }
+            echo "✓ macOS: daemon + moot-mgr LaunchAgents registered"
+          fi
+
+          "$MB" uninstall --yes >/dev/null 2>&1 || true
           sh install.sh --uninstall
           [ ! -e "$HOME/.mootx01" ] || { echo "✗ uninstall left ~/.mootx01"; exit 1; }
-          echo "✓ ${{ matrix.os }} install → run → uninstall clean"
+          echo "✓ ${{ matrix.os }} install → wire → run → uninstall clean"
