@@ -40,18 +40,41 @@ public enum ClaudeDesktopExtension {
     /// (verified against the Desktop app's own install code, 2026-07-03).
     public static let id = "local.mcpb.codedaptive.mootx01"
 
-    /// Install (or refresh) the Desktop extension. Returns false if Claude
-    /// Desktop is not present on this machine (nothing to do). Throws only on a
+    /// Install (or refresh) the Desktop extension in the main Claude data dir
+    /// AND every Parall sandboxed instance (each Parall/<name>/ dir is a full
+    /// Claude data dir with its own extension registry — extension installs
+    /// are per-instance, exactly like the raw config wiring). Returns the dirs
+    /// written; empty when Claude Desktop is not present. Throws only on a
     /// genuine write failure.
     @discardableResult
-    public static func install(binaryPath: String, version: String, homeDirectory: URL) throws -> Bool {
+    public static func install(binaryPath: String, version: String, homeDirectory: URL) throws -> [String] {
         let fm = FileManager.default
-        let claudeDir = homeDirectory
+        let appSupport = homeDirectory
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("Claude", isDirectory: true)
-        // Desktop not installed → no registry to write into.
-        guard fm.fileExists(atPath: claudeDir.path) else { return false }
+
+        var claudeDirs = [appSupport.appendingPathComponent("Claude", isDirectory: true)]
+        // Parall instances: any Parall/<instance>/ holding a Claude Desktop
+        // config is a sandboxed Claude data dir (mirrors Installer.parallConfigPaths).
+        let parallRoot = appSupport.appendingPathComponent("Parall", isDirectory: true)
+        if let instances = try? fm.contentsOfDirectory(
+            at: parallRoot, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) {
+            claudeDirs += instances
+                .filter { fm.fileExists(atPath: $0.appendingPathComponent("claude_desktop_config.json").path) }
+                .sorted { $0.path < $1.path }
+        }
+
+        var written: [String] = []
+        for claudeDir in claudeDirs where fm.fileExists(atPath: claudeDir.path) {
+            try writeExtension(into: claudeDir, binaryPath: binaryPath, version: version)
+            written.append(claudeDir.path)
+        }
+        return written
+    }
+
+    /// The three writes, into one Claude data dir.
+    private static func writeExtension(into claudeDir: URL, binaryPath: String, version: String) throws {
+        let fm = FileManager.default
 
         // Manifest — display_name matches `name` ("mootx01") so this collapses
         // with the raw mcpServers entry mootx01 install also writes.
@@ -116,8 +139,6 @@ public enum ClaudeDesktopExtension {
         try fm.createDirectory(at: settingsDir, withIntermediateDirectories: true)
         let enabled = try JSONSerialization.data(withJSONObject: ["isEnabled": true])
         try enabled.write(to: settingsDir.appendingPathComponent("\(id).json"), options: .atomic)
-
-        return true
     }
 
     private static func iso8601Now() -> String {
