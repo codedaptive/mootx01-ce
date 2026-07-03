@@ -1,7 +1,7 @@
 ---
-version: 2.0.0
+version: 2.1.0
 status: active
-date: 2026-07-02
+date: 2026-07-03
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
 ---
 
@@ -79,13 +79,25 @@ Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guara
 
 | Branch Pattern | Purpose |
 |---|---|
-| `stable/X.Y.x` | Production stable release line — published; user installs come from here |
-| `candidate/X.Y.x` | Release candidate line — builds are produced and validated here before promotion to stable |
-| `develop/X.Y.x` | Active development for next minor release |
-| `develop/X.0.x` or `develop/2.0` | Major version development, potentially experimental |
+| `develop/X.Y.x` | **Default branch.** Active development; pull requests land here; the daily regression suite (`make test`) runs here; security scanning targets it. |
+| `candidate/X.Y.x` | Test-build line. Every push produces an automatic **unsigned pre-release** whose installers are verified in CI (see 2.3). |
+| `stable/X.Y.x` | Release staging / last-known-good. Merges sit inert here; a `vX.Y.Z` tag on this branch is what cuts the **signed** production release. |
 
 All three branches of a release line (`develop`, `candidate`, `stable`) exist
-permanently and concurrently for the lifetime of that line.
+permanently and concurrently for the lifetime of that line. `develop` is the
+repository default branch (not `stable`): contributions and PRs target the
+active line, and released binaries are obtained from tagged releases, not by
+cloning.
+
+Per-branch automation:
+
+- **develop** — daily `make test` (regression backstop; runs only when develop
+  moved that day). Not a build.
+- **candidate** — on every push, build all platforms UNSIGNED, publish a
+  GitHub pre-release tagged `X.Y.Z-prerelease.<run>`, then verify the installers
+  by installing that pre-release. No signing here.
+- **stable** — no automation on push. Only a pushed `vX.Y.Z` tag triggers the
+  signed, notarized release build.
 
 ### 2.2 Stable Branch Lifecycle
 
@@ -113,15 +125,25 @@ develop/X.Y.x  --merge-->  candidate/X.Y.x  --merge-->  stable/X.Y.x
 ```
 
 1. Development lands on `develop/X.Y.x`.
-2. When preparing a release, `develop` is merged into `candidate`. Release
-   artifacts are built from `candidate` and the installer validation
-   harness runs against those builds.
-3. On a passing validation run, `candidate` is merged into `stable` and the
-   release tag is cut from `stable`.
-4. Fixes for problems found during validation land on `develop`, then
-   re-merge to `candidate` for re-validation. Commits are never made
-   directly on `candidate` or `stable`, so the branches never diverge and
-   `develop` always contains everything.
+2. When preparing a release, `develop` is merged into `candidate`. That push
+   automatically builds every platform and publishes an unsigned pre-release
+   (`X.Y.Z-prerelease.<run>`); CI then installs it via the product installers
+   to prove they work. Deeper hardware testing (e.g. the Windows VM harness)
+   runs against that same pre-release before promotion.
+3. On a passing candidate, `candidate` is merged into `stable`. This does NOT
+   build anything — `stable` is a staging area. When ready, a `vX.Y.Z` tag is
+   pushed on `stable`, and that tag alone triggers the signed, notarized
+   release.
+4. Fixes for problems found on candidate land on `develop`, then re-merge to
+   `candidate` for a fresh pre-release. Commits are never made directly on
+   `candidate` or `stable`.
+5. After a release ships, `stable` is merged back into `develop` so the two
+   stay in sync (the promotion merge-commits live only downstream otherwise).
+   This is a no-content merge and keeps the branches even.
+
+Because nothing originates on `candidate` or `stable`, every line that ships
+was authored and reviewed on `develop` first — so scanning/testing `develop`
+covers everything downstream.
 
 ### 2.4 Line Promotion Flow
 
@@ -136,13 +158,24 @@ When a development line stabilizes and ships as a new minor version:
 
 ### 2.5 Tagging Rules
 
-Every production release must be tagged in git at the exact commit that shipped.
+Every production release must be tagged in git at the exact commit that shipped,
+on `stable`. The tag push is the sole trigger for the signed release build.
 
-Tag format: `vMAJOR.MINOR.PATCH`
+Tag format: `vMAJOR.MINOR.PATCH` (e.g. `v1.0.0`, `v1.0.10`, `v1.1.0`). A
+pre-release qualifier is allowed on a signed release when applicable
+(`v1.0.0-beta`). **Only organization admins may create `v*` tags** (enforced by
+a repository tag ruleset), since a `v*` tag creates a Codedaptive-signed
+release.
 
-Example: `v1.0.0`, `v1.0.1`, `v1.1.0`
+Candidate pre-release tags are a **separate namespace**: `X.Y.Z-prerelease.<run>`
+with **no leading `v`**. This is deliberate — a `v*` tag would trigger the
+signed release pipeline, so candidate builds must stay clear of it. The
+installers normalize a bare `X.Y.Z` to its `vX.Y.Z` tag but leave
+`-prerelease` tags untouched, so a candidate installs with
+`MOOTX01_VERSION=X.Y.Z-prerelease.<run>`.
 
-Tags are immutable. A tagged release is never altered. If a critical fix is required, a new PATCH tag is created.
+Tags are immutable. A tagged release is never altered. If a critical fix is
+required, a new PATCH tag is created.
 
 ---
 
@@ -243,6 +276,14 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 2.1.0 -- 2026-07-03
+Documented the branch model as actually operated: `develop` is the repository
+default branch; `candidate` auto-builds unsigned pre-releases
+(`X.Y.Z-prerelease.<run>`) and verifies the installers in CI; `stable` stages
+inertly until a `vX.Y.Z` tag cuts the signed release; daily `make test` runs on
+`develop`; `stable` is merged back to `develop` after each release; and `v*`
+tag creation is restricted to organization admins. Additive (2.1, 2.3, 2.5).
 
 ### 2.0.0 -- 2026-07-02
 Added `candidate/X.Y.x` branch and documented the three-branch release
