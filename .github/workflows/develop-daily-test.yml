@@ -1,0 +1,58 @@
+# Develop daily regression — `make test` on develop, once a day, only if it moved.
+#
+# The regression backstop. `make test` (every Swift package + every Rust crate)
+# is heavy, so it does NOT gate builds — it runs here, on a schedule, against
+# the active development branch, to catch anything that slipped through review.
+# The first step short-circuits when develop had no commits in the last day, so
+# a quiet develop doesn't burn a macOS runner for nothing.
+#
+# candidate/1.0.x and stable/1.0.x do NOT run make test — candidate proves
+# installers work (candidate.yml); stable is a tagged snapshot of already-tested
+# develop content.
+
+name: develop daily test
+
+on:
+  schedule:
+    # Daily, 08:00 UTC. Scheduled runs fire from the default branch (develop).
+    - cron: "0 8 * * *"
+  workflow_dispatch:   # manual "run it now" regardless of the moved-check
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      moved: ${{ steps.check.outputs.moved }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: develop/1.0.x
+          fetch-depth: 0
+      - id: check
+        run: |
+          # Did develop move in the last day? A manual dispatch always runs.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "moved=true" >> "$GITHUB_OUTPUT"; echo "manual dispatch — running"; exit 0
+          fi
+          if [ -n "$(git log --since='24 hours ago' --oneline)" ]; then
+            echo "moved=true"  >> "$GITHUB_OUTPUT"; echo "develop moved in the last 24h — running make test"
+          else
+            echo "moved=false" >> "$GITHUB_OUTPUT"; echo "develop unchanged in the last 24h — skipping"
+          fi
+
+  test:
+    needs: gate
+    if: ${{ needs.gate.outputs.moved == 'true' }}
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: develop/1.0.x
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - run: make test

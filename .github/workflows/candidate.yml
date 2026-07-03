@@ -3,15 +3,21 @@
 # Branch model: develop (default, active work) → candidate (this: test builds /
 # pre-release) → stable (last-known-good; release tags cut from there).
 #
-# Triggers: every push to candidate/1.0.x (i.e. each promotion) and a weekly
-# schedule. Runs the `make test` gate, then builds UNSIGNED artifacts for every
-# platform and publishes them as a GitHub *pre-release* (kept: last 4). Nothing
-# here uses the Apple Developer ID or Windows signing paths — those are for real
-# releases only (see release.yml). Integrity is the minisign-signed checksums,
-# best-effort (a candidate must not fail the whole build just because the key is
-# absent — unlike the fail-closed stable release).
+# What this proves (and ONLY this): we have working binaries, and those binaries
+# have installers that work. It does NOT run the unit/kit suite — regression
+# testing is `make test`, which runs as a daily job on develop
+# (develop-daily-test.yml), not here.
 #
-# Testers install a candidate with the pre-release tag, e.g.
+# Flow: build UNSIGNED artifacts for every platform (each with a binary smoke),
+# publish them as a GitHub *pre-release* (kept: last 4), then install that
+# pre-release via the repo's own install.sh on Linux + macOS and confirm it
+# runs. Windows install verification is the operator's VM harness
+# (tools/ce-installer-harness) run against the pre-release before promotion.
+# Nothing here signs with Apple Developer ID / Windows Authenticode — those are
+# for real releases (release.yml, tag-triggered). Checksums are minisign-signed
+# best-effort (a candidate must not fail just because the key is absent).
+#
+# Testers install a candidate with the pre-release tag:
 #   MOOTX01_VERSION=candidate-1.0.10-42 sh install.sh
 # (the normal `releases/latest` path deliberately skips pre-releases).
 
@@ -21,7 +27,7 @@ on:
   push:
     branches: ["candidate/1.0.x"]
   schedule:
-    # Weekly dev build, Monday 09:00 UTC. Scheduled runs fire from the DEFAULT
+    # Weekly build, Monday 09:00 UTC. Scheduled runs fire from the DEFAULT
     # branch (develop), so every job pins `ref: candidate/1.0.x` to build the
     # candidate line regardless of what triggered the run.
     - cron: "0 9 * * 1"
@@ -35,7 +41,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Derive the candidate version/tag (fast; not gated behind the test job) ──
+  # ── Derive the candidate version/tag ────────────────────────────────────────
   meta:
     runs-on: ubuntu-latest
     outputs:
@@ -56,23 +62,9 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Candidate build: $tag"
 
-  # ── The quality gate: the project's canonical test target ───────────────────
-  test:
-    name: make test (gate)
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: candidate/1.0.x
-      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
-        with:
-          xcode-version: latest-stable
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - run: make test
-
   # ── Unsigned macOS builds (arm64 + x86_64) ──────────────────────────────────
   macos:
-    needs: [meta, test]
+    needs: meta
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +103,10 @@ jobs:
           asset="mootx01-${{ needs.meta.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz"
           tar -czf "$asset" mootx01 moot-mgr ./*.bundle
           echo "ASSET=$asset" >> "$GITHUB_ENV"
+          # Smoke: binary present in the archive; run --version natively (arm64
+          # only — x86_64 is cross-built and won't execute on the arm runner).
+          tar -tzf "$asset" | grep -qx 'mootx01' || { echo "no mootx01 in archive"; exit 1; }
+          [ "${{ matrix.arch }}" = "arm64" ] && ./mootx01 --version || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-${{ matrix.arch }}
@@ -118,7 +114,7 @@ jobs:
 
   # ── Unsigned Linux builds (x86_64 + arm64) ──────────────────────────────────
   linux:
-    needs: [meta, test]
+    needs: meta
     strategy:
       fail-fast: false
       matrix:
@@ -142,6 +138,8 @@ jobs:
           asset="mootx01-${{ needs.meta.outputs.tag }}-linux-${{ matrix.arch }}.tar.gz"
           tar -czf "$asset" mootx01 moot-mgr
           echo "ASSET=$asset" >> "$GITHUB_ENV"
+          # Smoke: both arches are native on their runners.
+          ./mootx01 --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-${{ matrix.arch }}
@@ -149,7 +147,7 @@ jobs:
 
   # ── Unsigned Windows builds (x86_64 + arm64): zip archive + Inno setup.exe ───
   windows:
-    needs: [meta, test]
+    needs: meta
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +173,8 @@ jobs:
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target ${{ matrix.target }}
           Copy-Item "apps/mootx01/rust/target/${{ matrix.target }}/release/mootx01.exe"  "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/${{ matrix.target }}/release/moot-mgr.exe" "moot-mgr.exe"
+          # Smoke: both arches run natively on their runners.
+          .\mootx01.exe --version
           $asset = "mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}.zip"
           Compress-Archive -Path "mootx01.exe","moot-mgr.exe" -DestinationPath $asset
           "ARCHIVE=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -263,3 +263,43 @@ jobs:
               echo "pruning old candidate: $old"
               gh release delete "$old" --cleanup-tag --yes
             done
+
+  # ── Verify the installer works: install the published pre-release via the ───
+  # repo's own install.sh, in a sandbox HOME, on Linux + macOS. This is the
+  # "the binaries have installers that work" gate. Windows installer verification
+  # is the operator VM harness (tools/ce-installer-harness) against this tag.
+  install-verify:
+    needs: [meta, prerelease]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+          - os: macos
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: candidate/1.0.x
+      - name: install.sh against the published pre-release (sandbox HOME)
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -eu
+          # Sandbox: install.sh honours $HOME for ~/.mootx01/bin + ~/.local/bin.
+          HOME="$(mktemp -d)"; export HOME
+          # Linux install.sh fail-closes without minisign present; macOS skips it.
+          [ "${{ matrix.os }}" = "linux" ] && { sudo apt-get update; sudo apt-get install -y minisign; }
+          MOOTX01_VERSION="$TAG" sh install.sh
+          out="$("$HOME/.mootx01/bin/mootx01" --version)"
+          echo "installed --version: $out"
+          case "$out" in
+            "$VERSION"*) echo "✓ installer works (version matches)";;
+            *) echo "✗ unexpected --version: $out (want $VERSION*)"; exit 1;;
+          esac
+          sh install.sh --uninstall
+          [ ! -e "$HOME/.mootx01" ] || { echo "✗ uninstall left ~/.mootx01"; exit 1; }
+          echo "✓ ${{ matrix.os }} install → run → uninstall clean"
