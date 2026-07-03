@@ -363,6 +363,134 @@ struct MatrixTierTests {
                 "both modes must produce the same matrix tier")
     }
 
+    // MARK: - Conformance: boundary prune (Finding #4) + backdated eventTime (Finding #3)
+
+    /// Finding #4 conformance (codex 98a790c2): incremental T rebuild must keep
+    /// sources that are exactly at the boundary of the corrected prune cutoff.
+    ///
+    /// The fold keeps a source S when floor((T − S) / 60_000) <= windowMinutes,
+    /// so the maximum kept delta is windowMinutes*60_000 + 59_999 ms. The prune
+    /// cutoff must be `watermark − (windowMinutes+1)*60_000 + 1` so sources in
+    /// that last 59_999-ms slice are not silently dropped.
+    ///
+    /// Setup: three entries A, B, C with raw HLC (no eventTimes override).
+    ///   A at   600_000 ms — the vulnerable source (within correct window of C
+    ///                        but below the old over-strict cutoff).
+    ///   B at 16_000_000 ms — establishes the snapshot watermark.
+    ///   C at 16_000_001 ms — new entry that should pair with A.
+    ///
+    /// With window = 256 minutes (15_360_000 ms), watermark = 16_000_000:
+    ///   old cutoff: 16_000_000 − 15_360_000 = 640_000  → A(600_000) DROPPED
+    ///   new cutoff: 16_000_000 − 15_419_999 = 580_001  → A(600_000) KEPT ✓
+    ///
+    /// Delta (C.clock − A.clock) = 15_400_001 ms → deltaMin = 256 → bucket 128.
+    @Test
+    func temporalBoundarySourceNotPrunedIncrementalEqualsFullRebuild() {
+        // A is in the 59_999-ms vulnerable zone between old and new cutoff.
+        let hA = hlc(600_000)      // source (in vulnerable zone)
+        let hB = hlc(16_000_000)   // entry that will establish snapshot watermark
+        let hC = hlc(16_000_001)   // new entry; should pair with A
+
+        let rowA = UUID(), rowB = UUID(), rowC = UUID()
+
+        // Full log: A, B, C.
+        var fullLog = UnifiedAuditLog()
+        fullLog.add(captureEntry(row: rowA, field: "f.src", value: .bitmap(1), at: hA))
+        fullLog.add(captureEntry(row: rowB, field: "f.mid", value: .bitmap(2), at: hB))
+        fullLog.add(captureEntry(row: rowC, field: "f.tgt", value: .bitmap(3), at: hC))
+
+        // Full rebuild is ground truth.
+        let full = MatrixTier.fullRebuild(from: fullLog)
+
+        // Snapshot = fullRebuild(A + B) only; C has not arrived yet.
+        var prefixLog = UnifiedAuditLog()
+        prefixLog.add(captureEntry(row: rowA, field: "f.src", value: .bitmap(1), at: hA))
+        prefixLog.add(captureEntry(row: rowB, field: "f.mid", value: .bitmap(2), at: hB))
+        var snapshot = MatrixTier.fullRebuild(from: prefixLog)
+
+        // Fold C forward onto the snapshot.
+        snapshot.incrementalUpdate(from: fullLog)
+
+        // T must be cell-for-cell equal to fullRebuild.
+        let tExtra = snapshot.temporalCausality.filter { full.temporalCausality[$0.key] != $0.value }
+        let tMissing = full.temporalCausality.filter { snapshot.temporalCausality[$0.key] != $0.value }
+        #expect(tExtra.isEmpty && tMissing.isEmpty,
+                "boundary-zone source A must produce A→C T cell: \(tExtra.count) extra, \(tMissing.count) missing")
+
+        // The A→C pair must exist in both (bucket 128: 256-minute lag).
+        let aCoord = MatrixValueCoord(fieldPath: "f.src", value: .bitmap(1))
+        let cCoord = MatrixValueCoord(fieldPath: "f.tgt", value: .bitmap(3))
+        let expectedKey = MatrixTemporalKey(source: aCoord, target: cCoord, lagBucket: 128)
+        #expect(full.temporalCausality[expectedKey] == 1,
+                "fullRebuild must contain A→C at bucket 128")
+        #expect(snapshot.temporalCausality[expectedKey] == 1,
+                "incrementalUpdate must contain A→C at bucket 128 after boundary fix")
+    }
+
+    /// Finding #3 conformance (codex 7af07c48): a row captured after the snapshot
+    /// but with an eventTime before the temporal watermark must trigger the
+    /// backdated fallback, producing a T matrix equal to fullRebuild.
+    ///
+    /// Setup (using eventTimes map to supply authored-in-world clocks):
+    ///   A: captureHLC = hlc(1_000), eventTime = 1_000_000 ms  ← earlier world time
+    ///   Snapshot = fullRebuild([A], eventTimes={A→1_000_000}).
+    ///     → T is empty (one entry). temporalWatermarkHLC = hlc_evtime(1_000_000).
+    ///   B: captureHLC = hlc(5_000), eventTime =   900_000 ms  ← BACKDATED
+    ///   incrementalUpdate([A, B], eventTimes={A→1_000_000, B→900_000}):
+    ///     B is new (captureHLC 5_000 > lastHLC 1_000) but its substituted
+    ///     clock (900_000) <= watermark (1_000_000) → backdated → full T rebuild.
+    ///   fullRebuild([A, B], eventTimes=…):
+    ///     sorted by eventTime: B(900_000) then A(1_000_000).
+    ///     deltaMs = 100_000, deltaMin = 1, bucket = 1.
+    ///     T = {B→A, bucket 1: 1}.
+    @Test
+    func backdatedEventTimeTriggersFullTemporalRebuildIncrementalEqualsFullRebuild() {
+        let rowA = UUID(), rowB = UUID()
+
+        // Capture HLCs (monotonic capture order).
+        let capHLCA = hlc(1_000)
+        let capHLCB = hlc(5_000)
+
+        // Authored-in-world times (ms): A is later in world time, B is backdated.
+        let evtA: Int64 = 1_000_000
+        let evtB: Int64 =   900_000   // before A in world time
+
+        var eventTimes: [UUID: Int64] = [rowA: evtA, rowB: evtB]
+
+        // Prefix log: only A.
+        var prefixLog = UnifiedAuditLog()
+        prefixLog.add(captureEntry(row: rowA, field: "f.src", value: .bitmap(10), at: capHLCA))
+        var snapshot = MatrixTier.fullRebuild(from: prefixLog, eventTimes: eventTimes)
+        // Single entry → T is empty; watermark is in eventTime space (1_000_000 ms).
+        #expect(snapshot.temporalCausality.isEmpty,
+                "single-entry snapshot must have empty T")
+
+        // Full log: A + B (B backdated in world time).
+        var fullLog = UnifiedAuditLog()
+        fullLog.add(captureEntry(row: rowA, field: "f.src", value: .bitmap(10), at: capHLCA))
+        fullLog.add(captureEntry(row: rowB, field: "f.tgt", value: .bitmap(20), at: capHLCB))
+
+        // Ground truth.
+        let full = MatrixTier.fullRebuild(from: fullLog, eventTimes: eventTimes)
+
+        // Incremental fold on the snapshot — must produce the same T as fullRebuild.
+        snapshot.incrementalUpdate(from: fullLog, eventTimes: eventTimes)
+
+        let tExtra = snapshot.temporalCausality.filter { full.temporalCausality[$0.key] != $0.value }
+        let tMissing = full.temporalCausality.filter { snapshot.temporalCausality[$0.key] != $0.value }
+        #expect(tExtra.isEmpty && tMissing.isEmpty,
+                "backdated eventTime: incremental must equal fullRebuild — \(tExtra.count) extra, \(tMissing.count) missing")
+
+        // Expected: B(900_000) → A(1_000_000), delta 100_000 ms → 1 min → bucket 1.
+        let bCoord = MatrixValueCoord(fieldPath: "f.tgt", value: .bitmap(20))
+        let aCoord = MatrixValueCoord(fieldPath: "f.src", value: .bitmap(10))
+        let expectedKey = MatrixTemporalKey(source: bCoord, target: aCoord, lagBucket: 1)
+        #expect(full.temporalCausality[expectedKey] == 1,
+                "fullRebuild must contain B→A at bucket 1")
+        #expect(snapshot.temporalCausality[expectedKey] == 1,
+                "incrementalUpdate must contain B→A at bucket 1 after backdated fallback")
+    }
+
     // MARK: - Calibration
 
     @Test

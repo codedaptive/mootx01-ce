@@ -674,6 +674,147 @@ fn snapshot_truncated_v2_before_watermark_is_rejected() {
     );
 }
 
+// MARK: - Conformance: boundary prune (Finding #4) + backdated eventTime (Finding #3)
+
+/// Finding #4 conformance (codex 98a790c2): incremental T rebuild must keep
+/// sources that are exactly at the boundary of the corrected prune cutoff.
+/// Mirrors Swift MatrixTierTests.temporalBoundarySourceNotPrunedIncrementalEqualsFullRebuild.
+///
+/// Setup (raw HLC, no event_times map):
+///   A at   600_000 ms — source in the vulnerable 59_999-ms zone.
+///   B at 16_000_000 ms — establishes the snapshot watermark.
+///   C at 16_000_001 ms — new entry that should pair with A.
+///
+/// With window = 256 minutes, watermark = 16_000_000:
+///   old cutoff: 16_000_000 − 15_360_000 = 640_000  → A(600_000) DROPPED
+///   new cutoff: 16_000_000 − 15_419_999 = 580_001  → A(600_000) KEPT ✓
+///
+/// delta (C − A) = 15_400_001 ms → deltaMin = 256 → bucket 128.
+#[test]
+fn temporal_boundary_source_not_pruned_incremental_equals_full_rebuild() {
+    let h_a = hlc(600_000);       // source in vulnerable zone
+    let h_b = hlc(16_000_000);    // snapshot watermark entry
+    let h_c = hlc(16_000_001);    // new entry; should pair with A
+    let row_a = EntryUUID([0x11; 16]);
+    let row_b = EntryUUID([0x22; 16]);
+    let row_c = EntryUUID([0x33; 16]);
+
+    // Full log: A, B, C.
+    let mut full_log = UnifiedAuditLog::new();
+    full_log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), h_a));
+    full_log.add(capture(row_b, "f.mid", UnifiedAuditValue::Bitmap(2), h_b));
+    full_log.add(capture(row_c, "f.tgt", UnifiedAuditValue::Bitmap(3), h_c));
+
+    // Ground truth.
+    let full = MatrixTier::full_rebuild(&full_log, &std::collections::HashMap::new());
+
+    // Snapshot = full_rebuild(A + B) only.
+    let mut prefix_log = UnifiedAuditLog::new();
+    prefix_log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), h_a));
+    prefix_log.add(capture(row_b, "f.mid", UnifiedAuditValue::Bitmap(2), h_b));
+    let mut snapshot = MatrixTier::full_rebuild(&prefix_log, &std::collections::HashMap::new());
+
+    // Fold C forward onto the snapshot.
+    snapshot.incremental_update(&full_log, &std::collections::HashMap::new());
+
+    // T must be cell-for-cell equal to full_rebuild.
+    assert_eq!(
+        snapshot.temporal_causality, full.temporal_causality,
+        "boundary-zone source A must produce A→C T cell; incremental must equal full_rebuild"
+    );
+
+    // A→C pair must exist at bucket 128 (deltaMin = 256).
+    let a_coord = MatrixValueCoord::new("f.src", UnifiedAuditValue::Bitmap(1));
+    let c_coord = MatrixValueCoord::new("f.tgt", UnifiedAuditValue::Bitmap(3));
+    let expected_key = MatrixTemporalKey { source: a_coord, target: c_coord, lag_bucket: 128 };
+    assert_eq!(
+        full.temporal_causality.get(&expected_key),
+        Some(&1),
+        "full_rebuild must contain A→C at bucket 128"
+    );
+    assert_eq!(
+        snapshot.temporal_causality.get(&expected_key),
+        Some(&1),
+        "incrementalUpdate must contain A→C at bucket 128 after boundary fix"
+    );
+}
+
+/// Finding #3 conformance (codex 7af07c48): a row captured after the snapshot
+/// but with an event_time before the temporal watermark must trigger the backdated
+/// fallback, producing a T matrix equal to full_rebuild.
+/// Mirrors Swift MatrixTierTests.backdatedEventTimeTriggersFullTemporalRebuildIncrementalEqualsFullRebuild.
+///
+/// Setup (event_times map supplies authored-in-world clocks):
+///   A: capture_hlc = hlc(1_000), event_time = 1_000_000 ms
+///   Snapshot = full_rebuild([A], event_times={A→1_000_000}).
+///     → T empty; temporal_watermark_hlc in event_time space = 1_000_000.
+///   B: capture_hlc = hlc(5_000), event_time = 900_000 ms  ← BACKDATED
+///   incremental_update([A, B], event_times=…):
+///     B is new (5_000 > 1_000) but substituted clock (900_000) <= watermark (1_000_000)
+///     → backdated → full T rebuild.
+///   full_rebuild([A, B], event_times=…):
+///     sorted: B(900_000) then A(1_000_000). delta = 100_000 ms → 1 min → bucket 1.
+///     T = {B→A, bucket 1: 1}.
+#[test]
+fn backdated_event_time_triggers_full_temporal_rebuild_incremental_equals_full_rebuild() {
+    use std::collections::HashMap;
+
+    let row_a = EntryUUID([0xA0; 16]);
+    let row_b = EntryUUID([0xB0; 16]);
+
+    // Capture HLCs (monotonic capture order).
+    let cap_hlc_a = hlc(1_000);
+    let cap_hlc_b = hlc(5_000);
+
+    // Authored-in-world event times (ms): B is backdated before A in world time.
+    let evt_a: i64 = 1_000_000;
+    let evt_b: i64 =   900_000;   // before A in world time
+    let mut event_times: HashMap<EntryUUID, i64> = HashMap::new();
+    event_times.insert(row_a, evt_a);
+    event_times.insert(row_b, evt_b);
+
+    // Prefix log: only A.
+    let mut prefix_log = UnifiedAuditLog::new();
+    prefix_log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(10), cap_hlc_a));
+    let mut snapshot = MatrixTier::full_rebuild(&prefix_log, &event_times);
+    // Single entry → T empty; watermark in event_time space = 1_000_000.
+    assert!(
+        snapshot.temporal_causality.is_empty(),
+        "single-entry snapshot must have empty T"
+    );
+
+    // Full log: A + B.
+    let mut full_log = UnifiedAuditLog::new();
+    full_log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(10), cap_hlc_a));
+    full_log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(20), cap_hlc_b));
+
+    // Ground truth.
+    let full = MatrixTier::full_rebuild(&full_log, &event_times);
+
+    // Incremental fold on the snapshot — must equal full_rebuild.
+    snapshot.incremental_update(&full_log, &event_times);
+
+    assert_eq!(
+        snapshot.temporal_causality, full.temporal_causality,
+        "backdated event_time: incremental must equal full_rebuild"
+    );
+
+    // Expected: B(900_000)→A(1_000_000), delta 100_000 ms → 1 min → bucket 1.
+    let b_coord = MatrixValueCoord::new("f.tgt", UnifiedAuditValue::Bitmap(20));
+    let a_coord = MatrixValueCoord::new("f.src", UnifiedAuditValue::Bitmap(10));
+    let expected_key = MatrixTemporalKey { source: b_coord, target: a_coord, lag_bucket: 1 };
+    assert_eq!(
+        full.temporal_causality.get(&expected_key),
+        Some(&1),
+        "full_rebuild must contain B→A at bucket 1"
+    );
+    assert_eq!(
+        snapshot.temporal_causality.get(&expected_key),
+        Some(&1),
+        "incremental_update must contain B→A at bucket 1 after backdated fallback"
+    );
+}
+
 // Small RAII helper — pulls a path out at drop time without bringing
 // in the `scopeguard` crate.
 struct ScopeguardRemove(std::path::PathBuf);
