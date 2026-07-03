@@ -2038,12 +2038,13 @@ impl Corpus {
         filed_at_secs: i64,
     ) -> CorpusKitResult<()> {
         // Batch size for the PARALLEL re-embed. Fixed (not n/cap) on purpose: it
-        // makes a corpus produce MORE batches than cores, so a slow batch cannot
-        // stall the join the way exact per-core slices can (better load balancing).
+        // makes a corpus produce MORE batches than workers, so a slow batch cannot
+        // stall the pool the way exact per-core slices can (better load balancing).
         // ~3000 amortizes per-batch overhead while a realistic import (tens of
-        // thousands of chunks) still fans across every core. Also the natural unit
-        // for a future chunked-commit write. Thread count scales as
-        // ceil(len / REEMBED_BATCH_SIZE); this is the tuning knob.
+        // thousands of chunks) still keeps every worker busy. Also the natural unit
+        // for a future chunked-commit write. Batch COUNT scales with corpus size;
+        // thread count does NOT — it is capped at embed_concurrency_cap() below
+        // (parity with Swift boundedConcurrentMap(batches, cap:)).
         const REEMBED_BATCH_SIZE: usize = 3000;
 
         let guard = self.slots[slot_index]
@@ -2062,55 +2063,103 @@ impl Corpus {
         let model_id_ref = &model_id;
         let model_version_ref = &model_version;
 
-        // Phase 1 (PARALLEL): embed each fixed-size CONTIGUOUS batch on its own
-        // scoped worker. Batches are joined in spawn order and flattened, so the
-        // resulting payload vector is byte-identical to the serial path —
-        // determinism / cross-port conformance is preserved; only the wall-clock
-        // changes (fan-out across cores instead of one core).
+        // Phase 1 (PARALLEL, BOUNDED): embed the fixed-size CONTIGUOUS batches on
+        // a pool of at most embed_concurrency_cap() persistent workers. Workers
+        // pull batch INDICES from a shared atomic counter (work-stealing), so a
+        // slow batch never stalls the others; results carry their batch index and
+        // are reassembled in batch order, so the flattened payload vector is
+        // byte-identical to the serial path — determinism / cross-port conformance
+        // preserved. The earlier shape spawned one scoped thread PER BATCH
+        // (ceil(len / REEMBED_BATCH_SIZE) threads, unbounded — a very large corpus
+        // could exhaust OS threads/stacks: local DoS, codex 3399b904); the pool
+        // caps live threads exactly like ingest_batch and Swift's
+        // boundedConcurrentMap(batches, cap: embedConcurrencyCap).
+        let batches: Vec<&[Chunk]> = chunks.chunks(REEMBED_BATCH_SIZE).collect();
+        let n_batches = batches.len();
+        let workers = self.embed_concurrency_cap().min(n_batches.max(1));
+        let batches_ref = &batches;
+        let next_batch = std::sync::atomic::AtomicUsize::new(0);
+        let next_ref = &next_batch;
         let batch_rows: Vec<Vec<VectorPayloadInput>> = std::thread::scope(
             |scope| -> Result<Vec<Vec<VectorPayloadInput>>, CorpusKitError> {
-                let handles: Vec<_> = chunks
-                    .chunks(REEMBED_BATCH_SIZE)
-                    .map(|batch| {
-                        scope.spawn(move || -> Result<Vec<VectorPayloadInput>, CorpusKitError> {
-                            let mut rows: Vec<VectorPayloadInput> =
-                                Vec::with_capacity(batch.len() * 2);
-                            for chunk in batch {
-                                // Single inference pass: embed_pair returns the engram
-                                // and float vector from ONE computation.
-                                let (engram, floats) =
-                                    provider_ref.embed_pair(&chunk.text).map_err(|e| {
-                                        CorpusKitError::EmbeddingFailed(format!("{:?}", e))
-                                    })?;
-                                rows.push(VectorPayloadInput {
-                                    item_id: chunk.id.to_string(),
-                                    vector_index: 0,
-                                    payload: VectorPayload::from_engram(&engram),
-                                    model_id: model_id_ref.clone(),
-                                    model_version: model_version_ref.clone(),
-                                    filed_at_unix_secs: filed_at_secs,
-                                });
-                                if !floats.is_empty() {
-                                    rows.push(VectorPayloadInput {
-                                        item_id: chunk.id.to_string(),
-                                        vector_index: 1,
-                                        payload: VectorPayload::from_f32(&floats),
-                                        model_id: model_id_ref.clone(),
-                                        model_version: model_version_ref.clone(),
-                                        filed_at_unix_secs: filed_at_secs,
-                                    });
+                let handles: Vec<_> = (0..workers)
+                    .map(|_| {
+                        scope.spawn(
+                            move || -> Result<Vec<(usize, Vec<VectorPayloadInput>)>, CorpusKitError> {
+                                let mut out: Vec<(usize, Vec<VectorPayloadInput>)> = Vec::new();
+                                loop {
+                                    // Claim the next unprocessed batch index; exit when done.
+                                    let i = next_ref
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if i >= batches_ref.len() {
+                                        break;
+                                    }
+                                    let batch = batches_ref[i];
+                                    let mut rows: Vec<VectorPayloadInput> =
+                                        Vec::with_capacity(batch.len() * 2);
+                                    for chunk in batch {
+                                        // Single inference pass: embed_pair returns the engram
+                                        // and float vector from ONE computation.
+                                        let (engram, floats) =
+                                            provider_ref.embed_pair(&chunk.text).map_err(|e| {
+                                                CorpusKitError::EmbeddingFailed(format!("{:?}", e))
+                                            })?;
+                                        rows.push(VectorPayloadInput {
+                                            item_id: chunk.id.to_string(),
+                                            vector_index: 0,
+                                            payload: VectorPayload::from_engram(&engram),
+                                            model_id: model_id_ref.clone(),
+                                            model_version: model_version_ref.clone(),
+                                            filed_at_unix_secs: filed_at_secs,
+                                        });
+                                        if !floats.is_empty() {
+                                            rows.push(VectorPayloadInput {
+                                                item_id: chunk.id.to_string(),
+                                                vector_index: 1,
+                                                payload: VectorPayload::from_f32(&floats),
+                                                model_id: model_id_ref.clone(),
+                                                model_version: model_version_ref.clone(),
+                                                filed_at_unix_secs: filed_at_secs,
+                                            });
+                                        }
+                                    }
+                                    out.push((i, rows));
                                 }
-                            }
-                            Ok(rows)
-                        })
+                                Ok(out)
+                            },
+                        )
                     })
                     .collect();
-                // Join in spawn order → batches reassemble in chunk order.
-                let mut all: Vec<Vec<VectorPayloadInput>> = Vec::with_capacity(handles.len());
+                // Reassemble by batch index → chunk order, independent of which
+                // worker embedded which batch. A worker panic surfaces as an
+                // error instead of aborting the join.
+                let mut all: Vec<Option<Vec<VectorPayloadInput>>> =
+                    (0..n_batches).map(|_| None).collect();
                 for h in handles {
-                    all.push(h.join().expect("re-embed worker thread panicked")?);
+                    match h.join() {
+                        Ok(Ok(pairs)) => {
+                            for (i, rows) in pairs {
+                                all[i] = Some(rows);
+                            }
+                        }
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            return Err(CorpusKitError::EmbeddingFailed(
+                                "re-embed worker thread panicked".into(),
+                            ))
+                        }
+                    }
                 }
-                Ok(all)
+                all.into_iter()
+                    .enumerate()
+                    .map(|(i, slot)| {
+                        slot.ok_or_else(|| {
+                            CorpusKitError::EmbeddingFailed(format!(
+                                "re-embed batch {i} was never produced (worker exited early)"
+                            ))
+                        })
+                    })
+                    .collect()
             },
         )?;
         drop(guard);
