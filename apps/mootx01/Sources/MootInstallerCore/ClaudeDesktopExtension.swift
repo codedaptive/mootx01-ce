@@ -2,10 +2,10 @@
 //
 // Installs mootx01 as a Claude Desktop extension — Desktop's equivalent of a
 // plugin. Desktop does NOT read a plugin directory or ~/.claude/settings.json;
-// it discovers extensions from its OWN registry under
-// ~/Library/Application Support/Claude. A .mcpb double-click writes three
-// things, and this reproduces them programmatically so `mootx01 install` (and
-// therefore the .pkg, which runs it) wires Desktop with no manual step:
+// it discovers extensions from its OWN registry inside the Claude data dir. A
+// .mcpb double-click writes three things, and this reproduces them
+// programmatically so `mootx01 install` (and therefore the .pkg, which runs it)
+// wires Desktop with no manual step:
 //
 //   1. Claude Extensions/<id>/manifest.json      — the unpacked bundle manifest
 //   2. extensions-installations.json  <id> entry — the registry record
@@ -16,13 +16,14 @@
 // real installed binary path, resolved at install time, so nothing is
 // hardcoded and the same code works on any machine.
 //
-// macOS only: Claude Desktop's support directory and this registry layout are
-// macOS-specific.
+// macOS only. This is the Swift install vertical (macOS/Linux); Windows ships
+// the Rust vertical and registers the Desktop extension in the Rust installer.
+// Linux has no Claude Desktop, so the whole file is gated to macOS.
 
 import Foundation
 
 #if os(macOS)
-import CryptoKit
+import Crypto
 
 public enum ClaudeDesktopExtension {
 
@@ -38,7 +39,9 @@ public enum ClaudeDesktopExtension {
     public static func install(binaryPath: String, version: String, homeDirectory: URL) throws -> Bool {
         let fm = FileManager.default
         let claudeDir = homeDirectory
-            .appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("Claude", isDirectory: true)
         // Desktop not installed → no registry to write into.
         guard fm.fileExists(atPath: claudeDir.path) else { return false }
 
@@ -66,7 +69,9 @@ public enum ClaudeDesktopExtension {
             withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
 
         // 1. Unpack the manifest into the extensions dir.
-        let extDir = claudeDir.appendingPathComponent("Claude Extensions/\(id)", isDirectory: true)
+        let extDir = claudeDir
+            .appendingPathComponent("Claude Extensions", isDirectory: true)
+            .appendingPathComponent(id, isDirectory: true)
         try fm.createDirectory(at: extDir, withIntermediateDirectories: true)
         try manifestData.write(to: extDir.appendingPathComponent("manifest.json"), options: .atomic)
 

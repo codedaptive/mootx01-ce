@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use crate::cli::{InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::depth::{self, DepthOutcome, InstallDepth};
+use crate::core::desktop_ext;
 use crate::core::{merge, paths, permissions};
 use crate::exit;
 
@@ -102,10 +103,41 @@ pub fn run(
             // vault_off = !vault_on: thread the vault posture into the plugin
             // installer so plugin-spawned stdio servers inherit the correct env.
             match depth::apply(client.id, depth, &home, !vault_on) {
-                Ok(DepthOutcome::Server) => println!(
-                    "  ⓘ {}: server only (no skill/plugin payload for this client)",
-                    client.display_name
-                ),
+                Ok(DepthOutcome::Server) => {
+                    // Claude Desktop's "plugin" is a Desktop extension, not a
+                    // file-drop payload. At plugin depth, install it
+                    // programmatically (the same registry writes a .mcpb
+                    // double-click makes). Other MCP-only hosts (continue, kiro)
+                    // genuinely have no plugin surface.
+                    if client.id == "claude-desktop" && depth == InstallDepth::Plugin {
+                        match desktop_ext::install(
+                            client,
+                            &home,
+                            &binary_path,
+                            env!("CARGO_PKG_VERSION"),
+                        ) {
+                            Ok(true) => println!(
+                                "  ✓ {}: extension installed → restart Claude Desktop to load it",
+                                client.display_name
+                            ),
+                            Ok(false) => println!(
+                                "  ⓘ {}: MCP server wired (Claude Desktop not detected — skipped extension)",
+                                client.display_name
+                            ),
+                            Err(e) => eprintln!(
+                                "  ⚠ {}: MCP server wired; extension install failed: {e}",
+                                client.display_name
+                            ),
+                        }
+                    } else if client.id == "claude-desktop" {
+                        println!("  ⓘ {}: MCP server wired.", client.display_name);
+                    } else {
+                        println!(
+                            "  ⓘ {}: server only (no skill/plugin payload for this client)",
+                            client.display_name
+                        );
+                    }
+                }
                 Ok(DepthOutcome::Skills(path)) => {
                     println!("  ✓ {}: skill installed → {path}", client.display_name)
                 }
