@@ -167,7 +167,16 @@ struct InstallCommand: AsyncParsableCommand {
                     )
                     switch outcome {
                     case .server:
-                        print("  ⓘ \(client.displayName): server only (no skill/plugin payload for this client)")
+                        // Claude Desktop's plugin ships as a Desktop extension
+                        // (installed from the Claude Desktop marketplace or the
+                        // mootx01 .mcpb), not as a file-drop payload — so don't
+                        // claim "no plugin". Other MCP-only hosts (continue,
+                        // kiro) genuinely have no plugin surface.
+                        if client.id == "claude-desktop" {
+                            print("  ⓘ \(client.displayName): MCP server wired. The plugin installs separately as the MOOTx01 Desktop extension.")
+                        } else {
+                            print("  ⓘ \(client.displayName): server only (no skill/plugin payload for this client)")
+                        }
                     case let .skills(path):
                         print("  ✓ \(client.displayName): skill installed → \(path)")
                     case let .plugin(path):
