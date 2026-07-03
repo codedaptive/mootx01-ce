@@ -8,7 +8,7 @@
 
 [![release](https://img.shields.io/github/v/release/codedaptive/mootx01-ce?label=release&color=success)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/codedaptive/mootx01-ce/total?color=blue)](https://github.com/codedaptive/mootx01-ce/releases)
-[![macOS pkg](https://img.shields.io/badge/macOS-.pkg%20installer%20(notarized)-black?logo=apple)](https://github.com/codedaptive/mootx01-ce/releases/latest)
+[![macOS pkg](https://img.shields.io/badge/macOS-.pkg%20installer%20(notarized)-blue?logo=apple)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![Windows setup](https://img.shields.io/badge/Windows-setup.exe%20·%20winget-0078D4?logo=windows)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![Homebrew](https://img.shields.io/badge/Homebrew-codedaptive%2Fmootx01--ce-FBB040?logo=homebrew&logoColor=white)](https://github.com/codedaptive/homebrew-mootx01-ce)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20·%20aarch64-FCC624?logo=linux&logoColor=black)](https://github.com/codedaptive/mootx01-ce/releases/latest)
