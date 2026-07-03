@@ -556,6 +556,76 @@ fn row_scoping_honors_tier() {
     assert!(p.row(AuditTier::Rag, shared).is_some());
 }
 
+// Security regression (codex a477800): verify-on-ingress rejects forged entries.
+#[test]
+fn audit_log_rejects_forged_content_id() {
+    // Construct an honest entry; new() computes the correct SHA-256 id.
+    let hlc = HLC::new(9999, 0, 42);
+    let row = EntryUUID([0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let honest = UnifiedAuditEntry::new(
+        AuditTier::Locus,
+        hlc,
+        UnifiedAuditVerb::Capture,
+        row,
+        "sec.test",
+        UnifiedAuditValue::Null,
+        UnifiedAuditValue::Integer(42),
+        None,
+    );
+
+    let mut log = UnifiedAuditLog::new();
+    log.add(honest.clone());
+    assert_eq!(log.count(), 1, "honest entry must be inserted");
+
+    // Forge: steal the honest entry's id but inject different content.
+    // The recomputed SHA-256 of this entry's wire bytes will not match
+    // the stolen id, so the log must reject it.
+    let forged = UnifiedAuditEntry {
+        id: honest.id,                          // stolen — does NOT match wire below
+        tier: AuditTier::Locus,
+        hlc,
+        verb: UnifiedAuditVerb::Capture,
+        row_id: row,
+        field_path: "sec.test".to_string(),
+        before_value: UnifiedAuditValue::Null,
+        after_value: UnifiedAuditValue::Integer(999), // different content
+        origin_row_id: None,
+    };
+
+    // add path: forged entry must be silently rejected.
+    log.add(forged.clone());
+    assert_eq!(log.count(), 1, "forged entry on add must not increase count");
+
+    // The honest entry's value is retained — not overwritten by the forged one.
+    let retained = log.ordered_entries();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].after_value,
+        UnifiedAuditValue::Integer(42),
+        "honest entry value must be preserved after forged-add attempt"
+    );
+
+    // merge path: a log containing a forged entry (bypassing add via
+    // with_entries which also validates) — since forged entries are
+    // rejected at all ingress points, build the source log honestly,
+    // then verify merge passes only honest entries through.
+    let mut source = UnifiedAuditLog::new();
+    source.add(forged.clone()); // rejected at source too
+    assert_eq!(source.count(), 0, "forged entry rejected in source log before merge");
+    log.merge(&source); // merging empty log is a no-op
+    assert_eq!(log.count(), 1, "count unchanged after merging log with forged entry");
+    assert_eq!(
+        log.ordered_entries()[0].after_value,
+        UnifiedAuditValue::Integer(42),
+        "honest entry value must be preserved after forged-merge attempt"
+    );
+
+    // Idempotent add of the honest entry leaves count unchanged.
+    log.add(honest);
+    assert_eq!(log.count(), 1, "re-adding honest entry must remain idempotent");
+}
+
 #[test]
 fn hlc_lexicographic_order() {
     let a = HLC::new(1, 0, 0);

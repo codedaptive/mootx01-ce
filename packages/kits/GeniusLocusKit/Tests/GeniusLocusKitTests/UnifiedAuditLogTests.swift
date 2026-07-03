@@ -336,6 +336,59 @@ struct UnifiedAuditLogTests {
         #expect(a.wireBytes.count == 16)
     }
 
+    // MARK: - Security regression (codex a477800)
+
+    @Test
+    func auditLogRejectsForgedContentID() {
+        // Construct an honest entry; its id is SHA-256 of its wire encoding.
+        let row = UUID(uuidString: "ffff0000-0000-0000-0000-000000000001")!
+        let hlc = HLC(physicalTime: 9999, logicalCount: 0, nodeID: 42)
+        let honest = UnifiedAuditEntry(
+            tier: .locus, hlc: hlc, verb: .capture, rowID: row,
+            fieldPath: "sec.test", beforeValue: .null, afterValue: .integer(42)
+        )
+
+        var log = UnifiedAuditLog()
+        log.add(honest)
+        #expect(log.count == 1, "honest entry must be inserted")
+
+        // Construct a forged entry: steal the honest id but inject a
+        // different afterValue. The recomputed SHA-256 will not match
+        // the stolen id, so the log must reject the entry.
+        let forged = UnifiedAuditEntry(
+            id: honest.id,          // stolen — does NOT match wire encoding below
+            tier: .locus, hlc: hlc, verb: .capture, rowID: row,
+            fieldPath: "sec.test", beforeValue: .null,
+            afterValue: .integer(999)   // different content
+        )
+
+        // add path: forged entry must be silently rejected.
+        log.add(forged)
+        #expect(log.count == 1, "forged entry on add must not increase count")
+
+        // The honest entry's value is retained — not overwritten by forged.
+        let retained = log.entries.values.first
+        #expect(retained?.afterValue == .integer(42),
+                "honest entry value must be preserved after forged-add attempt")
+
+        // merge path: a log that tries to merge the forged entry must
+        // also reject it (merge routes through add).
+        // Build a second log and attempt to add the forged entry there,
+        // then merge into the main log — the forged entry never reaches
+        // the main log's backing store.
+        var otherLog = UnifiedAuditLog()
+        otherLog.add(forged)    // rejected at source log too
+        #expect(otherLog.count == 0, "forged entry rejected in source log before merge")
+        log.merge(otherLog)     // merging an empty log is a no-op
+        #expect(log.count == 1, "count unchanged after merging log with forged entry")
+        #expect(log.entries.values.first?.afterValue == .integer(42),
+                "honest entry value must be preserved after forged-merge attempt")
+
+        // Idempotent add of the honest entry leaves count unchanged.
+        log.add(honest)
+        #expect(log.count == 1, "re-adding honest entry must remain idempotent")
+    }
+
     // MARK: - Helpers
 
     private let rowA = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!

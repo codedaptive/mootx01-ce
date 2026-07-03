@@ -219,6 +219,32 @@ impl UnifiedAuditEntry {
     fn ordering_key(&self) -> (HLC, &'static str, [u8; 32]) {
         (self.hlc, self.tier.raw_value(), self.id)
     }
+
+    /// Returns `true` if this entry's `id` matches the SHA-256 of its
+    /// canonical wire encoding — i.e., the entry is self-consistent.
+    ///
+    /// Reuses the existing `wire_bytes` + `sha256` path that
+    /// `UnifiedAuditEntry::new` uses, so the verification is
+    /// byte-identical to the construction. A legitimate locally-produced
+    /// entry always passes; an externally-supplied entry whose `id` was
+    /// crafted to collide with a different entry fails.
+    ///
+    /// Called on every ingress path in `UnifiedAuditLog` (add, merge)
+    /// as the structural defence against same-id/different-content CRDT
+    /// forgery (codex a477800).
+    fn content_id_matches(&self) -> bool {
+        let bytes = Self::wire_bytes(
+            self.tier,
+            self.hlc,
+            self.verb,
+            self.row_id,
+            &self.field_path,
+            &self.before_value,
+            &self.after_value,
+            self.origin_row_id,
+        );
+        sha256(&bytes) == self.id
+    }
 }
 
 // MARK: - G-Set log
@@ -245,13 +271,40 @@ impl UnifiedAuditLog {
         log
     }
 
+    /// Add a single entry. Idempotent for honest entries.
+    ///
+    /// Security (codex a477800): the entry's SHA-256 content id is
+    /// recomputed from its wire encoding before insertion. If the
+    /// recomputed id does not match `entry.id`, the entry is silently
+    /// rejected. This prevents a peer supplying a forged
+    /// (same-id, different-content) entry from overwriting an honest
+    /// one in the G-Set, which would break CRDT convergence and
+    /// constitute audit forgery. Federation peer-log merge relies on
+    /// this defence; any future non-local audit ingress must route
+    /// through `add` or `merge` to obtain it.
     pub fn add(&mut self, entry: UnifiedAuditEntry) {
+        if !entry.content_id_matches() {
+            // Entry rejected: recomputed id does not match entry.id.
+            // Legitimate entries always pass because new() computes
+            // the id from the same wire_bytes path used here.
+            return;
+        }
         self.entries.insert(entry.id, entry);
     }
 
+    /// CRDT join. Merging two G-Sets is set union over entry IDs.
+    ///
+    /// FEDERATION BOUNDARY NOTE: This method is the structural gate
+    /// that future federation peer-log merge relies on. Every entry
+    /// from a peer-supplied log must route through `merge` (or `add`)
+    /// to obtain the content-id verification. Do not add alternative
+    /// ingress paths that bypass this check.
+    ///
+    /// Routes each entry through `add` so the content-id verification
+    /// is applied uniformly on every ingress path (codex a477800).
     pub fn merge(&mut self, other: &UnifiedAuditLog) {
-        for (id, entry) in &other.entries {
-            self.entries.insert(*id, entry.clone());
+        for (_, entry) in &other.entries {
+            self.add(entry.clone());  // validated ingress — forged entries dropped
         }
     }
 
