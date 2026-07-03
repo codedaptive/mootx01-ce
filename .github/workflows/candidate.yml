@@ -18,7 +18,7 @@
 # best-effort (a candidate must not fail just because the key is absent).
 #
 # Testers install a candidate with the pre-release tag:
-#   MOOTX01_VERSION=candidate-1.0.10-42 sh install.sh
+#   MOOTX01_VERSION=1.0.10-prerelease.42 sh install.sh
 # (the normal `releases/latest` path deliberately skips pre-releases).
 
 name: candidate
@@ -55,9 +55,11 @@ jobs:
         run: |
           # Source version constant (matches Swift Mootx01.currentVersion).
           version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
-          # Tag is NOT vX.Y.Z on purpose — a v* tag would trigger release.yml and
-          # a signed public release. `candidate-` keeps it clear of that trigger.
-          tag="candidate-${version}-${{ github.run_number }}"
+          # Tag is <version>-prerelease.<run> with NO leading v on purpose — a
+          # v* tag would trigger release.yml and a signed public release. The
+          # `-prerelease` suffix (with the `-`) is what the installers key on to
+          # skip their v-normalization, so it installs as-is.
+          tag="${version}-prerelease.${{ github.run_number }}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Candidate build: $tag"
@@ -255,8 +257,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Select our candidate pre-releases: prerelease + a `-prerelease.`
+          # tag. Keeps real releases (v1.0.10, v1.0.10-beta) untouched.
           gh release list --limit 100 --json tagName,isPrerelease,createdAt \
-            --jq '[.[] | select(.isPrerelease and (.tagName|startswith("candidate-")))]
+            --jq '[.[] | select(.isPrerelease and (.tagName|contains("-prerelease.")))]
                   | sort_by(.createdAt) | reverse | .[4:] | .[].tagName' \
           | while read -r old; do
               [ -n "$old" ] || continue

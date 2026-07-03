@@ -160,7 +160,14 @@ if [ -z "$version" ]; then
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
 fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
-case "$version" in v*) ;; *) version="v$version" ;; esac
+# Normalize a bare release version to its v-prefixed tag (1.0.10 -> v1.0.10),
+# but leave anything already tag-shaped untouched: v-prefixed tags, and
+# pre-release tags carrying a `-` suffix (e.g. 1.0.10-prerelease.4 from the
+# candidate pipeline, whose real tag has no leading v).
+case "$version" in
+  v* | *-*) ;;
+  *) version="v$version" ;;
+esac
 
 # 3. Download the archive, checksums.txt, and the detached minisign signature.
 #    Verification order (fail closed at each step before proceeding to the next):
