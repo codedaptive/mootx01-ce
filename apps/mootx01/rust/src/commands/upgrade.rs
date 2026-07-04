@@ -15,6 +15,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::core::depth::{self, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::release;
 use crate::exit;
 use crate::CURRENT_VERSION;
@@ -94,6 +95,14 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
     match release::place_binary(src, home) {
         Ok(installed) => {
             println!("Installed: {}", installed.display());
+            // ADR-024 Wave 3, Defect 1: an upgrade alone never touches
+            // ~/.claude/mootx01-plugin or Claude Code's plugin cache —
+            // without this, a machine upgraded via `mootx01 upgrade` keeps a
+            // stranded plugin package (and Claude Code keeps a stranded
+            // cached snapshot) indefinitely. Independent of --no-restart:
+            // this is a filesystem/cache convergence step, not a service
+            // restart.
+            rematerialize_plugin_depth(home);
             if !no_restart {
                 restart_services();
             }
@@ -102,6 +111,35 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
         Err(e) => {
             eprintln!("mootx01 upgrade: cannot place binary: {e}");
             ExitCode::from(exit::FAILURE)
+        }
+    }
+}
+
+/// Rematerialize plugin-depth packages for every host that already has one
+/// on disk (never CREATES a new plugin-depth install for a host that never
+/// had one — upgrade only converges existing installs), and — for Claude
+/// Code — refresh its plugin cache the same way `mootx01 install` does (see
+/// `depth::install_plugin`'s stranded-cache refresh).
+///
+/// `vault_off: false` is safe regardless of the original install's vault
+/// posture: every plugin-capable host's package is HTTP-shaped today
+/// (ADR-024 §2), so `vault_off` has no effect on rematerialization (Defect
+/// 2) — the vault posture that matters lives in the resident daemon's own
+/// service-manager environment, which `mootx01 upgrade` does not touch (it
+/// restarts the daemon from its EXISTING unit/task, never rewriting it).
+fn rematerialize_plugin_depth(home: &std::path::Path) {
+    let bundle = depth::InstallBundle::embedded();
+    for host in bundle.plugin_capable_hosts() {
+        let dir = depth::plugin_install_directory(host, home);
+        if !dir.exists() {
+            continue;
+        }
+        match depth::apply(&host.id, InstallDepth::Plugin, home, false, &ProcessClaudeCliRunner) {
+            Ok(_) => println!("  ✓ {}: plugin package rematerialized", host.display_name),
+            Err(e) => println!(
+                "  ✗ {}: could not rematerialize plugin package: {e}",
+                host.display_name
+            ),
         }
     }
 }

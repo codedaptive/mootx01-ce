@@ -51,6 +51,12 @@ pub struct ServerConfig {
     /// construction via `crate::build_serial::derive()` so the filesystem
     /// is not touched on every ping call.
     pub build_serial: String,
+    /// ADR-024 §5: version-skew advisory (empty ⇒ none to report). This
+    /// reference server has no plugin concept, so it always constructs
+    /// with the empty default via `String::new()` — kept as a real field
+    /// (not a constant) so `Dispatcher::new` has one signature shared by
+    /// every host.
+    pub version_skew: String,
 }
 
 impl ServerConfig {
@@ -152,6 +158,7 @@ impl ServerConfig {
             // Derive build serial once at config construction so the
             // filesystem is not touched on every estate_ping call.
             build_serial: crate::build_serial::derive(),
+            version_skew: String::new(),
         }
     }
 
@@ -166,6 +173,7 @@ impl ServerConfig {
             // Derive build serial once at config construction so the
             // filesystem is not touched on every estate_ping call.
             build_serial: crate::build_serial::derive(),
+            version_skew: String::new(),
         }
     }
 }
@@ -263,6 +271,7 @@ pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: Serv
         &config.server_name,
         &config.server_version,
         &config.build_serial,
+        &config.version_skew,
     );
     let mut buf = BufReader::new(reader);
 

@@ -1632,6 +1632,7 @@ fn estate_ping_includes_injected_build_serial() {
         &registry,
         &ledger,
         "TESTSERIAL-XYZ",
+        "",
     )
     .expect("estate_ping must not throw");
     assert!(is_success(&result));
@@ -1640,6 +1641,40 @@ fn estate_ping_includes_injected_build_serial() {
         text.contains("build TESTSERIAL-XYZ"),
         "estate_ping must echo the injected serial; got: {text}"
     );
+}
+
+/// ADR-024 §5: a non-empty version_skew string is surfaced verbatim under a
+/// `version_skew:` line in both moot_estate_ping and moot_estate_status; an
+/// empty string (the common case, no skew detected) omits the field.
+#[test]
+fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
+    use aria_mcp::interface_tools;
+    use std::collections::BTreeMap;
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let advisory = "plugin 1.0.15 expects binary >= 1.0.15; binary is 1.0.11 -- run `mootx01 upgrade`";
+
+    for tool in ["moot_estate_ping", "moot_estate_status"] {
+        let with_skew = interface_tools::dispatch(
+            tool, &BTreeMap::new(), &registry, &ledger, "SERIAL", advisory,
+        )
+        .expect("dispatch must not throw");
+        let text = content_text(&with_skew);
+        assert!(
+            text.contains(&format!("version_skew: {advisory}")),
+            "{tool} must surface the injected version-skew advisory; got: {text}"
+        );
+
+        let without_skew = interface_tools::dispatch(
+            tool, &BTreeMap::new(), &registry, &ledger, "SERIAL", "",
+        )
+        .expect("dispatch must not throw");
+        let text2 = content_text(&without_skew);
+        assert!(
+            !text2.contains("version_skew"),
+            "{tool} must omit version_skew when the host injected none; got: {text2}"
+        );
+    }
 }
 
 #[test]
@@ -3011,7 +3046,7 @@ fn vault_export_returns_job_id_and_moot_vault_job_returns_completed_export_recor
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("moot_vault_export must not throw transport fault");
 
@@ -3042,7 +3077,7 @@ fn vault_export_returns_job_id_and_moot_vault_job_returns_completed_export_recor
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("moot_vault_job must not throw transport fault");
 
@@ -3094,7 +3129,7 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("export must succeed");
 
@@ -3104,7 +3139,7 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("moot_vault_import must not throw transport fault");
 
@@ -3131,7 +3166,7 @@ fn vault_import_returns_job_id_and_moot_vault_job_returns_completed_import_recor
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("moot_vault_job must not throw transport fault");
 
@@ -3194,7 +3229,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("export must succeed");
 
@@ -3205,7 +3240,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("first import must not throw");
 
@@ -3216,7 +3251,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("second import must not throw");
 
@@ -3242,7 +3277,7 @@ fn vault_import_job_surfaces_skip_counts() {
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("moot_vault_job must not throw");
 
@@ -3293,7 +3328,7 @@ fn vault_job_unknown_id_returns_swift_identical_not_found_shape() {
         &registry,
         &recall_ledger,
         &ledger,
-        "",
+        "", "",
     )
     .expect("moot_vault_job with unknown id must not throw transport fault");
 
@@ -3464,7 +3499,7 @@ fn import_with_directory_md_vault_does_not_exhaust_ledger() {
             &registry,
             &SurfacedRecallLedger::new(),
             &ledger,
-            "",
+            "", "",
         )
         .expect(&format!("import {i} must succeed (no slot exhaustion)"));
 

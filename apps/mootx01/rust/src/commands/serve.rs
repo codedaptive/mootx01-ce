@@ -23,6 +23,7 @@ use std::process::ExitCode;
 
 use crate::cli::HttpMode;
 use crate::core::daemon_client;
+use crate::core::mcp_ownership;
 use crate::core::paths;
 use crate::exit;
 
@@ -231,8 +232,18 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
         }
     }
 
+    // ADR-024 §5: computed once at startup (not per-call). Empty whenever no
+    // plugin is detected or its version matches this binary — the common
+    // case, which leaves ping/status unchanged.
+    let version_skew = mcp_ownership::version_skew_advisory(
+        "mootx01@mootx01",
+        env!("CARGO_PKG_VERSION"),
+        &super::install::home_dir(),
+    )
+    .unwrap_or_default();
+
     // Host the runtime. Does not return until the transport stops.
-    aria_mcp::runtime::run("mootx01");
+    aria_mcp::runtime::run("mootx01", &version_skew);
 
     if bound_port.is_some() {
         remove_port_file(&port_file);

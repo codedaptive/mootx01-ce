@@ -187,6 +187,95 @@ pub fn remove_from_json_config(
     Ok(removed)
 }
 
+// ---------------------------------------------------------------------------
+// Ownership-aware JSON removal (ADR-024 §3/§4)
+// ---------------------------------------------------------------------------
+
+/// Outcome of an ownership-aware JSON removal. Rust twin of Swift's
+/// `UninstallOutcome`/`DirectEntryDedupeOutcome` — the two dedupe call
+/// sites (install-time skip and uninstall) both resolve to this shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonOwnershipOutcome {
+    /// No config file, unparseable content, or no entry under the server
+    /// name — nothing this installer could safely act on.
+    NotPresent,
+    /// An entry existed and classified `OursDefault`; removed.
+    Removed,
+    /// An entry existed but classified `Foreign` (ADR-024 §4) — left
+    /// untouched. Carries the reason and the config path for reporting.
+    RetainedForeign { reason: String, path: PathBuf },
+}
+
+/// Read-only classification + conditional removal of a JSON
+/// `<servers_key>.<server_name>` entry, per ADR-024 §4. Parse failures are
+/// treated the same as "absent" (`NotPresent`) — mirrors Swift's
+/// `try?`-based forgiving decode, since a malformed config is not something
+/// this installer wrote and should not surface as a hard error from a
+/// dedupe/uninstall pass.
+fn classify_existing_json_entry(
+    path: &Path,
+    servers_key: &str,
+    server_name: &str,
+) -> Option<crate::core::mcp_ownership::McpEntryOwnership> {
+    if !path.exists() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let lossy = String::from_utf8_lossy(&bytes);
+    let text = strip_bom(&lossy);
+    let root: serde_json::Value = serde_json::from_str(text).ok()?;
+    let entry = root.get(servers_key)?.get(server_name)?;
+    Some(crate::core::mcp_ownership::classify(entry))
+}
+
+/// ADR-024 §3: install-time dedupe when a client's plugin already owns the
+/// connection. Skips writing a competing direct entry (the caller never
+/// calls `merge_into_json_config` in that case) and cleans up any direct
+/// entry a PRIOR install wrote — but only when `OursDefault`.
+pub fn dedupe_direct_entry(
+    path: &Path,
+    servers_key: &str,
+    server_name: &str,
+) -> Result<JsonOwnershipOutcome, MergeError> {
+    match classify_existing_json_entry(path, servers_key, server_name) {
+        None => Ok(JsonOwnershipOutcome::NotPresent),
+        Some(crate::core::mcp_ownership::McpEntryOwnership::Foreign(reason)) => {
+            Ok(JsonOwnershipOutcome::RetainedForeign { reason, path: path.to_path_buf() })
+        }
+        Some(crate::core::mcp_ownership::McpEntryOwnership::OursDefault) => {
+            backup_existing(path)?;
+            remove_from_json_config(path, servers_key, server_name)?;
+            Ok(JsonOwnershipOutcome::Removed)
+        }
+    }
+}
+
+/// ADR-024 §4: ownership-aware uninstall removal for JSON-format clients. A
+/// `Foreign` entry (env override — e.g. a development rig) is reported and
+/// left untouched rather than silently removed; only an `OursDefault` entry
+/// is actually removed from the file.
+pub fn remove_from_json_config_owned(
+    path: &Path,
+    servers_key: &str,
+    server_name: &str,
+) -> Result<JsonOwnershipOutcome, MergeError> {
+    match classify_existing_json_entry(path, servers_key, server_name) {
+        None => Ok(JsonOwnershipOutcome::NotPresent),
+        Some(crate::core::mcp_ownership::McpEntryOwnership::Foreign(reason)) => {
+            Ok(JsonOwnershipOutcome::RetainedForeign { reason, path: path.to_path_buf() })
+        }
+        Some(crate::core::mcp_ownership::McpEntryOwnership::OursDefault) => {
+            backup_existing(path)?;
+            let removed = remove_from_json_config(path, servers_key, server_name)?;
+            Ok(if removed {
+                JsonOwnershipOutcome::Removed
+            } else {
+                JsonOwnershipOutcome::NotPresent
+            })
+        }
+    }
+}
+
 /// Strip a leading UTF-8 BOM (`\u{FEFF}`) if present. Some editors and Windows
 /// tools — notably Windows PowerShell 5.1's `Set-Content -Encoding UTF8` —
 /// prepend a BOM. serde_json, toml, and the YAML line probes all treat it as a

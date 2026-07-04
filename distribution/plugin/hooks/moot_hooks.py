@@ -8,7 +8,9 @@ One script, four modes (argv[1]):
   precompact  PreCompact        Records that compaction is about to happen so
                                 the next SessionStart can trigger recovery.
   session     SessionStart      Orientation reminder on startup/resume/clear;
-                                continuity-recovery injection after compaction.
+                                continuity-recovery injection after compaction;
+                                warns (never edits) if a competing direct
+                                `mootx01` MCP entry is also wired (ADR-024 §3).
   stop        Stop              If MOOTx01 tools were used this session but no
                                 durable writeback happened, asks Claude (once)
                                 to file memories before finishing.
@@ -16,9 +18,12 @@ One script, four modes (argv[1]):
 Design constraints, on purpose:
   - Python standard library only. No third-party imports.
   - No network access. Ever.
-  - Reads only the hook JSON on stdin and the session transcript path that
-    Claude Code provides. Writes only a small state file in the system temp
-    directory. Nothing else is read or written.
+  - Reads only the hook JSON on stdin, the session transcript path that
+    Claude Code provides, and (session mode only) the user's own
+    ~/.claude.json to check for a competing direct MCP entry. Writes only a
+    small state file in the system temp directory. NEVER writes to
+    ~/.claude.json or any client config — detection is read-only, warn-mode
+    only (ADR-024 §3: "the hook never edits config").
   - Every failure path exits 0 silently. A broken hook must never break a
     session.
 
@@ -77,6 +82,13 @@ ORIENT_MESSAGE = (
     "task may depend on prior context, orient before answering: "
     "moot_estate_ping, moot_estate_status, moot_read_journal. Recall before "
     "relying on memory; write back durable knowledge before finishing."
+)
+
+COMPETING_ENTRY_MESSAGE = (
+    "[MOOTx01] Direct MCP entry \"{name}\" found in {path} in addition to the "
+    "mootx01@mootx01 plugin — Claude Code may open two connections to the same "
+    "estate. Run `mootx01 install` to remove the redundant direct entry (or "
+    "remove it by hand); the plugin's own wiring is enough."
 )
 
 RECOVERY_MESSAGE = (
@@ -204,6 +216,29 @@ def mode_precompact(data):
     save_state(session_id, state)
 
 
+def warn_competing_direct_entry():
+    """ADR-024 §3: warn (never edit) if the user's own ~/.claude.json also
+    carries a direct `mcpServers.mootx01` entry alongside this plugin. That
+    entry is the CLI installer's wiring (a stdio `serve`/`proxy` command, or
+    an HTTP entry) written before or after the plugin was installed; either
+    order can leave two live connections to the same estate (ADR-024
+    context). Read-only: this function never writes to the config file.
+    Every failure path is silent — a broken hook must never break a session.
+    """
+    path = os.path.expanduser("~/.claude.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+    except Exception:
+        return
+    if not isinstance(config, dict):
+        return
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict) or "mootx01" not in servers:
+        return
+    print(COMPETING_ENTRY_MESSAGE.format(name="mootx01", path=path))
+
+
 def mode_session(data):
     session_id = data.get("session_id", "default")
     source = data.get("source", "")
@@ -214,12 +249,14 @@ def mode_session(data):
         state["fired"] = []
         save_state(session_id, state)
         print(RECOVERY_MESSAGE)
+        warn_competing_direct_entry()
         return
     if source == "clear":
         state["fired"] = []
         state["stop_nagged"] = False
         save_state(session_id, state)
     print(ORIENT_MESSAGE)
+    warn_competing_direct_entry()
 
 
 def transcript_flags(transcript_path):

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.14.0
+version: 1.15.0
 status: active
-date: 2026-06-29
+date: 2026-07-04
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -438,6 +438,36 @@ fabricated `0`, which would be indistinguishable from a genuinely empty trace
 table and would lie about reward-pipeline depth. The read failure does not
 break the rest of the status response (the other fields are still returned).
 Both ports identical (`runEstateStatus`, `run_estate_status`).
+
+### Version-skew advisory (ADR-024 §5)
+
+Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
+`version_skew: <text>` line — present only when the host detected a mismatch
+between an installed plugin and this running binary's version; absent
+entirely otherwise (not a fixed empty slot).
+
+**Detection:** the host reads `~/.claude/plugins/installed_plugins.json` for
+the `mootx01@mootx01` entry's `version` field and compares it against the
+running binary's own version. Checking at runtime (rather than only at
+install time) catches skew regardless of install order.
+
+**Field text:** ``plugin <pluginVersion> expects binary ≥ <pluginVersion>; binary is <binaryVersion> — run `mootx01 upgrade` ``.
+
+**Threading (mirrors the build-serial pattern exactly):**
+- Swift: `ToolDispatcher.versionSkewAdvisory: String?`, computed once by
+  `ServeCommand` via `MootInstallerCore.VersionSkewAdvisory.compute(pluginID:binaryVersion:homeDirectory:)`
+  and injected at construction. `nil` ⇒ no line appended.
+- Rust: `Dispatcher.version_skew: String`, computed once by
+  `commands::serve::run` via `core::mcp_ownership::version_skew_advisory(plugin_id, binary_version, home)`
+  and threaded through `dispatch_tool_with_vault_ledger` → `dispatch_tool_with_vault_ledger_and_flag`
+  → `interface_tools::dispatch` → `run_estate_ping` / `run_estate_status`.
+  Empty string ⇒ no line appended.
+- `aria-mcp-server` (both ports) has no plugin concept — always constructs
+  with the nil/empty default, so its responses never carry the field.
+
+This kit never reads `~/.claude/plugins/` or knows a product version
+itself — the host binary computes the advisory string and injects it,
+same separation of concerns as `buildSerial`/`serverIdentity`.
 
 ### Session protocol block — `ToolDispatcher.ARIASessionProtocol`
 
@@ -994,6 +1024,23 @@ pass it to the reader. The `queryValue(_:in:)` helper was removed as it had no
 remaining callers. This matches the existing Rust posture where `get_graph_snapshot`
 always uses `registry.default` and explicitly documents that `?estate=` is ignored.
 The observable GET /api/graph response format is unchanged.
+
+### 1.15.0 -- 2026-07-04
+ADR-024 §5: `moot_estate_ping` / `moot_estate_status` gain an opt-in
+`version_skew:` line (see the new "Version-skew advisory" subsection under
+§`moot_estate_status` — sync field vocabulary, below) when the host detects a
+mismatch between an installed plugin (currently Claude Code's
+`mootx01@mootx01`) and the running binary's version. `ToolDispatcher`
+(Swift) gains a `versionSkewAdvisory: String?` field, injected at
+construction the same way `buildSerial` already is; `Dispatcher` (Rust)
+gains a `version_skew: String` field (empty string ⇒ no advisory), threaded
+through `dispatch_tool_with_vault_ledger` / `interface_tools::dispatch`
+alongside `build_serial`. Computed once at server startup by the host binary
+— `MootInstallerCore.VersionSkewAdvisory.compute` (Swift) /
+`mootx01_cli::core::mcp_ownership::version_skew_advisory` (Rust) — never by
+the kit itself, which does not read `~/.claude/plugins/` or know a product
+version. `aria-mcp-server` (both ports) has no plugin concept and always
+passes the empty/nil default. Both ports at parity.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -16,9 +16,9 @@ use std::process::ExitCode;
 
 use crate::cli::{InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
-use crate::core::depth::{self, DepthOutcome, InstallDepth};
+use crate::core::depth::{self, DepthOutcome, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::desktop_ext;
-use crate::core::{merge, paths, permissions};
+use crate::core::{mcp_ownership, merge, paths, permissions};
 use crate::exit;
 
 pub fn run(
@@ -74,6 +74,40 @@ pub fn run(
     let mut wired_ids: Vec<&'static str> = Vec::new();
 
     for client in &selected {
+        // ADR-024 §1/§3: the plugin is the preferred connection owner. Still
+        // place the binary/daemon (done above, unconditionally) but skip
+        // writing a competing direct entry, and clean up any direct entry a
+        // PRIOR install wrote — only when confirmed ours-default (§4).
+        // Adams #5: gate on installed AND enabled — Claude Code tracks
+        // enablement separately (~/.claude/settings.json's enabledPlugins
+        // map), and an installed-but-disabled plugin does not own the
+        // connection. Skipping/removing the direct entry in that state
+        // would leave the client with nothing.
+        if let Some(plugin_id) = plugin_owner(client.id) {
+            if mcp_ownership::owns_connection(plugin_id, &home) {
+                match dedupe_one(client, &home, location) {
+                    Ok(merge::JsonOwnershipOutcome::NotPresent) => {}
+                    Ok(merge::JsonOwnershipOutcome::Removed) => println!(
+                        "  ⓘ {}: removed a stale direct mootx01 entry — the plugin now owns the connection",
+                        client.display_name
+                    ),
+                    Ok(merge::JsonOwnershipOutcome::RetainedForeign { reason, path }) => println!(
+                        "  ⚠ {}: a non-default mootx01 entry at {} ({reason}) was left untouched — inspect it by hand",
+                        client.display_name,
+                        path.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "  ✗ {}: could not check for a competing direct entry: {e}",
+                        client.display_name
+                    ),
+                }
+                println!(
+                    "  ⓘ MOOTx01 plugin already installed — {} connects through it; skipping direct wiring.",
+                    client.display_name
+                );
+                continue;
+            }
+        }
         match install_one(client, &home, &binary_path, &daemon_url, location) {
             Ok(Some(p)) => {
                 println!("  ✓ wired {} ({})", client.display_name, p.display());
@@ -101,8 +135,13 @@ pub fn run(
                 continue;
             }
             // vault_off = !vault_on: thread the vault posture into the plugin
-            // installer so plugin-spawned stdio servers inherit the correct env.
-            match depth::apply(client.id, depth, &home, !vault_on) {
+            // installer so any command/stdio-shaped entry in the package (the
+            // proxy-bridge fallback for a host whose schema cannot express
+            // HTTP) inherits the correct env. HTTP-shaped entries are
+            // untouched — the resident daemon carries the vault posture in
+            // its own service-manager environment (`core::service`),
+            // independent of this call (ADR-024 Wave 3, Defect 2).
+            match depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner) {
                 Ok(DepthOutcome::Server) => {
                     // Claude Desktop's "plugin" is a Desktop extension, not a
                     // file-drop payload. At plugin depth, install it
@@ -358,6 +397,39 @@ fn install_one(
     }
 }
 
+/// ADR-024 §3: clients the CLI installer knows how to detect a live plugin
+/// for, mapped to the plugin registry id (`installed_plugins.json`'s
+/// top-level key). Only Claude Code has a live plugin today; kept as an
+/// explicit small table rather than guessed for hosts with no shipped
+/// plugin yet.
+fn plugin_owner(client_id: &str) -> Option<&'static str> {
+    match client_id {
+        "claude-code" => Some("mootx01@mootx01"),
+        _ => None,
+    }
+}
+
+/// ADR-024 §3/§4: resolve the same config path `install_one` would target
+/// (respecting `--location local` for Claude Code) and run the
+/// ownership-aware dedupe pass against it. Scoped to JSON-format clients —
+/// the only format any currently plugin-owned client uses.
+fn dedupe_one(
+    client: &McpClient,
+    home: &Path,
+    location: Location,
+) -> Result<merge::JsonOwnershipOutcome, merge::MergeError> {
+    let Some(mut config) = client.config_path(home) else {
+        return Ok(merge::JsonOwnershipOutcome::NotPresent);
+    };
+    if location == Location::Local && client.id == "claude-code" {
+        config = PathBuf::from(".mcp.json");
+    }
+    if client.format != ConfigFormat::Json {
+        return Ok(merge::JsonOwnershipOutcome::NotPresent);
+    }
+    merge::dedupe_direct_entry(&config, client.json_servers_key(), SERVER_NAME)
+}
+
 /// §3: clients are pointed at the resident daemon; resolve its URL from the
 /// port file, falling back to the default 4242.
 fn daemon_url() -> String {
@@ -554,6 +626,221 @@ mod tests {
         let err =
             resolve_targets(&reg, Some(vec!["frobnicator".into()]), false, &home).unwrap_err();
         assert!(err.contains("Unknown client id 'frobnicator'"));
+    }
+
+    // ADR-024 §3/§4: four-state matrix (plugin present/absent × prior direct
+    // entry present/absent) + the non-default-entry-survives guarantee.
+    // Mirrors Swift's PluginDedupeTests.swift. SAFETY: every test uses a
+    // temp-dir sandbox home; never the real ~/.claude.
+
+    fn plugin_test_home(tag: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("mootx01-plugin-dedupe-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    fn write_installed_plugins(home: &Path, plugin_id: &str) {
+        let dir = home.join(".claude").join("plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = serde_json::json!({
+            "version": 2,
+            "plugins": { plugin_id: [{"scope": "user", "installPath": "x", "version": "1.0.15"}] },
+        });
+        std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
+    }
+
+    fn write_settings(home: &Path, json_text: &str) {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude").join("settings.json"), json_text).unwrap();
+    }
+
+    fn claude_code_client() -> McpClient {
+        clients::supported().into_iter().find(|c| c.id == "claude-code").unwrap()
+    }
+
+    fn read_direct_entry(client: &McpClient, home: &Path) -> Option<serde_json::Value> {
+        let config = client.config_path(home)?;
+        let bytes = std::fs::read(&config).ok()?;
+        let root: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        root.get(client.json_servers_key())?.get(SERVER_NAME).cloned()
+    }
+
+    #[test]
+    fn state1_no_plugin_no_prior_entry_normal_install_wires() {
+        let home = plugin_test_home("s1");
+        let client = claude_code_client();
+        assert!(!mcp_ownership::is_plugin_installed("mootx01@mootx01", &home));
+        install_one(&client, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .unwrap();
+        assert!(read_direct_entry(&client, &home).is_some());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn state2_no_plugin_prior_entry_present_rewires_in_place() {
+        let home = plugin_test_home("s2");
+        let client = claude_code_client();
+        install_one(&client, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .unwrap();
+        assert!(!mcp_ownership::is_plugin_installed("mootx01@mootx01", &home));
+        install_one(&client, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .unwrap();
+        assert!(read_direct_entry(&client, &home).is_some());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn state3_plugin_present_no_prior_entry_dedupe_is_noop() {
+        let home = plugin_test_home("s3");
+        let client = claude_code_client();
+        write_installed_plugins(&home, "mootx01@mootx01");
+        assert!(mcp_ownership::is_plugin_installed("mootx01@mootx01", &home));
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        assert_eq!(outcome, merge::JsonOwnershipOutcome::NotPresent);
+        assert!(read_direct_entry(&client, &home).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn state4_plugin_present_prior_ours_default_entry_removed() {
+        let home = plugin_test_home("s4");
+        let client = claude_code_client();
+        install_one(&client, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .unwrap();
+        assert!(read_direct_entry(&client, &home).is_some());
+        write_installed_plugins(&home, "mootx01@mootx01");
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        assert_eq!(outcome, merge::JsonOwnershipOutcome::Removed);
+        assert!(read_direct_entry(&client, &home).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ADR-024 §1/§3 gated on installed AND enabled (Adams #5). Mirrors the
+    // exact conditional install::run() uses: "disabled falls back to direct
+    // wiring; enabled skips as shipped."
+
+    #[test]
+    fn disabled_plugin_falls_back_to_direct_wiring() {
+        let home = plugin_test_home("disabled");
+        let client = claude_code_client();
+        write_installed_plugins(&home, "mootx01@mootx01");
+        write_settings(&home, r#"{"enabledPlugins":{"mootx01@mootx01":false}}"#);
+
+        if mcp_ownership::owns_connection("mootx01@mootx01", &home) {
+            panic!("plugin must not be considered connection-owning while disabled");
+        }
+        install_one(&client, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .unwrap();
+        assert!(
+            read_direct_entry(&client, &home).is_some(),
+            "disabled plugin must not block direct wiring — the client would otherwise have no connection"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn enabled_plugin_skips_direct_wiring_as_shipped() {
+        let home = plugin_test_home("enabled");
+        let client = claude_code_client();
+        write_installed_plugins(&home, "mootx01@mootx01");
+        write_settings(&home, r#"{"enabledPlugins":{"mootx01@mootx01":true}}"#);
+
+        assert!(
+            mcp_ownership::owns_connection("mootx01@mootx01", &home),
+            "plugin must be considered connection-owning while installed and enabled"
+        );
+        // Matches install::run()'s skip branch: no install_one call.
+        assert!(
+            read_direct_entry(&client, &home).is_none(),
+            "enabled plugin must skip direct wiring — no competing entry written"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn non_default_dev_rig_entry_survives_dedupe_untouched_and_named() {
+        let home = plugin_test_home("nondefault");
+        let client = claude_code_client();
+        let config = client.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let dev_rig = serde_json::json!({
+            "mcpServers": {
+                "mootx01": {
+                    "command": "/Users/dev/build/mootx01",
+                    "args": ["proxy"],
+                    "env": {"MOOTX01_DATA_DIR": "/Users/dev/rig-a/.mootx01-data"},
+                }
+            }
+        });
+        std::fs::write(&config, dev_rig.to_string()).unwrap();
+
+        write_installed_plugins(&home, "mootx01@mootx01");
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        match outcome {
+            merge::JsonOwnershipOutcome::RetainedForeign { reason, path } => {
+                assert!(reason.contains("MOOTX01_DATA_DIR"));
+                assert_eq!(path, config);
+            }
+            other => panic!("expected RetainedForeign, got {other:?}"),
+        }
+        let entry = read_direct_entry(&client, &home).unwrap();
+        assert_eq!(entry["command"], "/Users/dev/build/mootx01");
+        assert_eq!(entry["env"]["MOOTX01_DATA_DIR"], "/Users/dev/rig-a/.mootx01-data");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // Verification-pass addendum: classify()'s label alone is by-construction
+    // evidence; these round-trip a shape-mismatched entry through a REAL temp
+    // config file and the full dedupe_one/dedupe_direct_entry pass with
+    // plugin-present state, proving the file survives untouched.
+
+    #[test]
+    fn dedupe_round_trip_malformed_entry_survives() {
+        let home = plugin_test_home("malformed");
+        let client = claude_code_client();
+        let config = client.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let malformed = serde_json::json!({"mcpServers": {"mootx01": {}}});
+        std::fs::write(&config, malformed.to_string()).unwrap();
+
+        write_installed_plugins(&home, "mootx01@mootx01");
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        match outcome {
+            merge::JsonOwnershipOutcome::RetainedForeign { .. } => {}
+            other => panic!("expected RetainedForeign for a malformed {{}} entry, got {other:?}"),
+        }
+        let entry = read_direct_entry(&client, &home).unwrap();
+        assert!(entry.as_object().unwrap().is_empty(), "the malformed entry must still be present, untouched");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn dedupe_round_trip_foreign_command_entry_survives() {
+        let home = plugin_test_home("foreign-command");
+        let client = claude_code_client();
+        let config = client.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let foreign = serde_json::json!({
+            "mcpServers": {
+                "mootx01": {
+                    "command": "/usr/bin/some-other-server",
+                    "args": ["--stdio"],
+                }
+            }
+        });
+        std::fs::write(&config, foreign.to_string()).unwrap();
+
+        write_installed_plugins(&home, "mootx01@mootx01");
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        match outcome {
+            merge::JsonOwnershipOutcome::RetainedForeign { .. } => {}
+            other => panic!("expected RetainedForeign for a foreign command entry, got {other:?}"),
+        }
+        let entry = read_direct_entry(&client, &home).unwrap();
+        assert_eq!(entry["command"], "/usr/bin/some-other-server");
+        assert_eq!(entry["args"][0], "--stdio");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The single "codex" entry wires ~/.codex/config.toml once and is idempotent —

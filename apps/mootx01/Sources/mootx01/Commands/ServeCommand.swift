@@ -210,9 +210,21 @@ struct ServeCommand: AsyncParsableCommand {
             name: "mootx01",
             version: "1.0.0"
         )
+        // ADR-024 §5: computed once at startup (not per-call) and threaded
+        // into every tool response via ToolDispatcher.versionSkewAdvisory.
+        // nil whenever no plugin is detected or its version matches this
+        // binary — the common case, which leaves ping/status unchanged.
+        let versionSkewAdvisory = VersionSkewAdvisory.compute(
+            pluginID: "mootx01@mootx01",
+            binaryVersion: Mootx01.currentVersion,
+            homeDirectory: home
+        )
         // Server identity injected so facts/memories filed via this host are
         // stamped "mootx01" — the product binary running mootx01 serve.
-        let tooling = ToolDispatcher(kit: kit, handle: handle, serverIdentity: "mootx01")
+        let tooling = ToolDispatcher(
+            kit: kit, handle: handle, serverIdentity: "mootx01",
+            versionSkewAdvisory: versionSkewAdvisory
+        )
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
         if let port = residentPort {
