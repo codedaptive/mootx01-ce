@@ -461,3 +461,31 @@ fn reindex_missing_result_never_exceeds_cap() {
         jobs.len()
     );
 }
+
+/// Delta-aware reindex tail — classification policy (vault-import O(estate)
+/// fix). The decision logic and threshold live in GLK beside the Swift twin's
+/// (EncodeIntake.swift smallDelta branch); the AriaMcpKit responsive-reindex
+/// driver and the behavior-level Swift suite (DeltaReindexTests) consume it.
+#[test]
+fn small_delta_classification_matches_swift_policy() {
+    use genius_locus_kit::coordinator::EstateCoordinator as C;
+
+    // An empty corpus is NEVER small: cold initial loads must take the full
+    // train-once+embed-once path.
+    assert!(!C::is_small_reindex_delta(0, 0));
+    assert!(!C::is_small_reindex_delta(1, 0));
+
+    // Strictly under 5% of the indexed corpus → small.
+    assert!(C::is_small_reindex_delta(1, 40)); // 2.5%
+    assert!(C::is_small_reindex_delta(2_499, 50_000)); // 4.998%
+
+    // At or over the threshold → large (strict <).
+    assert!(!C::is_small_reindex_delta(2, 40)); // exactly 5%
+    assert!(!C::is_small_reindex_delta(2_500, 50_000)); // exactly 5%
+    assert!(!C::is_small_reindex_delta(10, 40)); // 25%
+
+    // A full-cap first pass means "at least REINDEX_MAX_JOBS missing" — never
+    // small, even when the percentage math would qualify (the capped count
+    // classifies identically to Swift's uncapped count at every corpus size).
+    assert!(!C::is_small_reindex_delta(10_000, 1_000_000));
+}

@@ -233,6 +233,35 @@ impl EstateCoordinator {
     #[cfg(feature = "test-seams")]
     pub const REINDEX_MAX_JOBS: usize = 10_000;
 
+    /// A reindex sweep whose missing set is under this percentage of the
+    /// already-indexed sources is a SMALL DELTA: its drawers ride the encode
+    /// stream (embedded through the live basis at drain, like any live
+    /// capture) and the O(corpus) full-retrain tail is skipped. 5% of a 50k
+    /// estate is 2,500 drawers — comfortably inside what the encode drain
+    /// handles in near-realtime, while the skipped tail costs tens of minutes
+    /// of full-corpus FDC re-encode. Basis freshness for the delta's new
+    /// vocabulary arrives with the next large import, explicit `moot_reindex`,
+    /// or scheduled maintenance. An empty corpus is never a small delta (cold
+    /// initial loads always take the full train-once+embed-once path).
+    /// Swift parity: `deltaReindexThresholdPercent` in
+    /// GeniusLocusKit/Sources/.../EncodeIntake.swift.
+    pub const DELTA_REINDEX_THRESHOLD_PERCENT: usize = 5;
+
+    /// Classify a reindex sweep as a SMALL DELTA (see
+    /// `DELTA_REINDEX_THRESHOLD_PERCENT` for the policy and rationale).
+    ///
+    /// `missing_capped` is the FIRST pass's job count as returned by
+    /// `collect_reindex_jobs`, which is already capped at `REINDEX_MAX_JOBS`:
+    /// a full-cap pass means "at least 10k missing" and is never small, so the
+    /// capped count classifies identically to Swift's uncapped count at every
+    /// corpus size (wherever 5% of the corpus exceeds the cap, the capped
+    /// count trips the `< REINDEX_MAX_JOBS` guard first).
+    pub fn is_small_reindex_delta(missing_capped: usize, indexed: usize) -> bool {
+        indexed > 0
+            && missing_capped < Self::REINDEX_MAX_JOBS
+            && missing_capped * 100 < indexed * Self::DELTA_REINDEX_THRESHOLD_PERCENT
+    }
+
     /// Enqueue ingest jobs for every active drawer that is not yet present in
     /// the estate's Corpus (BM25/vector index). Returns the count enqueued.
     /// Idempotent: drawers already indexed are skipped. Empty-content,
