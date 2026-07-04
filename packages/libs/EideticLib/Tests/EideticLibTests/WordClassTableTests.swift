@@ -24,8 +24,14 @@ struct WordClassTableTests {
     @Test("table parses with pinned versions")
     func tableParsesWithPinnedVersions() throws {
         // Mirrors the Rust `table_parses_with_pinned_versions` test.
+        //
+        // table_version bumped 1.0.0 -> 1.1.0 by the wordclass-seed mission
+        // (curated the pristine seed from 21/18 to 466/428 entries; see
+        // WordClassSeedTests.swift in LatticeLib for the full seed test
+        // suite). This assertion pins the CURRENT shipped version so a
+        // future bump is caught here too.
         let table = try #require(WordClassTable.loadBundled())
-        #expect(table.tableVersion == "1.0.0")
+        #expect(table.tableVersion == "1.1.0")
         #expect(table.minOSVersion == "17.0")
         #expect(!table.snapshotDate.isEmpty)
     }

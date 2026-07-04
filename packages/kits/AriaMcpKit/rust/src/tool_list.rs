@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition.
-//!   Tier 1 (7)  — core memory: file, search, update, withdraw, erase, confirm, move
+//!   Tier 1 (8)  — core memory: file, search, get, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
@@ -15,7 +15,11 @@
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! Vault-on (default): 62 tools. Vault-off (MOOTX01_VAULT=0): 56 tools —
+//! The 8th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
+//! full — docs_internal/V1_1_PARKING_LOT.md's fetch-drawer-by-ID gap,
+//! build-now per Bob's ruling).
+//!
+//! Vault-on (default): 63 tools. Vault-off (MOOTX01_VAULT=0): 57 tools —
 //! the five moot_vault_* tools and moot_palace_import are hidden together
 //! because all open local SQLite files (filesystem import/export vector).
 //!
@@ -44,7 +48,7 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 62 tools when vault is enabled (the default) or 56 tools when
+/// Produces 63 tools when vault is enabled (the default) or 57 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
 /// posture). All other non-vault tiers are always present. See ADR-015.
@@ -58,12 +62,13 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    let capacity = if vault_on { 62 } else { 56 };
+    let capacity = if vault_on { 63 } else { 57 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
-    // Tier 1 — Core memory (7)
+    // Tier 1 — Core memory (8)
     tools.push(file_memory_tool());
     tools.push(memory_search_tool());
+    tools.push(memory_get_tool());
     tools.push(update_memory_tool());
     tools.push(withdraw_memory_tool());
     tools.push(erase_memory_tool());
@@ -190,6 +195,19 @@ fn memory_search_tool() -> serde_json::Value {
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
             }),
             json!(["query"])
+        )))
+    })
+}
+
+fn memory_get_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_memory_get",
+        "description": "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "id": string_schema("Memory row identifier (drawer UUID).")
+            }),
+            json!(["id"])
         )))
     })
 }

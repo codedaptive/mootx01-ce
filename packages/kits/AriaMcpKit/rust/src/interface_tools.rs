@@ -1,9 +1,9 @@
 //! Interface tool surface — Tier 1–5 of the 5-tier AI-client interface.
 //!
-//! Mirrors Swift `ToolDispatch.swift` for the 19 Tier 1–5 tools:
-//!   Tier 1 — Core memory (7): moot_file_memory, moot_memory_search,
-//!             moot_update_memory, moot_withdraw_memory, moot_erase_memory,
-//!             moot_confirm_memory, moot_move_memory
+//! Mirrors Swift `ToolDispatch.swift` for the 20 Tier 1–5 tools:
+//!   Tier 1 — Core memory (8): moot_file_memory, moot_memory_search,
+//!             moot_memory_get, moot_update_memory, moot_withdraw_memory,
+//!             moot_erase_memory, moot_confirm_memory, moot_move_memory
 //!   Tier 2 — Connections (3): moot_link_memories, moot_connection_search,
 //!             moot_connection_map
 //!   Tier 3 — Knowledge graph (4): moot_file_fact, moot_fact_search,
@@ -86,9 +86,10 @@ const DEFAULT_LATTICE_CODE: &str = "000";
 /// The 19 interface tool names (Tier 1–5) plus 2 Maintenance tools (21 total),
 /// in the order they appear in the tool list. Mirrors Swift `InterfaceTools`.
 pub const INTERFACE_TOOLS: &[&str] = &[
-    // Tier 1 — Core memory (7)
+    // Tier 1 — Core memory (8)
     "moot_file_memory",
     "moot_memory_search",
+    "moot_memory_get",
     "moot_update_memory",
     "moot_withdraw_memory",
     "moot_erase_memory",
@@ -116,7 +117,7 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_palace_import",
 ];
 
-/// True when `name` is one of the 19 Tier 1–5 interface tools or the 3
+/// True when `name` is one of the 20 Tier 1–5 interface tools or the 3
 /// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
@@ -332,6 +333,7 @@ pub fn dispatch(
     match name {
         "moot_file_memory" => run_file_memory(args, registry),
         "moot_memory_search" => run_memory_search(args, registry, ledger),
+        "moot_memory_get" => run_memory_get(args, registry),
         "moot_update_memory" => run_update_memory(args, registry, ledger),
         "moot_withdraw_memory" => run_withdraw_memory(args, registry, ledger),
         "moot_erase_memory" => run_erase_memory(args, registry),
@@ -634,10 +636,21 @@ fn run_memory_search(
         // Restricted (32) and Secret (48): replace with a redacted placeholder.
         // A raw content preview at the ARIA boundary leaks text that the
         // sensitivity designation marks as access-controlled. Recall can return
-        // these rows for relevance ranking without exposing the body; a
-        // dereference verb (moot_retrieve) with explicit id is the correct path
-        // for callers who need the content and have grant-level access to it.
-        // Mirrors the Swift MCP surface's intent for sensitivity-gated previews.
+        // these rows for relevance ranking without exposing the body.
+        //
+        // NOTE on moot_memory_get (ADR: docs_internal/V1_1_PARKING_LOT.md's
+        // fetch-drawer-by-ID gap, shipped): it does NOT bypass this redaction
+        // via a different door. moot_memory_get gates on the ADJECTIVE axis
+        // (state/trust/adjective_sensitivity, bits 6-11, via
+        // BitmapEvaluator's default insertion) — the same gate this tool
+        // applies to admit a row into `result.hits` at all. The provenance
+        // `Sensitivity` checked here (bits 30-35) is a SEPARATE, Rust-only
+        // preview redaction with no Swift twin today (Swift's
+        // `runMemorySearch` always shows the raw 120-char preview
+        // regardless of provenance sensitivity) — a pre-existing port
+        // divergence, not something moot_memory_get's gate is scoped to
+        // reconcile. moot_memory_get's own gate is byte-for-byte the same
+        // adjective-axis default both ports' moot_memory_search already use.
         let preview: String = hit.drawer.as_ref().map(|d| {
             use locus_kit::provenance::Sensitivity;
             match d.sensitivity() {
@@ -687,6 +700,111 @@ fn run_memory_search(
         format!("degraded_stages:[{}]", result.degraded_stages.join(","))
     };
     lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
+    Ok(text_result(&lines.join("\n")))
+}
+
+/// `moot_memory_get` — fetch one memory drawer by id, in full.
+///
+/// ADR reference: docs_internal/V1_1_PARKING_LOT.md's "MCP API gap:
+/// fetch-drawer-by-ID" (build-now per Bob's ruling, not deferred to v1.1).
+///
+/// Reifies the ARIA `recall` verb (docs/concepts/ARIA_LEXICON.md) applied to
+/// the Drawer noun, constrained by an exact identifier rather than free-text
+/// criteria — `moot_memory_search`'s degenerate, precise sibling. Named
+/// `memory_get` (noun_verb) per the lexicon's naming discipline: "an action
+/// tool is verb_noun, a query tool is noun_verb." Mirrors Swift
+/// `ToolDispatcher.runMemoryGet` exactly.
+///
+/// Routes through the same frame-faithful by-id load
+/// (`Estate::get_drawers_matching_frame`, LocusKit — the Rust peer of Swift
+/// `Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`) that backs
+/// `moot_memory_search`'s recall pipeline, with an EMPTY filter chain so
+/// `BitmapEvaluator`'s default gate applies unchanged: currentlyBelieve
+/// state, trustworthy trust, sensitivityAtMost(Elevated) — the IDENTICAL
+/// gate `moot_memory_search` applies by default. A drawer that exists but
+/// fails that gate is reported exactly like a genuinely absent id: "Memory
+/// not found: <id>". This is deliberate — the by-id door must not become a
+/// way to confirm the EXISTENCE of content the estate would otherwise
+/// refuse to surface. Tombstoned rows are always excluded, independent of
+/// the chain.
+///
+/// Hydration is `Full` (verbatim content) — never `Structured`, which strips
+/// the content blob this tool exists to return.
+fn run_memory_get(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let row_id = require_string(args, "id")?;
+
+    let coord = estate.coord.lock().unwrap();
+    let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
+        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
+    })?;
+
+    let mut frame = RecallFrame::new(vec![]);
+    frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+    let filtered = locus_estate
+        .get_drawers_matching_frame(&[row_id.to_string()], &frame)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
+
+    // Same message and error code whether the id is genuinely absent,
+    // tombstoned, or exists but failed the default gate — see the
+    // containment note above. Mirrors moot_link_memories' "not found" shape.
+    let Some(drawer) = filtered.admissible.into_iter().next() else {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Memory not found: {row_id}"),
+        ));
+    };
+
+    // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via the
+    // node tree, same pattern as every other read tool in this file.
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
+    let (wing, room) = node_names.get(&drawer.parent_node_id).cloned().unwrap_or_default();
+
+    // Linked tunnel summary: coord.all_tunnels (the estate-wide scan, mirrors
+    // Swift estate.allTunnels()) + tombstone-exclusion pattern
+    // moot_connection_search/moot_connection_map already use, scoped to
+    // tunnels touching this drawer on either end.
+    let all_tunnels = coord
+        .all_tunnels(&estate.handle)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+    let linked: Vec<_> = all_tunnels
+        .iter()
+        .filter(|t| {
+            (t.source_drawer_id.as_deref() == Some(row_id) || t.target_drawer_id.as_deref() == Some(row_id))
+                && t.tombstoned_at.is_none()
+        })
+        .collect();
+
+    let mut lines = vec![
+        format!("memory {}", drawer.id),
+        format!("room: {room}  wing: {wing}"),
+        format!("filed_at: {}", epoch_to_iso8601(drawer.filed_at)),
+        format!("event_time: {}", epoch_to_iso8601(drawer.event_time)),
+        format!("state: {:?}", drawer.state()).to_lowercase(),
+        format!("trust: {:?}", drawer.trust()).to_lowercase(),
+        format!("sensitivity: {:?}", drawer.adjective_sensitivity()).to_lowercase(),
+        format!("exportability: {:?}", drawer.exportability()).to_lowercase(),
+        format!("confirmation: {:?}", drawer.confirmation()).to_lowercase(),
+        format!("lineage: {}", drawer.lineage_id),
+        format!("tunnels: {}", linked.len()),
+    ];
+    for tunnel in linked.iter().take(50) {
+        let outgoing = tunnel.source_drawer_id.as_deref() == Some(row_id);
+        let other = if outgoing {
+            tunnel.target_drawer_id.clone().unwrap_or_else(|| format!("{}/{}", tunnel.target_wing, tunnel.target_room))
+        } else {
+            tunnel.source_drawer_id.clone().unwrap_or_else(|| format!("{}/{}", tunnel.source_wing, tunnel.source_room))
+        };
+        lines.push(format!("  {} {}  [{}]", if outgoing { "→" } else { "←" }, other, tunnel.label));
+    }
+    // Verbatim content, on its own trailing block — never truncated or
+    // previewed (that is moot_memory_search's job). This is the field the
+    // tool exists to return.
+    lines.push("content:".to_string());
+    lines.push(drawer.content.clone());
     Ok(text_result(&lines.join("\n")))
 }
 

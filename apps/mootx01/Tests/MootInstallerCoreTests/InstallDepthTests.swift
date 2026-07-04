@@ -139,6 +139,39 @@ struct InstallDepthTests {
         #expect(FileManager.default.fileExists(atPath: dest.path))
     }
 
+    // MARK: - hostsWithExistingPluginDirectory (upgrade rematerialization gate)
+
+    /// Priority Adams wave-3 coverage finding: direct test of the gating
+    /// logic behind `mootx01 upgrade`'s plugin rematerialization pass
+    /// (ADR-024 Wave 3, Defect 1). A host that already has a plugin
+    /// directory on disk must be returned (so `UpgradeCommand` reruns
+    /// `apply` and converges it); a plugin-capable host with NO existing
+    /// directory must NOT be returned — an upgrade never CREATES a new
+    /// plugin-depth install for a host that never had one.
+    @Test("hostsWithExistingPluginDirectory returns only hosts with a plugin dir already on disk")
+    func hostsWithExistingPluginDirectoryGate() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+
+        // No plugin-capable host has a directory yet.
+        #expect(DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home).isEmpty)
+
+        // Seed claude-code as an EXISTING plugin-depth install (as if
+        // `mootx01 install --mode plugin` ran previously for it only).
+        _ = try DepthInstaller.apply(
+            clientID: "claude-code", depth: .plugin, homeDirectory: home, binaryPath: "/safe/bin/mootx01")
+
+        let gated = DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home)
+        #expect(gated.map(\.id) == ["claude-code"],
+                "only the host with an existing plugin dir must be gated in; got: \(gated.map(\.id))")
+
+        // cursor is plugin-capable but was never installed — it must not
+        // appear, and its plugin directory must not exist.
+        let cursorHost = try #require(InstallBundle.embedded.host(forClientID: "cursor"))
+        let cursorDir = DepthInstaller.pluginInstallDirectory(host: cursorHost, homeDirectory: home)
+        #expect(!FileManager.default.fileExists(atPath: cursorDir.path))
+    }
+
     @Test("MCP-only client (claude-desktop) degrades to server at any depth")
     func mcpOnlyDegradesToServer() throws {
         let home = sandbox()
@@ -225,6 +258,47 @@ struct InstallDepthTests {
         let unchangedObj = try? JSONSerialization.jsonObject(with: Data(unchanged.utf8)) as? [String: Any]
         let unchangedServer = (unchangedObj?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
         #expect(unchangedServer?["env"] == nil, "an HTTP-shaped entry must never gain an env block")
+    }
+
+    /// Direct unit coverage of `rewriteBareMootCommand` (Adams wave-3
+    /// coverage finding — this rewrite is currently dead for every host
+    /// reachable through `installPlugin` per its own Defect-3 audit
+    /// comment, since every manifest-bundle host packages an HTTP-shaped
+    /// entry today, but the mechanism must still behave correctly if a host
+    /// ever falls back to the proxy-bridge `command` shape again). Mirrors
+    /// the `injectVaultEnvShapeCheck` standard: exercise both string forms
+    /// `JSONSerialization.data(withJSONObject:options: .prettyPrinted)`
+    /// actually produces (`"command" : "mootx01"` on the space-before-colon
+    /// form the embedded packages use, and `"command": "mootx01"` as the
+    /// second pattern the function also matches), verify the bare
+    /// placeholder becomes the absolute binary path, verify forward slashes
+    /// in that path are NOT escaped as `\/` (`jsonEscapedString`'s
+    /// `.withoutEscapingSlashes` contract), and verify a `command` value
+    /// that is not the bare `"mootx01"` placeholder is left untouched.
+    @Test("rewriteBareMootCommand replaces the bare mootx01 command placeholder with the absolute binary path")
+    func rewriteBareMootCommandFixture() {
+        let binaryPath = "/usr/local/bin/mootx01"
+
+        let spaceColonSpace = #"{"mcpServers":{"mootx01":{"command" : "mootx01","args":["proxy"]}}}"#
+        let rewrittenA = DepthInstaller.rewriteBareMootCommand(in: spaceColonSpace, binaryPath: binaryPath)
+        #expect(rewrittenA.contains("\"command\" : \"\(binaryPath)\""),
+                "space-before-colon form must be rewritten to the absolute path; got: \(rewrittenA)")
+        #expect(!rewrittenA.contains("\"command\" : \"mootx01\""),
+                "the bare placeholder must not survive the rewrite")
+
+        let colonSpace = #"{"command": "mootx01"}"#
+        let rewrittenB = DepthInstaller.rewriteBareMootCommand(in: colonSpace, binaryPath: binaryPath)
+        #expect(rewrittenB == #"{"command": "/usr/local/bin/mootx01"}"#,
+                "colon-space form must be rewritten to the absolute path; got: \(rewrittenB)")
+        #expect(!rewrittenB.contains("/usr/local/bin/mootx01".replacingOccurrences(of: "/", with: "\\/")),
+                "forward slashes in the placed binary path must not be escaped as \\/")
+
+        // A command value that is not the bare "mootx01" placeholder (e.g.
+        // already-absolute, or a different binary entirely) must be left
+        // exactly as-is — this rewrite only ever targets the placeholder.
+        let alreadyAbsolute = #"{"command": "/opt/other/tool"}"#
+        #expect(DepthInstaller.rewriteBareMootCommand(in: alreadyAbsolute, binaryPath: binaryPath) == alreadyAbsolute,
+                "a non-placeholder command value must be untouched")
     }
 
     /// vault-on (the default) must NOT inject an env block — absent MOOTX01_VAULT
