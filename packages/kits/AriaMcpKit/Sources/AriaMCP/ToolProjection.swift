@@ -10,8 +10,8 @@ import Foundation
 ///
 /// ## Five tiers
 ///
-/// - **Tier 1 — Core Memory (7):** file, search, update, withdraw, erase,
-///   confirm, move. The main CRUD surface for memory drawers.
+/// - **Tier 1 — Core Memory (8):** file, search, get, update, withdraw,
+///   erase, confirm, move. The main CRUD surface for memory drawers.
 /// - **Tier 2 — Connections (3):** link, search outgoing, map incoming.
 ///   Directed graph edges between memories.
 /// - **Tier 3 — Knowledge Graph (4):** file fact, search facts, retire fact,
@@ -33,7 +33,7 @@ import Foundation
 /// Where a projected tool comes from. The five tiers share `.interface`;
 /// non-tier tools keep their distinct cases.
 public enum ToolProvenance: Sendable, Equatable {
-    /// One of the 19 AI-client interface tools (five tiers).
+    /// One of the 20 AI-client interface tools (five tiers).
     case interface
     /// A federation-surface tool that sits above the interface tier.
     case federation
@@ -133,7 +133,7 @@ public enum ToolProjection {
         }
     }
 
-    // MARK: - Tier 1: Core Memory (7 tools)
+    // MARK: - Tier 1: Core Memory (8 tools)
 
     private static func coreMemoryTools() -> [ProjectedTool] {
         [
@@ -169,6 +169,17 @@ public enum ToolProjection {
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
                     ],
                     required: ["query"]
+                )),
+                provenance: .interface
+            ),
+            ProjectedTool(
+                name: "moot_memory_get",
+                description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "id": stringSchema("Memory row identifier (drawer UUID)."),
+                    ],
+                    required: ["id"]
                 )),
                 provenance: .interface
             ),

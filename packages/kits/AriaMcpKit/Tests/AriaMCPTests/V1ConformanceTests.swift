@@ -135,7 +135,7 @@ struct V1ConformanceTests {
     /// The count is a snapshot of the v1.0 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
     /// and commit the reason with the change.
-    @Test func v1ToolsListReturns54Tools() async throws {
+    @Test func v1ToolsListReturns63Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -154,14 +154,16 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 62 = 19 core ARIA + 1 federation + 11 recipe + 23 lens + 5 vault + 3
+        // 63 = 20 core ARIA + 1 federation + 11 recipe + 23 lens + 5 vault + 3
         // maintenance (moot_reindex, moot_drain_status, moot_palace_import). 3 new
         // distillation recipe tools added (DA1): moot_consolidate, moot_recall_distilled,
         // moot_recollect.
+        // 20th core ARIA = moot_memory_get (Tier 1, fetch-drawer-by-ID, build-now
+        // per Bob's ruling — docs_internal/V1_1_PARKING_LOT.md).
         // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
         // moot_palace_import (PAR-PB-1): direct palace → substrate import.
         // moot_drain_status: AI-queryable background drain progress.
-        #expect(tools.count == 62, "tools/list must return exactly 62 tools; got \(tools.count)")
+        #expect(tools.count == 63, "tools/list must return exactly 63 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────
