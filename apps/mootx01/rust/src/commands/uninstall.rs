@@ -153,8 +153,21 @@ fn remove_from_config(client: &McpClient, config: &Path) -> Result<bool, merge::
             if !config.exists() {
                 return Ok(false);
             }
-            merge::backup_existing(config)?;
-            merge::remove_from_json_config(config, client.json_servers_key(), SERVER_NAME)
+            // ADR-024 §4: ownership-aware — a Foreign entry (env override,
+            // e.g. a development rig) is reported and left untouched rather
+            // than silently removed.
+            match merge::remove_from_json_config_owned(config, client.json_servers_key(), SERVER_NAME)? {
+                merge::JsonOwnershipOutcome::NotPresent => Ok(false),
+                merge::JsonOwnershipOutcome::Removed => Ok(true),
+                merge::JsonOwnershipOutcome::RetainedForeign { reason, path } => {
+                    println!(
+                        "  ⚠ {}: a non-default mootx01 entry at {} ({reason}) was left untouched — remove it by hand if intended",
+                        client.display_name,
+                        path.display()
+                    );
+                    Ok(false)
+                }
+            }
         }
         ConfigFormat::Toml => {
             if !config.exists() {
@@ -309,6 +322,73 @@ mod tests {
             false,
             "second remove on already-cleaned file must return false"
         );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ADR-024 §4: uninstall must not silently remove a non-default (dev-rig)
+    // entry — it is reported and left untouched. An ours-default entry is
+    // still removed as before (regression guard).
+
+    #[test]
+    fn uninstall_retains_non_default_entry_and_reports_it() {
+        let home = std::env::temp_dir()
+            .join(format!("mootx01-uninstall-nondefault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let claude = reg.iter().find(|c| c.id == "claude-code").unwrap().clone();
+        let config = claude.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let dev_rig = serde_json::json!({
+            "mcpServers": {
+                "mootx01": {
+                    "command": "/Users/dev/build/mootx01",
+                    "args": ["proxy"],
+                    "env": {"ARIA_MCP_SQLITE_PATH": "/Users/dev/rig-a/estate.sqlite"},
+                }
+            }
+        });
+        std::fs::write(&config, dev_rig.to_string()).unwrap();
+
+        // remove_one aggregates to false (nothing "removed") but must not
+        // touch the file's content.
+        assert_eq!(remove_one(&claude, &home, None).unwrap(), false);
+        let bytes = std::fs::read(&config).unwrap();
+        let root: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            root["mcpServers"]["mootx01"]["env"]["ARIA_MCP_SQLITE_PATH"],
+            "/Users/dev/rig-a/estate.sqlite",
+            "non-default entry must survive uninstall untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn uninstall_removes_ours_default_entry_as_before() {
+        let home = std::env::temp_dir()
+            .join(format!("mootx01-uninstall-oursdefault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let claude = reg.iter().find(|c| c.id == "claude-code").unwrap().clone();
+        let config = claude.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        merge::merge_into_json_config(
+            &config,
+            claude.json_servers_key(),
+            SERVER_NAME,
+            merge::entry_for(&claude, "/usr/local/bin/mootx01", "http://127.0.0.1:4242"),
+        )
+        .unwrap();
+
+        assert_eq!(remove_one(&claude, &home, None).unwrap(), true);
+        let bytes = std::fs::read(&config).unwrap();
+        let root: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(root.get("mcpServers").and_then(|s| s.get(SERVER_NAME)).is_none());
 
         let _ = std::fs::remove_dir_all(&home);
     }
