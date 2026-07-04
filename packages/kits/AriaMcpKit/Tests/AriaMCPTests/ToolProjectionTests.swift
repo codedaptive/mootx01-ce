@@ -22,8 +22,11 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 62.
-    /// 19 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 3 maintenance.
+    /// Hard contract gate: the total tool count must be exactly 63.
+    /// 20 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 3 maintenance.
+    /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
+    /// drawer by id, in full; docs_internal/V1_1_PARKING_LOT.md's
+    /// fetch-drawer-by-ID gap, build-now per Bob's ruling).
     /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
     /// ADR-DIFFUSION-001) added alongside moot_lens_contradiction.
     /// The 11th recipe tool is moot_recollect (DA1 — three distillation tools:
@@ -33,18 +36,18 @@ struct ToolProjectionTests {
     /// (PAR-PB-1, direct palace import).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools().count == 62,
-                "tools() must return exactly 62 tools; got \(ToolProjection.tools().count)")
+        #expect(ToolProjection.tools().count == 63,
+                "tools() must return exactly 63 tools; got \(ToolProjection.tools().count)")
     }
 
-    /// All 19 interface tools must be present.
+    /// All 20 interface tools must be present.
     @Test func testInterfaceToolsArePresent() {
         let names = Set(ToolProjection.tools().map(\.name))
         let expected: [String] = [
             // Tier 1
-            "moot_file_memory", "moot_memory_search", "moot_update_memory",
-            "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
-            "moot_move_memory",
+            "moot_file_memory", "moot_memory_search", "moot_memory_get",
+            "moot_update_memory", "moot_withdraw_memory", "moot_erase_memory",
+            "moot_confirm_memory", "moot_move_memory",
             // Tier 2
             "moot_link_memories", "moot_connection_search", "moot_connection_map",
             // Tier 3
@@ -199,16 +202,16 @@ struct ToolProjectionTests {
     /// membership gate — the two sets must stay in sync. This catches the class
     /// of bug where a case is added to the switch but omitted from `names`.
     ///
-    /// The expected set is the canonical 19 Tier 1–5 tools plus maintenance
+    /// The expected set is the canonical 20 Tier 1–5 tools plus maintenance
     /// tools (`moot_reindex`, `moot_drain_status`, `moot_palace_import`). If a
     /// new tool is added to the switch, add it here too.
     @Test func testMembershipGateCoversAllDispatchCases() {
         // All tools that appear in the InterfaceTools dispatch switch.
         let dispatchCases: [String] = [
             // Tier 1
-            "moot_file_memory", "moot_memory_search", "moot_update_memory",
-            "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
-            "moot_move_memory",
+            "moot_file_memory", "moot_memory_search", "moot_memory_get",
+            "moot_update_memory", "moot_withdraw_memory", "moot_erase_memory",
+            "moot_confirm_memory", "moot_move_memory",
             // Tier 2
             "moot_link_memories", "moot_connection_search", "moot_connection_map",
             // Tier 3

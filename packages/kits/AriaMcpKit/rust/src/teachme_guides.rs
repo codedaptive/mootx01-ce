@@ -17,6 +17,7 @@ pub fn guide(tool_name: &str) -> &'static str {
         // Tier 1 — Core memory
         "moot_file_memory" => GUIDE_FILE_MEMORY,
         "moot_memory_search" => GUIDE_MEMORY_SEARCH,
+        "moot_memory_get" => GUIDE_MEMORY_GET,
         "moot_update_memory" => GUIDE_UPDATE_MEMORY,
         "moot_withdraw_memory" => GUIDE_WITHDRAW_MEMORY,
         "moot_erase_memory" => GUIDE_ERASE_MEMORY,
@@ -93,6 +94,41 @@ Response: \"found N memory(s)\\n<id>  [<room>]  <content_preview>\"
 Mistakes:
   — Queries over 200 characters trigger a hint to shorten the query.
   — Zero results usually means the estate is empty or the query is too specific.";
+
+const GUIDE_MEMORY_GET: &str = "\
+moot_memory_get — fetch one memory drawer by id, in full
+
+Returns verbatim content (never truncated), room/wing, filed_at and
+event_time, the adjective-axis metadata (state, trust, sensitivity,
+exportability, confirmation), lineage, and a linked-tunnel summary.
+Applies the same default gate as moot_memory_search — a drawer that
+exists but is contested/withdrawn/rejected, untrustworthy, or
+restricted/secret is reported not-found, identical to a genuinely
+absent id. This tool cannot be used to bypass that gate.
+
+When to use vs siblings:
+  — moot_memory_search: when you don't yet have an id, or want a ranked
+    set of candidates
+  — moot_recollect: when fanning out from a distilled factoid to its
+    source memories, not a single known id
+
+Required args:
+  id (string) drawer UUID returned by moot_file_memory or moot_memory_search
+
+Example:
+  { \"id\": \"abc-123\" }
+
+Response: \"memory <id>\\nroom: <room>  wing: <wing>\\nfiled_at: ...\\n\
+event_time: ...\\nstate: ...\\ntrust: ...\\nsensitivity: ...\\n\
+exportability: ...\\nconfirmation: ...\\nlineage: <uuid>\\ntunnels: N\\n  \
+→ <other-id>  [<kind>]\\ncontent:\\n<verbatim content>\"
+
+Mistakes:
+  — Calling with an id that does not exist, or one not already found via
+    moot_memory_search. Search first.
+  — Expecting a found result for a withdrawn/erased/restricted drawer.
+    The gate reports it not-found, same as a genuinely absent id — this
+    is deliberate, not a bug.";
 
 const GUIDE_UPDATE_MEMORY: &str = "\
 moot_update_memory — apply a named mutation to a memory

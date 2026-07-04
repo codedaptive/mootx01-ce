@@ -80,6 +80,8 @@ enum TeachmeGuides {
           - moot_estate_map — when browsing structure rather than searching content
           - moot_fact_search — when looking for structured KG assertions
           - moot_read_journal — when retrieving agent diary entries
+          - moot_memory_get — when you already have a specific id and need
+            the full verbatim content and metadata, not a ranked preview
 
         Example:
           { "query": "actor isolation concurrency decisions",
@@ -94,6 +96,50 @@ enum TeachmeGuides {
             short question under 50 words. Long queries dilute the semantic signal.
           - Calling without a query arg. Use moot_estate_map to browse structure.
           - Omitting limit when expecting many results; default is 20.
+        """
+
+    private static let memoryGetGuide = """
+        moot_memory_get — Fetch one memory drawer by id, in full.
+
+        Returns verbatim content (never truncated), room/wing, filed_at and
+        event_time, the adjective-axis metadata (state, trust, sensitivity,
+        exportability, confirmation), lineage, and a linked-tunnel summary.
+        Applies the same default gate as moot_memory_search — a drawer that
+        exists but is contested/withdrawn/rejected, untrustworthy, or
+        restricted/secret is reported not-found, identical to a genuinely
+        absent id. This tool cannot be used to bypass that gate.
+
+        When to use vs siblings:
+          - moot_memory_search — when you don't yet have an id, or want a
+            ranked set of candidates
+          - moot_recollect — when fanning out from a distilled factoid to
+            its source memories, not a single known id
+
+        Example:
+          { "id": "abc-123" }
+
+        Response:
+          memory abc-123
+          room: mootx01/architecture  wing: Agentic Memory
+          filed_at: 2026-06-05T10:00:00Z
+          event_time: 2026-06-05T10:00:00Z
+          state: active
+          trust: verbatim
+          sensitivity: normal
+          exportability: private_
+          confirmation: unconfirmed
+          lineage: <lineage-uuid>
+          tunnels: 1
+            → def-456  [relates]
+          content:
+          <verbatim content>
+
+        Common mistakes:
+          - Calling with an id that does not exist, or one you have not
+            already found via moot_memory_search. Search first.
+          - Expecting a found result for a withdrawn/erased/restricted
+            drawer. The gate reports it not-found, same as a genuinely
+            absent id — this is deliberate, not a bug.
         """
 
     private static let updateMemoryGuide = """
@@ -587,6 +633,7 @@ enum TeachmeGuides {
         // Tier 1
         case "moot_file_memory":     return fileMemoryGuide
         case "moot_memory_search":   return memorySearchGuide
+        case "moot_memory_get":      return memoryGetGuide
         case "moot_update_memory":   return updateMemoryGuide
         case "moot_withdraw_memory": return withdrawMemoryGuide
         case "moot_erase_memory":    return eraseMemoryGuide

@@ -194,11 +194,22 @@ pub fn run(
 
     // Permissions (Claude Code settings) — §4.2, AIRA-INSTALL-P3 key.
     //
-    //   default              → TIERED: diagnostics allow, reads/writes ask,
-    //                          destructive purges deny. Without this every tool
-    //                          is unapproved and nothing works out of the box;
-    //                          with it nothing destructive is silently
-    //                          auto-approved.
+    //   default              → TIERED by verb semantics (Bob's re-tier
+    //                          ruling, 2026-07-04, permissions::classify):
+    //                          reads and additive-unconfirmed writes allow,
+    //                          mutations of existing state ask, destructive
+    //                          purges deny. The PRIOR default put every
+    //                          non-diagnostic tool in ask — 55 ask rules on
+    //                          a real machine, including every pure read —
+    //                          which is what made moot unusable from
+    //                          permission prompts. migrate_tiers converges
+    //                          an existing install onto the new default
+    //                          before grant_tiered adds anything still
+    //                          missing; both write BOTH the direct
+    //                          (mcp__mootx01__) and plugin
+    //                          (mcp__plugin_mootx01_mootx01__) namespaces —
+    //                          a rule under only one matches zero calls made
+    //                          through the other Claude Code connection.
     //   --grant-permissions  → every tool into allow (explicit opt-in).
     //   --no-permissions     → write nothing (guaranteed no-write for scripts).
     if !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
@@ -221,12 +232,26 @@ pub fn run(
                 Err(e) => eprintln!("  ✗ permissions: {e}"),
             }
         } else {
+            // Re-tier any entry from a PRIOR install that predates the
+            // current classification (Bob's re-tier ruling, 2026-07-04)
+            // before adding whatever is still missing — otherwise a repeat
+            // `mootx01 install` run would leave an existing install's stale
+            // tiering (e.g. every read fossilized in `ask` under the old
+            // default) in place forever, since grant_tiered only adds
+            // absent entries.
             match merge::backup_existing(&settings)
                 .map_err(merge::MergeError::from)
-                .and_then(|_| permissions::grant_tiered(&settings))
+                .and_then(|_| permissions::migrate_tiers(&settings))
             {
+                Ok(moved) if moved > 0 => {
+                    println!("  ✓ Re-tiered {moved} existing ARIA tool permission(s) to the current default")
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("  ✗ permissions migration: {e}"),
+            }
+            match permissions::grant_tiered(&settings) {
                 Ok((a, k, d)) if a + k + d > 0 => println!(
-                    "  ✓ Claude Code tool permissions: {a} allowed (diagnostics), {k} ask, {d} denied (destructive) — edit in {}",
+                    "  ✓ Claude Code tool permissions: {a} allowed (reads + new-content writes), {k} ask (mutations of existing content), {d} denied (destructive) — edit in {}",
                     settings.display()
                 ),
                 Ok(_) => {}

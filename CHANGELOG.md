@@ -5,6 +5,30 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.16 — 2026-07-04
+
+Usability release: fetch any memory by ID, permission prompts collapsed to
+the destructive few, and real fast-path word-class coverage out of the box.
+
+- **New tool: `moot_memory_get`** — fetch a full memory drawer by UUID
+  (verbatim content, metadata, provenance), closing the gap where search
+  and recall return previews and `moot_recollect` covers only distilled
+  factoids. Applies the exact containment and trust gates the search tools
+  enforce — by-ID access is not a bypass.
+- **Permission tiers re-cut by verb semantics** — the installer previously
+  put every non-diagnostic tool behind an "ask" prompt (55 prompts,
+  including every read). Now: reads and additive captures (file_memory,
+  file_fact, write_journal, link_memories) are allowed; mutations of
+  existing state still ask; erase stays denied. Rules are written for both
+  the direct and plugin namespaces, and upgrades migrate the old
+  conservative tiering in place — while never overriding an entry the user
+  explicitly denied.
+- **WordClassTable pristine seed curated** — the bundled seed grew from
+  21 nouns / 18 verbs (a hand-written fixture) to 466 / 428 curated,
+  unambiguous entries, so fresh estates take the fast-path lookup instead
+  of paying the HMM on nearly every token. One shared artifact serves both
+  ports; guard tests lock ambiguous words out.
+
 ## v1.0.15 — 2026-07-04
 
 Installation integrity release. One daemon, one connection per client, no

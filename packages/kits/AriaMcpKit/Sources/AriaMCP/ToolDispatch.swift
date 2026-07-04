@@ -986,7 +986,7 @@ extension ToolDispatcher {
 /// Static dispatch table for the five-tier AI-client interface tools plus the
 /// Maintenance tier.
 ///
-/// Each of the 19 Tier 1–5 interface tools plus 1 Maintenance tool (20 total)
+/// Each of the 20 Tier 1–5 interface tools plus 1 Maintenance tool (21 total)
 /// has a named `run*` function on `ToolDispatcher`; this type routes from name
 /// to function, isolating the dispatch logic from the tool-name string
 /// constants. Mirrors the Rust `INTERFACE_TOOLS` constant in `interface_tools.rs`.
@@ -994,9 +994,9 @@ enum InterfaceTools {
 
     private static let names: Set<String> = [
         // Tier 1 — Core Memory
-        "moot_file_memory", "moot_memory_search", "moot_update_memory",
-        "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
-        "moot_move_memory",
+        "moot_file_memory", "moot_memory_search", "moot_memory_get",
+        "moot_update_memory", "moot_withdraw_memory", "moot_erase_memory",
+        "moot_confirm_memory", "moot_move_memory",
         // Tier 2 — Connections
         "moot_link_memories", "moot_connection_search", "moot_connection_map",
         // Tier 3 — Knowledge Graph
@@ -1025,6 +1025,7 @@ enum InterfaceTools {
         // Tier 1
         case "moot_file_memory":       return try await dispatcher.runFileMemory(args)
         case "moot_memory_search":     return try await dispatcher.runMemorySearch(args)
+        case "moot_memory_get":        return try await dispatcher.runMemoryGet(args)
         case "moot_update_memory":     return try await dispatcher.runUpdateMemory(args)
         case "moot_withdraw_memory":   return try await dispatcher.runWithdrawMemory(args)
         case "moot_erase_memory":      return try await dispatcher.runEraseMemory(args)
@@ -1302,6 +1303,100 @@ extension ToolDispatcher {
             degradedPart = "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
         }
         lines.append("recall_provenance: \((provenanceParts + [degradedPart]).joined(separator: " "))")
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// `moot_memory_get` — fetch one memory drawer by id, in full.
+    ///
+    /// ADR reference: docs_internal/V1_1_PARKING_LOT.md's "MCP API gap:
+    /// fetch-drawer-by-ID" (build-now per Bob's ruling, not deferred to v1.1).
+    ///
+    /// Reifies the ARIA `recall` verb (docs/concepts/ARIA_LEXICON.md) applied
+    /// to the Drawer noun, constrained by an exact identifier rather than
+    /// free-text/criteria — `moot_memory_search`'s degenerate, precise
+    /// sibling. Named `memory_get` (noun_verb) per the lexicon's own naming
+    /// discipline: "an action tool is verb_noun, a query tool is noun_verb."
+    /// `recall` is caller-driven like the mutation verbs, but it is a QUERY,
+    /// so it follows `moot_memory_search`'s noun_verb convention, not
+    /// `moot_file_memory`/`moot_update_memory`/`moot_withdraw_memory`'s
+    /// verb_noun convention (those reify capture/mutate/withdraw, a
+    /// different verb class).
+    ///
+    /// Routes through the SAME frame-faithful by-id load
+    /// (`Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`) that backs
+    /// `moot_memory_search`'s recall pipeline, with an EMPTY filter chain so
+    /// `BitmapEvaluator`'s default gate applies unchanged: currentlyBelieve
+    /// state, trustworthy trust, sensitivityAtMost(.elevated) — the
+    /// IDENTICAL gate `moot_memory_search` applies by default (no filter
+    /// argument on this tool — the by-id door has no adjective knobs to
+    /// widen it). A drawer that exists but fails that gate (contested/
+    /// superseded/withdrawn/expired/rejected state, derived/proposed/ambient
+    /// trust, or restricted/secret sensitivity) is reported exactly like a
+    /// genuinely absent id: "Memory not found: <id>". This is deliberate —
+    /// the by-id door must not become a way to confirm the EXISTENCE of
+    /// content the estate would otherwise refuse to surface. Tombstoned rows
+    /// are always excluded, independent of the chain.
+    ///
+    /// Hydration is `.full` (verbatim content, matching what was captured) —
+    /// never `.structured`, which strips the content blob this tool exists
+    /// to return.
+    func runMemoryGet(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        let estate = try await kit.estate(for: handle)
+
+        let frame = RecallFrame(filterChain: [], hydrationLevel: .full)
+        let filtered = try await estate.getDrawers(
+            ids: [rowID], matchingFrame: frame, hydrationLevel: .full)
+        guard let drawer = filtered.admissible.first else {
+            // Same message and error code whether the id is genuinely absent,
+            // tombstoned, or exists but failed the gate — see the containment
+            // note above. Mirrors moot_link_memories' "Memory not found" shape.
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Memory not found: \(rowID)"
+            )
+        }
+
+        // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via
+        // the node tree, same pattern as every other read tool in this file.
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
+
+        // Linked tunnel summary: same estate.allTunnels() + tombstone-exclusion
+        // pattern moot_connection_search/moot_connection_map already use,
+        // scoped to tunnels touching this drawer on either end.
+        let allTunnels = try await estate.allTunnels()
+        let linked = allTunnels.filter {
+            ($0.sourceDrawerId == rowID || $0.targetDrawerId == rowID) && $0.tombstonedAt == nil
+        }
+
+        let iso = ISO8601DateFormatter()
+        var lines: [String] = [
+            "memory \(drawer.id)",
+            "room: \(names.room)  wing: \(names.wing)",
+            "filed_at: \(iso.string(from: drawer.filedAt))",
+            "event_time: \(iso.string(from: drawer.eventTime))",
+            "state: \(String(describing: drawer.state))",
+            "trust: \(String(describing: drawer.trust))",
+            "sensitivity: \(String(describing: drawer.adjectiveSensitivity))",
+            "exportability: \(String(describing: drawer.exportability))",
+            "confirmation: \(String(describing: drawer.confirmation))",
+            "lineage: \(drawer.lineageID.uuidString)",
+            "tunnels: \(linked.count)",
+        ]
+        for tunnel in linked.prefix(50) {
+            let outgoing = tunnel.sourceDrawerId == rowID
+            let other = outgoing
+                ? (tunnel.targetDrawerId ?? "\(tunnel.targetWing)/\(tunnel.targetRoom)")
+                : (tunnel.sourceDrawerId ?? "\(tunnel.sourceWing)/\(tunnel.sourceRoom)")
+            lines.append("  \(outgoing ? "→" : "←") \(other)  [\(tunnel.label)]")
+        }
+        // Verbatim content, on its own trailing block — never truncated or
+        // previewed (that is moot_memory_search's job). This is the field the
+        // tool exists to return.
+        lines.append("content:")
+        lines.append(drawer.content)
         return Self.textResult(lines.joined(separator: "\n"))
     }
 

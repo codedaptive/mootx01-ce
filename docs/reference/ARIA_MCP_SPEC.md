@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.10.0
+version: 1.11.0
 status: active
 date: 2026-07-04
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -140,11 +140,11 @@ The external MCP tool surface is an AI-client-oriented interface
 organized in five tiers. This design exposes familiar, task-oriented verbs
 to AI clients rather than the substrate's internal grammar vocabulary.
 
-### Five-tier external tool surface (19 interface tools)
+### Five-tier external tool surface (20 interface tools)
 
 | Tier | Tools | Substrate operation |
 |------|-------|---------------------|
-| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` | GLK capture/recall/mutate/withdraw/expunge/reanchor on drawers |
+| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` | GLK capture/recall (by query or by id)/mutate/withdraw/expunge/reanchor on drawers |
 | 2 — Connections | `moot_link_memories`, `moot_connection_search`, `moot_connection_map` | GLK tunnel capture/recall |
 | 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` | GLK captureKGFact/recallKGFacts/retireKGFact |
 | 4 — Journal | `moot_write_journal`, `moot_read_journal` | GLK addDiaryEntry/readDiaryEntries |
@@ -153,6 +153,35 @@ to AI clients rather than the substrate's internal grammar vocabulary.
 One federation tool (`moot_federated_search`) sits above the interface tier. It performs
 a grant-authorized federated read across all locally-open estates the requester is
 authorized for.
+
+### `moot_memory_get` — fetch a drawer by id
+
+`moot_memory_get` reifies the `recall` verb (§2) applied to the Drawer noun,
+constrained by an exact identifier rather than a query. Per the naming
+discipline in `docs/concepts/ARIA_LEXICON.md` ("a query tool is
+`<noun>_<verb>`"), it is named as a `moot_memory_search` sibling, not as a
+`verb_noun` mutation tool — fetching an existing drawer by id is a read, not
+a capture/mutate/withdraw action.
+
+Input: `id` (drawer UUID, required) plus the standard optional `estateID`
+every direct tool accepts. Output: the drawer's verbatim content (hydration
+`.full`, never truncated or previewed), its room/wing location, `filedAt`
+and `eventTime`, the five adjective-axis fields (state, trust, sensitivity,
+exportability, confirmation), lineage, and a summary of linked tunnels
+(reusing the same tunnel-scan pattern as `moot_connection_search` /
+`moot_connection_map`).
+
+`moot_memory_get` applies the identical default containment gate that
+`moot_memory_search` applies when its filter chain does not constrain
+state/trust/sensitivity — `currentlyBelieve` (active/pending/contested/
+accepted), `trustworthy` (verbatim/observed/imported/canonical), and
+`sensitivityAtMost(.elevated)` (normal/elevated only), with tombstones
+always excluded. A drawer that exists but fails that gate (e.g. withdrawn,
+untrustworthy, or restricted/secret) is reported with the identical
+"Memory not found: `<id>`" error as a genuinely absent id — the by-id
+door cannot be used to probe for the existence of content the estate
+would otherwise refuse to surface. This is the same not-found convention
+`moot_link_memories` already uses for an unresolvable id.
 
 ### Infrastructure field ownership
 
@@ -692,6 +721,23 @@ On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
 ## Changelog
+
+### 1.11.0 -- 2026-07-04
+Added `moot_memory_get` (§11) — fetch-drawer-by-ID, build-now per Bob's
+ruling on the parking-lot gap ("no verb to fetch a full drawer by UUID on
+the MCP surface — recollect covers distilled factoids only"). Reifies the
+`recall` verb, named as a `moot_memory_search` sibling per the lexicon's
+`<noun>_<verb>` query-tool naming discipline. Routes through the existing
+frame-faithful by-id load (`Estate.getDrawers(ids:matchingFrame:
+hydrationLevel:)` / Rust `Estate::get_drawers_matching_frame`) with an
+empty filter chain, so it inherits `moot_memory_search`'s default
+containment gate unchanged — a drawer that exists but fails the gate is
+reported not-found identically to a genuinely absent id, closing off the
+by-id door as a gate-bypass vector. Returns verbatim content plus the full
+adjective-axis metadata and a linked-tunnel summary. Tool surface: 19 -> 20
+interface tools (Tier 1: 7 -> 8). Both ports at parity; teachme guide
+added on both. New tests: `MemoryGetTests.swift` (10 tests, AriaMcpKit);
+`memory_get_*` (7 tests) + 1 teachme test in Rust `dispatch_tests.rs`.
 
 ### 1.10.0 -- 2026-07-04
 ADR-024 §5 (MCP connection ownership, plugin transport, and install-moment

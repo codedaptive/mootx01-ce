@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.15.0
+version: 1.16.0
 status: active
 date: 2026-07-04
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -167,11 +167,11 @@ public enum ToolProjection {
 }
 ```
 
-#### Five-tier AI-client interface (`.interface` provenance, 19 tools)
+#### Five-tier AI-client interface (`.interface` provenance, 20 tools)
 
 | Tier | Tools |
 |------|-------|
-| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` |
+| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` |
 | 2 — Connections | `moot_link_memories`, `moot_connection_search`, `moot_connection_map` |
 | 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` |
 | 4 — Journal | `moot_write_journal`, `moot_read_journal` |
@@ -182,7 +182,9 @@ registered non-default estate and an optional `teachme` (boolean) to request a
 usage guide instead of executing. Infrastructure fields (`latticeAnchor`,
 `embeddingModelID`, `addedBy`, `channel`) are server-owned and never exposed
 to AI clients. Required caller fields: `content` + `location` for
-`moot_file_memory`; `query` for `moot_memory_search`; `subject`, `predicate`,
+`moot_file_memory`; `query` for `moot_memory_search`; `id` for
+`moot_memory_get` (drawer UUID — no `query`, this tool fetches an exact row,
+not a ranked set); `subject`, `predicate`,
 `object` for `moot_file_fact`; `entry` for `moot_write_journal` (note: `entry`,
 not `content` — mirrors the `DiaryEntry.entry` substrate field); optional `query`
 for `moot_fact_search` (substring match across subject, predicate, and object;
@@ -491,7 +493,7 @@ Static per-tool usage guides. Called by `ToolDispatcher.dispatch` when
 ```swift
 enum TeachmeGuides {
     static func guide(for toolName: String) -> String
-    // Per-tool guide for all 19 Tier 1–5 tools and moot_federated_search.
+    // Per-tool guide for all 20 Tier 1–5 tools and moot_federated_search.
     // moot_estate_status returns the nine-tier orientation guide.
     // Generic guide for lens, recipe, migration, and vault tools.
     // Fallback for unknown names: "Unknown tool '…'. Call moot_estate_status…"
@@ -1041,6 +1043,29 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.16.0 -- 2026-07-04
+Added `moot_memory_get` (§2 Tool projection, Tier 1 — Core Memory table)
+— fetch-drawer-by-ID, build-now per Bob's ruling on the
+`docs_internal/V1_1_PARKING_LOT.md` gap. Input: `id` (drawer UUID,
+required) plus the standard `estateID` every direct tool accepts.
+Output: verbatim content (hydration `.full`), room/wing, `filedAt`/
+`eventTime`, the five adjective-axis fields (state, trust, sensitivity,
+exportability, confirmation), lineage, and a linked-tunnel summary
+(same tunnel-scan pattern as `moot_connection_search`/
+`moot_connection_map`). Swift `ToolDispatcher.runMemoryGet` routes
+through `Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`; Rust
+`interface_tools::run_memory_get` routes through the Rust twin
+`Estate::get_drawers_matching_frame` — both with an empty filter chain,
+so `moot_memory_search`'s default containment gate (see the `filter`
+argument section above) applies unchanged. A drawer that exists but
+fails the gate is reported with the same "Memory not found: `<id>`"
+error `moot_link_memories` already uses for an unresolvable id — the
+by-id door cannot confirm existence of content the gate would
+otherwise hide. Tool surface: 62 -> 63 (Tier 1: 7 -> 8; vault-on
+62 -> 63, vault-off 56 -> 57). teachme guide added on both ports. Both
+ports at parity. New tests: `MemoryGetTests.swift` (10 tests); Rust
+`dispatch_tests.rs` `memory_get_*` (7 tests) + 1 teachme test.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
