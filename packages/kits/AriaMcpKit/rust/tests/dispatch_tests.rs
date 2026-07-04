@@ -1,10 +1,12 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 60-tool surface: 19 interface tools (Tier 1–5), 1 federation tool,
-//! 11 recipe tools, 23 lens tools (including moot_lens_cohesion and moot_lens_contradiction),
-//! 5 vault tools, and 1 maintenance tool (moot_reindex). Exercises dispatch routing,
-//! argument validation, and result shapes through the full stack using an in-memory
-//! estate. One success path + one error/validation path per tool group.
+//! Tests the 63-tool surface: 20 interface tools (Tier 1–5, including
+//! moot_memory_get), 1 federation tool, 11 recipe tools, 23 lens tools
+//! (including moot_lens_cohesion and moot_lens_contradiction), 5 vault tools,
+//! and 3 maintenance tools (moot_reindex, moot_drain_status, moot_palace_import).
+//! Exercises dispatch routing, argument validation, and result shapes through
+//! the full stack using an in-memory estate. One success path + one
+//! error/validation path per tool group.
 //!
 //! # Result shape conventions
 //!
@@ -91,19 +93,21 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 61 tools exact
+// 1. tools/list surface assertions — 63 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_62() {
+fn tools_list_count_is_63() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
     // moot_recall_shaped (named RecallShape preset surface) +
     // moot_lens_contradiction (genuine contradiction detector, Part 5) +
     // moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001) +
-    // moot_palace_import (direct palace import, PAR-PB-1):
-    //   19  interface tools (Tier 1–5)
+    // moot_palace_import (direct palace import, PAR-PB-1) +
+    // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling on
+    // docs_internal/V1_1_PARKING_LOT.md):
+    //   20  interface tools (Tier 1–5)
     //    1  federation tool (moot_federated_search)
     //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream,
@@ -113,15 +117,15 @@ fn tools_list_count_is_62() {
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
     //    3  maintenance tools (moot_reindex, moot_drain_status, moot_palace_import)
-    //   62  total
+    //   63  total
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 62, "expected 62 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 63, "expected 63 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_62_names() {
-    // Gate: all 62 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_63_names() {
+    // Gate: all 63 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -130,10 +134,13 @@ fn tools_list_name_set_matches_expected_62_names() {
     // moot_recall_shaped is the named RecallShape preset surface.
     // moot_consolidate, moot_recall_distilled, moot_recollect are the
     // distillation tools added for parity with Swift (R1 fix, 2026-06-20).
+    // moot_memory_get fetches a full drawer by id (fetch-drawer-by-ID gap,
+    // shipped in the 1.0.x train per Bob's build-now ruling).
     let expected: std::collections::HashSet<&str> = [
-        // Tier 1 — Core memory (7)
+        // Tier 1 — Core memory (8)
         "moot_file_memory",
         "moot_memory_search",
+        "moot_memory_get",
         "moot_update_memory",
         "moot_withdraw_memory",
         "moot_erase_memory",
@@ -251,8 +258,8 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
     //
     // Mirrors the Swift `testMembershipGateCoversAllDispatchCases` test.
     let dispatch_cases = [
-        // Tier 1 — Core memory (7)
-        "moot_file_memory", "moot_memory_search", "moot_update_memory",
+        // Tier 1 — Core memory (8)
+        "moot_file_memory", "moot_memory_search", "moot_memory_get", "moot_update_memory",
         "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
         "moot_move_memory",
         // Tier 2 — Connections (3)
@@ -356,6 +363,23 @@ fn teachme_true_returns_guide_without_touching_estate() {
     let text = content_text(&result);
     assert!(
         text.contains("moot_file_memory"),
+        "guide must name the tool; got: {text}"
+    );
+}
+
+#[test]
+fn teachme_true_on_memory_get_returns_its_guide_without_touching_estate() {
+    // moot_memory_get requires an id; teachme:true must short-circuit before
+    // the missing-id validation ever runs (same interception point as every
+    // other interface tool).
+    let registry = EstateRegistry::new_inmemory();
+    let a = args!["teachme" => true];
+    let result = dispatch_tool("moot_memory_get", &a, &registry, &SurfacedRecallLedger::new())
+        .expect("teachme interception must not throw even without id");
+    assert!(is_success(&result), "teachme result must be isError:false");
+    let text = content_text(&result);
+    assert!(
+        text.contains("moot_memory_get"),
         "guide must name the tool; got: {text}"
     );
 }
@@ -901,6 +925,172 @@ fn memory_search_schema_advertises_by_relevance_desc() {
         ordering_desc.contains("byRelevanceDesc"),
         "moot_memory_search ordering description must advertise byRelevanceDesc; got: {ordering_desc}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Tier 1 — moot_memory_get (fetch-drawer-by-ID)
+//
+// Mirrors Swift `MemoryGetTests.swift`'s four axes: found (verbatim content +
+// metadata + linked-tunnel summary), not-found (fake id and gate-failed ids
+// alike), and estateID routing (Item 3 direct-routing restriction).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn memory_get_found_returns_full_content_verbatim() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = file_one_memory(&registry, "verbatim content for memory-get test", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw");
+    assert!(is_success(&result), "memory_get must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains(&id),
+        "response must echo the memory id; got: {text}"
+    );
+    assert!(
+        text.ends_with("verbatim content for memory-get test"),
+        "response must include the exact verbatim content as the final block; got: {text}"
+    );
+}
+
+#[test]
+fn memory_get_includes_metadata_and_linked_tunnel_summary() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let from_id = file_one_memory(&registry, "memory-get link source", "alpha/hub");
+    let to_id = file_one_memory(&registry, "memory-get link target", "beta/spoke");
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => from_id.as_str(), "to_id" => to_id.as_str(), "kind" => "elaborates"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("link_memories must not throw");
+    assert!(is_success(&link), "link_memories must succeed; got: {link:?}");
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => from_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw");
+    assert!(is_success(&result), "memory_get must succeed; got: {result:?}");
+    let text = content_text(&result);
+    for field in ["room:", "filed_at:", "event_time:", "state:", "trust:",
+                  "sensitivity:", "exportability:", "confirmation:", "lineage:", "tunnels:"] {
+        assert!(text.contains(field), "response must include {field}; got: {text}");
+    }
+    assert!(
+        text.contains("tunnels: 1") && text.contains("elaborates"),
+        "response must summarize the one linked tunnel; got: {text}"
+    );
+}
+
+#[test]
+fn memory_get_not_found_returns_standard_structured_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let fake_id = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+    let err = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => fake_id],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("absent id must produce a transport fault, not a fabricated row");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("Memory not found") && err.message.contains(fake_id),
+        "error must be the standard not-found shape; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn memory_get_withdrawn_drawer_is_reported_not_found() {
+    // Containment-gate parity with moot_memory_search: a drawer that fails the
+    // default state gate (withdrawn is outside the currentlyBelieve cluster)
+    // must report the SAME "Memory not found" shape as a genuinely absent id —
+    // the by-id door must not become a gate bypass.
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = file_one_memory(&registry, "withdraw-then-get target", "lab");
+    let withdraw = dispatch_tool(
+        "moot_withdraw_memory",
+        &args!["id" => id.as_str(), "reason" => "obsolete"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("withdraw_memory must not throw");
+    assert!(is_success(&withdraw), "withdraw must succeed; got: {withdraw:?}");
+
+    let err = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("a withdrawn drawer must be reported not-found, not returned");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("Memory not found") && err.message.contains(&id),
+        "withdrawn drawer must produce the standard not-found shape; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn memory_get_omitted_estate_id_hits_default_estate() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = file_one_memory(&registry, "default-estate memory-get content", "lab");
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw");
+    assert!(is_success(&result), "omitted estateID must resolve to the default estate; got: {result:?}");
+}
+
+#[test]
+fn memory_get_explicit_default_estate_id_is_accepted() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = file_one_memory(&registry, "explicit-default-estate memory-get content", "lab");
+    let default_id = registry.default.estate_id.to_string();
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => id.as_str(), "estateID" => default_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw");
+    assert!(is_success(&result), "explicit default estateID must be accepted; got: {result:?}");
+}
+
+#[test]
+fn memory_get_non_default_estate_id_is_refused() {
+    // Item 3 hardening: direct tool calls may only target the default estate.
+    // Mirrors Swift MultiEstateRoutingTests's refusal case.
+    let mut registry = EstateRegistry::new_inmemory_bare();
+    let other_id = registry.register_inmemory("owner-two");
+    let id = file_one_memory(&registry, "non-default-estate memory-get content", "lab");
+
+    let err = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => id.as_str(), "estateID" => other_id.to_string().as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("a registered non-default estateID must be refused for direct routing");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
 }
 
 #[test]
@@ -4292,7 +4482,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 62, "vault-on must produce 62 tools");
+    assert_eq!(arr.len(), 63, "vault-on must produce 63 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -4307,7 +4497,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 56, "vault-off must produce 56 tools (62 − 5 vault − palace import)");
+    assert_eq!(arr.len(), 57, "vault-off must produce 57 tools (63 − 5 vault − palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
