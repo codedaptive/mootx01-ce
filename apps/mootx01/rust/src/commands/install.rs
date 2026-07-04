@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use crate::cli::{InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
-use crate::core::depth::{self, DepthOutcome, InstallDepth};
+use crate::core::depth::{self, DepthOutcome, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::desktop_ext;
 use crate::core::{mcp_ownership, merge, paths, permissions};
 use crate::exit;
@@ -135,8 +135,13 @@ pub fn run(
                 continue;
             }
             // vault_off = !vault_on: thread the vault posture into the plugin
-            // installer so plugin-spawned stdio servers inherit the correct env.
-            match depth::apply(client.id, depth, &home, !vault_on) {
+            // installer so any command/stdio-shaped entry in the package (the
+            // proxy-bridge fallback for a host whose schema cannot express
+            // HTTP) inherits the correct env. HTTP-shaped entries are
+            // untouched — the resident daemon carries the vault posture in
+            // its own service-manager environment (`core::service`),
+            // independent of this call (ADR-024 Wave 3, Defect 2).
+            match depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner) {
                 Ok(DepthOutcome::Server) => {
                     // Claude Desktop's "plugin" is a Desktop extension, not a
                     // file-drop payload. At plugin depth, install it
@@ -782,6 +787,59 @@ mod tests {
         let entry = read_direct_entry(&client, &home).unwrap();
         assert_eq!(entry["command"], "/Users/dev/build/mootx01");
         assert_eq!(entry["env"]["MOOTX01_DATA_DIR"], "/Users/dev/rig-a/.mootx01-data");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // Verification-pass addendum: classify()'s label alone is by-construction
+    // evidence; these round-trip a shape-mismatched entry through a REAL temp
+    // config file and the full dedupe_one/dedupe_direct_entry pass with
+    // plugin-present state, proving the file survives untouched.
+
+    #[test]
+    fn dedupe_round_trip_malformed_entry_survives() {
+        let home = plugin_test_home("malformed");
+        let client = claude_code_client();
+        let config = client.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let malformed = serde_json::json!({"mcpServers": {"mootx01": {}}});
+        std::fs::write(&config, malformed.to_string()).unwrap();
+
+        write_installed_plugins(&home, "mootx01@mootx01");
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        match outcome {
+            merge::JsonOwnershipOutcome::RetainedForeign { .. } => {}
+            other => panic!("expected RetainedForeign for a malformed {{}} entry, got {other:?}"),
+        }
+        let entry = read_direct_entry(&client, &home).unwrap();
+        assert!(entry.as_object().unwrap().is_empty(), "the malformed entry must still be present, untouched");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn dedupe_round_trip_foreign_command_entry_survives() {
+        let home = plugin_test_home("foreign-command");
+        let client = claude_code_client();
+        let config = client.config_path(&home).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let foreign = serde_json::json!({
+            "mcpServers": {
+                "mootx01": {
+                    "command": "/usr/bin/some-other-server",
+                    "args": ["--stdio"],
+                }
+            }
+        });
+        std::fs::write(&config, foreign.to_string()).unwrap();
+
+        write_installed_plugins(&home, "mootx01@mootx01");
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        match outcome {
+            merge::JsonOwnershipOutcome::RetainedForeign { .. } => {}
+            other => panic!("expected RetainedForeign for a foreign command entry, got {other:?}"),
+        }
+        let entry = read_direct_entry(&client, &home).unwrap();
+        assert_eq!(entry["command"], "/usr/bin/some-other-server");
+        assert_eq!(entry["args"][0], "--stdio");
         let _ = std::fs::remove_dir_all(&home);
     }
 
