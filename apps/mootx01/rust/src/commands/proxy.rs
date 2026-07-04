@@ -41,9 +41,27 @@ pub fn run(daemon_url: Option<String>) -> ExitCode {
         None => daemon_client::resolved_port(),
     };
 
-    if !daemon_client::alive(port) {
+    // Wait up to 2 min for the daemon to bind: on a large estate it takes
+    // ~30 s of startup work before listening, and the service manager may
+    // still be relaunching it after an upgrade. A single-shot check meant
+    // Claude Desktop connecting right after a daemon restart always failed.
+    let mut up = false;
+    for attempt in 0..240u32 {
+        if daemon_client::alive(port) {
+            up = true;
+            break;
+        }
+        if attempt == 10 {
+            eprintln!(
+                "mootx01 proxy: daemon not up yet on 127.0.0.1:{port} — waiting \
+                 (large estates take ~30 s to start)"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !up {
         eprintln!(
-            "mootx01 proxy: no resident daemon answering on 127.0.0.1:{port}. \
+            "mootx01 proxy: no resident daemon answering on 127.0.0.1:{port} after 2 min. \
              Start it with `mootx01 serve --http auto` (or check `mootx01 status`)."
         );
         return ExitCode::from(exit::FAILURE);

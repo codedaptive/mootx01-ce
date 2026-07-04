@@ -90,22 +90,32 @@ struct ProxyCommand: AsyncParsableCommand {
     /// POST a minimal body to the daemon endpoint to confirm the socket is bound.
     /// The daemon returns a JSON-RPC parseError (the body is not a valid JSON-RPC
     /// frame), which is sufficient to confirm it is accepting connections.
-    /// Retries 20 × 250 ms (5 s total) before giving up.
+    ///
+    /// Retries 240 × 500 ms (2 min total): on a large estate the daemon takes
+    /// ~30 s of startup work before it binds the port (measured live on a
+    /// 50k-memory estate), and launchd may still be relaunching it after an
+    /// upgrade. The old 5 s window meant Claude Desktop connecting right after
+    /// any daemon restart always failed ("Server disconnected").
     private func waitForDaemon(url: URL) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{}".utf8)
         let probe = URLSession(configuration: .ephemeral)
-        for attempt in 1...20 {
+        for attempt in 1...240 {
             if (try? await probe.data(for: request)) != nil {
                 return
             }
-            if attempt < 20 {
-                try await Task.sleep(nanoseconds: 250_000_000)  // 250 ms between retries
+            if attempt == 10 {
+                // One early stderr note so a human tailing the log sees why
+                // the bridge is quiet; keep waiting.
+                proxyStderrLog("mootx01 proxy: daemon not up yet at \(url.absoluteString) — waiting (large estates take ~30 s to start)")
+            }
+            if attempt < 240 {
+                try await Task.sleep(nanoseconds: 500_000_000)  // 500 ms between retries
             }
         }
-        proxyStderrLog("mootx01 proxy: daemon not responding at \(url.absoluteString) after 5 s — is mootx01 running? (start with: mootx01 serve --http 4242)")
+        proxyStderrLog("mootx01 proxy: daemon not responding at \(url.absoluteString) after 2 min — is mootx01 running? (start with: mootx01 serve --http 4242)")
         throw ExitCode.failure
     }
 

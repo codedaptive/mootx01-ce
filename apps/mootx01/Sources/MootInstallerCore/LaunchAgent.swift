@@ -214,17 +214,35 @@ public enum LaunchAgent {
         let target = "\(domain)/\(label)"
         // Tear down any prior instance so bootstrap doesn't fail "already loaded".
         _ = runLaunchctl(["bootout", target])
-        let boot = runLaunchctl(["bootstrap", domain, plistURL.path])
-        if boot.code != 0 {
-            let legacy = runLaunchctl(["load", "-w", plistURL.path])
-            if legacy.code != 0 {
-                let detail = boot.output.isEmpty ? legacy.output : boot.output
-                return (false, detail.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
+        // bootout is ASYNCHRONOUS — and worse than a failed bootstrap: a
+        // bootout completing late can tear down the freshly bootstrapped
+        // replacement job (observed live: install verified the job loaded,
+        // and moments later launchd had nothing). Wait until launchd actually
+        // reports the job gone before bootstrapping the new one.
+        for _ in 1...20 where runLaunchctl(["print", target]).code == 0 {
+            usleep(250_000)  // 250 ms; up to 5 s for the teardown to finish
         }
-        // RunAtLoad already started it; kickstart makes "running now" explicit.
-        _ = runLaunchctl(["kickstart", "-k", target])
-        return (true, "")
+        // Bootstrap with verify-and-retry: after each attempt, confirm launchd
+        // actually has the job before declaring success.
+        var lastDetail = ""
+        for attempt in 1...5 {
+            let boot = runLaunchctl(["bootstrap", domain, plistURL.path])
+            if boot.code != 0 {
+                let legacy = runLaunchctl(["load", "-w", plistURL.path])
+                if legacy.code != 0 {
+                    lastDetail = (boot.output.isEmpty ? legacy.output : boot.output)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            // Verify: is the job actually registered with launchd now?
+            if runLaunchctl(["print", target]).code == 0 {
+                // RunAtLoad already started it; kickstart makes "running now" explicit.
+                _ = runLaunchctl(["kickstart", "-k", target])
+                return (true, "")
+            }
+            if attempt < 5 { usleep(300_000) }  // 300 ms before retrying
+        }
+        return (false, lastDetail.isEmpty ? "job not registered after 5 bootstrap attempts" : lastDetail)
     }
 
     /// Restart both mootx01 background agents (daemon + moot-mgr console) using
