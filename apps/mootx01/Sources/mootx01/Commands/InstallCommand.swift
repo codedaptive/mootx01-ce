@@ -108,8 +108,13 @@ struct InstallCommand: AsyncParsableCommand {
         let pluginOwnedClients: [String: String] = ["claude-code": "mootx01@mootx01"]
 
         for client in clients {
+            // Adams #5: gate on installed AND enabled — Claude Code tracks
+            // enablement separately (~/.claude/settings.json's
+            // enabledPlugins map), and an installed-but-disabled plugin
+            // does not own the connection. Skipping/removing the direct
+            // entry in that state would leave the client with nothing.
             if let pluginID = pluginOwnedClients[client.id],
-               PluginDetector.isPluginInstalled(pluginID: pluginID, homeDirectory: home) {
+               PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
                 // The plugin is the preferred connection owner (§1): still
                 // place the binary/daemon (done above, unconditionally) but
                 // skip writing a competing direct entry, and clean up any

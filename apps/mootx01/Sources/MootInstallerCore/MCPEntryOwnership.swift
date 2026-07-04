@@ -54,25 +54,85 @@ public enum MCPEntryClassifier {
     /// `{"type":"http","url":...}`). Callers pass only entries already known
     /// to exist under the server name.
     ///
-    /// HTTP entries (no `env` key at all in every shape this installer
-    /// writes) cannot disagree about the database — they reach whatever
-    /// estate the resident daemon holds (ADR-024 §4) — so the absence of an
-    /// `env` map is itself `.oursDefault`. Command/stdio entries (the proxy
-    /// bridge, or a legacy bare `serve`) are `.oursDefault` only when their
-    /// `env` carries neither override key.
+    /// Adams #2 correction: a positive SHAPE check runs first. Classifying
+    /// `.oursDefault` from the mere absence of an env override — without
+    /// ever checking that the entry actually looks like ours — made a
+    /// malformed entry (`{}`) or a user's own unrelated server that happens
+    /// to sit under the key `"mootx01"` (with no env block) auto-removable
+    /// on a routine `mootx01 install` once a plugin is present. An entry
+    /// must resolve to the `mootx01` binary (command basename + `serve`/
+    /// `proxy` args) OR the loopback daemon endpoint (`isLoopbackDaemonEntry`)
+    /// before its env is even considered; anything else is `.foreign` —
+    /// reported by name, never removed — regardless of its env block.
+    ///
+    /// Once the shape check passes: HTTP entries (no `env` key at all in
+    /// every shape this installer writes) cannot disagree about the
+    /// database — they reach whatever estate the resident daemon holds
+    /// (ADR-024 §4) — so the absence of an `env` map is itself
+    /// `.oursDefault`. Command/stdio entries (the proxy bridge, or a legacy
+    /// bare `serve`) are `.oursDefault` only when their `env` carries
+    /// neither override key.
     public static func classify(entry: [String: Any]) -> MCPEntryOwnership {
+        guard looksLikeOurs(entry) else {
+            return .foreign(reason: "entry shape does not resolve to the mootx01 binary or the loopback daemon endpoint")
+        }
         guard let env = entry["env"] as? [String: Any] else { return .oursDefault }
         return classify(env: env)
     }
 
     /// Classify from an already-extracted env map (used by the TOML/YAML
     /// merge paths, whose entries are not decoded through JSONSerialization).
+    /// Callers of this overload have already established the entry's shape
+    /// out of band (there is no raw entry object to shape-check here) — see
+    /// `classify(entry:)` for the shape-checked JSON entry point.
     public static func classify(env: [String: Any]) -> MCPEntryOwnership {
         let overriding = overrideEnvKeys.filter { env[$0] != nil }
         guard overriding.isEmpty else {
             return .foreign(reason: "env override: \(overriding.joined(separator: ", "))")
         }
         return .oursDefault
+    }
+
+    /// Positive shape check (Adams #2): does `entry` actually look like an
+    /// entry this installer itself would write?
+    ///
+    /// - Command/stdio shape: `command`'s last path component is exactly
+    ///   `"mootx01"` (matches either the bare binary name or the absolute
+    ///   placed-binary path), AND `args` contains `"serve"` or `"proxy"` —
+    ///   the only two stdio shapes the installer ever writes.
+    /// - HTTP shape: `url` matches the loopback daemon endpoint exactly
+    ///   (`isLoopbackDaemonURL`) — the ONLY port this installer's default
+    ///   wiring ever writes. A loopback URL on a non-default port does NOT
+    ///   match: it may point at a different, deliberately-scoped daemon
+    ///   instance (the HTTP analogue of an env override), so it fails the
+    ///   shape check and is reported rather than assumed identical.
+    ///
+    /// A malformed entry (e.g. `{}`), an entry with neither key, or a
+    /// foreign command/URL under our key name all fail this check.
+    private static func looksLikeOurs(_ entry: [String: Any]) -> Bool {
+        if let url = entry["url"] as? String {
+            return isLoopbackDaemonURL(url)
+        }
+        if let command = entry["command"] as? String,
+           URL(fileURLWithPath: command).lastPathComponent == "mootx01",
+           let args = entry["args"] as? [String],
+           args.contains("serve") || args.contains("proxy") {
+            return true
+        }
+        return false
+    }
+
+    /// True only for the exact loopback daemon endpoint this installer
+    /// writes: `http://127.0.0.1:<defaultResidentPort>` or
+    /// `http://localhost:<defaultResidentPort>`, with nothing else in the
+    /// string (no path, query, userinfo, or trailing characters after the
+    /// port digits).
+    private static func isLoopbackDaemonURL(_ url: String) -> Bool {
+        for host in ["127.0.0.1", "localhost"] {
+            let prefix = "http://\(host):\(MootPaths.defaultResidentPort)"
+            if url == prefix { return true }
+        }
+        return false
     }
 }
 
@@ -93,6 +153,47 @@ public enum PluginDetector {
     ///   injected temp home (see InstallerTests' pattern).
     public static func isPluginInstalled(pluginID: String, homeDirectory: URL) -> Bool {
         installedEntry(pluginID: pluginID, homeDirectory: homeDirectory) != nil
+    }
+
+    /// Returns `true` when `pluginID` is enabled in
+    /// `~/.claude/settings.json`'s `enabledPlugins` map (Adams #5
+    /// correction).
+    ///
+    /// Claude Code tracks installation and enablement SEPARATELY:
+    /// `installed_plugins.json` records what is present; `settings.json`
+    /// carries `"enabledPlugins": {"<id>": true/false, ...}` recording what
+    /// is actually active. An installed-but-disabled plugin does NOT own
+    /// the MCP connection — treating "installed" alone as "owns the
+    /// connection" would make `mootx01 install` silently strip the
+    /// client's only working direct entry out from under it, leaving no
+    /// connection at all.
+    ///
+    /// Fails CLOSED toward "not enabled": an absent file, absent
+    /// `enabledPlugins` key, absent entry for `pluginID`, or any decode
+    /// failure all return `false` — the safer direction, since the caller
+    /// uses this to decide whether to skip/remove the direct entry, and
+    /// keeping a redundant direct entry is far less harmful than removing
+    /// the client's only connection.
+    ///
+    /// - Parameter homeDirectory: user's home directory. Inject in tests —
+    ///   SAFETY: never point this at the real `~/.claude` in a test.
+    public static func isPluginEnabled(pluginID: String, homeDirectory: URL) -> Bool {
+        let path = homeDirectory.appendingPathComponent(".claude/settings.json", isDirectory: false)
+        guard let data = try? Data(contentsOf: path),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let enabled = root["enabledPlugins"] as? [String: Any]
+        else { return false }
+        return (enabled[pluginID] as? Bool) == true
+    }
+
+    /// True when the plugin both HAS an installed entry and IS enabled —
+    /// the combined condition that actually means "this plugin owns the
+    /// MCP connection right now" (ADR-024 §1/§3, Adams #5 correction).
+    /// Callers deciding whether to skip/remove a direct entry must use
+    /// this, not `isPluginInstalled` alone.
+    public static func ownsConnection(pluginID: String, homeDirectory: URL) -> Bool {
+        isPluginInstalled(pluginID: pluginID, homeDirectory: homeDirectory)
+            && isPluginEnabled(pluginID: pluginID, homeDirectory: homeDirectory)
     }
 
     /// Returns the installed plugin manifest version (e.g. `"1.0.15"`) from

@@ -451,8 +451,7 @@ the `mootx01@mootx01` entry's `version` field and compares it against the
 running binary's own version. Checking at runtime (rather than only at
 install time) catches skew regardless of install order.
 
-**Field text:** `plugin <pluginVersion> expects binary ≥ <pluginVersion>;
-binary is <binaryVersion> — run `mootx01 upgrade``.
+**Field text:** ``plugin <pluginVersion> expects binary ≥ <pluginVersion>; binary is <binaryVersion> — run `mootx01 upgrade` ``.
 
 **Threading (mirrors the build-serial pattern exactly):**
 - Swift: `ToolDispatcher.versionSkewAdvisory: String?`, computed once by

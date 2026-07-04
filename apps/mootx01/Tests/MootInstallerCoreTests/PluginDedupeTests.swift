@@ -1,14 +1,17 @@
 // PluginDedupeTests.swift
 //
 // ADR-024 §3/§4: MCP connection ownership and install-moment dedupe.
-// Covers PluginDetector.isPluginInstalled, MCPEntryClassifier.classify, and
-// Installer.dedupeDirectEntry/uninstall's ownership-aware removal — the
-// four-state matrix (plugin present/absent × prior direct entry present/
-// absent) plus the "non-default entry survives untouched" guarantee.
+// Covers PluginDetector.isPluginInstalled/isPluginEnabled/ownsConnection,
+// MCPEntryClassifier.classify (including its positive shape check, Adams
+// #2), and Installer.dedupeDirectEntry/uninstall's ownership-aware removal —
+// the four-state matrix (plugin present/absent × prior direct entry
+// present/absent) plus the "non-default entry survives untouched" guarantee
+// and the installed-but-disabled-plugin guarantee (Adams #5).
 //
 // SAFETY: every test uses an injected sandbox home directory
 // (makeSandboxHome/cleanupSandbox, same pattern as InstallerTests). Never
-// point PluginDetector or Installer at the real ~/.claude or ~/.claude.json.
+// point PluginDetector or Installer at the real ~/.claude, ~/.claude.json,
+// or ~/.claude/settings.json.
 
 import Testing
 import Foundation
@@ -53,6 +56,125 @@ struct PluginDedupeTests {
         defer { cleanupSandbox(home) }
         try writeInstalledPlugins(home: home, plugins: [pluginID])
         #expect(PluginDetector.isPluginInstalled(pluginID: pluginID, homeDirectory: home))
+    }
+
+    // MARK: - isPluginEnabled / ownsConnection (Adams #5)
+
+    @Test("isPluginEnabled is false when settings.json is absent")
+    func enabledFalseWhenSettingsAbsent() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        #expect(!PluginDetector.isPluginEnabled(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("isPluginEnabled is false when enabledPlugins is absent from settings.json")
+    func enabledFalseWhenKeyAbsent() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeSettings(home: home, json: #"{"editorMode":"vim"}"#)
+        #expect(!PluginDetector.isPluginEnabled(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("isPluginEnabled is false when the plugin's entry is explicitly false")
+    func enabledFalseWhenExplicitlyDisabled() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":false}}"#)
+        #expect(!PluginDetector.isPluginEnabled(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("isPluginEnabled is false when settings.json is malformed")
+    func enabledFalseWhenMalformed() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeSettings(home: home, json: "not json at all {{{")
+        #expect(!PluginDetector.isPluginEnabled(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("isPluginEnabled is true when the plugin's entry is explicitly true")
+    func enabledTrueWhenEnabled() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":true,"startup-advisor@awesome-skills":true}}"#)
+        #expect(PluginDetector.isPluginEnabled(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("ownsConnection is false when installed but disabled")
+    func ownsConnectionFalseWhenDisabled() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":false}}"#)
+        #expect(PluginDetector.isPluginInstalled(pluginID: pluginID, homeDirectory: home))
+        #expect(!PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("ownsConnection is false when installed but settings.json is absent (fail closed)")
+    func ownsConnectionFalseWhenSettingsAbsent() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        #expect(!PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("ownsConnection is true when installed and enabled")
+    func ownsConnectionTrueWhenInstalledAndEnabled() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":true}}"#)
+        #expect(PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home))
+    }
+
+    @Test("ownsConnection is false when enabled but never installed")
+    func ownsConnectionFalseWhenNotInstalled() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":true}}"#)
+        #expect(!PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home))
+    }
+
+    /// Mirrors the exact decision InstallCommand.run() makes (Adams #5):
+    /// "disabled falls back to direct wiring; enabled skips as shipped."
+    /// Exercised at the Installer/PluginDetector level since InstallCommand
+    /// itself lives in the `mootx01` executable target, not a library.
+    @Test("disabled plugin: install falls back to normal direct wiring")
+    func disabledPluginFallsBackToDirectWiring() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":false}}"#)
+
+        // The exact conditional InstallCommand.run() uses.
+        if PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
+            Issue.record("plugin must not be considered connection-owning while disabled")
+        } else {
+            try Installer.install(
+                client: client, binaryPath: "/usr/local/bin/mootx01",
+                daemonURL: MootPaths.residentEndpointURL,
+                homeDirectory: home, workingDirectory: home, local: false
+            )
+        }
+        #expect(try directEntry(client: client, home: home) != nil,
+                "disabled plugin must not block direct wiring — the client would otherwise have no connection")
+    }
+
+    @Test("enabled plugin: install skips direct wiring as shipped")
+    func enabledPluginSkipsDirectWiring() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":true}}"#)
+
+        if PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
+            // Skip — matches InstallCommand.run()'s `continue` branch.
+        } else {
+            Issue.record("plugin must be considered connection-owning while installed and enabled")
+        }
+        #expect(try directEntry(client: client, home: home) == nil,
+                "enabled plugin must skip direct wiring — no competing entry written")
     }
 
     // MARK: - VersionSkewAdvisory (ADR-024 §5)
@@ -106,7 +228,7 @@ struct PluginDedupeTests {
     @Test("an entry with MOOTX01_DATA_DIR override classifies as foreign")
     func classifyDataDirOverrideIsForeign() {
         let entry: [String: Any] = [
-            "command": "/usr/local/bin/mootx01", "args": [],
+            "command": "/usr/local/bin/mootx01", "args": ["proxy"],
             "env": ["MOOTX01_DATA_DIR": "/Users/dev/rig-a"],
         ]
         guard case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) else {
@@ -119,7 +241,7 @@ struct PluginDedupeTests {
     @Test("an entry with ARIA_MCP_SQLITE_PATH override classifies as foreign")
     func classifySqlitePathOverrideIsForeign() {
         let entry: [String: Any] = [
-            "command": "/usr/local/bin/mootx01", "args": [],
+            "command": "/usr/local/bin/mootx01", "args": ["proxy"],
             "env": ["ARIA_MCP_SQLITE_PATH": "/Users/dev/estate.sqlite"],
         ]
         guard case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) else {
@@ -127,6 +249,75 @@ struct PluginDedupeTests {
             return
         }
         #expect(reason.contains("ARIA_MCP_SQLITE_PATH"))
+    }
+
+    // MARK: - Positive shape check (Adams #2)
+
+    @Test("a malformed empty entry never classifies as oursDefault")
+    func classifyMalformedEmptyEntryIsForeign() {
+        let entry: [String: Any] = [:]
+        guard case .foreign = MCPEntryClassifier.classify(entry: entry) else {
+            Issue.record("expected .foreign for a malformed {} entry — must never be auto-removed")
+            return
+        }
+    }
+
+    @Test("a foreign command under our key name never classifies as oursDefault")
+    func classifyForeignCommandUnderOurKeyIsForeign() {
+        // Structurally valid, no env override at all — but the command does
+        // not resolve to mootx01. Before the shape check this classified
+        // .oursDefault purely from env absence.
+        let entry: [String: Any] = ["command": "/usr/bin/some-other-server", "args": ["--stdio"]]
+        guard case .foreign = MCPEntryClassifier.classify(entry: entry) else {
+            Issue.record("expected .foreign for a foreign command entry under our key")
+            return
+        }
+    }
+
+    @Test("a mootx01 command entry without serve/proxy args never classifies as oursDefault")
+    func classifyMootx01CommandWithoutRecognizedArgsIsForeign() {
+        // Basename matches, but args don't match either recognized shape —
+        // shouldn't happen for our own writes, so treat conservatively.
+        let entry: [String: Any] = ["command": "/usr/local/bin/mootx01", "args": ["--version"]]
+        guard case .foreign = MCPEntryClassifier.classify(entry: entry) else {
+            Issue.record("expected .foreign for an unrecognized args shape")
+            return
+        }
+    }
+
+    @Test("a loopback URL on a non-default port never classifies as oursDefault")
+    func classifyLoopbackURLNonstandardPortIsForeign() {
+        // Structurally a loopback HTTP entry, but not on the exact port this
+        // installer writes — may be a different, deliberately-scoped daemon
+        // instance. Before the shape check this classified .oursDefault
+        // purely from env absence (HTTP entries carry no env at all).
+        let entry: [String: Any] = ["type": "http", "url": "http://127.0.0.1:9999"]
+        guard case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) else {
+            Issue.record("expected .foreign for a nonstandard-port loopback URL")
+            return
+        }
+        #expect(!reason.isEmpty)
+    }
+
+    @Test("a non-loopback URL never classifies as oursDefault")
+    func classifyNonLoopbackURLIsForeign() {
+        let entry: [String: Any] = ["type": "http", "url": "http://example.com:4242"]
+        guard case .foreign = MCPEntryClassifier.classify(entry: entry) else {
+            Issue.record("expected .foreign for a non-loopback host")
+            return
+        }
+    }
+
+    @Test("the localhost loopback shape also classifies as oursDefault")
+    func classifyLocalhostLoopbackIsOursDefault() {
+        let entry: [String: Any] = ["url": "http://localhost:4242"]
+        #expect(MCPEntryClassifier.classify(entry: entry) == .oursDefault)
+    }
+
+    @Test("a legacy bare serve command entry still classifies as oursDefault")
+    func classifyLegacyServeCommandIsOursDefault() {
+        let entry: [String: Any] = ["command": "/usr/local/bin/mootx01", "args": ["serve"], "env": [String: Any]()]
+        #expect(MCPEntryClassifier.classify(entry: entry) == .oursDefault)
     }
 
     // MARK: - Four-state matrix: plugin present/absent × prior direct entry present/absent
@@ -326,6 +517,16 @@ struct PluginDedupeTests {
         }
         let root: [String: Any] = ["version": 2, "plugins": pluginsObj]
         try JSONSerialization.data(withJSONObject: root).write(to: path)
+    }
+
+    /// Writes raw `json` text to `~/.claude/settings.json` in the sandbox —
+    /// used to control `enabledPlugins` state (Adams #5). Accepts arbitrary
+    /// (including deliberately malformed) text so tests can exercise the
+    /// fail-closed decode path.
+    private func writeSettings(home: URL, json: String) throws {
+        let path = home.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try json.write(to: path, atomically: true, encoding: .utf8)
     }
 
     private func directEntry(client: MCPClient, home: URL) throws -> [String: Any]? {
