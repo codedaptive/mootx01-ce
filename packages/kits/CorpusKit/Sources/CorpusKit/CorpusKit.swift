@@ -27,6 +27,7 @@ import IntellectusLib
 import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
+import Synchronization
 import QueueKit
 import SubstrateLib
 import SubstrateML
@@ -1755,6 +1756,13 @@ public actor Corpus {
         // re-embedded back into recall by a (possibly auto-triggered) reindex.
         let chunks = try await activeChunks()
 
+        // Phase logging throughout: on a large corpus this call legitimately
+        // runs tens of minutes (full basis retrain + full re-embed); without
+        // log lines that is indistinguishable from a hang (the v1.0.13 vault
+        // import triage required sampling the process to prove it was alive).
+        corpusLog.info(
+            "reindex: start — \(chunks.count, privacy: .public) active chunks, \(self.slots.count, privacy: .public) provider slots")
+
         // Phase 1 — train every trainable slot CONCURRENTLY. The five-signal
         // default carries FOUR trainable providers (RI / PPMI / LSA / NMF) whose
         // trainings are independent computations over the same chunk snapshot.
@@ -1777,6 +1785,8 @@ public actor Corpus {
             }
         }
         if !trainInputs.isEmpty {
+            corpusLog.info(
+                "reindex: training \(trainInputs.count, privacy: .public) trainable slots concurrently over \(texts.count, privacy: .public) texts")
             let trained: [(Int, any EmbeddingProvider)] =
                 try await withThrowingTaskGroup(of: (Int, any EmbeddingProvider).self) { group in
                     for input in trainInputs {
@@ -1791,6 +1801,8 @@ public actor Corpus {
                                     "reconstructed provider is not trainable — basis seam invariant violated")
                             }
                             trainable.trainOnCorpus(texts: texts)
+                            corpusLog.info(
+                                "reindex: trained \(provider.modelID, privacy: .public)")
                             return (input.index, provider)
                         }
                     }
@@ -1810,6 +1822,7 @@ public actor Corpus {
                     trainedChunkCount: chunks.count
                 ))
             }
+            corpusLog.info("reindex: training complete — bases persisted")
         }
 
         // Phase 2 — re-embed every chunk under each slot's (now possibly
@@ -1819,6 +1832,8 @@ public actor Corpus {
         // written. Serial per slot: each re-embed already fans its embed compute
         // across all cores and funnels one bulk single-writer transaction.
         for index in slots.indices {
+            corpusLog.info(
+                "reindex: re-embedding \(chunks.count, privacy: .public) chunks under \(self.slots[index].provider.modelID, privacy: .public) (slot \(index + 1, privacy: .public)/\(self.slots.count, privacy: .public))")
             try await reembedChunks(slotIndex: index, chunks, now: now)
         }
 
@@ -1826,6 +1841,8 @@ public actor Corpus {
         // accumulators were kept current by the ingest fold path; persisting here
         // re-anchors the growth trigger to the just-reindexed state.
         try await persistMaintainedCounts(now: now)
+        corpusLog.info(
+            "reindex: complete — \(chunks.count, privacy: .public) chunks re-embedded across \(self.slots.count, privacy: .public) slots")
     }
 
     /// Train a FRESH provider on the given chunks' texts and persist the
@@ -1912,8 +1929,26 @@ public actor Corpus {
         // per-batch payloads reproduces chunk order EXACTLY — the stored rows are
         // byte-identical to the serial path (determinism / cross-port conformance
         // preserved); only the wall-clock changes.
+        //
+        // Progress counter: on a large corpus this phase runs many minutes; a
+        // line every ~5k chunks keeps the daemon log distinguishable from a
+        // hang. Lock-guarded (batches complete concurrently); logging order may
+        // interleave but counts are exact.
+        let progressStride = 5_000
+        let totalChunks = chunks.count
+        let embedded = Mutex(0)
         let perBatch: [[VectorPayloadInput]] =
             try await boundedConcurrentMap(batches, cap: embedConcurrencyCap) { batch in
+                defer {
+                    let done = embedded.withLock { count -> Int in
+                        count += batch.count
+                        return count
+                    }
+                    if done / progressStride > (done - batch.count) / progressStride {
+                        corpusLog.info(
+                            "reindex: reembed \(done, privacy: .public)/\(totalChunks, privacy: .public) (\(modelID, privacy: .public))")
+                    }
+                }
                 var rows: [VectorPayloadInput] = []
                 rows.reserveCapacity(batch.count * 2)
                 for chunk in batch {

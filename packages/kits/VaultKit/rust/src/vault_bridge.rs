@@ -475,12 +475,25 @@ impl<'a> VaultBridge<'a> {
             .map_err(|e| VaultKitError::VerbError(format!("collect_reindex_jobs failed: {e:?}")))?
         {
             report.enqueued_for_encode = jobs.len();
-            corpus
-                .enqueue_ingest_batch(&jobs)
-                .map_err(|e| VaultKitError::VerbError(format!("enqueue_ingest_batch failed: {e:?}")))?;
-            self.coordinator
-                .rollup_after_reindex(handle, now / 1000)
-                .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;
+            if jobs.is_empty() {
+                // Nothing was missing: no new chunks enter the corpus, so the
+                // Merkle tree and every embedding are exactly as current as
+                // before this import — skip the tail entirely (an unchanged
+                // reimport must be free). Swift twin: the total == 0 guard in
+                // GeniusLocusKit.reindexMissing.
+                eprintln!("[vault-import] nothing to index — reindex tail skipped");
+            } else {
+                eprintln!(
+                    "[vault-import] {} drawers enqueued on the encode stream (embedded via the live basis at drain)",
+                    jobs.len()
+                );
+                corpus
+                    .enqueue_ingest_batch(&jobs)
+                    .map_err(|e| VaultKitError::VerbError(format!("enqueue_ingest_batch failed: {e:?}")))?;
+                self.coordinator
+                    .rollup_after_reindex(handle, now / 1000)
+                    .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;
+            }
         }
 
         let entry = format!(

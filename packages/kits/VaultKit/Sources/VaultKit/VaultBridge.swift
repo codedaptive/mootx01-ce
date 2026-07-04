@@ -477,6 +477,13 @@ public struct VaultBridge: Sendable {
         // `reindexMissing` (idempotent, capped at reindexMaxJobs = 10,000 per call).
         // The per-item path uses `kit.capture(mode:)` which enqueues each drawer
         // individually, so the sweep is a no-op (returns 0) for those runs.
+        //
+        // The tail is delta-aware (see reindexMissing): a no-op sweep skips the
+        // full-corpus reindex entirely, a small delta rides the encode stream
+        // against the live basis, and only a large delta pays the O(corpus)
+        // train+re-embed tail. Log the sweep start so a long tail on a big
+        // estate is always attributable in the daemon log.
+        Self.log.info("post-import encode sweep: scanning for unindexed drawers (delta-aware reindex tail)")
         report.enqueuedForEncode = try await kit.reindexMissing(handle: handle, now: now)
 
         try await writeImportReceipt(report, source: source, handle: handle, now: now)
