@@ -5,6 +5,36 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.15 — 2026-07-04
+
+Installation integrity release. One daemon, one connection per client, no
+accidental duplicates — however you install, in whatever order (ADR-024).
+
+- **Plugin now connects over HTTP** — the Claude Code plugin's MCP manifest
+  wires the resident daemon (`http://127.0.0.1:4242`) instead of spawning a
+  private stdio `mootx01 serve` per session. Sessions share the one daemon
+  (and its telemetry and governor); no second process ever holds the estate.
+  All plugin flavors follow suit; hosts whose config schema cannot express
+  HTTP use the `mootx01 proxy` bridge — no shipped manifest contains a bare
+  `serve` entry, enforced by a packager test.
+- **Install-moment dedupe** — the CLI installer now detects an installed and
+  enabled MOOTx01 plugin and skips (and cleans up) its own direct MCP entry,
+  so plugin + binary installs in any order converge to exactly one
+  connection. Entries it does not own — custom data dirs, dev rigs, foreign
+  servers squatting on the `mootx01` key, malformed shapes — are named in
+  the output and never touched. A disabled plugin keeps the direct wiring
+  (never leaves a client with no connection).
+- **Existing installs self-heal** — `mootx01 install`/`upgrade` refresh the
+  plugin package in place and update Claude Code's installed plugin copy
+  (`claude plugin update`), so machines wired stdio by earlier versions
+  converge to HTTP on their next install or upgrade plus a client restart.
+- **Version-skew advisory** — `moot_estate_ping`/`moot_estate_status` report
+  when the installed plugin and binary versions disagree, whichever was
+  updated first.
+- **Vault posture on HTTP entries** — vault-off installs carry
+  `MOOTX01_VAULT=0` on the daemon itself; client-side env injection now
+  applies only to command-shaped (proxy) entries where it has effect.
+
 ## v1.0.14 — 2026-07-04
 
 Import cost release. Vault imports now pay for what they import, not for the
