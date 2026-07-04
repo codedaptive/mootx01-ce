@@ -9,6 +9,7 @@
 //
 // Use --check to query the latest release without downloading.
 
+import AriaMCP
 import ArgumentParser
 import Foundation
 import MootInstallerCore
@@ -99,6 +100,16 @@ struct UpgradeCommand: AsyncParsableCommand {
         // `mootx01 install` does.
         rematerializePluginDepth(home: home, binaryPath: binaryPath)
 
+        // Bob's re-tier ruling (2026-07-04): converge an EXISTING Claude
+        // Code integration's tool-permission tiering onto the current
+        // default the same way rematerializePluginDepth converges the
+        // plugin package above — never CREATES `~/.claude/settings.json`
+        // or a mootx01 integration for a user who never selected Claude
+        // Code as an install target. Gated on hasAnyMootEntries so a user
+        // who never ran `mootx01 install` with Claude Code selected sees no
+        // side effect at all from `mootx01 upgrade`.
+        migratePermissionTiers(home: home)
+
         restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
     }
@@ -128,6 +139,33 @@ struct UpgradeCommand: AsyncParsableCommand {
             } catch {
                 print("  ✗ \(host.displayName): could not rematerialize plugin package: \(error)")
             }
+        }
+    }
+
+    /// See the call site's doc comment. Only touches
+    /// `~/.claude/settings.json` when it already carries at least one of
+    /// our permission entries (`PermissionsWriter.hasAnyMootEntries`) — an
+    /// upgrade never creates a Claude Code integration that was never
+    /// installed. When gated in, runs the same two-pass composition
+    /// `mootx01 install` runs: `migrateTiers` re-tiers anything already
+    /// present but stale, then `mergeTiered` adds anything still missing
+    /// (e.g. a tool added to the surface since the last install/upgrade,
+    /// such as moot_memory_get).
+    private func migratePermissionTiers(home: URL) {
+        let settingsURL = MootPaths.globalClaudeSettingsURL(homeDirectory: home)
+        guard PermissionsWriter.hasAnyMootEntries(at: settingsURL) else { return }
+        let toolNames = ToolProjection.tools().map(\.name)
+        do {
+            let moved = try PermissionsWriter.migrateTiers(at: settingsURL, toolNames: toolNames)
+            if moved > 0 {
+                print("  ✓ Re-tiered \(moved) existing ARIA tool permission(s) to the current default")
+            }
+            let added = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+            if added.allow + added.ask + added.deny > 0 {
+                print("  ✓ Added \(added.allow + added.ask + added.deny) new ARIA tool permission(s)")
+            }
+        } catch {
+            print("  ✗ Could not migrate Claude Code tool permissions: \(error)")
         }
     }
 

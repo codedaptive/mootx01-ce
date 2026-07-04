@@ -15,8 +15,9 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::core::clients::join_rel;
 use crate::core::depth::{self, InstallDepth, ProcessClaudeCliRunner};
-use crate::core::release;
+use crate::core::{permissions, release};
 use crate::exit;
 use crate::CURRENT_VERSION;
 
@@ -103,6 +104,16 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
             // this is a filesystem/cache convergence step, not a service
             // restart.
             rematerialize_plugin_depth(home);
+
+            // Bob's re-tier ruling (2026-07-04): converge an EXISTING
+            // Claude Code integration's tool-permission tiering onto the
+            // current default the same way rematerialize_plugin_depth
+            // converges the plugin package above — never CREATES
+            // ~/.claude/settings.json or a mootx01 integration for a user
+            // who never selected Claude Code as an install target (gated
+            // on has_any_moot_entries).
+            migrate_permission_tiers(home);
+
             if !no_restart {
                 restart_services();
             }
@@ -141,6 +152,35 @@ fn rematerialize_plugin_depth(home: &std::path::Path) {
                 host.display_name
             ),
         }
+    }
+}
+
+/// See the call site's doc comment. Only touches `~/.claude/settings.json`
+/// when it already carries at least one of our permission entries
+/// (`permissions::has_any_moot_entries`) — an upgrade never creates a
+/// Claude Code integration that was never installed. When gated in, runs
+/// the same two-pass composition `mootx01 install` runs: `migrate_tiers`
+/// re-tiers anything already present but stale, then `grant_tiered` adds
+/// anything still missing (e.g. a tool added to the surface since the last
+/// install/upgrade, such as moot_memory_get).
+fn migrate_permission_tiers(home: &std::path::Path) {
+    let settings = join_rel(home, ".claude/settings.json");
+    if !permissions::has_any_moot_entries(&settings) {
+        return;
+    }
+    match permissions::migrate_tiers(&settings) {
+        Ok(moved) if moved > 0 => {
+            println!("  ✓ Re-tiered {moved} existing ARIA tool permission(s) to the current default")
+        }
+        Ok(_) => {}
+        Err(e) => println!("  ✗ could not migrate Claude Code tool permissions: {e}"),
+    }
+    match permissions::grant_tiered(&settings) {
+        Ok((a, k, d)) if a + k + d > 0 => {
+            println!("  ✓ Added {} new ARIA tool permission(s)", a + k + d)
+        }
+        Ok(_) => {}
+        Err(e) => println!("  ✗ could not add new Claude Code tool permissions: {e}"),
     }
 }
 

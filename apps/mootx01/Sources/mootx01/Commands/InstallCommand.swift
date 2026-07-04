@@ -156,11 +156,23 @@ struct InstallCommand: AsyncParsableCommand {
 
         // Write tool permissions into Claude Code settings.json.
         //
-        //   default              → TIERED: diagnostics allow, reads/writes ask,
-        //                          destructive purges deny. Without this every
-        //                          tool is unapproved and nothing works out of
-        //                          the box; with it nothing destructive is
-        //                          silently auto-approved.
+        //   default              → TIERED by verb semantics (Bob's re-tier
+        //                          ruling, 2026-07-04, PermissionsWriter.classify):
+        //                          reads and additive-unconfirmed writes allow,
+        //                          mutations of existing state ask, destructive
+        //                          purges deny. The PRIOR default put every
+        //                          non-diagnostic tool in ask — 55 ask rules on
+        //                          a real machine, including every pure read —
+        //                          which is what made moot unusable from
+        //                          permission prompts. migrateTiers converges
+        //                          an existing install onto the new default
+        //                          before mergeTiered adds anything still
+        //                          missing; both write BOTH the direct
+        //                          (mcp__mootx01__) and plugin
+        //                          (mcp__plugin_mootx01_mootx01__) namespaces
+        //                          — a rule under only one matches zero calls
+        //                          made through the other Claude Code
+        //                          connection.
         //   --grant-permissions  → every tool into allow (explicit opt-in to
         //                          full auto-approval of the high-impact surface).
         //   --no-permissions     → write nothing.
@@ -178,9 +190,20 @@ struct InstallCommand: AsyncParsableCommand {
                     try PermissionsWriter.merge(into: settingsURL, toolNames: toolNames)
                     print("  ✓ Granted \(toolNames.count) ARIA tool permissions (allow) in \(settingsURL.path)")
                 } else {
+                    // Re-tier any entry from a PRIOR install that predates
+                    // the current classification (Bob's re-tier ruling,
+                    // 2026-07-04) before adding whatever is still missing —
+                    // otherwise a repeat `mootx01 install` run would leave
+                    // an existing install's stale tiering (e.g. every read
+                    // fossilized in `ask` under the old default) in place
+                    // forever, since mergeTiered only adds absent entries.
+                    let moved = try PermissionsWriter.migrateTiers(at: settingsURL, toolNames: toolNames)
+                    if moved > 0 {
+                        print("  ✓ Re-tiered \(moved) existing ARIA tool permission(s) to the current default")
+                    }
                     let added = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
                     if added.allow + added.ask + added.deny > 0 {
-                        print("  ✓ Claude Code tool permissions: \(added.allow) allowed (diagnostics), \(added.ask) ask, \(added.deny) denied (destructive) — edit in \(settingsURL.path)")
+                        print("  ✓ Claude Code tool permissions: \(added.allow) allowed (reads + new-content writes), \(added.ask) ask (mutations of existing content), \(added.deny) denied (destructive) — edit in \(settingsURL.path)")
                     }
                 }
             } catch {
