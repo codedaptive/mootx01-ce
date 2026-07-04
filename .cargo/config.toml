@@ -1,0 +1,12 @@
+# Windows (MSVC) builds statically link the C runtime. Without this, the
+# Rust MSVC targets default to dynamic CRT linkage (/MD) and the shipped
+# .exe imports VCRUNTIME140.dll — a VC++ redistributable DLL that clean
+# Windows installs do not have, so both mootx01.exe and moot-mgr.exe fail
+# to load with STATUS_DLL_NOT_FOUND (0xC0000135). Caught by winget
+# validation on a pristine VM (microsoft/winget-pkgs PR #397443).
+# The cfg matches both x86_64-pc-windows-msvc and aarch64-pc-windows-msvc;
+# macOS and Linux targets are unaffected. This file lives at the repo root
+# so CI (which invokes cargo from here via --manifest-path) and local
+# builds inside apps/*/rust both pick it up.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
