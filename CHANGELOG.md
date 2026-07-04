@@ -10,6 +10,14 @@ the tag carries the pre-release qualifier.
 Claude Desktop reliability release. Fixes the session timeouts and
 "Server disconnected" failures against large estates.
 
+- **launchd: daemon runs at Interactive QoS** — the LaunchAgent's
+  `ProcessType=Background` clamped the whole daemon to efficiency cores with
+  throttled I/O. Measured live: the identical palace import ran 20x slower
+  under launchd than shell-launched — long enough to starve tool responses
+  past Claude Desktop's ~4-minute client timeout, whose cancel then aborted
+  the import's basis-retrain tail and left semantic recall dark. The daemon
+  serves live MCP requests; Interactive is the honest ProcessType.
+
 - **Proxy: concurrent frame forwarding (both verticals)** — one slow tool call
   no longer blocks pings, cancellations, and parallel calls behind it.
 - **Proxy: transport timeouts raised to 1 h** — lens/synthesis calls on a
