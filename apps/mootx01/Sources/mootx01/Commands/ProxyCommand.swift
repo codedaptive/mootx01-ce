@@ -49,21 +49,40 @@ struct ProxyCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
         try await waitForDaemon(url: url)
-        let session = URLSession(configuration: .ephemeral)
+        // Long tool calls are legitimate: lens/synthesis operations on a large
+        // estate run for minutes. URLSession's DEFAULT 60 s request timeout was
+        // killing them mid-flight — the client (Claude Desktop) owns the
+        // timeout policy and cancels via notifications/cancelled; the proxy
+        // must not impose a shorter one of its own.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3600
+        config.timeoutIntervalForResource = 3600
+        let session = URLSession(configuration: config)
+        let writer = FrameWriter()
         var buffer = Data()
         // Read stdin until EOF. Same availableData loop as StdioServer.run —
         // availableData blocks until bytes arrive at the pipe (non-blocking for
         // the buffer-fill, blocking at the OS read level), and returns empty
         // Data on EOF, which ends the loop cleanly.
-        while true {
-            let chunk = FileHandle.standardInput.availableData
-            if chunk.isEmpty { break }
-            buffer.append(chunk)
-            while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                let frame = buffer.subdata(in: buffer.startIndex..<newlineIndex)
-                buffer.removeSubrange(buffer.startIndex...newlineIndex)
-                if frame.isEmpty { continue }
-                await forward(frame, to: url, session: session)
+        //
+        // Frames forward CONCURRENTLY (task per frame): awaiting each response
+        // serially meant one slow tool call blocked every frame behind it —
+        // pings, cancellations, parallel calls — and Claude Desktop read the
+        // stall as a dead server. Responses may interleave out of order; that
+        // is legal JSON-RPC (the client correlates by id).
+        await withDiscardingTaskGroup { group in
+            while true {
+                let chunk = FileHandle.standardInput.availableData
+                if chunk.isEmpty { break }
+                buffer.append(chunk)
+                while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let frame = buffer.subdata(in: buffer.startIndex..<newlineIndex)
+                    buffer.removeSubrange(buffer.startIndex...newlineIndex)
+                    if frame.isEmpty { continue }
+                    group.addTask {
+                        await Self.forward(frame, to: url, session: session, writer: writer)
+                    }
+                }
             }
         }
     }
@@ -92,7 +111,7 @@ struct ProxyCommand: AsyncParsableCommand {
 
     /// Forward one newline-delimited JSON-RPC frame to the resident daemon
     /// and relay the response to stdout.
-    private func forward(_ frame: Data, to url: URL, session: URLSession) async {
+    private static func forward(_ frame: Data, to url: URL, session: URLSession, writer: FrameWriter) async {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -106,18 +125,46 @@ struct ProxyCommand: AsyncParsableCommand {
             if httpResponse.statusCode == 202 { return }
             // Any other status: relay the response body to stdout so the client
             // receives a valid JSON-RPC frame.
-            var out = data
-            if out.last != 0x0A { out.append(0x0A) }  // ensure newline terminator
-            try? FileHandle.standardOutput.write(contentsOf: out)
+            await writer.write(data)
         } catch {
-            // Network failure: synthesize a JSON-RPC internal error so the client
-            // sees a clean failure instead of a silent hang.
+            // Network failure. Only synthesize an error for a REQUEST (a frame
+            // with an id) — notifications get no reply per spec. The error MUST
+            // echo the request's id: Claude Desktop's MCP client rejects
+            // `id: null` frames at the schema level, and the resulting parse
+            // error poisoned the whole stream ("Server disconnected").
+            guard let requestID = Self.requestID(of: frame) else { return }
             let msg = error.localizedDescription
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "'")
-            let errorJSON = "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"proxy: \(msg)\"}}\n"
-            try? FileHandle.standardOutput.write(contentsOf: Data(errorJSON.utf8))
+            let errorJSON = "{\"jsonrpc\":\"2.0\",\"id\":\(requestID),\"error\":{\"code\":-32603,\"message\":\"proxy: \(msg)\"}}\n"
+            await writer.write(Data(errorJSON.utf8))
         }
+    }
+
+    /// Extract the JSON-RPC `id` of a request frame, re-encoded as a JSON
+    /// literal (quoted string or bare number). Returns nil for notifications
+    /// (no id) and unparseable frames — both get no synthesized reply.
+    private static func requestID(of frame: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+              let id = obj["id"] else { return nil }
+        if let s = id as? String {
+            let escaped = s
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(escaped)\""
+        }
+        if let n = id as? NSNumber { return "\(n)" }
+        return nil
+    }
+}
+
+/// Serializes stdout writes: frames forward concurrently, but stdout is one
+/// stream and an interleaved write would corrupt both frames.
+private actor FrameWriter {
+    func write(_ data: Data) {
+        var out = data
+        if out.last != 0x0A { out.append(0x0A) }  // ensure newline terminator
+        try? FileHandle.standardOutput.write(contentsOf: out)
     }
 }
 
