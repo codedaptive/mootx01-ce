@@ -53,7 +53,11 @@ pub fn post_frame(port: u16, frame: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_secs(2),
     )?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    // Long read timeout on purpose: lens/synthesis tool calls on a large
+    // estate legitimately run for minutes, and the CLIENT owns timeout policy
+    // (Claude Desktop cancels via notifications/cancelled). A 120 s cap here
+    // killed long calls mid-flight and surfaced as Desktop timeouts.
+    stream.set_read_timeout(Some(Duration::from_secs(3600)))?;
 
     let mut request = format!(
         "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

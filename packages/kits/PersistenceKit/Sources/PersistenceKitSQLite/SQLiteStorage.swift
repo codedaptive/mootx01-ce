@@ -337,8 +337,26 @@ actor SQLiteBackend {
         isolation: IsolationLevel,
         _ block: (any StorageTransaction) async throws -> T
     ) async throws -> T {
-        if inTransaction {
-            throw StorageError.transactionConflict(detail: "nested transactions not supported")
+        // Concurrent transactions WAIT for the open one to finish rather than
+        // failing. The actor suspends inside `block` (it is async), so a second
+        // caller can interleave at that suspension and land here with
+        // `inTransaction == true` — that is ordinary contention between
+        // background workers (reindex's Merkle rollup vs. a dream cycle vs. a
+        // live capture), not a programming error, and throwing surfaced as
+        // "reindex: background backfill failed: transactionConflict" on a busy
+        // daemon. The wait is bounded so a TRUE nested transaction (a block
+        // reentering runTransaction on its own backend, which would deadlock)
+        // still fails loudly instead of hanging. beginTransactionDirect keeps
+        // its immediate throw: it is synchronous and cannot await.
+        var waitedNanos: UInt64 = 0
+        let waitLimitNanos: UInt64 = 60_000_000_000  // 60 s
+        while inTransaction {
+            if waitedNanos >= waitLimitNanos {
+                throw StorageError.transactionConflict(
+                    detail: "transaction still open after 60 s wait — nested transactions not supported")
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)  // 25 ms, then re-check
+            waitedNanos += 25_000_000
         }
         let begin: String
         switch isolation {
