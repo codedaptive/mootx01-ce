@@ -52,8 +52,15 @@ fn env_observer_enabled() -> bool {
 
 /// Run the server to completion. See module docs. The `banner` is the
 /// stderr identity line (e.g. "aria-mcp" or "mootx01"), so logs say who is
-/// hosting the runtime.
-pub fn run(banner: &str) {
+/// hosting the runtime. `version_skew` is ADR-024 §5's advisory — empty when
+/// the caller detected no plugin/binary version mismatch (the common case,
+/// and the only option for `aria-mcp-server`, which has no plugin concept),
+/// or the advisory text to surface verbatim in `moot_estate_ping` /
+/// `moot_estate_status`. The caller computes it (this kit does not read
+/// `~/.claude/plugins/` or know a product version itself — see
+/// `mootx01-cli`'s `commands::serve::version_skew_advisory`, the Rust twin
+/// of Swift's `MootInstallerCore.VersionSkewAdvisory`).
+pub fn run(banner: &str, version_skew: &str) {
     eprintln!("{banner}: starting Rust MCP server");
     // from_env reads ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH and applies
     // the four-state precedence ladder. Exits with a nonzero code on ambiguous
@@ -70,6 +77,7 @@ pub fn run(banner: &str) {
     // banner so the Rust product reports "mootx01", byte-for-byte matching the
     // Swift product's `ServerInfo(name: "mootx01")` in ServeCommand.swift.
     config.server_name = banner.to_owned();
+    config.version_skew = version_skew.to_owned();
 
     // Telemetry wiring (durable default for resident mode, opt-in for stdio).
     //

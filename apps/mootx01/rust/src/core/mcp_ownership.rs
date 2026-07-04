@@ -73,22 +73,49 @@ pub fn classify(entry: &Value) -> McpEntryOwnership {
 ///
 /// SAFETY: tests must inject a sandbox `home`, never the real `~/.claude`.
 pub fn is_plugin_installed(plugin_id: &str, home: &Path) -> bool {
+    installed_entry(plugin_id, home).is_some()
+}
+
+/// Returns the installed plugin manifest version (e.g. `"1.0.15"`) from the
+/// first entry for `plugin_id`, or `None` when not installed. Used by
+/// `version_skew_advisory` (ADR-024 §5) to compare the plugin's declared
+/// version against the running binary's version.
+pub fn installed_version(plugin_id: &str, home: &Path) -> Option<String> {
+    installed_entry(plugin_id, home)?
+        .get("version")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn installed_entry(plugin_id: &str, home: &Path) -> Option<Value> {
     let path = home
         .join(".claude")
         .join("plugins")
         .join("installed_plugins.json");
-    let Ok(bytes) = std::fs::read(&path) else {
-        return false;
-    };
+    let bytes = std::fs::read(&path).ok()?;
     let lossy = String::from_utf8_lossy(&bytes);
-    let Ok(root) = serde_json::from_str::<Value>(&lossy) else {
-        return false;
-    };
-    root.get("plugins")
-        .and_then(|p| p.get(plugin_id))
-        .and_then(|e| e.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false)
+    let root: Value = serde_json::from_str(&lossy).ok()?;
+    root.get("plugins")?
+        .get(plugin_id)?
+        .as_array()?
+        .first()
+        .cloned()
+}
+
+/// ADR-024 §5: at daemon startup (and in `moot_estate_ping` /
+/// `moot_estate_status`), when a plugin is detected, compare the plugin
+/// manifest version against the binary version and report skew. Rust twin
+/// of Swift's `MootInstallerCore.VersionSkewAdvisory.compute` — keep the two
+/// in sync by hand. Returns `None` when the plugin is not installed or its
+/// version matches `binary_version` exactly (no skew to report).
+pub fn version_skew_advisory(plugin_id: &str, binary_version: &str, home: &Path) -> Option<String> {
+    let plugin_version = installed_version(plugin_id, home)?;
+    if plugin_version == binary_version {
+        return None;
+    }
+    Some(format!(
+        "plugin {plugin_version} expects binary >= {plugin_version}; binary is {binary_version} — run `mootx01 upgrade`"
+    ))
 }
 
 #[cfg(test)]
@@ -157,6 +184,42 @@ mod tests {
         });
         std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
         assert!(is_plugin_installed("mootx01@mootx01", &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn version_skew_advisory_none_when_no_plugin() {
+        let home = std::env::temp_dir().join(format!("mootx01-skew-{}-1", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(version_skew_advisory("mootx01@mootx01", "1.0.15", &home), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn version_skew_advisory_none_when_versions_match() {
+        let home = std::env::temp_dir().join(format!("mootx01-skew-{}-2", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join(".claude").join("plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = json!({"version": 2, "plugins": {"mootx01@mootx01": [{"scope": "user", "installPath": "x", "version": "1.0.15"}]}});
+        std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
+        assert_eq!(version_skew_advisory("mootx01@mootx01", "1.0.15", &home), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn version_skew_advisory_reports_mismatch() {
+        let home = std::env::temp_dir().join(format!("mootx01-skew-{}-3", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join(".claude").join("plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = json!({"version": 2, "plugins": {"mootx01@mootx01": [{"scope": "user", "installPath": "x", "version": "1.0.15"}]}});
+        std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
+        let advisory = version_skew_advisory("mootx01@mootx01", "1.0.11", &home).unwrap();
+        assert!(advisory.contains("1.0.15"));
+        assert!(advisory.contains("1.0.11"));
+        assert!(advisory.contains("mootx01 upgrade"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

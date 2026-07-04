@@ -17,7 +17,7 @@ use aria_mcp::{
 };
 
 fn make_dispatcher() -> Dispatcher {
-    Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial")
+    Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", "")
 }
 
 fn initialize_with_version(dispatcher: &Dispatcher, version: Option<&str>) -> serde_json::Value {

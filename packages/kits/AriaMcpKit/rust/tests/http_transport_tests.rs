@@ -25,7 +25,7 @@ use aria_mcp::server::ServerConfig;
 
 fn make_dispatcher() -> Dispatcher {
     let config = ServerConfig::default_inmemory();
-    Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial)
+    Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, &config.version_skew)
 }
 
 /// One HTTP request/response round-trip against a freshly bound listener.
@@ -276,7 +276,7 @@ fn http_get_graph_store_payload_returned_verbatim() {
         .write_topology_snapshot(&estate_id, 1_735_689_600.0, pre_built_payload, None)
         .expect("write_topology_snapshot must succeed");
 
-    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial");
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", "");
     let (status, body) = round_trip_get_with_stats_store("/api/graph", dispatcher, Some(&store));
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -523,7 +523,7 @@ fn slow_client_does_not_block_fast_concurrent_request() {
     // Build a fresh in-memory dispatcher for this test.
     let config = ServerConfig::default_inmemory();
     let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial)
+        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, &config.version_skew)
     ));
 
     // Bind the listener.
@@ -650,7 +650,7 @@ fn saturation_overflow_reads_503_on_wire_while_slot_holder_in_flight() {
     // ── Server setup ─────────────────────────────────────────────────────────
     let config = ServerConfig::default_inmemory();
     let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial)
+        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, &config.version_skew)
     ));
     let listener = bind_loopback(0).expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
@@ -951,7 +951,7 @@ fn sse_streams_do_not_starve_normal_gate_slots() {
 
     let config = ServerConfig::default_inmemory();
     let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial)
+        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, &config.version_skew)
     ));
     let listener = bind_loopback(0).expect("bind loopback");
     let port = listener.local_addr().unwrap().port();

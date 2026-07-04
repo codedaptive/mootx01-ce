@@ -327,6 +327,7 @@ pub fn dispatch(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
     build_serial: &str,
+    version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
         "moot_file_memory" => run_file_memory(args, registry),
@@ -345,10 +346,12 @@ pub fn dispatch(
         "moot_fact_timeline" => run_fact_timeline(args, registry),
         "moot_write_journal" => run_write_journal(args, registry),
         "moot_read_journal" => run_read_journal(args, registry),
-        "moot_estate_status" => run_estate_status(args, registry),
+        // Pass version_skew so the report includes the ADR-024 §5 advisory
+        // when present (empty string ⇒ no line appended).
+        "moot_estate_status" => run_estate_status(args, registry, version_skew),
         "moot_estate_map" => run_estate_map(args, registry),
         // Pass build_serial so the pong includes the build segment.
-        "moot_estate_ping" => run_estate_ping(args, registry, build_serial),
+        "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew),
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
@@ -1580,6 +1583,7 @@ fn run_read_journal(
 fn run_estate_status(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
+    version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
@@ -1650,16 +1654,21 @@ fn run_estate_status(
 
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
-    let body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\n{}",
+    //   [/ version_skew — ADR-024 §5, appended only when the host detected one]
+    let mut body = format!(
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}",
         active.len(),
         total.len(),
         wings_list,
         kg_facts.len(),
         trace_rows,
         sync_token,
-        ARIA_SESSION_PROTOCOL
     );
+    if !version_skew.is_empty() {
+        body.push_str(&format!("\nversion_skew: {version_skew}"));
+    }
+    body.push('\n');
+    body.push_str(ARIA_SESSION_PROTOCOL);
     Ok(text_result(&body))
 }
 
@@ -1755,6 +1764,7 @@ fn run_estate_ping(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     build_serial: &str,
+    version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
@@ -1769,10 +1779,16 @@ fn run_estate_ping(
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("estate_ping: manifest read failed: {e}"))
     })?;
 
-    Ok(text_result(&format!(
+    // ADR-024 §5: append the version-skew advisory when present — same
+    // opt-in shape as run_estate_status.
+    let mut pong = format!(
         "pong: estate {} [{}] is live — build {}",
         manifest.estate_name, manifest.estate_uuid, build_serial
-    )))
+    );
+    if !version_skew.is_empty() {
+        pong.push_str(&format!("\nversion_skew: {version_skew}"));
+    }
+    Ok(text_result(&pong))
 }
 
 // ===========================================================================
