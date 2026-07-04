@@ -356,6 +356,7 @@ pub fn run_http_loop(
             &config.server_name,
             &config.server_version,
             &config.build_serial,
+            &config.version_skew,
         )
     ));
 

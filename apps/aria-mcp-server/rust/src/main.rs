@@ -16,5 +16,6 @@
 //! ```
 
 fn main() {
-    aria_mcp::runtime::run("mootx01");
+    // No plugin concept for this reference server — always "" (no skew to report).
+    aria_mcp::runtime::run("mootx01", "");
 }

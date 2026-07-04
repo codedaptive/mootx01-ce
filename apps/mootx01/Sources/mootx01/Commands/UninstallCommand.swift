@@ -49,13 +49,23 @@ struct UninstallCommand: AsyncParsableCommand {
 
         for client in clients {
             do {
-                try Installer.uninstall(
+                // ADR-024 §4: ownership-aware for JSON-format clients — a
+                // `.foreign` entry (env override, e.g. a development rig) is
+                // reported and left untouched rather than silently removed.
+                let outcome = try Installer.uninstall(
                     client: client,
                     homeDirectory: home,
                     workingDirectory: cwd,
                     local: false
                 )
-                print("  ✓ \(client.displayName)")
+                switch outcome {
+                case .notPresent:
+                    print("  ⓘ \(client.displayName): no entry present")
+                case .removed:
+                    print("  ✓ \(client.displayName)")
+                case let .retainedForeign(reason, path):
+                    print("  ⚠ \(client.displayName): a non-default mootx01 entry at \(path) (\(reason)) was left untouched — remove it by hand if intended")
+                }
             } catch {
                 print("  ✗ \(client.displayName): \(error)")
             }

@@ -25,9 +25,11 @@ Then initialize it:
 mootx01 install
 ```
 
-> Without the binary, the plugin installs fine but the MCP server cannot
-> start — your client's MCP status will show the `mootx01` command as not
-> found. Install the binary and restart the client to fix it.
+> Without the binary installed and its resident daemon running (`mootx01
+> install` places both and starts the daemon via launchd), the plugin
+> installs fine but has nothing to connect to — your client's MCP status
+> will show `mootx01` as unreachable. Install the binary and restart the
+> client to fix it.
 
 ## 2 · Install this plugin
 
@@ -70,9 +72,11 @@ Or run the orientation command in Claude Code:
 - **Lifecycle hooks** (Claude Code) — context meter with escalating writeback
   reminders, compaction recovery, a writeback gate before finishing, and an
   update-availability check
-- **MCP wiring** — connects the client to `mootx01 serve`
+- **MCP wiring** — connects the client to the resident `mootx01` daemon over
+  loopback HTTP, so every session shares the one running daemon instead of
+  spawning a private `serve` process per session
 
-Version 1.0.11 — this plugin tracks the MOOTx01 product release.
+Version 1.0.15 — this plugin tracks the MOOTx01 product release.
 
 ## Documentation
 

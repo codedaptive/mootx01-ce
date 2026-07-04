@@ -53,7 +53,7 @@ pub fn dispatch_tool(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "")
+    dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "", "")
 }
 
 /// Dispatch with an explicit vault-on flag. Used by tests that need to verify
@@ -68,14 +68,15 @@ pub fn dispatch_tool_with_vault_flag(
     ledger: &SurfacedRecallLedger,
     vault_on: bool,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger_and_flag(name, args, registry, ledger, &VaultJobLedger::new(), vault_on, "")
+    dispatch_tool_with_vault_ledger_and_flag(name, args, registry, ledger, &VaultJobLedger::new(), vault_on, "", "")
 }
 
-/// Internal dispatch entry point that accepts an explicit `vault_ledger` and
-/// build serial. Used by `Dispatcher::handle` (passes the owned ledger and
-/// serial) and by `dispatch_tool` (passes a throwaway ledger and empty serial
-/// for callers that don't need job tracking or build-serial surfacing, such as
-/// test helpers that call individual tools in isolation).
+/// Internal dispatch entry point that accepts an explicit `vault_ledger`,
+/// build serial, and version-skew advisory. Used by `Dispatcher::handle`
+/// (passes the owned ledger, serial, and advisory) and by `dispatch_tool`
+/// (passes a throwaway ledger and empty strings for callers that don't need
+/// job tracking or build-serial/version-skew surfacing, such as test helpers
+/// that call individual tools in isolation).
 pub fn dispatch_tool_with_vault_ledger(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
@@ -83,20 +84,25 @@ pub fn dispatch_tool_with_vault_ledger(
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
     build_serial: &str,
+    version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, crate::tool_list::vault_enabled(),
-        build_serial,
+        build_serial, version_skew,
     )
 }
 
-/// Inner dispatch that accepts an explicit vault-on flag and build serial. This
-/// is the single implementation all entry points delegate to. The `vault_on`
-/// flag controls whether vault tool calls are routed to the vault backend or
-/// rejected with a clear refusal. Callers that want env-var semantics pass
-/// `vault_enabled()`; callers that need deterministic testing pass `true`/`false`
-/// directly. `build_serial` is forwarded to `interface_tools::dispatch` so
-/// `moot_estate_ping` can include it without touching the filesystem.
+/// Inner dispatch that accepts an explicit vault-on flag, build serial, and
+/// version-skew advisory. This is the single implementation all entry points
+/// delegate to. The `vault_on` flag controls whether vault tool calls are
+/// routed to the vault backend or rejected with a clear refusal. Callers that
+/// want env-var semantics pass `vault_enabled()`; callers that need
+/// deterministic testing pass `true`/`false` directly. `build_serial` is
+/// forwarded to `interface_tools::dispatch` so `moot_estate_ping` can include
+/// it without touching the filesystem. `version_skew` (ADR-024 §5) is an
+/// empty string when the host detected no plugin/binary version mismatch —
+/// the common case — or the advisory text to surface verbatim in
+/// `moot_estate_ping` / `moot_estate_status`.
 fn dispatch_tool_with_vault_ledger_and_flag(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
@@ -105,6 +111,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     vault_ledger: &VaultJobLedger,
     vault_on: bool,
     build_serial: &str,
+    version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // 0. Teachme interception — intercepts BEFORE any runner fires.
     //    Returns guide text; estate is never touched.
@@ -138,7 +145,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));
         }
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger, build_serial)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, build_serial, version_skew)?;
         return Ok(inject_hint(name, args, result));
     }
 

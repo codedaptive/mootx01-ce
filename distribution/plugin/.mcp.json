@@ -1,10 +1,8 @@
 {
   "mcpServers" : {
     "mootx01" : {
-      "args" : [
-        "serve"
-      ],
-      "command" : "mootx01"
+      "type" : "http",
+      "url" : "http://127.0.0.1:4242"
     }
   }
 }

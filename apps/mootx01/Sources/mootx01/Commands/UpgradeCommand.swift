@@ -88,8 +88,46 @@ struct UpgradeCommand: AsyncParsableCommand {
             }
         }
 
+        // ADR-024 Wave 3, Defect 1: an upgrade alone never touches
+        // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
+        // this, a machine upgraded via `mootx01 upgrade` keeps a stranded
+        // plugin package (and Claude Code keeps a stranded cached snapshot)
+        // indefinitely. Rematerialize plugin-depth packages for every host
+        // that already has one on disk (never CREATES a new plugin-depth
+        // install for a host that never had one — upgrade only converges
+        // existing installs), and refresh Claude Code's cache the same way
+        // `mootx01 install` does.
+        rematerializePluginDepth(home: home, binaryPath: binaryPath)
+
         restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
+    }
+
+    /// See the call site's doc comment. Iterates every plugin-capable host
+    /// in the embedded install map; for each whose plugin directory already
+    /// exists, reruns `DepthInstaller.apply(depth: .plugin, ...)` so the
+    /// on-disk package (and, for Claude Code, the plugin cache) converge on
+    /// whatever the CURRENT embedded bundle carries. `vaultOff` is not
+    /// tracked across upgrades — passing `false` here is safe regardless:
+    /// every plugin-capable host's package is HTTP-shaped today (ADR-024
+    /// §2), so `vaultOff` has no effect on rematerialization (Defect 2); the
+    /// vault posture that matters lives in the resident daemon's own
+    /// launchd environment, which `mootx01 upgrade` does not touch (it
+    /// restarts the daemon from its EXISTING plist via `LaunchAgent.restart`,
+    /// never rewriting it).
+    private func rematerializePluginDepth(home: URL, binaryPath: String) {
+        for host in InstallBundle.embedded.hosts.values where host.supportsPlugin {
+            let dir = DepthInstaller.pluginInstallDirectory(host: host, homeDirectory: home)
+            guard FileManager.default.fileExists(atPath: dir.path) else { continue }
+            do {
+                _ = try DepthInstaller.apply(
+                    clientID: host.id, depth: .plugin, homeDirectory: home, binaryPath: binaryPath
+                )
+                print("  ✓ \(host.displayName): plugin package rematerialized")
+            } catch {
+                print("  ✗ \(host.displayName): could not rematerialize plugin package: \(error)")
+            }
+        }
     }
 
     /// Restart the installed background agents after a binary replacement.

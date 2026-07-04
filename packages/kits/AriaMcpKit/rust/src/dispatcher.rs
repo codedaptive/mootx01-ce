@@ -72,16 +72,30 @@ pub struct Dispatcher {
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
     pub(crate) build_serial: String,
+    /// ADR-024 §5: version-skew advisory surfaced by `moot_estate_ping` /
+    /// `moot_estate_status` when the host detected a mismatch between an
+    /// installed plugin (e.g. Claude Code's `mootx01@mootx01`) and this
+    /// running binary. Empty string when no plugin is detected or its
+    /// version matches — the common case, which omits the field entirely
+    /// (see `run_estate_ping`/`run_estate_status` in `interface_tools.rs`).
+    /// Computed once at server startup by the host binary (mootx01-cli's
+    /// `serve` command); this kit never reads `~/.claude/plugins/` itself.
+    pub(crate) version_skew: String,
 }
 
 impl Dispatcher {
-    /// Construct from an estate registry, server identity, and build serial.
+    /// Construct from an estate registry, server identity, build serial, and
+    /// version-skew advisory.
     ///
     /// `build_serial` is produced by `crate::build_serial::derive()` at
     /// server startup and carried unchanged for the lifetime of the server.
     /// It is surfaced by `moot_estate_ping` so drivers can confirm they are
     /// talking to the most recently compiled binary.
-    pub fn new(registry: EstateRegistry, name: &str, version: &str, build_serial: &str) -> Self {
+    ///
+    /// `version_skew` is empty when the host detected no plugin/binary
+    /// version mismatch (ADR-024 §5) — pass `""` from callers that have no
+    /// skew to report (e.g. `aria-mcp-server`, which has no plugin concept).
+    pub fn new(registry: EstateRegistry, name: &str, version: &str, build_serial: &str, version_skew: &str) -> Self {
         let tools = build_tool_list();
         Dispatcher {
             registry,
@@ -91,6 +105,7 @@ impl Dispatcher {
             ledger: SurfacedRecallLedger::new(),
             vault_ledger: VaultJobLedger::new(),
             build_serial: build_serial.to_owned(),
+            version_skew: version_skew.to_owned(),
         }
     }
 
@@ -196,7 +211,7 @@ impl Dispatcher {
 
         crate::dispatch::dispatch_tool_with_vault_ledger(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger,
-            &self.build_serial,
+            &self.build_serial, &self.version_skew,
         )
     }
 }

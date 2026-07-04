@@ -100,7 +100,44 @@ struct InstallCommand: AsyncParsableCommand {
         var installed: [String] = []
         var skipped: [String] = []
 
+        // ADR-024 §1/§3: plugins the CLI installer knows how to detect and
+        // defer to. Keyed by client id → the plugin registry id
+        // (`installed_plugins.json`'s top-level key). Only Claude Code has a
+        // live plugin today; the table is intentionally small rather than
+        // guessed for hosts with no shipped plugin yet.
+        let pluginOwnedClients: [String: String] = ["claude-code": "mootx01@mootx01"]
+
         for client in clients {
+            // Adams #5: gate on installed AND enabled — Claude Code tracks
+            // enablement separately (~/.claude/settings.json's
+            // enabledPlugins map), and an installed-but-disabled plugin
+            // does not own the connection. Skipping/removing the direct
+            // entry in that state would leave the client with nothing.
+            if let pluginID = pluginOwnedClients[client.id],
+               PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
+                // The plugin is the preferred connection owner (§1): still
+                // place the binary/daemon (done above, unconditionally) but
+                // skip writing a competing direct entry, and clean up any
+                // direct entry a PRIOR install wrote — only when it is
+                // confirmed ours-default (§4).
+                do {
+                    let outcome = try Installer.dedupeDirectEntry(
+                        client: client, homeDirectory: home, workingDirectory: cwd, local: local
+                    )
+                    switch outcome {
+                    case .none:
+                        break
+                    case .removedOursDefault:
+                        print("  ⓘ \(client.displayName): removed a stale direct mootx01 entry — the plugin now owns the connection")
+                    case let .retainedForeign(reason, path):
+                        print("  ⚠ \(client.displayName): a non-default mootx01 entry at \(path) (\(reason)) was left untouched — inspect it by hand")
+                    }
+                } catch {
+                    print("  ✗ \(client.displayName): could not check for a competing direct entry: \(error)")
+                }
+                print("  ⓘ MOOTx01 plugin already installed — \(client.displayName) connects through it; skipping direct wiring.")
+                continue
+            }
             do {
                 try Installer.install(
                     client: client,
@@ -176,8 +213,14 @@ struct InstallCommand: AsyncParsableCommand {
             print("Integration depth: \(depth.rawValue)")
             for client in clients where installed.contains(client.displayName) {
                 do {
-                    // Thread the vault posture so plugin-spawned stdio servers
-                    // inherit MOOTX01_VAULT=0 when --vault-off was passed (sec-fix 6b08d56b).
+                    // Thread the vault posture so any command/stdio-shaped
+                    // entry in the plugin package (the proxy-bridge fallback
+                    // for a host whose schema cannot express HTTP) inherits
+                    // MOOTX01_VAULT=0 when --vault-off was passed (sec-fix
+                    // 6b08d56b). HTTP-shaped entries are untouched — the
+                    // resident daemon carries the vault posture in its own
+                    // launchd environment (`daemonEnv` above), independent
+                    // of this call (ADR-024 Wave 3, Defect 2).
                     let outcome = try DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
