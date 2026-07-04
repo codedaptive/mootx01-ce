@@ -36,6 +36,35 @@
 
 import Foundation
 
+/// Outcome of `Installer.uninstall` for a JSON-format client (ADR-024 §4:
+/// ownership-aware removal). Non-JSON formats (TOML, Continue/Hermes YAML)
+/// do not yet carry the ownership check and always report `.removed` when a
+/// prior entry existed — see the doc comment on `uninstall(...)`.
+public enum UninstallOutcome: Equatable, Sendable {
+    /// No config file, or no entry under the server name — nothing to do.
+    case notPresent
+    /// An entry existed and was removed (JSON: only when `.oursDefault`;
+    /// other formats: unconditionally, pre-existing behavior).
+    case removed
+    /// A JSON entry existed but classified `.foreign` (ADR-024 §4) — left
+    /// untouched. Carries the reason and the config path for reporting.
+    case retainedForeign(reason: String, path: String)
+}
+
+/// Outcome of `Installer.dedupeDirectEntry` (ADR-024 §3: install-time
+/// dedupe when a client's plugin already owns the connection).
+public enum DirectEntryDedupeOutcome: Equatable, Sendable {
+    /// No existing direct entry (or the config format isn't a dedupe target
+    /// yet) — nothing to do.
+    case none
+    /// An existing direct entry was `.oursDefault`; removed so the plugin is
+    /// the sole connection.
+    case removedOursDefault
+    /// An existing direct entry is `.foreign` (env override) — reported by
+    /// name and path, never auto-removed.
+    case retainedForeign(reason: String, path: String)
+}
+
 /// Writes and removes MCP server config entries for each supported client.
 public enum Installer {
 
@@ -442,6 +471,59 @@ public enum Installer {
         }
     }
 
+    /// ADR-024 §3/§4: when `client`'s plugin already owns the MCP connection
+    /// (detected by the caller via `PluginDetector`), the CLI installer must
+    /// skip writing a competing direct entry AND clean up any direct entry a
+    /// PRIOR install wrote — but only when that entry is confirmed
+    /// `.oursDefault` (§4). A `.foreign` entry (env override, e.g. a
+    /// development rig) is reported and left untouched. Callers still place
+    /// the binary/PATH/daemon as normal — the plugin requires the binary —
+    /// this only governs the direct client config entry.
+    ///
+    /// Scoped to JSON-format configs today (the only format any currently
+    /// plugin-owned client — Claude Code — uses); other formats return
+    /// `.none` unconditionally.
+    ///
+    /// - Parameters:
+    ///   - client: the client whose direct entry to check (typically
+    ///     Claude Code, the only client with a live plugin today).
+    ///   - homeDirectory: user's home directory. Inject in tests.
+    ///   - workingDirectory: CWD at install time (for --local Claude Code).
+    ///   - local: when true and client is Claude Code, target `.mcp.json`.
+    /// - Returns: `.none` (nothing to do), `.removedOursDefault` (cleaned
+    ///   up), or `.retainedForeign` (reported, left untouched).
+    /// - Throws: filesystem or JSON errors.
+    @discardableResult
+    public static func dedupeDirectEntry(
+        client: MCPClient,
+        homeDirectory: URL,
+        workingDirectory: URL,
+        local: Bool
+    ) throws -> DirectEntryDedupeOutcome {
+        let configURL = resolveConfigURL(
+            client: client,
+            homeDirectory: homeDirectory,
+            workingDirectory: workingDirectory,
+            local: local
+        )
+        guard FileManager.default.fileExists(atPath: configURL.path) else { return .none }
+        let ext = configURL.pathExtension.lowercased()
+        guard ext == "json" || ext == "jsonc" else { return .none }
+
+        switch try uninstallJSON(
+            configURL: configURL,
+            serversKey: client.jsonServersKey,
+            serverName: client.serverName
+        ) {
+        case .notPresent:
+            return .none
+        case .removed:
+            return .removedOursDefault
+        case let .retainedForeign(reason, path):
+            return .retainedForeign(reason: reason, path: path)
+        }
+    }
+
     /// Scan ~/Library/Application Support/Parall/ for sandboxed app instances
     /// that contain a config file matching this client's config filename.
     ///
@@ -527,13 +609,20 @@ public enum Installer {
     ///   - homeDirectory: user's home directory.
     ///   - workingDirectory: CWD at uninstall time.
     ///   - local: when true and client is Claude Code, target `.mcp.json`.
+    /// - Returns: the outcome (ADR-024 §4). JSON-format clients are
+    ///   ownership-aware: a `.foreign` entry (env override — e.g. a
+    ///   development rig) is reported and left untouched rather than
+    ///   removed. Other formats (TOML, Continue/Hermes YAML) remove
+    ///   unconditionally, matching prior behavior — they are not yet
+    ///   ownership-checked (see MCPEntryOwnership.swift's doc comment).
     /// - Throws: filesystem or JSON errors.
+    @discardableResult
     public static func uninstall(
         client: MCPClient,
         homeDirectory: URL,
         workingDirectory: URL,
         local: Bool
-    ) throws {
+    ) throws -> UninstallOutcome {
         let configURL = resolveConfigURL(
             client: client,
             homeDirectory: homeDirectory,
@@ -541,33 +630,39 @@ public enum Installer {
             local: local
         )
 
-        guard FileManager.default.fileExists(atPath: configURL.path) else { return }
-
-        // §4.2: timestamped backup before modification (continue's per-server
-        // file is deleted outright; the backup preserves it).
-        try backupExisting(at: configURL)
+        guard FileManager.default.fileExists(atPath: configURL.path) else { return .notPresent }
 
         if client.id == "continue" {
+            // §4.2: timestamped backup before modification — the per-server
+            // file is deleted outright; the backup preserves it.
+            try backupExisting(at: configURL)
             try? FileManager.default.removeItem(at: configURL)
-        } else {
-            switch configURL.pathExtension.lowercased() {
-            case "toml":
-                // Codex config.toml — the old path routed TOML through the JSON
-                // remover, whose parse failed and silently no-opped, leaving the
-                // [mcp_servers.mootx01] table behind forever.
-                try removeFromTOMLConfig(at: configURL, serverName: client.serverName)
-            case "json", "jsonc":
-                try uninstallJSON(
-                    configURL: configURL,
-                    serversKey: client.jsonServersKey,
-                    serverName: client.serverName
-                )
-            default:
-                if client.id == "hermes" {
-                    try removeFromHermesYAML(at: configURL, serverName: client.serverName)
-                }
-                // Unknown formats: nothing was ever written by us; leave alone.
+            return .removed
+        }
+
+        switch configURL.pathExtension.lowercased() {
+        case "toml":
+            // Codex config.toml — the old path routed TOML through the JSON
+            // remover, whose parse failed and silently no-opped, leaving the
+            // [mcp_servers.mootx01] table behind forever. Not yet
+            // ownership-checked (§4) — removes unconditionally.
+            try backupExisting(at: configURL)
+            try removeFromTOMLConfig(at: configURL, serverName: client.serverName)
+            return .removed
+        case "json", "jsonc":
+            return try uninstallJSON(
+                configURL: configURL,
+                serversKey: client.jsonServersKey,
+                serverName: client.serverName
+            )
+        default:
+            if client.id == "hermes" {
+                try backupExisting(at: configURL)
+                try removeFromHermesYAML(at: configURL, serverName: client.serverName)
+                return .removed
             }
+            // Unknown formats: nothing was ever written by us; leave alone.
+            return .notPresent
         }
     }
 
@@ -1036,12 +1131,31 @@ public enum Installer {
         return result
     }
 
-    private static func uninstallJSON(configURL: URL, serversKey: String, serverName: String) throws {
+    /// Ownership-aware JSON removal (ADR-024 §4). A `.foreign` entry (env
+    /// override — e.g. a development rig pointed at a non-default data dir
+    /// or estate) is reported and left untouched; only a `.oursDefault`
+    /// entry is actually removed from the file. Absent file content, absent
+    /// entry, or an unparseable file all resolve to `.notPresent` — there
+    /// was nothing this installer could safely act on.
+    private static func uninstallJSON(
+        configURL: URL, serversKey: String, serverName: String
+    ) throws -> UninstallOutcome {
         let data = try Data(contentsOf: configURL).strippingLeadingUTF8BOM
         guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return
+            return .notPresent
         }
         var mcpServers = root[serversKey] as? [String: Any] ?? [:]
+        guard let entry = mcpServers[serverName] as? [String: Any] else {
+            return .notPresent
+        }
+        if case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) {
+            return .retainedForeign(reason: reason, path: configURL.path)
+        }
+
+        // §4.2: timestamped backup immediately before the write that actually
+        // modifies the file — not taken for entries left untouched above.
+        try backupExisting(at: configURL)
+
         mcpServers.removeValue(forKey: serverName)
         if mcpServers.isEmpty {
             root.removeValue(forKey: serversKey)
@@ -1053,6 +1167,7 @@ public enum Installer {
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         )
         try updated.write(to: configURL, options: .atomic)
+        return .removed
     }
 
     // MARK: - Continue YAML helper

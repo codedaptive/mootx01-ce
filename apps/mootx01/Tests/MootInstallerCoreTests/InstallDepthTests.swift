@@ -112,10 +112,16 @@ struct InstallDepthTests {
         let manifest = root.appendingPathComponent(".claude-plugin/plugin.json")
         #expect(FileManager.default.fileExists(atPath: skill.path))
         #expect(FileManager.default.fileExists(atPath: manifest.path))
+        // ADR-024 §2: Claude Code's embedded package wires the resident
+        // daemon's loopback HTTP endpoint, not a bare `command` placeholder
+        // — there is nothing for rewriteBareMootCommand to rewrite, and
+        // nothing SHOULD need the placed binary path baked in (HTTP entries
+        // carry no absolute path at all).
         let mcp = root.appendingPathComponent(".mcp.json")
         let mcpContents = try String(contentsOf: mcp, encoding: .utf8)
-        #expect(mcpContents.contains("\"command\" : \"/safe/bin/mootx01\""))
-        #expect(!mcpContents.contains("\"command\" : \"mootx01\""))
+        #expect(mcpContents.contains("\"type\" : \"http\""))
+        #expect(mcpContents.contains("\"url\" : \"\(MootPaths.residentEndpointURL)\""))
+        #expect(!mcpContents.contains("\"command\""))
     }
 
     @Test("plugin depth falls back to skills (reported) for a module-code host")

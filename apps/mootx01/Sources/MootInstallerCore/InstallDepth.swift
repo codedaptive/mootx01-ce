@@ -373,9 +373,14 @@ public enum DepthInstaller {
         return str.hasSuffix("\n") ? str : str + "\n"
     }
 
-    /// Embedded plugin package MCP configs are generated with a portable bare
-    /// executable name. Rewrite that placeholder at install time so plugin
-    /// launches use the same absolute binary path as the normal MCP config.
+    /// ADR-024 §2: most embedded plugin packages now wire the resident
+    /// daemon's loopback HTTP endpoint and carry no `command` field at all —
+    /// nothing for this function to rewrite. It remains meaningful for the
+    /// hosts whose schema cannot express HTTP and fall back to the proxy
+    /// bridge (currently Xcode's inline manifest: `command: mootx01, args:
+    /// [proxy]`), whose embedded package still carries the portable bare
+    /// executable name `"mootx01"` that must become the placed binary's
+    /// absolute path at install time.
     private static func rewriteBareMootCommand(in contents: String, binaryPath: String) -> String {
         let escapedBinaryPath = jsonEscapedString(binaryPath)
         return contents
