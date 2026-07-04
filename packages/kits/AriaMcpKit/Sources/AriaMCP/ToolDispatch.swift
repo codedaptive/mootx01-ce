@@ -86,6 +86,17 @@ public struct ToolDispatcher: Sendable {
     /// not pass an explicit value receive the default "aria-mcp-server".
     public let serverIdentity: String
 
+    /// ADR-024 §5: advisory message when the host has detected a version
+    /// mismatch between an installed plugin (e.g. Claude Code's
+    /// `mootx01@mootx01`) and this running binary — `nil` when no plugin is
+    /// detected or its version matches. Computed once by the host at
+    /// construction time (see `MootInstallerCore.VersionSkewAdvisory` in the
+    /// `mootx01` app layer — kits do not read `~/.claude/plugins/` or know a
+    /// product version themselves; the host injects the precomputed string)
+    /// and surfaced verbatim in `moot_estate_ping` / `moot_estate_status` so
+    /// a stale plugin or stale binary is visible without a separate check.
+    public let versionSkewAdvisory: String?
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
@@ -102,7 +113,8 @@ public struct ToolDispatcher: Sendable {
     /// source (e.g. "mootx01" for `mootx01 serve`).
     public init(kit: GeniusLocusKit, handle: EstateHandle,
                 buildSerial: String = Self.deriveBuildSerial(),
-                serverIdentity: String = "aria-mcp-server") {
+                serverIdentity: String = "aria-mcp-server",
+                versionSkewAdvisory: String? = nil) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
@@ -110,6 +122,7 @@ public struct ToolDispatcher: Sendable {
         self.recallLedger = SurfacedRecallLedger()
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
+        self.versionSkewAdvisory = versionSkewAdvisory
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -125,19 +138,21 @@ public struct ToolDispatcher: Sendable {
         next[additional.estateUUID] = additional
         return ToolDispatcher(kit: kit, handle: handle, estates: next,
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
-                              buildSerial: buildSerial, serverIdentity: serverIdentity)
+                              buildSerial: buildSerial, serverIdentity: serverIdentity,
+                              versionSkewAdvisory: versionSkewAdvisory)
     }
 
     /// Private designated initializer carrying an explicit estate map,
     /// a shared job registry, a shared recall ledger, the build serial,
-    /// and the server identity. Used by `registering(_:)`; the public
-    /// `init(kit:handle:buildSerial:serverIdentity:)` is the only
-    /// construction path external callers use.
+    /// the server identity, and the version-skew advisory. Used by
+    /// `registering(_:)`; the public
+    /// `init(kit:handle:buildSerial:serverIdentity:versionSkewAdvisory:)` is
+    /// the only construction path external callers use.
     private init(
         kit: GeniusLocusKit, handle: EstateHandle,
         estates: [UUID: EstateHandle], jobRegistry: VaultJobRegistry,
         recallLedger: SurfacedRecallLedger, buildSerial: String,
-        serverIdentity: String
+        serverIdentity: String, versionSkewAdvisory: String?
     ) {
         self.kit = kit
         self.handle = handle
@@ -146,6 +161,7 @@ public struct ToolDispatcher: Sendable {
         self.recallLedger = recallLedger
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
+        self.versionSkewAdvisory = versionSkewAdvisory
     }
 
     // MARK: - Build serial derivation
@@ -1942,15 +1958,21 @@ extension ToolDispatcher {
         // response; fall back to "local-only" so the field is always present
         // and honest. "local-only" means no sync engine is wired for this estate.
         let syncToken = (try? await kit.syncStateToken(for: handle)) ?? "local-only"
-        let stats = [
+        var stats = [
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
             "memories: \(active.count) active (\(total.count) total)",
             "wings: \(wings.joined(separator: ", "))",
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",
             "sync: \(syncToken)",
-        ].joined(separator: "\n")
-        return Self.textResult(stats + Self.ARIASessionProtocol)
+        ]
+        // ADR-024 §5: surface a plugin/binary version-skew advisory when the
+        // host detected one. Appended only when present so the common
+        // no-skew case leaves the response shape unchanged.
+        if let versionSkewAdvisory {
+            stats.append("version_skew: \(versionSkewAdvisory)")
+        }
+        return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol)
     }
 
     /// `moot_estate_map` — return the estate's structural map with memory counts.
@@ -2026,9 +2048,13 @@ extension ToolDispatcher {
         let state = await kit.mountState(for: handle)
         switch state {
         case .mounted:
-            return Self.textResult(
-                "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
-            )
+            // ADR-024 §5: append the version-skew advisory when present —
+            // same opt-in shape as moot_estate_status.
+            var pong = "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
+            if let versionSkewAdvisory {
+                pong += "\nversion_skew: \(versionSkewAdvisory)"
+            }
+            return Self.textResult(pong)
         case .quiesced, .draining:
             // Return a tool-level error (not a JSON-RPC protocol error) so the
             // caller sees an actionable message through the tools/call result.

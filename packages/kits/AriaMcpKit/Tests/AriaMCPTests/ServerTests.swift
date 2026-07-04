@@ -452,4 +452,70 @@ struct ServerTests {
         #expect(text.contains("build \(knownSerial)"),
                 "estate_ping must echo the injected serial 'ABC123'; got: \(text)")
     }
+
+    // MARK: - Version-skew advisory (ADR-024 §5)
+
+    /// When the host injects a version-skew advisory, both `moot_estate_ping`
+    /// and `moot_estate_status` surface it verbatim under a `version_skew:`
+    /// line. The default (`nil`) case is covered implicitly by every other
+    /// test in this file — none of them mention "version_skew".
+    @Test func testVersionSkewAdvisorySurfacesInPingAndStatus() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-skew-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let advisory = "plugin 1.0.15 expects binary ≥ 1.0.15; binary is 1.0.11 — run `mootx01 upgrade`"
+        let tooling = ToolDispatcher(kit: kit, handle: handle, versionSkewAdvisory: advisory)
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        for toolName in ["moot_estate_ping", "moot_estate_status"] {
+            let request = JSONRPCRequest(
+                id: .integer(62),
+                method: "tools/call",
+                params: .object([
+                    "name": .string(toolName),
+                    "arguments": .object([:]),
+                ])
+            )
+            let rawResponse = await dispatcher.handle(request)
+            let response = try #require(rawResponse)
+            guard case .result(let result) = response.payload else {
+                Issue.record("\(toolName) returned error: \(response.payload)")
+                continue
+            }
+            let content = try #require(result.objectValue?["content"]?.arrayValue)
+            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            #expect(text.contains("version_skew: \(advisory)"),
+                    "\(toolName) must surface the injected version-skew advisory; got: \(text)")
+        }
+    }
+
+    /// The default (no advisory injected) case must not mention
+    /// `version_skew` at all — the field is opt-in, not a fixed empty slot.
+    @Test func testNoVersionSkewAdvisoryOmitsField() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(63),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_estate_status"),
+                "arguments": .object([:]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("estate_status returned error: \(response.payload)")
+            return
+        }
+        let content = try #require(result.objectValue?["content"]?.arrayValue)
+        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+        #expect(!text.contains("version_skew"),
+                "no version_skew field expected when the host injected no advisory; got: \(text)")
+    }
 }

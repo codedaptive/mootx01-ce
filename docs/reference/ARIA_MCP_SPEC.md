@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.9.0
+version: 1.10.0
 status: active
-date: 2026-06-28
+date: 2026-07-04
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -692,6 +692,29 @@ On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
 ## Changelog
+
+### 1.10.0 -- 2026-07-04
+ADR-024 §5 (MCP connection ownership, plugin transport, and install-moment
+dedupe): `moot_estate_ping` / `moot_estate_status` gain an opt-in
+`version_skew:` line when the host has detected a mismatch between an
+installed plugin (currently Claude Code's `mootx01@mootx01`) and this
+running binary's version. Runtime detection (rather than only at install
+time) catches skew regardless of install order — plugin-then-binary or
+binary-then-plugin both leave a point-in-time version pinned in
+`~/.claude/plugins/installed_plugins.json` that can drift as either side
+upgrades independently. Computed once at server startup (Swift
+`ServeCommand`; Rust `commands::serve::run`), never per-call, and threaded
+through the dispatcher (`ToolDispatcher.versionSkewAdvisory` / Rust
+`Dispatcher.version_skew`) exactly like the existing build-serial pattern
+(§ 14). Empty/`nil` when no plugin is detected or versions match — the
+common case, which leaves the response shape byte-identical to before this
+change. Both ports at parity. New tests:
+`testVersionSkewAdvisorySurfacesInPingAndStatus`,
+`testNoVersionSkewAdvisoryOmitsField` (Swift, AriaMcpKit `ServerTests.swift`);
+`version_skew_advisory_surfaces_when_present_and_omitted_when_absent` (Rust,
+`dispatch_tests.rs`); `VersionSkewAdvisory` / `version_skew_advisory` unit
+tests in `MootInstallerCore` (Swift) and `mootx01-cli::core::mcp_ownership`
+(Rust).
 
 ### 1.9.0 -- 2026-06-28
 Security hardening — three ARIA tool gate changes (secfix/batch2-aria). Framed as

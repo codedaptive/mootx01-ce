@@ -92,13 +92,48 @@ public enum PluginDetector {
     ///   SAFETY: never point this at the real `~/.claude` in a test; use an
     ///   injected temp home (see InstallerTests' pattern).
     public static func isPluginInstalled(pluginID: String, homeDirectory: URL) -> Bool {
+        installedEntry(pluginID: pluginID, homeDirectory: homeDirectory) != nil
+    }
+
+    /// Returns the installed plugin manifest version (e.g. `"1.0.15"`) from
+    /// the first entry for `pluginID`, or `nil` when not installed. Used by
+    /// the daemon's version-skew advisory (ADR-024 §5) to compare the
+    /// plugin's declared version against the running binary's version.
+    public static func installedVersion(pluginID: String, homeDirectory: URL) -> String? {
+        installedEntry(pluginID: pluginID, homeDirectory: homeDirectory)?["version"] as? String
+    }
+
+    private static func installedEntry(pluginID: String, homeDirectory: URL) -> [String: Any]? {
         let path = homeDirectory
             .appendingPathComponent(".claude/plugins/installed_plugins.json", isDirectory: false)
         guard let data = try? Data(contentsOf: path),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let plugins = root["plugins"] as? [String: Any],
-              let entries = plugins[pluginID] as? [Any]
-        else { return false }
-        return !entries.isEmpty
+              let entries = plugins[pluginID] as? [Any],
+              let first = entries.first as? [String: Any]
+        else { return nil }
+        return first
+    }
+}
+
+/// ADR-024 §5: at daemon startup (and in `moot_estate_ping` /
+/// `moot_estate_status`), when a plugin is detected, compare the plugin
+/// manifest version against the binary version and report skew. Checking at
+/// runtime (rather than only at install time) catches skew regardless of
+/// install order — plugin-then-binary or binary-then-plugin both leave a
+/// point-in-time version pinned in `installed_plugins.json` that can drift
+/// from the binary as either side upgrades independently.
+public enum VersionSkewAdvisory {
+    /// Compute the advisory string for `pluginID`, or `nil` when the plugin
+    /// is not installed or its version matches `binaryVersion` exactly (no
+    /// skew to report). Deterministic and side-effect-free — the daemon
+    /// computes this once at startup and threads it into `ToolDispatcher`.
+    public static func compute(
+        pluginID: String, binaryVersion: String, homeDirectory: URL
+    ) -> String? {
+        guard let pluginVersion = PluginDetector.installedVersion(
+            pluginID: pluginID, homeDirectory: homeDirectory
+        ), pluginVersion != binaryVersion else { return nil }
+        return "plugin \(pluginVersion) expects binary ≥ \(pluginVersion); binary is \(binaryVersion) — run `mootx01 upgrade`"
     }
 }

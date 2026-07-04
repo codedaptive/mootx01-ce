@@ -55,6 +55,40 @@ struct PluginDedupeTests {
         #expect(PluginDetector.isPluginInstalled(pluginID: pluginID, homeDirectory: home))
     }
 
+    // MARK: - VersionSkewAdvisory (ADR-024 §5)
+
+    @Test("VersionSkewAdvisory is nil when the plugin is not installed")
+    func versionSkewNilWhenNoPlugin() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        #expect(VersionSkewAdvisory.compute(
+            pluginID: pluginID, binaryVersion: "1.0.15", homeDirectory: home
+        ) == nil)
+    }
+
+    @Test("VersionSkewAdvisory is nil when versions match")
+    func versionSkewNilWhenVersionsMatch() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeInstalledPlugins(home: home, plugins: [pluginID])  // stamps "1.0.15"
+        #expect(VersionSkewAdvisory.compute(
+            pluginID: pluginID, binaryVersion: "1.0.15", homeDirectory: home
+        ) == nil)
+    }
+
+    @Test("VersionSkewAdvisory names both versions when they differ")
+    func versionSkewReportsMismatch() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        try writeInstalledPlugins(home: home, plugins: [pluginID])  // stamps "1.0.15"
+        let advisory = try #require(VersionSkewAdvisory.compute(
+            pluginID: pluginID, binaryVersion: "1.0.11", homeDirectory: home
+        ))
+        #expect(advisory.contains("1.0.15"))
+        #expect(advisory.contains("1.0.11"))
+        #expect(advisory.contains("mootx01 upgrade"))
+    }
+
     // MARK: - MCPEntryClassifier
 
     @Test("an HTTP entry (no env) classifies as oursDefault")
