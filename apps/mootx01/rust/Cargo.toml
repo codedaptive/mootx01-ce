@@ -16,7 +16,7 @@
 
 [package]
 name = "mootx01-cli"
-version = "1.0.12"
+version = "1.0.13"
 edition = "2021"
 rust-version = "1.75"
 description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
