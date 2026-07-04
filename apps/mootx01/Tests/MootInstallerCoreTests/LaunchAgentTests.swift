@@ -50,7 +50,10 @@ final class LaunchAgentTests: XCTestCase {
         XCTAssertTrue(plist.contains("<string>serve</string>"))
         XCTAssertTrue(plist.contains("<key>RunAtLoad</key>"))
         XCTAssertTrue(plist.contains("<key>KeepAlive</key>"))
-        XCTAssertTrue(plist.contains("<string>Background</string>"))
+        // Interactive, not Background: a Background ProcessType clamps the
+        // whole daemon to efficiency cores (20x slower imports, starved tool
+        // responses). See makePlist doc comment.
+        XCTAssertTrue(plist.contains("<string>Interactive</string>"))
         XCTAssertTrue(plist.contains("moot-mgr.out.log"))
         XCTAssertTrue(plist.contains("moot-mgr.err.log"))
         // A plist with no env dict must NOT emit an EnvironmentVariables key.
