@@ -110,6 +110,16 @@ so rogue instances are self-announcing in a process listing. (Origin: the two
 development-rig `serve` processes in the field finding were identifiable only
 by their exec paths.)
 
+### Known limitation — plugin manifests are static
+
+Plugin manifests are declarative files stamped at packaging time; they cannot
+read runtime configuration. The shipped HTTP entry therefore pins the default
+port (`http://127.0.0.1:4242`). A user who overrides the daemon port
+(`MOOTX01_HTTP_PORT`) has a plugin that cannot connect until the override is
+removed or the manifest is hand-edited; the daemon's ping/status advisory is
+the surface that should name this condition. Accepted for the point release;
+a config-aware handshake is v1.1 material alongside the multi-database work.
+
 ### 7. Deferred to v1.1 (recorded, not designed here)
 
 - **Multiple concurrent moot installations** (two servers/two estates on one
