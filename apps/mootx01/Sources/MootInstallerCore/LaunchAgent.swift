@@ -44,8 +44,14 @@ public enum LaunchAgent {
     ///
     /// - `RunAtLoad` + `KeepAlive` start it immediately and keep it up across
     ///   crashes and logout/login.
-    /// - `ProcessType = Background` tells the scheduler this is a
-    ///   non-interactive service (lower CPU priority, no app-nap surprises).
+    /// - `ProcessType = Interactive`: the daemon serves LIVE user requests
+    ///   (MCP tool calls from Claude Desktop/Code) and its encode pipeline is
+    ///   designed to "drain hard on the performance cores". The previous
+    ///   `Background` value made launchd clamp the WHOLE process to the
+    ///   efficiency cores with throttled I/O — no task-level priority can
+    ///   escape a process-level clamp — and a palace import that completed in
+    ///   83 s on a shell-launched daemon ran 20x slower under launchd, starving
+    ///   tool responses past Claude Desktop's ~4-minute client timeout.
     /// - stdout/stderr are captured to the logs dir so a failed launch is
     ///   diagnosable after the fact.
     ///
@@ -101,7 +107,7 @@ public enum LaunchAgent {
             "    <key>KeepAlive</key>",
             "    <true/>",
             "    <key>ProcessType</key>",
-            "    <string>Background</string>",
+            "    <string>Interactive</string>",
             "    <key>StandardOutPath</key>",
             "    <string>\(xmlEscape(stdoutPath))</string>",
             "    <key>StandardErrorPath</key>",
