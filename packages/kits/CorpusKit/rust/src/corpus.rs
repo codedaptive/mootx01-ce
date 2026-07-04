@@ -2013,6 +2013,17 @@ impl Corpus {
         let chunks = self.active_chunks()?;
         let filed_at_secs = now_millis / 1000;
 
+        // Phase logging throughout: on a large corpus this call legitimately
+        // runs tens of minutes (full basis retrain + full re-embed); without
+        // log lines that is indistinguishable from a hang (the v1.0.13 vault
+        // import triage required sampling the process to prove it was alive).
+        // Swift twin logs the same phases via corpusLog.
+        eprintln!(
+            "[corpus] reindex: start — {} active chunks, {} provider slots",
+            chunks.len(),
+            self.slots.len()
+        );
+
         // Phase 1 — train every trainable slot CONCURRENTLY. The five-signal
         // default carries FOUR trainable providers (RI / PPMI / LSA / NMF) whose
         // trainings are independent computations over the same chunk snapshot:
@@ -2040,11 +2051,19 @@ impl Corpus {
                     }));
                 }
             }
+            if !handles.is_empty() {
+                eprintln!(
+                    "[corpus] reindex: training {} trainable slots concurrently over {} texts",
+                    handles.len(),
+                    chunks_ref.len()
+                );
+            }
             for h in handles {
                 h.join().expect("slot train thread panicked")?;
             }
             Ok(())
         })?;
+        eprintln!("[corpus] reindex: training complete — bases persisted");
 
         // Phase 2 — re-embed every chunk under each slot's (now possibly
         // retrained) provider, replacing stale vectors. Done whether or not a
@@ -2053,6 +2072,12 @@ impl Corpus {
         // re-embed already fans its embed compute across all cores and funnels
         // one bulk single-writer transaction (replace_model_vectors).
         for slot_index in 0..self.slots.len() {
+            eprintln!(
+                "[corpus] reindex: re-embedding {} chunks (slot {}/{})",
+                chunks.len(),
+                slot_index + 1,
+                self.slots.len()
+            );
             self.reembed_chunks(slot_index, &chunks, filed_at_secs)?;
         }
 
@@ -2060,6 +2085,11 @@ impl Corpus {
         // accumulators were kept current by the ingest fold path; persisting here
         // re-anchors the growth trigger to the just-reindexed state.
         self.persist_maintained_counts(filed_at_secs)?;
+        eprintln!(
+            "[corpus] reindex: complete — {} chunks re-embedded across {} slots",
+            chunks.len(),
+            self.slots.len()
+        );
         Ok(())
     }
 
@@ -2182,6 +2212,15 @@ impl Corpus {
         let batches_ref = &batches;
         let next_batch = std::sync::atomic::AtomicUsize::new(0);
         let next_ref = &next_batch;
+        // Progress counter: on a large corpus this phase runs many minutes; a
+        // line every ~5k chunks keeps the daemon log distinguishable from a
+        // hang. Atomic (batches complete concurrently); logging order may
+        // interleave but counts are exact. Swift twin: the Mutex-guarded
+        // counter in Corpus.reembedChunks.
+        const PROGRESS_STRIDE: usize = 5_000;
+        let total_chunks = chunks.len();
+        let embedded = std::sync::atomic::AtomicUsize::new(0);
+        let embedded_ref = &embedded;
         let batch_rows: Vec<Vec<VectorPayloadInput>> = std::thread::scope(
             |scope| -> Result<Vec<Vec<VectorPayloadInput>>, CorpusKitError> {
                 let handles: Vec<_> = (0..workers)
@@ -2224,6 +2263,17 @@ impl Corpus {
                                                 filed_at_unix_secs: filed_at_secs,
                                             });
                                         }
+                                    }
+                                    let done = embedded_ref.fetch_add(
+                                        batch.len(),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    ) + batch.len();
+                                    if done / PROGRESS_STRIDE
+                                        > (done - batch.len()) / PROGRESS_STRIDE
+                                    {
+                                        eprintln!(
+                                            "[corpus] reindex: reembed {done}/{total_chunks} ({model_id_ref})"
+                                        );
                                     }
                                     out.push((i, rows));
                                 }

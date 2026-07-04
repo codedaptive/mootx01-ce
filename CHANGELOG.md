@@ -5,6 +5,25 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.14 — 2026-07-04
+
+Import cost release. Vault imports now pay for what they import, not for the
+whole estate.
+
+- **Vault import — delta-aware reindex tail** — importing into a populated
+  estate previously always retrained the full embedding basis and re-embedded
+  every chunk in the corpus (~70 minutes on a 50k estate — even when the
+  vault was completely unchanged). Now: an unchanged reimport skips the tail
+  outright (seconds); a small delta (under 5% of the indexed corpus) is
+  embedded through the live basis by the encode drain — the same path a live
+  capture takes — with no full retrain; only large imports (cold loads, big
+  vaults) pay the full train-once+embed-once tail. Full retrain remains
+  available on demand via `moot_reindex`. Both ports.
+- **Reindex progress logging** — the full-corpus reindex now logs its phases
+  (per-slot training, re-embed progress every 5,000 chunks, completion), and
+  the vault import logs its sweep start and routing decision, so a long
+  legitimate reindex is distinguishable from a hang in the daemon log.
+
 ## v1.0.13 — 2026-07-04
 
 Claude Desktop reliability release. Fixes the session timeouts and

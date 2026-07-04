@@ -1802,6 +1802,18 @@ fn run_reindex_responsive(
     // against concurrent live captures.
     const ENQUEUE_CHUNK: usize = 1024;
     let mut total = 0usize;
+    // Delta-aware tail: decided on the FIRST pass and sticky for the loop.
+    // When the missing set is a small fraction of an already-trained corpus,
+    // the O(corpus) tail below (full basis retrain + full re-embed + index
+    // rebuild) is grossly oversized — a ~1k-note vault import into a 50k
+    // estate burned ~70 min of CPU, and an UNCHANGED reimport burned the same
+    // for literally nothing. Small deltas instead ride the ENCODE stream,
+    // whose drain embeds each chunk through the LIVE basis as it ingests (the
+    // live-capture machinery, reused verbatim), and the tail retrain is
+    // skipped: new vocabulary enters the basis at the next large import,
+    // explicit `moot_reindex`, or scheduled maintenance. Swift twin: the
+    // smallDelta branch in GeniusLocusKit.reindexMissing.
+    let mut small_delta = false;
     // Auto-continuation loop: collect_reindex_jobs caps each pass at
     // REINDEX_MAX_JOBS. Enqueue the pass LOCK-FREE, poll its drain to idle
     // (lock-free — the Corpus queue is independent of the coord Mutex, so
@@ -1812,7 +1824,7 @@ fn run_reindex_responsive(
     // size, while each pass stays bounded. The 1000-pass ceiling is a backstop
     // against a drawer that never indexes (e.g. an encode error) spinning
     // forever (covers 10M drawers at the 10k cap).
-    for _pass in 0..1000 {
+    for pass in 0..1000 {
         let (corpus, jobs) = {
             let mut c = coord_arc
                 .lock()
@@ -1828,17 +1840,34 @@ fn run_reindex_responsive(
         if jobs.is_empty() {
             break; // every active drawer is indexed — done
         }
-        // IMPORT stream, not the daily-driving encode stream: the discrete
-        // corpus-import-drain worker claims these jobs and ingests them via
-        // ingest_batch_import — chunk + BM25 only, no bootstrap train, no embed.
-        // The encode drain's embed-now / train-as-you-go work is correct for a
-        // live single capture but pure repeated waste for a bulk import, whose
-        // basis is retrained on the WHOLE corpus and whose chunks are embedded
-        // ONCE at the tail below. Same durable queue.sqlite, so a crash
-        // mid-import cold-starts: the import worker reclaims orphaned rows and
-        // resumes.
+        if pass == 0 {
+            // Classify the import size from the first pass (the decision logic
+            // and threshold live in GLK, beside the Swift twin's).
+            let indexed_count = corpus.indexed_source_ids().map(|ids| ids.len()).unwrap_or(0);
+            small_delta =
+                genius_locus_kit::coordinator::EstateCoordinator::is_small_reindex_delta(
+                    jobs.len(),
+                    indexed_count,
+                );
+        }
+        // Stream choice is the delta decision above:
+        //   • LARGE import → IMPORT stream: the discrete corpus-import-drain
+        //     worker ingests chunk + BM25 only — no bootstrap train, no embed.
+        //     The encode drain's embed-now work would be pure repeated waste
+        //     for a bulk import whose basis is retrained on the WHOLE corpus
+        //     and whose chunks are embedded ONCE at the tail below.
+        //   • SMALL delta → ENCODE stream: the encode drain embeds each chunk
+        //     through the LIVE basis as it ingests (identical to a live
+        //     capture), so no tail retrain/re-embed is needed at all.
+        // Same durable queue.sqlite either way, so a crash mid-import
+        // cold-starts: the drain worker reclaims orphaned rows and resumes.
         for chunk in jobs.chunks(ENQUEUE_CHUNK) {
-            if corpus.enqueue_ingest_batch_import(chunk).is_ok() {
+            let enqueued = if small_delta {
+                corpus.enqueue_ingest_batch(chunk).is_ok()
+            } else {
+                corpus.enqueue_ingest_batch_import(chunk).is_ok()
+            };
+            if enqueued {
                 total += chunk.len();
             }
         }
@@ -1846,44 +1875,84 @@ fn run_reindex_responsive(
         // collect sees the batch's chunks as indexed and does NOT re-enqueue
         // still-in-flight jobs (that duplicate-enqueue was the encode stall).
         //
-        // POLL, do not pump — the single lease-holding import worker owns the
-        // drain; this loop only observes the read-only import-stream depth probe.
-        // collect_reindex_jobs keys on chunk presence (written inside the drain),
-        // so (0, 0) depth means the pass is fully indexed and the next collect
-        // returns only the remainder.
+        // POLL, do not pump — the single lease-holding drain worker owns the
+        // drain; this loop only observes the read-only depth probe FOR THE
+        // STREAM the batch was enqueued on. collect_reindex_jobs keys on chunk
+        // presence (written inside the drain), so (0, 0) depth means the pass
+        // is fully indexed and the next collect returns only the remainder.
         loop {
-            match corpus.import_queue_depth() {
+            let depth = if small_delta {
+                corpus.ingest_queue_depth()
+            } else {
+                corpus.import_queue_depth()
+            };
+            match depth {
                 Ok((0, 0)) => break,
                 Ok(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
                 Err(_) => break, // depth probe fault — stop rather than spin
             }
         }
     }
-    // Full-corpus embedding-basis retrain, so the DENSE (semantic / vector / RAG)
-    // recall lane is query-ready the moment the import cycle reports complete.
-    //
-    // The loop above reaches full CHUNK coverage: every drawer is chunked, BM25
-    // (lexical) indexed, and embedded — but embedded against whatever basis was
-    // live when its batch drained, which for a cold import is the FIRST-batch
-    // bootstrap basis (its vocabulary is only the first pass's terms). A query term
-    // that appears only in a later batch therefore reads dense_lane:dark:vocabMiss
-    // until the basis is retrained on the WHOLE corpus and every chunk re-embedded
-    // into that space. Corpus::reindex does exactly that (train_and_persist_basis
-    // over all active chunks, then reembed_chunks → one index rebuild). Lexical
-    // (BM25) and structured (Locus) recall are already live from chunk coverage;
-    // THIS is the step that lights up semantic recall — so it belongs at the tail
-    // of the import cycle, not on a later cadence. Run on the Arc<Corpus> OUTSIDE
-    // the coord lock (a full re-embed is long; the lock must not be held across it).
-    let corpus_for_retrain = {
-        let c = coord_arc
-            .lock()
-            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
-        c.corpus_handle(handle)
-    };
-    if let Some(corpus) = corpus_for_retrain {
-        corpus
-            .reindex(now)
-            .map_err(|e| format!("corpus basis retrain failed: {e:?}"))?;
+    // Nothing was missing: no new chunks entered the corpus, so the basis,
+    // every embedding, and the Merkle tree are exactly as current as before
+    // this call — the O(corpus) tail below would be pure waste (observed: an
+    // UNCHANGED vault reimport into a 50k estate burned ~70 min of full
+    // retrain + re-embed for a no-op). A previously interrupted import (chunks
+    // present but basis stale) is repaired by the explicit `moot_reindex`
+    // tool, which exists for exactly that. Swift twin: the total == 0 guard in
+    // GeniusLocusKit.reindexMissing.
+    if total == 0 {
+        eprintln!("[reindex] nothing to index — reindex tail skipped");
+        return Ok(0);
+    }
+    if small_delta {
+        // Small delta: every enqueued chunk was already embedded through the
+        // LIVE basis by the encode drain. Pump the barrier once — it publishes
+        // the resident vector index, the searchability contract — and skip the
+        // full retrain. New vocabulary enters the basis at the next large
+        // import, explicit `moot_reindex`, or maintenance.
+        let corpus_for_publish = {
+            let c = coord_arc
+                .lock()
+                .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+            c.corpus_handle(handle)
+        };
+        if let Some(corpus) = corpus_for_publish {
+            corpus
+                .await_ingest_drain()
+                .map_err(|e| format!("small-delta ingest barrier failed: {e:?}"))?;
+        }
+        eprintln!(
+            "[reindex] small delta ({total} drawers) embedded via the live basis — full retrain skipped (moot_reindex retrains on demand)"
+        );
+    } else {
+        // Full-corpus embedding-basis retrain, so the DENSE (semantic / vector /
+        // RAG) recall lane is query-ready the moment the import cycle reports
+        // complete.
+        //
+        // The loop above reaches full CHUNK coverage: every drawer is chunked
+        // and BM25 (lexical) indexed — but import-stream ingest deliberately
+        // does NOT embed. A query term that appears only in an unembedded chunk
+        // reads dense_lane:dark:vocabMiss until the basis is trained on the
+        // WHOLE corpus and every chunk embedded into that space. Corpus::reindex
+        // does exactly that (train_and_persist_basis over all active chunks,
+        // then reembed_chunks → one index rebuild). Lexical (BM25) and
+        // structured (Locus) recall are already live from chunk coverage; THIS
+        // is the step that lights up semantic recall — so it belongs at the
+        // tail of the import cycle, not on a later cadence. Run on the
+        // Arc<Corpus> OUTSIDE the coord lock (a full re-embed is long; the lock
+        // must not be held across it).
+        let corpus_for_retrain = {
+            let c = coord_arc
+                .lock()
+                .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+            c.corpus_handle(handle)
+        };
+        if let Some(corpus) = corpus_for_retrain {
+            corpus
+                .reindex(now)
+                .map_err(|e| format!("corpus basis retrain failed: {e:?}"))?;
+        }
     }
     // Brief re-lock for the deferred Merkle full-tree rollup, once, after coverage.
     {
