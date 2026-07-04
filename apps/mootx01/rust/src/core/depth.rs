@@ -39,7 +39,10 @@ pub trait ClaudeCliRunning {
 /// Default runner: shells out to `claude`. `std::process::Command` searches
 /// PATH itself on every platform (unlike Swift's `Process`, which requires
 /// an absolute `executableURL` and needs the `env` indirection) — so no
-/// platform-specific PATH resolution is needed here.
+/// platform-specific PATH resolution is needed here. `Command::new` resolves
+/// PATH binaries only — a shell alias or function named `claude` (no PATH
+/// binary) is invisible to it, so an alias-only setup falls into this same
+/// CLI-absent `false` fallback.
 pub struct ProcessClaudeCliRunner;
 
 impl ClaudeCliRunning for ProcessClaudeCliRunner {

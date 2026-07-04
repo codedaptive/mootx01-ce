@@ -185,3 +185,74 @@ fn restart_services() {
          daemon manually: stop it, then `mootx01 serve --http auto`)"
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::depth::{self, InstallBundle, InstallDepth, ProcessClaudeCliRunner};
+
+    fn tmp_home(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("mootx01-upgrade-rematerialize-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Priority Adams wave-3 coverage finding: direct test of
+    /// `rematerialize_plugin_depth`'s gating logic (ADR-024 Wave 3, Defect
+    /// 1). A host that already has a plugin directory on disk (claude-code,
+    /// seeded here) must be converged — its package is rewritten in place.
+    /// A plugin-capable host with NO existing directory (cursor) must be
+    /// left alone: an upgrade never CREATES a new plugin-depth install for
+    /// a host that never had one.
+    #[test]
+    fn rematerializes_only_hosts_with_an_existing_plugin_dir() {
+        let home = tmp_home("gate");
+
+        // No plugin-capable host has a directory yet.
+        let cursor_host = InstallBundle::embedded()
+            .host("cursor")
+            .expect("cursor must be in the embedded install map")
+            .clone();
+        let cursor_dir = depth::plugin_install_directory(&cursor_host, &home);
+        assert!(!cursor_dir.exists(), "cursor must start with no plugin dir");
+
+        // Seed claude-code as an EXISTING plugin-depth install (as if
+        // `mootx01 install --mode plugin` ran previously for it only).
+        depth::apply("claude-code", InstallDepth::Plugin, &home, false, &ProcessClaudeCliRunner)
+            .expect("seeding claude-code's plugin install must succeed");
+        let claude_host = InstallBundle::embedded().host("claude-code").unwrap().clone();
+        let claude_dir = depth::plugin_install_directory(&claude_host, &home);
+        let marker = claude_dir.join(".claude-plugin/plugin.json");
+        assert!(marker.exists(), "seed must have created claude-code's plugin manifest");
+
+        // Delete the manifest so the rematerialize pass has something
+        // observable to converge — a no-op pass would leave it missing.
+        std::fs::remove_file(&marker).unwrap();
+
+        rematerialize_plugin_depth(&home);
+
+        assert!(marker.exists(), "claude-code (had an existing dir) must be rematerialized");
+        assert!(!cursor_dir.exists(), "cursor (never had a dir) must NOT get a new plugin install");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The gate is keyed on the plugin directory's existence, not on any
+    /// other install state — a host with the directory pre-created (but not
+    /// via a full `apply`) must still be picked up and populated.
+    #[test]
+    fn rematerializes_a_bare_pre_existing_directory() {
+        let home = tmp_home("bare-dir");
+        let claude_host = InstallBundle::embedded().host("claude-code").unwrap().clone();
+        let claude_dir = depth::plugin_install_directory(&claude_host, &home);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let manifest = claude_dir.join(".claude-plugin/plugin.json");
+        assert!(!manifest.exists());
+
+        rematerialize_plugin_depth(&home);
+
+        assert!(manifest.exists(), "a bare pre-existing plugin dir must still be rematerialized");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

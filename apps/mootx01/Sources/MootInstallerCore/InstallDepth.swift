@@ -39,6 +39,9 @@ public protocol ClaudeCLIRunning: Sendable {
 /// not search PATH itself — so `env` is the standard way to get PATH
 /// resolution). `env` itself exits nonzero when `claude` is not found, which
 /// this reports as `false`, identical to a nonzero exit from `claude` itself.
+/// `env` resolves PATH binaries only — a shell alias or function named
+/// `claude` (no PATH binary) is invisible to it, so an alias-only setup
+/// falls into this same CLI-absent `false` fallback.
 public struct ProcessClaudeCLIRunner: ClaudeCLIRunning {
     public init() {}
 
@@ -277,6 +280,35 @@ public enum DepthInstaller {
             .deletingLastPathComponent()  // skills/
             .deletingLastPathComponent()  // host plugin root
             .appendingPathComponent("mootx01-plugin", isDirectory: true)
+    }
+
+    /// Every plugin-capable host that ALREADY has a plugin directory on disk
+    /// for `homeDirectory` — the gating logic behind `mootx01 upgrade`'s
+    /// rematerialization pass (ADR-024 Wave 3, Defect 1: an upgrade alone
+    /// never touches `~/.claude/mootx01-plugin`, stranding the package and,
+    /// for Claude Code, its plugin cache).
+    ///
+    /// Extracted from `UpgradeCommand.rematerializePluginDepth` (Adams
+    /// wave-3 coverage finding) so the gate — CONVERGE existing installs,
+    /// never CREATE a new one for a host that never had one — is directly
+    /// unit-testable from `MootInstallerCoreTests` without needing the
+    /// `mootx01` executable target's test seam. `UpgradeCommand` calls this,
+    /// then loops the result through `apply(depth: .plugin, ...)` and prints
+    /// its own per-host CLI output — that print/apply loop is left in the
+    /// executable target because it is not itself logic worth testing (it is
+    /// a straight iteration + one `apply` call already covered by
+    /// `plugin_depth_installs_package`-shaped tests elsewhere).
+    ///
+    /// - Parameter homeDirectory: user's home (for plugin-directory resolution).
+    /// - Returns: the plugin-capable hosts whose plugin directory already
+    ///   exists, in `InstallBundle.embedded.hosts` iteration order.
+    public static func hostsWithExistingPluginDirectory(homeDirectory: URL) -> [InstallMapHost] {
+        InstallBundle.embedded.hosts.values
+            .filter { host in
+                host.supportsPlugin
+                    && FileManager.default.fileExists(
+                        atPath: pluginInstallDirectory(host: host, homeDirectory: homeDirectory).path)
+            }
     }
 
     /// Mode 2: write the embedded canonical SKILL.md to the host's skillUserPath.
@@ -538,7 +570,11 @@ public enum DepthInstaller {
     /// no host ever needs it again, remove it in a follow-up; do not treat
     /// its current inertness as license to silently keep it as ceremony
     /// without this note.
-    private static func rewriteBareMootCommand(in contents: String, binaryPath: String) -> String {
+    // Internal (not private), matching `injectVaultEnv`'s access level —
+    // both are direct-unit-test targets from `MootInstallerCoreTests` via
+    // `@testable import` (Adams wave-3 coverage finding: this function had
+    // no direct test despite being the forward-compat rewrite path).
+    static func rewriteBareMootCommand(in contents: String, binaryPath: String) -> String {
         let escapedBinaryPath = jsonEscapedString(binaryPath)
         return contents
             .replacingOccurrences(of: "\"command\" : \"mootx01\"", with: "\"command\" : \"\(escapedBinaryPath)\"")

@@ -103,22 +103,23 @@ struct UpgradeCommand: AsyncParsableCommand {
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
     }
 
-    /// See the call site's doc comment. Iterates every plugin-capable host
-    /// in the embedded install map; for each whose plugin directory already
-    /// exists, reruns `DepthInstaller.apply(depth: .plugin, ...)` so the
-    /// on-disk package (and, for Claude Code, the plugin cache) converge on
-    /// whatever the CURRENT embedded bundle carries. `vaultOff` is not
-    /// tracked across upgrades — passing `false` here is safe regardless:
-    /// every plugin-capable host's package is HTTP-shaped today (ADR-024
-    /// §2), so `vaultOff` has no effect on rematerialization (Defect 2); the
-    /// vault posture that matters lives in the resident daemon's own
-    /// launchd environment, which `mootx01 upgrade` does not touch (it
-    /// restarts the daemon from its EXISTING plist via `LaunchAgent.restart`,
-    /// never rewriting it).
+    /// See the call site's doc comment. The gating (which hosts qualify —
+    /// plugin-capable AND already has a plugin directory on disk) lives in
+    /// `DepthInstaller.hostsWithExistingPluginDirectory`, directly unit-
+    /// tested from `MootInstallerCoreTests` (Adams wave-3 coverage finding).
+    /// This loop reruns `DepthInstaller.apply(depth: .plugin, ...)` for each
+    /// gated host so the on-disk package (and, for Claude Code, the plugin
+    /// cache) converge on whatever the CURRENT embedded bundle carries, and
+    /// prints the per-host CLI result. `vaultOff` is not tracked across
+    /// upgrades — passing `false` here is safe regardless: every
+    /// plugin-capable host's package is HTTP-shaped today (ADR-024 §2), so
+    /// `vaultOff` has no effect on rematerialization (Defect 2); the vault
+    /// posture that matters lives in the resident daemon's own launchd
+    /// environment, which `mootx01 upgrade` does not touch (it restarts the
+    /// daemon from its EXISTING plist via `LaunchAgent.restart`, never
+    /// rewriting it).
     private func rematerializePluginDepth(home: URL, binaryPath: String) {
-        for host in InstallBundle.embedded.hosts.values where host.supportsPlugin {
-            let dir = DepthInstaller.pluginInstallDirectory(host: host, homeDirectory: home)
-            guard FileManager.default.fileExists(atPath: dir.path) else { continue }
+        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
             do {
                 _ = try DepthInstaller.apply(
                     clientID: host.id, depth: .plugin, homeDirectory: home, binaryPath: binaryPath
