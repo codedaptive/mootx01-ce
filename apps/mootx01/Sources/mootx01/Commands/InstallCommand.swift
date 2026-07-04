@@ -213,8 +213,14 @@ struct InstallCommand: AsyncParsableCommand {
             print("Integration depth: \(depth.rawValue)")
             for client in clients where installed.contains(client.displayName) {
                 do {
-                    // Thread the vault posture so plugin-spawned stdio servers
-                    // inherit MOOTX01_VAULT=0 when --vault-off was passed (sec-fix 6b08d56b).
+                    // Thread the vault posture so any command/stdio-shaped
+                    // entry in the plugin package (the proxy-bridge fallback
+                    // for a host whose schema cannot express HTTP) inherits
+                    // MOOTX01_VAULT=0 when --vault-off was passed (sec-fix
+                    // 6b08d56b). HTTP-shaped entries are untouched — the
+                    // resident daemon carries the vault posture in its own
+                    // launchd environment (`daemonEnv` above), independent
+                    // of this call (ADR-024 Wave 3, Defect 2).
                     let outcome = try DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,

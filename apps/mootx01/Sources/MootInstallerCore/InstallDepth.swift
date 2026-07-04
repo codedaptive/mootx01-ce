@@ -21,6 +21,43 @@
 
 import Foundation
 
+/// Abstraction over invoking the `claude` CLI (ADR-024 Wave 3, Defect 1:
+/// "stranded cache"). Real callers use `ProcessClaudeCLIRunner`, which shells
+/// out to `claude` resolved from PATH; tests inject a fake so the refresh
+/// path is unit-testable without touching a real Claude Code installation.
+/// Absence of the CLI on PATH and a nonzero exit both surface as `false` —
+/// the caller never fails the install over this, only prints a fallback
+/// instruction.
+public protocol ClaudeCLIRunning: Sendable {
+    /// Runs `claude <arguments>`. Returns `true` on a clean (exit 0) run,
+    /// `false` if `claude` is absent from PATH or exits nonzero.
+    func run(arguments: [String]) -> Bool
+}
+
+/// Default runner: shells out to `claude` resolved via `/usr/bin/env`
+/// (Foundation's `Process.executableURL` requires an absolute path — it does
+/// not search PATH itself — so `env` is the standard way to get PATH
+/// resolution). `env` itself exits nonzero when `claude` is not found, which
+/// this reports as `false`, identical to a nonzero exit from `claude` itself.
+public struct ProcessClaudeCLIRunner: ClaudeCLIRunning {
+    public init() {}
+
+    public func run(arguments: [String]) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["claude"] + arguments
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}
+
 /// The integration depth requested for an install run.
 public enum InstallDepth: String, Sendable, CaseIterable {
     case server
@@ -171,10 +208,19 @@ public enum DepthInstaller {
     ///   - homeDirectory: user's home (for ~ expansion).
     ///   - binaryPath: absolute path of the placed binary, rewritten into MCP configs.
     ///   - vaultOff: when `true`, `MOOTX01_VAULT=0` is injected into the env
-    ///     block of every MCP server entry written by the plugin installer so
-    ///     plugin-spawned stdio servers inherit the correct vault posture.
-    ///     Defaults to `false` (vault-on); absent `MOOTX01_VAULT` means
-    ///     vault-on per ADR-015 §1.
+    ///     block of any command/stdio-shaped MCP server entry written by the
+    ///     plugin installer (a host whose schema cannot express HTTP and
+    ///     falls back to the proxy bridge — see `injectVaultEnv`). HTTP-shaped
+    ///     entries are never touched: the resident daemon is the actual MCP
+    ///     server for those, its own launchd/systemd/Task-Scheduler
+    ///     environment already carries `MOOTX01_VAULT` (wired at daemon
+    ///     registration time, independent of this function), and client-side
+    ///     env on an HTTP entry is inert — nothing reads it. Defaults to
+    ///     `false` (vault-on); absent `MOOTX01_VAULT` means vault-on per
+    ///     ADR-015 §1.
+    ///   - claudeCLIRunner: injectable seam for the `claude plugin update`
+    ///     stranded-cache refresh (ADR-024 Wave 3, Defect 1). Defaults to the
+    ///     real process-based runner; tests inject a fake.
     /// - Returns: the achieved `DepthOutcome`.
     /// - Throws: filesystem errors writing the skill file or package tree.
     @discardableResult
@@ -183,7 +229,8 @@ public enum DepthInstaller {
         depth: InstallDepth,
         homeDirectory: URL,
         binaryPath: String,
-        vaultOff: Bool = false
+        vaultOff: Bool = false,
+        claudeCLIRunner: ClaudeCLIRunning = ProcessClaudeCLIRunner()
     ) throws -> DepthOutcome {
         if depth == .server { return .server }
 
@@ -203,7 +250,8 @@ public enum DepthInstaller {
                     host: host,
                     homeDirectory: homeDirectory,
                     binaryPath: binaryPath,
-                    vaultOff: vaultOff
+                    vaultOff: vaultOff,
+                    claudeCLIRunner: claudeCLIRunner
                 )
             }
             // Ceiling: fall back to skills and report it (§4.4).
@@ -213,6 +261,22 @@ public enum DepthInstaller {
             }
             return outcome
         }
+    }
+
+    /// The plugin-depth install directory for `host` (parent of the skill's
+    /// `skills/` dir, `+ "mootx01-plugin"`), without checking existence.
+    /// Exposed so callers outside this file (e.g. `mootx01 upgrade`) can
+    /// check whether a plugin was previously materialized for this host, to
+    /// decide whether to rematerialize it after a binary swap (ADR-024 Wave
+    /// 3, Defect 1 — an upgrade alone does not touch this directory or
+    /// Claude Code's plugin cache unless something asks it to).
+    public static func pluginInstallDirectory(host: InstallMapHost, homeDirectory: URL) -> URL {
+        let skillDest = expandTilde(host.skillUserPath, homeDirectory: homeDirectory)
+        return skillDest
+            .deletingLastPathComponent()  // mootx01-memory/
+            .deletingLastPathComponent()  // skills/
+            .deletingLastPathComponent()  // host plugin root
+            .appendingPathComponent("mootx01-plugin", isDirectory: true)
     }
 
     /// Mode 2: write the embedded canonical SKILL.md to the host's skillUserPath.
@@ -231,15 +295,23 @@ public enum DepthInstaller {
     /// embedded bundle into the host's plugin root (the parent of the skill's
     /// `skills/` dir). The package's own SKILL.md is byte-identical to Mode 2's.
     ///
-    /// When `vaultOff` is true, every MCP config JSON file in the package that
-    /// declares a `mcpServers.mootx01` entry has `env.MOOTX01_VAULT=0` injected
-    /// after the binary-path rewrite. Skills files and plugin-metadata files
-    /// (plugin.json without an mcpServers block) are written verbatim.
+    /// When `vaultOff` is true, every command/stdio-shaped MCP entry in the
+    /// package (the proxy-bridge fallback for hosts whose schema cannot
+    /// express HTTP — see `injectVaultEnv`) has `env.MOOTX01_VAULT=0`
+    /// injected after the binary-path rewrite. HTTP-shaped entries, skills
+    /// files, and plugin-metadata files (plugin.json without an mcpServers
+    /// block) are written verbatim.
+    ///
+    /// ADR-024 Wave 3, Defect 1 ("stranded cache"): for Claude Code
+    /// specifically, after materializing the package this also refreshes
+    /// Claude Code's own plugin cache if it was already installed — see
+    /// `refreshStrandedPluginCache`.
     private static func installPlugin(
         host: InstallMapHost,
         homeDirectory: URL,
         binaryPath: String,
-        vaultOff: Bool
+        vaultOff: Bool,
+        claudeCLIRunner: ClaudeCLIRunning
     ) throws -> DepthOutcome {
         let files = InstallBundle.embedded.packageFiles(forHostID: host.id)
         guard !files.isEmpty else {
@@ -250,14 +322,7 @@ public enum DepthInstaller {
             }
             return outcome
         }
-        // Host plugin root: parent of the skill's `skills/` dir. For
-        // ~/.claude/skills/mootx01-memory/SKILL.md that is ~/.claude.
-        let skillDest = expandTilde(host.skillUserPath, homeDirectory: homeDirectory)
-        let pluginRoot = skillDest
-            .deletingLastPathComponent()  // mootx01-memory/
-            .deletingLastPathComponent()  // skills/
-            .deletingLastPathComponent()  // host plugin root
-        let dest = pluginRoot.appendingPathComponent("mootx01-plugin", isDirectory: true)
+        let dest = pluginInstallDirectory(host: host, homeDirectory: homeDirectory)
         // §4.2: back up an existing plugin dir, then replace it.
         if FileManager.default.fileExists(atPath: dest.path) {
             try Installer.backupExisting(at: dest)
@@ -268,9 +333,19 @@ public enum DepthInstaller {
             let fileURL = dest.appendingPathComponent(rel)
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // 1. Rewrite bare "mootx01" command placeholder to the installed path.
-            // 2. When vault-off, inject MOOTX01_VAULT=0 so the plugin-spawned
-            //    stdio server inherits the correct vault posture (sec-fix 6b08d56b).
+            // 1. Rewrite the bare "mootx01" command placeholder to the
+            //    installed path — live only for hosts whose package still
+            //    carries a `command` entry (the proxy-bridge fallback;
+            //    currently none of the manifestBundle hosts reachable here,
+            //    since ADR-024 §2 moved them all to HTTP — see
+            //    rewriteBareMootCommand's own doc comment).
+            // 2. When vault-off, inject MOOTX01_VAULT=0 into any
+            //    command/stdio-shaped entry — HTTP entries are skipped (see
+            //    injectVaultEnv): the resident daemon already carries the
+            //    vault posture in its own launchd/systemd/Task-Scheduler
+            //    environment, wired independently at daemon-registration
+            //    time (sec-fix 6b08d56b's intent), and client-side env on an
+            //    HTTP entry is inert — nothing reads it.
             var safeContents = rewriteBareMootCommand(in: contents, binaryPath: binaryPath)
             if vaultOff {
                 safeContents = injectVaultEnv(in: safeContents, rel: rel)
@@ -286,9 +361,55 @@ public enum DepthInstaller {
         // their package payloads; this step is Claude Code specific.)
         if host.id == "claude-code" {
             try registerClaudeCodeMarketplace(pluginDir: dest)
+            refreshStrandedPluginCache(homeDirectory: homeDirectory, claudeCLIRunner: claudeCLIRunner)
         }
 
         return .plugin(path: dest.path)
+    }
+
+    /// The Claude Code plugin registry id this installer manages. Shared by
+    /// the stranded-cache refresh and (eventually) any other Claude-Code-
+    /// specific plugin-identity lookup.
+    static let claudeCodePluginID = "mootx01@mootx01"
+
+    /// ADR-024 Wave 3, Defect 1 ("stranded cache"): Claude Code loads
+    /// plugins from a CACHE SNAPSHOT
+    /// (`~/.claude/plugins/installed_plugins.json`) that pins `installPath`
+    /// + `version` at install time — it does NOT re-read the marketplace
+    /// directory on every launch. Rewriting `~/.claude/mootx01-plugin` above
+    /// (a fresh package, current transport) does nothing to that cache: a
+    /// user who already has the plugin installed keeps whatever snapshot
+    /// Claude Code cached — potentially the OLD stdio manifest — no matter
+    /// how many times `mootx01 install`/`upgrade` rewrites the on-disk
+    /// package, until something explicitly tells Claude Code to refresh it.
+    ///
+    /// If the plugin is NOT yet installed, there is no stale cache to
+    /// refresh: the marketplace registration just performed is sufficient —
+    /// Claude Code discovers and installs fresh (reading the CURRENT
+    /// package) the next time it loads.
+    ///
+    /// If it IS already installed, ask the live `claude` CLI to refresh its
+    /// cached copy (`claude plugin update <id>`, default scope `user` —
+    /// matches where `registerClaudeCodeMarketplace` registers). Never fails
+    /// the install over this: a missing CLI or a nonzero exit only prints a
+    /// one-line instruction asking the user to run the refresh themselves,
+    /// then restart Claude Code.
+    ///
+    /// - Parameter claudeCLIRunner: injectable seam so this is testable
+    ///   without shelling out to a real `claude` binary.
+    static func refreshStrandedPluginCache(
+        homeDirectory: URL,
+        claudeCLIRunner: ClaudeCLIRunning
+    ) {
+        guard PluginDetector.isPluginInstalled(
+            pluginID: claudeCodePluginID, homeDirectory: homeDirectory
+        ) else {
+            return
+        }
+        guard claudeCLIRunner.run(arguments: ["plugin", "update", claudeCodePluginID]) else {
+            print("  ⓘ Could not refresh the cached mootx01 plugin automatically — run `claude plugin update \(claudeCodePluginID)` yourself, then restart Claude Code.")
+            return
+        }
     }
 
     /// Register the just-materialised plugin dir as a local (directory-source)
@@ -342,15 +463,29 @@ public enum DepthInstaller {
         try out.write(to: settingsURL, options: .atomic)
     }
 
-    /// Inject `env.MOOTX01_VAULT=0` into the `mcpServers.mootx01` entry of an
-    /// MCP config JSON file. Only operates on `.json` files whose content
-    /// declares an `mcpServers` block — plugin-metadata files (author/description
-    /// only) and non-JSON files (SKILL.md, YAML) are returned unchanged.
+    /// ADR-024 Wave 3, Defect 2 ("dead vault env on HTTP entry"): inject
+    /// `env.MOOTX01_VAULT=0` into the `mcpServers.mootx01` entry of an MCP
+    /// config JSON file — but ONLY when that entry is command/stdio-shaped
+    /// (carries a `command` key: the proxy-bridge fallback for a host whose
+    /// schema cannot express HTTP). An HTTP-shaped entry (`type`/`url`, no
+    /// `command`) is left untouched: the resident daemon is the actual MCP
+    /// server for HTTP transport, so client-side env on the entry is never
+    /// read by anything — the vault posture for HTTP hosts is carried
+    /// entirely by the daemon's own launchd/systemd/Task-Scheduler
+    /// environment, wired independently at daemon-registration time
+    /// (`InstallCommand.swift`'s `daemonEnv` / the Rust twins in
+    /// `core::service`). Injecting a client-side env block there would be
+    /// pure noise — worse, it could read as "vault-off applied" when it did
+    /// nothing.
+    ///
+    /// Also returns `contents` unchanged for non-`.json` files and JSON
+    /// files without an `mcpServers` declaration (plugin-metadata files:
+    /// author/description only).
     ///
     /// On parse failure or re-serialisation failure the original content is
     /// returned so the host tool can surface the error rather than silently
     /// dropping the file.
-    private static func injectVaultEnv(in contents: String, rel: String) -> String {
+    static func injectVaultEnv(in contents: String, rel: String) -> String {
         // Fast-path: non-JSON files and JSON files without a server declaration.
         guard rel.hasSuffix(".json"), contents.contains("\"mcpServers\"") else { return contents }
         guard let data = contents.data(using: .utf8),
@@ -358,6 +493,11 @@ public enum DepthInstaller {
               var servers = root["mcpServers"] as? [String: Any],
               var server = servers["mootx01"] as? [String: Any]
         else { return contents }
+
+        // HTTP-shaped entry (no `command` key) — client-side env is inert;
+        // skip it (Defect 2). Only command/stdio entries (the proxy bridge)
+        // read their own env at all.
+        guard server["command"] != nil else { return contents }
 
         // Merge MOOTX01_VAULT=0 into the existing env block or create a new one.
         var env = server["env"] as? [String: Any] ?? [:]
@@ -373,14 +513,31 @@ public enum DepthInstaller {
         return str.hasSuffix("\n") ? str : str + "\n"
     }
 
-    /// ADR-024 §2: most embedded plugin packages now wire the resident
-    /// daemon's loopback HTTP endpoint and carry no `command` field at all —
-    /// nothing for this function to rewrite. It remains meaningful for the
-    /// hosts whose schema cannot express HTTP and fall back to the proxy
-    /// bridge (currently Xcode's inline manifest: `command: mootx01, args:
-    /// [proxy]`), whose embedded package still carries the portable bare
+    /// ADR-024 Wave 3, Defect 3 audit: as of the current platform matrix,
+    /// this rewrite is DEAD for every host `installPlugin` can reach today.
+    /// `installPlugin` only runs for `family == "manifestBundle"` hosts
+    /// (`host.supportsPlugin`) — antigravity, claude-code, codex, cursor,
+    /// gemini-cli, github-copilot — and every one of those now packages an
+    /// HTTP-shaped entry (`httpTyped`/`http`/`httpServerUrl`; ADR-024 §2),
+    /// which carries no `command` field at all. Xcode is the one host whose
+    /// package still uses the proxy-bridge `command`/`args` shape, but Xcode
+    /// is `family == "ideConfig"` — `supportsPlugin` is false for it, so it
+    /// never reaches `installPlugin` (it ceils at Mode 2/skills instead; see
+    /// `apply`'s `.plugin` branch). moduleCode hosts (cline, hermes,
+    /// opencode) are in the same position — no plugin package is
+    /// materialized for them at all.
+    ///
+    /// This function is kept, not deleted, as forward-compatible dead code:
+    /// if `tools/moot-packager`'s platform matrix ever promotes a host to
+    /// `manifestBundle` before its HTTP transport is verified (matching
+    /// today's Xcode disposition), or a currently-HTTP host's schema turns
+    /// out not to support HTTP after all and falls back to the proxy
+    /// bridge, its embedded package would carry the portable bare
     /// executable name `"mootx01"` that must become the placed binary's
-    /// absolute path at install time.
+    /// absolute path at install time — exactly what this function does. If
+    /// no host ever needs it again, remove it in a follow-up; do not treat
+    /// its current inertness as license to silently keep it as ceremony
+    /// without this note.
     private static func rewriteBareMootCommand(in contents: String, binaryPath: String) -> String {
         let escapedBinaryPath = jsonEscapedString(binaryPath)
         return contents

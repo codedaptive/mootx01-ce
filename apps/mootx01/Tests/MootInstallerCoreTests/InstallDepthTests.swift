@@ -147,13 +147,17 @@ struct InstallDepthTests {
         #expect(try DepthInstaller.apply(clientID: "kiro", depth: .skills, homeDirectory: home, binaryPath: "/safe/bin/mootx01") == .server)
     }
 
-    // MARK: - vault posture propagation (sec-fix 6b08d56b)
+    // MARK: - vault posture propagation (sec-fix 6b08d56b; ADR-024 Wave 3 Defect 2)
 
-    /// vault-off must write MOOTX01_VAULT=0 into the env block of every MCP
-    /// config JSON in the installed plugin package. Skills files (SKILL.md) and
-    /// plugin-metadata JSON files (no mcpServers key) must be unmodified.
-    @Test("vault-off injects MOOTX01_VAULT=0 into plugin MCP config files")
-    func vaultOffInjectsEnvIntoMCPConfigs() throws {
+    /// ADR-024 Wave 3, Defect 2: an HTTP-shaped plugin entry (claude-code's
+    /// `.mcp.json`, ADR-024 §2) must NOT get an env block even under
+    /// vault-off — client-side env on an HTTP entry is inert (the resident
+    /// daemon is the actual server, and it carries the vault posture in its
+    /// own launchd environment, wired independently at daemon-registration
+    /// time). Before this fix, injectVaultEnv blindly added an env key to
+    /// this HTTP entry, which did nothing but looked like it had applied.
+    @Test("vault-off does NOT inject env into an HTTP-shaped plugin entry (Defect 2)")
+    func vaultOffSkipsHTTPShapedEntry() throws {
         let home = sandbox()
         defer { cleanup(home) }
         let outcome = try DepthInstaller.apply(
@@ -168,18 +172,19 @@ struct InstallDepthTests {
         }
         let root = URL(fileURLWithPath: path)
 
-        // The .mcp.json in the plugin package must carry MOOTX01_VAULT=0.
         let mcpURL = root.appendingPathComponent(".mcp.json")
         let mcpData = try Data(contentsOf: mcpURL)
         let mcp = try #require(
             try? JSONSerialization.jsonObject(with: mcpData) as? [String: Any],
-            ".mcp.json must be valid JSON after vault-off injection"
+            ".mcp.json must be valid JSON"
         )
         let servers = mcp["mcpServers"] as? [String: Any]
         let server = servers?["mootx01"] as? [String: Any]
-        let env = server?["env"] as? [String: Any]
-        #expect(env?["MOOTX01_VAULT"] as? String == "0",
-                "vault-off must write MOOTX01_VAULT=0 into .mcp.json env block")
+        #expect(server?["command"] == nil, "claude-code's plugin entry must remain HTTP-shaped")
+        #expect(server?["env"] == nil,
+                "HTTP-shaped entries must never get a client-side env block — it is inert")
+        #expect(server?["type"] as? String == "http")
+        #expect(server?["url"] != nil)
 
         // Plugin-metadata JSON (no mcpServers) must not gain a spurious env key.
         let metaURL = root.appendingPathComponent(".claude-plugin/plugin.json")
@@ -194,6 +199,32 @@ struct InstallDepthTests {
         // SKILL.md must be present and unmodified.
         let skillURL = root.appendingPathComponent("skills/mootx01-memory/SKILL.md")
         #expect(FileManager.default.fileExists(atPath: skillURL.path))
+    }
+
+    /// Direct unit coverage of `injectVaultEnv`'s shape check (Defect 2): a
+    /// synthetic command/stdio-shaped entry (the proxy-bridge fallback
+    /// shape — dead for every host reachable through `installPlugin` today,
+    /// per `rewriteBareMootCommand`'s Defect-3 audit, but the mechanism
+    /// itself must still behave correctly if a host ever uses it again)
+    /// still gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
+    @Test("injectVaultEnv still patches a command-shaped entry; skips an HTTP-shaped one")
+    func injectVaultEnvShapeCheck() {
+        let commandEntry = """
+        {"mcpServers":{"mootx01":{"command":"mootx01","args":["proxy"]}}}
+        """
+        let patched = DepthInstaller.injectVaultEnv(in: commandEntry, rel: ".mcp.json")
+        let patchedObj = try? JSONSerialization.jsonObject(with: Data(patched.utf8)) as? [String: Any]
+        let patchedServer = (patchedObj?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
+        #expect((patchedServer?["env"] as? [String: Any])?["MOOTX01_VAULT"] as? String == "0",
+                "a command-shaped entry must still get MOOTX01_VAULT=0 injected")
+
+        let httpEntry = """
+        {"mcpServers":{"mootx01":{"type":"http","url":"http://127.0.0.1:4242"}}}
+        """
+        let unchanged = DepthInstaller.injectVaultEnv(in: httpEntry, rel: ".mcp.json")
+        let unchangedObj = try? JSONSerialization.jsonObject(with: Data(unchanged.utf8)) as? [String: Any]
+        let unchangedServer = (unchangedObj?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
+        #expect(unchangedServer?["env"] == nil, "an HTTP-shaped entry must never gain an env block")
     }
 
     /// vault-on (the default) must NOT inject an env block — absent MOOTX01_VAULT
@@ -220,6 +251,137 @@ struct InstallDepthTests {
         let server = servers?["mootx01"] as? [String: Any]
         #expect(server?["env"] == nil,
                 "vault-on must leave env absent (absent = vault-on per ADR-015 §1)")
+    }
+
+    // MARK: - stranded cache refresh (ADR-024 Wave 3, Defect 1)
+
+    /// Test double for `ClaudeCLIRunning`. `@unchecked Sendable` is safe here:
+    /// every test using this drives it synchronously, single-threaded.
+    private final class FakeClaudeCLIRunner: ClaudeCLIRunning, @unchecked Sendable {
+        let shouldSucceed: Bool
+        private(set) var invokedArguments: [[String]] = []
+        init(shouldSucceed: Bool) { self.shouldSucceed = shouldSucceed }
+        func run(arguments: [String]) -> Bool {
+            invokedArguments.append(arguments)
+            return shouldSucceed
+        }
+    }
+
+    private func writeInstalledPlugins(home: URL, version: String = "1.0.11") throws {
+        let dir = home.appendingPathComponent(".claude/plugins")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let body = """
+        {"version":2,"plugins":{"mootx01@mootx01":[{"scope":"user","installPath":"cache/mootx01/mootx01/\(version)","version":"\(version)"}]}}
+        """
+        try body.write(to: dir.appendingPathComponent("installed_plugins.json"), atomically: true, encoding: .utf8)
+    }
+
+    @Test("stranded cache: refresh is invoked when the plugin is already installed")
+    func strandedCacheRefreshInvokedWhenInstalled() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home)
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: fake)
+        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]])
+    }
+
+    @Test("stranded cache: refresh is a no-op when the plugin is not yet installed")
+    func strandedCacheRefreshNoopWhenNotInstalled() {
+        let home = sandbox()
+        defer { cleanup(home) }
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: fake)
+        #expect(fake.invokedArguments.isEmpty, "no stale cache to refresh when the plugin was never installed")
+    }
+
+    @Test("stranded cache: a failing runner never fails the install (plain fallback instruction only)")
+    func strandedCacheRefreshFailureDoesNotThrow() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home)
+
+        // shouldSucceed: false simulates both "claude CLI absent from PATH"
+        // and "claude plugin update exited nonzero" — both fall back to a
+        // printed instruction, never a thrown error.
+        let fake = FakeClaudeCLIRunner(shouldSucceed: false)
+        let outcome = try DepthInstaller.apply(
+            clientID: "claude-code", depth: .plugin, homeDirectory: home,
+            binaryPath: "/safe/bin/mootx01", claudeCLIRunner: fake
+        )
+        guard case .plugin = outcome else {
+            Issue.record("expected .plugin outcome even when the cache-refresh CLI fails"); return
+        }
+        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]])
+    }
+
+    @Test("stranded cache refresh is reached end-to-end through apply(), not just the standalone function")
+    func strandedCacheRefreshReachedThroughApply() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home)
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        _ = try DepthInstaller.apply(
+            clientID: "claude-code", depth: .plugin, homeDirectory: home,
+            binaryPath: "/safe/bin/mootx01", claudeCLIRunner: fake
+        )
+        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]])
+    }
+
+    @Test("stranded cache refresh does not fire for a client other than claude-code")
+    func strandedCacheRefreshScopedToClaudeCode() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home)  // present, but keyed for a different host's install run
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        _ = try DepthInstaller.apply(
+            clientID: "cursor", depth: .plugin, homeDirectory: home,
+            binaryPath: "/safe/bin/mootx01", claudeCLIRunner: fake
+        )
+        #expect(fake.invokedArguments.isEmpty, "the stranded-cache refresh is Claude-Code specific")
+    }
+
+    /// Acceptance test (mission text verbatim): "a machine in today's exact
+    /// broken state (marketplace dir stdio, cache pinned 1.0.11-stdio,
+    /// binary upgraded) converges to HTTP-only after `mootx01 install`/
+    /// `upgrade` + the plugin update hook + a Claude restart" — exercised
+    /// via the injectable seam, matching the acceptance criterion's own
+    /// wording.
+    @Test("acceptance: a stdio-era plugin install converges to HTTP + cache refresh")
+    func stdioEraInstallConvergesToHTTP() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+
+        // Today's exact broken state: a stale hand-written plugin dir with a
+        // bare stdio .mcp.json, AND a cache pinned to that stdio manifest.
+        let pluginDir = home.appendingPathComponent(".claude/mootx01-plugin")
+        try FileManager.default.createDirectory(at: pluginDir, withIntermediateDirectories: true)
+        try #"{"mcpServers":{"mootx01":{"command":"mootx01","args":["serve"]}}}"#
+            .write(to: pluginDir.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try writeInstalledPlugins(home: home, version: "1.0.11")
+
+        // The exact check `mootx01 upgrade` uses before rematerializing:
+        // only hosts that already have a plugin dir get rematerialized.
+        let host = try #require(InstallBundle.embedded.host(forClientID: "claude-code"))
+        #expect(FileManager.default.fileExists(
+            atPath: DepthInstaller.pluginInstallDirectory(host: host, homeDirectory: home).path
+        ))
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        let outcome = try DepthInstaller.apply(
+            clientID: "claude-code", depth: .plugin, homeDirectory: home,
+            binaryPath: "/usr/local/bin/mootx01", claudeCLIRunner: fake
+        )
+        guard case .plugin = outcome else { Issue.record("expected .plugin outcome"); return }
+
+        let mcpText = try String(contentsOf: pluginDir.appendingPathComponent(".mcp.json"), encoding: .utf8)
+        #expect(mcpText.contains("\"type\" : \"http\""), "converged package must be HTTP-shaped")
+        #expect(!mcpText.contains("\"serve\""), "stdio-era serve entry must not survive rematerialization")
+        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]],
+                "the stranded cache must be refreshed as part of convergence")
     }
 
     // MARK: - sandbox helpers

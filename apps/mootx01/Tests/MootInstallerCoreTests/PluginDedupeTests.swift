@@ -320,6 +320,75 @@ struct PluginDedupeTests {
         #expect(MCPEntryClassifier.classify(entry: entry) == .oursDefault)
     }
 
+    // MARK: - Shape check proven through the real file-write dedupe path
+    // (verification-pass addendum: classify()'s label alone is by-construction
+    // evidence; these round-trip a shape-mismatched entry through a REAL temp
+    // config file and the full dedupeDirectEntry pass with plugin-present
+    // state, proving the file survives untouched — not just that classify()
+    // returns the right label in isolation.)
+
+    @Test("dedupeDirectEntry round-trip: a malformed {} entry under our key survives untouched, plugin present")
+    func dedupeRoundTripMalformedEntrySurvives() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        let configURL = home.appendingPathComponent(client.configPath)
+
+        // A malformed entry: present under our server name, but an empty
+        // object — no command, no url, no env. Hand-written directly to a
+        // real config file (not constructed in-memory) so this proves the
+        // actual file-write/file-read path, not just classify()'s label.
+        let malformed: [String: Any] = ["mcpServers": ["mootx01": [String: Any]()]]
+        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: malformed).write(to: configURL)
+
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        let outcome = try Installer.dedupeDirectEntry(
+            client: client, homeDirectory: home, workingDirectory: home, local: false
+        )
+        guard case .retainedForeign = outcome else {
+            Issue.record("expected .retainedForeign for a malformed {} entry, got \(outcome)")
+            return
+        }
+        let entry = try directEntry(client: client, home: home)
+        #expect(entry != nil, "the malformed entry must still be present in the file after dedupe")
+        #expect(entry?.isEmpty == true, "the entry must be byte-for-byte untouched (still empty)")
+    }
+
+    @Test("dedupeDirectEntry round-trip: a foreign command entry under our key survives untouched, plugin present")
+    func dedupeRoundTripForeignCommandEntrySurvives() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        let configURL = home.appendingPathComponent(client.configPath)
+
+        // Under our key, but the command does not resolve to mootx01 at all
+        // — a different tool that happens to share the server name.
+        let foreign: [String: Any] = [
+            "mcpServers": [
+                "mootx01": [
+                    "command": "/usr/bin/some-other-server",
+                    "args": ["--stdio"],
+                ] as [String: Any],
+            ],
+        ]
+        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: foreign).write(to: configURL)
+
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        let outcome = try Installer.dedupeDirectEntry(
+            client: client, homeDirectory: home, workingDirectory: home, local: false
+        )
+        guard case .retainedForeign = outcome else {
+            Issue.record("expected .retainedForeign for a foreign command entry, got \(outcome)")
+            return
+        }
+        let entry = try directEntry(client: client, home: home)
+        #expect(entry?["command"] as? String == "/usr/bin/some-other-server",
+                "the foreign entry must still be present, byte-for-byte untouched")
+        #expect((entry?["args"] as? [String]) == ["--stdio"])
+    }
+
     // MARK: - Four-state matrix: plugin present/absent × prior direct entry present/absent
 
     /// State 1: plugin absent, no prior entry — normal install wires the
