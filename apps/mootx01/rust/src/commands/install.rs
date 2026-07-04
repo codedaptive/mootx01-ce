@@ -78,8 +78,13 @@ pub fn run(
         // place the binary/daemon (done above, unconditionally) but skip
         // writing a competing direct entry, and clean up any direct entry a
         // PRIOR install wrote — only when confirmed ours-default (§4).
+        // Adams #5: gate on installed AND enabled — Claude Code tracks
+        // enablement separately (~/.claude/settings.json's enabledPlugins
+        // map), and an installed-but-disabled plugin does not own the
+        // connection. Skipping/removing the direct entry in that state
+        // would leave the client with nothing.
         if let Some(plugin_id) = plugin_owner(client.id) {
-            if mcp_ownership::is_plugin_installed(plugin_id, &home) {
+            if mcp_ownership::owns_connection(plugin_id, &home) {
                 match dedupe_one(client, &home, location) {
                     Ok(merge::JsonOwnershipOutcome::NotPresent) => {}
                     Ok(merge::JsonOwnershipOutcome::Removed) => println!(
@@ -640,6 +645,11 @@ mod tests {
         std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
     }
 
+    fn write_settings(home: &Path, json_text: &str) {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude").join("settings.json"), json_text).unwrap();
+    }
+
     fn claude_code_client() -> McpClient {
         clients::supported().into_iter().find(|c| c.id == "claude-code").unwrap()
     }
@@ -698,6 +708,48 @@ mod tests {
         let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
         assert_eq!(outcome, merge::JsonOwnershipOutcome::Removed);
         assert!(read_direct_entry(&client, &home).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ADR-024 §1/§3 gated on installed AND enabled (Adams #5). Mirrors the
+    // exact conditional install::run() uses: "disabled falls back to direct
+    // wiring; enabled skips as shipped."
+
+    #[test]
+    fn disabled_plugin_falls_back_to_direct_wiring() {
+        let home = plugin_test_home("disabled");
+        let client = claude_code_client();
+        write_installed_plugins(&home, "mootx01@mootx01");
+        write_settings(&home, r#"{"enabledPlugins":{"mootx01@mootx01":false}}"#);
+
+        if mcp_ownership::owns_connection("mootx01@mootx01", &home) {
+            panic!("plugin must not be considered connection-owning while disabled");
+        }
+        install_one(&client, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .unwrap();
+        assert!(
+            read_direct_entry(&client, &home).is_some(),
+            "disabled plugin must not block direct wiring — the client would otherwise have no connection"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn enabled_plugin_skips_direct_wiring_as_shipped() {
+        let home = plugin_test_home("enabled");
+        let client = claude_code_client();
+        write_installed_plugins(&home, "mootx01@mootx01");
+        write_settings(&home, r#"{"enabledPlugins":{"mootx01@mootx01":true}}"#);
+
+        assert!(
+            mcp_ownership::owns_connection("mootx01@mootx01", &home),
+            "plugin must be considered connection-owning while installed and enabled"
+        );
+        // Matches install::run()'s skip branch: no install_one call.
+        assert!(
+            read_direct_entry(&client, &home).is_none(),
+            "enabled plugin must skip direct wiring — no competing entry written"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
