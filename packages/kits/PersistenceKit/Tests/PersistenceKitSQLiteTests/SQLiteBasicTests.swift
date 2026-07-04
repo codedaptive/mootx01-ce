@@ -303,4 +303,46 @@ struct SQLiteBasicTests {
         #expect(version == 2)
         await storage.close()
     }
+    /// Two CONCURRENT transactions must both succeed: the second waits for the
+    /// first instead of throwing transactionConflict. Regression for the live
+    /// daemon failure "reindex: background backfill failed: transactionConflict
+    /// (nested transactions not supported)" — background workers (reindex
+    /// rollup, dream cycle, captures) legitimately overlap on one estate, and
+    /// runTransaction used to reject the overlap outright. True nesting (a
+    /// block reentering its own backend) still fails via the bounded wait.
+    @Test func concurrentTransactionsBothCommit() async throws {
+        let storage = try makeStorage()
+        try await storage.open(schema: makeSchema())
+
+        // Each transaction holds the backend across an await (Task.sleep) so
+        // the two genuinely interleave at a suspension point — the exact shape
+        // that used to throw.
+        @Sendable func slowInsert(_ tag: String) async throws {
+            try await storage.transaction { txn in
+                _ = try await txn.rowStore.insert(
+                    table: "drawers",
+                    values: [
+                        "row_id": .uuid(UUID()),
+                        "adjective": .bitmap(0),
+                        "operational": .bitmap(0),
+                        "provenance": .bitmap(0),
+                        "verbatim": .text(tag),
+                        "captured_at": .timestamp(Date())
+                    ]
+                )
+                try await Task.sleep(nanoseconds: 100_000_000)  // hold the txn open 100 ms
+            }
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await slowInsert("first") }
+            group.addTask { try await slowInsert("second") }
+            try await group.waitForAll()
+        }
+
+        let count = try await storage.rowStore.count(table: "drawers", where: nil)
+        #expect(count == 2, "both concurrent transactions must commit")
+        await storage.close()
+    }
+
 }
