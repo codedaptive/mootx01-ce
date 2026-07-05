@@ -3258,10 +3258,15 @@ details.panel[open] summary::before{content:"▼ "}
     brainEdgesDraw.forEach(function (e) {
       var s = brainNodeMap[e.src], t = brainNodeMap[e.tgt];
       if (!s || !t) return;
-      // L5: an edge to an unborn or dead endpoint does not exist at the
-      // playhead; a tombstoned edge itself also disappears at its death time.
-      if (brainHidden(s) || brainHidden(t)) return;
+      // Hide edges to tombstoned endpoints and tombstoned edges — edges to
+      // merely-unborn nodes are kept so the full base layer stays visible
+      // throughout radar-loop playback (pulses draw on top of the base layer,
+      // not through it). The alive(t) birth filter is not applied to edges.
+      if (brainDead(s) || brainDead(t)) return;
       if (e.deadMs && (topoPlay.active ? e.deadMs <= brainNowMs : true)) return;
+      // Guard against uninitialised projected coordinates (should not occur in
+      // normal operation but prevents phantom beams if a node misses a frame).
+      if (!isFinite(s.px) || !isFinite(s.py) || !isFinite(t.px) || !isFinite(t.py)) return;
       var isTunnel = e.type === "tunnel";
       // Lattice edges: faint amber — below kgFact (0.045) to maintain the
       // evidence-strength visual hierarchy (tunnel > kgFact > lattice).
@@ -3304,12 +3309,21 @@ details.panel[open] summary::before{content:"▼ "}
   // bioluminescent blue glow (think) and expanding orange pulse ring (capture).
   // When a node is selected, unrelated nodes fade to 12% and hop-2 nodes to 55%.
   // Layered on top (multiplicative on alpha): L2 recency brightness, L4 depth
-  // fog, and the L5 unborn ghost (×0.06, decorations suppressed). High-
-  // centrality hubs (> 0.55) get a soft L2 halo. Iterates brainDrawOrder,
-  // which is painter-sorted deepest-first in 3D.
+  // fog. High-centrality hubs (> 0.55) get a soft L2 halo. Iterates
+  // brainDrawOrder, which is painter-sorted deepest-first in 3D.
+  //
+  // Radar-loop invariant: the base layer (galaxy of lobes, nodes, labels) is
+  // ALWAYS visible at full fidelity during playback — event pulses draw on top
+  // of it, not instead of it. The alive(t) birth filter is NOT applied here;
+  // only tombstoned nodes (brainDead) are hidden outright.
   function drawBrainNodes(ctx) {
     var hasSel = !!brainSelectedNode;
     brainDrawOrder.forEach(function (n) {
+      // Guard against uninitialised projected coordinates (defensive — should
+      // not occur in normal operation but prevents phantom fill if a node's
+      // px/py was never assigned by drawBrainFrame).
+      if (!isFinite(n.px) || !isFinite(n.py)) return;
+
       var style = nounStyle(n.nounType);
       // Community hue (the original encoding-map rule: communityId → hue).
       // Real-data nodes carry n.rgb from the community palette; synthetic
@@ -3345,16 +3359,6 @@ details.panel[open] summary::before{content:"▼ "}
       // Tombstoned: hidden in live view; during playback the node vanishes
       // once the playhead passes its death time (dissolution made visible).
       if (brainDead(n)) return;
-
-      // L5 unborn ghost: the node has not been ingested yet at the playhead.
-      // Faint dot only — glow, halo, pulse, and anomaly dressing suppressed.
-      if (brainUnborn(n)) {
-        ctx.beginPath();
-        ctx.arc(n.px, n.py, baseR, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + "," + (alpha * 0.06) + ")";
-        ctx.fill();
-        return;
-      }
 
       // Think event: blue bioluminescent glow spreads outward (~10s decay)
       if (n.glowBlue > 0.01) {
@@ -3944,10 +3948,15 @@ details.panel[open] summary::before{content:"▼ "}
   }
 
   // Pulse the brain for one replayed event. Exact node when drawerId maps to
-  // a brain node; otherwise a random member of the event's estate-hash
+  // a visible brain node; otherwise a random member of the event's estate-hash
   // community keeps the replay visible (deterministic community per estate).
+  // Dead (tombstoned) nodes are skipped — they are not rendered and pulsing
+  // them would produce geometry at invisible positions.
   function topoPlaybackPulse(ev) {
     var node = ev.drawerId ? brainNodeMap[ev.drawerId] : null;
+    // Skip tombstoned nodes — fall through to the community-pool path so the
+    // pulse still fires on a visible node rather than being silently dropped.
+    if (node && brainDead(node)) node = null;
     if (!node) {
       var comms = Object.keys(brainCommPools);
       if (!comms.length) return;
@@ -3955,7 +3964,12 @@ details.panel[open] summary::before{content:"▼ "}
       for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
       var pool = brainCommPools[comms[h % comms.length]];
       if (!pool || !pool.length) return;
-      node = pool[Math.floor(Math.random() * pool.length)];
+      // Pick a non-dead node from the pool (max 4 attempts to avoid an infinite
+      // loop in a fully-tombstoned community — unlikely but defensive).
+      var tries = 0;
+      do { node = pool[Math.floor(Math.random() * pool.length)]; tries++; }
+      while (brainDead(node) && tries < 4);
+      if (brainDead(node)) return;
     }
     if (ev.kind === "capture") {
       node.pulseOrange = 1.0;
@@ -3964,18 +3978,29 @@ details.panel[open] summary::before{content:"▼ "}
     }
   }
 
-  // Advance the playhead one event, then schedule the next step:
-  // ~110ms dwell + the real inter-event gap capped at 400ms. After the last
-  // event the playhead holds on "now" for ~2s, then loops to the window start.
+  // Advance the playhead one event, then schedule the next step.
+  //
+  // Pacing is event-indexed: each event gets a fixed 150ms dwell regardless of
+  // the real inter-event gap. This keeps 13 events spanning 6 hours visible in
+  // ~2 seconds of continuously-interesting motion rather than compressing 6 h of
+  // real wall-clock gaps into the UI. The playhead timestamp shown in the clock
+  // is still the event's honest wall-clock time.
+  //
+  // After the last event a short 400ms pause (enough for the final pulse ring
+  // to start fading) clears residual pulse state and loops back to the start so
+  // each pass begins from a clean base layer.
   function topoPlayStep() {
     var win = topoPlayWindowEvents();
     if (!win.length) { topoPlayToggle(); return; }
     if (topoPlay.idx >= win.length) {
-      // Dwell-on-now: hold at the final event so live SSE pulses share the stage.
+      // Brief end-of-pass pause: base layer is visible, final pulse fades.
+      // Clear orange pulse state on all nodes so the next loop starts clean —
+      // prevents residual pulses from the previous pass building into a flood.
       topoPlay.timer = setTimeout(function () {
+        brainNodes.forEach(function (n) { n.pulseOrange = 0; });
         topoPlay.idx = 0;
         topoPlayStep();
-      }, 2000);
+      }, 400);
       return;
     }
     var ev = win[topoPlay.idx];
@@ -3983,10 +4008,9 @@ details.panel[open] summary::before{content:"▼ "}
     var clock = $("#topoPlayClock");
     if (clock) clock.textContent = new Date(ev.ms).toLocaleString();
     topoPlaybackPulse(ev);
-    var next = win[topoPlay.idx + 1];
-    var gap = next ? Math.min(Math.max(0, next.ms - ev.ms), 400) : 0;
     topoPlay.idx++;
-    topoPlay.timer = setTimeout(topoPlayStep, 110 + gap);
+    // Fixed 150ms per event — event-indexed pacing, not wall-clock proportional.
+    topoPlay.timer = setTimeout(topoPlayStep, 150);
   }
 
   // Play/pause toggle. Pause freezes the playhead (the session stays active,
@@ -4000,7 +4024,13 @@ details.panel[open] summary::before{content:"▼ "}
       if (btn) { btn.textContent = "Play"; btn.setAttribute("aria-pressed", "false"); }
       return;
     }
-    if (!topoPlayWindowEvents().length) return;  // nothing to replay
+    var win = topoPlayWindowEvents();
+    if (!win.length) return;  // nothing to replay
+    // Initialise the playhead to the first event's time BEFORE setting active=true.
+    // This prevents animation frames between the active flag flip and the first
+    // topoPlayStep call from seeing playheadMs=0 (epoch-0), which would make every
+    // node appear alive-from-the-future and could trigger degenerate recency values.
+    if (topoPlay.idx < win.length) topoPlay.playheadMs = win[topoPlay.idx].ms;
     topoPlay.playing = true;
     topoPlay.active = true;
     if (btn) { btn.textContent = "Pause"; btn.setAttribute("aria-pressed", "true"); }
