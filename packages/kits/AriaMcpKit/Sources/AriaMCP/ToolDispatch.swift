@@ -70,6 +70,16 @@ public struct ToolDispatcher: Sendable {
     /// are still correlated.
     let recallLedger: SurfacedRecallLedger
 
+    /// ADR-025 sensitivity unlock: daemon-RAM-only grant ledger for the
+    /// restricted/secret sensitivity tiers. Actor-isolated (Sendable) — safe
+    /// in the immutable Sendable struct. Shared across dispatchers derived
+    /// via `registering(_:)` for the same reason `recallLedger` is: exactly
+    /// one instance lives for the lifetime of one `mootx01 serve` process,
+    /// so "daemon restart = everything locked" (ADR-025 §1) falls out of
+    /// `ToolDispatcher` construction rather than needing special-cased
+    /// reset logic. See `SensitivityGrantLedger`'s own doc comment.
+    let sensitivityUnlockLedger: SensitivityGrantLedger
+
     /// The build serial for this running executable, surfaced by
     /// `moot_estate_ping` so drivers can confirm they are talking to the
     /// most recently compiled build.
@@ -120,6 +130,7 @@ public struct ToolDispatcher: Sendable {
         self.estates = [handle.estateUUID: handle]
         self.jobRegistry = VaultJobRegistry()
         self.recallLedger = SurfacedRecallLedger()
+        self.sensitivityUnlockLedger = SensitivityGrantLedger()
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
@@ -138,6 +149,7 @@ public struct ToolDispatcher: Sendable {
         next[additional.estateUUID] = additional
         return ToolDispatcher(kit: kit, handle: handle, estates: next,
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
+                              sensitivityUnlockLedger: sensitivityUnlockLedger,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory)
     }
@@ -151,7 +163,8 @@ public struct ToolDispatcher: Sendable {
     private init(
         kit: GeniusLocusKit, handle: EstateHandle,
         estates: [UUID: EstateHandle], jobRegistry: VaultJobRegistry,
-        recallLedger: SurfacedRecallLedger, buildSerial: String,
+        recallLedger: SurfacedRecallLedger,
+        sensitivityUnlockLedger: SensitivityGrantLedger, buildSerial: String,
         serverIdentity: String, versionSkewAdvisory: String?
     ) {
         self.kit = kit
@@ -159,6 +172,7 @@ public struct ToolDispatcher: Sendable {
         self.estates = estates
         self.jobRegistry = jobRegistry
         self.recallLedger = recallLedger
+        self.sensitivityUnlockLedger = sensitivityUnlockLedger
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
@@ -622,6 +636,32 @@ public struct ToolDispatcher: Sendable {
             )
         }
         return min(raw, ceiling)
+    }
+
+    /// `true` if `chain` already constrains sensitivity in any way — an
+    /// exact `.sensitivity` match, an explicit `.sensitivityAtMost`
+    /// ceiling (whether from the caller's own `filter` argument or
+    /// injected by ADR-025's grant ceiling), or one nested inside
+    /// `.all`/`.any`/`.not`. Mirrors LocusKit `BitmapEvaluator`'s private
+    /// `isBitmapSensitivityFilter` classifier — kept as a small local
+    /// duplicate rather than exposing that private substrate function,
+    /// since this ARIA-boundary use is "should I inject the grant
+    /// ceiling", a different question from BitmapEvaluator's own "should
+    /// I insert my default" (this function runs BEFORE that one; an ARIA
+    /// caller that already has a sensitivity constraint should not also
+    /// get a grant-ceiling appended on top of it, which would AND two
+    /// constraints together in a caller-surprising way).
+    static func isSensitivityFilter(_ f: Filter) -> Bool {
+        switch f {
+        case .sensitivity, .sensitivityAtMost:
+            return true
+        case .all(let fs), .any(let fs):
+            return fs.contains(where: isSensitivityFilter)
+        case .not(let inner):
+            return isSensitivityFilter(inner)
+        default:
+            return false
+        }
     }
 
     func decodeChannel(_ value: JSONValue?) throws -> CaptureChannel {
@@ -1164,8 +1204,28 @@ extension ToolDispatcher {
         // Parity: Rust run_memory_search uses clamp_limit with the same ceiling.
         let limit = try Self.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        // Wall-clock time for this request. Hoisted to the top of the
+        // function (rather than the later `let now = Date()` this replaces)
+        // so the SAME instant gates both the ADR-025 grant check below and
+        // the surfaced-recall-ledger recording further down — one request,
+        // one `now`.
+        let now = Date()
         // Build the base filter chain from the `filter` argument.
         var filterChain = try decodeFilterChain(args["filter"])
+        // ADR-025 sensitivity unlock: when a restricted/secret grant is
+        // live, inject the grant-lifted ceiling explicitly. This is the
+        // seam BitmapEvaluator.insertDefaults documents: "conditional on
+        // absence so an explicit sensitivity constraint from the caller
+        // suppresses this default" — by appending our own
+        // `.sensitivityAtMost` here, the substrate's own narrower default
+        // (`.elevated`) never gets inserted. Only applies when the caller's
+        // `filter` argument did not already specify a sensitivity
+        // constraint of its own (an explicit caller constraint always
+        // wins — same precedence BitmapEvaluator already documents).
+        if !filterChain.contains(where: Self.isSensitivityFilter),
+           let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
+            filterChain.append(ceiling)
+        }
         // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
         // When absent, recall spans all wings (existing default behavior unchanged).
         // Appended to the filter chain so it composes with any explicit filter.
@@ -1223,8 +1283,8 @@ extension ToolDispatcher {
         let result = try await kit.recall(handle, request)
         // Record surfaced drawer ids in the session ledger so dereference verbs
         // can trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12
-        // § session-ledger).
-        let now = Date()
+        // § session-ledger). Reuses the `now` hoisted at the top of this
+        // function (one request, one wall-clock instant).
         let surfacedIDs = result.hits.compactMap { $0.drawer?.id }
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
@@ -1370,7 +1430,18 @@ extension ToolDispatcher {
         let rowID = try requireString(args, "id")
         let estate = try await kit.estate(for: handle)
 
-        let frame = RecallFrame(filterChain: [], hydrationLevel: .full)
+        // ADR-025 sensitivity unlock: same grant-ceiling injection as
+        // runMemorySearch — see that function's doc comment. moot_memory_get
+        // deliberately uses the SAME containment gate moot_memory_search
+        // does (its own doc history says so explicitly), so the grant must
+        // lift it here too, or an unlocked restricted/secret row would be
+        // visible in search but still "not found" by id — an inconsistent,
+        // confusing half-unlock.
+        var filterChain: [Filter] = []
+        if let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: Date()) {
+            filterChain.append(ceiling)
+        }
+        let frame = RecallFrame(filterChain: filterChain, hydrationLevel: .full)
         let filtered = try await estate.getDrawers(
             ids: [rowID], matchingFrame: frame, hydrationLevel: .full)
         guard let drawer = filtered.admissible.first else {
