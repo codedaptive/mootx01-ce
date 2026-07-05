@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.11.0
+version: 1.12.0
 status: active
-date: 2026-07-04
+date: 2026-07-05
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -720,7 +720,121 @@ and kgFact edges are emitted by both legs.
 On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
+## § 19. Sensitivity unlock/lock control endpoints (ADR-025)
+
+Two loopback-only POST endpoints accept out-of-band sensitivity-tier grants and
+revocations. They share the HTTP transport's CSRF/DNS-rebinding Origin guard. The
+stdio transport does not expose these endpoints.
+
+```
+POST /api/control/unlock
+POST /api/control/lock
+```
+
+### POST /api/control/unlock — grant a sensitivity tier
+
+Admits the caller's estate session to view restricted or secret drawers by lifting
+the default `sensitivityAtMost(.elevated)` recall gate for the duration of the
+grant. The daemon validates a freshness proof in the request body; the caller's
+host-side binary performs identity verification before issuing the POST.
+
+**Identity verification (platform-specific):**
+
+- **Swift/macOS** — `LocalAuthenticationAuthority` calls
+  `LAContext.evaluatePolicy(.deviceOwnerAuthentication, ...)`. The daemon issues
+  the grant only after receiving the POST with a valid proof; LocalAuthentication
+  runs client-side in the `mootx01 unlock` command before the POST.
+- **Rust/Linux/Windows** — `unlock_authority::authenticate_and_grant` reads the
+  `sensitivity_hashes.json` sidecar (PBKDF2-HMAC-SHA256 at 260,000 iterations,
+  OWASP 2024 minimum), prompts the user for the tier-specific password (echo-off
+  via `tcgetattr`/`tcsetattr` on Unix, plain stdin on Windows), verifies the hash,
+  then issues the POST.
+
+**Request body (both ports):**
+```json
+{
+  "tier": "restricted" | "secret",
+  "proof": { "ts": <unix_ms> }
+}
+```
+
+The daemon rejects proofs where `|now_ms - proof.ts| > 10_000` (10-second window)
+to prevent replay attacks on the loopback socket. `"tier"` must be one of the two
+legal strings; any other value returns HTTP 400.
+
+**TTL semantics (ADR-025 §1):**
+
+| Tier | Grant TTL |
+|---|---|
+| `restricted` | Expires at next local midnight |
+| `secret` | Expires 30 minutes after grant |
+
+**Success response (HTTP 200):**
+```json
+{ "granted": true, "expires_at": "2026-07-05T23:59:59Z" }
+```
+
+**Failure responses:**
+
+| Condition | HTTP | Body |
+|---|---|---|
+| Tier unknown | 400 | `{"error": "unknown tier"}` |
+| Proof stale (±10s) | 403 | `{"error": "proof stale"}` |
+| Any other server error | 500 | `{"error": "<message>"}` |
+
+### POST /api/control/lock — revoke all grants
+
+Immediately clears all active sensitivity grants. No identity verification is
+required (ADR-025 §1: "locking reduces the user's own access and is always
+permitted").
+
+**Request body:** empty (`{}`)
+
+**Success response (HTTP 200):**
+```json
+{ "locked": true }
+```
+
+### CLI surface
+
+```
+mootx01 unlock private | secret
+mootx01 lock
+```
+
+`private` is the user-facing alias for the `restricted` tier; `restricted` is also
+accepted. Both commands require the resident daemon (`mootx01 serve --http auto`)
+to be running.
+
+### Redaction advisory in moot_memory_search / moot_memory_get output
+
+When no sensitivity grant is active and the estate has at least one row tagged
+`restricted` or `secret`, both `moot_memory_search` and `moot_memory_get` append a
+trailing `sensitivity_advisory:` line to their output text:
+
+```
+sensitivity_advisory: results may be hidden by sensitivity tier — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
+```
+
+The advisory is absent when a grant IS active (rows are already visible and no
+guidance is needed). It is also absent when the estate has no sensitive rows at all.
+The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector cost,
+no recall-trace rows written — `origin: internal` per B-10a).
+
 ## Changelog
+
+### 1.12.0 -- 2026-07-05
+ADR-025: sensitivity unlock/lock control endpoints (§19). Adds
+`POST /api/control/unlock` and `POST /api/control/lock` — loopback-only
+endpoints for out-of-band sensitivity-tier grants and revocations. Grant
+TTLs: restricted → next local midnight; secret → 30 minutes. Proof
+freshness gate ±10s. Platform identity: macOS/Swift via LocalAuthentication;
+Linux/Windows/Rust via PBKDF2-HMAC-SHA256 (260,000 iterations) against
+the `sensitivity_hashes.json` sidecar. CLI surface: `mootx01 unlock
+private|secret` and `mootx01 lock`. Both ports at parity. Also adds
+redaction advisory (`sensitivity_advisory:` trailing line) to
+`moot_memory_search` and `moot_memory_get` when no grant is active and
+the estate has restricted/secret rows.
 
 ### 1.11.0 -- 2026-07-04
 Added `moot_memory_get` (§11) — fetch-drawer-by-ID, build-now per Bob's
