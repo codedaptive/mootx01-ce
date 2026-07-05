@@ -96,6 +96,17 @@ impl StatsStoreSchema {
     /// Key for the ISO-8601 timestamp of the last retention pass cutoff.
     pub const RETENTION_CUTOFF_KEY: &'static str = "retention_cutoff";
 
+    /// Key for the monitoring source marker.
+    ///
+    /// Value "default" means the monitoring flag was set by the wave 8.1 seed or
+    /// one-time migration — the operator has NOT explicitly chosen a value, so a
+    /// future migration is allowed to override it.
+    /// Value "user" means the operator explicitly called `setMonitoringEnabled` and
+    /// the migration MUST NOT revert that choice on re-open.
+    ///
+    /// Mirrors Swift `StatsStore.monitoringSourceKey`.
+    pub const MONITORING_SOURCE_KEY: &'static str = "monitoring_source";
+
     // topology_snapshots table (v2)
 
     /// One row per estate. Latest-wins upsert via estate PRIMARY KEY.
@@ -445,37 +456,88 @@ impl StatsStore {
 
     /// Open the store and apply schema / migrations.
     ///
-    /// Seeds the default control rows ("monitoring"="0", "retention_cutoff"=epoch-zero)
-    /// ONLY IF ABSENT — seed-if-absent, NOT upsert.
+    /// Seeds the default control rows only if absent (seed-if-absent, NOT upsert).
     ///
     /// Rationale: upsert would overwrite an operator-set "monitoring" value on
-    /// every process restart, resetting the persistent on/off switch to "0" each
-    /// time the manager relaunches. Seeding only when the row is missing means the
-    /// first open installs the defaults and every subsequent open is a no-op for
-    /// those rows. Mirrors Swift `StatsStore.open()` / `seedControlIfAbsent` exactly
-    /// (fix landed in Swift commit 852821cc).
+    /// every process restart, resetting the persistent on/off switch on each
+    /// relaunch. Seeding only when the row is missing means the first open installs
+    /// the defaults and every subsequent open is a no-op for those rows. Mirrors
+    /// Swift `StatsStore.open()` / `seedControlIfAbsent` exactly.
     ///
-    /// Mirrors Swift `StatsStore.open()`.
+    /// Wave 8.1: monitoring defaults ON for new estates (seed "1", not "0") and
+    /// a companion "monitoring_source" row is seeded as "default". The one-time
+    /// migration below flips existing estates that were seeded at "0" by a pre-8.1
+    /// binary — but only if the operator has not explicitly set monitoring via
+    /// `setMonitoringEnabled` (source != "user"). Mirrors Swift `StatsStore.open()`.
     pub fn open(&self) -> Result<(), persistence_kit::StorageError> {
         let schema = make_schema();
         self.storage.open(&schema)?;
 
-        // Seed "monitoring" = "0" (off by default) only if absent.
-        // The manager sets this to "1" when it starts accepting subscribers.
+        // Seed "monitoring" = "1" (on by default, wave 8.1) only if absent.
         // Overwriting would reset the operator's on/off switch on every restart.
         self.seed_control_if_absent(
             StatsStoreSchema::MONITORING_KEY,
-            "0",
+            "1",
         )?;
 
+        // Seed "monitoring_source" = "default" only if absent.
+        // The source marker distinguishes a seed/migration value ("default") from
+        // an explicit operator choice ("user"). setMonitoringEnabled writes "user"
+        // so the migration below never reverts an explicit operator decision.
+        self.seed_control_if_absent(
+            StatsStoreSchema::MONITORING_SOURCE_KEY,
+            "default",
+        )?;
+
+        // Wave 8.1 one-time migration: flip monitoring "0" → "1" for estates
+        // that were seeded by a pre-8.1 binary (default-off seed), BUT only when
+        // the operator has not explicitly chosen a value (source != "user").
+        // If the operator turned monitoring off intentionally, we must not revert
+        // that choice here — the "user" marker is the guard.
+        let current_monitoring = self.read_control_value(StatsStoreSchema::MONITORING_KEY)?;
+        let current_source = self.read_control_value(StatsStoreSchema::MONITORING_SOURCE_KEY)?;
+        let source_is_default = current_source.as_deref().map_or(true, |s| s != "user");
+        if current_monitoring.as_deref() == Some("0") && source_is_default {
+            // Pre-8.1 seeded "0" with no operator override → upgrade to "1".
+            self.upsert_control_value(StatsStoreSchema::MONITORING_KEY, "1")?;
+        }
+
         // Seed "retention_cutoff" = epoch-zero ISO-8601 only if absent.
-        // Epoch zero ("1970-01-01T00:00:00.000Z") indicates no retention pass
-        // has run yet. Overwriting would erase the last-known retention timestamp.
+        // Epoch zero indicates no retention pass has run yet.
         self.seed_control_if_absent(
             StatsStoreSchema::RETENTION_CUTOFF_KEY,
             "1970-01-01T00:00:00.000Z",
         )?;
 
+        Ok(())
+    }
+
+    /// Read a single control-table value by key. Returns None if the key is absent.
+    fn read_control_value(&self, key: &str) -> Result<Option<String>, persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let predicate = StoragePredicate::Eq(
+            Column {
+                table: StatsStoreSchema::CONTROL_TABLE.to_string(),
+                name: StatsStoreSchema::KEY_COLUMN.to_string(),
+            },
+            TypedValue::Text(key.to_string()),
+        );
+        let rows = rs.query(StatsStoreSchema::CONTROL_TABLE, Some(&predicate), &[], Some(1), None)?;
+        Ok(rows.first().and_then(|row| {
+            match row.values.get(StatsStoreSchema::CONTROL_VALUE_COLUMN) {
+                Some(TypedValue::Text(v)) => Some(v.clone()),
+                _ => None,
+            }
+        }))
+    }
+
+    /// Upsert a control-table row, replacing the value if the key already exists.
+    fn upsert_control_value(&self, key: &str, value: &str) -> Result<(), persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let mut row = BTreeMap::new();
+        row.insert(StatsStoreSchema::KEY_COLUMN.to_string(), TypedValue::Text(key.to_string()));
+        row.insert(StatsStoreSchema::CONTROL_VALUE_COLUMN.to_string(), TypedValue::Text(value.to_string()));
+        rs.upsert(StatsStoreSchema::CONTROL_TABLE, row, &[StatsStoreSchema::KEY_COLUMN.to_string()])?;
         Ok(())
     }
 
@@ -561,23 +623,18 @@ impl StatsStore {
 
     /// Set the monitoring flag.
     ///
-    /// Mirrors Swift `StatsStore.setMonitoringEnabled(_:)`.
+    /// Writing the flag also writes `monitoring_source` = "user" so the wave 8.1
+    /// one-time migration in `open()` knows not to revert an explicit operator
+    /// choice. Mirrors Swift `StatsStore.setMonitoringEnabled(_:)`.
     pub fn set_monitoring_enabled(&self, enabled: bool) -> Result<(), persistence_kit::StorageError> {
-        let rs = self.storage.row_store();
-        let mut row = BTreeMap::new();
-        row.insert(
-            StatsStoreSchema::KEY_COLUMN.to_string(),
-            TypedValue::Text(StatsStoreSchema::MONITORING_KEY.to_string()),
-        );
-        row.insert(
-            StatsStoreSchema::CONTROL_VALUE_COLUMN.to_string(),
-            TypedValue::Text(if enabled { "1" } else { "0" }.to_string()),
-        );
-        rs.upsert(
-            StatsStoreSchema::CONTROL_TABLE,
-            row,
-            &[StatsStoreSchema::KEY_COLUMN.to_string()],
+        // Write the monitoring flag.
+        self.upsert_control_value(
+            StatsStoreSchema::MONITORING_KEY,
+            if enabled { "1" } else { "0" },
         )?;
+        // Mark the choice as operator-explicit so the one-time migration in open()
+        // never reverts it on the next process start.
+        self.upsert_control_value(StatsStoreSchema::MONITORING_SOURCE_KEY, "user")?;
         Ok(())
     }
 
@@ -1030,13 +1087,16 @@ impl StatsStore {
         )?;
         // PRIMARY KEY lookup yields ≤1 row; the None-estate path picks the
         // newest generated_at across estates. The column is written as TEXT
-        // ISO-8601 but the storage backend parses it back to `Timestamp(secs)`
-        // on read; tolerate BOTH representations (InMemory and SQLite can differ
-        // on read-back type) and normalise to epoch seconds so the comparison is
-        // numeric. Absent/unparseable sorts oldest.
+        // ISO-8601; the SQLite backend decodes it back as Timestamp(ms) (epoch
+        // MILLISECONDS). For ordering purposes the units don't matter as long as
+        // they are consistent within a backend — both Timestamp(ms) and the
+        // Text path (which returns seconds as i64) are monotonically comparable
+        // for finding the max. Absent/unparseable sorts oldest.
         fn generated_at(row: &persistence_kit::StorageRow) -> i64 {
             match row.values.get(StatsStoreSchema::GENERATED_AT_COLUMN) {
-                Some(TypedValue::Timestamp(t)) => *t,
+                // SQLite path: Timestamp(ms) — use raw ms for comparison (monotonic).
+                Some(TypedValue::Timestamp(ms)) => *ms,
+                // InMemory path: read back as Text → convert to seconds as i64.
                 Some(TypedValue::Text(s)) => iso8601_to_epoch(s) as i64,
                 _ => i64::MIN,
             }
@@ -1149,10 +1209,11 @@ impl MetricRow {
             TypedValue::Text(s) => s.clone(),
             _ => return None,
         };
-        // Timestamp is stored as Timestamp(i64 epoch seconds) by the SQLite backend
-        // after decoding from ISO-8601 TEXT. Convert back to f64.
+        // The SQLite backend decodes TEXT ISO-8601 timestamp columns as
+        // TypedValue::Timestamp(ms) where the i64 is epoch MILLISECONDS, not seconds.
+        // Divide by 1000 to recover epoch seconds (f64) matching the caller's expectation.
         let ts_epoch = match row.values.get(StatsStoreSchema::TS_COLUMN)? {
-            TypedValue::Timestamp(secs) => *secs as f64,
+            TypedValue::Timestamp(ms) => *ms as f64 / 1000.0,
             TypedValue::Text(s) => iso8601_to_epoch(s),
             _ => return None,
         };
@@ -1205,8 +1266,10 @@ impl EventRow {
             TypedValue::Text(s) => s.clone(),
             _ => return None,
         };
+        // Timestamp is stored as TEXT ISO-8601; the SQLite backend decodes it as
+        // TypedValue::Timestamp(ms) — epoch MILLISECONDS. Divide by 1000 → seconds.
         let ts_epoch = match row.values.get(StatsStoreSchema::TS_COLUMN)? {
-            TypedValue::Timestamp(secs) => *secs as f64,
+            TypedValue::Timestamp(ms) => *ms as f64 / 1000.0,
             TypedValue::Text(s) => iso8601_to_epoch(s),
             _ => return None,
         };
