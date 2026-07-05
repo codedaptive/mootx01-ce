@@ -229,12 +229,46 @@ public enum VersionSkewAdvisory {
     /// is not installed or its version matches `binaryVersion` exactly (no
     /// skew to report). Deterministic and side-effect-free — the daemon
     /// computes this once at startup and threads it into `ToolDispatcher`.
+    ///
+    /// Direction-aware: the remedy depends on WHICH side is newer.
+    /// - Binary newer than plugin: the plugin bundle needs refreshing
+    ///   (`mootx01 install` rewrites it; `claude plugin update` also works).
+    /// - Plugin newer than binary: the binary needs upgrading
+    ///   (`mootx01 upgrade` fetches the latest release).
     public static func compute(
         pluginID: String, binaryVersion: String, homeDirectory: URL
     ) -> String? {
         guard let pluginVersion = PluginDetector.installedVersion(
             pluginID: pluginID, homeDirectory: homeDirectory
         ), pluginVersion != binaryVersion else { return nil }
-        return "plugin \(pluginVersion) expects binary ≥ \(pluginVersion); binary is \(binaryVersion) — run `mootx01 upgrade`"
+
+        if versionGreaterThan(binaryVersion, pluginVersion) {
+            // Binary is ahead of the plugin — the plugin bundle is stale.
+            // `mootx01 install` rewrites the bundle to the current version;
+            // `claude plugin update mootx01@mootx01` does the same via Claude Code.
+            return "binary \(binaryVersion) is newer than plugin \(pluginVersion) — refresh the plugin with `mootx01 install` or `claude plugin update mootx01@mootx01`"
+        } else {
+            // Plugin is ahead of the binary — the binary needs upgrading.
+            return "plugin \(pluginVersion) expects binary ≥ \(pluginVersion); binary is \(binaryVersion) — run `mootx01 upgrade`"
+        }
+    }
+
+    /// Compare two semver strings numerically, component by component.
+    ///
+    /// Returns `true` when `a > b`. Splits on "." and compares each component
+    /// as an integer so "1.0.10" > "1.0.9" (string comparison would disagree).
+    /// Missing trailing components are treated as 0 (e.g. "1.2" == "1.2.0").
+    /// Returns `false` on parse failure or equality.
+    private static func versionGreaterThan(_ a: String, _ b: String) -> Bool {
+        let aParts = a.split(separator: ".").compactMap { Int($0) }
+        let bParts = b.split(separator: ".").compactMap { Int($0) }
+        guard !aParts.isEmpty, !bParts.isEmpty else { return false }
+        let len = max(aParts.count, bParts.count)
+        for i in 0..<len {
+            let aVal = i < aParts.count ? aParts[i] : 0
+            let bVal = i < bParts.count ? bParts[i] : 0
+            if aVal != bVal { return aVal > bVal }
+        }
+        return false // equal
     }
 }

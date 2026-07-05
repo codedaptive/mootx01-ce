@@ -284,17 +284,38 @@ struct PluginDedupeTests {
         ) == nil)
     }
 
-    @Test("VersionSkewAdvisory names both versions when they differ")
-    func versionSkewReportsMismatch() throws {
+    @Test("VersionSkewAdvisory: plugin newer than binary → suggest mootx01 upgrade")
+    func versionSkewPluginAheadSuggestsUpgrade() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
+        // Plugin is 1.0.15, binary is 1.0.11 → plugin is ahead → binary needs upgrading.
         try writeInstalledPlugins(home: home, plugins: [pluginID])  // stamps "1.0.15"
         let advisory = try #require(VersionSkewAdvisory.compute(
             pluginID: pluginID, binaryVersion: "1.0.11", homeDirectory: home
         ))
         #expect(advisory.contains("1.0.15"))
         #expect(advisory.contains("1.0.11"))
-        #expect(advisory.contains("mootx01 upgrade"))
+        #expect(advisory.contains("mootx01 upgrade"),
+            "plugin > binary: remedy is mootx01 upgrade; got: \(advisory)")
+        #expect(!advisory.contains("mootx01 install"),
+            "should not suggest install when binary is the stale side; got: \(advisory)")
+    }
+
+    @Test("VersionSkewAdvisory: binary newer than plugin → suggest refreshing plugin")
+    func versionSkewBinaryAheadSuggestsPluginRefresh() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        // Plugin is 1.0.15, binary is 1.0.18 → binary is ahead → plugin needs refreshing.
+        try writeInstalledPlugins(home: home, plugins: [pluginID])  // stamps "1.0.15"
+        let advisory = try #require(VersionSkewAdvisory.compute(
+            pluginID: pluginID, binaryVersion: "1.0.18", homeDirectory: home
+        ))
+        #expect(advisory.contains("1.0.15"))
+        #expect(advisory.contains("1.0.18"))
+        #expect(advisory.contains("mootx01 install"),
+            "binary > plugin: remedy is mootx01 install; got: \(advisory)")
+        #expect(!advisory.contains("mootx01 upgrade"),
+            "should not suggest upgrade when plugin is the stale side; got: \(advisory)")
     }
 
     // MARK: - MCPEntryClassifier

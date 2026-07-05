@@ -187,14 +187,54 @@ fn installed_entry(plugin_id: &str, home: &Path) -> Option<Value> {
 /// of Swift's `MootInstallerCore.VersionSkewAdvisory.compute` — keep the two
 /// in sync by hand. Returns `None` when the plugin is not installed or its
 /// version matches `binary_version` exactly (no skew to report).
+///
+/// Direction-aware: the remedy depends on which side is newer.
+/// - Binary newer than plugin: plugin bundle is stale → suggest `mootx01 install`
+///   or `claude plugin update mootx01@mootx01`.
+/// - Plugin newer than binary: binary is stale → suggest `mootx01 upgrade`.
 pub fn version_skew_advisory(plugin_id: &str, binary_version: &str, home: &Path) -> Option<String> {
     let plugin_version = installed_version(plugin_id, home)?;
     if plugin_version == binary_version {
         return None;
     }
-    Some(format!(
-        "plugin {plugin_version} expects binary ≥ {plugin_version}; binary is {binary_version} — run `mootx01 upgrade`"
-    ))
+    if version_greater_than(binary_version, &plugin_version) {
+        // Binary is ahead of the plugin — the plugin bundle needs refreshing.
+        // `mootx01 install` rewrites it; `claude plugin update mootx01@mootx01` also works.
+        Some(format!(
+            "binary {binary_version} is newer than plugin {plugin_version} — refresh the plugin with `mootx01 install` or `claude plugin update mootx01@mootx01`"
+        ))
+    } else {
+        // Plugin is ahead of the binary — the binary needs upgrading.
+        Some(format!(
+            "plugin {plugin_version} expects binary ≥ {plugin_version}; binary is {binary_version} — run `mootx01 upgrade`"
+        ))
+    }
+}
+
+/// Compare two semver strings numerically, component by component.
+///
+/// Returns `true` when `a > b`. Splits on '.' and compares each component as
+/// an integer so "1.0.10" > "1.0.9" (string comparison disagrees). Missing
+/// trailing components are treated as 0. Returns `false` on parse failure or
+/// equality. Mirrors Swift `VersionSkewAdvisory.versionGreaterThan`.
+fn version_greater_than(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.').filter_map(|p| p.parse().ok()).collect()
+    };
+    let a_parts = parse(a);
+    let b_parts = parse(b);
+    if a_parts.is_empty() || b_parts.is_empty() {
+        return false;
+    }
+    let len = a_parts.len().max(b_parts.len());
+    for i in 0..len {
+        let av = a_parts.get(i).copied().unwrap_or(0);
+        let bv = b_parts.get(i).copied().unwrap_or(0);
+        if av != bv {
+            return av > bv;
+        }
+    }
+    false // equal
 }
 
 /// Returns `true` when `plugin_id` is enabled in `~/.claude/settings.json`'s
@@ -495,17 +535,40 @@ mod tests {
     }
 
     #[test]
-    fn version_skew_advisory_reports_mismatch() {
-        let home = std::env::temp_dir().join(format!("mootx01-skew-{}-3", std::process::id()));
+    fn version_skew_advisory_plugin_ahead_suggests_upgrade() {
+        // Plugin 1.0.15 > binary 1.0.11 → binary is stale → suggest mootx01 upgrade.
+        let home = std::env::temp_dir().join(format!("mootx01-skew-{}-3a", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let dir = home.join(".claude").join("plugins");
         std::fs::create_dir_all(&dir).unwrap();
         let body = json!({"version": 2, "plugins": {"mootx01@mootx01": [{"scope": "user", "installPath": "x", "version": "1.0.15"}]}});
         std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
         let advisory = version_skew_advisory("mootx01@mootx01", "1.0.11", &home).unwrap();
-        assert!(advisory.contains("1.0.15"));
-        assert!(advisory.contains("1.0.11"));
-        assert!(advisory.contains("mootx01 upgrade"));
+        assert!(advisory.contains("1.0.15"), "advisory must name plugin version");
+        assert!(advisory.contains("1.0.11"), "advisory must name binary version");
+        assert!(advisory.contains("mootx01 upgrade"),
+            "plugin > binary: remedy is mootx01 upgrade; got: {advisory}");
+        assert!(!advisory.contains("mootx01 install"),
+            "should not suggest install when binary is stale; got: {advisory}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn version_skew_advisory_binary_ahead_suggests_plugin_refresh() {
+        // Binary 1.0.18 > plugin 1.0.15 → plugin is stale → suggest mootx01 install.
+        let home = std::env::temp_dir().join(format!("mootx01-skew-{}-3b", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join(".claude").join("plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = json!({"version": 2, "plugins": {"mootx01@mootx01": [{"scope": "user", "installPath": "x", "version": "1.0.15"}]}});
+        std::fs::write(dir.join("installed_plugins.json"), body.to_string()).unwrap();
+        let advisory = version_skew_advisory("mootx01@mootx01", "1.0.18", &home).unwrap();
+        assert!(advisory.contains("1.0.15"), "advisory must name plugin version");
+        assert!(advisory.contains("1.0.18"), "advisory must name binary version");
+        assert!(advisory.contains("mootx01 install"),
+            "binary > plugin: remedy is mootx01 install; got: {advisory}");
+        assert!(!advisory.contains("mootx01 upgrade"),
+            "should not suggest upgrade when plugin is stale; got: {advisory}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
