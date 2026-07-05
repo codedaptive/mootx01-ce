@@ -58,8 +58,16 @@ There is **no `moot_unlock` tool and there never will be** — a prompt-injected
 model could call it. The approval channel is physically separate from the
 model's channel:
 
-- Search/recall over locked tiers reports plainly:
-  `"N results redacted (restricted) — run `mootx01 unlock private` to view"`.
+- Search/recall over locked tiers reports plainly, WITHOUT an exact count —
+  the count of matching sensitive rows is itself a leak (it confirms to a
+  model that N secrets match a probe query). Two cases:
+  (a) rows present in results whose previews were redacted carry their
+  per-row redaction marker (free — the rows are already in hand);
+  (b) rows excluded by the ceiling produce a static advisory line —
+  `"results may be hidden by sensitivity tier — run `mootx01 unlock
+  private` to include them"` — emitted only when the estate contains any
+  restricted/secret rows at all (a cheap estate-level stat, never a
+  per-query probe with the ceiling lifted).
 - The human approves out-of-band: the `mootx01 unlock` CLI (v1; moot-mgr and
   the app shells later, behind the same UnlockAuthority seam).
 - The daemon's grant endpoint accepts a grant only with proof: the verified
@@ -69,9 +77,15 @@ model's channel:
 
 ### 4. Audit
 
-Every grant, every denial, every expiry, and every read served under an
-active grant is written to the UnifiedAuditLog with tier, grant id, and
-timestamps. Sensitive content never appears in the log — row ids only.
+Every grant, every denial, every manual revocation (`mootx01 lock`), and
+every read served under an active grant is written to the UnifiedAuditLog
+with tier, grant id, and timestamps. Expiry is not a logged event: grants
+lapse passively by time, and the issued record carries its expiry
+timestamp, so expiry is derivable from the log without an expiry-time
+writer existing. Sensitivity-unlock events use NEW dedicated audit verbs —
+the existing `grantIssued`/`grantRevoked` verbs are reserved for the
+federation sharing feature and are not reused. Sensitive content never
+appears in the log — row ids only.
 
 ### 5. Threat model and residual risk (stated honestly)
 
