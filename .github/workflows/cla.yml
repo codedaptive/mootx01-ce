@@ -25,7 +25,6 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  actions: write
   contents: write        # write the signature file to the cla-signatures branch
   pull-requests: write   # post/update the CLA comment
   statuses: write        # set the CLA status check
@@ -37,7 +36,7 @@ jobs:
     if: (github.event.issue.pull_request && contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')) || contains(github.event.comment.body, 'recheck') || github.event_name == 'pull_request_target'
     steps:
       - name: CLA Assistant
-        uses: contributor-assistant/github-action@v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PAT used only to store signatures on the cla-signatures branch.
