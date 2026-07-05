@@ -5,6 +5,23 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.18 — 2026-07-05
+
+moot-mgr fix release. With monitoring now on by default (v1.0.17), the
+dashboard's dead spots got a full wiring pass.
+
+- **Capabilities panel fixed on Linux/Windows** — the Rust console read
+  metrics that nothing emits, so the panel was always empty; it now shows
+  the shipped capability set exactly as the macOS console does.
+- **Busiest-estates panel** — the Overview now ranks the top five estates
+  by activity, as the console spec always promised.
+- **Topology chain proven** — the graph endpoint verified end-to-end
+  against a populated estate snapshot in both consoles.
+- **Test hygiene** — moot-mgr's test suite no longer depends on whether a
+  live daemon happens to be running on the machine.
+- Deferred (needs daemon-side support, v1.1): per-session Connections
+  panel; estate admin controls.
+
 ## v1.0.17 — 2026-07-05
 
 Sensitivity unlock and monitoring release. Private and secret memories
