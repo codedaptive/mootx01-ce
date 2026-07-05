@@ -740,7 +740,7 @@ fn run_memory_search(
         let preview: String = hit.drawer.as_ref().map(|d| {
             use locus_kit::provenance::Sensitivity;
             match d.sensitivity() {
-                Sensitivity::Restricted => "[sensitivity: restricted — retrieve by id for content]".to_string(),
+                Sensitivity::Restricted => "[sensitivity: restricted — content redacted]".to_string(),
                 Sensitivity::Secret    => "[sensitivity: secret — content access requires explicit grant]".to_string(),
                 Sensitivity::Normal | Sensitivity::Elevated => {
                     d.content.chars().take(120).collect()
@@ -829,8 +829,11 @@ fn run_memory_search(
 /// refuse to surface. Tombstoned rows are always excluded, independent of
 /// the chain.
 ///
-/// Hydration is `Full` (verbatim content) — never `Structured`, which strips
-/// the content blob this tool exists to return.
+/// Hydration is `Full` for drawers that pass both gates — never `Structured`,
+/// which strips the content blob this tool exists to return. Provenance
+/// `Sensitivity::Restricted` and `Sensitivity::Secret` remain access-controlled
+/// at the MCP boundary and are reported with the same not-found shape as other
+/// gate failures until an explicit grant mechanism exists.
 fn run_memory_get(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -869,7 +872,7 @@ fn run_memory_get(
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
 
     // Same message and error code whether the id is genuinely absent,
-    // tombstoned, or exists but failed the default gate — see the
+    // tombstoned, or exists but failed a disclosure gate — see the
     // containment note above. Mirrors moot_link_memories' "not found" shape.
     let Some(drawer) = filtered.admissible.into_iter().next() else {
         return Err(JSONRPCError::new(
@@ -877,6 +880,25 @@ fn run_memory_get(
             format!("Memory not found: {row_id}"),
         ));
     };
+
+    // Preserve moot_memory_search's provenance-sensitivity redaction boundary
+    // for the full-content by-id path. The default RecallFrame gate above only
+    // checks adjective sensitivity (bits 6–11); Drawer::sensitivity() decodes
+    // provenance sensitivity (bits 30–35), where Restricted/Secret content is
+    // access-controlled and must not be returned verbatim without an explicit
+    // grant mechanism. Use the standard not-found shape so by-id lookup does not
+    // become an oracle for rows hidden by this MCP disclosure gate.
+    match drawer.sensitivity() {
+        locus_kit::provenance::Sensitivity::Restricted
+        | locus_kit::provenance::Sensitivity::Secret => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("Memory not found: {row_id}"),
+            ));
+        }
+        locus_kit::provenance::Sensitivity::Normal
+        | locus_kit::provenance::Sensitivity::Elevated => {}
+    }
 
     // ADR-025 §4: same read-under-grant audit recording as
     // run_memory_search — gated on BOTH the ceiling having been lifted AND
