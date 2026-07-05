@@ -88,6 +88,9 @@ struct Mootx01: AsyncParsableCommand {
                 DbCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
+                // ADR-025 — out-of-band sensitivity unlock / lock.
+                UnlockCommand.self,
+                LockCommand.self,
             ]
         )
         #else
