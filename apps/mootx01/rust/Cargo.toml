@@ -53,3 +53,7 @@ queuekit = { path = "../../../packages/kits/QueueKit/rust", features = ["persist
 # uuid: per-process instance token for the dreaming DrainLease — prevents
 # a reused PID after a crash from impersonating the prior lease holder.
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# tempfile: temporary directories for sensitivity_hashes unit tests.
+tempfile = "3"
