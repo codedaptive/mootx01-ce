@@ -99,6 +99,10 @@ const MUTATION_TOOLS: &[&str] = &[
     "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
     "moot_reindex", "moot_dream", "moot_consolidate", "moot_synthesize",
     "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
+    // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
+    // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
+    // Mirrors Swift PermissionsWriter.mutationTools (parity required).
+    "moot_monitoring_status",
 ];
 
 /// Destructive, irreversible: hard-deletes content from the estate.
@@ -596,6 +600,8 @@ mod tests {
         assert_eq!(classify("moot_reindex"), Tier::Ask);
         assert_eq!(classify("moot_palace_import"), Tier::Ask);
         assert_eq!(classify("moot_vault_import"), Tier::Ask);
+        // ADR-025 wave 8.2: monitoring_status mutates daemon behaviour — ask tier.
+        assert_eq!(classify("moot_monitoring_status"), Tier::Ask, "monitoring_status is mutating — ask tier");
 
         assert_eq!(classify("moot_erase_memory"), Tier::Deny);
 
