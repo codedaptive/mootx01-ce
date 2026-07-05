@@ -116,7 +116,8 @@ pub fn dispatch(
             let top_k = crate::dispatch::clamp_limit(
                 Some(opt_integer(args, "topK", 5)?), "topK", 5, crate::dispatch::LIMIT_HARD_CEILING
             )?;
-            let ranked = run_keystones(&coord, &estate.handle, wing, top_k).map_err(lens_error)?;
+            let ranked = run_keystones(&coord, &estate.handle, wing, top_k, now as f64)
+                .map_err(lens_error)?;
             Ok(list(
                 "keystones",
                 ranked
@@ -129,7 +130,8 @@ pub fn dispatch(
         "moot_lens_constellation" => {
             // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
-            let out = run_constellation(&coord, &estate.handle, wing).map_err(lens_error)?;
+            let out = run_constellation(&coord, &estate.handle, wing, now as f64)
+                .map_err(lens_error)?;
             Ok(list(
                 "constellation",
                 out.communities.iter().map(|c| c.join(", ")).collect(),

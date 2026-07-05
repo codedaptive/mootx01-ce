@@ -24,6 +24,7 @@ pub fn run_constellation(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
     wing: &str,
+    ts: f64,
 ) -> Result<Constellation, RecipeRunError> {
     let tunnels = coord
         .recall_tunnels(handle, wing)
@@ -44,10 +45,16 @@ pub fn run_constellation(
     }
     let nodes: Vec<String> = node_set.into_iter().collect();
 
+    // Thread estate and ts so the VizGraph telemetry row carries the caller's
+    // estate identifier and timestamp — not empty/0 defaults (mirrors the
+    // Swift recipe, which threads handle.estateUUID + now).
+    let estate = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
     Ok(constellations(
         &nodes,
         &edges,
         neuron_kit::constellation::DEFAULT_MAX_PASSES,
+        &estate,
+        ts,
     ))
 }
 
@@ -104,7 +111,8 @@ mod tests {
         add_edge(&coord, &h, "t5", "B1", "B3");
         add_edge(&coord, &h, "t6", "B2", "B3");
 
-        let c = run_constellation(&coord, &h, WING).expect("constellation");
+        // ts sentinel: telemetry timestamp is irrelevant to this assertion.
+        let c = run_constellation(&coord, &h, WING, 0.0).expect("constellation");
         assert_eq!(c.communities.len(), 2, "two cliques ⇒ two emergent themes");
     }
 
@@ -112,7 +120,8 @@ mod tests {
     #[test]
     fn ck_cs2_empty_wing_guarded() {
         let (coord, h) = coord_with_parent();
-        let c = run_constellation(&coord, &h, WING).expect("constellation");
+        // ts sentinel: telemetry timestamp is irrelevant to this assertion.
+        let c = run_constellation(&coord, &h, WING, 0.0).expect("constellation");
         assert!(c.communities.is_empty());
     }
 }
