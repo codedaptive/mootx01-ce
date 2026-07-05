@@ -43,7 +43,11 @@ public enum LexRank {
             }
         }
 
-        let scores = EigenvalueCentrality.compute(adjacency: scores0Guard(adjacency, sents.count))
+        // LexRank operates at build-time over article text with no associated
+        // estate. estate: "" and ts: 0 are intentional explicit sentinels —
+        // VizGraph telemetry for LexRank is not estate-scoped.
+        let scores = EigenvalueCentrality.compute(adjacency: scores0Guard(adjacency, sents.count),
+                                                  estate: "", ts: 0)
         // Top-n by score (ties by earlier sentence), then restore original order.
         let chosen = (0..<sents.count)
             .sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }

@@ -41,7 +41,9 @@ struct EigenvalueCentralityDirectedTests {
             adj[2] = [(neighbor: 3, weight: 1.0)]
             // node 3 has no out-edges
 
-            let scores = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 300, tolerance: 1e-9)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let scores = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 300, tolerance: 1e-9,
+                                                      estate: "", ts: 0)
             #expect(scores.count == 4)
 
             // Authority: node 3 is pointed at by 2, which is pointed at
@@ -76,7 +78,9 @@ struct EigenvalueCentralityDirectedTests {
             adj[3] = [(neighbor: 2, weight: 1.0)]
             // Node 2 has no out-edges
 
-            let scores = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 300, tolerance: 1e-9)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let scores = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 300, tolerance: 1e-9,
+                                                      estate: "", ts: 0)
             #expect(scores.count == 4)
 
             // Node 2 receives edges from 0, 1, and 3 — highest in-degree.
@@ -105,7 +109,9 @@ struct EigenvalueCentralityDirectedTests {
             adj[1] = [(neighbor: 2, weight: 1.0)]
             adj[3] = [(neighbor: 2, weight: 1.0)]
 
-            let scores = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 300, tolerance: 1e-9)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let scores = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 300, tolerance: 1e-9,
+                                                      estate: "", ts: 0)
 
             // Authority ordering that both ports must agree on:
             //   scores[2] > scores[0]: the authority node beats the hub

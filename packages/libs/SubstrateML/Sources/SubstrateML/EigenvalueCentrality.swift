@@ -82,14 +82,18 @@ public enum EigenvalueCentrality {
     ///   - adjacency: Sparse adjacency list.
     ///   - maxIterations: Power iteration cap.
     ///   - tolerance: Convergence tolerance (L2 diff norm).
-    ///   - estate: Estate identifier for VizGraph telemetry.
-    ///   - ts: Caller-supplied epoch seconds for telemetry.
+    ///   - estate: Estate identifier for VizGraph telemetry. Callers with no
+    ///             estate context must pass "" explicitly (no default — compiler
+    ///             enforces the decision at every call site).
+    ///   - ts: Caller-supplied epoch seconds for telemetry. Never read a clock
+    ///         inside SubstrateML; the caller provides `ts`. Pass 0.0 explicitly
+    ///         when no meaningful timestamp is available.
     public static func compute(
         adjacency: Adjacency,
         maxIterations: Int = defaultMaxIterations,
         tolerance: Double = defaultTolerance,
-        estate: String = "",
-        ts: Double = 0
+        estate: String,
+        ts: Double
     ) -> [Double] {
         let shift: Double = 1.0
         let n = adjacency.count

@@ -78,13 +78,15 @@ struct CommunityDetectionTests {
 
     @Test("an empty graph yields an empty labeling")
     func emptyGraph() {
-        #expect(CommunityDetection.detect(adjacency: [], maxPasses: 10).isEmpty)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        #expect(CommunityDetection.detect(adjacency: [], maxPasses: 10, estate: "", ts: 0).isEmpty)
     }
 
     @Test("a disconnected graph gives one community per node")
     func disconnectedGraphOneCommunityPerNode() {
         let adj: CommunityDetection.Adjacency = Array(repeating: [], count: 4)
-        #expect(CommunityDetection.detect(adjacency: adj, maxPasses: 10) == [0, 1, 2, 3])
+        // estate/ts: explicit sentinels — tests have no estate context.
+        #expect(CommunityDetection.detect(adjacency: adj, maxPasses: 10, estate: "", ts: 0) == [0, 1, 2, 3])
     }
 
     @Test("two cliques with a weak bridge split into two communities")
@@ -97,7 +99,9 @@ struct CommunityDetectionTests {
                 (3, 4, 1.0), (3, 5, 1.0), (4, 5, 1.0),
                 (0, 3, 0.01),
             ]
-            let result = CommunityDetection.detect(adjacency: symmetricEdges(6, edges), maxPasses: 20)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let result = CommunityDetection.detect(adjacency: symmetricEdges(6, edges), maxPasses: 20,
+                                                   estate: "", ts: 0)
             #expect(result[0] == result[1])
             #expect(result[1] == result[2])
             #expect(result[3] == result[4])
@@ -112,7 +116,9 @@ struct CommunityDetectionTests {
         // VizGraphSignalTests sink does not capture a stray sample.
         await GlobalTestLock.shared.withLock {
             let edges: [(Int, Int, Double)] = [(0, 1, 1.0), (0, 2, 1.0), (1, 2, 1.0)]
-            let result = CommunityDetection.detect(adjacency: symmetricEdges(3, edges), maxPasses: 20)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let result = CommunityDetection.detect(adjacency: symmetricEdges(3, edges), maxPasses: 20,
+                                                   estate: "", ts: 0)
             #expect(result[0] == 0)
             let maxLabel = result.max() ?? 0
             #expect(maxLabel < result.count)
@@ -149,7 +155,9 @@ struct CommunityDetectionTests {
     func v1Phase1LocksPairs() async {
         // detect() calls Intellectus.report() — hold GlobalTestLock.
         await GlobalTestLock.shared.withLock {
-            let result = CommunityDetection.detect(adjacency: v1StarOfPairs, maxPasses: 20)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let result = CommunityDetection.detect(adjacency: v1StarOfPairs, maxPasses: 20,
+                                                   estate: "", ts: 0)
             #expect(result == [0, 0, 1, 1, 2, 2, 3, 3])
         }
     }
@@ -162,8 +170,10 @@ struct CommunityDetectionTests {
             // first-merge gain is −0.206. Full Louvain must NOT differ from
             // phase 1 here — the cure for the pathology is resolution, not
             // aggregation alone.
+            // estate/ts: explicit sentinels — tests have no estate context.
             let result = CommunityDetection.detectFull(
-                adjacency: v1StarOfPairs, maxLevels: 10, maxPasses: 20, resolution: 1.0)
+                adjacency: v1StarOfPairs, maxLevels: 10, maxPasses: 20, resolution: 1.0,
+                estate: "", ts: 0)
             #expect(result == [0, 0, 1, 1, 2, 2, 3, 3])
         }
     }
@@ -177,8 +187,10 @@ struct CommunityDetectionTests {
             // supernode merges into the star at level 1. Intermediate gain ties
             // among the symmetric pair supernodes are harmless: the terminal
             // state is the single community regardless of tie order.
+            // estate/ts: explicit sentinels — tests have no estate context.
             let result = CommunityDetection.detectFull(
-                adjacency: v1StarOfPairs, maxLevels: 10, maxPasses: 20, resolution: 0.05)
+                adjacency: v1StarOfPairs, maxLevels: 10, maxPasses: 20, resolution: 0.05,
+                estate: "", ts: 0)
             #expect(result == [0, 0, 0, 0, 0, 0, 0, 0])
         }
     }
@@ -199,9 +211,12 @@ struct CommunityDetectionTests {
         // detect() and detectFull() both call Intellectus.report() — hold GlobalTestLock.
         await GlobalTestLock.shared.withLock {
             let expected = [0, 0, 0, 0, 1, 1, 1, 1]
-            #expect(CommunityDetection.detect(adjacency: v2TwoCliquesBridge, maxPasses: 20) == expected)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            #expect(CommunityDetection.detect(adjacency: v2TwoCliquesBridge, maxPasses: 20,
+                                              estate: "", ts: 0) == expected)
             #expect(CommunityDetection.detectFull(
-                adjacency: v2TwoCliquesBridge, maxLevels: 10, maxPasses: 20, resolution: 1.0) == expected)
+                adjacency: v2TwoCliquesBridge, maxLevels: 10, maxPasses: 20, resolution: 1.0,
+                estate: "", ts: 0) == expected)
         }
     }
 
@@ -212,8 +227,10 @@ struct CommunityDetectionTests {
             // Continent-merge threshold is γ < 2m·w_bridge/(k·(σ+k)) ≈ 0.00083
             // for these cliques — orders of magnitude below 0.05. The low γ that
             // absorbs pair supernodes must not glue real continents together.
+            // estate/ts: explicit sentinels — tests have no estate context.
             #expect(CommunityDetection.detectFull(
-                adjacency: v2TwoCliquesBridge, maxLevels: 10, maxPasses: 20, resolution: 0.05)
+                adjacency: v2TwoCliquesBridge, maxLevels: 10, maxPasses: 20, resolution: 0.05,
+                estate: "", ts: 0)
                 == [0, 0, 0, 0, 1, 1, 1, 1])
         }
     }
@@ -232,9 +249,12 @@ struct CommunityDetectionTests {
     func v3DetectFullMatchesDetectWhenOptimal() async {
         // detect() and detectFull() both call Intellectus.report() — hold GlobalTestLock.
         await GlobalTestLock.shared.withLock {
-            let phase1 = CommunityDetection.detect(adjacency: v3AlreadyOptimal, maxPasses: 20)
+            // estate/ts: explicit sentinels — tests have no estate context.
+            let phase1 = CommunityDetection.detect(adjacency: v3AlreadyOptimal, maxPasses: 20,
+                                                   estate: "", ts: 0)
             let full = CommunityDetection.detectFull(
-                adjacency: v3AlreadyOptimal, maxLevels: 10, maxPasses: 20, resolution: 1.0)
+                adjacency: v3AlreadyOptimal, maxLevels: 10, maxPasses: 20, resolution: 1.0,
+                estate: "", ts: 0)
             #expect(phase1 == [0, 0, 0, 1, 1, 1])
             #expect(full == phase1)
         }
@@ -256,13 +276,17 @@ struct CommunityDetectionTests {
             // At γ = 1.0 every move gain is negative (k₀ = 2.5 inflates the
             // penalty), so all three nodes stay singletons; detectFull's level-0
             // K == n and the loop terminates without condensing.
-            #expect(CommunityDetection.detect(adjacency: v4SelfLoopTriangle, maxPasses: 20) == [0, 1, 2])
+            // estate/ts: explicit sentinels — tests have no estate context.
+            #expect(CommunityDetection.detect(adjacency: v4SelfLoopTriangle, maxPasses: 20,
+                                              estate: "", ts: 0) == [0, 1, 2])
             #expect(CommunityDetection.detectFull(
-                adjacency: v4SelfLoopTriangle, maxLevels: 10, maxPasses: 20, resolution: 1.0) == [0, 1, 2])
+                adjacency: v4SelfLoopTriangle, maxLevels: 10, maxPasses: 20, resolution: 1.0,
+                estate: "", ts: 0) == [0, 1, 2])
             // At γ = 0.05 the penalty shrinks and the triangle collapses; the
             // condensation path then carries the self-loop weight through.
             #expect(CommunityDetection.detectFull(
-                adjacency: v4SelfLoopTriangle, maxLevels: 10, maxPasses: 20, resolution: 0.05) == [0, 0, 0])
+                adjacency: v4SelfLoopTriangle, maxLevels: 10, maxPasses: 20, resolution: 0.05,
+                estate: "", ts: 0) == [0, 0, 0])
         }
     }
 
@@ -273,14 +297,18 @@ struct CommunityDetectionTests {
         // all three sub-cases are covered (empty and zero-weight cases skip the
         // emit site but share the lock acquisition, which is cheap).
         await GlobalTestLock.shared.withLock {
+            // estate/ts: explicit sentinels — tests have no estate context.
             #expect(CommunityDetection.detectFull(
-                adjacency: [], maxLevels: 10, maxPasses: 10, resolution: 1.0).isEmpty)
+                adjacency: [], maxLevels: 10, maxPasses: 10, resolution: 1.0,
+                estate: "", ts: 0).isEmpty)
             // Singleton, no edges (zero total weight).
             #expect(CommunityDetection.detectFull(
-                adjacency: [[]], maxLevels: 10, maxPasses: 10, resolution: 1.0) == [0])
+                adjacency: [[]], maxLevels: 10, maxPasses: 10, resolution: 1.0,
+                estate: "", ts: 0) == [0])
             // Singleton with a self-loop (non-zero weight, no candidate moves).
             #expect(CommunityDetection.detectFull(
-                adjacency: [[(neighbor: 0, weight: 1.0)]], maxLevels: 10, maxPasses: 10, resolution: 1.0) == [0])
+                adjacency: [[(neighbor: 0, weight: 1.0)]], maxLevels: 10, maxPasses: 10, resolution: 1.0,
+                estate: "", ts: 0) == [0])
         }
     }
 
