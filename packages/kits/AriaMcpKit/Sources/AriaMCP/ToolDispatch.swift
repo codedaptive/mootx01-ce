@@ -1247,18 +1247,43 @@ extension ToolDispatcher {
         var lines: [String] = ["found \(result.hits.count) memory(s)"]
         for hit in result.hits.prefix(50) {
             let room = hit.drawer.flatMap { hitNodeNames[$0.parentNodeId]?.room } ?? "?"
-            // For _distilled drawers, apply injection-depth formatting so the LLM
-            // caller sees factoid prose with calibrated provenance annotations rather
-            // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
-            if room == "_distilled",
-               let content = hit.drawer?.content,
-               let header = DistilledHeader.parse(content) {
-                let formatted = Self.injectionDepthFormatted(header: header, drawerID: hit.id)
-                lines.append("\(hit.id)  [\(room)]  \(formatted)")
-            } else {
-                let preview = hit.drawer?.content.prefix(120) ?? "(not hydrated)"
-                lines.append("\(hit.id)  [\(room)]  \(preview)")
+            // Sensitivity-aware content preview (search-redaction parity fix,
+            // Wave 6): LocusKit stores provenance sensitivity in bits 30-35
+            // (Drawer.sensitivity, separate from the adjective-axis
+            // sensitivity moot_memory_get's containment gate checks). This
+            // was previously a Rust-only preview redaction (Rust
+            // run_memory_search) — Swift always showed the raw 120-char
+            // preview regardless of provenance sensitivity, a pre-existing
+            // port divergence. moot_memory_search can surface a Restricted/
+            // Secret row for relevance ranking without exposing its body; a
+            // raw content preview at the ARIA boundary would leak text the
+            // sensitivity designation marks as access-controlled.
+            //
+            // Normal and Elevated: the bulk-export tiers, safe to preview —
+            // proceed to the existing distilled-header / 120-char-preview
+            // formatting below, unchanged.
+            // Restricted and Secret: replace with a redacted placeholder,
+            // even for a `_distilled` row — the security control applies
+            // regardless of formatting path.
+            let preview: String
+            switch hit.drawer?.sensitivity {
+            case .restricted:
+                preview = "[sensitivity: restricted — retrieve by id for content]"
+            case .secret:
+                preview = "[sensitivity: secret — content access requires explicit grant]"
+            case .normal, .elevated, .none:
+                // For _distilled drawers, apply injection-depth formatting so the LLM
+                // caller sees factoid prose with calibrated provenance annotations rather
+                // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
+                if room == "_distilled",
+                   let content = hit.drawer?.content,
+                   let header = DistilledHeader.parse(content) {
+                    preview = Self.injectionDepthFormatted(header: header, drawerID: hit.id)
+                } else {
+                    preview = hit.drawer.map { String($0.content.prefix(120)) } ?? "(not hydrated)"
+                }
             }
+            lines.append("\(hit.id)  [\(room)]  \(preview)")
             if explain {
                 for line in hit.explanation { lines.append("  \(line)") }
             }

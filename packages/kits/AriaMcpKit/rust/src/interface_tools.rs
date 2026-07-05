@@ -644,13 +644,13 @@ fn run_memory_search(
         // (state/trust/adjective_sensitivity, bits 6-11, via
         // BitmapEvaluator's default insertion) — the same gate this tool
         // applies to admit a row into `result.hits` at all. The provenance
-        // `Sensitivity` checked here (bits 30-35) is a SEPARATE, Rust-only
-        // preview redaction with no Swift twin today (Swift's
-        // `runMemorySearch` always shows the raw 120-char preview
-        // regardless of provenance sensitivity) — a pre-existing port
-        // divergence, not something moot_memory_get's gate is scoped to
-        // reconcile. moot_memory_get's own gate is byte-for-byte the same
-        // adjective-axis default both ports' moot_memory_search already use.
+        // `Sensitivity` checked here (bits 30-35) is a SEPARATE preview
+        // redaction — Swift's `runMemorySearch` now applies the identical
+        // redaction (search-redaction parity fix, Wave 6; previously a
+        // Rust-only behavior) — not something moot_memory_get's gate is
+        // scoped to reconcile. moot_memory_get's own gate is byte-for-byte
+        // the same adjective-axis default both ports' moot_memory_search
+        // already use.
         let preview: String = hit.drawer.as_ref().map(|d| {
             use locus_kit::provenance::Sensitivity;
             match d.sensitivity() {
