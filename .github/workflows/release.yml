@@ -94,8 +94,13 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          MOOT_BIN="$(find apps/mootx01/.build -name mootx01 -path '*/release/mootx01' | head -1)"
-          MGR_BIN="$(find apps/moot-mgr/.build -name moot-mgr -path '*/release/moot-mgr' | head -1)"
+          MOOT_BIN="apps/mootx01/.build/arm64-apple-macosx/release/mootx01"
+          MGR_BIN="apps/moot-mgr/.build/arm64-apple-macosx/release/moot-mgr"
+          for bin in "$MOOT_BIN" "$MGR_BIN"; do
+            test -f "$bin"
+            test -x "$bin"
+            file "$bin" | grep -E 'Mach-O.*arm64'
+          done
           codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
           codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
           codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
@@ -158,7 +163,10 @@ jobs:
           # Setup assistant links MootInstallerCore from apps/mootx01 via local
           # path dependency; both packages must be built for the same arch.
           swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup
-          SETUP_BIN="$(find apps/Mootx01-Setup/.build -name Mootx01Setup -path '*/release/Mootx01Setup' | head -1)"
+          SETUP_BIN="apps/Mootx01-Setup/.build/arm64-apple-macosx/release/Mootx01Setup"
+          test -f "$SETUP_BIN"
+          test -x "$SETUP_BIN"
+          file "$SETUP_BIN" | grep -E 'Mach-O.*arm64'
           echo "SETUP_BIN=${SETUP_BIN}" >> "${GITHUB_ENV}"
 
       - name: Sign setup assistant (arm64)
@@ -316,8 +324,13 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          MOOT_BIN="$(find apps/mootx01/.build -name mootx01 -path '*/release/mootx01' | head -1)"
-          MGR_BIN="$(find apps/moot-mgr/.build -name moot-mgr -path '*/release/moot-mgr' | head -1)"
+          MOOT_BIN="apps/mootx01/.build/x86_64-apple-macosx/release/mootx01"
+          MGR_BIN="apps/moot-mgr/.build/x86_64-apple-macosx/release/moot-mgr"
+          for bin in "$MOOT_BIN" "$MGR_BIN"; do
+            test -f "$bin"
+            test -x "$bin"
+            file "$bin" | grep -E 'Mach-O.*x86_64'
+          done
           codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
           codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
           codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
@@ -373,7 +386,10 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         run: |
           swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup --arch x86_64
-          SETUP_BIN="$(find apps/Mootx01-Setup/.build -name Mootx01Setup -path '*/release/Mootx01Setup' | head -1)"
+          SETUP_BIN="apps/Mootx01-Setup/.build/x86_64-apple-macosx/release/Mootx01Setup"
+          test -f "$SETUP_BIN"
+          test -x "$SETUP_BIN"
+          file "$SETUP_BIN" | grep -E 'Mach-O.*x86_64'
           echo "SETUP_BIN=${SETUP_BIN}" >> "${GITHUB_ENV}"
 
       - name: Sign setup assistant (x86_64)
