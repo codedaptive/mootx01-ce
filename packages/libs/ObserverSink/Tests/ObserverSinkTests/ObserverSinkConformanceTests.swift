@@ -698,7 +698,79 @@ struct ObserverSinkConformanceTests {
         #expect(result.isEmpty, "Empty input must return empty result")
     }
 
-    // MARK: 18. v3→v4 migration on an existing store
+    // MARK: 18. queryLatestMetricsByNamesAndDropboxes — per-pair latest-row query
+
+    /// 10k rows across 4 (name, dropboxID) pairs — result count must equal 4,
+    /// not 10k. This is the core correctness proof for the estatesPayload fix:
+    /// the method returns the LATEST row per group, not all rows.
+    @Test("queryLatestMetricsByNamesAndDropboxes returns one row per group, not table size")
+    func latestMetricsByNamesAndDropboxesGroupCount() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        // Seed 10k rows across 2 names × 2 dropboxes (2500 rows per pair).
+        // Row timestamps are sequential (ts=1, 2, ..., 10000).
+        // The most-recent row per (name, dropboxID) is the one with the highest ts.
+        let names: [String] = ["metric.a", "metric.b"]
+        let dropboxes: [String] = ["dropbox-1", "dropbox-2"]
+        var ts = 1.0
+        let rowsPerGroup = 2_500
+        for name in names {
+            for dropbox in dropboxes {
+                for _ in 0..<rowsPerGroup {
+                    try await store.insertMetric(
+                        name: name, value: ts, tags: ["group": "\(name):\(dropbox)"],
+                        ts: ts, dropboxID: dropbox
+                    )
+                    ts += 1
+                }
+            }
+        }
+
+        let result = try await store.queryLatestMetricsByNamesAndDropboxes(
+            Set(names), dropboxIDs: dropboxes
+        )
+
+        // Must return exactly 4 rows (one per group), not 10k.
+        #expect(
+            result.count == names.count * dropboxes.count,
+            "Must return one row per (name, dropboxID) pair; got \(result.count)"
+        )
+
+        // Verify each row is the LATEST (highest ts) for its group.
+        // The last row inserted for each (name, dropboxID) has the highest value.
+        for name in names {
+            for dropbox in dropboxes {
+                let row = result.first(where: { $0.name == name && $0.dropboxID == dropbox })
+                let r = try #require(row, "Row for (\(name), \(dropbox)) must be present")
+                // Each group's last insert has value = ts of that insert (the max for the group).
+                // Group rows were inserted in batches so the max ts for (name, dropbox) is
+                // not trivially predictable by index — assert the row has the highest ts for
+                // that group rather than a specific constant.
+                let allForGroup = try await store.queryMetricsByNames(Set([name]), dropboxID: dropbox)
+                let maxTs = allForGroup.max(by: { $0.ts < $1.ts })?.ts
+                #expect(r.ts == maxTs, "Latest row for (\(name), \(dropbox)) must have max ts; got \(r.ts)")
+            }
+        }
+    }
+
+    @Test("queryLatestMetricsByNamesAndDropboxes returns empty for empty inputs")
+    func latestMetricsByNamesAndDropboxesEmptyInputs() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let emptyNames = try await store.queryLatestMetricsByNamesAndDropboxes(
+            [], dropboxIDs: ["dropbox-1"]
+        )
+        #expect(emptyNames.isEmpty, "Empty names must yield empty result")
+
+        let emptyDropboxes = try await store.queryLatestMetricsByNamesAndDropboxes(
+            ["metric.a"], dropboxIDs: []
+        )
+        #expect(emptyDropboxes.isEmpty, "Empty dropboxIDs must yield empty result")
+    }
+
+    // MARK: 20. v3→v4 migration on an existing store
 
     /// Seed a database at v3 (all StatsStore tables present up through
     /// topology_fingerprint, but WITHOUT idx_metric_samples_dropbox_id).

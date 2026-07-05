@@ -681,6 +681,7 @@ dependencies = [
  "chrono",
  "intellectus-lib",
  "persistence-kit",
+ "rusqlite",
  "serde_json",
  "uuid",
 ]

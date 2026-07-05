@@ -24,7 +24,7 @@
 //   Same table names, same column names, same TEXT (ISO-8601) timestamp format.
 //   Timestamp comparisons use 1-second tolerance (millisecond encoding rounding).
 
-use observer_sink::{PersistenceStatsSink, StatsStore, DropboxMetricAggregate};
+use observer_sink::{PersistenceStatsSink, StatsStore, DropboxMetricAggregate, MetricRow};
 use intellectus_lib::{EventKind, Intellectus, StatSample};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -754,6 +754,77 @@ fn metric_aggregates_empty_input_returns_empty() {
         .query_metric_aggregates_by_dropbox(&[])
         .expect("empty input must succeed");
     assert!(aggs.is_empty(), "empty input must yield empty output");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query_latest_metrics_by_names_and_dropboxes — per-pair latest-row query
+// Mirrors Swift: StatsStore.queryLatestMetricsByNamesAndDropboxes(_:dropboxIDs:)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn latest_metrics_by_names_and_dropboxes_group_count() {
+    let store = make_store();
+
+    // Seed 10k rows across 2 names × 2 dropboxes (2500 rows per pair).
+    // Timestamps are sequential (ts=1.0, 2.0, ..., 10000.0).
+    let names = ["metric.a", "metric.b"];
+    let dropboxes = ["dropbox-1", "dropbox-2"];
+    let mut ts = 1.0_f64;
+    for name in &names {
+        for dropbox in &dropboxes {
+            for _ in 0..2_500_usize {
+                store
+                    .insert_metric(name, ts, &BTreeMap::new(), ts, dropbox)
+                    .expect("insert must succeed");
+                ts += 1.0;
+            }
+        }
+    }
+
+    let result = store
+        .query_latest_metrics_by_names_and_dropboxes(&names, &dropboxes)
+        .expect("query must succeed");
+
+    // Must return exactly 4 rows (one per group), not 10k.
+    assert_eq!(
+        result.len(),
+        names.len() * dropboxes.len(),
+        "must return one row per (name, dropboxID) pair; got {}",
+        result.len()
+    );
+
+    // Verify each row is the LATEST (highest ts) for its group.
+    for name in &names {
+        for dropbox in &dropboxes {
+            let row = result.iter().find(|r| r.name == *name && r.dropbox_id == *dropbox)
+                .unwrap_or_else(|| panic!("row for ({name}, {dropbox}) must be present"));
+            // The max ts for this group is the last row inserted for (name, dropbox).
+            // Rows within one group share sequential timestamps; find the group's max.
+            let all = store
+                .query_metrics_by_names(&[name], Some(dropbox))
+                .expect("group query must succeed");
+            let max_ts = all.iter().map(|r| r.ts_epoch).fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (row.ts_epoch - max_ts).abs() < 1e-6,
+                "latest row for ({name}, {dropbox}) must have max ts_epoch {max_ts}; got {}",
+                row.ts_epoch
+            );
+        }
+    }
+}
+
+#[test]
+fn latest_metrics_by_names_and_dropboxes_empty_inputs() {
+    let store = make_store();
+    let empty_names: Vec<MetricRow> = store
+        .query_latest_metrics_by_names_and_dropboxes(&[], &["dropbox-1"])
+        .expect("empty names must succeed");
+    assert!(empty_names.is_empty(), "empty names must yield empty result");
+
+    let empty_dropboxes: Vec<MetricRow> = store
+        .query_latest_metrics_by_names_and_dropboxes(&["metric.a"], &[])
+        .expect("empty dropboxes must succeed");
+    assert!(empty_dropboxes.is_empty(), "empty dropboxes must yield empty result");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

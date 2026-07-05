@@ -988,6 +988,73 @@ impl StatsStore {
         Ok(results)
     }
 
+    /// Return the single most-recent MetricRow for each (name, dropbox_id) pair.
+    ///
+    /// This is the correct replacement for `query_metrics_by_names` in paths that
+    /// only need the LATEST value per (metric, consumer) — e.g. the `estates_payload`
+    /// queue-stats block, where 8 names × N dropboxes produces at most 8×N rows
+    /// regardless of total table size.
+    ///
+    /// For each pair this method issues one indexed query:
+    ///   `WHERE name = ? AND dropbox_id = ? ORDER BY ts DESC LIMIT 1`
+    /// Both columns have B-tree indexes, so each resolves in O(log n) not O(n).
+    /// Pairs with no matching rows are skipped; result count is ≤ |names| × |dropbox_ids|.
+    ///
+    /// Mirrors Swift `StatsStore.queryLatestMetricsByNamesAndDropboxes(_:dropboxIDs:)`.
+    pub fn query_latest_metrics_by_names_and_dropboxes(
+        &self,
+        names: &[&str],
+        dropbox_ids: &[&str],
+    ) -> Result<Vec<MetricRow>, persistence_kit::StorageError> {
+        if names.is_empty() || dropbox_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rs = self.storage.row_store();
+        let table = StatsStoreSchema::METRIC_SAMPLES_TABLE;
+        let name_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::NAME_COLUMN.to_string(),
+        };
+        let db_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+        };
+        let ts_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::TS_COLUMN.to_string(),
+        };
+        let ts_order = PkOrderClause {
+            column: ts_col,
+            direction: OrderDirection::Descending,
+        };
+
+        let mut results = Vec::with_capacity(names.len() * dropbox_ids.len());
+        for &dropbox_id in dropbox_ids {
+            for &name in names {
+                // Compound predicate: `WHERE name = ? AND dropbox_id = ?`
+                // The idx_metric_samples_dropbox_id index narrows to one dropbox's
+                // rows; ts DESC LIMIT 1 picks the most-recent sample for that pair.
+                let predicate = StoragePredicate::And(vec![
+                    StoragePredicate::Eq(name_col.clone(), TypedValue::Text(name.to_string())),
+                    StoragePredicate::Eq(db_col.clone(), TypedValue::Text(dropbox_id.to_string())),
+                ]);
+                let rows = rs.query(
+                    table,
+                    Some(&predicate),
+                    &[ts_order.clone()],
+                    Some(1),
+                    None,
+                )?;
+                if let Some(row) = rows.into_iter().next() {
+                    if let Some(metric) = MetricRow::from_storage_row(row) {
+                        results.push(metric);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
     // MARK: - Retention
 
     /// Delete metric samples with `ts` strictly before `cutoff_epoch_secs`.

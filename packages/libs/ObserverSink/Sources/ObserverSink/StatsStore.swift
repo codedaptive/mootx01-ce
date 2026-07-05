@@ -897,6 +897,65 @@ public final class StatsStore: Sendable {
         return rows.compactMap(MetricRow.init(storageRow:))
     }
 
+    /// Return the single most-recent MetricRow for each (name, dropboxID) pair.
+    ///
+    /// This is the correct replacement for `queryMetricsByNames(_:)` in paths that
+    /// only need the LATEST value per (metric, consumer) — for example the
+    /// `estatesPayload()` queue stats block, where 8 metric names × N dropboxes
+    /// produces at most 8×N rows regardless of how many rows the table holds.
+    ///
+    /// For each pair this method issues one indexed query:
+    ///   `WHERE name = ? AND dropbox_id = ? ORDER BY ts DESC LIMIT 1`
+    /// Both columns carry B-tree indexes (`idx_metric_samples_ts` on ts and
+    /// `idx_metric_samples_dropbox_id` on dropbox_id), so each call resolves in
+    /// O(log n) rather than O(n).
+    ///
+    /// Pairs with no matching rows are skipped; the result count is ≤ |names| × |dropboxIDs|.
+    ///
+    /// - Parameters:
+    ///   - names:      The metric names to retrieve (e.g. the 8 queue.* names).
+    ///   - dropboxIDs: The dropbox IDs to restrict the query to.
+    /// - Returns: At most one MetricRow per (name, dropboxID) pair, in iteration order.
+    /// - Throws: `StorageError` on I/O failure.
+    public func queryLatestMetricsByNamesAndDropboxes(
+        _ names: Set<String>,
+        dropboxIDs: [String]
+    ) async throws -> [MetricRow] {
+        guard !names.isEmpty, !dropboxIDs.isEmpty else { return [] }
+
+        let table = StatsStoreSchema.metricSamplesTable
+        let nameCol = Column(table: table, name: StatsStoreSchema.nameColumn)
+        let dbCol = Column(table: table, name: StatsStoreSchema.dropboxIDColumn)
+        let tsCol = Column(table: table, name: StatsStoreSchema.tsColumn)
+
+        var results: [MetricRow] = []
+        results.reserveCapacity(names.count * dropboxIDs.count)
+
+        for dropboxID in dropboxIDs {
+            for name in names {
+                // Compound predicate: `WHERE name = ? AND dropbox_id = ?`
+                // The idx_metric_samples_dropbox_id index narrows the scan to
+                // one dropbox's rows; the ts-descending ORDER BY + LIMIT 1 picks
+                // the most-recent sample for that (name, dropboxID) pair.
+                let predicate = StoragePredicate.and([
+                    .eq(nameCol, .text(name)),
+                    .eq(dbCol, .text(dropboxID)),
+                ])
+                let rows = try await storage.rowStore.query(
+                    table: table,
+                    where: predicate,
+                    orderBy: [OrderClause(column: tsCol, direction: .descending)],
+                    limit: 1,
+                    offset: nil
+                )
+                if let row = rows.first, let metric = MetricRow(storageRow: row) {
+                    results.append(metric)
+                }
+            }
+        }
+        return results
+    }
+
     /// Count total metric rows without reading their content.
     ///
     /// Used by `serverPayload()` to report `totalMetrics` without a full-row decode.
