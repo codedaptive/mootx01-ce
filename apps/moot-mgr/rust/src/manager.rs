@@ -473,8 +473,12 @@ impl MootManager {
             }
         }
 
-        // Read the queue.* / locuskit.gate.* metric rows and keep the latest
-        // sample per (estate, metric).
+        // For each estate (dropbox) we only need the LATEST sample per queue metric —
+        // not every historical row. With millions of rows a `WHERE name IN (...)` still
+        // full-scans those rows when the flooded names ARE the queue.* names.
+        // The replacement issues one indexed query per (name, dropboxID) pair and returns
+        // ≤1 row per pair: 8 names × N dropboxes = at most 8N rows regardless of
+        // table size, each using idx_metric_samples_dropbox_id + ts DESC LIMIT 1.
         let queue_metric_names: BTreeSet<&str> = [
             "queue.depth",
             "queue.drain_count",
@@ -487,15 +491,25 @@ impl MootManager {
         ]
         .into_iter()
         .collect();
-        // Read only the named queue/gate metric rows — avoids a full table scan.
-        // Mirrors Swift estatesPayload() which calls store.queryMetricsByNames(queueMetricNames).
-        let queue_metric_name_slice: Vec<&str> = queue_metric_names.iter().copied().collect();
-        let queue_metrics = store.query_metrics_by_names(&queue_metric_name_slice, None)?;
-        // latest[(estate, metric)] = value of the newest sample.
-        let mut latest: BTreeMap<(String, String), (f64, f64)> = BTreeMap::new(); // -> (value, ts)
-        for m in queue_metrics
+        // Restrict to the dropboxIDs seen in the event stream — the same
+        // set of dropboxes that report queue metrics.
+        let queue_dropbox_ids: Vec<&str> = events
             .iter()
-        {
+            .map(|e| e.dropbox_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let queue_metric_name_slice: Vec<&str> = queue_metric_names.iter().copied().collect();
+        let queue_metrics = store.query_latest_metrics_by_names_and_dropboxes(
+            &queue_metric_name_slice,
+            &queue_dropbox_ids,
+        )?;
+        // latest[(estate, metric)] = value of the newest sample.
+        // The returned rows already hold ≤1 row per (name, dropboxID), but a single
+        // dropbox may report metrics for multiple estates via tags["estate"]; take max
+        // per (estate, metric) key for correctness.
+        let mut latest: BTreeMap<(String, String), (f64, f64)> = BTreeMap::new(); // -> (value, ts)
+        for m in queue_metrics.iter() {
             let est = m.tags.get("estate").cloned().unwrap_or_else(|| "unknown".to_string());
             let key = (est, m.name.clone());
             let entry = latest.entry(key).or_insert((m.value, m.ts_epoch));
@@ -601,10 +615,25 @@ impl MootManager {
         ]
         .into_iter()
         .collect();
-        // Read only the named VizGraph signal rows — avoids a full table scan.
-        // Mirrors Swift graphPayload() which calls store.queryMetricsByNames(vizSignals).
+        // VizGraph signals: only the latest sample per (signal, dropbox) is needed.
+        // Use the same indexed approach as estates_payload to stay fast when the
+        // metric_samples table holds millions of rows.
+        // Event dropboxIDs identify the active consumers; viz signals share the same
+        // observer infrastructure as queue metrics.
+        let viz_events = store.query_events(None)?;
+        let viz_dropbox_ids: Vec<&str> = viz_events
+            .iter()
+            .map(|e| e.dropbox_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let viz_signal_slice: Vec<&str> = viz_signals.iter().copied().collect();
-        let viz_metrics = store.query_metrics_by_names(&viz_signal_slice, None)?;
+        let viz_metrics = if viz_dropbox_ids.is_empty() {
+            // No events recorded yet — no dropboxes to query.
+            vec![]
+        } else {
+            store.query_latest_metrics_by_names_and_dropboxes(&viz_signal_slice, &viz_dropbox_ids)?
+        };
 
         // Group by (estate, signal): keep the latest sample + the sample count.
         let mut latest: BTreeMap<(String, String), MetricRow> = BTreeMap::new();
@@ -1099,6 +1128,12 @@ mod tests {
         store
             .insert_metric("community.assignment", 999_999.0, &tags, 100.0, "substrateml")
             .expect("insert must succeed");
+        // graph_payload() now derives dropboxIDs from events so it can use the
+        // indexed query path.  Insert a matching event so "substrateml" appears
+        // in viz_dropbox_ids and the metric row above is found.
+        store
+            .insert_event("write", 1, "node-0", "home", 100.0, "substrateml")
+            .expect("insert event must succeed");
         let payload = mgr.graph_payload(100.0, None).expect("graph_payload must succeed");
         // The cap is 10,000 — the Vec must never exceed that regardless of the
         // stored value.

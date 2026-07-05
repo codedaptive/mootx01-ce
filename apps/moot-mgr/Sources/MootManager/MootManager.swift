@@ -607,15 +607,25 @@ public actor MootManager {
             }
         }
 
-        // Read only the queue metric rows by name via SQL IN predicate.
-        // No in-process filter needed — the named rows arrive directly.
+        // For each estate (dropbox) we only need the LATEST sample per queue metric —
+        // not every historical row. With 6.3M rows in the metric_samples table a
+        // `WHERE name IN (...)` still full-scans that 6.3M set when the flooded names
+        // ARE those queue.* names. The replacement method issues one indexed query per
+        // (name, dropboxID) pair and returns ≤1 row per pair: 8 names × N dropboxes =
+        // at most 8N rows regardless of table size, each hitting
+        // idx_metric_samples_dropbox_id + ts-descending LIMIT 1 (O(log n) per query).
         let queueMetricNames: Set<String> = [
             "queue.depth", "queue.drain_count", "queue.idle_nonempty",
             "queue.latency_p50_ms", "queue.latency_p95_ms",
             "queue.head_of_line_age_s",
             "locuskit.gate.admit_count", "locuskit.gate.reject_count",
         ]
-        let queueMetrics = try await store.queryMetricsByNames(queueMetricNames)
+        // Restrict to the dropboxIDs seen in the event stream — same set of
+        // dropboxes that report queue metrics. Unknown dropboxes produce no rows.
+        let queueDropboxIDs = Array(Set(events.map(\.dropboxID)))
+        let queueMetrics = try await store.queryLatestMetricsByNamesAndDropboxes(
+            queueMetricNames, dropboxIDs: queueDropboxIDs
+        )
 
         // Group by (estate, metric-name): keep the most-recent sample per key.
         struct QKey: Hashable { let estate: String; let metric: String }
@@ -762,9 +772,22 @@ public actor MootManager {
             "anomaly.flag", "edge.decayed_weight",
         ]
 
-        // Read only the five VizGraph signal rows by name via SQL IN predicate.
-        // No in-process filter needed — the named rows arrive directly.
-        let vizMetrics = try await store.queryMetricsByNames(vizSignals)
+        // VizGraph signals: only the latest sample per (signal, dropbox) is needed.
+        // Uses the same indexed approach as estatesPayload (one query per pair) so the
+        // response stays fast even when metric_samples holds millions of rows.
+        // Event dropboxIDs identify the active consumers; viz signals share the same
+        // observer infrastructure as queue metrics.
+        let vizEvents = try await store.queryEvents(dropboxID: nil)
+        let vizDropboxIDs = Array(Set(vizEvents.map(\.dropboxID)))
+        let vizMetrics: [MetricRow]
+        if vizDropboxIDs.isEmpty {
+            // No events recorded yet — no dropboxes to query.
+            vizMetrics = []
+        } else {
+            vizMetrics = try await store.queryLatestMetricsByNamesAndDropboxes(
+                vizSignals, dropboxIDs: vizDropboxIDs
+            )
+        }
 
         // Group by (estate, signal). Estate is a metric tag (VizGraphSignals);
         // samples missing it are bucketed under "unknown" rather than dropped.
