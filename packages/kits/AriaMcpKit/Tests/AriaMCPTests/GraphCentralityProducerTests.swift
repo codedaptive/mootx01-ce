@@ -88,8 +88,11 @@ struct GraphCentralityProducerTests {
         let facts = try await kit.recallKGFacts(handle)
         let graph = GraphCentralityAdjacency.build(
             drawers: drawers, tunnels: tunnels, facts: facts)
+        // Estate threaded from the handle so telemetry carries the correct estate tag.
+        // Epoch-0 sentinel for now — this is a test helper, not production telemetry.
         let ranked = NeuronKit.keystones(
-            nodeIDs: graph.nodeIDs, edges: graph.edges, topK: graph.nodeIDs.count)
+            nodeIDs: graph.nodeIDs, edges: graph.edges, topK: graph.nodeIDs.count,
+            estate: handle.estateUUID.uuidString, now: Date(timeIntervalSince1970: 0))
         var expected: [String: Float] = [:]
         for k in ranked { expected[k.id] = Float(k.centrality) }
         return (GraphCentralityCache(scores: expected), expected, graph.nodeIDs)

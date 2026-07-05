@@ -1460,7 +1460,8 @@ impl AutonomicGovernor {
         };
         if graph_centrality_fired {
             self.last_graph_centrality_secs = Some(now_epoch_secs);
-            if let Err(e) = graph_centrality_duty(&self.coord, &self.handle) {
+            let estate_uuid_str = Uuid::from_bytes(self.handle.estate_uuid).to_string();
+            if let Err(e) = graph_centrality_duty(&self.coord, &self.handle, &estate_uuid_str, now_epoch_secs) {
                 eprintln!(
                     "AutonomicGovernor: graph-centrality producer error for estate {:?}: {e}",
                     Uuid::from_bytes(self.handle.estate_uuid)
@@ -1684,6 +1685,8 @@ fn system_time_to_nanos(t: SystemTime) -> i64 {
 fn graph_centrality_duty(
     coord: &Arc<Mutex<EstateCoordinator>>,
     handle: &EstateHandle,
+    estate_id: &str,
+    now_epoch_secs: f64,
 ) -> Result<(), String> {
     use crate::graph_centrality::{
         build_centrality_graph, compute_centrality_scores, GraphCentralityCache,
@@ -1735,7 +1738,9 @@ fn graph_centrality_duty(
     }
 
     let graph = build_centrality_graph(&live_drawers, &tunnels, &facts);
-    let scores = compute_centrality_scores(&graph);
+    // Thread estate_id and now_epoch_secs so VizGraph telemetry carries the
+    // correct estate tag and timestamp — not empty/0 defaults.
+    let scores = compute_centrality_scores(&graph, estate_id, now_epoch_secs);
 
     coord.register_graph_cache(handle, Arc::new(GraphCentralityCache::new(scores)));
     Ok(())
@@ -1980,7 +1985,9 @@ fn topology_snapshot_duty(
         })
         .collect();
 
-    let topo = graph_topology(&drawer_inputs, &tunnel_inputs, &fact_inputs);
+    // Thread estate_id and now_epoch_secs so VizGraph telemetry carries the
+    // correct estate tag and timestamp — not empty/0 defaults.
+    let topo = graph_topology(&drawer_inputs, &tunnel_inputs, &fact_inputs, estate_id, now_epoch_secs);
 
     // Wire-shape serialization — field names match the Swift snapshot payload
     // (moot-mgr's GraphNodePayload/GraphEdgePayload decode both legs' bytes).

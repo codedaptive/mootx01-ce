@@ -48,8 +48,10 @@ struct KeystonesTests {
         try await addEdge(kit, handle, src: "hub", tgt: "s3")
         try await addEdge(kit, handle, src: "hub", tgt: "s4")
 
+        // now: explicit sentinel — unit tests have no real estate clock context.
         let top = try await Keystones.run(
-            kit: kit, handle: handle, wing: Self.wing, topK: 3)
+            kit: kit, handle: handle, wing: Self.wing, topK: 3,
+            now: Date(timeIntervalSince1970: 0))
 
         #expect(!top.isEmpty)
         #expect(top[0].id == "hub", "the hub is the load-bearing memory")
@@ -60,8 +62,10 @@ struct KeystonesTests {
     @Test("empty wing has no keystones")
     func emptyWingHasNoKeystones() async throws {
         let (kit, handle) = try await openEstate()
+        // now: explicit sentinel — unit tests have no real estate clock context.
         let top = try await Keystones.run(
-            kit: kit, handle: handle, wing: Self.wing, topK: 5)
+            kit: kit, handle: handle, wing: Self.wing, topK: 5,
+            now: Date(timeIntervalSince1970: 0))
         #expect(top.isEmpty)
     }
 }

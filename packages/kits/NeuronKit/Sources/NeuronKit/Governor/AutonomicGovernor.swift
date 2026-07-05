@@ -743,10 +743,14 @@ public actor AutonomicGovernor {
         // keystones over ALL nodes (topK = node count) gives every live
         // drawer's centrality, not just the top ranks. Empty node set ⇒
         // empty result ⇒ empty cache (C-16).
+        // Estate and now are threaded from the caller so telemetry carries
+        // the correct estate tag and timestamp (never read Date() here).
         let ranked = NeuronKit.keystones(
             nodeIDs: graph.nodeIDs,
             edges: graph.edges,
-            topK: graph.nodeIDs.count)
+            topK: graph.nodeIDs.count,
+            estate: handle.estateUUID.uuidString,
+            now: now)
 
         var scores: [String: Float] = Dictionary(minimumCapacity: ranked.count)
         for keystone in ranked {
@@ -877,9 +881,15 @@ public actor AutonomicGovernor {
             TopologyFactInput(subject: f.subject, sourceDrawerID: f.sourceDrawerID)
         }
 
+        // Thread estate UUID and the caller-supplied `now` so VizGraph analytics
+        // rows carry the correct estate tag and timestamp. The governor already
+        // receives both via its duty parameters; pass them rather than letting
+        // SubstrateML silently emit with empty estate and epoch-0 ts.
         let topo = NeuronKit.graphTopology(drawers: drawerInputs,
                                            tunnels: tunnelInputs,
-                                           facts: factInputs)
+                                           facts: factInputs,
+                                           estate: handle.estateUUID.uuidString,
+                                           now: now)
 
         let nodes = topo.nodes.map { n in
             TopologySnapshotNode(

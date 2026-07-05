@@ -374,16 +374,22 @@ enum LensTools {
         let handle = try resolveHandle(args)
         switch name {
         case "moot_lens_keystones":
+            // Date() is permitted here: this is the ARIA MCP boundary, not a kit.
+            // Kits and substrate must never read the clock — the caller provides `now`.
             let ranked = try await Keystones.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
                 topK: try ToolDispatcher.clampLimit(
-                    try integer(args, "topK", default: 5), argument: "topK"))
+                    try integer(args, "topK", default: 5), argument: "topK"),
+                now: Date())
             return list("keystones", ranked.map { "\($0.id) centrality=\($0.centrality)" })
 
         case "moot_lens_constellation":
+            // Date() is permitted here: this is the ARIA MCP boundary, not a kit.
+            // Kits and substrate must never read the clock — the caller provides `now`.
             let out = try await ConstellationLens.run(
-                kit: kit, handle: handle, wing: try requireString(args, "wing"))
+                kit: kit, handle: handle, wing: try requireString(args, "wing"),
+                now: Date())
             return list("constellation", out.communities.map { $0.joined(separator: ", ") })
 
         case "moot_lens_free_association":

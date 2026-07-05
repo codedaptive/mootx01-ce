@@ -29,10 +29,16 @@ public enum ConstellationLens {
     /// Recover the emergent communities of `wing`'s drawer-to-drawer tunnel
     /// graph. A wing with no tunnels yields no communities. A recall-tunnels
     /// failure propagates.
+    ///
+    /// - Parameters:
+    ///   - now: Caller-supplied timestamp for VizGraph telemetry. Threaded
+    ///          down to SubstrateML so analytics rows carry the correct ts.
+    ///          Never call Date() inside a kit — the caller provides `now`.
     public static func run(
         kit: GeniusLocusKit,
         handle: EstateHandle,
-        wing: String
+        wing: String,
+        now: Date
     ) async throws -> Constellation {
         let tunnels = try await kit.recallTunnels(handle, wing: wing)
 
@@ -51,6 +57,9 @@ public enum ConstellationLens {
         }
         let nodeIDs = nodeSet.sorted()
 
-        return NeuronKit.constellations(nodeIDs: nodeIDs, edges: edges, maxPasses: maxPasses)
+        // Thread estate and now so VizGraph analytics carry the correct estate
+        // tag and timestamp instead of the empty defaults.
+        return NeuronKit.constellations(nodeIDs: nodeIDs, edges: edges, maxPasses: maxPasses,
+                                        estate: handle.estateUUID.uuidString, now: now)
     }
 }

@@ -209,10 +209,15 @@ pub fn epoch_to_iso8601(epoch_ms: i64) -> String {
 /// only. Lattice edges are appended to the Louvain adjacency after centrality
 /// to prevent lattice star hubs from minting topology-artifact keystones.
 /// Mirrors the Swift implementation field-for-field.
+/// `estate` and `ts` thread into SubstrateML so VizGraph telemetry rows carry
+/// the correct estate tag and timestamp. Callers must inject the timestamp —
+/// never read a clock inside NeuronKit or SubstrateML.
 pub fn graph_topology(
     drawers: &[TopologyDrawerInput],
     tunnels: &[TopologyTunnelInput],
     facts: &[TopologyFactInput],
+    estate: &str,
+    ts: f64,
 ) -> GraphTopology {
     let live: Vec<&TopologyDrawerInput> = drawers.iter().filter(|d| !d.tombstoned).collect();
     let dead: Vec<&TopologyDrawerInput> = drawers.iter().filter(|d| d.tombstoned).collect();
@@ -323,14 +328,14 @@ pub fn graph_topology(
     // derived classification and must not mint keystones."
     // Louvain adjacency receives all three classes: tunnel + kgFact + lattice.
     //
-    // Telemetry tags are empty/0: a no-op emit when monitoring is off, same
-    // convention as the Keystones/Constellation lenses.
+    // Thread estate and ts so VizGraph telemetry carries the correct estate
+    // identifier and timestamp — not empty/0 defaults.
     let centralities = EigenvalueCentrality::compute(
         &adjacency,
         EigenvalueCentrality::DEFAULT_MAX_ITERATIONS,
         EigenvalueCentrality::DEFAULT_TOLERANCE,
-        "",
-        0.0,
+        estate,
+        ts,
     );
 
     // Append lattice edges to the Louvain adjacency only (after centrality).
@@ -348,7 +353,7 @@ pub fn graph_topology(
     // continents.
     let labels = CommunityDetection::detect_full(
         &adjacency, TOPOLOGY_MAX_LEVELS, TOPOLOGY_MAX_PASSES,
-        TOPOLOGY_RESOLUTION, "", 0.0);
+        TOPOLOGY_RESOLUTION, estate, ts);
 
     // Normalize centrality to [0, 1] against the max value.
     let max_c = centralities.iter().cloned().fold(0.0_f64, f64::max);
@@ -501,7 +506,7 @@ mod tests {
 
     #[test]
     fn nodes_carry_created_ts_from_filed_at() {
-        let topo = graph_topology(&[drawer("a", "510")], &[], &[]);
+        let topo = graph_topology(&[drawer("a", "510")], &[], &[], "", 0.0);
         assert_eq!(topo.nodes[0].created_ts.as_deref(), Some(epoch_to_iso8601(T0).as_str()));
         assert_eq!(topo.nodes[0].last_active_ts.as_deref(), Some(epoch_to_iso8601(T0).as_str()));
         assert_eq!(topo.nodes[0].tombstoned_ts, None);
@@ -511,7 +516,7 @@ mod tests {
     fn tunnel_edges_carry_created_ts() {
         let topo = graph_topology(
             &[drawer("a", ""), drawer("b", "")],
-            &[tunnel("a", "b")], &[]);
+            &[tunnel("a", "b")], &[], "", 0.0);
         let e = topo.edges.iter().find(|e| e.edge_type == "tunnel").unwrap();
         assert!(e.created_ts.is_some());
         assert_eq!(e.tombstoned_ts, None);
@@ -523,7 +528,8 @@ mod tests {
             TopologyFactInput { subject: "s".into(), source_drawer_id: "a".into() },
             TopologyFactInput { subject: "s".into(), source_drawer_id: "b".into() },
         ];
-        let topo = graph_topology(&[drawer("a", ""), drawer("b", "")], &[], &facts);
+        // estate/ts: explicit sentinels — unit tests have no estate context.
+        let topo = graph_topology(&[drawer("a", ""), drawer("b", "")], &[], &facts, "", 0.0);
         let kg = topo.edges.iter().find(|e| e.edge_type == "kgFact").unwrap();
         assert_eq!(kg.weight, 0.3);
         assert_eq!(kg.created_ts, None);
@@ -542,7 +548,7 @@ mod tests {
         let (ad, at, aids) = triangle("art", ["700", "700", "700"]);
         let mut tunnels = [mt, at].concat();
         tunnels.push(tunnel(&mids[0], &aids[0]));
-        let topo = graph_topology(&[md, ad].concat(), &tunnels, &[]);
+        let topo = graph_topology(&[md, ad].concat(), &tunnels, &[], "", 0.0);
         assert_eq!(topo.communities.len(), 1);
         assert_eq!(topo.communities[0].size, 6);
         // 510 and 700 tie at 3 members each; ascending tie-break -> "510".
@@ -563,7 +569,7 @@ mod tests {
         let (ld, lt, _lids) = triangle("tie", ["700", "510", ""]);
         let (rd, rt, _rids) = triangle("uni", ["900", "900", "900"]);
         let tunnels = [lt, rt].concat();
-        let topo = graph_topology(&[ld, rd].concat(), &tunnels, &[]);
+        let topo = graph_topology(&[ld, rd].concat(), &tunnels, &[], "", 0.0);
         let tied = topo.communities.iter().find(|c| c.dominant_udc_code != "900").unwrap();
         assert_eq!(tied.size, 3);
         assert_eq!(tied.dominant_udc_code, "510");
@@ -596,7 +602,7 @@ mod tests {
             });
             tunnels.push(tunnel(&a, &b));
         }
-        let topo = graph_topology(&drawers, &tunnels, &[]);
+        let topo = graph_topology(&drawers, &tunnels, &[], "", 0.0);
         assert_eq!(topo.community_count, 1);
         assert_eq!(topo.communities.len(), 1);
         assert_eq!(topo.communities[0].size, 8);
@@ -609,7 +615,7 @@ mod tests {
         let (ld, lt, _) = triangle("live", ["510", "510", "510"]);
         let mut drawers = ld;
         drawers.push(dead_drawer("dead", Some(died)));
-        let topo = graph_topology(&drawers, &lt, &[]);
+        let topo = graph_topology(&drawers, &lt, &[], "", 0.0);
         let dead = topo.nodes.iter().find(|n| n.id == "dead").unwrap();
         assert_eq!(dead.community_id, -1);
         assert_eq!(dead.centrality, 0.0);
@@ -619,7 +625,7 @@ mod tests {
 
     #[test]
     fn dead_drawer_with_unresolved_instant_keeps_sentinel() {
-        let topo = graph_topology(&[dead_drawer("dead", None)], &[], &[]);
+        let topo = graph_topology(&[dead_drawer("dead", None)], &[], &[], "", 0.0);
         assert_eq!(topo.nodes[0].community_id, -1);
         assert_eq!(topo.nodes[0].tombstoned_ts, None);
     }
@@ -633,7 +639,7 @@ mod tests {
 
         let partition = |extra: &[TopologyDrawerInput]| -> std::collections::BTreeSet<Vec<String>> {
             let drawers = [md.clone(), ad.clone(), extra.to_vec()].concat();
-            let topo = graph_topology(&drawers, &tunnels, &[]);
+            let topo = graph_topology(&drawers, &tunnels, &[], "", 0.0);
             let mut by_comm: BTreeMap<i64, Vec<String>> = BTreeMap::new();
             for n in topo.nodes.iter().filter(|n| n.community_id >= 0) {
                 by_comm.entry(n.community_id).or_default().push(n.id.clone());
@@ -653,7 +659,7 @@ mod tests {
         // The ONLY bridge is dead — partition must keep the triangles apart,
         // while the edge still ships for playback.
         tunnels.push(dead_tunnel(&mids[0], &aids[0], died));
-        let topo = graph_topology(&[md, ad].concat(), &tunnels, &[]);
+        let topo = graph_topology(&[md, ad].concat(), &tunnels, &[], "", 0.0);
         assert_eq!(topo.communities.len(), 2);
         let dead_edge = topo.edges.iter().find(|e| e.tombstoned_ts.is_some()).unwrap();
         assert_eq!(dead_edge.source, mids[0]);
@@ -662,7 +668,7 @@ mod tests {
 
     #[test]
     fn empty_inputs_produce_empty_topology() {
-        let topo = graph_topology(&[], &[], &[]);
+        let topo = graph_topology(&[], &[], &[], "", 0.0);
         assert!(topo.nodes.is_empty());
         assert!(topo.edges.is_empty());
         assert!(topo.communities.is_empty());
@@ -686,7 +692,7 @@ mod tests {
         let hub = drawer_at("hub", "510", T0);
         let m1  = drawer_at("m1",  "510", T0 + 100);
         let m2  = drawer_at("m2",  "510", T0 + 200);
-        let topo = graph_topology(&[hub, m1, m2], &[], &[]);
+        let topo = graph_topology(&[hub, m1, m2], &[], &[], "", 0.0);
         let lat: Vec<_> = topo.edges.iter().filter(|e| e.edge_type == "lattice").collect();
         assert_eq!(lat.len(), 2);
         assert!(lat.iter().all(|e| e.source == "hub"));
@@ -720,7 +726,7 @@ mod tests {
             drawer_at("aaa", "400", t_late),
         ];
         for drawers in [drawers_fwd, drawers_rev] {
-            let topo = graph_topology(&drawers, &[], &[]);
+            let topo = graph_topology(&drawers, &[], &[], "", 0.0);
             let lat300: Vec<_> = topo.edges.iter()
                 .filter(|e| e.edge_type == "lattice" && ["aa","bb","cc"].contains(&e.source.as_str()))
                 .collect();
@@ -748,7 +754,7 @@ mod tests {
         drawers.push(drawer("t-peer-1", ""));
         drawers.push(drawer("t-peer-2", ""));
         let tunnels = vec![tunnel("tunnel-node", "t-peer-1"), tunnel("tunnel-node", "t-peer-2")];
-        let topo = graph_topology(&drawers, &tunnels, &[]);
+        let topo = graph_topology(&drawers, &tunnels, &[], "", 0.0);
         let lat_hub_c = topo.nodes.iter().find(|n| n.id == "lat-hub").unwrap().centrality;
         let tunnel_c  = topo.nodes.iter().find(|n| n.id == "tunnel-node").unwrap().centrality;
         assert!(tunnel_c > lat_hub_c,
@@ -762,7 +768,7 @@ mod tests {
             drawer("a", ""),
             drawer("b", ""),
             drawer("c", "999"), // singleton — only one drawer with this code
-        ], &[], &[]);
+        ], &[], &[], "", 0.0);
         assert!(topo.edges.iter().all(|e| e.edge_type != "lattice"));
     }
 
@@ -775,7 +781,7 @@ mod tests {
             id: "dead".to_string(), udc_code: "700".to_string(),
             filed_at: T0 + 2, event_time: T0, tombstoned: true, tombstoned_at: Some(T0 + 100),
         };
-        let topo = graph_topology(&[live1, live2, dead], &[], &[]);
+        let topo = graph_topology(&[live1, live2, dead], &[], &[], "", 0.0);
         let lat: Vec<_> = topo.edges.iter().filter(|e| e.edge_type == "lattice").collect();
         assert_eq!(lat.len(), 1, "only the 2 live drawers bond");
         assert_eq!(lat[0].source, "live-1");

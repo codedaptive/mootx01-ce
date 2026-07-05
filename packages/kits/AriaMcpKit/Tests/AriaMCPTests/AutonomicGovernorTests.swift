@@ -128,8 +128,9 @@ struct AutonomicGovernorTests {
             let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
-                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
-                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+                // Thread `now` from the handler parameter so telemetry carries the correct timestamp.
+                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100, now: now)
+                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing, now: now)
             }
         }
         try await handler(kit, handle, Date(timeIntervalSince1970: 6_000_000))
@@ -154,8 +155,9 @@ struct AutonomicGovernorTests {
             let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
-                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
-                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+                // Thread `now` from the handler parameter so telemetry carries the correct timestamp.
+                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100, now: now)
+                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing, now: now)
             }
         }
         try await handler(kit, handle, Date(timeIntervalSince1970: 7_000_000))

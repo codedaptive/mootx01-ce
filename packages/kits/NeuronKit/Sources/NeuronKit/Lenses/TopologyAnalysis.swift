@@ -239,9 +239,19 @@ extension NeuronKit {
     /// O(N log N). Elapsed time above 500ms logs a warning — the signal that
     /// an estate has outgrown compute-on-read and the scheduled-snapshot
     /// path should take over.
+    /// - Parameters:
+    ///   - estate: Estate UUID string for VizGraph telemetry. Threaded to
+    ///             SubstrateML so analytics rows (community.assignment,
+    ///             centrality.score) carry the correct estate tag rather than
+    ///             the empty string that caused live-dashboard analytics to emit
+    ///             with estate:"" and ts:0 before this fix.
+    ///   - now: Caller-supplied timestamp for telemetry. Never read a clock
+    ///          inside NeuronKit or SubstrateML; the caller provides `now`.
     public static func graphTopology(drawers: [TopologyDrawerInput],
                                      tunnels: [TopologyTunnelInput],
-                                     facts: [TopologyFactInput]) -> GraphTopology {
+                                     facts: [TopologyFactInput],
+                                     estate: String,
+                                     now: Date) -> GraphTopology {
         // Live/dead partition. The descriptor's `tombstoned` flag is the
         // authoritative dead signal (the caller derives it from the state
         // axis and/or the stamp).
@@ -342,8 +352,12 @@ extension NeuronKit {
         // derived classification and must not mint keystones."
         // Louvain adjacency receives all three classes: tunnel + kgFact + lattice.
         let startT = CFAbsoluteTimeGetCurrent()
+        // Thread estate and ts from the caller so analytics rows carry the
+        // correct estate identifier and timestamp.
         let centralities = SubstrateML.EigenvalueCentrality.compute(
-            adjacency: adjacency)
+            adjacency: adjacency,
+            estate: estate,
+            ts: now.timeIntervalSince1970)
 
         // Append lattice edges to the Louvain adjacency only (after centrality).
         for edge in latticeEdges {
@@ -356,9 +370,12 @@ extension NeuronKit {
         // phase-1 alone locks tunnel-bonded pairs out of their lattice
         // stars (the §7.3 pair-locking limitation), fragmenting the
         // dashboard continents.
+        // Thread estate and ts from the caller so the community.assignment
+        // analytics row carries the correct estate identifier and timestamp.
         let labels = SubstrateML.CommunityDetection.detectFull(
             adjacency: adjacency, maxLevels: topologyMaxLevels,
-            maxPasses: topologyMaxPasses, resolution: topologyResolution)
+            maxPasses: topologyMaxPasses, resolution: topologyResolution,
+            estate: estate, ts: now.timeIntervalSince1970)
         let elapsed = CFAbsoluteTimeGetCurrent() - startT
         if elapsed > 0.5 {
             topologyLogger.info(

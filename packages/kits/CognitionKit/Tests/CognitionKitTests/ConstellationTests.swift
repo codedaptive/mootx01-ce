@@ -52,8 +52,10 @@ struct ConstellationTests {
         try await addEdge(kit, handle, src: "B2", tgt: "B3")
         try await addEdge(kit, handle, src: "B1", tgt: "B3")
 
+        // now: explicit sentinel — unit tests have no real estate clock context.
         let c = try await ConstellationLens.run(
-            kit: kit, handle: handle, wing: Self.wing)
+            kit: kit, handle: handle, wing: Self.wing,
+            now: Date(timeIntervalSince1970: 0))
 
         #expect(c.communities.count == 2, "two cliques ⇒ two emergent themes")
     }
@@ -62,8 +64,10 @@ struct ConstellationTests {
     @Test("empty wing has no communities")
     func emptyWingHasNoCommunities() async throws {
         let (kit, handle) = try await openEstate()
+        // now: explicit sentinel — unit tests have no real estate clock context.
         let c = try await ConstellationLens.run(
-            kit: kit, handle: handle, wing: Self.wing)
+            kit: kit, handle: handle, wing: Self.wing,
+            now: Date(timeIntervalSince1970: 0))
         #expect(c.communities.isEmpty)
     }
 }

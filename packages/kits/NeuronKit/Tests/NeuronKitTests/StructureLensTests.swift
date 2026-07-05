@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import NeuronKit
 
@@ -19,7 +20,9 @@ struct StructureLensTests {
     func keystonesHubDominates() {
         let nodes = ["hub", "s1", "s2", "s3", "s4"]
         let edges = [("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("hub", "s4")]
-        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(ranked.first?.id == "hub")
         #expect(ranked[0].centrality > ranked[1].centrality)
     }
@@ -34,7 +37,9 @@ struct StructureLensTests {
             ("a", "b"), ("a", "bridge"), ("b", "bridge"),
             ("bridge", "c"), ("bridge", "d"), ("c", "d"),
         ]
-        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(ranked.first?.id == "bridge")
     }
 
@@ -43,7 +48,9 @@ struct StructureLensTests {
     func keystonesRankedAndCapped() {
         let nodes = ["hub", "s1", "s2", "s3"]
         let edges = [("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("s1", "s2")]
-        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 2)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 2,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(ranked.count == 2)
         #expect(ranked.first?.id == "hub")
         #expect(ranked[0].centrality >= ranked[1].centrality)
@@ -56,16 +63,22 @@ struct StructureLensTests {
         let nodes = ["hub", "s1", "s2", "s3", "s4"]
         let clean = [("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("hub", "s4")]
         let noisy = clean + [("hub", "hub"), ("hub", "ghost"), ("ghost", "s1")]
-        #expect(NeuronKit.keystones(nodeIDs: nodes, edges: clean, topK: 5)
-                == NeuronKit.keystones(nodeIDs: nodes, edges: noisy, topK: 5))
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let t0 = Date(timeIntervalSince1970: 0)
+        #expect(NeuronKit.keystones(nodeIDs: nodes, edges: clean, topK: 5, estate: "", now: t0)
+                == NeuronKit.keystones(nodeIDs: nodes, edges: noisy, topK: 5, estate: "", now: t0))
     }
 
     // Edge totality (C-16): no nodes ⇒ empty; nodes-no-edges still bounded by topK.
     @Test("Keystones: total over edge inputs")
     func keystonesEdgeTotality() {
-        #expect(NeuronKit.keystones(nodeIDs: [], edges: [], topK: 5).isEmpty)
-        #expect(NeuronKit.keystones(nodeIDs: ["x", "y", "z"], edges: [], topK: 2).count == 2)
-        #expect(NeuronKit.keystones(nodeIDs: ["x", "y"], edges: [("x", "y")], topK: 0).isEmpty)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let t0 = Date(timeIntervalSince1970: 0)
+        #expect(NeuronKit.keystones(nodeIDs: [], edges: [], topK: 5, estate: "", now: t0).isEmpty)
+        #expect(NeuronKit.keystones(nodeIDs: ["x", "y", "z"], edges: [], topK: 2,
+                                    estate: "", now: t0).count == 2)
+        #expect(NeuronKit.keystones(nodeIDs: ["x", "y"], edges: [("x", "y")], topK: 0,
+                                    estate: "", now: t0).isEmpty)
     }
 
     // MARK: Constellation — emergent clusters
@@ -80,7 +93,9 @@ struct StructureLensTests {
             ("A1", "A2"), ("A1", "A3"), ("A2", "A3"),
             ("B1", "B2"), ("B1", "B3"), ("B2", "B3"),
         ]
-        let c = NeuronKit.constellations(nodeIDs: nodes, edges: edges, maxPasses: 10)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let c = NeuronKit.constellations(nodeIDs: nodes, edges: edges, maxPasses: 10,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(c.communities.count == 2)
         #expect(c.communities.contains(["A1", "A2", "A3"]))
         #expect(c.communities.contains(["B1", "B2", "B3"]))
@@ -94,10 +109,14 @@ struct StructureLensTests {
             ("A1", "A2"), ("A1", "A3"), ("A2", "A3"),
             ("B1", "B2"), ("B1", "B3"), ("B2", "B3"),
         ]
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let t0 = Date(timeIntervalSince1970: 0)
         let forward = NeuronKit.constellations(
-            nodeIDs: ["A1", "A2", "A3", "B1", "B2", "B3"], edges: edges, maxPasses: 10)
+            nodeIDs: ["A1", "A2", "A3", "B1", "B2", "B3"], edges: edges, maxPasses: 10,
+            estate: "", now: t0)
         let shuffled = NeuronKit.constellations(
-            nodeIDs: ["B3", "A2", "B1", "A3", "A1", "B2"], edges: edges, maxPasses: 10)
+            nodeIDs: ["B3", "A2", "B1", "A3", "A1", "B2"], edges: edges, maxPasses: 10,
+            estate: "", now: t0)
         #expect(forward == shuffled, "result independent of input id order")
         for grp in forward.communities { #expect(grp == grp.sorted()) }
         let firsts = forward.communities.map { $0[0] }
@@ -107,7 +126,9 @@ struct StructureLensTests {
     // Edge totality (C-16).
     @Test("Constellation: total over edge inputs")
     func constellationEdgeTotality() {
-        #expect(NeuronKit.constellations(nodeIDs: [], edges: [], maxPasses: 10).communities.isEmpty)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        #expect(NeuronKit.constellations(nodeIDs: [], edges: [], maxPasses: 10,
+                                         estate: "", now: Date(timeIntervalSince1970: 0)).communities.isEmpty)
     }
 
     // MARK: Spreading activation — free association from a seed

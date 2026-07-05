@@ -422,16 +422,20 @@ struct LensVectorConformanceTests {
         }
         v.keystones = vectors.keystones.map { c in
             var c = c
+            // estate/ts: explicit sentinels — conformance vectors have no estate context.
             c.ranked = NeuronKit.keystones(
-                nodeIDs: c.nodeIDs, edges: c.edges.map { ($0[0], $0[1]) }, topK: c.topK)
+                nodeIDs: c.nodeIDs, edges: c.edges.map { ($0[0], $0[1]) }, topK: c.topK,
+                estate: "", now: Date(timeIntervalSince1970: 0))
                 .map { .init(id: $0.id, centrality: hex($0.centrality)) }
             return c
         }
         v.constellations = vectors.constellations.map { c in
             var c = c
+            // estate/ts: explicit sentinels — conformance vectors have no estate context.
             c.communities = NeuronKit.constellations(
                 nodeIDs: c.nodeIDs, edges: c.edges.map { ($0[0], $0[1]) },
-                maxPasses: c.maxPasses).communities
+                maxPasses: c.maxPasses,
+                estate: "", now: Date(timeIntervalSince1970: 0)).communities
             return c
         }
         v.spreadingActivation = vectors.spreadingActivation.map { c in

@@ -24,11 +24,17 @@ public enum Keystones {
     /// over its drawer-to-drawer tunnel graph (descending, ties by ascending
     /// id). A wing with no tunnels yields an empty result. A recall-tunnels
     /// failure propagates.
+    ///
+    /// - Parameters:
+    ///   - now: Caller-supplied timestamp for VizGraph telemetry. Threaded
+    ///          down to SubstrateML so analytics rows carry the correct ts.
+    ///          Never call Date() inside a kit — the caller provides `now`.
     public static func run(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         wing: String,
-        topK: Int
+        topK: Int,
+        now: Date
     ) async throws -> [Keystone] {
         let tunnels = try await kit.recallTunnels(handle, wing: wing)
 
@@ -47,6 +53,9 @@ public enum Keystones {
         }
         let nodeIDs = nodeSet.sorted()
 
-        return NeuronKit.keystones(nodeIDs: nodeIDs, edges: edges, topK: topK)
+        // Thread estate and now so VizGraph analytics carry the correct estate
+        // tag and timestamp instead of the empty defaults.
+        return NeuronKit.keystones(nodeIDs: nodeIDs, edges: edges, topK: topK,
+                                   estate: handle.estateUUID.uuidString, now: now)
     }
 }
