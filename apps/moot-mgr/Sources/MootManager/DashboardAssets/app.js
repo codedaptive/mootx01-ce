@@ -2003,17 +2003,26 @@
   // down (tilt factor 0.22·H) and sway ±3° with time for parallax. Drag adds
   // a user yaw (±~17°) and pitch (±0.1 tilt) on top, springing back to the
   // reading angle on release (the orbit lerp lives in the frame loop).
+  //
+  // NEAR-PLANE SAFETY: the formula s = BRAIN_PERSP / (BRAIN_PERSP + z·BRAIN_DEPTH)
+  // is bounded [0.57, 1.0] for z ∈ [0,1], but z3 can drift outside that range in
+  // edge cases (future-timestamped nodes, physics overshoot, floating-point
+  // accumulation). Hard-clamping s prevents baseR from blowing up and producing
+  // viewport-spanning radial-gradient fills that render as giant flashing sheets.
+  // s_max = 1.0 for 2D-parity; s_min = 0.05 prevents degenerate near-zero draws.
   function brainProject(n) {
-    if (!brain3D) return { x: n.x, y: n.y, s: 1 };
+    if (!brain3D) return { x: n.x, y: n.y, s: 1, culled: false };
     var z = n.z3 || 0;
-    var s = BRAIN_PERSP / (BRAIN_PERSP + z * BRAIN_DEPTH);
+    var denom = BRAIN_PERSP + z * BRAIN_DEPTH;
+    // Near-plane guard: if denom is at or below zero the node is behind the
+    // camera; cull it entirely rather than inverting or exploding the scale.
+    if (denom <= 0) return { x: n.x, y: n.y, s: 0, culled: true };
+    var s = Math.min(1.0, Math.max(0.05, BRAIN_PERSP / denom));
     var vx = brainW / 2, vy = brainH * 0.32;
     var drift = Math.sin(brainT * 0.15) * (3 * Math.PI / 180) + brainOrbit.yaw;
-    return {
-      x: vx + (n.x - vx) * s + drift * z * brainW * 0.35,
-      y: vy + (n.y - vy) * s + z * brainH * (0.22 + brainOrbit.pitch),
-      s: s,
-    };
+    var px = vx + (n.x - vx) * s + drift * z * brainW * 0.35;
+    var py = vy + (n.y - vy) * s + z * brainH * (0.22 + brainOrbit.pitch);
+    return { x: px, y: py, s: s, culled: false };
   }
 
   // Deepest endpoint of an edge — used for painter sorting and depth fog.
@@ -2066,9 +2075,20 @@
     // Cache per-frame projected coordinates (px, py) and projection scale (ps)
     // on every node — hulls, edges, nodes, and rings all draw from these.
     // In 2D the projection is the identity (px = x, ps = 1).
+    //
+    // VIEWPORT CULLING: also mark nodes that project outside 3× the canvas
+    // extent (logical-space check). Such nodes can never appear on screen even
+    // at maximum zoom (3.5×), and their radial-gradient fills can produce
+    // giant viewport-spanning sheets in some Chrome/WebKit versions when the
+    // gradient circle is larger than the render surface. All draw sites
+    // (drawBrainNodes, drawBrainEdges, drawCommHulls) respect n.culled.
     brainNodes.forEach(function (n) {
       var p = brainProject(n);
       n.px = p.x; n.py = p.y; n.ps = p.s;
+      n.culled = p.culled
+          || !isFinite(n.px) || !isFinite(n.py) || !isFinite(n.ps)
+          || Math.abs(n.px) > 3 * W
+          || Math.abs(n.py) > 3 * H;
     });
     // Apply zoom transform: center on brainZoomX/Y at current scale.
     ctx.save();
@@ -2136,12 +2156,19 @@
 
     Object.keys(byComm).forEach(function (c) {
       var members = byComm[c];
+      // Exclude culled members from hull geometry — an off-screen node would
+      // pull the centroid off-canvas and its gradient fill could span the viewport.
+      var visible = members.filter(function (n) { return !n.culled; });
+      if (!visible.length) return;
       var ci = parseInt(c, 10);
       // Centroid/spread from projected coordinates so hulls track the 3D view.
-      var cx = members.reduce(function (s, n) { return s + n.px; }, 0) / members.length;
-      var cy = members.reduce(function (s, n) { return s + n.py; }, 0) / members.length;
-      var spread = members.reduce(function (s, n) { return s + Math.hypot(n.px - cx, n.py - cy); }, 0) / members.length;
+      var cx = visible.reduce(function (s, n) { return s + n.px; }, 0) / visible.length;
+      var cy = visible.reduce(function (s, n) { return s + n.py; }, 0) / visible.length;
+      var spread = visible.reduce(function (s, n) { return s + Math.hypot(n.px - cx, n.py - cy); }, 0) / visible.length;
       var r = Math.min(spread * 1.85, 200);
+      // Skip degenerate hull: all visible members at the same pixel — nothing
+      // useful to draw and createRadialGradient(r1=0) is browser-undefined.
+      if (r < 1) return;
 
       // Hull tint follows the members' stable content hue (n.rgb), not the
       // layout rank — ranks reshuffle under content-filter re-layouts.
@@ -2182,9 +2209,9 @@
       // not through it). The alive(t) birth filter is not applied to edges.
       if (brainDead(s) || brainDead(t)) return;
       if (e.deadMs && (topoPlay.active ? e.deadMs <= brainNowMs : true)) return;
-      // Guard against uninitialised projected coordinates (should not occur in
-      // normal operation but prevents phantom beams if a node misses a frame).
-      if (!isFinite(s.px) || !isFinite(s.py) || !isFinite(t.px) || !isFinite(t.py)) return;
+      // Skip edges to culled nodes — same culling that suppresses node draw also
+      // suppresses the edge so no phantom beam points toward off-screen space.
+      if (s.culled || t.culled) return;
       var isTunnel = e.type === "tunnel";
       // Lattice edges: faint amber — below kgFact (0.045) to maintain the
       // evidence-strength visual hierarchy (tunnel > kgFact > lattice).
@@ -2237,10 +2264,11 @@
   function drawBrainNodes(ctx) {
     var hasSel = !!brainSelectedNode;
     brainDrawOrder.forEach(function (n) {
-      // Guard against uninitialised projected coordinates (defensive — should
-      // not occur in normal operation but prevents phantom fill if a node's
-      // px/py was never assigned by drawBrainFrame).
-      if (!isFinite(n.px) || !isFinite(n.py)) return;
+      // Cull nodes whose projection is degenerate or off-screen — this covers
+      // near-plane camera nodes, physics overshoots, and finite-but-huge
+      // projected coordinates that produce viewport-spanning gradient fills.
+      // n.culled is set each frame by drawBrainFrame's projection cache loop.
+      if (n.culled) return;
 
       var style = nounStyle(n.nounType);
       // Community hue (the original encoding-map rule: communityId → hue).
