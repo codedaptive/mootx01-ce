@@ -59,6 +59,7 @@ pub mod lens_tools;
 pub mod recall_discrimination;
 pub mod recipe_tools;
 pub mod runtime;
+pub mod sensitivity_grant_ledger;
 pub mod server;
 pub mod session_protocol;
 pub mod surfaced_recall_ledger;

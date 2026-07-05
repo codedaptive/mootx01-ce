@@ -4176,6 +4176,175 @@ impl EstateCoordinator {
         Ok(())
     }
 
+    // MARK: - ADR-025 sensitivity-unlock audit verbs
+    //
+    // Mirror of Swift `SensitivityAuditVerbs.swift`. Uses NEW dedicated
+    // `UnifiedAuditVerb` cases (sensitivityGrantIssued/Denied/Revoked,
+    // sensitivityReadUnderGrant) — NOT the federation-reserved
+    // grantIssued/grantRevoked (see `audit/log.rs`'s enum doc comment).
+    // Unlike `issue_grant`/`revoke_grant` above (which do not append any
+    // audit entry in this Rust port today — a pre-existing, unrelated
+    // divergence from Swift's FUP-C seam, out of scope for ADR-025), these
+    // four methods DO append directly to `self.audit_logs`, since ADR-025
+    // §4 explicitly requires it. `tier` uses LocusKit's existing
+    // `AdjectiveSensitivity` rather than a new type — GeniusLocusKit must
+    // not depend on a higher-layer (AriaMcpKit) tier vocabulary.
+
+    /// Record that a sensitivity-unlock grant was approved and is now
+    /// live. `grant_id` is a fresh identifier the caller mints per grant;
+    /// `expires_at_ms` (epoch-milliseconds) is stored in `after_value` so
+    /// expiry is derivable from the log alone (ADR-025 §4: expiry is
+    /// passive, no dedicated expiry-time writer).
+    pub fn record_sensitivity_grant_issued(
+        &mut self,
+        handle: &EstateHandle,
+        tier: locus_kit::adjectives::AdjectiveSensitivity,
+        grant_id: Uuid,
+        expires_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        self.append_sensitivity_audit_entry(
+            handle,
+            crate::audit::UnifiedAuditVerb::SensitivityGrantIssued,
+            grant_id,
+            Self::sensitivity_audit_token(tier),
+            crate::audit::UnifiedAuditValue::Null,
+            crate::audit::UnifiedAuditValue::Integer(expires_at_ms),
+            now_ms,
+        );
+        Ok(())
+    }
+
+    /// Record that a sensitivity-unlock grant request was DENIED (a
+    /// failed `UnlockAuthority` verification). A fresh id is minted for
+    /// the denial event itself — there is no persisted grant to
+    /// correlate.
+    pub fn record_sensitivity_grant_denied(
+        &mut self,
+        handle: &EstateHandle,
+        tier: locus_kit::adjectives::AdjectiveSensitivity,
+        now_ms: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        self.append_sensitivity_audit_entry(
+            handle,
+            crate::audit::UnifiedAuditVerb::SensitivityGrantDenied,
+            Uuid::new_v4(),
+            Self::sensitivity_audit_token(tier),
+            crate::audit::UnifiedAuditValue::Null,
+            crate::audit::UnifiedAuditValue::Null,
+            now_ms,
+        );
+        Ok(())
+    }
+
+    /// Record a manual revocation (`mootx01 lock`) of a live grant.
+    /// `grant_id` should be the SAME id passed to
+    /// `record_sensitivity_grant_issued` for the grant being revoked, so
+    /// the two entries correlate by `row_id`.
+    pub fn record_sensitivity_grant_revoked(
+        &mut self,
+        handle: &EstateHandle,
+        tier: locus_kit::adjectives::AdjectiveSensitivity,
+        grant_id: Uuid,
+        now_ms: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        self.append_sensitivity_audit_entry(
+            handle,
+            crate::audit::UnifiedAuditVerb::SensitivityGrantRevoked,
+            grant_id,
+            Self::sensitivity_audit_token(tier),
+            crate::audit::UnifiedAuditValue::Integer(1),
+            crate::audit::UnifiedAuditValue::Null,
+            now_ms,
+        );
+        Ok(())
+    }
+
+    /// Record that a specific drawer was read only because a live
+    /// sensitivity grant admitted it past the default ceiling. `row_id`
+    /// here is the DRAWER's own id (parsed from `drawer_id`), not a grant
+    /// id — unlike the three methods above, a read-under-grant entry is
+    /// genuinely about a specific row.
+    ///
+    /// Malformed `drawer_id` is silently skipped (returns `Ok(())`
+    /// without appending) rather than erroring — audit recording is
+    /// best-effort observability, never a gate on the read path. Mirrors
+    /// Swift `recordSensitivityReadUnderGrant`'s same silent-skip.
+    pub fn record_sensitivity_read_under_grant(
+        &mut self,
+        handle: &EstateHandle,
+        tier: locus_kit::adjectives::AdjectiveSensitivity,
+        drawer_id: &str,
+        now_ms: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        let Ok(row_uuid) = Uuid::parse_str(drawer_id) else {
+            return Ok(());
+        };
+        self.append_sensitivity_audit_entry(
+            handle,
+            crate::audit::UnifiedAuditVerb::SensitivityReadUnderGrant,
+            row_uuid,
+            Self::sensitivity_audit_token(tier),
+            crate::audit::UnifiedAuditValue::Null,
+            crate::audit::UnifiedAuditValue::Null,
+            now_ms,
+        );
+        Ok(())
+    }
+
+    /// Shared append helper for the four methods above. HLC physical
+    /// time is `now_ms` directly (already epoch-milliseconds — the Rust
+    /// dispatch layer's canonical `now` unit, `wall_now()` in
+    /// aria-mcp's `dispatch.rs`); `tier` (the audit entry field) is
+    /// always `Locus` since a sensitivity grant governs LocusKit-tier
+    /// drawers. Mirrors Swift `appendSensitivityAuditEntry` exactly.
+    fn append_sensitivity_audit_entry(
+        &mut self,
+        handle: &EstateHandle,
+        verb: crate::audit::UnifiedAuditVerb,
+        row_id: Uuid,
+        field_path: &'static str,
+        before_value: crate::audit::UnifiedAuditValue,
+        after_value: crate::audit::UnifiedAuditValue,
+        now_ms: i64,
+    ) {
+        let hlc = substrate_types::hlc::HLC {
+            physical_time: now_ms,
+            logical_count: 0,
+            node_id: 0,
+        };
+        let entry = crate::audit::UnifiedAuditEntry::new(
+            crate::audit::AuditTier::Locus,
+            hlc,
+            verb,
+            crate::audit::EntryUUID(row_id.as_u128().to_be_bytes()),
+            field_path,
+            before_value,
+            after_value,
+            None,
+        );
+        self.audit_logs
+            .entry(*handle)
+            .or_insert_with(crate::audit::UnifiedAuditLog::new)
+            .add(entry);
+    }
+
+    /// The `field_path` token stamped onto a sensitivity-unlock audit
+    /// entry — mirrors Swift `AdjectiveSensitivity.auditToken`.
+    fn sensitivity_audit_token(tier: locus_kit::adjectives::AdjectiveSensitivity) -> &'static str {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        match tier {
+            AdjectiveSensitivity::Normal => "normal",
+            AdjectiveSensitivity::Elevated => "elevated",
+            AdjectiveSensitivity::Restricted => "restricted",
+            AdjectiveSensitivity::Secret => "secret",
+        }
+    }
+
     /// Borrow the `GrantStore` for `handle`, or `None` for a stale handle.
     ///
     /// Mirror of Swift `GeniusLocusKit.grantStore(for:)`.

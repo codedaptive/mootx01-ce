@@ -84,6 +84,16 @@ impl UnifiedAuditValue {
 
 // MARK: - Verb
 
+// NOTE (pre-existing divergence, not introduced or fixed by ADR-025):
+// Swift's `UnifiedAuditVerb` also carries `grantIssued`/`grantRevoked`/
+// `keyDecayed`/`physicalKeyDecayed` — federation grant-lifecycle / key-
+// custody placeholders (GLK-03, DECISION_FEDERATION_SHARING_MODEL
+// Appendix B) added ahead of the federation mechanics themselves
+// shipping. Rust has never carried those 4 cases. Bringing Rust to
+// parity with Swift's federation placeholders is unrelated to ADR-025
+// (sensitivity unlock is a different feature entirely) and is out of
+// scope for this mission — see the ADR-025 Blast Radius Report addendum
+// for the explicit INTENTIONALLY_LEFT classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum UnifiedAuditVerb {
     Capture,
@@ -97,6 +107,17 @@ pub enum UnifiedAuditVerb {
     Associate,
     Migrate,
     DreamCompact,
+
+    // ADR-025 sensitivity-unlock verbs (2026-07-04, amended 2026-07-04).
+    // Deliberately NOT the federation grantIssued/grantRevoked — see the
+    // Swift `UnifiedAuditLog.swift` doc comment for why those are a
+    // different concern. No expiry verb: expiry is passive (the issued
+    // record's `after_value` carries its own expiry timestamp; ADR-025
+    // §4).
+    SensitivityGrantIssued,
+    SensitivityGrantDenied,
+    SensitivityGrantRevoked,
+    SensitivityReadUnderGrant,
 }
 
 impl UnifiedAuditVerb {
@@ -113,6 +134,12 @@ impl UnifiedAuditVerb {
             UnifiedAuditVerb::Associate => "associate",
             UnifiedAuditVerb::Migrate => "migrate",
             UnifiedAuditVerb::DreamCompact => "dreamCompact",
+            // Raw strings match Swift's `String` rawValue exactly —
+            // camelCase, same spelling as the Swift enum case names.
+            UnifiedAuditVerb::SensitivityGrantIssued => "sensitivityGrantIssued",
+            UnifiedAuditVerb::SensitivityGrantDenied => "sensitivityGrantDenied",
+            UnifiedAuditVerb::SensitivityGrantRevoked => "sensitivityGrantRevoked",
+            UnifiedAuditVerb::SensitivityReadUnderGrant => "sensitivityReadUnderGrant",
         }
     }
 }

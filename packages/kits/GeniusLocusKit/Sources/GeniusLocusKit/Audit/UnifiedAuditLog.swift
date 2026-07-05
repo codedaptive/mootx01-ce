@@ -157,6 +157,20 @@ public enum UnifiedAuditVerb: String, Sendable, Codable, Hashable {
     case grantRevoked
     case keyDecayed         // custody mode 3: Lagrange threshold crossed
     case physicalKeyDecayed // custody mode 4: SRAM cells decayed past threshold
+
+    // ADR-025 sensitivity-unlock verbs (2026-07-04, amended 2026-07-04).
+    // Deliberately NOT the federation grantIssued/grantRevoked above —
+    // those are reserved for the federation sharing feature (Appendix B)
+    // and are a different concern (custody/decay, not a human approving
+    // their OWN estate's restricted/secret tiers). Every sensitivity
+    // grant, denial, and manual revocation gets one of these; there is
+    // NO expiry verb — expiry is passive (the issued record carries its
+    // own expiry timestamp in `afterValue`, so expiry is derivable from
+    // the log without an expiry-time writer; ADR-025 §4).
+    case sensitivityGrantIssued
+    case sensitivityGrantDenied
+    case sensitivityGrantRevoked
+    case sensitivityReadUnderGrant
 }
 
 // MARK: - Entry
