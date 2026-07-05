@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::vault_tools::VaultJobLedger;
 
@@ -56,6 +57,39 @@ pub fn dispatch_tool(
     dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "", "")
 }
 
+/// ADR-025 §3: dispatch with an explicit, PERSISTENT sensitivity-unlock
+/// grant ledger. This is the entry point `Dispatcher::tools_call` uses in
+/// production — it is the one owned by the `Dispatcher` for the process
+/// lifetime, so a live grant persists across calls within the same
+/// `mootx01 serve` process (and is gone on restart, by construction, same
+/// as Swift's `ToolDispatcher`).
+///
+/// Every OTHER public entry point in this file (`dispatch_tool`,
+/// `dispatch_tool_with_vault_flag`, `dispatch_tool_with_vault_ledger`) is
+/// left with its EXACT existing signature — each internally passes a
+/// fresh, throwaway, always-locked `SensitivityGrantLedger::new()` to the
+/// inner implementation. This keeps every existing call site (the ~180+
+/// tests across `dispatch_tests.rs` that call those functions directly)
+/// compiling unchanged; none of them exercise sensitivity-unlock gating,
+/// so a throwaway ledger (equivalent to "no grant ever issued") preserves
+/// their existing behavior exactly.
+#[allow(clippy::too_many_arguments)] // production entry point threading every session-scoped ledger + advisory string; grouping would obscure which caller owns which state
+pub fn dispatch_tool_with_ledgers(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    vault_ledger: &VaultJobLedger,
+    sensitivity_ledger: &SensitivityGrantLedger,
+    build_serial: &str,
+    version_skew: &str,
+) -> Result<serde_json::Value, JSONRPCError> {
+    dispatch_tool_with_vault_ledger_and_flag(
+        name, args, registry, ledger, vault_ledger, sensitivity_ledger,
+        crate::tool_list::vault_enabled(), build_serial, version_skew,
+    )
+}
+
 /// Dispatch with an explicit vault-on flag. Used by tests that need to verify
 /// vault-gating behaviour without mutating the process environment
 /// (std::env::set_var is not thread-safe under the parallel Rust test runner).
@@ -68,7 +102,12 @@ pub fn dispatch_tool_with_vault_flag(
     ledger: &SurfacedRecallLedger,
     vault_on: bool,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger_and_flag(name, args, registry, ledger, &VaultJobLedger::new(), vault_on, "", "")
+    // Throwaway sensitivity ledger — see `dispatch_tool_with_ledgers`'s doc
+    // comment for why every non-production entry point does this.
+    dispatch_tool_with_vault_ledger_and_flag(
+        name, args, registry, ledger, &VaultJobLedger::new(), &SensitivityGrantLedger::new(),
+        vault_on, "", "",
+    )
 }
 
 /// Internal dispatch entry point that accepts an explicit `vault_ledger`,
@@ -86,9 +125,11 @@ pub fn dispatch_tool_with_vault_ledger(
     build_serial: &str,
     version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    // Throwaway sensitivity ledger — see `dispatch_tool_with_ledgers`'s doc
+    // comment for why every non-production entry point does this.
     dispatch_tool_with_vault_ledger_and_flag(
-        name, args, registry, ledger, vault_ledger, crate::tool_list::vault_enabled(),
-        build_serial, version_skew,
+        name, args, registry, ledger, vault_ledger, &SensitivityGrantLedger::new(),
+        crate::tool_list::vault_enabled(), build_serial, version_skew,
     )
 }
 
@@ -103,12 +144,14 @@ pub fn dispatch_tool_with_vault_ledger(
 /// empty string when the host detected no plugin/binary version mismatch —
 /// the common case — or the advisory text to surface verbatim in
 /// `moot_estate_ping` / `moot_estate_status`.
+#[allow(clippy::too_many_arguments)] // single inner impl all entry points delegate to; grouping would obscure which ledger/flag each callsite supplies
 fn dispatch_tool_with_vault_ledger_and_flag(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
+    sensitivity_ledger: &SensitivityGrantLedger,
     vault_on: bool,
     build_serial: &str,
     version_skew: &str,
@@ -145,7 +188,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));
         }
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger, build_serial, version_skew)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, build_serial, version_skew)?;
         return Ok(inject_hint(name, args, result));
     }
 

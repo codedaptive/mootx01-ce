@@ -1813,14 +1813,17 @@ fn estate_ping_returns_live_pong() {
 #[test]
 fn estate_ping_includes_injected_build_serial() {
     use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
     use std::collections::BTreeMap;
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
+    let sensitivity_ledger = SensitivityGrantLedger::new();
     let result = interface_tools::dispatch(
         "moot_estate_ping",
         &BTreeMap::new(),
         &registry,
         &ledger,
+        &sensitivity_ledger,
         "TESTSERIAL-XYZ",
         "",
     )
@@ -1839,14 +1842,16 @@ fn estate_ping_includes_injected_build_serial() {
 #[test]
 fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
     use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
     use std::collections::BTreeMap;
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
+    let sensitivity_ledger = SensitivityGrantLedger::new();
     let advisory = "plugin 1.0.15 expects binary >= 1.0.15; binary is 1.0.11 -- run `mootx01 upgrade`";
 
     for tool in ["moot_estate_ping", "moot_estate_status"] {
         let with_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, "SERIAL", advisory,
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", advisory,
         )
         .expect("dispatch must not throw");
         let text = content_text(&with_skew);
@@ -1856,7 +1861,7 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
         );
 
         let without_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, "SERIAL", "",
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "",
         )
         .expect("dispatch must not throw");
         let text2 = content_text(&without_skew);
@@ -5901,5 +5906,174 @@ fn lens_contradiction_hides_secret_tunnel_endpoint() {
     assert!(
         !text.contains(&secret),
         "secret endpoint drawer id must not leak; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-025 sensitivity unlock — ceiling seam + read-under-grant audit wiring
+// ---------------------------------------------------------------------------
+//
+// Mirrors Swift `SensitivityUnlockIntegrationTests.swift`. Drives the real
+// `interface_tools::dispatch` path with an explicit `SensitivityGrantLedger`
+// the test controls directly (the CLI/UnlockAuthority approval surface is a
+// separate, out-of-band channel per ADR §3 — these tests exercise the POLICY
+// the ceiling seam enforces once a grant exists).
+
+#[test]
+fn restricted_drawer_grant_makes_it_visible_in_search() {
+    use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+
+    let registry = EstateRegistry::new_inmemory();
+    dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "unlock-marker-restricted classified briefing",
+            "location" => "vault/plans",
+            "sensitivity" => "restricted"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory must succeed");
+
+    // NOTE: this estate is `new_inmemory()`, which seeds the seven ADR-016
+    // default wing-hint drawers — a single-novel-token query like
+    // "unlock-marker-restricted" can still return those (degraded/fallback
+    // ranking over the non-excluded pool) even though the restricted row
+    // itself is correctly excluded. So the assertion checks CONTENT
+    // absence, not a literal "found 0" hit count (unlike the isolated,
+    // unseeded estate Swift's mirror test uses).
+    let sensitivity_ledger = SensitivityGrantLedger::new();
+    let before = interface_tools::dispatch(
+        "moot_memory_search",
+        &args!["query" => "unlock-marker-restricted"],
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+    ).expect("dispatch must not throw");
+    assert!(
+        !content_text(&before).contains("classified briefing"),
+        "without a grant the restricted drawer's content must never appear; got: {}",
+        content_text(&before)
+    );
+
+    sensitivity_ledger.grant_restricted(aria_mcp::dispatch::wall_now(), 0);
+    let after = interface_tools::dispatch(
+        "moot_memory_search",
+        &args!["query" => "unlock-marker-restricted"],
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+    ).expect("dispatch must not throw");
+    assert!(
+        content_text(&after).contains("classified briefing"),
+        "with a live restricted grant the drawer's content must be visible; got: {}",
+        content_text(&after)
+    );
+}
+
+#[test]
+fn restricted_drawer_grant_makes_it_found_by_id() {
+    use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "unlock-get-marker restricted content body",
+            "location" => "vault/plans",
+            "sensitivity" => "restricted"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory must succeed");
+
+    let drawer_id = {
+        let coord = registry.coord.lock().unwrap();
+        let mut frame = RecallFrame::new(vec![Filter::Sensitivity(AdjectiveSensitivity::Restricted)]);
+        frame.hydration_level = HydrationLevel::Full;
+        frame.ordering = Ordering::ByCaptureTimeDesc;
+        frame.limit = Some(1);
+        let drawers = coord.recall(&registry.default.handle, frame, wall_now()).expect("recall must succeed");
+        drawers.first().expect("restricted drawer must exist").id.clone()
+    };
+
+    let sensitivity_ledger = SensitivityGrantLedger::new();
+    let before = interface_tools::dispatch(
+        "moot_memory_get", &args!["id" => drawer_id.clone()],
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+    );
+    assert!(before.is_err(), "without a grant, moot_memory_get must report not-found for a restricted drawer");
+
+    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    let after = interface_tools::dispatch(
+        "moot_memory_get", &args!["id" => drawer_id],
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+    ).expect("with a live grant, moot_memory_get must find the drawer");
+    assert!(content_text(&after).contains("restricted content body"));
+}
+
+#[test]
+fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
+    use genius_locus_kit::audit::UnifiedAuditVerb;
+    use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    dispatch_tool(
+        "moot_file_memory",
+        &args![
+            "content" => "audit-search-marker restricted content",
+            "location" => "vault/plans",
+            "sensitivity" => "restricted"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory must succeed");
+
+    let sensitivity_ledger = SensitivityGrantLedger::new();
+    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    interface_tools::dispatch(
+        "moot_memory_search", &args!["query" => "audit-search-marker"],
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+    ).expect("dispatch must not throw");
+
+    let coord = registry.coord.lock().unwrap();
+    let log = coord.audit_log(&registry.default.handle).expect("audit log");
+    let entries: Vec<_> = log.ordered_entries().into_iter()
+        .filter(|e| e.verb == UnifiedAuditVerb::SensitivityReadUnderGrant)
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one read-under-grant entry after one qualifying search hit");
+    assert_eq!(entries[0].field_path, "restricted");
+}
+
+#[test]
+fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
+    use genius_locus_kit::audit::UnifiedAuditVerb;
+    use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use aria_mcp::dispatch::wall_now;
+
+    let registry = EstateRegistry::new_inmemory();
+    dispatch_tool(
+        "moot_file_memory",
+        &args!["content" => "audit-normal-marker ordinary content", "location" => "vault/plans"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("file_memory must succeed");
+
+    let sensitivity_ledger = SensitivityGrantLedger::new();
+    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    interface_tools::dispatch(
+        "moot_memory_search", &args!["query" => "audit-normal-marker"],
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+    ).expect("dispatch must not throw");
+
+    let coord = registry.coord.lock().unwrap();
+    let log = coord.audit_log(&registry.default.handle).expect("audit log");
+    assert!(
+        log.ordered_entries().into_iter().all(|e| e.verb != UnifiedAuditVerb::SensitivityReadUnderGrant),
+        "a row admitted regardless of any grant must not be recorded as read-under-grant"
     );
 }

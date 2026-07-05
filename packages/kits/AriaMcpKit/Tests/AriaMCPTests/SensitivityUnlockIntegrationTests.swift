@@ -1,10 +1,14 @@
 import Testing
 import Foundation
-import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
+// @testable (not plain `import`) so ADR-025 §4 audit-emission tests below
+// can read `kit.auditLog(for:)` — internal API, exposed to this test
+// target the same way SensitivityAuditVerbsTests.swift (GeniusLocusKit's
+// own test target) reads it.
+@testable import GeniusLocusKit
 
 /// ADR-025 sensitivity unlock — end-to-end integration through the real
 /// dispatch path (`moot_memory_search` / `moot_memory_get`), driving the
@@ -207,6 +211,77 @@ struct SensitivityUnlockIntegrationTests {
         await dispatcher.sensitivityUnlockLedger.lock()
         let hiddenAgain = try await dispatcher.runMemorySearch(["query": .string("unlock-lock-marker")])
         #expect(text(of: hiddenAgain).contains("found 0 memory(s)"))
+    }
+
+    // MARK: - ADR-025 §4: read-under-grant audit emission
+
+    @Test("reading a restricted drawer under a live grant emits a sensitivityReadUnderGrant audit entry, via search")
+    func restrictedReadUnderGrantEmitsAuditEntryViaSearch() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "unlock-owner")
+        let handle = try await openEstate(in: kit, owner: owner)
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let drawer = try await seed("audit-search-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
+        _ = try await dispatcher.runMemorySearch(["query": .string("audit-search-marker")])
+
+        let log = try await kit.auditLog(for: handle)
+        let entries = log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }
+        #expect(entries.count == 1)
+        #expect(entries.first?.rowID == UUID(uuidString: drawer.id))
+        #expect(entries.first?.fieldPath == "restricted")
+    }
+
+    @Test("reading a restricted drawer under a live grant emits a sensitivityReadUnderGrant audit entry, via get")
+    func restrictedReadUnderGrantEmitsAuditEntryViaGet() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "unlock-owner")
+        let handle = try await openEstate(in: kit, owner: owner)
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let drawer = try await seed("audit-get-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
+        _ = try await dispatcher.runMemoryGet(["id": .string(drawer.id)])
+
+        let log = try await kit.auditLog(for: handle)
+        let entries = log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }
+        #expect(entries.count == 1)
+        #expect(entries.first?.rowID == UUID(uuidString: drawer.id))
+    }
+
+    @Test("a normal-sensitivity drawer read alongside a live grant does NOT emit a read-under-grant entry")
+    func normalDrawerReadDuringLiveGrantDoesNotEmitAuditEntry() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "unlock-owner")
+        let handle = try await openEstate(in: kit, owner: owner)
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        try await seed("audit-normal-marker ordinary content", sensitivity: .normal, in: handle, kit: kit)
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
+        _ = try await dispatcher.runMemorySearch(["query": .string("audit-normal-marker")])
+
+        let log = try await kit.auditLog(for: handle)
+        #expect(log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }.isEmpty,
+                "a row that would be admitted regardless of any grant must not be recorded as read-under-grant")
+    }
+
+    @Test("a restricted drawer read WITHOUT a live grant does not emit a read-under-grant entry (there is nothing to read)")
+    func restrictedDrawerReadWithoutGrantDoesNotEmitAuditEntry() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "unlock-owner")
+        let handle = try await openEstate(in: kit, owner: owner)
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        try await seed("audit-nogrant-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
+        _ = try await dispatcher.runMemorySearch(["query": .string("audit-nogrant-marker")])
+
+        let log = try await kit.auditLog(for: handle)
+        #expect(log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }.isEmpty)
     }
 
     // MARK: - isSensitivityFilter classifier (the grant-injection suppression check)

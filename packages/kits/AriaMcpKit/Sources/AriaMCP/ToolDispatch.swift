@@ -1222,9 +1222,11 @@ extension ToolDispatcher {
         // `filter` argument did not already specify a sensitivity
         // constraint of its own (an explicit caller constraint always
         // wins — same precedence BitmapEvaluator already documents).
+        var sensitivityCeilingLifted = false
         if !filterChain.contains(where: Self.isSensitivityFilter),
            let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
             filterChain.append(ceiling)
+            sensitivityCeilingLifted = true
         }
         // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
         // When absent, recall spans all wings (existing default behavior unchanged).
@@ -1288,6 +1290,28 @@ extension ToolDispatcher {
         let surfacedIDs = result.hits.compactMap { $0.drawer?.id }
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
+        }
+        // ADR-025 §4: record a sensitivityReadUnderGrant audit entry for
+        // each hit that was admitted PAST the substrate's own default
+        // ceiling specifically because a grant is live. Only rows whose
+        // own adjective sensitivity is restricted/secret qualify — an
+        // elevated-or-below row would have been admitted regardless of
+        // any grant, so recording it here would misrepresent "read under
+        // grant" as having happened when it did not. Gated on
+        // `sensitivityCeilingLifted` so a query with no live grant never
+        // emits (in that case no restricted/secret row could have been
+        // admitted in the first place — the default ceiling excludes them).
+        if sensitivityCeilingLifted {
+            for hit in result.hits {
+                guard let drawer = hit.drawer else { continue }
+                switch drawer.adjectiveSensitivity {
+                case .restricted, .secret:
+                    try? await kit.recordSensitivityReadUnderGrant(
+                        handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: now)
+                case .normal, .elevated:
+                    continue
+                }
+            }
         }
         // Compute discrimination before building the result lines so the signal
         // reflects the full ordered hit list, not just the displayed prefix.
@@ -1438,8 +1462,11 @@ extension ToolDispatcher {
         // visible in search but still "not found" by id — an inconsistent,
         // confusing half-unlock.
         var filterChain: [Filter] = []
-        if let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: Date()) {
+        let now = Date()
+        var sensitivityCeilingLifted = false
+        if let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
             filterChain.append(ceiling)
+            sensitivityCeilingLifted = true
         }
         let frame = RecallFrame(filterChain: filterChain, hydrationLevel: .full)
         let filtered = try await estate.getDrawers(
@@ -1452,6 +1479,19 @@ extension ToolDispatcher {
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Memory not found: \(rowID)"
             )
+        }
+        // ADR-025 §4: same read-under-grant audit recording as
+        // runMemorySearch — see that function's comment for why this is
+        // gated on BOTH the ceiling having been lifted AND the drawer's
+        // own sensitivity actually being restricted/secret.
+        if sensitivityCeilingLifted {
+            switch drawer.adjectiveSensitivity {
+            case .restricted, .secret:
+                try? await kit.recordSensitivityReadUnderGrant(
+                    handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: now)
+            case .normal, .elevated:
+                break
+            }
         }
 
         // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via

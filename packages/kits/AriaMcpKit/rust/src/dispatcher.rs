@@ -29,6 +29,7 @@
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JSONRPCResponse, JsonValue};
+use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::tool_list::build_tool_list;
 use crate::vault_tools::VaultJobLedger;
@@ -68,6 +69,11 @@ pub struct Dispatcher {
     /// `moot_vault_export` / `moot_vault_import` write here on completion;
     /// `moot_vault_job` reads by job ID. Bounded to 100 entries.
     vault_ledger: VaultJobLedger,
+    /// ADR-025 sensitivity-unlock grant ledger. Process-scoped, RAM-only —
+    /// constructed fresh exactly once per `Dispatcher` (i.e. once per
+    /// `mootx01 serve` process), so a daemon restart drops any live grant
+    /// by construction, mirroring Swift `ToolDispatcher.sensitivityUnlockLedger`.
+    sensitivity_ledger: SensitivityGrantLedger,
     /// Build serial surfaced by `moot_estate_ping`. Computed once at
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
@@ -104,6 +110,7 @@ impl Dispatcher {
             tools,
             ledger: SurfacedRecallLedger::new(),
             vault_ledger: VaultJobLedger::new(),
+            sensitivity_ledger: SensitivityGrantLedger::new(),
             build_serial: build_serial.to_owned(),
             version_skew: version_skew.to_owned(),
         }
@@ -209,8 +216,8 @@ impl Dispatcher {
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
         let args_map = arguments.as_object().cloned().unwrap_or_default();
 
-        crate::dispatch::dispatch_tool_with_vault_ledger(
-            name, &args_map, &self.registry, &self.ledger, &self.vault_ledger,
+        crate::dispatch::dispatch_tool_with_ledgers(
+            name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
             &self.build_serial, &self.version_skew,
         )
     }
