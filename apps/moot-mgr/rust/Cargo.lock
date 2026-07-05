@@ -205,6 +205,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "cognition-kit"
+version = "0.1.0"
+dependencies = [
+ "genius-locus-kit",
+ "intellectus-lib",
+ "locus-kit",
+ "neuron-kit",
+ "serde",
+ "serde_json",
+ "substrate-ml",
+ "substrate-types",
+ "uuid",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,6 +982,7 @@ name = "moot-mgr"
 version = "0.1.0"
 dependencies = [
  "aria-lexicon-lib",
+ "cognition-kit",
  "corpus-kit-providers",
  "genius-locus-kit",
  "interprocess",
@@ -995,6 +1011,25 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "neuron-kit"
+version = "0.1.0"
+dependencies = [
+ "eidetic-lib",
+ "engram-lib",
+ "genius-locus-kit",
+ "intellectus-lib",
+ "lattice-lib",
+ "locus-kit",
+ "persistence-kit",
+ "queuekit",
+ "serde",
+ "serde_json",
+ "substrate-ml",
+ "substrate-types",
+ "uuid",
 ]
 
 [[package]]

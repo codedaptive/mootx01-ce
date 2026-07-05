@@ -38,6 +38,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cognition_kit::capability::shipped_capabilities;
 use observer_sink::{EventRow, MetricRow, StatsStore};
 
 use crate::api_payloads::{
@@ -385,14 +386,14 @@ impl MootManager {
         // Per-dropbox summaries (Connects tab / Overview observers panel).
         let by_dropbox = build_dropbox_summaries(&all_metrics, &events);
 
-        // NeuronKit capabilities: the Swift host reads CognitionKit's compile-time
-        // shippedNeuronKitCapabilities constant. The Rust CognitionKit crate is not
-        // a dependency of this host (the manager is a pure observer of the stats
-        // store and does not link the cognition layer), so the capability list is
-        // sourced from the stats stream instead: any `neuronkit.capability.*`
-        // metric the consumers self-report. Empty when none reported — the
-        // dashboard renders the absent state. Documented difference from Swift.
-        let capabilities = collect_capabilities(&all_metrics);
+        // NeuronKit capabilities: sourced from CognitionKit's compile-time
+        // shipped_capabilities() constant, mirroring the Swift host's
+        // shippedNeuronKitCapabilities call. Both ports now use the same static
+        // manifest approach — no metrics dependency required.
+        let capabilities: Vec<String> = shipped_capabilities()
+            .iter()
+            .map(|c| c.raw_value().to_string())
+            .collect();
 
         Ok(ServerPayload {
             monitoring_enabled,
@@ -956,23 +957,6 @@ fn build_dropbox_summaries(
         .collect()
 }
 
-/// Collect shipped-capability names from any `neuronkit.capability.<name>`
-/// metric samples the consumers self-report (the Rust-host source for the
-/// capability list — see the documented difference in `server_payload`). Sorted,
-/// deduplicated; empty when none reported.
-fn collect_capabilities(metrics: &[MetricRow]) -> Vec<String> {
-    const PREFIX: &str = "neuronkit.capability.";
-    let mut caps: BTreeSet<String> = BTreeSet::new();
-    for m in metrics {
-        if let Some(name) = m.name.strip_prefix(PREFIX) {
-            if !name.is_empty() {
-                caps.insert(name.to_string());
-            }
-        }
-    }
-    caps.into_iter().collect()
-}
-
 /// Project an `EventRow` to its metadata-only wire payload. An empty estate row
 /// id projects to `None` so the wire carries null, never "". Mirrors Swift
 /// `MootManager.projectEvent`.
@@ -1061,7 +1045,7 @@ mod tests {
         // A crafted metric carrying a value far above any sane community count
         // must be clamped to 10,000 so graph_payload() cannot allocate an
         // unbounded Vec in response to a crafted sample.
-        let mut mgr = temp_manager();
+        let mgr = temp_manager();
         let store = mgr.stats_store().unwrap();
         // Insert a metric with a value of 999_999 — simulates a crafted sample.
         let mut tags = std::collections::BTreeMap::new();

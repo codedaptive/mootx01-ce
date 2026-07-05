@@ -5,10 +5,21 @@
 // temp dir; the real estate and ~/.mempalace are never touched.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use moot_mgr::manager::{epoch_to_iso8601, ManagerError, MootManager};
 use moot_mgr::manager_cli::{self, ManagerCommand};
 use moot_mgr::manager_config::ManagerConfig;
+
+/// Guard for tests that mutate the `ARIA_MCP_API_BASE` environment variable.
+///
+/// `std::env::set_var` is not thread-safe in a process with multiple threads
+/// (Rust's test harness runs integration-test functions in parallel by default).
+/// Any test that sets and removes ARIA_MCP_API_BASE must hold this mutex for the
+/// entire operation — from `set_var` through `remove_var` — to prevent its
+/// value being overwritten mid-flight by a concurrently running test that also
+/// needs to temporarily point the proxy at a different address.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// A fresh, unique scratch store path inside its OWN temp directory.
 ///
@@ -47,11 +58,13 @@ fn operations_before_start_error() {
 #[test]
 fn monitoring_switch_round_trips() {
     let mut m = started_manager();
-    assert!(!m.is_monitoring().unwrap()); // off by default (seed)
-    m.set_monitoring(true).unwrap();
-    assert!(m.is_monitoring().unwrap());
+    // Wave 8.1 (v1.0.17): monitoring defaults ON for new stores so the read
+    // plane is live immediately. The seed value is "1", not "0".
+    assert!(m.is_monitoring().unwrap()); // on by default (wave 8.1 seed)
     m.set_monitoring(false).unwrap();
     assert!(!m.is_monitoring().unwrap());
+    m.set_monitoring(true).unwrap();
+    assert!(m.is_monitoring().unwrap());
     m.stop();
 }
 
@@ -226,9 +239,10 @@ fn estates_payload_rolls_up_events_per_estate() {
     let a = p.estates.iter().find(|e| e.id == "estate-a").unwrap();
     assert_eq!(a.event_count, 2);
     assert!(a.last_event_ts.is_some());
-    // admin is None here because no daemon proxy is available in this test
-    // environment; in production the proxy may populate admin from the daemon.
-    assert!(p.admin.is_none());
+    // admin is populated by the daemon proxy when a daemon is reachable at
+    // the configured address; in CI and on machines without a live daemon it
+    // is None. The test verifies the rollup shape only — admin presence is
+    // environment-dependent and not under the manager's control.
     m.stop();
 }
 
@@ -446,11 +460,15 @@ fn proxy_lattice_parse_valid_daemon_response() {
         }
     });
 
-    // Point the daemon_client at our echo server via the env var.
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
-    let snap = moot_mgr::manager::proxy_lattice_snapshot();
-    // Reset env so other tests aren't affected.
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle so no concurrent test
+    // can overwrite ARIA_MCP_API_BASE while proxy_lattice_snapshot() is running.
+    let snap = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
+        let snap = moot_mgr::manager::proxy_lattice_snapshot();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        snap
+    };
 
     handle.join().unwrap();
 
@@ -470,9 +488,14 @@ fn proxy_lattice_degrades_on_closed_port() {
     let closed_port = l.local_addr().unwrap().port();
     drop(l);
 
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
-    let snap = moot_mgr::manager::proxy_lattice_snapshot();
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle.
+    let snap = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
+        let snap = moot_mgr::manager::proxy_lattice_snapshot();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        snap
+    };
 
     assert!(snap.pending, "closed port must degrade to pending=true");
     assert!(snap.addresses.is_empty(), "degraded state must have empty addresses");
@@ -500,9 +523,14 @@ fn proxy_admin_estates_parse_valid_daemon_response() {
         }
     });
 
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
-    let result = moot_mgr::manager::proxy_admin_estates();
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle.
+    let result = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
+        let r = moot_mgr::manager::proxy_admin_estates();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        r
+    };
 
     handle.join().unwrap();
 
@@ -520,9 +548,14 @@ fn proxy_admin_estates_returns_none_on_closed_port() {
     let closed_port = l.local_addr().unwrap().port();
     drop(l);
 
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
-    let result = moot_mgr::manager::proxy_admin_estates();
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle.
+    let result = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
+        let r = moot_mgr::manager::proxy_admin_estates();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        r
+    };
 
     assert!(result.is_none(), "closed port must degrade to None");
 }

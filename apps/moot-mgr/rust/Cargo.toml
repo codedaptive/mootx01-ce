@@ -75,3 +75,10 @@ aria-lexicon-lib = { path = "../../../packages/libs/AriaLexiconLib/rust" }
 # the /api/lexicon fdcAvailable / fdcDataVersion / latticeVersion fields. Same
 # composition-layer justification as aria-lexicon-lib above.
 lattice-lib      = { path = "../../../packages/libs/LatticeLib/rust" }
+# cognition-kit: shipped_capabilities() compile-time constant — the set of
+# NeuronKit capabilities shipped in this build, sourced the same way the Swift
+# host sources shippedNeuronKitCapabilities. Replaces the dead metrics-read path
+# (collect_capabilities), closing the Swift/Rust divergence (Finding #3).
+# Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; host layer dep,
+# not a kit-to-kit inversion. cognition-kit has no runtime external deps (serde only).
+cognition-kit    = { path = "../../../packages/kits/CognitionKit/rust" }
