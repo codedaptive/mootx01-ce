@@ -111,7 +111,11 @@ impl TrainingThresholdGate {
                 | UnifiedAuditVerb::Associate
                 | UnifiedAuditVerb::Learn
                 | UnifiedAuditVerb::DreamCompact
-                | UnifiedAuditVerb::Migrate => continue,
+                | UnifiedAuditVerb::Migrate
+                | UnifiedAuditVerb::SensitivityGrantIssued
+                | UnifiedAuditVerb::SensitivityGrantDenied
+                | UnifiedAuditVerb::SensitivityGrantRevoked
+                | UnifiedAuditVerb::SensitivityReadUnderGrant => continue,
             }
         }
         count

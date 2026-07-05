@@ -44,6 +44,13 @@ final class SetupViewModel {
     /// user did not ask for.
     var depth: InstallDepth = .default
 
+    /// Set once the silent background convergence pass (see `detect()`'s
+    /// doc comment) finishes. Not surfaced in the UI today — this app has
+    /// no persistent log view — but observable for tests and for a future
+    /// UI hook, and worth keeping distinct from `results`/`skipped` (the
+    /// interactive "Connect" flow's own outcome) so the two never conflate.
+    private(set) var convergenceOutcome: String?
+
     // MARK: - Derived
 
     /// At least one client is selected and not yet wired.
@@ -106,6 +113,60 @@ final class SetupViewModel {
             )
         }
         phase = .selecting
+
+        // Wave 6, Defect B: the .pkg postinstall script launches THIS app
+        // as its only user-context step (root cannot safely write to the
+        // console user's ~/.claude directly) — see
+        // distribution/macos/scripts/postinstall's "Launch setup assistant"
+        // section. Before this fix, converging an EXISTING install (plugin
+        // package rematerialization, ADR-024 Wave 3 Defect 1; permission
+        // tier migration, Bob's 2026-07-04 ruling) only ever happened
+        // inside `install()`, which only runs for clients the user
+        // explicitly checked — and `detect()` above deliberately
+        // pre-deselects already-wired clients (correctly: an upgrade
+        // should not re-prompt for a connection that's already fine). The
+        // combination meant a machine upgraded via .pkg with Claude Code
+        // already wired (Bob's exact case) got NO convergence at all
+        // unless the user happened to check an already-wired client
+        // anyway and click Connect — clicking "Skip", or simply having
+        // nothing new to select, silently skipped `mootx01 install`
+        // entirely, stranding the plugin package and its permission
+        // tiering exactly like Defect A did before that fix.
+        //
+        // Fix: run `mootx01 install --target <already-wired-ids> --yes`
+        // silently in the background the moment detection completes,
+        // independent of anything the user does next (Skip, Connect, or
+        // leaving the window open). This is "prior-choice preservation":
+        // already-wired clients are re-converged without re-prompting;
+        // the interactive selection flow below remains reserved for
+        // genuinely new connections. No-ops when nothing is already
+        // wired (a first install has nothing to converge).
+        convergeAlreadyWired()
+    }
+
+    /// See `detect()`'s call-site doc comment. Extracted as a pure
+    /// function so the targeting decision is unit-testable without
+    /// spawning the `mootx01` subprocess.
+    nonisolated static func convergenceTargetIDs(for clients: [ClientItem]) -> [String] {
+        clients.filter(\.isAlreadyWired).map(\.client.id)
+    }
+
+    private func convergeAlreadyWired() {
+        let ids = Self.convergenceTargetIDs(for: clients)
+        guard !ids.isEmpty else { return }
+        let displayNames = clients.filter(\.isAlreadyWired).map(\.client.displayName)
+        let launchPath = binaryPath
+        let mode = depth.rawValue
+        Task {
+            let (converged, failed) = await Self.runInstall(
+                launchPath: launchPath, ids: ids.joined(separator: ","), mode: mode, names: displayNames)
+            if failed.isEmpty {
+                self.convergenceOutcome = "converged: \(converged.joined(separator: ", "))"
+            } else {
+                self.convergenceOutcome = "convergence issue: \(failed.joined(separator: "; "))"
+                print("Mootx01Setup: background convergence for \(ids) reported: \(failed)")
+            }
+        }
     }
 
     /// Toggle selection for a client.

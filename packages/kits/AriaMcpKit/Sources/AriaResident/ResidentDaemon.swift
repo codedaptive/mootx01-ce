@@ -219,6 +219,35 @@ public enum AriaResident {
     /// Run the resident daemon: install telemetry (if configured), spawn the Brain
     /// pump and the continuous monitoring gate, and serve the HTTP MCP transport
     /// until the process is terminated. Throws on bind failure (the caller decides
+    // MARK: - MonitoringControl concrete implementation (ADR-025 wave 8.2)
+
+    /// Concrete `MonitoringControl` backed by the resident `StatsStore`.
+    ///
+    /// Defined here because `AriaResident` is the only module that imports BOTH
+    /// `AriaMCP` (for the `MonitoringControl` protocol) AND `ObserverSink` (for
+    /// `StatsStore`). Keeping it `fileprivate` within the `ResidentDaemon` type
+    /// prevents it from leaking into the public surface — it is an implementation
+    /// detail of the injection seam.
+    ///
+    /// `read()` and `set(_:)` are best-effort: errors are logged to stderr and
+    /// swallowed so a transient store fault never surfaces as a tool error. The
+    /// tool runner maps `nil` from `read()` to "unavailable" rather than "disabled".
+    fileprivate struct StatsStoreMonitoringControl: MonitoringControl {
+        let store: StatsStore
+
+        func read() async -> Bool? {
+            try? await store.isMonitoringEnabled()
+        }
+
+        func set(_ enabled: Bool) async {
+            do {
+                try await store.setMonitoringEnabled(enabled)
+            } catch {
+                Logging.stderr.log("AriaResident MonitoringControl set failed: \(error)")
+            }
+        }
+    }
+
     /// the exit code); never calls `exit()`.
     public static func runResidentDaemon(
         dispatcher: ARIA_MCPDispatcher,
@@ -274,7 +303,28 @@ public enum AriaResident {
             { @Sendable in (try? await store.isMonitoringEnabled()) ?? true }
         }
 
-        let server = HTTPServer(dispatcher: dispatcher, port: config.port, maxBodyBytes: config.maxBodyBytes, topologyReader: topologyReader)
+        // ADR-025 wave 8.2: inject the monitoring control into the dispatcher
+        // so moot_monitoring_status can read/write the stats store without
+        // AriaMcpKit importing ObserverSink. The concrete type lives here because
+        // AriaResident is the only module that imports both AriaMCP (for the
+        // protocol) and ObserverSink (for StatsStore). In stdio mode and
+        // provision-less contexts, statsStore is nil, so monitoringControl is nil
+        // and the tool reports "unavailable" — never fabricating state.
+        let monitoringControl: (any MonitoringControl)? = statsStore.map { store in
+            StatsStoreMonitoringControl(store: store)
+        }
+        let residentDispatcher: ARIA_MCPDispatcher
+        if let monitoringControl {
+            // Re-wrap the dispatcher with the monitoring seam wired. ToolDispatcher
+            // is a value type, so this copies all fields and overwrites only
+            // monitoringControl. ARIA_MCPDispatcher.init re-invokes ToolProjection
+            // to regenerate the projected-tool list — idempotent and cheap.
+            let updatedTooling = dispatcher.tooling.withMonitoringControl(monitoringControl)
+            residentDispatcher = ARIA_MCPDispatcher(info: dispatcher.info, tooling: updatedTooling)
+        } else {
+            residentDispatcher = dispatcher
+        }
+        let server = HTTPServer(dispatcher: residentDispatcher, port: config.port, maxBodyBytes: config.maxBodyBytes, topologyReader: topologyReader)
 
         // Graph-analytics handler: inject the CognitionKit-based Keystones +
         // ConstellationLens scan into NeuronKit.AutonomicGovernor as a closure.

@@ -230,7 +230,12 @@ public struct EnrichmentPipeline: Sendable, Equatable {
                  // federation layer; they do not fold into matrix state,
                  // so they skip without counting alongside the other
                  // read-only and derived verbs.
-                 .grantIssued, .grantRevoked, .keyDecayed, .physicalKeyDecayed:
+                 .grantIssued, .grantRevoked, .keyDecayed, .physicalKeyDecayed,
+                 // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                 // revoke/read-under-grant events; they do not fold into
+                 // matrix state either.
+                 .sensitivityGrantIssued, .sensitivityGrantDenied,
+                 .sensitivityGrantRevoked, .sensitivityReadUnderGrant:
                 // Read-only and derived verbs: skip without counting.
                 // They do not change matrix state per the gate's
                 // transition partition. Enumerated rather than caught

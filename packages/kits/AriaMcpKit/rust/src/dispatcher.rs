@@ -29,6 +29,7 @@
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JSONRPCResponse, JsonValue};
+use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::tool_list::build_tool_list;
 use crate::vault_tools::VaultJobLedger;
@@ -68,6 +69,13 @@ pub struct Dispatcher {
     /// `moot_vault_export` / `moot_vault_import` write here on completion;
     /// `moot_vault_job` reads by job ID. Bounded to 100 entries.
     vault_ledger: VaultJobLedger,
+    /// ADR-025 sensitivity-unlock grant ledger. Process-scoped, RAM-only —
+    /// constructed fresh exactly once per `Dispatcher` (i.e. once per
+    /// `mootx01 serve` process), so a daemon restart drops any live grant
+    /// by construction, mirroring Swift `ToolDispatcher.sensitivityUnlockLedger`.
+    /// `pub(crate)` so `http_server.rs` can access it for the control routes
+    /// that are structurally outside the JSON-RPC/MCP surface (ADR-025 §3).
+    pub(crate) sensitivity_ledger: SensitivityGrantLedger,
     /// Build serial surfaced by `moot_estate_ping`. Computed once at
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
@@ -81,6 +89,14 @@ pub struct Dispatcher {
     /// Computed once at server startup by the host binary (mootx01-cli's
     /// `serve` command); this kit never reads `~/.claude/plugins/` itself.
     pub(crate) version_skew: String,
+    /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+    ///
+    /// `None` when no stats store is configured (stdio mode, test harnesses,
+    /// provision-less contexts). The concrete type lives in the serve host
+    /// (`StatsStoreMonitoringControl` in `monitoring_control.rs`), which wraps
+    /// `observer_sink::StatsStore`. AriaMcpKit never imports observer_sink directly —
+    /// the trait keeps the dependency boundary clean.
+    pub(crate) monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
 }
 
 impl Dispatcher {
@@ -95,7 +111,11 @@ impl Dispatcher {
     /// `version_skew` is empty when the host detected no plugin/binary
     /// version mismatch (ADR-024 §5) — pass `""` from callers that have no
     /// skew to report (e.g. `aria-mcp-server`, which has no plugin concept).
-    pub fn new(registry: EstateRegistry, name: &str, version: &str, build_serial: &str, version_skew: &str) -> Self {
+    pub fn new(
+        registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
+        version_skew: &str,
+        monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
+    ) -> Self {
         let tools = build_tool_list();
         Dispatcher {
             registry,
@@ -104,8 +124,10 @@ impl Dispatcher {
             tools,
             ledger: SurfacedRecallLedger::new(),
             vault_ledger: VaultJobLedger::new(),
+            sensitivity_ledger: SensitivityGrantLedger::new(),
             build_serial: build_serial.to_owned(),
             version_skew: version_skew.to_owned(),
+            monitoring_control,
         }
     }
 
@@ -209,9 +231,12 @@ impl Dispatcher {
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
         let args_map = arguments.as_object().cloned().unwrap_or_default();
 
-        crate::dispatch::dispatch_tool_with_vault_ledger(
-            name, &args_map, &self.registry, &self.ledger, &self.vault_ledger,
+        crate::dispatch::dispatch_tool_with_ledgers(
+            name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
             &self.build_serial, &self.version_skew,
+            // ADR-025 wave 8.2: thread the monitoring-control seam so the
+            // interface-tools layer can reach it without importing observer_sink.
+            self.monitoring_control.as_deref(),
         )
     }
 }

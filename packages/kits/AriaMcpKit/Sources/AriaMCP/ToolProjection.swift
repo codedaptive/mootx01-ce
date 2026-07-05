@@ -408,6 +408,23 @@ public enum ToolProjection {
                 )),
                 provenance: .interface
             ),
+            // Monitoring control (ADR-025 wave 8.2) — sibling to moot_estate_status.
+            // Read/write the daemon's telemetry monitoring flag via the injected
+            // MonitoringControl seam. "absent enabled" = read path (no mutation);
+            // "present enabled" = write path (persists flag + monitoring_source=user).
+            // Reports "unavailable" when no stats store is wired (stdio, test
+            // harnesses, provision-less contexts) — never fabricates state.
+            ProjectedTool(
+                name: "moot_monitoring_status",
+                description: "Read or set the daemon's telemetry monitoring flag. Absent `enabled`: reports current monitoring state (enabled / disabled / unavailable). Present `enabled`: persists the new flag and reports the effective state after the write. Monitoring controls whether server-metrics telemetry is emitted on a 30-second cadence. Reports 'monitoring: unavailable' when no telemetry store is wired (stdio mode, test contexts) — never fabricates enabled/disabled.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "enabled": booleanSchema("Optional: the monitoring flag to set. Omit to read the current state without mutating it. true enables telemetry emission; false disables it."),
+                    ],
+                    required: []
+                )),
+                provenance: .interface
+            ),
             // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
             // Backfills BM25/vector indexes for drawers captured before the dual-path
             // intake wiring landed (or after an index loss). Enqueues encode jobs for

@@ -177,6 +177,92 @@ struct PluginDedupeTests {
                 "enabled plugin must skip direct wiring — no competing entry written")
     }
 
+    /// Test double for `ClaudeCLIRunning`, local to this file — the one in
+    /// InstallDepthTests.swift is `private` (file-scoped) and unreachable
+    /// here. `@unchecked Sendable` is safe: driven synchronously,
+    /// single-threaded.
+    private final class FakeClaudeCLIRunner: ClaudeCLIRunning, @unchecked Sendable {
+        private(set) var invokedArguments: [[String]] = []
+        func run(arguments: [String]) -> Bool {
+            invokedArguments.append(arguments)
+            return true
+        }
+    }
+
+    /// Wave 6, Defect A regression fixture — the exact state Bob's machine
+    /// was found in: plugin installed+enabled (ownsConnection true) AND a
+    /// stale stdio-era package already on disk (`.mcp.json` with
+    /// `command: mootx01, args: [serve]`, pre-ADR-024-§2). Before the fix,
+    /// `InstallCommand.run()`'s loop skipped the plugin-owned client via
+    /// `continue` WITHOUT appending it to `installed`, so the depth pass's
+    /// `installed.contains(client.displayName)` filter silently excluded
+    /// claude-code — the plugin package, and Claude Code's cached snapshot
+    /// of it, never converged.
+    ///
+    /// This drives the same two calls `run()`'s FIXED code path makes once
+    /// a plugin-owned client is (correctly) counted as installed:
+    /// `Installer.dedupeDirectEntry` (must find no competing direct entry)
+    /// and `DepthInstaller.apply(depth: .plugin, ...)` (must rewrite the
+    /// stale package to the current HTTP-shaped manifest and invoke the
+    /// stranded-cache CLI-update seam, since the plugin is already
+    /// installed).
+    @Test("Defect A fixture: plugin-owned client with a stale on-disk package is rematerialized, not skipped")
+    func pluginOwnedClientWithStalePackageIsRematerialized() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        try writeInstalledPlugins(home: home, plugins: [pluginID])
+        try writeSettings(home: home, json: #"{"enabledPlugins":{"mootx01@mootx01":true}}"#)
+        #expect(PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home),
+                "fixture setup: plugin must be connection-owning")
+
+        // Seed the stale stdio-era package Bob's machine actually had on
+        // disk — pre-ADR-024-§2, before the package moved to an
+        // HTTP-shaped .mcp.json.
+        let host = try #require(InstallBundle.embedded.host(forClientID: "claude-code"))
+        let pluginDir = DepthInstaller.pluginInstallDirectory(host: host, homeDirectory: home)
+        try FileManager.default.createDirectory(at: pluginDir, withIntermediateDirectories: true)
+        let staleMCP: [String: Any] = [
+            "mcpServers": ["mootx01": ["command": "mootx01", "args": ["serve"]]]
+        ]
+        try JSONSerialization.data(withJSONObject: staleMCP)
+            .write(to: pluginDir.appendingPathComponent(".mcp.json"))
+
+        // Step 1 of run()'s plugin-owned branch: dedupe — no direct entry
+        // exists to remove or retain, and none must be written.
+        let dedupeOutcome = try Installer.dedupeDirectEntry(
+            client: client, homeDirectory: home, workingDirectory: home, local: false
+        )
+        #expect(dedupeOutcome == .none, "no prior direct entry in this fixture; expected .none")
+
+        // Step 2 (the fix): the depth pass now runs for this client too.
+        let fake = FakeClaudeCLIRunner()
+        let result = try DepthInstaller.apply(
+            clientID: "claude-code", depth: .plugin, homeDirectory: home,
+            binaryPath: "/safe/bin/mootx01", claudeCLIRunner: fake
+        )
+        guard case .plugin = result else {
+            Issue.record("expected .plugin outcome, got \(result)"); return
+        }
+
+        let rewrittenData = try Data(contentsOf: pluginDir.appendingPathComponent(".mcp.json"))
+        let rewritten = try JSONSerialization.jsonObject(with: rewrittenData) as? [String: Any]
+        let server = (rewritten?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
+        #expect(server?["type"] as? String == "http",
+                "the stale stdio manifest must have converged to the current HTTP-shaped entry; got: \(String(describing: rewritten))")
+        #expect(server?["command"] == nil,
+                "the stale bare `command: mootx01` placeholder must be gone")
+
+        // The stranded-cache refresh (ADR-024 Wave 3, Defect 1) must have
+        // invoked the CLI-update seam, since the plugin is already installed.
+        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]],
+                "rematerializing an already-installed plugin must invoke `claude plugin update`")
+
+        // No direct entry must exist — the plugin still owns the connection.
+        #expect(try directEntry(client: client, home: home) == nil,
+                "a plugin-owned client must never gain a competing direct entry from the depth pass")
+    }
+
     // MARK: - VersionSkewAdvisory (ADR-024 §5)
 
     @Test("VersionSkewAdvisory is nil when the plugin is not installed")

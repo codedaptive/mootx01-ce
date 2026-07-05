@@ -165,6 +165,35 @@ struct HTTPReadAPIReadTests {
         let (status, _) = try await httpRequest(port: port, method: "GET", path: "/api/nope")
         #expect(status == 404)
     }
+
+    // MARK: - Wave 8.3 smoke: default monitoring seed (ADR-025)
+
+    /// Wave 8.3 smoke test: verify that a fresh StatsStore seeds monitoring=ON
+    /// by default (wave 8.1 commits 4ad7b2f9 / 1d16cd17), and that this state
+    /// is correctly reflected in the HTTPReadAPI JSON response.
+    ///
+    /// The test opens a host with NO explicit `setMonitoringEnabled` call in the
+    /// seed block. The wave 8.1 StatsStore change ensures a fresh store returns
+    /// true for `isMonitoringEnabled()`, and the HTTPReadAPI's `/api/config`
+    /// endpoint must surface that as `"monitoringEnabled": true`.
+    ///
+    /// Failure here means the default-seed behaviour from wave 8.1 regressed
+    /// (or the read-API is no longer wiring the store flag correctly).
+    @Test("fresh StatsStore seeds monitoringEnabled=true by default (wave 8.1 regression gate)")
+    func freshStoreMonitoringDefaultIsEnabled() async throws {
+        // No seed block — wave 8.1 StatsStore opens with monitoring=1 by default.
+        let (host, port) = try await makeStartedHost()
+        defer { Task { await host.stop() } }
+
+        let (status, body) = try await httpRequest(port: port, method: "GET", path: "/api/config")
+        #expect(status == 200, "GET /api/config must return 200")
+
+        let payload = try JSONDecoder().decode(ConfigPayload.self, from: Data(body.utf8))
+        #expect(
+            payload.monitoringEnabled == true,
+            "StatsStore seeds monitoring=ON by default (wave 8.1); got monitoringEnabled=\(payload.monitoringEnabled)"
+        )
+    }
 }
 
 // MARK: - Auth / security

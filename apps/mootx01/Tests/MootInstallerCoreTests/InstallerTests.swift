@@ -49,13 +49,15 @@ struct InstallerTests {
         #expect(entry?["command"] == nil, "HTTP-wired client carries no command entry")
     }
 
-    @Test("Claude Desktop gets a stdio command entry (no native local-HTTP)")
+    @Test("Claude Desktop gets a stdio command entry pointing at the proxy symlink (no native local-HTTP)")
     func claudeDesktopStaysStdio() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
         let client = MCPClients.supported.first { $0.id == "claude-desktop" }!
         let binaryPath = "/usr/local/bin/mootx01"
+        // Expected proxy symlink path: same directory, "mootx01-proxy" name.
+        let proxyPath = "/usr/local/bin/mootx01-proxy"
         try Installer.install(
             client: client, binaryPath: binaryPath,
             daemonURL: MootPaths.residentEndpointURL,
@@ -65,7 +67,12 @@ struct InstallerTests {
         let configURL = home.appendingPathComponent(client.configPath)
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
-        #expect(entry?["command"] as? String == binaryPath)
+        // Proxy-bridge clients use the bare proxy symlink as command — no args needed.
+        // ArgvDispatch maps argv0 "mootx01-proxy" to the proxy subcommand automatically.
+        #expect(entry?["command"] as? String == proxyPath,
+                "proxy-bridge client must use the mootx01-proxy symlink as its bare command")
+        #expect(entry?["args"] == nil,
+                "proxy-bridge client must not carry an explicit args array — argv0 dispatch handles routing")
         #expect(entry?["url"] == nil, "stdio client must not get an HTTP url entry")
     }
 
@@ -357,7 +364,7 @@ struct InstallerTests {
                 "re-place must refresh bundle contents, not keep the stale copy")
     }
 
-    @Test("config command is the ABSOLUTE placed path, not the source path")
+    @Test("config command is the ABSOLUTE proxy-symlink path, not the source path")
     func configCommandUsesPlacedPath() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
@@ -369,9 +376,9 @@ struct InstallerTests {
         defer { try? FileManager.default.removeItem(at: source) }
         let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
 
-        // Claude Desktop is the proxy-bridge client: command is the absolute placed
-        // path; args carry the proxy subcommand and daemon URL. HTTP clients carry
-        // a url instead — see installCreatesConfig / claudeDesktopStaysStdio.
+        // Claude Desktop is the proxy-bridge client: command is the absolute proxy
+        // symlink path (mootx01-proxy, same directory as placed binary). HTTP clients
+        // carry a url instead — see installCreatesConfig / claudeDesktopStaysStdio.
         let client = MCPClients.supported.first { $0.id == "claude-desktop" }!
         try Installer.install(
             client: client, binaryPath: placed,
@@ -386,16 +393,48 @@ struct InstallerTests {
         let entry = servers?[client.serverName] as? [String: Any]
         let command = entry?["command"] as? String
 
-        #expect(command == home.appendingPathComponent(".mootx01/bin/mootx01").path,
-                "config command must be the absolute placed path")
+        // Proxy-bridge clients use the bare proxy symlink as command — argv0 dispatch
+        // routes "mootx01-proxy" to the proxy subcommand automatically.
+        #expect(command == home.appendingPathComponent(".mootx01/bin/mootx01-proxy").path,
+                "config command must be the absolute mootx01-proxy symlink path")
         #expect(command?.hasPrefix("/") == true, "config command must be absolute")
         #expect(command != source.path, "config command must not be the source/CWD path")
         #expect(command?.hasPrefix("./") == false, "config command must not be relative")
-        // Proxy bridge: args carry the subcommand and daemon URL so Desktop's
-        // frames execute inside the resident daemon, not an ephemeral serve instance.
-        let args = entry?["args"] as? [String]
-        #expect(args == ["proxy"],
-                "claude-desktop must get the bare proxy subcommand (it self-resolves the daemon port)")
+        // Proxy bridge: no args needed — ArgvDispatch handles routing via argv0.
+        #expect(entry?["args"] == nil,
+                "claude-desktop proxy entry must not carry an explicit args array")
+    }
+
+    @Test("placeBinary creates the same-directory mootx01-proxy symlink beside the binary")
+    func placeBinaryCreatesProxySymlink() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        let proxyURL = MootPaths.proxySymlinkURL(homeDirectory: home)
+        // The proxy symlink must exist as a symlink (not a regular file).
+        let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: proxyURL.path)
+        #expect(dest == "mootx01",
+                "proxy symlink must be a relative symlink pointing at 'mootx01'")
+    }
+
+    @Test("placeBinary re-run recreates the proxy symlink (idempotent)")
+    func placeBinaryProxySymlinkIsIdempotent() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home, force: true)
+        // Second call must not throw — idempotent.
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home, force: true)
+
+        let proxyURL = MootPaths.proxySymlinkURL(homeDirectory: home)
+        let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: proxyURL.path)
+        #expect(dest == "mootx01", "proxy symlink must survive re-install")
     }
 
     @Test("removePlacedBinary removes the binary and the PATH symlink")
@@ -438,13 +477,15 @@ struct InstallerTests {
                 "claude-desktop config schema requires a stdio command entry, not a direct HTTP url")
     }
 
-    @Test("install for useProxyBridge client produces proxy subcommand args")
+    @Test("install for useProxyBridge client uses proxy symlink as bare command (no args)")
     func installProxyBridgeClientProducesProxyArgs() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
         let client = MCPClients.supported.first { $0.id == "claude-desktop" }!
         let binaryPath = "/usr/local/bin/mootx01"
+        // Proxy symlink is in the same directory as the binary.
+        let proxyPath = "/usr/local/bin/mootx01-proxy"
         let daemonURL = MootPaths.residentEndpointURL
 
         try Installer.install(
@@ -457,10 +498,12 @@ struct InstallerTests {
         let configURL = home.appendingPathComponent(client.configPath)
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
-        #expect(entry?["command"] as? String == binaryPath,
-                "proxy entry must carry the absolute binary command")
-        #expect(entry?["args"] as? [String] == ["proxy"],
-                "proxy entry must carry the bare proxy subcommand (it self-resolves the daemon port)")
+        // Proxy-bridge clients use the bare proxy symlink — no args needed.
+        // ArgvDispatch routes argv0 "mootx01-proxy" to the proxy subcommand.
+        #expect(entry?["command"] as? String == proxyPath,
+                "proxy entry must use the mootx01-proxy symlink as bare command")
+        #expect(entry?["args"] == nil,
+                "proxy entry must not carry an explicit args array — argv0 dispatch handles routing")
         #expect(entry?["url"] == nil,
                 "proxy client must not get an HTTP url entry")
     }
@@ -767,13 +810,15 @@ struct InstallerTests {
 
     // MARK: - mergeIntoJSONConfig
 
-    @Test("mergeIntoJSONConfig writes correct proxy-bridge entry for useProxyBridge client")
+    @Test("mergeIntoJSONConfig writes proxy-symlink bare-command entry for useProxyBridge client")
     func mergeIntoJSONConfigProxyBridge() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
         let client = MCPClients.supported.first { $0.id == "claude-desktop" }!
         let binaryPath = "/usr/local/bin/mootx01"
+        // Proxy symlink is in the same directory as the binary.
+        let proxyPath = "/usr/local/bin/mootx01-proxy"
         let daemonURL = MootPaths.residentEndpointURL
 
         let configURL = home.appendingPathComponent("test-config.json")
@@ -783,10 +828,12 @@ struct InstallerTests {
 
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
         let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
-        #expect(entry?["command"] as? String == binaryPath,
-                "proxy-bridge entry must carry the binary command")
-        #expect(entry?["args"] as? [String] == ["proxy"],
-                "proxy-bridge entry must carry the bare proxy subcommand (it self-resolves the daemon port)")
+        // Proxy-bridge clients use the bare proxy symlink — argv0 dispatch routes
+        // "mootx01-proxy" to the proxy subcommand, so no args array is needed.
+        #expect(entry?["command"] as? String == proxyPath,
+                "proxy-bridge entry must use the mootx01-proxy symlink as bare command")
+        #expect(entry?["args"] == nil,
+                "proxy-bridge entry must not carry an explicit args array")
         #expect(entry?["url"] == nil, "proxy-bridge entry must not have a url field")
     }
 
@@ -1043,14 +1090,15 @@ struct InstallerTests {
             )
         }
 
-        // Every config file must contain the proxy-bridge entry.
+        // Every config file must contain the proxy-bridge entry (bare proxy symlink, no args).
+        let proxyPath = "/usr/local/bin/mootx01-proxy"
         for configURL in paths {
             let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
             let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
-            #expect(entry?["command"] as? String == binaryPath,
-                    "Parall instance \(configURL.deletingLastPathComponent().lastPathComponent) must be wired")
-            #expect(entry?["args"] as? [String] == ["proxy"],
-                    "Parall proxy-bridge args must be set correctly")
+            #expect(entry?["command"] as? String == proxyPath,
+                    "Parall instance \(configURL.deletingLastPathComponent().lastPathComponent) must be wired with proxy symlink")
+            #expect(entry?["args"] == nil,
+                    "Parall proxy-bridge entry must not carry an explicit args array")
         }
     }
 

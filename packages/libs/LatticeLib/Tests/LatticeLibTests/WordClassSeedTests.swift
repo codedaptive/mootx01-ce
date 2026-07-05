@@ -40,17 +40,20 @@ struct WordClassSeedTests {
         #expect(table.tableVersion == "1.1.0")
         #expect(table.snapshotDate == "2026-07-04")
 
-        // 466 nouns / 428 verbs: the 21/18 v0.8 fixture entries preserved
+        // 466 nouns / 426 verbs: the 21/18 v0.8 fixture entries preserved
         // verbatim, plus the curated additions ("nebula" was dropped from
         // the initial 467-noun draft — it collided with the synthetic
         // novel-token fixture word used by
         // NovelTokenEffectivenessTests.endToEndNovelTokenLearned, see the
-        // synthetic-fixture-word guard test below). These counts are
+        // synthetic-fixture-word guard test below; "solder" and "weld" were
+        // dropped from the initial 428-verb draft — Wave 6 Adams finding:
+        // both are noun/verb homographs and belong in the ambiguous-word
+        // guard's exclusion list below, not the seed). These counts are
         // pinned so an accidental partial edit (e.g. a merge conflict
         // resolution that drops entries) fails loudly rather than
         // silently shrinking the fast path again.
         #expect(table.nouns.count == 466, "noun count drifted from the shipped seed")
-        #expect(table.verbs.count == 428, "verb count drifted from the shipped seed")
+        #expect(table.verbs.count == 426, "verb count drifted from the shipped seed")
 
         // No duplicates within each class.
         #expect(Set(table.nouns).count == table.nouns.count, "duplicate noun entries")
@@ -193,6 +196,13 @@ struct WordClassSeedTests {
             "monitor", "coach", "train", "author", "produce", "design",
             "estimate", "delegate", "coordinate", "moderate", "initiate",
             "affiliate", "subordinate", "aggregate",
+            // Adams finding (Wave 6): "point" (a point / to point), "solder"
+            // (a solder joint / to solder), and "weld" (a weld / to weld)
+            // were missing from this guard. "solder" and "weld" were
+            // ALREADY present in the shipped verbs table (a latent
+            // ambiguity this guard should have caught) — removed from
+            // Resources/WordClassTable.json as part of this fix.
+            "point", "solder", "weld",
         ]
         var offenders: [String] = []
         for word in ambiguousWords {

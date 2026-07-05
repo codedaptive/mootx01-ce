@@ -30,5 +30,19 @@ let package = Package(
             ],
             path: "Sources/Mootx01Setup"
         ),
+        // Wave 6, Defect B: unit coverage for SetupViewModel's pure
+        // convergence-targeting logic (which clients get silently
+        // re-converged on launch). Tests the executable target directly
+        // (SPM builds it testable when a test target depends on it) rather
+        // than duplicating its logic into a library target — this app is
+        // thin enough that a second target would be pure ceremony.
+        .testTarget(
+            name: "Mootx01SetupTests",
+            dependencies: [
+                "Mootx01Setup",
+                .product(name: "MootInstallerCore", package: "mootx01"),
+            ],
+            path: "Tests/Mootx01SetupTests"
+        ),
     ]
 )

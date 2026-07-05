@@ -173,6 +173,22 @@ public enum Installer {
         try fm.createDirectory(at: localBinDir, withIntermediateDirectories: true)
         try writePathWrapper(at: symlinkURL, execTarget: destURL)
 
+        // 4. Create the same-directory proxy symlink `mootx01-proxy → mootx01`.
+        //    This is a RELATIVE symlink (target is just "mootx01", not an absolute
+        //    path) so the link survives home-directory moves or username changes.
+        //    Placement: same directory as the binary (binDir) — load-bearing for
+        //    Bundle.main resource resolution (both `mootx01` and `mootx01-proxy`
+        //    must resolve to the same directory so SPM bundles are found).
+        //    Clients whose MCP config schema supports only a bare command string
+        //    (no separate args array) use `mootx01-proxy` as their command;
+        //    ArgvDispatch then invokes the `proxy` subcommand automatically.
+        let proxySymlinkURL = MootPaths.proxySymlinkURL(homeDirectory: homeDirectory)
+        if fm.fileExists(atPath: proxySymlinkURL.path)
+            || (try? fm.destinationOfSymbolicLink(atPath: proxySymlinkURL.path)) != nil {
+            try fm.removeItem(at: proxySymlinkURL)
+        }
+        try fm.createSymbolicLink(atPath: proxySymlinkURL.path, withDestinationPath: "mootx01")
+
         return destURL.path
     }
 
@@ -677,7 +693,8 @@ public enum Installer {
     ///
     /// The entry shape follows the same logic as `install()`:
     ///   - supportsLocalHTTP → `{"type":"http","url":daemonURL}` or `{"url":daemonURL}`
-    ///   - useProxyBridge    → `{"command":binaryPath,"args":["proxy"],"env":{}}`
+    ///   - useProxyBridge    → `{"command":proxySymlinkPath,"env":{}}` (bare command, no args —
+    ///                         ArgvDispatch maps argv0 "mootx01-proxy" to the proxy subcommand)
     ///   - isHeadlessStdio  → `{"command":binaryPath,"args":[],"env":{}}` (not used for any
     ///                         current client but included for completeness)
     ///
@@ -707,8 +724,15 @@ public enum Installer {
                 ? ["type": "http", "url": daemonURL]
                 : ["url": daemonURL]
         } else if client.useProxyBridge {
-            entry = ["command": binaryPath,
-                     "args": ["proxy"],
+            // Use the proxy symlink (`mootx01-proxy`) as the bare command — no
+            // `args` needed because ArgvDispatch routes argv0 "mootx01-proxy" to
+            // the `proxy` subcommand automatically. This form works for clients
+            // whose config schema cannot express a separate args array and is
+            // cleaner than the two-token {"command":…,"args":["proxy"]} form.
+            // The symlink is placed in the same directory as the binary by
+            // `placeBinary()` so Bundle.main resource resolution is identical.
+            let proxyPath = Self.proxyBinaryPath(from: binaryPath)
+            entry = ["command": proxyPath,
                      "env": [:] as [String: String]]
         } else {
             // Headless stdio: client spawns an ephemeral serve process per call.
@@ -773,7 +797,7 @@ public enum Installer {
     ///
     /// The entry shape follows the same transport logic as the JSON writer:
     ///   - supportsLocalHTTP → `url = "<daemonURL>"`
-    ///   - useProxyBridge    → `command`/`args = ["proxy"]`
+    ///   - useProxyBridge    → `command = "<proxySymlinkPath>"` (bare, no args)
     ///   - headless stdio    → `command`/`args = []`
     ///
     /// - Throws: `InstallerError.malformedConfig` if the existing file contains
@@ -790,8 +814,10 @@ public enum Installer {
         if client.supportsLocalHTTP {
             block.append("url = \"\(daemonURL)\"")
         } else if client.useProxyBridge {
-            block.append("command = \"\(binaryPath)\"")
-            block.append("args = [\"proxy\"]")
+            // Same proxy-symlink rationale as mergeIntoJSONConfig: bare command
+            // pointing at mootx01-proxy, no args needed (ArgvDispatch handles routing).
+            let proxyPath = Self.proxyBinaryPath(from: binaryPath)
+            block.append("command = \"\(proxyPath)\"")
         } else {
             block.append("command = \"\(binaryPath)\"")
             block.append("args = []")
@@ -1137,6 +1163,23 @@ public enum Installer {
     /// entry is actually removed from the file. Absent file content, absent
     /// entry, or an unparseable file all resolve to `.notPresent` — there
     /// was nothing this installer could safely act on.
+    /// Derives the proxy symlink path from the installed binary path.
+    ///
+    /// The proxy symlink lives in the same directory as the binary and is
+    /// always named `mootx01-proxy`. Given `/path/to/.mootx01/bin/mootx01`,
+    /// returns `/path/to/.mootx01/bin/mootx01-proxy`.
+    ///
+    /// This computation is purely path arithmetic — it does NOT check whether
+    /// the symlink currently exists on disk (callers that write the entry
+    /// first and create the symlink later follow the same contract as the
+    /// `placeBinary` step).
+    private static func proxyBinaryPath(from binaryPath: String) -> String {
+        URL(fileURLWithPath: binaryPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("mootx01-proxy", isDirectory: false)
+            .path
+    }
+
     private static func uninstallJSON(
         configURL: URL, serversKey: String, serverName: String
     ) throws -> UninstallOutcome {

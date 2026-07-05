@@ -142,7 +142,12 @@ public struct TrainingThresholdGate: Sendable, Equatable, Codable {
                  // Federation grant-lifecycle / key-custody verbs record
                  // grant and key events, not drawer state-transitions,
                  // so they do not count toward the training threshold.
-                 .grantIssued, .grantRevoked, .keyDecayed, .physicalKeyDecayed:
+                 .grantIssued, .grantRevoked, .keyDecayed, .physicalKeyDecayed,
+                 // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                 // revoke/read-under-grant events, not drawer state
+                 // transitions, so they do not count either.
+                 .sensitivityGrantIssued, .sensitivityGrantDenied,
+                 .sensitivityGrantRevoked, .sensitivityReadUnderGrant:
                 continue
             }
         }

@@ -22,6 +22,23 @@ struct ToolProjectionTests {
         }
     }
 
+    /// ADR-025 §3, the structural rule: "There is no moot_unlock tool and
+    /// there never will be" — the sensitivity-unlock approval channel is
+    /// physically separate from the MCP surface a prompt-injected model
+    /// could reach. This guard fails loudly if any future tool addition
+    /// accidentally (or deliberately) introduces an unlock-shaped verb on
+    /// the MCP surface — approval must only ever happen via the
+    /// out-of-band `mootx01 unlock`/`lock` CLI.
+    @Test func testNoUnlockToolOnMCPSurface() {
+        for tool in ToolProjection.tools() {
+            let lower = tool.name.lowercased()
+            #expect(!lower.contains("unlock"),
+                    "ADR-025 §3 violation: '\(tool.name)' looks like an unlock verb on the MCP surface")
+            #expect(!(lower.contains("lock") && !lower.contains("block") && !lower.contains("clock")),
+                    "ADR-025 §3 violation: '\(tool.name)' looks like a lock/unlock verb on the MCP surface")
+        }
+    }
+
     /// Hard contract gate: the total tool count must be exactly 63.
     /// 20 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 3 maintenance.
     /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory

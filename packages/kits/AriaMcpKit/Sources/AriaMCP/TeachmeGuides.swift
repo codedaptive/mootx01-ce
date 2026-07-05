@@ -568,6 +568,43 @@ enum TeachmeGuides {
             choose the right location.
         """
 
+    private static let monitoringStatusGuide = """
+        moot_monitoring_status — Read or set the daemon's telemetry monitoring flag.
+
+        Monitoring controls whether the daemon emits server-metrics telemetry on a
+        30-second cadence (counters, timing, health signals). The flag is durable:
+        it persists across restarts because it is stored in the StatsStore. Changing
+        it takes effect on the next telemetry emit interval.
+
+        This tool is a maintenance/admin verb — not one of the nine ARIA grammar
+        verbs. It is permission-gated at the `ask` tier because it mutates daemon
+        behaviour, not estate content.
+
+        Read path — omit `enabled`:
+          { }   → "monitoring: enabled"   (when flag is on)
+          { }   → "monitoring: disabled"  (when flag is off)
+          { }   → "monitoring: unavailable" (when no telemetry store is wired;
+                   e.g. stdio transport, test harness — never fabricated)
+
+        Write path — supply `enabled: bool`:
+          { "enabled": true }   → persists flag, echoes "monitoring: enabled"
+          { "enabled": false }  → persists flag, echoes "monitoring: disabled"
+          Write path also appends "monitoring_source: user" to the response so
+          readers can distinguish operator changes from defaults.
+
+        When to use vs siblings:
+          - moot_estate_status — for estate-wide statistics; does NOT report
+            the monitoring flag.
+          - moot_estate_ping — for liveness only; no flag state.
+
+        Common mistakes:
+          - Reading "unavailable" as "disabled" — they are distinct. Unavailable
+            means no telemetry store is wired, not that monitoring is off.
+          - Omitting `estateID` when multiple estates are open. The monitoring
+            flag is daemon-global, but the tool resolves the estate for future
+            estate-scoped extensions; always pass the target estate when in doubt.
+        """
+
     private static let estatePingGuide = """
         moot_estate_ping — Ping the estate to confirm the server is live.
 
@@ -652,9 +689,11 @@ enum TeachmeGuides {
         case "moot_write_journal": return writeJournalGuide
         case "moot_read_journal":  return readJournalGuide
         // Tier 5
-        case "moot_estate_status":    return estateStatusGuide
-        case "moot_estate_map":       return estateMapGuide
-        case "moot_estate_ping":      return estatePingGuide
+        case "moot_estate_status":       return estateStatusGuide
+        case "moot_estate_map":          return estateMapGuide
+        case "moot_estate_ping":         return estatePingGuide
+        // Monitoring control (ADR-025 wave 8.2)
+        case "moot_monitoring_status":   return monitoringStatusGuide
         // Federation
         case "moot_federated_search": return federatedSearchGuide
         // Recipe (Tier 6) — precise recall has its own guide.

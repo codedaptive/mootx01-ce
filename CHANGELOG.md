@@ -5,6 +5,38 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.17 — 2026-07-05
+
+Sensitivity unlock and monitoring release. Private and secret memories
+become reachable — by human approval only, never by a model — and the
+monitoring dashboard is live out of the box.
+
+- **Sensitivity unlock (ADR-025)** — restricted ("private") rows unlock
+  until local start-of-day; secret rows for a fixed 30 minutes. Approval
+  is strictly out-of-band: `mootx01 unlock private|secret` and
+  `mootx01 lock` in a terminal — macOS verifies with Touch ID / password
+  (LocalAuthentication), Linux/Windows with two discrete passwords set at
+  estate creation (salted PBKDF2, no recovery path). There is deliberately
+  NO unlock tool on the MCP surface, so a prompt-injected model can never
+  grant itself access. Grants live in daemon memory only (restart =
+  locked), every grant, denial, and read-under-grant is audited, and
+  search results never reveal how many sensitive rows matched — only that
+  something may be hidden.
+- **Monitoring ships ON** — the moot-mgr dashboard is live from first
+  install instead of dark by default. Existing installs converge once on
+  upgrade; an explicit user OFF is always respected. New
+  `moot_monitoring_status` tool reads or sets the state (prompted, both
+  namespaces).
+- **Install integrity follow-ups** — the plugin package now refreshes for
+  Claude Code even when the plugin owns the connection (the v1.0.16
+  self-heal had skipped exactly that case); .pkg installs converge
+  automatically; Desktop proxies run under the visible name
+  `mootx01-proxy` so Activity Monitor distinguishes bridges from the
+  daemon; plugin hooks fail soft when the daemon is down.
+- **Search redaction parity** — Swift search previews now redact
+  restricted/secret content exactly as Rust does; restricted-grant expiry
+  on Linux/Windows honors local midnight, not UTC.
+
 ## v1.0.16 — 2026-07-04
 
 Usability release: fetch any memory by ID, permission prompts collapsed to

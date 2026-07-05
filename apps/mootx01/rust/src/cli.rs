@@ -8,6 +8,21 @@
 //! Spec §2: `mootx01` with no subcommand prints usage and exits 64,
 //! unconditionally. No TTY/pipe detection, no implicit default subcommand —
 //! the installer writes explicit args (`serve`, `proxy`) into client configs.
+//! `parse` itself is unchanged by the argv0 dispatch below — that dispatch
+//! runs BEFORE `parse` sees the args (main.rs), so this invariant still
+//! holds for every caller that reaches `parse` with a non-empty args slice.
+//!
+//! argv0 dispatch (Wave 6 addendum, `resolve_argv0_dispatch`): a SEPARATE,
+//! narrower mechanism from the above — when invoked with an EMPTY args
+//! slice AND argv0's basename is `mootx01-proxy` (typically a symlink to
+//! this same binary), the effective args become `["proxy"]` before
+//! `parse` ever runs. This does not reintroduce "no implicit default
+//! subcommand": an empty-args invocation under any OTHER argv0 still
+//! reaches `parse` with an empty slice and gets the unconditional usage/64
+//! behavior above, unchanged. Mirrors Swift's `ArgvDispatch.resolvedArguments`
+//! (MootInstallerCore) — Rust has no bare-pipe → `serve` default (that half
+//! of the Swift function does not apply here, per this file's own §2 spec
+//! citation), only the argv0 → `proxy` half.
 
 use std::fmt;
 
@@ -64,6 +79,12 @@ pub enum Command {
     Dream { db: Option<String> },
     /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart]
     Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool },
+    /// ADR-025 unlock <private|secret> [--db <name>]
+    /// Authenticate and issue an in-RAM sensitivity-tier grant to the daemon.
+    /// "private" maps to the restricted tier; "secret" to the secret tier.
+    Unlock { tier: String, db: Option<String> },
+    /// ADR-025 lock — revoke all sensitivity grants (no auth required).
+    Lock,
     /// --version on the root command.
     Version,
     /// --help / help on the root command (prints usage, exits 0).
@@ -116,6 +137,34 @@ impl fmt::Display for UsageError {
     }
 }
 
+/// The argv0 basename that triggers implicit `proxy` dispatch. Mirrors
+/// Swift `ArgvDispatch.proxyInvocationName`.
+pub const PROXY_INVOCATION_NAME: &str = "mootx01-proxy";
+
+/// Resolve argv0-based subcommand dispatch. See this module's doc comment
+/// for the precedence and scope of this mechanism relative to `parse`'s
+/// own §2 "no implicit default" invariant.
+///
+/// Only fires when `args` is empty AND argv0's last path component is
+/// exactly `mootx01-proxy` — an explicit subcommand (or any other argv0)
+/// passes `args` through unchanged.
+///
+/// - Parameters:
+///   - argv0: the invoked program path or name (`std::env::args().next()`;
+///     may be absolute, relative, or a bare PATH-resolved name).
+///   - args: the arguments AFTER argv0.
+/// - Returns: `vec!["proxy".to_string()]` when the dispatch fires,
+///   otherwise `args` unchanged.
+pub fn resolve_argv0_dispatch(argv0: &str, args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        let basename = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
+        if basename == PROXY_INVOCATION_NAME {
+            return vec!["proxy".to_string()];
+        }
+    }
+    args.to_vec()
+}
+
 /// Parse argv (without the program name) into a Command.
 pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut it = args.iter().peekable();
@@ -148,6 +197,13 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "drain" => parse_drain(&mut it),
         "dream" => parse_dream(&mut it),
         "upgrade" => parse_upgrade(&mut it),
+        "unlock" => parse_unlock(&mut it),
+        "lock" => {
+            if let Some(h) = expect_help_or_end(&mut it, "lock")? {
+                return Ok(h);
+            }
+            Ok(Command::Lock)
+        }
         other => Err(UsageError(format!(
             "Error: unknown subcommand '{other}'.\n\n{}",
             root_usage()
@@ -422,6 +478,40 @@ fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
     Ok(Command::Upgrade { from, check, yes, no_restart })
 }
 
+fn parse_unlock(it: &mut Args) -> Result<Command, UsageError> {
+    // First positional argument is the tier name.
+    let tier = match it.next() {
+        None => {
+            return Err(UsageError(
+                "Error: 'unlock' requires a tier: 'private' or 'secret'.".into(),
+            ))
+        }
+        Some(v) if v == "--help" || v == "-h" => return Ok(Command::HelpFor("unlock")),
+        Some(v) => {
+            let s = v.to_lowercase();
+            // Validate early so the error message is at parse time, not dispatch time.
+            match s.as_str() {
+                "private" | "restricted" | "secret" => {}
+                _ => {
+                    return Err(UsageError(format!(
+                        "Error: unknown tier '{v}'. Use 'private' or 'secret'."
+                    )))
+                }
+            }
+            s
+        }
+    };
+    let mut db = None;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = Some(take_value(it, "--db")?),
+            "--help" | "-h" => return Ok(Command::HelpFor("unlock")),
+            other => return Err(unexpected(other, "unlock")),
+        }
+    }
+    Ok(Command::Unlock { tier, db })
+}
+
 fn unexpected(arg: &str, cmd: &str) -> UsageError {
     UsageError(format!("Error: unexpected argument '{arg}' for '{cmd}'."))
 }
@@ -438,6 +528,8 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "drain" => Ok("drain"),
         "dream" => Ok("dream"),
         "upgrade" => Ok("upgrade"),
+        "unlock" => Ok("unlock"),
+        "lock" => Ok("lock"),
         other => Err(UsageError(format!("Error: unknown subcommand '{other}'."))),
     }
 }
@@ -461,6 +553,8 @@ pub fn root_usage() -> &'static str {
      \x20 query                   Issue a single ARIA tool call (v1.0: MCP subprocess passthrough).\n\
      \x20 proxy                   Proxy stdin JSON-RPC frames to the resident daemon over loopback HTTP (for Claude Desktop).\n\
      \x20 upgrade                 Upgrade mootx01 to the latest release or a local build.\n\
+     \x20 unlock                  Authenticate and issue a sensitivity-tier grant (private → midnight; secret → 30 min).\n\
+     \x20 lock                    Revoke all sensitivity grants immediately.\n\
      \n\
      \x20 See 'mootx01 help <subcommand>' for detailed help."
 }
@@ -549,6 +643,26 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --check                 Print the latest available version and exit without downloading.\n\
             \x20 --yes                   Skip the confirmation prompt before downloading a new release.\n\
             \x20 --no-restart            Copy the binary but skip restarting the background agents.".into(),
+        "unlock" => "Authenticate and issue a sensitivity-tier grant to the resident daemon.\n\
+            \n\
+            USAGE: mootx01 unlock <private|secret> [--db <name>]\n\
+            \n\
+            ARGUMENTS:\n\
+            \x20 private                 Grant access to restricted-tier rows until local midnight (ADR-025 §1).\n\
+            \x20 secret                  Grant access to secret-tier rows for 30 minutes.\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --db <name>             Named estate (uses that estate's daemon port). Default: active estate.\n\
+            \n\
+            Authentication (Linux/Windows): verifies the tier-specific PBKDF2 password stored in\n\
+            <dataDir>/sensitivity_hashes.json. Use `mootx01 lock` to revoke immediately.".into(),
+        "lock" => "Revoke all sensitivity grants immediately (no authentication required).\n\
+            \n\
+            USAGE: mootx01 lock\n\
+            \n\
+            Calls the daemon's /api/control/lock endpoint and clears any active restricted\n\
+            and secret grants for the current session. Reducing your own access is always\n\
+            permitted — no identity verification is needed (ADR-025 §1).".into(),
         other => format!("(no help for '{other}')"),
     }
 }
@@ -565,6 +679,40 @@ mod tests {
     #[test]
     fn bare_invocation_is_usage_error() {
         assert!(p(&[]).is_err()); // §2: no default subcommand, exit 64
+    }
+
+    // MARK: - resolve_argv0_dispatch (Wave 6 addendum)
+
+    fn dispatch(argv0: &str, args: &[&str]) -> Vec<String> {
+        let v: Vec<String> = args.iter().map(|x| x.to_string()).collect();
+        resolve_argv0_dispatch(argv0, &v)
+    }
+
+    #[test]
+    fn argv0_proxy_basename_with_no_args_injects_proxy() {
+        assert_eq!(dispatch("/usr/local/bin/mootx01-proxy", &[]), vec!["proxy".to_string()]);
+        assert_eq!(dispatch("mootx01-proxy", &[]), vec!["proxy".to_string()]);
+        // Windows-style separator.
+        assert_eq!(dispatch(r"C:\Users\dev\mootx01-proxy.exe", &[]), Vec::<String>::new(),
+            "a .exe suffix does not match the exact basename — documents the current exact-match behavior");
+    }
+
+    #[test]
+    fn argv0_proxy_basename_with_explicit_args_untouched() {
+        assert_eq!(dispatch("mootx01-proxy", &["install", "--yes"]), vec!["install".to_string(), "--yes".to_string()]);
+    }
+
+    #[test]
+    fn bare_invocation_with_non_proxy_argv0_is_untouched() {
+        assert_eq!(dispatch("mootx01", &[]), Vec::<String>::new());
+        // Still reaches parse()'s unconditional usage-error path (§2).
+        assert!(parse(&dispatch("mootx01", &[])).is_err());
+    }
+
+    #[test]
+    fn only_exact_basename_triggers_dispatch() {
+        assert_eq!(dispatch("mootx01-proxy-dev", &[]), Vec::<String>::new());
+        assert_eq!(dispatch("not-mootx01-proxy", &[]), Vec::<String>::new());
     }
 
     #[test]
@@ -771,5 +919,60 @@ mod tests {
     #[test]
     fn unknown_subcommand_is_usage_error() {
         assert!(p(&["frobnicate"]).is_err());
+    }
+
+    // ADR-025 unlock / lock
+
+    #[test]
+    fn unlock_private_parses() {
+        assert_eq!(
+            p(&["unlock", "private"]).unwrap(),
+            Command::Unlock { tier: "private".into(), db: None }
+        );
+    }
+
+    #[test]
+    fn unlock_secret_parses() {
+        assert_eq!(
+            p(&["unlock", "secret"]).unwrap(),
+            Command::Unlock { tier: "secret".into(), db: None }
+        );
+    }
+
+    #[test]
+    fn unlock_with_db_parses() {
+        assert_eq!(
+            p(&["unlock", "private", "--db", "work"]).unwrap(),
+            Command::Unlock { tier: "private".into(), db: Some("work".into()) }
+        );
+    }
+
+    #[test]
+    fn unlock_restricted_alias_normalises() {
+        // "restricted" is the internal name; the CLI also accepts it.
+        assert_eq!(
+            p(&["unlock", "restricted"]).unwrap(),
+            Command::Unlock { tier: "restricted".into(), db: None }
+        );
+    }
+
+    #[test]
+    fn unlock_unknown_tier_is_usage_error() {
+        assert!(p(&["unlock", "public"]).is_err());
+    }
+
+    #[test]
+    fn unlock_no_tier_is_usage_error() {
+        assert!(p(&["unlock"]).is_err());
+    }
+
+    #[test]
+    fn lock_parses() {
+        assert_eq!(p(&["lock"]).unwrap(), Command::Lock);
+    }
+
+    #[test]
+    fn lock_with_trailing_args_is_usage_error() {
+        assert!(p(&["lock", "extra"]).is_err());
     }
 }

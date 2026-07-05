@@ -67,10 +67,13 @@ fn bundled_seed_loads_with_shipped_counts() {
     assert_eq!(table.table_version, "1.1.0");
     assert_eq!(table.snapshot_date, "2026-07-04");
 
-    // 466 nouns / 428 verbs -- identical counts to the Swift-side pinned
+    // 466 nouns / 426 verbs -- identical counts to the Swift-side pinned
     // assertion (WordClassSeedTests.bundledSeedLoadsWithShippedCounts).
+    // Verb count dropped from 428: Wave 6 Adams finding removed "solder"
+    // and "weld" from the seed (noun/verb homographs; moved to the
+    // ambiguous-word guard's exclusion list below).
     assert_eq!(table.nouns.len(), 466, "noun count drifted from the shipped seed");
-    assert_eq!(table.verbs.len(), 428, "verb count drifted from the shipped seed");
+    assert_eq!(table.verbs.len(), 426, "verb count drifted from the shipped seed");
 
     let noun_set: HashSet<&String> = table.nouns.iter().collect();
     let verb_set: HashSet<&String> = table.verbs.iter().collect();
@@ -143,6 +146,13 @@ fn ambiguous_words_absent_from_seed() {
         "buffalo", "monitor", "coach", "train", "author", "produce", "design",
         "estimate", "delegate", "coordinate", "moderate", "initiate", "affiliate",
         "subordinate", "aggregate",
+        // Adams finding (Wave 6): "point" (a point / to point), "solder" (a
+        // solder joint / to solder), and "weld" (a weld / to weld) were
+        // missing from this guard. "solder" and "weld" were ALREADY present
+        // in the shipped verbs table (a latent ambiguity this guard should
+        // have caught) — removed from Resources/WordClassTable.json (the
+        // single JSON both ports embed) as part of this fix.
+        "point", "solder", "weld",
     ];
     let mut offenders: Vec<String> = Vec::new();
     for word in ambiguous_words {
