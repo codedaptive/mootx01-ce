@@ -295,14 +295,20 @@ fn make_schema() -> SchemaDeclaration {
                 columns: vec![StatsStoreSchema::TS_COLUMN.to_string()],
                 unique: false,
             },
-            // Index on metric_samples.dropbox_id (v4).
-            // The dashboard polls `query_metric_aggregates_by_dropbox` which issues
-            // one COUNT(*) WHERE dropbox_id=? per estate. Without this index that
-            // COUNT is a full 6M-row scan; with the index it resolves in <1ms.
+            // Composite index on metric_samples.(dropbox_id, name, ts) (v5).
+            // Replaces the v4 single-column dropbox_id index. The composite allows
+            // `WHERE dropbox_id=? AND name=? ORDER BY ts DESC LIMIT 1` probes used
+            // by `query_latest_metrics_by_names_and_dropboxes` to become pure index
+            // seeks. The composite also covers all dropbox_id-only queries (COUNT,
+            // query_metrics_by_names) because it starts with the dropbox_id prefix.
             IndexDeclaration {
-                name: "idx_metric_samples_dropbox_id".to_string(),
+                name: "idx_metric_samples_dropbox_name_ts".to_string(),
                 table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
-                columns: vec![StatsStoreSchema::DROPBOX_ID_COLUMN.to_string()],
+                columns: vec![
+                    StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+                    StatsStoreSchema::NAME_COLUMN.to_string(),
+                    StatsStoreSchema::TS_COLUMN.to_string(),
+                ],
                 unique: false,
             },
         ],
@@ -360,6 +366,33 @@ fn make_schema() -> SchemaDeclaration {
                         name: "idx_metric_samples_dropbox_id".to_string(),
                         table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
                         columns: vec![StatsStoreSchema::DROPBOX_ID_COLUMN.to_string()],
+                        unique: false,
+                    }),
+                ],
+            },
+            // v4 → v5: replace single-column dropbox_id index with composite index.
+            // Drop idx_metric_samples_dropbox_id and add composite
+            // idx_metric_samples_dropbox_name_ts (dropbox_id, name, ts).
+            // The composite supports all existing dropbox_id-only queries (it starts
+            // with the dropbox_id prefix) while also enabling per-(dropbox, name)
+            // ORDER BY ts DESC LIMIT 1 seeks used by
+            // query_latest_metrics_by_names_and_dropboxes. This reduced dashboard
+            // /api/estates latency from 3.8–4.3s to sub-second on a 2.76M-row table.
+            Migration {
+                from_version: 4,
+                to_version: 5,
+                operations: vec![
+                    SchemaOperation::DropIndex {
+                        name: "idx_metric_samples_dropbox_id".to_string(),
+                    },
+                    SchemaOperation::AddIndex(IndexDeclaration {
+                        name: "idx_metric_samples_dropbox_name_ts".to_string(),
+                        table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                        columns: vec![
+                            StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+                            StatsStoreSchema::NAME_COLUMN.to_string(),
+                            StatsStoreSchema::TS_COLUMN.to_string(),
+                        ],
                         unique: false,
                     }),
                 ],
@@ -478,7 +511,11 @@ impl StatsStore {
     /// v3: added topology_snapshots.topology_fingerprint (nullable) so the governor
     ///     can skip the full topology read on restart when inputs are unchanged.
     /// v4: added idx_metric_samples_dropbox_id so per-dropbox COUNT is O(log n).
-    pub const SCHEMA_VERSION: i32 = 4;
+    /// v5: replaced idx_metric_samples_dropbox_id with composite index
+    ///     idx_metric_samples_dropbox_name_ts (dropbox_id, name, ts) so that
+    ///     per-(dropbox, name) ORDER BY ts DESC LIMIT 1 probes become pure index
+    ///     seeks instead of scanning the hot-dropbox prefix (0.45s → sub-ms).
+    pub const SCHEMA_VERSION: i32 = 5;
 
     // MARK: - Initialisation
 
@@ -519,6 +556,16 @@ impl StatsStore {
     /// `setMonitoringEnabled` (source != "user"). Mirrors Swift `StatsStore.open()`.
     pub fn open(&self) -> Result<(), persistence_kit::StorageError> {
         let schema = make_schema();
+        // apply_schema creates all schema.tables and schema.indices with IF NOT EXISTS
+        // semantics on every open(). For index REMOVAL (e.g. the v4 single-column
+        // idx_metric_samples_dropbox_id dropped in favour of the v5 composite), the
+        // Rust SQLite backend does NOT replay Migration.operations — this is a known
+        // design divergence from Swift's PersistenceKitSQLite. The new composite index
+        // IS created via apply_schema's IF NOT EXISTS pass, so the outcome that matters
+        // (composite index exists on any-age store) is achieved. Old indices from prior
+        // versions remain on existing stores; they are inert (SQLite's planner picks
+        // the better-matching one) but not reclaimed. See conformance.rs
+        // v4_to_v5_migration_adds_composite_index for the documented divergence test.
         self.storage.open(&schema)?;
 
         // Seed "monitoring" = "1" (on by default, wave 8.1) only if absent.

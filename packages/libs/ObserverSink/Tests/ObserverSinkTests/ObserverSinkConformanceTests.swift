@@ -63,8 +63,8 @@ struct ObserverSinkConformanceTests {
     func schemaVersion() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
-        // Schema version 4: idx_metric_samples_dropbox_id added (v3→v4).
-        #expect(StatsStore.schemaVersion == 4)
+        // Schema version 5: composite idx_metric_samples_dropbox_name_ts added (v4→v5).
+        #expect(StatsStore.schemaVersion == 5)
     }
 
     @Test("StatsStore seeds monitoring ON by default (wave 8.1)")
@@ -447,12 +447,14 @@ struct ObserverSinkConformanceTests {
 
     // MARK: 12. Topology snapshot — schema version bump
 
-    @Test("StatsStore schema is version 4 after dropbox_id index added")
-    func schemaVersionIsFour() async throws {
+    @Test("StatsStore schema is version 5 after composite index added")
+    func schemaVersionIsFive() async throws {
         // v1→v2: topology_snapshots table.
         // v2→v3: topology_snapshots.topology_fingerprint.
         // v3→v4: idx_metric_samples_dropbox_id (per-dropbox COUNT is now O(log n)).
-        #expect(StatsStore.schemaVersion == 4)
+        // v4→v5: composite idx_metric_samples_dropbox_name_ts replaces the v4 index,
+        //        enabling per-(dropbox, name) ORDER BY ts DESC LIMIT 1 pure index seeks.
+        #expect(StatsStore.schemaVersion == 5)
     }
 
     // MARK: 13. Topology snapshot write and read
@@ -770,7 +772,7 @@ struct ObserverSinkConformanceTests {
         #expect(emptyDropboxes.isEmpty, "Empty dropboxIDs must yield empty result")
     }
 
-    // MARK: 20. v3→v4 migration on an existing store
+    // MARK: 20. v3 / v4 migration tests
 
     /// Seed a database at v3 (all StatsStore tables present up through
     /// topology_fingerprint, but WITHOUT idx_metric_samples_dropbox_id).
@@ -855,24 +857,50 @@ struct ObserverSinkConformanceTests {
         }
     }
 
+    /// Seed a database at v4 (all v3 tables plus idx_metric_samples_dropbox_id,
+    /// version row = 4). Used by v4→v5 migration test.
+    private func seedV4Database(at url: URL) throws {
+        // Start from v3 state.
+        try seedV3Database(at: url)
+
+        // Advance to v4: update version + add the single-column dropbox_id index.
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw StatsStoreTestError.seedFailed("could not open v4 seed DB at \(url.path)")
+        }
+        defer { sqlite3_close(db) }
+
+        let statements: [String] = [
+            "UPDATE \"_storagekit_migrations\" SET version = 4, applied_at = '2026-01-02T00:00:00Z' WHERE kit_id = 'ObserverSink'",
+            "CREATE INDEX \"idx_metric_samples_dropbox_id\" ON \"metric_samples\" (\"dropbox_id\")",
+        ]
+        for sql in statements {
+            var errmsg: UnsafeMutablePointer<CChar>?
+            let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
+            if rc != SQLITE_OK {
+                let msg = errmsg.map { String(cString: $0) } ?? "rc=\(rc)"
+                sqlite3_free(errmsg)
+                throw StatsStoreTestError.seedFailed("v4 seed DDL failed: \(msg) — \(sql.prefix(60))")
+            }
+        }
+    }
+
     /// Verify that opening an existing v3 database through StatsStore applies
-    /// the v3→v4 migration: advances the stored version to 4 and creates
-    /// idx_metric_samples_dropbox_id.
-    @Test("v3→v4 migration adds dropbox index and records version 4")
-    func v3ToV4MigrationAddsDropboxIndex() async throws {
+    /// the full migration chain (v3→v4→v5): the stored version advances to 5,
+    /// the old single-column index is replaced by the composite index.
+    @Test("v3 db migrates to v5 through full chain — composite index present, old index absent")
+    func v3DatabaseMigratesToV5() async throws {
         let url = makeTempURL()
 
         // Build the v3 seed DB.
         try seedV3Database(at: url)
 
-        // Open via StatsStore — the migration runner detects version=3 < 4
-        // and applies the v3→v4 step (CREATE INDEX IF NOT EXISTS + version upsert).
+        // Open via StatsStore — the migration runner applies v3→v4 then v4→v5.
         let store = try StatsStore(url: url)
         try await store.open()
         await store.close()
 
-        // Re-open the same file with raw SQLCipher to inspect the DB state.
-        // No key = plaintext mode; matches how PersistenceKitSQLite opens this file.
+        // Re-open with raw SQLCipher to inspect the final DB state.
         var db: OpaquePointer?
         guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
             Issue.record("could not re-open seed DB at \(url.path) for verification")
@@ -880,7 +908,7 @@ struct ObserverSinkConformanceTests {
         }
         defer { sqlite3_close(db) }
 
-        // 1. _storagekit_migrations must now record version 4 for "ObserverSink".
+        // 1. Version must be 5.
         var storedVersion: Int32 = 0
         let verSQL = "SELECT version FROM \"_storagekit_migrations\" WHERE kit_id = 'ObserverSink'"
         var vStmt: OpaquePointer?
@@ -889,24 +917,87 @@ struct ObserverSinkConformanceTests {
             storedVersion = sqlite3_column_int(vStmt, 0)
         }
         sqlite3_finalize(vStmt)
-        #expect(
-            storedVersion == 4,
-            "v3→v4 migration must record version 4 in _storagekit_migrations; got \(storedVersion)"
-        )
+        #expect(storedVersion == 5, "v3 db migrated through chain must reach version 5; got \(storedVersion)")
 
-        // 2. idx_metric_samples_dropbox_id must exist after v3→v4 migration.
-        var indexFound = false
-        let idxSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'"
-        var iStmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, idxSQL, -1, &iStmt, nil) == SQLITE_OK,
-           sqlite3_step(iStmt) == SQLITE_ROW {
-            indexFound = true
+        // 2. Composite index must be present.
+        var compositeFound = false
+        let compSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'"
+        var cStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, compSQL, -1, &cStmt, nil) == SQLITE_OK,
+           sqlite3_step(cStmt) == SQLITE_ROW {
+            compositeFound = true
         }
-        sqlite3_finalize(iStmt)
-        #expect(
-            indexFound,
-            "v3→v4 migration must create idx_metric_samples_dropbox_id on metric_samples"
-        )
+        sqlite3_finalize(cStmt)
+        #expect(compositeFound, "composite index idx_metric_samples_dropbox_name_ts must exist after v3→v5 chain")
+
+        // 3. Old single-column index must be gone (dropped by v4→v5 migration).
+        var oldIndexGone = true
+        let oldSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'"
+        var oStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, oldSQL, -1, &oStmt, nil) == SQLITE_OK,
+           sqlite3_step(oStmt) == SQLITE_ROW {
+            oldIndexGone = false
+        }
+        sqlite3_finalize(oStmt)
+        #expect(oldIndexGone, "old index idx_metric_samples_dropbox_id must be dropped by v4→v5 migration")
+    }
+
+    /// Verify that opening an existing v4 database through StatsStore applies
+    /// the v4→v5 migration: advances the stored version to 5, drops the
+    /// single-column index, and creates the composite index.
+    @Test("v4→v5 migration drops old index and adds composite index")
+    func v4ToV5MigrationAddsCompositeIndex() async throws {
+        let url = makeTempURL()
+
+        // Build the v4 seed DB (v3 base + single-column dropbox_id index, version=4).
+        try seedV4Database(at: url)
+
+        // Open via StatsStore — the migration runner detects version=4 < 5
+        // and applies the v4→v5 step (DROP INDEX + CREATE INDEX + version upsert).
+        let store = try StatsStore(url: url)
+        try await store.open()
+        await store.close()
+
+        // Re-open with raw SQLCipher to inspect the migrated DB state.
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            Issue.record("could not re-open v4 seed DB at \(url.path) for verification")
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        // 1. Version must now be 5.
+        var storedVersion: Int32 = 0
+        let verSQL = "SELECT version FROM \"_storagekit_migrations\" WHERE kit_id = 'ObserverSink'"
+        var vStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, verSQL, -1, &vStmt, nil) == SQLITE_OK,
+           sqlite3_step(vStmt) == SQLITE_ROW {
+            storedVersion = sqlite3_column_int(vStmt, 0)
+        }
+        sqlite3_finalize(vStmt)
+        #expect(storedVersion == 5, "v4→v5 migration must record version 5 in _storagekit_migrations; got \(storedVersion)")
+
+        // 2. Composite index must be present after migration.
+        var compositeFound = false
+        let compSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'"
+        var cStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, compSQL, -1, &cStmt, nil) == SQLITE_OK,
+           sqlite3_step(cStmt) == SQLITE_ROW {
+            compositeFound = true
+        }
+        sqlite3_finalize(cStmt)
+        #expect(compositeFound, "v4→v5 migration must create idx_metric_samples_dropbox_name_ts")
+
+        // 3. Old single-column index must be absent after migration.
+        var oldIndexGone = true
+        let oldSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'"
+        var oStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, oldSQL, -1, &oStmt, nil) == SQLITE_OK,
+           sqlite3_step(oStmt) == SQLITE_ROW {
+            oldIndexGone = false
+        }
+        sqlite3_finalize(oStmt)
+        #expect(oldIndexGone, "v4→v5 migration must drop idx_metric_samples_dropbox_id")
     }
 }
 

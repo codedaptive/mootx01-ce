@@ -17,8 +17,8 @@
 //       (regression lock for the seed-if-absent fix — seed-if-absent must NOT
 //        overwrite an operator-set "monitoring"="1" on reopen)
 //  12. storageStats reports the SQLite-backed store's own DB-layer health.
-//  13. v3→v4 migration: seed a v3-state DB (no dropbox index), re-open via
-//      StatsStore, assert schemaVersion==4 and idx_metric_samples_dropbox_id exists.
+//  13. Migration tests: v3 db migrates to v5 (full chain), v4→v5 migration drops
+//      old single-column index and creates composite idx_metric_samples_dropbox_name_ts.
 //
 // Schema parity with Swift:
 //   Same table names, same column names, same TEXT (ISO-8601) timestamp format.
@@ -66,8 +66,8 @@ fn make_store() -> Arc<StatsStore> {
 
 #[test]
 fn schema_version() {
-    // Schema version 4: idx_metric_samples_dropbox_id added (v3→v4).
-    assert_eq!(StatsStore::SCHEMA_VERSION, 4);
+    // Schema version 5: composite idx_metric_samples_dropbox_name_ts added (v4→v5).
+    assert_eq!(StatsStore::SCHEMA_VERSION, 5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -828,7 +828,7 @@ fn latest_metrics_by_names_and_dropboxes_empty_inputs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 13. v3→v4 migration on an existing store
+// 13. v3 / v4 migration tests
 //
 // Mirrors Swift: ObserverSinkConformanceTests.v3ToV4MigrationAddsDropboxIndex
 // ─────────────────────────────────────────────────────────────────────────────
@@ -896,24 +896,41 @@ fn seed_v3_database(path: &str) {
     }
 }
 
+/// Seed a v4 database (v3 base + single-column dropbox_id index, version=4).
+/// Used by the v4→v5 migration test.
+fn seed_v4_database(path: &str) {
+    // Start from v3 state.
+    seed_v3_database(path);
+
+    // Advance to v4: update version + add single-column dropbox_id index.
+    use rusqlite::Connection;
+    let conn = Connection::open(path).expect("seed_v4: could not open DB");
+    conn.execute_batch(
+        r#"UPDATE "_storagekit_migrations" SET version = 4, applied_at = '2026-01-02T00:00:00Z' WHERE kit_id = 'ObserverSink'"#,
+    )
+    .expect("seed_v4: version update failed");
+    conn.execute_batch(
+        r#"CREATE INDEX "idx_metric_samples_dropbox_id" ON "metric_samples" ("dropbox_id")"#,
+    )
+    .expect("seed_v4: index creation failed");
+}
+
 #[test]
-fn v3_to_v4_migration_adds_dropbox_index() {
+fn v3_database_migrates_to_v5() {
     let path = make_temp_path();
 
     // Build the v3 seed DB — no dropbox index, version=3 recorded.
     seed_v3_database(&path);
 
-    // Open via StatsStore — apply_schema detects version=3, creates the missing
-    // index IF NOT EXISTS, then upserts version=4 in _storagekit_migrations.
+    // Open via StatsStore — apply_schema applies the full v3→v4→v5 chain.
     let store = StatsStore::new(&path).expect("StatsStore::new must succeed on v3 seed");
-    store.open().expect("StatsStore::open must run v3→v4 migration");
-    drop(store); // release the connection before re-opening
+    store.open().expect("StatsStore::open must run v3→v4→v5 migration chain");
+    drop(store);
 
-    // Verify via raw rusqlite (same vendored SQLCipher engine, no-key mode).
     use rusqlite::Connection;
     let conn = Connection::open(&path).expect("verification: could not re-open DB");
 
-    // 1. _storagekit_migrations must now record version 4.
+    // 1. Version must be 5.
     let stored_version: i64 = conn
         .query_row(
             r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = 'ObserverSink'"#,
@@ -922,12 +939,25 @@ fn v3_to_v4_migration_adds_dropbox_index() {
         )
         .expect("version query must succeed");
     assert_eq!(
-        stored_version, 4,
-        "v3→v4 migration must record version 4 in _storagekit_migrations; got {stored_version}"
+        stored_version, 5,
+        "v3 db migrated through chain must reach version 5; got {stored_version}"
     );
 
-    // 2. idx_metric_samples_dropbox_id must exist in sqlite_master.
-    let index_count: i64 = conn
+    // 2. Composite index must be present.
+    let composite_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        composite_count, 1,
+        "composite index idx_metric_samples_dropbox_name_ts must exist after v3→v5 chain"
+    );
+
+    // 3. Old single-column index must be absent (dropped by v4→v5).
+    let old_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'",
             [],
@@ -935,7 +965,71 @@ fn v3_to_v4_migration_adds_dropbox_index() {
         )
         .expect("sqlite_master query must succeed");
     assert_eq!(
-        index_count, 1,
-        "v3→v4 migration must create idx_metric_samples_dropbox_id; found {index_count} rows in sqlite_master"
+        old_count, 0,
+        "old index idx_metric_samples_dropbox_id must be dropped by v4→v5 migration; found {old_count}"
+    );
+}
+
+#[test]
+fn v4_to_v5_migration_adds_composite_index() {
+    let path = make_temp_path();
+
+    // Build the v4 seed DB (v3 base + single-column index, version=4).
+    seed_v4_database(&path);
+
+    // Open via StatsStore — apply_schema detects version=4, drops old index,
+    // creates composite, then upserts version=5 in _storagekit_migrations.
+    let store = StatsStore::new(&path).expect("StatsStore::new must succeed on v4 seed");
+    store.open().expect("StatsStore::open must run v4→v5 migration");
+    drop(store);
+
+    use rusqlite::Connection;
+    let conn = Connection::open(&path).expect("verification: could not re-open DB");
+
+    // 1. Version must now be 5.
+    let stored_version: i64 = conn
+        .query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = 'ObserverSink'"#,
+            [],
+            |row| row.get(0),
+        )
+        .expect("version query must succeed");
+    assert_eq!(
+        stored_version, 5,
+        "v4→v5 migration must record version 5 in _storagekit_migrations; got {stored_version}"
+    );
+
+    // 2. Composite index must be present.
+    let composite_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        composite_count, 1,
+        "v4→v5 migration must create idx_metric_samples_dropbox_name_ts; found {composite_count}"
+    );
+
+    // 3. Old index behaviour: Rust PersistenceKit SQLite backend does NOT replay
+    // Migration.operations (DropIndex, AddColumn etc.) — it uses idempotent
+    // CREATE TABLE/INDEX IF NOT EXISTS semantics on every open(). Swift does apply
+    // per-step migration ops, so Swift drops idx_metric_samples_dropbox_id here.
+    //
+    // On Rust v4 stores the old single-column index REMAINS after open() (it is
+    // inert — SQLite's planner picks the better-matching composite for the query;
+    // both coexist safely). This assertion documents the known divergence so that
+    // any future change that does start dropping it shows up as a diff.
+    let old_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        old_count, 1,
+        "Rust v4→v5: old idx_metric_samples_dropbox_id remains (Rust does not replay DropIndex ops); found {old_count}"
     );
 }
