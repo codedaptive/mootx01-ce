@@ -188,17 +188,18 @@ pub struct GraphCommunityPayload {
 /// One graph node (GET /api/graph, from the stored topology snapshot). Mirrors
 /// Swift `GraphNodePayload`. Structural — passed through from the governor's
 /// snapshot. Absent-key-tolerant on decode; explicit null on re-encode.
+///
+/// nounType and lastActiveTs removed from wire format (FIX 2 — payload trim):
+/// nounType was redundant (all drawers are type 0); lastActiveTs is not
+/// surfaced by the dashboard renderer.  The `#[serde(default)]` annotation on
+/// absent fields means existing snapshots with these keys decode without error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNodePayload {
     pub id: String,
-    #[serde(rename = "nounType")]
-    pub noun_type: i64,
     #[serde(rename = "communityId")]
     pub community_id: i64,
     pub centrality: f64,
     pub anomaly: bool,
-    #[serde(rename = "lastActiveTs", default)]
-    pub last_active_ts: Option<String>,
     #[serde(rename = "createdTs", default)]
     pub created_ts: Option<String>,
     #[serde(rename = "tombstonedTs", default)]
@@ -206,6 +207,10 @@ pub struct GraphNodePayload {
 }
 
 /// One graph edge (GET /api/graph). Mirrors Swift `GraphEdgePayload`.
+///
+/// decayedWeight and createdTs removed from wire format (FIX 2 — payload trim):
+/// decayedWeight is not consumed by the dashboard renderer; createdTs per-edge
+/// costs significant JSON bytes and is not displayed per edge in the dashboard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphEdgePayload {
     pub source: String,
@@ -213,10 +218,6 @@ pub struct GraphEdgePayload {
     #[serde(rename = "edgeType")]
     pub edge_type: String,
     pub weight: f64,
-    #[serde(rename = "decayedWeight")]
-    pub decayed_weight: f64,
-    #[serde(rename = "createdTs", default)]
-    pub created_ts: Option<String>,
     #[serde(rename = "tombstonedTs", default)]
     pub tombstoned_ts: Option<String>,
 }

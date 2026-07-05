@@ -772,21 +772,20 @@ public actor MootManager {
             "anomaly.flag", "edge.decayed_weight",
         ]
 
-        // VizGraph signals: only the latest sample per (signal, dropbox) is needed.
-        // Uses the same indexed approach as estatesPayload (one query per pair) so the
-        // response stays fast even when metric_samples holds millions of rows.
-        // Event dropboxIDs identify the active consumers; viz signals share the same
-        // observer infrastructure as queue metrics.
+        // VizGraph signal metrics: filter by event dropboxIDs to prevent a full
+        // metric_samples table scan when millions of unrelated rows are present.
+        // Unlike queue metrics (one dropbox per estate), VizGraph signals from
+        // SubstrateML may be emitted by a single dropboxID for multiple estates —
+        // the estate is carried as a row tag, not encoded in the dropboxID.  So
+        // queryMetricsByNames per dropboxID is used (not queryLatestMetricsByNames
+        // AndDropboxes) to ensure rows for ALL estates within a dropboxID are
+        // returned; the analytics code below keeps the latest per (estate, signal).
         let vizEvents = try await store.queryEvents(dropboxID: nil)
         let vizDropboxIDs = Array(Set(vizEvents.map(\.dropboxID)))
-        let vizMetrics: [MetricRow]
-        if vizDropboxIDs.isEmpty {
-            // No events recorded yet — no dropboxes to query.
-            vizMetrics = []
-        } else {
-            vizMetrics = try await store.queryLatestMetricsByNamesAndDropboxes(
-                vizSignals, dropboxIDs: vizDropboxIDs
-            )
+        var vizMetrics: [MetricRow] = []
+        for dropboxID in vizDropboxIDs {
+            let rows = try await store.queryMetricsByNames(vizSignals, dropboxID: dropboxID)
+            vizMetrics.append(contentsOf: rows)
         }
 
         // Group by (estate, signal). Estate is a metric tag (VizGraphSignals);

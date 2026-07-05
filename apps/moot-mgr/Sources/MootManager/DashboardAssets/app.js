@@ -1521,10 +1521,12 @@
     var nodes = [];
 
     function pushNode(n, x, y, cIdx, isLobe, commKey, colorIdx) {
-      // Parse wire timestamps once at build. lastMs drives L2 recency
-      // brightness and (preferred) the L4 dormancy depth; createdMs is the
-      // birth instant for the L5 alive(t) filter; deadMs (tombstonedTs) hides
-      // the entity in live view and ends its playback lifespan.
+      // Parse wire timestamps once at build. createdMs is the birth instant for
+      // the L5 alive(t) filter; deadMs (tombstonedTs) hides the entity in live
+      // view and ends its playback lifespan.
+      // lastActiveTs was removed from the wire format (FIX 2 payload trim) so
+      // lastMs is always null for topology nodes; the renderer falls through to
+      // createdMs for recency brightness.
       // Date.parse(null/undefined) is NaN, and NaN || null collapses to null.
       var lastMs = Date.parse(n.lastActiveTs) || null;
       var createdMs = Date.parse(n.createdTs) || null;
@@ -1544,9 +1546,9 @@
         // a bucket. Stable across snapshots, unlike Louvain ids.
         commKey: commKey || null,
         // Community hue for the node fill (encoding rule: communityId → hue).
-        // Real drawers are all nounType 0, so without this the whole estate
-        // renders in the drawer style's uniform white.
         rgb: BRAIN_COMM_COLORS[(colorIdx !== undefined ? colorIdx : cIdx) % BRAIN_COMM_COLORS.length],
+        // nounType removed from wire format (FIX 2 payload trim); all drawers
+        // are type 0 — the rendering path is unchanged (defaults to 0).
         nounType: n.nounType || 0,
         centrality: n.centrality || 0,
         breathPhase: Math.random() * Math.PI * 2,

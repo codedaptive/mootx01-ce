@@ -615,25 +615,27 @@ impl MootManager {
         ]
         .into_iter()
         .collect();
-        // VizGraph signals: only the latest sample per (signal, dropbox) is needed.
-        // Use the same indexed approach as estates_payload to stay fast when the
-        // metric_samples table holds millions of rows.
-        // Event dropboxIDs identify the active consumers; viz signals share the same
-        // observer infrastructure as queue metrics.
+        // VizGraph signal metrics: filter by event dropboxIDs to prevent a full
+        // metric_samples table scan when millions of unrelated rows are present.
+        // Unlike queue metrics (one dropbox per estate), VizGraph signals from
+        // SubstrateML may be emitted by a single dropboxID for multiple estates —
+        // the estate is carried as a row tag, not encoded in the dropboxID.  So
+        // query_metrics_by_names per dropboxID is used (not query_latest_metrics_
+        // by_names_and_dropboxes) to ensure rows for ALL estates within a dropboxID
+        // are returned; the analytics code below keeps the latest per (estate, signal).
         let viz_events = store.query_events(None)?;
-        let viz_dropbox_ids: Vec<&str> = viz_events
+        let viz_dropbox_ids: Vec<String> = viz_events
             .iter()
-            .map(|e| e.dropbox_id.as_str())
+            .map(|e| e.dropbox_id.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
         let viz_signal_slice: Vec<&str> = viz_signals.iter().copied().collect();
-        let viz_metrics = if viz_dropbox_ids.is_empty() {
-            // No events recorded yet — no dropboxes to query.
-            vec![]
-        } else {
-            store.query_latest_metrics_by_names_and_dropboxes(&viz_signal_slice, &viz_dropbox_ids)?
-        };
+        let mut viz_metrics: Vec<MetricRow> = Vec::new();
+        for dropbox_id in &viz_dropbox_ids {
+            let rows = store.query_metrics_by_names(&viz_signal_slice, Some(dropbox_id.as_str()))?;
+            viz_metrics.extend(rows);
+        }
 
         // Group by (estate, signal): keep the latest sample + the sample count.
         let mut latest: BTreeMap<(String, String), MetricRow> = BTreeMap::new();
@@ -1143,6 +1145,71 @@ mod tests {
             payload.communities.len()
         );
         assert_eq!(payload.communities.len(), 10_000, "cap is exactly 10,000");
+    }
+
+    // ── FIX 2: GraphNodePayload/GraphEdgePayload dropped-field wire contract ────
+
+    #[test]
+    fn graph_payload_wire_format_omits_dropped_fields() {
+        // Build a 50 k-node GraphPayload and verify that the dropped fields —
+        // nounType + lastActiveTs (nodes), decayedWeight + createdTs (edges) —
+        // do not appear in the serialised JSON.  Also verifies the payload stays
+        // under the 6 MB ceiling established by FIX 2 (the old format was ~7.5 MB
+        // for the same fixture).
+        use crate::api_payloads::{GraphNodePayload, GraphEdgePayload, GraphPayload};
+
+        let nodes: Vec<GraphNodePayload> = (0u64..50_000)
+            .map(|i| GraphNodePayload {
+                id: i.to_string(),
+                community_id: (i as i64) % 16,
+                centrality: 0.5,
+                anomaly: false,
+                created_ts: None,
+                tombstoned_ts: None,
+            })
+            .collect();
+        let edges: Vec<GraphEdgePayload> = (0u64..100)
+            .map(|i| GraphEdgePayload {
+                source: i.to_string(),
+                target: (i + 1).to_string(),
+                edge_type: "tunnel".to_string(),
+                weight: 0.8,
+                tombstoned_ts: None,
+            })
+            .collect();
+        let payload = GraphPayload {
+            nodes,
+            edges,
+            communities: vec![],
+            analytics: vec![],
+            structure_pending: false,
+            pending: vec![],
+            generated_ts: Some("2026-07-05T00:00:00Z".to_string()),
+            estate: "test".to_string(),
+            snapshot_ts: "2026-07-05T00:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&payload).expect("serialise must succeed");
+
+        // --- Size gate ---
+        assert!(
+            json.len() < 6_000_000,
+            "50k-node payload must be < 6 MB; got {} bytes",
+            json.len()
+        );
+
+        // --- Field-absence gate ---
+        assert!(!json.contains("\"nounType\""), "nounType must not appear in wire output");
+        assert!(!json.contains("\"lastActiveTs\""), "lastActiveTs must not appear in wire output");
+        assert!(!json.contains("\"decayedWeight\""), "decayedWeight must not appear in wire output");
+        // createdTs appears on NODES (as explicit null) but not on EDGES.
+        // Count occurrences: must equal exactly 50 k (one per node, zero per edge).
+        let created_ts_count = json.matches("\"createdTs\"").count();
+        assert_eq!(
+            created_ts_count, 50_000,
+            "createdTs must appear exactly once per node (not edges); got {}",
+            created_ts_count
+        );
     }
 
     // ── retention prefs filename — stem-derived, not fixed ───────────────────

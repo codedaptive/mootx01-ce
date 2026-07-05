@@ -70,7 +70,15 @@ private func jsonObject(port: UInt16, path: String) async throws -> [String: Any
 }
 
 /// Seed the five canonical VizGraph signals for one estate.
+///
+/// graphPayload() now derives dropboxIDs from events (FIX 1 metric-flood fix)
+/// so an event with the matching dropboxID must be present for the metrics to
+/// be found via the indexed query path.
 private func seedVizGraph(_ store: StatsStore, estate: String) async throws {
+    // Seed a matching event so graphPayload()'s event-derived dropboxID lookup
+    // finds "substrateml" and queries the viz metrics below.
+    try await store.insertEvent(kind: "capture", nounType: 0, rowID: "",
+                                estate: estate, ts: 90, dropboxID: "substrateml")
     try await store.insertMetric(name: "community.assignment", value: 3,
                                  tags: ["estate": estate, "node_count": "12", "community_count": "3"],
                                  ts: 100, dropboxID: "substrateml")
@@ -208,7 +216,11 @@ struct GraphAPITests {
     func communityCountCap() async throws {
         // A crafted metric with a value far above any sane community count.
         // The cap (10_000) prevents an unbounded allocation loop in graphPayload().
+        // An event with the same dropboxID is required so graphPayload()'s
+        // event-derived dropboxID lookup (FIX 1 metric-flood fix) finds the metric.
         let (host, port) = try await makeStartedHost { store in
+            try await store.insertEvent(kind: "capture", nounType: 0, rowID: "",
+                                        estate: "home", ts: 90, dropboxID: "substrateml")
             try await store.insertMetric(
                 name: "community.assignment", value: 999_999,
                 tags: ["estate": "home", "node_count": "12", "community_count": "999999"],

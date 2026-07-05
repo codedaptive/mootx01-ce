@@ -503,16 +503,12 @@ public struct GraphPayload: Codable, Sendable, Equatable {
 public struct GraphNodePayload: Codable, Sendable, Equatable {
     /// Row identifier (UUID string) — an identifier, never content.
     public let id: String
-    /// `NounType` ordinal (SubstrateTypes) selecting the node's visual treatment.
-    public let nounType: Int
     /// Louvain community id this node belongs to (drives cluster colour).
     public let communityId: Int
     /// Eigenvalue-centrality score in [0, 1]; scales the rendered radius.
     public let centrality: Double
     /// Whether anomaly detection flagged this node as a structural outlier.
     public let anomaly: Bool
-    /// ISO-8601 UTC timestamp of the node's last activity, or nil.
-    public let lastActiveTs: String?
     /// ISO-8601 UTC ingest timestamp — the drawer's `filedAt` (ingest clock,
     /// VIZ_V2 L0) — or nil when the daemon did not supply one. Drives the
     /// renderer's age axis (strata depth / recency brightness).
@@ -525,17 +521,21 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
     /// live entities only.
     public let tombstonedTs: String?
 
+    // nounType and lastActiveTs removed from wire format (FIX 2 — payload
+    // trim): nounType was redundant (all drawers are type 0, JS defaults to 0);
+    // lastActiveTs is not surfaced by the dashboard renderer.  Both fields are
+    // still decoded via synthesised Codable — keys present in existing snapshots
+    // on disk are silently ignored by the decoder.
+
     public init(
-        id: String, nounType: Int, communityId: Int,
-        centrality: Double, anomaly: Bool, lastActiveTs: String?,
+        id: String, communityId: Int,
+        centrality: Double, anomaly: Bool,
         createdTs: String?, tombstonedTs: String?
     ) {
         self.id = id
-        self.nounType = nounType
         self.communityId = communityId
         self.centrality = centrality
         self.anomaly = anomaly
-        self.lastActiveTs = lastActiveTs
         self.createdTs = createdTs
         self.tombstonedTs = tombstonedTs
     }
@@ -543,14 +543,13 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
     /// Custom encode so the nullable timestamps are always present on the wire
     /// as explicit JSON nulls (VIZ_V2 contract). Decoding stays synthesized,
     /// so a daemon that omits `createdTs` or `tombstonedTs` still decodes (nil).
+    /// nounType and lastActiveTs are omitted from the encode path (payload trim).
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
-        try c.encode(nounType, forKey: .nounType)
         try c.encode(communityId, forKey: .communityId)
         try c.encode(centrality, forKey: .centrality)
         try c.encode(anomaly, forKey: .anomaly)
-        try c.encode(lastActiveTs, forKey: .lastActiveTs)    // nil → null
         try c.encode(createdTs, forKey: .createdTs)          // nil → null
         try c.encode(tombstonedTs, forKey: .tombstonedTs)    // nil → null
     }
@@ -567,42 +566,39 @@ public struct GraphEdgePayload: Codable, Sendable, Equatable {
     public let edgeType: String
     /// Raw edge weight in [0, 1].
     public let weight: Double
-    /// MatrixDecay-decayed weight in [0, 1] (drives opacity + pull).
-    public let decayedWeight: Double
-    /// ISO-8601 UTC ingest timestamp (VIZ_V2 L0): the tunnel's `filedAt` for
-    /// tunnel edges; nil for kgFact edges (a derived bond has no single ingest
-    /// instant) and for daemons that do not supply one.
-    public let createdTs: String?
     /// ISO-8601 UTC tombstone timestamp (VIZ_V2 dissolution), or nil when the
     /// edge is alive now. Tombstoned tunnels ARE included in the graph payload
     /// with their real source/target so playback can render them within
-    /// [createdTs, tombstonedTs); they are excluded from adjacency upstream so
+    /// the dissolution window; they are excluded from adjacency upstream so
     /// they never shift community structure. kgFact derived edges remain
     /// live-facts-only: always nil here.
     public let tombstonedTs: String?
 
+    // decayedWeight and createdTs removed from wire format (FIX 2 — payload
+    // trim): decayedWeight is not consumed by the dashboard renderer;
+    // createdTs added per-edge costs significant JSON bytes and the dashboard
+    // does not display individual edge ages.  Keys present in existing
+    // snapshots are silently ignored by the synthesised decoder.
+
     public init(source: String, target: String, edgeType: String, weight: Double,
-                decayedWeight: Double, createdTs: String?, tombstonedTs: String?) {
+                tombstonedTs: String?) {
         self.source = source
         self.target = target
         self.edgeType = edgeType
         self.weight = weight
-        self.decayedWeight = decayedWeight
-        self.createdTs = createdTs
         self.tombstonedTs = tombstonedTs
     }
 
-    /// Custom encode so `createdTs` and `tombstonedTs` are always present on
-    /// the wire — explicit JSON nulls when nil (VIZ_V2 contract). Decoding
-    /// stays synthesized, so a daemon that omits either key still decodes (nil).
+    /// Custom encode so `tombstonedTs` is always present on the wire as an
+    /// explicit JSON null when nil (VIZ_V2 contract). Decoding stays
+    /// synthesized, so a daemon that omits the key still decodes (nil).
+    /// decayedWeight and createdTs are omitted from the encode path (payload trim).
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(source, forKey: .source)
         try c.encode(target, forKey: .target)
         try c.encode(edgeType, forKey: .edgeType)
         try c.encode(weight, forKey: .weight)
-        try c.encode(decayedWeight, forKey: .decayedWeight)
-        try c.encode(createdTs, forKey: .createdTs)        // nil → null
         try c.encode(tombstonedTs, forKey: .tombstonedTs)  // nil → null
     }
 }
