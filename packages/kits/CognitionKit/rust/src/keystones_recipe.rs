@@ -32,6 +32,7 @@ pub fn run_keystones(
     handle: &EstateHandle,
     wing: &str,
     top_k: usize,
+    ts: f64,
 ) -> Result<Vec<Keystone>, RecipeRunError> {
     let tunnels = coord
         .recall_tunnels(handle, wing)
@@ -57,7 +58,11 @@ pub fn run_keystones(
     }
     let nodes: Vec<String> = node_set.into_iter().collect();
 
-    Ok(keystones(&nodes, &edges, top_k))
+    // Thread estate and ts so the VizGraph telemetry row carries the caller's
+    // estate identifier and timestamp — not empty/0 defaults (mirrors the
+    // Swift recipe, which threads handle.estateUUID + now).
+    let estate = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
+    Ok(keystones(&nodes, &edges, top_k, &estate, ts))
 }
 
 #[cfg(test)]
@@ -111,7 +116,8 @@ mod tests {
         add_edge(&coord, &h, "t3", "hub", "s3");
         add_edge(&coord, &h, "t4", "hub", "s4");
 
-        let top = run_keystones(&coord, &h, WING, 3).expect("keystones");
+        // ts sentinel: telemetry timestamp is irrelevant to this assertion.
+        let top = run_keystones(&coord, &h, WING, 3, 0.0).expect("keystones");
         assert!(!top.is_empty());
         assert_eq!(top[0].id, "hub", "the hub is the load-bearing memory");
         assert!(top.len() <= 3, "top_k bounds the result");
@@ -122,7 +128,8 @@ mod tests {
     #[test]
     fn ck_ks2_empty_wing_has_no_keystones() {
         let (coord, h) = coord_with_parent();
-        let top = run_keystones(&coord, &h, WING, 5).expect("keystones");
+        // ts sentinel: telemetry timestamp is irrelevant to this assertion.
+        let top = run_keystones(&coord, &h, WING, 5, 0.0).expect("keystones");
         assert!(top.is_empty());
     }
 }
