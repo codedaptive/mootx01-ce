@@ -193,17 +193,21 @@ struct SupportingTypeTests {
     // Rust twin needs no test: its window was always Mutex-guarded.
     @Test func latencyWindowBoxSafeUnderConcurrentSampling() async {
         let box = QueueLatencyWindowBox(capacity: 100)
+        // Use a fixed "now" far enough past epoch-zero that shouldEmit is always
+        // true (interval check: now - 0 = 100_000 >= 30). The shouldEmit result
+        // is not the focus of this test — concurrency safety is.
+        let testNow = 100_000.0
         await withTaskGroup(of: Void.self) { group in
             for worker in 0..<8 {
                 group.addTask {
                     for i in 0..<1_000 {
-                        _ = box.sample(Double(worker * 1_000 + i))
+                        _ = box.sample(Double(worker * 1_000 + i), now: testNow, interval: 30.0)
                     }
                 }
             }
         }
         // Percentiles remain ordered and finite after 8k concurrent samples.
-        let (p50, p95) = box.sample(1.0)
+        let (p50, p95, _) = box.sample(1.0, now: testNow, interval: 30.0)
         #expect(p50.isFinite && p95.isFinite)
         #expect(p95 >= p50, "p95 must dominate p50 after concurrent sampling")
     }

@@ -46,7 +46,9 @@ private struct PendingFaultBackend: QueueBackend {
     func completed(streamID: StreamID?) async throws -> [Job] { [] }
 }
 
-@Suite("QueueKitTelemetry fail-closed depth (P0-5 site 7)")
+// Tests in this suite mutate the Intellectus singleton (sink + enabled flag).
+// .serialized prevents concurrent tests from racing on that shared global state.
+@Suite("QueueKitTelemetry fail-closed depth (P0-5 site 7)", .serialized)
 struct QueueKitTelemetryFailClosedTests {
 
     /// Install a capturing sink, run reportQueueStats, return the emitted

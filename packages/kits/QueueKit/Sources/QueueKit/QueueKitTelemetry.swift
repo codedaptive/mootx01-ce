@@ -64,33 +64,75 @@ public struct QueueLatencyWindow: Sendable {
 /// `reportQueueStats` under full-suite test load). Rust twin already
 /// guards: `facade.rs` `latency_window: Mutex<QueueLatencyWindow>`.
 ///
-/// `sample(_:)` appends and reads both percentiles under ONE lock
-/// acquisition so a pair of concurrent drains cannot interleave between
-/// the append and its percentile reads.
+/// Combined inner state — latency window AND emission throttle — guarded
+/// by a single Mutex so sample-and-check-throttle is one atomic operation.
+/// This prevents a concurrent drain from racing between "shouldEmit=true"
+/// and the subsequent emission gate update.
 public final class QueueLatencyWindowBox: Sendable {
-    private let inner: Mutex<QueueLatencyWindow>
-
-    public init(capacity: Int = 100) {
-        inner = Mutex(QueueLatencyWindow(capacity: capacity))
+    /// Inner state: mutable under the Mutex lock.
+    private struct Inner {
+        var window: QueueLatencyWindow
+        /// Epoch-seconds of the last Intellectus.report emission for this
+        /// stream. Starts at 0.0 (guaranteed to fire on the first call when
+        /// monitoring is enabled, since now >> 0 + interval for any real clock).
+        var lastEmissionEpoch: Double = 0.0
     }
 
-    /// Append a latency sample and return the updated (p50, p95)
-    /// percentiles atomically.
-    public func sample(_ ms: Double) -> (p50: Double, p95: Double) {
-        inner.withLock { w in
-            w.append(ms)
-            return (w.percentile(50), w.percentile(95))
+    private let inner: Mutex<Inner>
+
+    public init(capacity: Int = 100) {
+        inner = Mutex(Inner(window: QueueLatencyWindow(capacity: capacity)))
+    }
+
+    /// Append a latency sample, then check the emission throttle.
+    ///
+    /// The sample is ALWAYS appended so the rolling window accumulates every
+    /// drain tick — the aggregate p50/p95 reflects all ticks, not just the
+    /// ones that fire an emission.
+    ///
+    /// - Parameters:
+    ///   - ms: Drain latency in milliseconds.
+    ///   - now: Current epoch-seconds (caller-supplied; never calls Date()).
+    ///   - interval: Minimum seconds between emissions (pass 30.0 from the
+    ///               `EMISSION_INTERVAL_S` constant at the call site).
+    /// - Returns: `(p50, p95, shouldEmit)` — percentiles from the current
+    ///            window plus a flag that is `true` at most once per `interval`.
+    ///            When `shouldEmit` is `true`, `lastEmissionEpoch` is updated
+    ///            to `now` inside the lock.
+    public func sample(_ ms: Double, now: Double, interval: Double) -> (p50: Double, p95: Double, shouldEmit: Bool) {
+        inner.withLock { state in
+            state.window.append(ms)
+            let p50 = state.window.percentile(50)
+            let p95 = state.window.percentile(95)
+            let shouldEmit = now - state.lastEmissionEpoch >= interval
+            if shouldEmit { state.lastEmissionEpoch = now }
+            return (p50, p95, shouldEmit)
         }
     }
 }
 
 // MARK: - Report entry point
 
+// Minimum seconds between queue.* metric emissions per estate stream.
+//
+// A busy queue drains 100+ times per second; without rate-limiting every
+// drain tick emits five metrics (depth, drain_count, idle_nonempty, p50, p95),
+// flooding the metric_samples table at ~116 rows/sec — observed to reach
+// 6 M rows in 3 hours in production. 30 s is long enough to keep the
+// dashboard responsive without producing millions of rows per day.
+//
+// The latency window ACCUMULATES on every tick regardless (see
+// QueueLatencyWindowBox.sample); emission carries the aggregate over the
+// whole window, not just the last tick.
+private let EMISSION_INTERVAL_S: Double = 30.0
+
 /// Emit queue-state metrics after a drain call completes.
 ///
 /// Off-path cost is a single `Atomic<Bool>` load + branch when monitoring
-/// is disabled — effectively zero overhead. When enabled, makes one
-/// `pendingCount()` call and emits at most six metrics.
+/// is disabled — effectively zero overhead. When enabled, samples the
+/// latency window every tick but rate-limits all Intellectus.report calls
+/// to at most once per `EMISSION_INTERVAL_S` (30 s) per estate stream,
+/// preventing the metric-flood observed in production (6 M rows / 3 h).
 ///
 /// - Parameters:
 ///   - backend:    The QueueBackend whose pending count to read.
@@ -113,18 +155,24 @@ public func reportQueueStats(
 
     let drainLatencyMs = (now - drainStart) * 1000.0
 
-    // Tags carried by all queue.* metrics for estate-level filtering.
+    // Sample the window on every drain tick (window accumulates between
+    // emissions). Check the throttle gate atomically inside the box.
+    let (p50, p95, shouldEmit) = window.sample(drainLatencyMs, now: now, interval: EMISSION_INTERVAL_S)
+
+    // Rate-limit: skip emission until the interval elapses.
+    guard shouldEmit else { return }
+
+    // All Intellectus.report calls below fire at most once per EMISSION_INTERVAL_S.
     let tags: [String: String] = ["estate": estateTag, "kit": "QueueKit"]
 
-    // Snapshot depth at this drain cycle. A pendingCount read failure must NOT
-    // be reported as `queue.depth = 0`: a fabricated zero is indistinguishable
-    // from a genuinely empty queue and would tell the observer "all drained"
-    // when the truth is "could not read the depth". On failure we emit NO depth
-    // metric (the consumer sees a gap, not a false floor) and a dedicated
-    // `queue.depth_unavailable` error counter so the read fault is itself
-    // observable. The depth-derived metrics below (idle_nonempty,
-    // head_of_line_age) are likewise skipped when depth is unknown — they
-    // cannot be computed honestly without it.
+    // Snapshot depth at this emission point. A pendingCount read failure must
+    // NOT be reported as `queue.depth = 0`: a fabricated zero is
+    // indistinguishable from a genuinely empty queue and would tell the
+    // observer "all drained" when the truth is "could not read the depth".
+    // On failure we emit NO depth metric (the consumer sees a gap, not a false
+    // floor) and a dedicated `queue.depth_unavailable` error counter so the
+    // read fault is itself observable. Depth-derived metrics (idle_nonempty,
+    // head_of_line_age) are likewise skipped when depth is unknown.
     let depthOpt = try? await backend.pendingCount()
     if let depth = depthOpt {
         Intellectus.report(.metric(
@@ -165,9 +213,9 @@ public func reportQueueStats(
         ))
     }
 
-    // Latency percentiles from the rolling window — append + both reads
-    // happen atomically inside the box (concurrent drainers share it).
-    let (p50, p95) = window.sample(drainLatencyMs)
+    // Latency percentiles from the rolling window — already computed above.
+    // Both values reflect ALL drain ticks since the last emission, not just
+    // the current tick (the window accumulates every call to sample()).
     Intellectus.report(.metric(
         name: "queue.latency_p50_ms",
         value: p50,
