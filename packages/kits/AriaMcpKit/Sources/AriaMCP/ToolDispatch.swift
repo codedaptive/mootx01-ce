@@ -1412,6 +1412,22 @@ extension ToolDispatcher {
             degradedPart = "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
         }
         lines.append("recall_provenance: \((provenanceParts + [degradedPart]).joined(separator: " "))")
+        // ADR-025 §4: redaction advisory stat (Wave 7.4).
+        // When no grant is active, check cheaply whether the estate holds any
+        // restricted or secret rows. If so, append an advisory so the AI client
+        // knows results may be incomplete and how to request access.
+        // Gated on `!sensitivityCeilingLifted` — when a grant IS live, the rows
+        // are already included and no advisory is appropriate.
+        // The stat uses a private `.internal` limit-1 scan (no trace rows, no
+        // BM25/vector cost) — a pure bitmap filter probe. See
+        // `estateHasSensitiveRows(handle:)`.
+        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+            lines.append(
+                "sensitivity_advisory: results may be hidden by sensitivity tier — " +
+                "run `mootx01 unlock private` to include restricted memories, " +
+                "`mootx01 unlock secret` for secret memories."
+            )
+        }
         return Self.textResult(lines.joined(separator: "\n"))
     }
 
@@ -1533,7 +1549,61 @@ extension ToolDispatcher {
         // tool exists to return.
         lines.append("content:")
         lines.append(drawer.content)
+        // ADR-025 §4: redaction advisory stat (Wave 7.4) — same logic as
+        // runMemorySearch. When no grant is active, surface an advisory if the
+        // estate contains any restricted/secret rows not visible through the
+        // default gate. Consistent with search so the AI client receives the
+        // same hint from both tools.
+        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+            lines.append(
+                "sensitivity_advisory: some memories may be hidden by sensitivity tier — " +
+                "run `mootx01 unlock private` to include restricted memories, " +
+                "`mootx01 unlock secret` for secret memories."
+            )
+        }
         return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// Returns `true` if the estate has at least one row tagged restricted or secret.
+    ///
+    /// Used by `runMemorySearch` and `runMemoryGet` to decide whether to append a
+    /// sensitivity advisory. The advisory tells the AI client that results may be
+    /// incomplete and how to unlock the hidden tier (ADR-025 §4, Wave 7.4).
+    ///
+    /// Implementation: two limit-1 `GLKRecallRequest` scans with explicit
+    /// `Filter.sensitivity(tier)` — these filters suppress the default
+    /// `sensitivityAtMost(.elevated)` gate (see `BitmapEvaluator.insertDefaults`),
+    /// so restricted/secret rows become visible for counting. Mode `.locusOnly` +
+    /// scoring `.raw` skips the BM25/vector pipeline; the scan is a pure bitmap
+    /// filter probe — cheap even for large estates.
+    ///
+    /// `origin: .internal` — must NOT write recall-trace rows (B-10a: only the
+    /// ARIA_MCP boundary sets `.external`). This is an internal diagnostic query.
+    private func estateHasSensitiveRows(handle: EstateHandle) async -> Bool {
+        for tier: AdjectiveSensitivity in [.restricted, .secret] {
+            // Limit 1: stop at first match — no need to count.
+            let frame = RecallFrame(
+                filterChain: [.sensitivity(tier)],
+                hydrationLevel: .structured, // No content body needed — existence check only.
+                limit: 1,
+                ordering: .byCaptureTimeDesc
+            )
+            let request = GLKRecallRequest(
+                frame: frame,
+                mode: .locusOnly,     // Skip BM25/vector — pure bitmap probe.
+                scoring: .raw,        // No matrix scoring needed.
+                limit: 1,
+                fallback: .allowDegraded,
+                queryText: nil,       // No text query — filter only.
+                origin: .internal     // Internal diagnostic — must not write trace rows (B-10a).
+            )
+            // A nil result (thrown error) is treated as no sensitive rows — fail-safe:
+            // don't surface the advisory when we can't confirm sensitive rows exist.
+            if let result = try? await kit.recall(handle, request), !result.hits.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     /// Note that a drawer id was "used" (acted upon) by a dereference verb.
