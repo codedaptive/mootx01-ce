@@ -79,6 +79,8 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_vault_import") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_export") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_reconcile") == .ask)
+        // ADR-025 wave 8.2: monitoring_status mutates daemon behaviour when `enabled` is supplied.
+        #expect(PermissionsWriter.classify("moot_monitoring_status") == .ask, "monitoring_status is mutating — ask tier")
 
         // Destructive.
         #expect(PermissionsWriter.classify("moot_erase_memory") == .deny)
@@ -110,7 +112,7 @@ struct PermissionsWriterTests {
     /// gains or removes a tool, update BOTH this pinned list and whichever
     /// of `readTools` / `additiveWriteTools` / `mutationTools` /
     /// `destructiveTools` the new tool belongs in.
-    @Test("classify's tier tables are exhaustive over the real 63-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 64-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
@@ -125,17 +127,18 @@ struct PermissionsWriterTests {
             "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm",
             "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
-            "moot_memory_search", "moot_move_memory", "moot_palace_import", "moot_read_journal",
-            "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped", "moot_recollect",
-            "moot_reindex", "moot_retire_fact", "moot_run_migration", "moot_synthesize",
-            "moot_update_memory", "moot_vault_export", "moot_vault_import", "moot_vault_job",
-            "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory", "moot_write_journal",
+            "moot_memory_search", "moot_monitoring_status", "moot_move_memory", "moot_palace_import",
+            "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
+            "moot_recollect", "moot_reindex", "moot_retire_fact", "moot_run_migration",
+            "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
+            "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
+            "moot_write_journal",
         ]
-        // Count guard (see doc comment): 63 as of moot_memory_get (Wave 4,
-        // fetch-drawer-by-ID). A mismatch here means THIS PINNED LIST is
-        // stale relative to tool_list.rs / ToolProjection.swift — fix the
-        // pin first, then re-run before trusting the set-difference below.
-        #expect(realTools.count == 63, "pinned tool inventory drifted from the real surface count")
+        // Count guard (see doc comment): 64 as of moot_monitoring_status (ADR-025 wave 8.2).
+        // A mismatch here means THIS PINNED LIST is stale relative to
+        // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
+        // before trusting the set-difference below.
+        #expect(realTools.count == 64, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
