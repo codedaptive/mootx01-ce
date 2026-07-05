@@ -222,6 +222,21 @@ def mode_session(data):
     print(ORIENT_MESSAGE)
 
 
+def is_daemon_reachable(port=4242, timeout=0.5):
+    """Return True if the mootx01 HTTP daemon appears to be listening on
+    the loopback port. Used by mode_stop to skip the block decision when
+    the daemon is down — the user cannot complete a writeback against an
+    unreachable server, and blocking just surfaces an MCP-not-connected
+    error. Every failure path returns False silently.
+    """
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def transcript_flags(transcript_path):
     """Return (used_moot, wrote_back) by scanning the raw transcript."""
     used_moot = False
@@ -248,6 +263,11 @@ def transcript_flags(transcript_path):
 def mode_stop(data):
     # Never fight our own continuation; never nag twice in one session.
     if data.get("stop_hook_active"):
+        return
+    # Do not block when the daemon is unreachable — the user cannot complete
+    # a writeback against a down server, and the block decision would just
+    # surface an "MCP server not connected" error into the session.
+    if not is_daemon_reachable():
         return
     session_id = data.get("session_id", "default")
     state = load_state(session_id)
