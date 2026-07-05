@@ -15,14 +15,12 @@
 // an MCP client whose config schema can only express a bare `command`
 // string (no `args` array) reach ProxyCommand without an args array —
 // see ArgvDispatch.swift (MootInstallerCore) for the full rationale.
-// SCOPE NOTE: this file only adds the DISPATCH behavior. Creating and
-// placing an actual `mootx01-proxy` symlink (installer wiring, PATH
-// placement, uninstall cleanup) is a separate, not-yet-scoped follow-up —
-// Installer.placeBinary's PATH wrapper mechanism has its own constraints
-// (a raw symlink at the PATH location breaks `Bundle.main` resolution;
-// see Installer.swift's `writePathWrapper` doc comment) that a
-// `mootx01-proxy` placement would need to be designed against
-// specifically, not assumed to reuse verbatim.
+// Proxy symlink placement (wave 7.6): `Installer.placeBinary()` writes a
+// relative symlink `mootx01-proxy → mootx01` in the same directory as the
+// installed binary. MCP client configs that specify `"command": "mootx01-proxy"`
+// invoke the proxy subcommand via argv0 dispatch above. Uninstall removes
+// the symlink. No separate PATH entry is needed — same-dir placement means
+// both names are equally reachable via the single PATH-visible directory.
 //
 // On macOS: full subcommand surface including `serve`/`proxy`.
 // On Linux: install, uninstall, db, status, query (serve/proxy require macOS).
