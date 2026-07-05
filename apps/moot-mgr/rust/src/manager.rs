@@ -725,9 +725,59 @@ impl MootManager {
             }
         }
 
+        // FIX 2b — build compact parallel-array wire payload from stored per-object nodes/edges.
+        //
+        // Parallel node arrays eliminate per-node JSON key overhead.
+        // Compact edges `[si, ti, w, et]` eliminate UUID duplication in edge endpoints
+        // (70k edges × 2 × 36-char UUIDs ≈ 5 MB saved).  Mirrors Swift GraphPayload init(nodes:edges:).
+        use crate::api_payloads::CompactEdge;
+        use std::collections::HashMap;
+
+        let node_count = live_nodes.len();
+        let mut ids        = Vec::with_capacity(node_count);
+        let mut community_id = Vec::with_capacity(node_count);
+        let mut centrality  = Vec::with_capacity(node_count);
+        let mut anomaly     = Vec::with_capacity(node_count);
+        let mut created_ts  = Vec::with_capacity(node_count);
+        // Sparse tombstone map: string(index) → ISO-8601 ts.
+        let mut tombstoned: HashMap<String, String> = HashMap::new();
+        // Build the id→index map for edge endpoint resolution.
+        let mut id_to_idx: HashMap<String, usize> = HashMap::with_capacity(node_count);
+
+        for (idx, n) in live_nodes.iter().enumerate() {
+            id_to_idx.insert(n.id.clone(), idx);
+            ids.push(n.id.clone());
+            community_id.push(n.community_id);
+            centrality.push(n.centrality);
+            anomaly.push(n.anomaly);
+            created_ts.push(n.created_ts.clone());
+            if let Some(ts) = &n.tombstoned_ts {
+                tombstoned.insert(idx.to_string(), ts.clone());
+            }
+        }
+
+        // Map stored per-object edges → compact index-pair edges.
+        // Edges whose endpoints are not in the node set are dropped (safety guard
+        // against snapshot inconsistency between node and edge lists).
+        let compact_edges: Vec<CompactEdge> = live_edges.iter().filter_map(|e| {
+            let si = id_to_idx.get(&e.source)?;
+            let ti = id_to_idx.get(&e.target)?;
+            Some(CompactEdge {
+                si: *si,
+                ti: *ti,
+                w: e.weight,
+                et: CompactEdge::edge_type_ordinal(&e.edge_type),
+            })
+        }).collect();
+
         Ok(GraphPayload {
-            nodes: live_nodes,
-            edges: live_edges,
+            ids,
+            community_id,
+            centrality,
+            anomaly,
+            created_ts,
+            tombstoned,
+            edges: compact_edges,
             communities,
             analytics,
             structure_pending,
@@ -1147,38 +1197,44 @@ mod tests {
         assert_eq!(payload.communities.len(), 10_000, "cap is exactly 10,000");
     }
 
-    // ── FIX 2: GraphNodePayload/GraphEdgePayload dropped-field wire contract ────
+    // ── FIX 2b: compact parallel-array wire format — size and shape contract ────
 
     #[test]
     fn graph_payload_wire_format_omits_dropped_fields() {
-        // Build a 50 k-node GraphPayload and verify that the dropped fields —
-        // nounType + lastActiveTs (nodes), decayedWeight + createdTs (edges) —
-        // do not appear in the serialised JSON.  Also verifies the payload stays
-        // under the 6 MB ceiling established by FIX 2 (the old format was ~7.5 MB
-        // for the same fixture).
-        use crate::api_payloads::{GraphNodePayload, GraphEdgePayload, GraphPayload};
+        // Build a 50 k-node, 70 k-edge compact GraphPayload (FIX 2b format) and verify:
+        //  - payload is under 5 MB (target for 51k nodes / 70k edges)
+        //  - "ids" key present (parallel-array format)
+        //  - "nodes" key absent (old per-object format gone)
+        //  - "source" / "target" keys absent (edges are index-pair arrays now)
+        //  - "createdTs" appears once (as the parallel-array key, not per-node)
+        //  - dropped fields (nounType, lastActiveTs, decayedWeight) absent
+        use crate::api_payloads::{CompactEdge, GraphPayload};
+        use std::collections::HashMap;
 
-        let nodes: Vec<GraphNodePayload> = (0u64..50_000)
-            .map(|i| GraphNodePayload {
-                id: i.to_string(),
-                community_id: (i as i64) % 16,
-                centrality: 0.5,
-                anomaly: false,
-                created_ts: None,
-                tombstoned_ts: None,
+        let n = 50_000usize;
+        let ids: Vec<String>       = (0..n).map(|i| format!("{:08x}-0000-0000-0000-{:012x}", i, i)).collect();
+        let community_id: Vec<i64> = (0..n).map(|i| (i as i64) % 16).collect();
+        let centrality: Vec<f64>   = vec![0.5; n];
+        let anomaly: Vec<bool>     = vec![false; n];
+        let created_ts: Vec<Option<String>> = vec![None; n];
+        let tombstoned: HashMap<String, String> = HashMap::new();
+
+        // 70k edges using sequential index pairs so endpoint indices are valid.
+        let edges: Vec<CompactEdge> = (0u64..70_000)
+            .map(|i| {
+                let si = (i as usize) % n;
+                let ti = (i as usize + 1) % n;
+                CompactEdge { si, ti, w: 0.8, et: 0 }
             })
             .collect();
-        let edges: Vec<GraphEdgePayload> = (0u64..100)
-            .map(|i| GraphEdgePayload {
-                source: i.to_string(),
-                target: (i + 1).to_string(),
-                edge_type: "tunnel".to_string(),
-                weight: 0.8,
-                tombstoned_ts: None,
-            })
-            .collect();
+
         let payload = GraphPayload {
-            nodes,
+            ids,
+            community_id,
+            centrality,
+            anomaly,
+            created_ts,
+            tombstoned,
             edges,
             communities: vec![],
             analytics: vec![],
@@ -1191,24 +1247,33 @@ mod tests {
 
         let json = serde_json::to_string(&payload).expect("serialise must succeed");
 
-        // --- Size gate ---
+        // --- Size gate: compact format and within 5 MB ceiling ---
         assert!(
-            json.len() < 6_000_000,
-            "50k-node payload must be < 6 MB; got {} bytes",
+            json.len() < 5_000_000,
+            "50k-node/70k-edge payload must be < 5 MB (compact format); got {} bytes",
             json.len()
         );
 
-        // --- Field-absence gate ---
-        assert!(!json.contains("\"nounType\""), "nounType must not appear in wire output");
-        assert!(!json.contains("\"lastActiveTs\""), "lastActiveTs must not appear in wire output");
+        // --- Format gate: parallel-array keys present ---
+        assert!(json.contains("\"ids\""),        "\"ids\" key must appear in compact format");
+        assert!(json.contains("\"communityId\""),"\"communityId\" key must appear in compact format");
+
+        // --- Format gate: old per-object keys absent ---
+        assert!(!json.contains("\"nodes\""),  "\"nodes\" key must NOT appear (compact format)");
+        assert!(!json.contains("\"source\""), "\"source\" edge key must NOT appear (compact format)");
+        assert!(!json.contains("\"target\""), "\"target\" edge key must NOT appear (compact format)");
+
+        // --- Dropped-field gate ---
+        assert!(!json.contains("\"nounType\""),      "nounType must not appear in wire output");
+        assert!(!json.contains("\"lastActiveTs\""),  "lastActiveTs must not appear in wire output");
         assert!(!json.contains("\"decayedWeight\""), "decayedWeight must not appear in wire output");
-        // createdTs appears on NODES (as explicit null) but not on EDGES.
-        // Count occurrences: must equal exactly 50 k (one per node, zero per edge).
-        let created_ts_count = json.matches("\"createdTs\"").count();
+
+        // createdTs appears exactly once — as the parallel-array key, not per-node.
+        let created_ts_key_count = json.matches("\"createdTs\"").count();
         assert_eq!(
-            created_ts_count, 50_000,
-            "createdTs must appear exactly once per node (not edges); got {}",
-            created_ts_count
+            created_ts_key_count, 1,
+            "\"createdTs\" must appear exactly once (as the array key); got {}",
+            created_ts_key_count
         );
     }
 

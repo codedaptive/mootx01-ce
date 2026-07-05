@@ -12,7 +12,7 @@
 // Timestamps are emitted as ISO-8601 UTC TEXT (matching the store's on-disk
 // format) so the wire format is stable and human-readable, never epoch floats.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 
 use crate::admin_payloads::EstateAdminPayload;
 
@@ -186,19 +186,21 @@ pub struct GraphCommunityPayload {
 }
 
 /// One graph node (GET /api/graph, from the stored topology snapshot). Mirrors
-/// Swift `GraphNodePayload`. Structural — passed through from the governor's
-/// snapshot. Absent-key-tolerant on decode; explicit null on re-encode.
+/// Stored node shape decoded from governor-written topology_snapshots.
+/// Mirrors Swift `GraphNodePayload`. Absent-key-tolerant; decode-only.
 ///
 /// nounType and lastActiveTs removed from wire format (FIX 2 — payload trim):
 /// nounType was redundant (all drawers are type 0); lastActiveTs is not
-/// surfaced by the dashboard renderer.  The `#[serde(default)]` annotation on
-/// absent fields means existing snapshots with these keys decode without error.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// surfaced by the dashboard renderer.  The `#[serde(default)]` on absent
+/// fields means existing snapshots with these keys still decode without error.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GraphNodePayload {
     pub id: String,
-    #[serde(rename = "communityId")]
+    #[serde(rename = "communityId", default)]
     pub community_id: i64,
+    #[serde(default)]
     pub centrality: f64,
+    #[serde(default)]
     pub anomaly: bool,
     #[serde(rename = "createdTs", default)]
     pub created_ts: Option<String>,
@@ -206,30 +208,107 @@ pub struct GraphNodePayload {
     pub tombstoned_ts: Option<String>,
 }
 
-/// One graph edge (GET /api/graph). Mirrors Swift `GraphEdgePayload`.
+/// Stored edge shape decoded from governor-written topology_snapshots.
+/// Mirrors Swift `GraphEdgePayload`. Absent-key-tolerant; decode-only.
 ///
-/// decayedWeight and createdTs removed from wire format (FIX 2 — payload trim):
-/// decayedWeight is not consumed by the dashboard renderer; createdTs per-edge
-/// costs significant JSON bytes and is not displayed per edge in the dashboard.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// decayedWeight and createdTs removed from wire format (FIX 2 — payload trim).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GraphEdgePayload {
     pub source: String,
     pub target: String,
-    #[serde(rename = "edgeType")]
+    #[serde(rename = "edgeType", default)]
     pub edge_type: String,
+    #[serde(default = "default_weight")]
     pub weight: f64,
     #[serde(rename = "tombstonedTs", default)]
     pub tombstoned_ts: Option<String>,
 }
 
+fn default_weight() -> f64 { 0.5 }
+
+/// Compact wire-format edge for the `/api/graph` response (FIX 2b).
+///
+/// Serializes as a JSON array `[si, ti, w, et]` to eliminate per-edge key
+/// overhead. Mirrors Swift `CompactEdge`.
+///
+/// Edge-type ordinal mapping (matches app.js `edgeTypeNames` constant):
+/// - 0 = "tunnel"      (default)
+/// - 1 = "kgFact"
+/// - 2 = "association"
+/// - 3 = "nmf_bond"
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactEdge {
+    /// Index of the source node in the parallel `ids` array.
+    pub si: usize,
+    /// Index of the target node in the parallel `ids` array.
+    pub ti: usize,
+    /// Raw edge weight in [0, 1].
+    pub w: f64,
+    /// Edge-type ordinal: 0=tunnel, 1=kgFact, 2=association, 3=nmf_bond.
+    pub et: u8,
+}
+
+impl CompactEdge {
+    /// Map an ARIA edge-type string to its compact ordinal.
+    pub fn edge_type_ordinal(edge_type: &str) -> u8 {
+        match edge_type {
+            "kgFact"      => 1,
+            "association" => 2,
+            "nmf_bond"    => 3,
+            _             => 0,  // "tunnel" and any unrecognised type
+        }
+    }
+}
+
+impl Serialize for CompactEdge {
+    /// Serialize as a flat JSON array `[si, ti, w, et]` — no keys.
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(4))?;
+        seq.serialize_element(&self.si)?;
+        seq.serialize_element(&self.ti)?;
+        seq.serialize_element(&self.w)?;
+        seq.serialize_element(&self.et)?;
+        seq.end()
+    }
+}
+
 /// The Topology node-link snapshot (GET /api/graph). Mirrors Swift `GraphPayload`.
 ///
-/// CONTENT-SAFETY INVARIANT: every field is metadata only — identifiers, integer
+/// ## Wire format (FIX 2b compact layout)
+///
+/// Nodes are encoded as parallel arrays to eliminate per-node key overhead:
+///
+///   `ids`          — `[String]` UUID per node
+///   `communityId`  — `[i64]` Louvain community id per node
+///   `centrality`   — `[f64]` eigenvalue-centrality in [0, 1] per node
+///   `anomaly`      — `[bool]` anomaly flag per node
+///   `createdTs`    — `[String?]` ISO-8601 ingest timestamp or null per node
+///   `tombstoned`   — `{indexStr: ts}` SPARSE map (tombstoned nodes only)
+///
+/// Edges are compact arrays-of-arrays:
+///   `edges` — `[[si, ti, w, et], ...]`
+///
+/// Old per-object `"nodes"` key is absent from the wire. See `StoredGraphPayload`
+/// for the decode-only shape used to read governor-written snapshots.
+///
+/// CONTENT-SAFETY INVARIANT: all fields are metadata only — identifiers, integer
 /// enums, float scores, ISO-8601 timestamps. No drawer text / KGFact predicates.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GraphPayload {
-    pub nodes: Vec<GraphNodePayload>,
-    pub edges: Vec<GraphEdgePayload>,
+    /// Parallel node arrays.
+    pub ids: Vec<String>,
+    #[serde(rename = "communityId")]
+    pub community_id: Vec<i64>,
+    pub centrality: Vec<f64>,
+    pub anomaly: Vec<bool>,
+    /// createdTs parallel array — null entries serialize as JSON null.
+    #[serde(rename = "createdTs",
+            serialize_with = "serialize_option_vec")]
+    pub created_ts: Vec<Option<String>>,
+    /// Sparse tombstone map: string(nodeIndex) → ISO-8601 ts.
+    pub tombstoned: std::collections::HashMap<String, String>,
+    /// Compact edges: each element serializes as [si, ti, w, et].
+    pub edges: Vec<CompactEdge>,
     pub communities: Vec<GraphCommunityPayload>,
     pub analytics: Vec<GraphAnalyticPayload>,
     #[serde(rename = "structurePending")]
@@ -240,6 +319,16 @@ pub struct GraphPayload {
     pub estate: String,
     #[serde(rename = "snapshotTs")]
     pub snapshot_ts: String,
+}
+
+/// Serialize `Vec<Option<String>>` so each `None` becomes a JSON null.
+fn serialize_option_vec<S>(v: &[Option<String>], s: S) -> Result<S::Ok, S::Error>
+where S: Serializer {
+    let mut seq = s.serialize_seq(Some(v.len()))?;
+    for item in v {
+        seq.serialize_element(item)?;
+    }
+    seq.end()
 }
 
 /// The decodable envelope for a stored topology snapshot (what the governor

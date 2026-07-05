@@ -279,7 +279,8 @@ fn graph_payload_is_pending_without_snapshot() {
     let mut m = started_manager();
     let p = m.graph_payload(NOW, None).unwrap();
     assert!(p.structure_pending);
-    assert!(p.nodes.is_empty());
+    // Compact format: parallel ids array is empty when no snapshot is available.
+    assert!(p.ids.is_empty());
     assert_eq!(p.estate, "all");
     assert!(!p.pending.is_empty());
     m.stop();
@@ -296,8 +297,9 @@ fn graph_payload_serves_stored_snapshot() {
     }
     let p = m.graph_payload(NOW, Some("estate-a")).unwrap();
     assert!(!p.structure_pending);
-    assert_eq!(p.nodes.len(), 1);
-    assert_eq!(p.nodes[0].id, "n1");
+    // Compact format: verify node appeared in the parallel ids array.
+    assert_eq!(p.ids.len(), 1);
+    assert_eq!(p.ids[0], "n1");
     assert_eq!(p.estate, "estate-a");
     m.stop();
 }

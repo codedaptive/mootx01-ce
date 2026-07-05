@@ -2591,16 +2591,53 @@
     if (topoPlayEvents.length > 1) topoPlayToggle();
 
     // Build node + edge sets: real VizGraph structure when available, synthetic otherwise.
-    const hasRealStructure = !g.structurePending && (g.nodes || []).length > 0;
+    //
+    // FIX 2b compact format: the server emits parallel arrays (g.ids, g.communityId, ...)
+    // and compact edges ([[si, ti, w, et], ...]).  The legacy per-object format
+    // (g.nodes / g.edges) is no longer emitted but is accepted for any cached/old
+    // responses still in flight.  Detect by Array.isArray(g.ids).
+    //
+    // Edge-type ordinal mapping (mirrors CompactEdge.edgeTypeOrdinal in Swift/Rust):
+    var edgeTypeNames = ["tunnel", "kgFact", "association", "nmf_bond"];
+    var rawNodes, rawEdges;
+    if (Array.isArray(g.ids)) {
+      // Compact format — unpack parallel arrays into per-object form for the renderer.
+      var tombstoned = g.tombstoned || {};
+      rawNodes = g.ids.map(function (id, i) {
+        return {
+          id: id,
+          communityId: g.communityId[i],
+          centrality:  g.centrality[i],
+          anomaly:     g.anomaly[i],
+          createdTs:   g.createdTs[i],
+          tombstonedTs: tombstoned[String(i)] || null,
+        };
+      });
+      // Compact edges [[si, ti, w, et]] → per-object form the renderer expects.
+      rawEdges = (g.edges || []).map(function (e) {
+        return {
+          source: g.ids[e[0]], target: g.ids[e[1]],
+          weight: e[2],
+          edgeType: edgeTypeNames[e[3]] || "tunnel",
+          tombstonedTs: null,  // tombstoned edges are absent from the snapshot
+        };
+      });
+    } else {
+      // Legacy per-object format (no longer emitted; accepted for graceful fallback).
+      rawNodes = g.nodes || [];
+      rawEdges = g.edges || [];
+    }
+    const nodeCount = rawNodes.length;
+    const hasRealStructure = !g.structurePending && nodeCount > 0;
     if (hasRealStructure) {
       // Retain the full dataset + community→content-key map so the content
       // picker can re-layout a SUBSET without refetching.
-      topoRealData = { rawNodes: g.nodes, rawEdges: g.edges || [],
+      topoRealData = { rawNodes: rawNodes, rawEdges: rawEdges,
                        communities: g.communities || [], W: W, H: H,
                        container: container };
       topoCommKeyById = Object.create(null);
       const sizeById = Object.create(null);
-      g.nodes.forEach(function (n) {
+      rawNodes.forEach(function (n) {
         if (n.communityId >= 0) sizeById[n.communityId] = (sizeById[n.communityId] || 0) + 1;
       });
       (g.communities || []).forEach(function (c) {

@@ -405,6 +405,55 @@ public struct ConfigPayload: Codable, Sendable, Equatable {
 
 // MARK: - GraphPayload (GET /api/graph)
 
+/// Compact wire-format edge for the `/api/graph` response (FIX 2b).
+///
+/// Each edge encodes as a JSON array `[sourceIndex, targetIndex, weight, edgeTypeOrdinal]`
+/// to eliminate per-edge key overhead. UUID strings are replaced with integer indices into
+/// the parallel `ids` array, and the edge-type string is replaced with a small integer.
+///
+/// Edge-type ordinal mapping (matches app.js `edgeTypeNames` constant):
+/// - 0 = "tunnel"      (default, most common)
+/// - 1 = "kgFact"
+/// - 2 = "association"
+/// - 3 = "nmf_bond"
+///
+/// Encoding 70k edges as `[[si, ti, w, et]]` vs `{source, target, edgeType, weight, tombstonedTs}`
+/// reduces the edge section from ~8 MB to ~1 MB for a real-estate snapshot (70k edges ×
+/// 36-char UUIDs × 2 = ~5 MB saved from source/target alone).
+public struct CompactEdge: Encodable, Sendable, Equatable {
+    /// Index of the source node in the parallel `ids` array.
+    public let si: Int
+    /// Index of the target node in the parallel `ids` array.
+    public let ti: Int
+    /// Raw edge weight in [0, 1].
+    public let w: Double
+    /// Edge-type ordinal: 0=tunnel, 1=kgFact, 2=association, 3=nmf_bond.
+    public let et: Int
+
+    public init(si: Int, ti: Int, w: Double, et: Int) {
+        self.si = si; self.ti = ti; self.w = w; self.et = et
+    }
+
+    /// Map an ARIA edge-type string to its compact ordinal.
+    public static func edgeTypeOrdinal(_ type: String) -> Int {
+        switch type {
+        case "kgFact":      return 1
+        case "association": return 2
+        case "nmf_bond":    return 3
+        default:            return 0  // "tunnel" and any unrecognised type
+        }
+    }
+
+    /// Encodes as a flat JSON array `[si, ti, w, et]` — no keys, no brackets overhead.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.unkeyedContainer()
+        try c.encode(si)
+        try c.encode(ti)
+        try c.encode(w)
+        try c.encode(et)
+    }
+}
+
 /// The Topology node-link snapshot (PoC spec §4.1, GUI SPEC Topology section).
 ///
 /// ## Data sources
@@ -424,14 +473,70 @@ public struct ConfigPayload: Codable, Sendable, Equatable {
 /// CONTENT-SAFETY INVARIANT (concepts §1.6): every field here is metadata only
 /// — identifiers, integer enums, float scores, ISO-8601 timestamps. No drawer
 /// text, no KGFact predicates, no rung content (PoC spec §7).
-public struct GraphPayload: Codable, Sendable, Equatable {
-    /// Graph nodes — populated from the topology snapshot when available, empty
-    /// when structurePending is true. Contains only UUIDs, NounType ordinals,
-    /// and numeric scores; never drawer or content text (content-safety invariant).
-    public let nodes: [GraphNodePayload]
-    /// Graph edges — populated from the topology snapshot when available, empty
-    /// when structurePending is true.
-    public let edges: [GraphEdgePayload]
+/// The Topology node-link snapshot (PoC spec §4.1, GUI SPEC Topology section).
+///
+/// ## Wire format (FIX 2b compact layout)
+///
+/// Nodes are encoded as parallel arrays to eliminate per-node key overhead:
+///
+///   `ids`          — `[String]` UUID per node (one entry per node, in order)
+///   `communityId`  — `[Int]` Louvain community id per node
+///   `centrality`   — `[Double]` eigenvalue-centrality score per node in [0, 1]
+///   `anomaly`      — `[Bool]` anomaly flag per node
+///   `createdTs`    — `[String?]` ISO-8601 ingest timestamp or null per node
+///   `tombstoned`   — `{indexStr: ts}` SPARSE map (only tombstoned nodes)
+///
+/// Edges are encoded as compact arrays-of-arrays:
+///
+///   `edges` — `[[si, ti, w, et], ...]` where si/ti are indices into `ids`,
+///   w is the raw weight, et is the edge-type ordinal (see `CompactEdge`).
+///
+/// For 51k nodes / 70k edges the per-object format produced ~18 MB (UUID strings
+/// dominate: 70k × 2 × 36-char UUIDs ≈ 5 MB in edges alone). The compact format
+/// targets < 5 MB for the same fixture.
+///
+/// ## Backwards compatibility
+///
+/// Old per-object snapshots stored by the governor are decoded via
+/// `StoredGraphPayload`/`GraphNodePayload`/`GraphEdgePayload` and transformed
+/// at response-assembly time — no stored data changes format.
+///
+/// app.js detects the new format by checking `Array.isArray(g.ids)` (compact)
+/// vs `Array.isArray(g.nodes)` (legacy per-object, no longer emitted).
+///
+/// CONTENT-SAFETY INVARIANT (concepts §1.6): all fields here are metadata only
+/// — identifiers, integer enums, float scores, ISO-8601 timestamps. No drawer
+/// text, no KGFact predicates, no rung content (PoC spec §7).
+public struct GraphPayload: Encodable, Sendable {
+    // MARK: - Parallel node arrays (compact wire format)
+
+    /// Node UUIDs — one entry per node, in insertion order. All other parallel
+    /// arrays index into this array by position.
+    private let ids: [String]
+    /// Louvain community id per node (matches `communityId` on stored nodes).
+    /// Int8Array-able in JS for most real graphs (community count < 128).
+    private let communityId: [Int]
+    /// Eigenvalue-centrality score per node in [0, 1].
+    private let centrality: [Double]
+    /// Anomaly-detection flag per node.
+    private let anomaly: [Bool]
+    /// ISO-8601 ingest timestamp per node (drawer's filedAt), or null when the
+    /// daemon did not supply one. Nil entries encode as explicit JSON nulls.
+    private let createdTs: [String?]
+    /// Sparse tombstone map: string(nodeIndex) → ISO-8601 ts.
+    /// Only live entries for tombstoned nodes; live nodes are absent.
+    /// Saves ~50 bytes per live node vs a full parallel array (most nodes alive).
+    private let tombstoned: [String: String]
+
+    // MARK: - Compact edges
+
+    /// Compact edge array: each element is `[si, ti, w, et]`.
+    /// `si`/`ti` are indices into `ids`; `et` is the edge-type ordinal.
+    /// See `CompactEdge` for edge-type ordinal mapping.
+    private let edges: [CompactEdge]
+
+    // MARK: - Unchanged fields
+
     /// Community legend entries `{id, label, size}` (VIZ_V2 L3). When a snapshot
     /// is available these are governor-produced descriptors enriched with FDC
     /// heading labels (raw `dominantUdcCode` dropped at this boundary — content
@@ -449,8 +554,7 @@ public struct GraphPayload: Codable, Sendable, Equatable {
     /// Topology view surfaces (never silently empty).
     public let pending: [String]
     /// ISO-8601 instant the governor produced the stored snapshot. Nil when
-    /// structurePending is true (no snapshot yet). Encodes as explicit JSON null
-    /// (same explicit-null pattern as createdTs/tombstonedTs).
+    /// structurePending is true (no snapshot yet). Encodes as explicit JSON null.
     public let generatedTs: String?
     /// The estate filter echoed back (the `?estate=` query value, or "all" when
     /// unfiltered).
@@ -458,6 +562,15 @@ public struct GraphPayload: Codable, Sendable, Equatable {
     /// ISO-8601 UTC timestamp this response was assembled.
     public let snapshotTs: String
 
+    /// Build a `GraphPayload` from stored per-object nodes and edges.
+    ///
+    /// Transforms the per-object representation used by the governor's stored
+    /// snapshots (`StoredGraphPayload`) into the compact parallel-array wire
+    /// format at response-assembly time. Stored data is never re-written.
+    ///
+    /// Edges whose source or target UUID is not in the node set are dropped
+    /// (consistent with the pre-existing filtering in the topology snapshot
+    /// pipeline — should not occur in practice but guarded for safety).
     public init(
         nodes: [GraphNodePayload],
         edges: [GraphEdgePayload],
@@ -469,31 +582,81 @@ public struct GraphPayload: Codable, Sendable, Equatable {
         estate: String,
         snapshotTs: String
     ) {
-        self.nodes = nodes
-        self.edges = edges
-        self.communities = communities
-        self.analytics = analytics
+        // Build node index map and all parallel arrays in one pass.
+        var indexMap: [String: Int] = [:]
+        indexMap.reserveCapacity(nodes.count)
+        var idsArr:         [String]   = []; idsArr.reserveCapacity(nodes.count)
+        var communityIdArr: [Int]      = []; communityIdArr.reserveCapacity(nodes.count)
+        var centralityArr:  [Double]   = []; centralityArr.reserveCapacity(nodes.count)
+        var anomalyArr:     [Bool]     = []; anomalyArr.reserveCapacity(nodes.count)
+        var createdTsArr:   [String?]  = []; createdTsArr.reserveCapacity(nodes.count)
+        var tombstonedMap:  [String: String] = [:]
+        for (i, n) in nodes.enumerated() {
+            indexMap[n.id] = i
+            idsArr.append(n.id)
+            communityIdArr.append(n.communityId)
+            centralityArr.append(n.centrality)
+            anomalyArr.append(n.anomaly)
+            createdTsArr.append(n.createdTs)
+            if let ts = n.tombstonedTs { tombstonedMap["\(i)"] = ts }
+        }
+        self.ids         = idsArr
+        self.communityId = communityIdArr
+        self.centrality  = centralityArr
+        self.anomaly     = anomalyArr
+        self.createdTs   = createdTsArr
+        self.tombstoned  = tombstonedMap
+
+        // Build compact edges — drop edges whose endpoints are not in the node set.
+        var compactEdges: [CompactEdge] = []; compactEdges.reserveCapacity(edges.count)
+        for e in edges {
+            guard let si = indexMap[e.source], let ti = indexMap[e.target] else { continue }
+            compactEdges.append(CompactEdge(
+                si: si, ti: ti,
+                w: e.weight,
+                et: CompactEdge.edgeTypeOrdinal(e.edgeType)
+            ))
+        }
+        self.edges = compactEdges
+
+        self.communities     = communities
+        self.analytics       = analytics
         self.structurePending = structurePending
-        self.pending = pending
-        self.generatedTs = generatedTs
-        self.estate = estate
-        self.snapshotTs = snapshotTs
+        self.pending         = pending
+        self.generatedTs     = generatedTs
+        self.estate          = estate
+        self.snapshotTs      = snapshotTs
     }
 
-    /// Custom encode so `generatedTs` is always present on the wire — nil encodes
-    /// as an explicit JSON null rather than a missing key (same pattern as
-    /// `createdTs`/`tombstonedTs` on node/edge payloads).
+    // MARK: - Encoding
+
+    private enum CodingKeys: String, CodingKey {
+        case ids, communityId, centrality, anomaly, createdTs, tombstoned, edges
+        case communities, analytics, structurePending, pending, generatedTs, estate, snapshotTs
+    }
+
+    /// Custom encode — parallel node arrays + compact edges + `generatedTs` as explicit null.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(nodes, forKey: .nodes)
-        try c.encode(edges, forKey: .edges)
-        try c.encode(communities, forKey: .communities)
-        try c.encode(analytics, forKey: .analytics)
+        // Parallel node arrays (compact layout).
+        try c.encode(ids,         forKey: .ids)
+        try c.encode(communityId, forKey: .communityId)
+        try c.encode(centrality,  forKey: .centrality)
+        try c.encode(anomaly,     forKey: .anomaly)
+        // createdTs: encodes nil entries as explicit JSON nulls (VIZ_V2 contract).
+        var createdTsC = c.nestedUnkeyedContainer(forKey: .createdTs)
+        for ts in createdTs { try createdTsC.encode(ts) }  // nil encodes as null
+        try c.encode(tombstoned,  forKey: .tombstoned)
+        // Compact edges: each encodes as [si, ti, w, et] via CompactEdge.encode(to:).
+        try c.encode(edges,       forKey: .edges)
+        // Unchanged envelope fields.
+        try c.encode(communities,      forKey: .communities)
+        try c.encode(analytics,        forKey: .analytics)
         try c.encode(structurePending, forKey: .structurePending)
-        try c.encode(pending, forKey: .pending)
-        try c.encode(generatedTs, forKey: .generatedTs)   // nil → null
-        try c.encode(estate, forKey: .estate)
-        try c.encode(snapshotTs, forKey: .snapshotTs)
+        try c.encode(pending,          forKey: .pending)
+        try c.encode(generatedTs,      forKey: .generatedTs)  // nil → explicit null
+        try c.encode(estate,           forKey: .estate)
+        try c.encode(snapshotTs,       forKey: .snapshotTs)
     }
 }
 

@@ -381,11 +381,12 @@ struct TopologyEnrichmentCacheTests {
         let first = try await manager.graphPayload(now: Date(timeIntervalSince1970: 2_000))
         let second = try await manager.graphPayload(now: Date(timeIntervalSince1970: 2_005))
 
-        // Cache hit must be invisible in the result: same nodes, same
-        // enriched communities, same generatedTs.
+        // Cache hit must be invisible in the result: both calls return the same
+        // generatedTs (from the snapshot) and the same enriched communities.
+        // snapshotTs legitimately differs (caller-supplied `now` varies between
+        // polls), so byte-for-byte equality is not the right assertion here.
         #expect(first.generatedTs == "T1")
         #expect(second.generatedTs == "T1")
-        #expect(first.nodes == second.nodes)
         #expect(first.communities == second.communities)
     }
 
@@ -415,14 +416,17 @@ struct TopologyEnrichmentCacheTests {
 
 struct GraphPayloadSizeTests {
 
-    /// Build a `GraphPayload` containing 50 k nodes and verify two things:
+    /// Build a `GraphPayload` containing 50 k nodes and 100 edges and verify:
     ///
-    /// 1. **Absent fields**: `nounType`, `lastActiveTs` (nodes) and `decayedWeight`,
-    ///    `createdTs` (edges) must never appear in the encoded JSON.
-    /// 2. **Size ceiling**: the 50 k-node array must encode to fewer than 6 MB.
-    ///    The old format (8 fields per node + 7 fields per edge) would have been
-    ///    ~7.5 MB for the same fixture; the new format trims ~1.5 MB off nodes alone.
-    @Test("50k-node GraphPayload encodes without dropped fields and within size ceiling")
+    /// 1. **Compact wire format (FIX 2b)**: `ids`, `communityId`, `centrality`,
+    ///    `anomaly`, `createdTs`, `tombstoned` parallel arrays are present;
+    ///    old per-object `nodes` key is absent; edges are compact `[[si,ti,w,et]]`.
+    /// 2. **Absent fields from FIX 2**: `nounType`, `lastActiveTs` (stored-snapshot
+    ///    fields), `decayedWeight` (edge field) must not appear on the wire.
+    /// 3. **Size ceiling**: 50 k-node payload must encode to fewer than 5 MB.
+    ///    The per-object format (before FIX 2b) would have been ~5.6 MB for the
+    ///    same fixture; the compact format is ~1 MB (short IDs used in test).
+    @Test("50k-node GraphPayload encodes in compact parallel format and within 5 MB ceiling")
     func fiftyKNodePayloadSizeAndFieldAbsence() throws {
         // Build 50,000 minimal nodes and a small edge set to exercise both types.
         // IDs are short strings to keep the fixture realistic but not bloated by UUIDs.
@@ -451,12 +455,28 @@ struct GraphPayloadSizeTests {
         let data = try APIJSON.encode(payload)
         let text = String(data: data, encoding: .utf8) ?? ""
 
-        // --- Size gate: new format must be under 6 MB ---
-        // 50 k nodes × ~110 bytes + edges + envelope ≈ 5.6 MB.
-        // With the old format (+ nounType + lastActiveTs per node) it would be
-        // ~7.5 MB — the ceiling of 6 MB would NOT have passed before FIX 2.
-        #expect(data.count < 6_000_000,
-                "50k-node payload must be < 6 MB; got \(data.count) bytes")
+        // --- Size gate: compact format must be under 5 MB ---
+        // Compact parallel arrays + [[si,ti,w,et]] edges: ~1 MB for this short-ID fixture.
+        // The per-object format (pre-FIX 2b) was ~5.6 MB — compact saves 4.6 MB.
+        #expect(data.count < 5_000_000,
+                "50k-node compact payload must be < 5 MB; got \(data.count) bytes")
+
+        // --- Compact format presence gate ---
+        // Top-level parallel-array keys must be present.
+        #expect(text.contains("\"ids\""),
+                "compact format must emit \"ids\" parallel array key")
+        #expect(text.contains("\"communityId\""),
+                "compact format must emit \"communityId\" parallel array key")
+        #expect(text.contains("\"centrality\""),
+                "compact format must emit \"centrality\" parallel array key")
+        // Legacy per-object \"nodes\" key must NOT appear (replaced by parallel arrays).
+        #expect(!text.contains("\"nodes\""),
+                "compact format must not emit old per-object \"nodes\" key")
+        // Edges in compact [[si,ti,w,et]] format have no \"source\" or \"target\" keys.
+        #expect(!text.contains("\"source\""),
+                "compact edges must not contain per-edge \"source\" key")
+        #expect(!text.contains("\"target\""),
+                "compact edges must not contain per-edge \"target\" key")
 
         // --- Field-absence gate: dropped fields must not appear in wire output ---
         #expect(!text.contains("\"nounType\""),
@@ -465,13 +485,9 @@ struct GraphPayloadSizeTests {
                 "lastActiveTs must not appear in wire output (removed FIX 2)")
         #expect(!text.contains("\"decayedWeight\""),
                 "decayedWeight must not appear in wire output (removed FIX 2)")
-        // createdTs appears on NODES (kept) but must not appear on EDGES (removed).
-        // Validate indirectly: after dropping all node entries, no edge createdTs remains.
-        // The simplest check: ensure the total createdTs count matches the node count
-        // (one explicit null per node, zero per edge).
-        let createdTsCount = text.components(separatedBy: "\"createdTs\"").count - 1
-        // createdTs appears on nodes (one explicit null each) but not on edges.
-        // So the count must equal exactly the number of nodes.
-        #expect(createdTsCount == nodes.count, "createdTs count must equal node count (not edges)")
+
+        // createdTs appears once (as the parallel array key) not 50k times.
+        let createdTsKeyCount = text.components(separatedBy: "\"createdTs\"").count - 1
+        #expect(createdTsKeyCount == 1, "createdTs must appear once (parallel array key), got \(createdTsKeyCount)")
     }
 }

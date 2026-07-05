@@ -110,7 +110,10 @@ struct GraphAPITests {
         #expect(ctype?.hasPrefix("application/json") == true)
 
         let obj = try await jsonObject(port: port, path: "/api/graph")
-        for key in ["nodes", "edges", "communities", "analytics",
+        // FIX 2b compact format: nodes are parallel arrays (ids, communityId, ...)
+        // not a per-object "nodes" array. Edges are compact [[si,ti,w,et]].
+        for key in ["ids", "communityId", "centrality", "anomaly", "createdTs",
+                    "tombstoned", "edges", "communities", "analytics",
                     "structurePending", "pending", "generatedTs", "estate", "snapshotTs"] {
             #expect(obj[key] != nil, "missing /api/graph field: \(key)")
         }
@@ -122,8 +125,10 @@ struct GraphAPITests {
         defer { Task { await host.stop() } }
         let obj = try await jsonObject(port: port, path: "/api/graph")
         #expect((obj["structurePending"] as? Bool) == true)
-        #expect((obj["nodes"] as? [Any])?.isEmpty == true)
-        #expect((obj["edges"] as? [Any])?.isEmpty == true)
+        // FIX 2b compact format: nodes are parallel arrays. When structurePending
+        // is true, all parallel arrays are empty (no nodes, no edges).
+        #expect((obj["ids"] as? [Any])?.isEmpty == true, "ids must be empty when pending")
+        #expect((obj["edges"] as? [Any])?.isEmpty == true, "edges must be empty when pending")
         // The gap is enumerated honestly, not silently empty.
         #expect((obj["pending"] as? [Any])?.isEmpty == false)
         // generatedTs is null when no snapshot has been written.
@@ -266,10 +271,11 @@ struct GraphAPITests {
 
         // Chain proved: structurePending must be false when a snapshot is present.
         #expect((obj["structurePending"] as? Bool) == false)
-        // The governor's node must survive the round-trip.
-        let nodes = obj["nodes"] as? [[String: Any]] ?? []
-        #expect(nodes.count == 1)
-        #expect((nodes[0]["id"] as? String) == "node-fixture-1")
+        // FIX 2b compact format: nodes are encoded as parallel arrays.
+        // The `ids` array carries node UUIDs; `"nodes"` key is absent.
+        let ids = obj["ids"] as? [String] ?? []
+        #expect(ids.count == 1, "compact ids array must have 1 entry")
+        #expect(ids.first == "node-fixture-1", "first id must be node-fixture-1")
     }
 }
 
