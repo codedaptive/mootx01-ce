@@ -105,6 +105,22 @@ pub fn run(
                     "  ⓘ MOOTx01 plugin already installed — {} connects through it; skipping direct wiring.",
                     client.display_name
                 );
+                // Wave 6, Defect A (live 1.0.16 machine finding): the
+                // ADR-024 ownership skip above applies ONLY to the direct
+                // mcpServers entry. Before this fix, `continue` here left
+                // `client.id` out of `wired_ids` entirely, and the depth
+                // loop below filters on `wired_ids.contains(...)` — so a
+                // plugin-owned client got NO depth pass at all: no package
+                // rematerialization, no stranded-cache refresh. The stale
+                // stdio-era package in ~/.claude/mootx01-plugin (and Claude
+                // Code's stale cached snapshot) then survived every
+                // subsequent `mootx01 install` run forever. A plugin-owned
+                // connection is exactly the case where the package must
+                // stay freshest, so this client counts as wired (its MCP
+                // connection succeeded — via the plugin, not a direct
+                // entry) and proceeds to the depth pass below.
+                wired.push(client.display_name);
+                wired_ids.push(client.id);
                 continue;
             }
         }
@@ -125,8 +141,10 @@ pub fn run(
     // Integration depth (§4.4): server = MCP only (done above); skills/plugin
     // add the canonical SKILL.md / pre-generated package per client. The depth
     // is a target — each client gets the most it supports, and any plugin→skills
-    // fallback is reported (the §4.4 ceiling). Applied only to clients whose MCP
-    // wiring succeeded.
+    // fallback is reported (the §4.4 ceiling). Applied to every client whose MCP
+    // wiring succeeded — direct OR plugin-owned (Wave 6, Defect A: a
+    // plugin-owned client's connection ownership is NOT a reason to skip this
+    // pass; it is the reason the package must stay freshest).
     if depth != InstallDepth::Server {
         println!();
         println!("Integration depth: {}", depth.as_str());
@@ -780,6 +798,101 @@ mod tests {
             read_direct_entry(&client, &home).is_none(),
             "enabled plugin must skip direct wiring — no competing entry written"
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Wave 6, Defect A regression fixture — the exact state Bob's machine
+    /// was found in: plugin installed+enabled (own_connection true) AND a
+    /// stale stdio-era package already on disk (`.mcp.json` with
+    /// `command: mootx01, args: [serve]`, pre-ADR-024-§2). Before the fix,
+    /// `run()`'s loop `continue`d without pushing `client.id` into
+    /// `wired_ids`, so the depth pass's `wired_ids.contains(...)` filter
+    /// (line ~134) silently excluded claude-code — the plugin package,
+    /// and Claude Code's cached snapshot of it, never converged.
+    ///
+    /// This test drives the same two calls `run()`'s FIXED code path makes
+    /// once a plugin-owned client is (correctly) included in the depth
+    /// pass: `dedupe_one` (must find no competing direct entry to write)
+    /// and `depth::apply(.., InstallDepth::Plugin, ..)` (must rewrite the
+    /// stale package to the current HTTP-shaped manifest and invoke the
+    /// stranded-cache CLI-update seam, since the plugin is already
+    /// installed).
+    struct FakeClaudeCliRunner {
+        invoked: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+    impl FakeClaudeCliRunner {
+        fn new() -> Self {
+            FakeClaudeCliRunner { invoked: std::cell::RefCell::new(Vec::new()) }
+        }
+    }
+    impl depth::ClaudeCliRunning for FakeClaudeCliRunner {
+        fn run(&self, args: &[&str]) -> bool {
+            self.invoked.borrow_mut().push(args.iter().map(|s| s.to_string()).collect());
+            true
+        }
+    }
+
+    #[test]
+    fn plugin_owned_client_with_stale_package_is_rematerialized_not_skipped() {
+        let home = plugin_test_home("defect-a");
+        let client = claude_code_client();
+        write_installed_plugins(&home, "mootx01@mootx01");
+        write_settings(&home, r#"{"enabledPlugins":{"mootx01@mootx01":true}}"#);
+        assert!(
+            mcp_ownership::owns_connection("mootx01@mootx01", &home),
+            "fixture setup: plugin must be connection-owning"
+        );
+
+        // Seed the stale stdio-era package Bob's machine actually had on
+        // disk — pre-ADR-024-§2, before the package moved to an
+        // HTTP-shaped .mcp.json.
+        let bundle = depth::InstallBundle::embedded();
+        let host = bundle.host("claude-code").expect("claude-code must be in the embedded install map");
+        let plugin_dir = depth::plugin_install_directory(host, &home);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let stale_mcp = serde_json::json!({
+            "mcpServers": {"mootx01": {"command": "mootx01", "args": ["serve"]}}
+        });
+        std::fs::write(plugin_dir.join(".mcp.json"), stale_mcp.to_string()).unwrap();
+
+        // Step 1 of run()'s plugin-owned branch: dedupe — no direct entry
+        // exists to remove or retain, and none must be written.
+        let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
+        assert!(
+            matches!(outcome, merge::JsonOwnershipOutcome::NotPresent),
+            "no prior direct entry in this fixture; expected NotPresent, got {outcome:?}"
+        );
+
+        // Step 2 (the fix): the depth pass now runs for this client too.
+        let fake = FakeClaudeCliRunner::new();
+        let result = depth::apply("claude-code", InstallDepth::Plugin, &home, false, &fake).unwrap();
+        assert!(matches!(result, DepthOutcome::Plugin(_)), "expected DepthOutcome::Plugin, got {result:?}");
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(plugin_dir.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            rewritten["mcpServers"]["mootx01"]["type"], "http",
+            "the stale stdio manifest must have converged to the current HTTP-shaped entry; got: {rewritten}"
+        );
+        assert!(
+            rewritten["mcpServers"]["mootx01"]["command"].is_null(),
+            "the stale bare `command: mootx01` placeholder must be gone; got: {rewritten}"
+        );
+
+        // The stranded-cache refresh (ADR-024 Wave 3, Defect 1) must have
+        // invoked the CLI-update seam, since the plugin is already installed.
+        assert_eq!(
+            fake.invoked.borrow().as_slice(),
+            &[vec!["plugin".to_string(), "update".to_string(), "mootx01@mootx01".to_string()]],
+            "rematerializing an already-installed plugin must invoke `claude plugin update`"
+        );
+
+        // No direct entry must exist — the plugin still owns the connection.
+        assert!(
+            read_direct_entry(&client, &home).is_none(),
+            "a plugin-owned client must never gain a competing direct entry from the depth pass"
+        );
+
         let _ = std::fs::remove_dir_all(&home);
     }
 

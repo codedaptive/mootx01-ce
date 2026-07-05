@@ -70,6 +70,25 @@ public struct ToolDispatcher: Sendable {
     /// are still correlated.
     let recallLedger: SurfacedRecallLedger
 
+    /// ADR-025 sensitivity unlock: daemon-RAM-only grant ledger for the
+    /// restricted/secret sensitivity tiers. Actor-isolated (Sendable) — safe
+    /// in the immutable Sendable struct. Shared across dispatchers derived
+    /// via `registering(_:)` for the same reason `recallLedger` is: exactly
+    /// one instance lives for the lifetime of one `mootx01 serve` process,
+    /// so "daemon restart = everything locked" (ADR-025 §1) falls out of
+    /// `ToolDispatcher` construction rather than needing special-cased
+    /// reset logic. See `SensitivityGrantLedger`'s own doc comment.
+    let sensitivityUnlockLedger: SensitivityGrantLedger
+
+    /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+    ///
+    /// Nil when the host has no stats store wired (stdio mode, test harnesses,
+    /// provision-less contexts). The concrete implementation (AriaResident's
+    /// `StatsStoreMonitoringControl`) wraps the `StatsStore` actor — AriaMcpKit
+    /// never imports ObserverSink or IntellectusLib directly. Sendable because
+    /// `MonitoringControl` requires `Sendable`.
+    let monitoringControl: (any MonitoringControl)?
+
     /// The build serial for this running executable, surfaced by
     /// `moot_estate_ping` so drivers can confirm they are talking to the
     /// most recently compiled build.
@@ -114,15 +133,18 @@ public struct ToolDispatcher: Sendable {
     public init(kit: GeniusLocusKit, handle: EstateHandle,
                 buildSerial: String = Self.deriveBuildSerial(),
                 serverIdentity: String = "aria-mcp-server",
-                versionSkewAdvisory: String? = nil) {
+                versionSkewAdvisory: String? = nil,
+                monitoringControl: (any MonitoringControl)? = nil) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
         self.jobRegistry = VaultJobRegistry()
         self.recallLedger = SurfacedRecallLedger()
+        self.sensitivityUnlockLedger = SensitivityGrantLedger()
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
+        self.monitoringControl = monitoringControl
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -138,8 +160,24 @@ public struct ToolDispatcher: Sendable {
         next[additional.estateUUID] = additional
         return ToolDispatcher(kit: kit, handle: handle, estates: next,
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
+                              sensitivityUnlockLedger: sensitivityUnlockLedger,
+                              monitoringControl: monitoringControl,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory)
+    }
+
+    /// Return a copy of this dispatcher with `control` wired as the monitoring
+    /// seam. Used by `AriaResident.runResidentDaemon` to inject the stats-store
+    /// control AFTER the stats store is opened (the store is opened inside
+    /// `runResidentDaemon`, after the dispatcher is first constructed). All
+    /// other state — kit, handle, ledgers, estate map — is forwarded unchanged.
+    public func withMonitoringControl(_ control: (any MonitoringControl)?) -> ToolDispatcher {
+        ToolDispatcher(kit: kit, handle: handle, estates: estates,
+                       jobRegistry: jobRegistry, recallLedger: recallLedger,
+                       sensitivityUnlockLedger: sensitivityUnlockLedger,
+                       monitoringControl: control,
+                       buildSerial: buildSerial, serverIdentity: serverIdentity,
+                       versionSkewAdvisory: versionSkewAdvisory)
     }
 
     /// Private designated initializer carrying an explicit estate map,
@@ -151,14 +189,18 @@ public struct ToolDispatcher: Sendable {
     private init(
         kit: GeniusLocusKit, handle: EstateHandle,
         estates: [UUID: EstateHandle], jobRegistry: VaultJobRegistry,
-        recallLedger: SurfacedRecallLedger, buildSerial: String,
-        serverIdentity: String, versionSkewAdvisory: String?
+        recallLedger: SurfacedRecallLedger,
+        sensitivityUnlockLedger: SensitivityGrantLedger,
+        monitoringControl: (any MonitoringControl)?,
+        buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?
     ) {
         self.kit = kit
         self.handle = handle
         self.estates = estates
         self.jobRegistry = jobRegistry
         self.recallLedger = recallLedger
+        self.sensitivityUnlockLedger = sensitivityUnlockLedger
+        self.monitoringControl = monitoringControl
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
@@ -624,6 +666,32 @@ public struct ToolDispatcher: Sendable {
         return min(raw, ceiling)
     }
 
+    /// `true` if `chain` already constrains sensitivity in any way — an
+    /// exact `.sensitivity` match, an explicit `.sensitivityAtMost`
+    /// ceiling (whether from the caller's own `filter` argument or
+    /// injected by ADR-025's grant ceiling), or one nested inside
+    /// `.all`/`.any`/`.not`. Mirrors LocusKit `BitmapEvaluator`'s private
+    /// `isBitmapSensitivityFilter` classifier — kept as a small local
+    /// duplicate rather than exposing that private substrate function,
+    /// since this ARIA-boundary use is "should I inject the grant
+    /// ceiling", a different question from BitmapEvaluator's own "should
+    /// I insert my default" (this function runs BEFORE that one; an ARIA
+    /// caller that already has a sensitivity constraint should not also
+    /// get a grant-ceiling appended on top of it, which would AND two
+    /// constraints together in a caller-surprising way).
+    static func isSensitivityFilter(_ f: Filter) -> Bool {
+        switch f {
+        case .sensitivity, .sensitivityAtMost:
+            return true
+        case .all(let fs), .any(let fs):
+            return fs.contains(where: isSensitivityFilter)
+        case .not(let inner):
+            return isSensitivityFilter(inner)
+        default:
+            return false
+        }
+    }
+
     func decodeChannel(_ value: JSONValue?) throws -> CaptureChannel {
         guard let name = try optionalString(value, argument: "channel") else { return .importedFile }
         switch name {
@@ -1006,6 +1074,8 @@ enum InterfaceTools {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        // Monitoring control (ADR-025 wave 8.2) — read/write daemon telemetry flag
+        "moot_monitoring_status",
         // Maintenance / admin
         "moot_reindex", "moot_drain_status",
         // Direct palace import (bypass NoteIR)
@@ -1044,9 +1114,11 @@ enum InterfaceTools {
         case "moot_write_journal":     return try await dispatcher.runWriteJournal(args, now: Date())
         case "moot_read_journal":      return try await dispatcher.runReadJournal(args)
         // Tier 5
-        case "moot_estate_status":     return try await dispatcher.runEstateStatus(args)
-        case "moot_estate_map":        return try await dispatcher.runEstateMap(args)
+        case "moot_estate_status":      return try await dispatcher.runEstateStatus(args)
+        case "moot_estate_map":         return try await dispatcher.runEstateMap(args)
         case "moot_estate_ping":        return try await dispatcher.runEstatePing(args)
+        // Monitoring control (ADR-025 wave 8.2)
+        case "moot_monitoring_status":  return try await dispatcher.runMonitoringStatus(args)
         // Maintenance / admin
         case "moot_reindex":           return try await dispatcher.runReindex(args)
         case "moot_drain_status":      return try await dispatcher.runDrainStatus(args)
@@ -1164,8 +1236,30 @@ extension ToolDispatcher {
         // Parity: Rust run_memory_search uses clamp_limit with the same ceiling.
         let limit = try Self.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        // Wall-clock time for this request. Hoisted to the top of the
+        // function (rather than the later `let now = Date()` this replaces)
+        // so the SAME instant gates both the ADR-025 grant check below and
+        // the surfaced-recall-ledger recording further down — one request,
+        // one `now`.
+        let now = Date()
         // Build the base filter chain from the `filter` argument.
         var filterChain = try decodeFilterChain(args["filter"])
+        // ADR-025 sensitivity unlock: when a restricted/secret grant is
+        // live, inject the grant-lifted ceiling explicitly. This is the
+        // seam BitmapEvaluator.insertDefaults documents: "conditional on
+        // absence so an explicit sensitivity constraint from the caller
+        // suppresses this default" — by appending our own
+        // `.sensitivityAtMost` here, the substrate's own narrower default
+        // (`.elevated`) never gets inserted. Only applies when the caller's
+        // `filter` argument did not already specify a sensitivity
+        // constraint of its own (an explicit caller constraint always
+        // wins — same precedence BitmapEvaluator already documents).
+        var sensitivityCeilingLifted = false
+        if !filterChain.contains(where: Self.isSensitivityFilter),
+           let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
+            filterChain.append(ceiling)
+            sensitivityCeilingLifted = true
+        }
         // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
         // When absent, recall spans all wings (existing default behavior unchanged).
         // Appended to the filter chain so it composes with any explicit filter.
@@ -1223,11 +1317,33 @@ extension ToolDispatcher {
         let result = try await kit.recall(handle, request)
         // Record surfaced drawer ids in the session ledger so dereference verbs
         // can trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12
-        // § session-ledger).
-        let now = Date()
+        // § session-ledger). Reuses the `now` hoisted at the top of this
+        // function (one request, one wall-clock instant).
         let surfacedIDs = result.hits.compactMap { $0.drawer?.id }
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
+        }
+        // ADR-025 §4: record a sensitivityReadUnderGrant audit entry for
+        // each hit that was admitted PAST the substrate's own default
+        // ceiling specifically because a grant is live. Only rows whose
+        // own adjective sensitivity is restricted/secret qualify — an
+        // elevated-or-below row would have been admitted regardless of
+        // any grant, so recording it here would misrepresent "read under
+        // grant" as having happened when it did not. Gated on
+        // `sensitivityCeilingLifted` so a query with no live grant never
+        // emits (in that case no restricted/secret row could have been
+        // admitted in the first place — the default ceiling excludes them).
+        if sensitivityCeilingLifted {
+            for hit in result.hits {
+                guard let drawer = hit.drawer else { continue }
+                switch drawer.adjectiveSensitivity {
+                case .restricted, .secret:
+                    try? await kit.recordSensitivityReadUnderGrant(
+                        handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: now)
+                case .normal, .elevated:
+                    continue
+                }
+            }
         }
         // Compute discrimination before building the result lines so the signal
         // reflects the full ordered hit list, not just the displayed prefix.
@@ -1247,18 +1363,43 @@ extension ToolDispatcher {
         var lines: [String] = ["found \(result.hits.count) memory(s)"]
         for hit in result.hits.prefix(50) {
             let room = hit.drawer.flatMap { hitNodeNames[$0.parentNodeId]?.room } ?? "?"
-            // For _distilled drawers, apply injection-depth formatting so the LLM
-            // caller sees factoid prose with calibrated provenance annotations rather
-            // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
-            if room == "_distilled",
-               let content = hit.drawer?.content,
-               let header = DistilledHeader.parse(content) {
-                let formatted = Self.injectionDepthFormatted(header: header, drawerID: hit.id)
-                lines.append("\(hit.id)  [\(room)]  \(formatted)")
-            } else {
-                let preview = hit.drawer?.content.prefix(120) ?? "(not hydrated)"
-                lines.append("\(hit.id)  [\(room)]  \(preview)")
+            // Sensitivity-aware content preview (search-redaction parity fix,
+            // Wave 6): LocusKit stores provenance sensitivity in bits 30-35
+            // (Drawer.sensitivity, separate from the adjective-axis
+            // sensitivity moot_memory_get's containment gate checks). This
+            // was previously a Rust-only preview redaction (Rust
+            // run_memory_search) — Swift always showed the raw 120-char
+            // preview regardless of provenance sensitivity, a pre-existing
+            // port divergence. moot_memory_search can surface a Restricted/
+            // Secret row for relevance ranking without exposing its body; a
+            // raw content preview at the ARIA boundary would leak text the
+            // sensitivity designation marks as access-controlled.
+            //
+            // Normal and Elevated: the bulk-export tiers, safe to preview —
+            // proceed to the existing distilled-header / 120-char-preview
+            // formatting below, unchanged.
+            // Restricted and Secret: replace with a redacted placeholder,
+            // even for a `_distilled` row — the security control applies
+            // regardless of formatting path.
+            let preview: String
+            switch hit.drawer?.sensitivity {
+            case .restricted:
+                preview = "[sensitivity: restricted — retrieve by id for content]"
+            case .secret:
+                preview = "[sensitivity: secret — content access requires explicit grant]"
+            case .normal, .elevated, .none:
+                // For _distilled drawers, apply injection-depth formatting so the LLM
+                // caller sees factoid prose with calibrated provenance annotations rather
+                // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
+                if room == "_distilled",
+                   let content = hit.drawer?.content,
+                   let header = DistilledHeader.parse(content) {
+                    preview = Self.injectionDepthFormatted(header: header, drawerID: hit.id)
+                } else {
+                    preview = hit.drawer.map { String($0.content.prefix(120)) } ?? "(not hydrated)"
+                }
             }
+            lines.append("\(hit.id)  [\(room)]  \(preview)")
             if explain {
                 for line in hit.explanation { lines.append("  \(line)") }
             }
@@ -1303,6 +1444,22 @@ extension ToolDispatcher {
             degradedPart = "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
         }
         lines.append("recall_provenance: \((provenanceParts + [degradedPart]).joined(separator: " "))")
+        // ADR-025 §4: redaction advisory stat (Wave 7.4).
+        // When no grant is active, check cheaply whether the estate holds any
+        // restricted or secret rows. If so, append an advisory so the AI client
+        // knows results may be incomplete and how to request access.
+        // Gated on `!sensitivityCeilingLifted` — when a grant IS live, the rows
+        // are already included and no advisory is appropriate.
+        // The stat uses a private `.internal` limit-1 scan (no trace rows, no
+        // BM25/vector cost) — a pure bitmap filter probe. See
+        // `estateHasSensitiveRows(handle:)`.
+        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+            lines.append(
+                "sensitivity_advisory: results may be hidden by sensitivity tier — " +
+                "run `mootx01 unlock private` to include restricted memories, " +
+                "`mootx01 unlock secret` for secret memories."
+            )
+        }
         return Self.textResult(lines.joined(separator: "\n"))
     }
 
@@ -1345,7 +1502,21 @@ extension ToolDispatcher {
         let rowID = try requireString(args, "id")
         let estate = try await kit.estate(for: handle)
 
-        let frame = RecallFrame(filterChain: [], hydrationLevel: .full)
+        // ADR-025 sensitivity unlock: same grant-ceiling injection as
+        // runMemorySearch — see that function's doc comment. moot_memory_get
+        // deliberately uses the SAME containment gate moot_memory_search
+        // does (its own doc history says so explicitly), so the grant must
+        // lift it here too, or an unlocked restricted/secret row would be
+        // visible in search but still "not found" by id — an inconsistent,
+        // confusing half-unlock.
+        var filterChain: [Filter] = []
+        let now = Date()
+        var sensitivityCeilingLifted = false
+        if let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
+            filterChain.append(ceiling)
+            sensitivityCeilingLifted = true
+        }
+        let frame = RecallFrame(filterChain: filterChain, hydrationLevel: .full)
         let filtered = try await estate.getDrawers(
             ids: [rowID], matchingFrame: frame, hydrationLevel: .full)
         guard let drawer = filtered.admissible.first else {
@@ -1356,6 +1527,19 @@ extension ToolDispatcher {
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Memory not found: \(rowID)"
             )
+        }
+        // ADR-025 §4: same read-under-grant audit recording as
+        // runMemorySearch — see that function's comment for why this is
+        // gated on BOTH the ceiling having been lifted AND the drawer's
+        // own sensitivity actually being restricted/secret.
+        if sensitivityCeilingLifted {
+            switch drawer.adjectiveSensitivity {
+            case .restricted, .secret:
+                try? await kit.recordSensitivityReadUnderGrant(
+                    handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: now)
+            case .normal, .elevated:
+                break
+            }
         }
 
         // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via
@@ -1397,7 +1581,61 @@ extension ToolDispatcher {
         // tool exists to return.
         lines.append("content:")
         lines.append(drawer.content)
+        // ADR-025 §4: redaction advisory stat (Wave 7.4) — same logic as
+        // runMemorySearch. When no grant is active, surface an advisory if the
+        // estate contains any restricted/secret rows not visible through the
+        // default gate. Consistent with search so the AI client receives the
+        // same hint from both tools.
+        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+            lines.append(
+                "sensitivity_advisory: some memories may be hidden by sensitivity tier — " +
+                "run `mootx01 unlock private` to include restricted memories, " +
+                "`mootx01 unlock secret` for secret memories."
+            )
+        }
         return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// Returns `true` if the estate has at least one row tagged restricted or secret.
+    ///
+    /// Used by `runMemorySearch` and `runMemoryGet` to decide whether to append a
+    /// sensitivity advisory. The advisory tells the AI client that results may be
+    /// incomplete and how to unlock the hidden tier (ADR-025 §4, Wave 7.4).
+    ///
+    /// Implementation: two limit-1 `GLKRecallRequest` scans with explicit
+    /// `Filter.sensitivity(tier)` — these filters suppress the default
+    /// `sensitivityAtMost(.elevated)` gate (see `BitmapEvaluator.insertDefaults`),
+    /// so restricted/secret rows become visible for counting. Mode `.locusOnly` +
+    /// scoring `.raw` skips the BM25/vector pipeline; the scan is a pure bitmap
+    /// filter probe — cheap even for large estates.
+    ///
+    /// `origin: .internal` — must NOT write recall-trace rows (B-10a: only the
+    /// ARIA_MCP boundary sets `.external`). This is an internal diagnostic query.
+    private func estateHasSensitiveRows(handle: EstateHandle) async -> Bool {
+        for tier: AdjectiveSensitivity in [.restricted, .secret] {
+            // Limit 1: stop at first match — no need to count.
+            let frame = RecallFrame(
+                filterChain: [.sensitivity(tier)],
+                hydrationLevel: .structured, // No content body needed — existence check only.
+                limit: 1,
+                ordering: .byCaptureTimeDesc
+            )
+            let request = GLKRecallRequest(
+                frame: frame,
+                mode: .locusOnly,     // Skip BM25/vector — pure bitmap probe.
+                scoring: .raw,        // No matrix scoring needed.
+                limit: 1,
+                fallback: .allowDegraded,
+                queryText: nil,       // No text query — filter only.
+                origin: .internal     // Internal diagnostic — must not write trace rows (B-10a).
+            )
+            // A nil result (thrown error) is treated as no sensitive rows — fail-safe:
+            // don't surface the advisory when we can't confirm sensitive rows exist.
+            if let result = try? await kit.recall(handle, request), !result.hits.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     /// Note that a drawer id was "used" (acted upon) by a dereference verb.
@@ -2068,6 +2306,51 @@ extension ToolDispatcher {
             stats.append("version_skew: \(versionSkewAdvisory)")
         }
         return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol)
+    }
+
+    /// `moot_monitoring_status` — read or write the daemon's telemetry monitoring flag.
+    ///
+    /// ## Read path (absent `enabled` argument)
+    /// Returns the current effective monitoring state without mutation.
+    ///
+    /// ## Write path (present `enabled: Bool` argument)
+    /// Persists `enabled` to the stats store and reports the new effective state.
+    /// Writes the `monitoring_source: user` marker so downstream readers can
+    /// distinguish operator-driven changes from env-var or default-seeded state.
+    ///
+    /// ## No-store case
+    /// When `monitoringControl` is `nil` (stdio mode, test harnesses, provision-less
+    /// contexts), the tool reports `monitoring: unavailable` and never fabricates
+    /// a false enabled/disabled state. Mirrors the B-6 honesty discipline.
+    ///
+    /// Permission tier: `ask` (it can mutate monitoring state when `enabled` is
+    /// supplied — classified in PermissionsWriter.mutationTools, ADR-025 wave 8.2).
+    func runMonitoringStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
+        guard let control = monitoringControl else {
+            // No stats store wired — honest "unavailable" response. Never say
+            // "disabled" when the true answer is "no store to read from".
+            return Self.textResult("monitoring: unavailable (no telemetry store wired)")
+        }
+
+        // Write path: `enabled` argument present → set flag, return new state.
+        if let enabledArg = try optionalBool(args["enabled"], argument: "enabled") {
+            await control.set(enabledArg)
+            // Re-read the persisted value so the response reflects what was
+            // actually written, not just what was requested.
+            let effective = await control.read()
+            var lines = [
+                "monitoring: \(effective.map { $0 ? "enabled" : "disabled" } ?? "unavailable")",
+                "monitoring_source: user",
+            ]
+            if effective == nil {
+                lines.append("warning: flag was written but could not be re-read; retry moot_monitoring_status to confirm")
+            }
+            return Self.textResult(lines.joined(separator: "\n"))
+        }
+
+        // Read path: no `enabled` argument → report current state only.
+        let current = await control.read()
+        return Self.textResult("monitoring: \(current.map { $0 ? "enabled" : "disabled" } ?? "unavailable")")
     }
 
     /// `moot_estate_map` — return the estate's structural map with memory counts.

@@ -7,6 +7,7 @@
 use std::process::ExitCode;
 
 use crate::cli::Command;
+use crate::core::paths;
 
 pub mod db;
 pub mod drain;
@@ -18,6 +19,8 @@ pub mod serve;
 pub mod status;
 pub mod uninstall;
 pub mod upgrade;
+/// ADR-025 unlock/lock commands (password-based, Rust/Linux/Windows path).
+pub mod unlock;
 
 pub fn dispatch(command: Command) -> ExitCode {
     match command {
@@ -40,6 +43,17 @@ pub fn dispatch(command: Command) -> ExitCode {
         Command::Upgrade { from, check, yes, no_restart } => {
             upgrade::run(from, check, yes, no_restart)
         }
+        // ADR-025: sensitivity unlock / lock.
+        Command::Unlock { tier, db: _ } => {
+            // Resolve the data directory for the sidecar and daemon-port files.
+            // The `--db` flag (estate override) is accepted by the parser but the
+            // daemon itself owns grant-issuance — the estate name affects which
+            // estate is opened by `serve`, not which port to unlock on. The port
+            // is always resolved via the standard daemon-port-file mechanism.
+            let data_dir = paths::data_dir();
+            ExitCode::from(unlock::run_unlock(&tier, &data_dir) as u8)
+        }
+        Command::Lock => ExitCode::from(unlock::run_lock() as u8),
         // Version/Help/HelpFor are handled in main before dispatch.
         Command::Version | Command::Help | Command::HelpFor(_) => {
             unreachable!("handled in main")

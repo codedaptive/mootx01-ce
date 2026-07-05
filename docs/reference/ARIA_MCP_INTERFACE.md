@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.16.0
+version: 1.18.0
 status: active
-date: 2026-07-04
+date: 2026-07-05
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -789,6 +789,85 @@ serialization failure.
 
 `GET <anything-else>` returns HTTP 404 `{"error":"not_found"}`.
 
+## § 4.6 — Sensitivity control POST endpoints (HTTP transport only, ADR-025)
+
+Two write-only POST endpoints accept out-of-band sensitivity grants and revocations.
+Both ports (Swift + Rust) share the same CSRF/DNS-rebinding Origin guard as the
+MCP JSON-RPC endpoint. The stdio transport does not expose these endpoints. See
+ARIA_MCP_SPEC.md §19 for the full behavioral contract.
+
+```
+POST /api/control/unlock
+POST /api/control/lock
+```
+
+### Swift implementation
+
+```swift
+// HTTPServer.swift — route(_ request:) dispatch
+case .unlock: return try await handleUnlock(request)
+case .lock:   return await handleLock()
+
+// SensitivityGrantLedger.swift
+struct SensitivityGrantLedger: Sendable {
+    func ceiling_sensitivity(now: Date) -> AdjectiveSensitivity?
+    func grant(tier: SensitivityTier, expiresAt: Date) async
+    func revokeAll() async
+}
+```
+
+CLI entry point (macOS only): `UnlockCommand.swift` / `LockCommand.swift`
+(`apps/mootx01/Sources/mootx01/Commands/`). Uses `LocalAuthenticationAuthority`
+(`LAContext.evaluatePolicy(.deviceOwnerAuthentication)`).
+
+### Rust implementation
+
+```rust
+// http_server.rs — route() dispatch
+"/api/control/unlock" => handle_unlock(&body, &state),
+"/api/control/lock"   => handle_lock(&state),
+
+// sensitivity_grant_ledger.rs
+pub fn ceiling_sensitivity(&self, now_ms: i64) -> Option<AdjectiveSensitivity>
+pub fn grant(&self, tier: SensitivityTier, expires_at_ms: i64)
+pub fn revoke_all(&self)
+```
+
+CLI entry point: `commands::unlock::{run_unlock, run_lock}`. Uses
+`core::unlock_authority::authenticate_and_grant` — reads `sensitivity_hashes.json`
+sidecar, prompts for password (echo-off), verifies PBKDF2-HMAC-SHA256.
+
+### Request/response shapes
+
+**`POST /api/control/unlock`**
+
+Request:
+```json
+{ "tier": "restricted" | "secret", "proof": { "ts": <unix_ms as integer> } }
+```
+
+Success (HTTP 200):
+```json
+{ "granted": true, "expires_at": "ISO-8601" }
+```
+
+**`POST /api/control/lock`**
+
+Request: `{}`
+
+Success (HTTP 200):
+```json
+{ "locked": true }
+```
+
+**Error responses (both endpoints):**
+
+| HTTP | Body | Condition |
+|------|------|-----------|
+| 400 | `{"error":"unknown tier"}` | `tier` is not `"restricted"` or `"secret"` |
+| 403 | `{"error":"proof stale"}` | `|now_ms - proof.ts| > 10_000` |
+| 500 | `{"error":"<message>"}` | Any other server error |
+
 ## § 5 — Conformance test entry points
 
 ```
@@ -1043,6 +1122,31 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.18.0 -- 2026-07-05
+ADR-025 wave 8.2: `moot_monitoring_status` tool (§2 Tool projection, Tier 5 —
+Estate tools, monitoring-control entry). Injection pattern: `MonitoringControl`
+protocol (Swift) / trait (Rust) defined in AriaMcpKit; concrete implementation
+(`StatsStoreMonitoringControl`) in AriaResident (Swift) and `http_server.rs`
+(Rust). Read path: absent `enabled` arg returns current flag state. Write path:
+present `enabled: bool` persists the flag via `StatsStore.setMonitoringEnabled` /
+`set_monitoring_enabled` (wave 8.1 API), echoes new state with
+`monitoring_source: user` line. No-store case: returns `monitoring: unavailable`
+— never fabricates state. Permission tier: `ask` in both namespace prefixes.
+Wave 8.3 smoke: `HTTPReadAPITests.freshStoreMonitoringDefaultIsEnabled` verifies
+fresh StatsStore seeds monitoring=ON (wave 8.1 regression gate). Tool count: 64
+(Swift and Rust at parity).
+
+### 1.17.0 -- 2026-07-05
+ADR-025 sensitivity unlock/lock control endpoints (§4.6). Documents
+`POST /api/control/unlock` and `POST /api/control/lock` — platform-
+specific identity verification (macOS: LocalAuthentication; Linux/Windows:
+PBKDF2-HMAC-SHA256), request/response shapes, proof freshness gate,
+CLI surface (`mootx01 unlock private|secret`, `mootx01 lock`). Both
+Swift and Rust ports at parity. Redaction advisory
+(`sensitivity_advisory:` line) added to `moot_memory_search` and
+`moot_memory_get` output when no grant is active and estate has
+restricted/secret rows.
 
 ### 1.16.0 -- 2026-07-04
 Added `moot_memory_get` (§2 Tool projection, Tier 1 — Core Memory table)

@@ -7,6 +7,7 @@
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
+//!   Monitoring (1) — moot_monitoring_status (ADR-025 wave 8.2, telemetry flag R/W)
 //!   Maintenance (2/3) — moot_reindex, moot_drain_status, and vault-gated moot_palace_import
 //!   Federation (1) — moot_federated_search
 //!   Recipe (11) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
@@ -19,7 +20,8 @@
 //! full — docs_internal/V1_1_PARKING_LOT.md's fetch-drawer-by-ID gap,
 //! build-now per Bob's ruling).
 //!
-//! Vault-on (default): 63 tools. Vault-off (MOOTX01_VAULT=0): 57 tools —
+//! Vault-on (default): 64 tools (ADR-025 wave 8.2 added moot_monitoring_status).
+//! Vault-off (MOOTX01_VAULT=0): 58 tools —
 //! the five moot_vault_* tools and moot_palace_import are hidden together
 //! because all open local SQLite files (filesystem import/export vector).
 //!
@@ -48,10 +50,11 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 63 tools when vault is enabled (the default) or 57 tools when
+/// Produces 64 tools when vault is enabled (the default) or 58 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
 /// posture). All other non-vault tiers are always present. See ADR-015.
+/// ADR-025 wave 8.2 added `moot_monitoring_status` (count was 63/57 before).
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_vault_flag(vault_enabled())
 }
@@ -62,7 +65,9 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    let capacity = if vault_on { 63 } else { 57 };
+    // Vault-on: 64 tools (adds monitoring_status, +1 from 63 before wave 8.2).
+    // Vault-off: 58 tools (palace_import + 5 vault_* hidden; +1 from 57 before wave 8.2).
+    let capacity = if vault_on { 64 } else { 58 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Tier 1 — Core memory (8)
@@ -94,6 +99,11 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     tools.push(estate_status_tool());
     tools.push(estate_map_tool());
     tools.push(estate_ping_tool());
+
+    // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
+    // Always available: reports "unavailable" when no stats store wired rather than
+    // gating on the store's presence. Honest and safe to expose unconditionally.
+    tools.push(monitoring_status_tool());
 
     // Maintenance — index backfill and drain status are always available.
     // Direct palace import opens arbitrary local SQLite files, so it is
@@ -448,6 +458,30 @@ fn estate_ping_tool() -> serde_json::Value {
         "name": "moot_estate_ping",
         "description": "Verify the estate connection is alive. Returns pong immediately.",
         "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring control (ADR-025 wave 8.2)
+// ---------------------------------------------------------------------------
+
+/// moot_monitoring_status — read or write the daemon telemetry monitoring flag.
+/// Injected via `MonitoringControl` trait; reports "unavailable" when no store
+/// wired (stdio mode, test harnesses, provision-less contexts).
+/// Mirrors Swift `ToolProjection.estateTools()` monitoring entry.
+fn monitoring_status_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_monitoring_status",
+        "description": "Read or set the daemon's telemetry monitoring flag. Absent `enabled`: reports current monitoring state (enabled / disabled / unavailable). Present `enabled`: persists the new flag and reports the effective state after the write. Monitoring controls whether server-metrics telemetry is emitted on a 30-second cadence. Reports 'monitoring: unavailable' when no telemetry store is wired (stdio mode, test contexts) — never fabricates enabled/disabled.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Optional: the monitoring flag to set. Omit to read the current state without mutating it. true enables telemetry emission; false disables it."
+                }
+            }),
+            json!([])
+        )))
     })
 }
 

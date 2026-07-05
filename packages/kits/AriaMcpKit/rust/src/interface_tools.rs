@@ -59,6 +59,7 @@ use crate::dispatch::{
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::session_protocol::ARIA_SESSION_PROTOCOL;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 
@@ -111,6 +112,9 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_estate_status",
     "moot_estate_map",
     "moot_estate_ping",
+    // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
+    // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
+    "moot_monitoring_status",
     // Maintenance (3)
     "moot_reindex",
     "moot_drain_status",
@@ -322,18 +326,29 @@ fn strip_enum_prefix(reason: &str) -> &str {
 ///   - Dereference verbs — to trigger reward-trace marking when a surfaced
 ///     drawer id is subsequently acted upon (B-10a trace-reward wiring).
 ///   - `run_estate_status` — to include the trace row count in the status output.
+///
+/// `sensitivity_ledger` is the process-scoped ADR-025 grant ledger, also
+/// owned by the `Dispatcher` (mirrors Swift `ToolDispatcher.runMemorySearch`/
+/// `runMemoryGet`'s `sensitivityUnlockLedger` threading). Passed to
+/// `run_memory_search` and `run_memory_get` so a live restricted/secret
+/// grant lifts the substrate's default sensitivity ceiling for those two
+/// read paths.
 pub fn dispatch(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    sensitivity_ledger: &SensitivityGrantLedger,
     build_serial: &str,
     version_skew: &str,
+    // ADR-025 wave 8.2: monitoring seam injected from the serve host.
+    // None when no stats store wired — moot_monitoring_status reports "unavailable".
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
         "moot_file_memory" => run_file_memory(args, registry),
-        "moot_memory_search" => run_memory_search(args, registry, ledger),
-        "moot_memory_get" => run_memory_get(args, registry),
+        "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger),
+        "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger),
         "moot_update_memory" => run_update_memory(args, registry, ledger),
         "moot_withdraw_memory" => run_withdraw_memory(args, registry, ledger),
         "moot_erase_memory" => run_erase_memory(args, registry),
@@ -354,6 +369,8 @@ pub fn dispatch(
         "moot_estate_map" => run_estate_map(args, registry),
         // Pass build_serial so the pong includes the build segment.
         "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew),
+        // Monitoring control (ADR-025 wave 8.2) — pass the injected seam.
+        "moot_monitoring_status" => run_monitoring_status(args, monitoring_control),
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
@@ -485,6 +502,22 @@ fn run_file_memory(
     }
 }
 
+/// `true` if `f` constrains sensitivity anywhere in its structure (directly,
+/// nested under `All`/`Any`, or negated). Used to suppress the ADR-025
+/// grant-ceiling injection when the caller's own `filter` argument already
+/// specifies a sensitivity constraint — an explicit caller constraint
+/// always wins over the grant-lifted default. Mirrors Swift
+/// `ToolDispatcher.isSensitivityFilter` exactly.
+fn is_sensitivity_filter(f: &locus_kit::filter::Filter) -> bool {
+    use locus_kit::filter::Filter;
+    match f {
+        Filter::Sensitivity(_) | Filter::SensitivityAtMost(_) => true,
+        Filter::All(fs) | Filter::Any(fs) => fs.iter().any(is_sensitivity_filter),
+        Filter::Not(inner) => is_sensitivity_filter(inner),
+        _ => false,
+    }
+}
+
 /// Search memories in the estate using hybrid BM25+vector scored recall.
 ///
 /// Requires `query`. Optional `scoring` (raw/rrf/matrixAware, default
@@ -508,6 +541,7 @@ fn run_memory_search(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    sensitivity_ledger: &SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use genius_locus_kit::recall::{
         GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
@@ -572,6 +606,26 @@ fn run_memory_search(
     // hydration (the RecallFrame default) strips content blobs and would
     // render every result as an empty-content preview.
     let mut filter_chain = decode_filter_chain(args)?;
+    // Wall-clock time for this request, hoisted here (rather than the later
+    // call site this replaces) so the SAME instant gates both the ADR-025
+    // grant check below and `recall_scored` further down — one request, one
+    // `now`. Mirrors Swift `runMemorySearch`'s identical hoist.
+    let now = wall_now();
+    // ADR-025 sensitivity unlock: when a restricted/secret grant is live,
+    // inject the grant-lifted ceiling explicitly. This is the seam
+    // `BitmapEvaluator::insert_defaults` documents: conditional on absence
+    // so an explicit caller sensitivity constraint suppresses this default
+    // — by appending our own `SensitivityAtMost` here, the substrate's own
+    // narrower default (`Elevated`) never gets inserted. Only applies when
+    // the caller's `filter` argument did not already specify a sensitivity
+    // constraint of its own. Mirrors Swift `runMemorySearch` exactly.
+    let mut sensitivity_ceiling_lifted = false;
+    if !filter_chain.iter().any(is_sensitivity_filter) {
+        if let Some(ceiling) = sensitivity_ledger.ceiling_sensitivity(now) {
+            filter_chain.push(locus_kit::filter::Filter::SensitivityAtMost(ceiling));
+            sensitivity_ceiling_lifted = true;
+        }
+    }
     // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
     // When absent, recall spans all wings (existing default behavior unchanged).
     // Appended to the filter chain so it composes with any explicit filter arg.
@@ -592,8 +646,13 @@ fn run_memory_search(
         .with_query_text(query.to_string())
         .external(); // B-10a: ARIA boundary is external origin
 
-    let now = wall_now();
-    let coord = estate.coord.lock().unwrap();
+    // `mut`: ADR-025 §4 read-under-grant audit recording below needs a
+    // mutable coordinator borrow (audit append is a coordinator-owned
+    // HashMap mutation), in addition to the existing immutable
+    // `recall_scored`/`resolve_drawer_node_names` reads later in this
+    // function (both still work through the same `&mut` binding — a `mut`
+    // binding can call `&self` methods too).
+    let mut coord = estate.coord.lock().unwrap();
 
     let result = coord
         .recall_scored(&estate.handle, request, now)
@@ -606,6 +665,33 @@ fn run_memory_search(
         .collect();
     if !surfaced_ids.is_empty() {
         ledger.record_surfaced(&surfaced_ids, now);
+    }
+
+    // ADR-025 §4: record a sensitivity_read_under_grant audit entry for each
+    // hit admitted PAST the substrate's default ceiling specifically
+    // because a grant is live. Only rows whose OWN adjective sensitivity is
+    // restricted/secret qualify — an elevated-or-below row would have been
+    // admitted regardless of any grant, so recording it here would
+    // misrepresent "read under grant" as having happened when it did not.
+    // Gated on `sensitivity_ceiling_lifted` so a query with no live grant
+    // never emits. Mirrors Swift `runMemorySearch`'s identical guard.
+    if sensitivity_ceiling_lifted {
+        for hit in &result.hits {
+            let Some(drawer) = hit.drawer.as_ref() else { continue };
+            match drawer.adjective_sensitivity() {
+                locus_kit::adjectives::AdjectiveSensitivity::Restricted
+                | locus_kit::adjectives::AdjectiveSensitivity::Secret => {
+                    let _ = coord.record_sensitivity_read_under_grant(
+                        &estate.handle,
+                        drawer.adjective_sensitivity(),
+                        &drawer.id,
+                        now,
+                    );
+                }
+                locus_kit::adjectives::AdjectiveSensitivity::Normal
+                | locus_kit::adjectives::AdjectiveSensitivity::Elevated => {}
+            }
+        }
     }
 
     // Compute discrimination over the full ordered hit list before the display
@@ -644,13 +730,13 @@ fn run_memory_search(
         // (state/trust/adjective_sensitivity, bits 6-11, via
         // BitmapEvaluator's default insertion) — the same gate this tool
         // applies to admit a row into `result.hits` at all. The provenance
-        // `Sensitivity` checked here (bits 30-35) is a SEPARATE, Rust-only
-        // preview redaction with no Swift twin today (Swift's
-        // `runMemorySearch` always shows the raw 120-char preview
-        // regardless of provenance sensitivity) — a pre-existing port
-        // divergence, not something moot_memory_get's gate is scoped to
-        // reconcile. moot_memory_get's own gate is byte-for-byte the same
-        // adjective-axis default both ports' moot_memory_search already use.
+        // `Sensitivity` checked here (bits 30-35) is a SEPARATE preview
+        // redaction — Swift's `runMemorySearch` now applies the identical
+        // redaction (search-redaction parity fix, Wave 6; previously a
+        // Rust-only behavior) — not something moot_memory_get's gate is
+        // scoped to reconcile. moot_memory_get's own gate is byte-for-byte
+        // the same adjective-axis default both ports' moot_memory_search
+        // already use.
         let preview: String = hit.drawer.as_ref().map(|d| {
             use locus_kit::provenance::Sensitivity;
             match d.sensitivity() {
@@ -700,6 +786,21 @@ fn run_memory_search(
         format!("degraded_stages:[{}]", result.degraded_stages.join(","))
     };
     lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
+    // ADR-025 §4: redaction advisory stat (Wave 7.4).
+    // When no grant is active, check cheaply whether the estate holds any
+    // restricted or secret rows. If so, append an advisory so the AI client
+    // knows results may be incomplete and how to request access.
+    // Gated on `!sensitivity_ceiling_lifted` — when a grant IS live, the rows
+    // are already included and no advisory is appropriate.
+    // The stat uses a limit-1 LocusOnly scan with no query text (origin:
+    // Internal — no trace rows, B-10a). See `has_sensitive_rows`.
+    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+        lines.push(
+            "sensitivity_advisory: results may be hidden by sensitivity tier — \
+             run `mootx01 unlock private` to include restricted memories, \
+             `mootx01 unlock secret` for secret memories.".to_string()
+        );
+    }
     Ok(text_result(&lines.join("\n")))
 }
 
@@ -733,16 +834,35 @@ fn run_memory_search(
 fn run_memory_get(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
+    sensitivity_ledger: &SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let row_id = require_string(args, "id")?;
 
-    let coord = estate.coord.lock().unwrap();
+    // `mut`: ADR-025 §4 read-under-grant audit recording below needs a
+    // mutable coordinator borrow. `locus_estate`'s immutable borrow (just
+    // below) ends at its last use (`get_drawers_matching_frame`), well
+    // before the mutable audit call, so this does not conflict — same
+    // pattern as `run_memory_search` above.
+    let mut coord = estate.coord.lock().unwrap();
     let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
     })?;
 
-    let mut frame = RecallFrame::new(vec![]);
+    let now = wall_now();
+    // ADR-025 sensitivity unlock: same grant-ceiling injection as
+    // run_memory_search — see that function's comment. moot_memory_get
+    // deliberately uses the SAME containment gate moot_memory_search does,
+    // so the grant must lift it here too, or an unlocked restricted/secret
+    // row would be visible in search but still "not found" by id — an
+    // inconsistent, confusing half-unlock. Mirrors Swift `runMemoryGet`.
+    let mut filter_chain: Vec<locus_kit::filter::Filter> = vec![];
+    let mut sensitivity_ceiling_lifted = false;
+    if let Some(ceiling) = sensitivity_ledger.ceiling_sensitivity(now) {
+        filter_chain.push(locus_kit::filter::Filter::SensitivityAtMost(ceiling));
+        sensitivity_ceiling_lifted = true;
+    }
+    let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
     let filtered = locus_estate
         .get_drawers_matching_frame(&[row_id.to_string()], &frame)
@@ -757,6 +877,25 @@ fn run_memory_get(
             format!("Memory not found: {row_id}"),
         ));
     };
+
+    // ADR-025 §4: same read-under-grant audit recording as
+    // run_memory_search — gated on BOTH the ceiling having been lifted AND
+    // the drawer's own sensitivity actually being restricted/secret.
+    if sensitivity_ceiling_lifted {
+        match drawer.adjective_sensitivity() {
+            locus_kit::adjectives::AdjectiveSensitivity::Restricted
+            | locus_kit::adjectives::AdjectiveSensitivity::Secret => {
+                let _ = coord.record_sensitivity_read_under_grant(
+                    &estate.handle,
+                    drawer.adjective_sensitivity(),
+                    &drawer.id,
+                    now,
+                );
+            }
+            locus_kit::adjectives::AdjectiveSensitivity::Normal
+            | locus_kit::adjectives::AdjectiveSensitivity::Elevated => {}
+        }
+    }
 
     // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via the
     // node tree, same pattern as every other read tool in this file.
@@ -805,7 +944,62 @@ fn run_memory_get(
     // tool exists to return.
     lines.push("content:".to_string());
     lines.push(drawer.content.clone());
+    // ADR-025 §4: redaction advisory stat (Wave 7.4) — same logic as
+    // run_memory_search. When no grant is active, surface an advisory if the
+    // estate contains any restricted/secret rows the default gate suppresses.
+    // Consistent with search so the AI client receives the same hint from
+    // both tools. Mirrors Swift ToolDispatcher.runMemoryGet.
+    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+        lines.push(
+            "sensitivity_advisory: some memories may be hidden by sensitivity tier — \
+             run `mootx01 unlock private` to include restricted memories, \
+             `mootx01 unlock secret` for secret memories.".to_string()
+        );
+    }
     Ok(text_result(&lines.join("\n")))
+}
+
+/// Returns `true` if the estate has at least one row tagged restricted or secret.
+///
+/// Used by `run_memory_search` and `run_memory_get` to decide whether to append a
+/// sensitivity advisory (ADR-025 §4, Wave 7.4). The advisory tells the AI client
+/// that results may be incomplete and how to unlock the hidden tier.
+///
+/// Implementation: two limit-1 `GLKRecallRequest` probes with explicit
+/// `Filter::Sensitivity(tier)` — these filters suppress the default
+/// `sensitivityAtMost(Elevated)` gate (see `BitmapEvaluator::insert_defaults`),
+/// so restricted/secret rows become visible for counting. Mode `LocusOnly` +
+/// scoring `Raw` skips the BM25/vector pipeline — a pure bitmap filter probe.
+///
+/// Origin defaults to `RecallOrigin::Internal` (the builder default) — must NOT
+/// write recall-trace rows (B-10a: only the ARIA_MCP external boundary sets External).
+fn has_sensitive_rows(estate: &crate::estate_registry::OpenEstate, now: i64) -> bool {
+    use genius_locus_kit::recall::{
+        GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
+    };
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::filter::{Filter, RecallFrame};
+
+    let coord = estate.coord.lock().unwrap();
+    for tier in &[AdjectiveSensitivity::Restricted, AdjectiveSensitivity::Secret] {
+        // Limit 1: stop at first match — no need to count.
+        let mut frame = RecallFrame::new(vec![Filter::Sensitivity(*tier)]);
+        // Structured hydration (default): no content body needed — existence check only.
+        // Limit: 1 — stops at the first matching row.
+        frame.limit = Some(1);
+        let request = GLKRecallRequest::new(frame)
+            .with_mode(GLKRecallMode::LocusOnly) // Skip BM25/vector — pure bitmap probe.
+            .with_scoring(GLKRecallScoring::Raw) // No matrix scoring needed.
+            .with_limit(1);
+        // A failed call is treated as "no sensitive rows" — fail-safe:
+        // don't surface the advisory when we can't confirm sensitive rows exist.
+        if let Ok(result) = coord.recall_scored(&estate.handle, request, now) {
+            if !result.hits.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Note that a drawer id was "used" (acted upon) by a dereference verb.
@@ -1907,6 +2101,68 @@ fn run_estate_ping(
         pong.push_str(&format!("\nversion_skew: {version_skew}"));
     }
     Ok(text_result(&pong))
+}
+
+// ===========================================================================
+// Monitoring control (ADR-025 wave 8.2)
+// ===========================================================================
+
+/// Read or write the daemon's telemetry monitoring flag.
+///
+/// ## Read path (absent `enabled` argument)
+/// Returns the current effective monitoring state without mutation.
+///
+/// ## Write path (present `enabled: bool` argument)
+/// Persists `enabled` via the injected `MonitoringControl` and reports the
+/// new effective state. The concrete implementation (`StatsStoreMonitoringControl`)
+/// also writes `monitoring_source=user` so downstream readers can distinguish
+/// operator-driven changes from env-var or default-seeded state.
+///
+/// ## No-store case
+/// When `monitoring_control` is `None` (stdio mode, test harnesses, provision-less
+/// contexts), the tool reports `monitoring: unavailable` and never fabricates a
+/// false enabled/disabled state. Mirrors B-6 honesty discipline.
+///
+/// Mirrors Swift `ToolDispatcher.runMonitoringStatus`.
+fn run_monitoring_status(
+    args: &BTreeMap<String, JsonValue>,
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let control = match monitoring_control {
+        Some(c) => c,
+        None => {
+            // No stats store wired — honest "unavailable" response. Never say
+            // "disabled" when the true answer is "no store to read from".
+            return Ok(text_result("monitoring: unavailable (no telemetry store wired)"));
+        }
+    };
+
+    // Write path: `enabled` argument present → set flag, return new state.
+    if let Some(enabled) = optional_bool(args, "enabled")? {
+        control.set(enabled);
+        // Re-read the persisted value so the response reflects what was actually
+        // written, not just what was requested.
+        let effective = control.read();
+        let state_str = match effective {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "unavailable",
+        };
+        let mut lines = format!("monitoring: {state_str}\nmonitoring_source: user");
+        if effective.is_none() {
+            lines.push_str("\nwarning: flag was written but could not be re-read; retry moot_monitoring_status to confirm");
+        }
+        return Ok(text_result(&lines));
+    }
+
+    // Read path: no `enabled` argument → report current state only.
+    let current = control.read();
+    let state_str = match current {
+        Some(true) => "enabled",
+        Some(false) => "disabled",
+        None => "unavailable",
+    };
+    Ok(text_result(&format!("monitoring: {state_str}")))
 }
 
 // ===========================================================================

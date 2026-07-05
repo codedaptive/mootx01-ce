@@ -16,7 +16,7 @@
 
 [package]
 name = "mootx01-cli"
-version = "1.0.16"
+version = "1.0.17"
 edition = "2021"
 rust-version = "1.75"
 description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
@@ -53,3 +53,7 @@ queuekit = { path = "../../../packages/kits/QueueKit/rust", features = ["persist
 # uuid: per-process instance token for the dreaming DrainLease — prevents
 # a reused PID after a crash from impersonating the prior lease holder.
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# tempfile: temporary directories for sensitivity_hashes unit tests.
+tempfile = "3"

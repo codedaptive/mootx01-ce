@@ -266,12 +266,15 @@ fn read_line_capped<R: BufRead>(reader: &mut R) -> Option<String> {
 /// `MAX_FRAME_BYTES` without a newline the loop exits cleanly. The peer
 /// is expected to reconnect; the process does not crash or grow without bound.
 pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: ServerConfig) {
+    // stdio mode: no stats store → monitoring_control = None.
+    // moot_monitoring_status will report "unavailable" in this transport.
     let dispatcher = Dispatcher::new(
         config.registry,
         &config.server_name,
         &config.server_version,
         &config.build_serial,
         &config.version_skew,
+        None,
     );
     let mut buf = BufReader::new(reader);
 

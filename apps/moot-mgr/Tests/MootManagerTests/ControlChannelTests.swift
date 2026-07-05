@@ -154,20 +154,22 @@ struct ControlChannelVerbTests {
         defer { Task { await host.stop() } }
         let manager = host.managerHandle()
 
-        // Default off.
+        // Wave 8.1: StatsStore seeds monitoring=ON by default on fresh open.
+        #expect(try await manager.isMonitoring() == true)
+
+        // Flip OFF via control channel.
+        let offResp = await udsRoundTrip(socketPath: path,
+                                             request: "/api/control/monitoring/off\n")
+        #expect(offResp.contains("\"ok\":true"))
         #expect(try await manager.isMonitoring() == false)
 
+        // Flip back ON via control channel.
         let onResp = await udsRoundTrip(socketPath: path,
                                             request: "/api/control/monitoring/on\n")
         #expect(onResp.contains("\"ok\":true"))
         #expect(try await manager.isMonitoring() == true)
         let cfgOn = try await manager.configPayload()
         #expect(cfgOn.monitoringEnabled == true)
-
-        let offResp = await udsRoundTrip(socketPath: path,
-                                             request: "/api/control/monitoring/off\n")
-        #expect(offResp.contains("\"ok\":true"))
-        #expect(try await manager.isMonitoring() == false)
     }
 
     @Test("set retention over UDS updates the effective window and /api/config")

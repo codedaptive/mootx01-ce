@@ -158,6 +158,28 @@ public enum MootPaths {
             .appendingPathComponent("mootx01", isDirectory: false)
     }
 
+    /// Absolute path of the same-directory proxy symlink. The symlink sits
+    /// beside the placed binary in `~/.mootx01/bin/` so that `Bundle.main`
+    /// resource resolution works identically whether the process was launched
+    /// as `mootx01` or `mootx01-proxy` (both resolve to the same install
+    /// directory). Clients whose config schema cannot express a bare
+    /// `command` + separate `args` array use this entry as the bare command
+    /// — the argv0 name `mootx01-proxy` triggers `ArgvDispatch` to invoke
+    /// the `proxy` subcommand automatically.
+    ///
+    /// Same-directory placement is load-bearing: `Bundle.main.bundleURL`
+    /// resolves relative to the executable path, so the symlink MUST live
+    /// next to the binary (not in `~/.local/bin/`).
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.mootx01/bin/mootx01-proxy`. Does not touch
+    ///   the filesystem.
+    public static func proxySymlinkURL(homeDirectory: URL) -> URL {
+        installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("mootx01-proxy", isDirectory: false)
+    }
+
     /// URL of the project-local Claude Code settings file.
     ///
     /// When `--local` is used during install, Claude Code is wired to

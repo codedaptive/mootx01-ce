@@ -175,12 +175,13 @@ struct MootManagerMonitoringTests {
         let manager = try await makeStartedManager()
         defer { Task { await manager.stop() } }
 
-        // Default off (StatsStore seeds "0").
-        #expect(try await manager.isMonitoring() == false)
-        try await manager.setMonitoring(true)
+        // Wave 8.1: StatsStore seeds monitoring=ON (1) by default on fresh open.
         #expect(try await manager.isMonitoring() == true)
         try await manager.setMonitoring(false)
         #expect(try await manager.isMonitoring() == false)
+        // Confirm round-trip back to ON.
+        try await manager.setMonitoring(true)
+        #expect(try await manager.isMonitoring() == true)
     }
 
     @Test("Monitoring switch persists across a manager restart (same store path)")
@@ -326,6 +327,10 @@ struct MootManagerStatusTests {
         let manager = try await makeStartedManager()
         defer { Task { await manager.stop() } }
         let store = try await manager.statsStore()
+
+        // Wave 8.1 seeds monitoring ON by default; this test verifies the
+        // monitoring-OFF render path, so explicitly disable it.
+        try await manager.setMonitoring(false)
 
         // Two dropboxes, two estates.
         try await store.insertMetric(name: "m1", value: 1, tags: [:], ts: 100, dropboxID: "a")

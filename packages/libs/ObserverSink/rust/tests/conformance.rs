@@ -69,14 +69,43 @@ fn schema_version() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Control rows seeded on open
+// 2. Control rows seeded on open — wave 8.1: monitoring defaults ON
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn control_rows_seeded_on_open() {
     let store = make_store();
     let monitoring_on = store.is_monitoring_enabled().expect("is_monitoring_enabled");
-    assert!(!monitoring_on, "Expected monitoring off by default");
+    // Wave 8.1: monitoring defaults to ON for new estates.
+    assert!(monitoring_on, "Expected monitoring ON by default (wave 8.1)");
+}
+
+/// Wave 8.1: setMonitoringEnabled writes monitoring_source="user" so the
+/// one-time migration in open() never reverts an explicit operator choice.
+/// Mirrors Swift `monitoringUserSourceMarkerPreventsRevert`.
+#[test]
+fn monitoring_user_source_marker_prevents_revert() {
+    // Open a named path so we can re-open it and test migration.
+    let path = make_temp_path();
+    let store1 = StatsStore::new(&path).expect("StatsStore::new");
+    store1.open().expect("open");
+
+    // Fresh estate: monitoring defaults ON, source=default.
+    assert!(store1.is_monitoring_enabled().expect("is_monitoring_enabled"));
+
+    // Operator explicitly turns monitoring off → source becomes "user".
+    store1.set_monitoring_enabled(false).expect("set false");
+    assert!(!store1.is_monitoring_enabled().expect("is_monitoring_enabled"));
+    store1.close().expect("close");
+
+    // Re-open: migration must NOT flip monitoring back to "1" because source="user".
+    let store2 = StatsStore::new(&path).expect("StatsStore::new");
+    store2.open().expect("open");
+    assert!(
+        !store2.is_monitoring_enabled().expect("is_monitoring_enabled"),
+        "User-set monitoring=off must survive a store re-open (wave 8.1 migration must not revert it)"
+    );
+    store2.close().expect("close");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,16 +116,16 @@ fn control_rows_seeded_on_open() {
 fn monitoring_flag_round_trip() {
     let store = make_store();
 
-    // Default: off.
-    assert!(!store.is_monitoring_enabled().unwrap());
-
-    // Enable.
-    store.set_monitoring_enabled(true).unwrap();
-    assert!(store.is_monitoring_enabled().unwrap());
+    // Wave 8.1 default: ON.
+    assert!(store.is_monitoring_enabled().unwrap(), "Expected monitoring ON by default (wave 8.1)");
 
     // Disable.
     store.set_monitoring_enabled(false).unwrap();
     assert!(!store.is_monitoring_enabled().unwrap());
+
+    // Re-enable.
+    store.set_monitoring_enabled(true).unwrap();
+    assert!(store.is_monitoring_enabled().unwrap());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +227,8 @@ fn sink_discards_when_monitoring_off() {
     let _lock = INTELLECTUS_TEST_LOCK.lock().unwrap();
 
     let store = make_store();
-    // monitoring stays off (default)
+    // Wave 8.1: monitoring defaults ON — disable explicitly to exercise the discard path.
+    store.set_monitoring_enabled(false).expect("set_monitoring_enabled(false)");
 
     let dropbox_id = "rust-test-dropbox-off";
     let sink = Arc::new(PersistenceStatsSink::new(Arc::clone(&store), dropbox_id.to_string()));
@@ -353,26 +383,26 @@ fn monitoring_flag_survives_reopen() {
         let store = StatsStore::new(&path).expect("StatsStore::new (first open)");
         store.open().expect("open (first open)");
 
-        // Default is off.
-        assert!(!store.is_monitoring_enabled().unwrap(), "Default must be off");
+        // Wave 8.1: default is ON.
+        assert!(store.is_monitoring_enabled().unwrap(), "Wave 8.1: default must be ON");
 
-        // Operator sets it to ON.
-        store.set_monitoring_enabled(true).unwrap();
-        assert!(store.is_monitoring_enabled().unwrap(), "Must be on after set");
+        // Operator turns it OFF — source becomes "user", migration must not flip it back.
+        store.set_monitoring_enabled(false).unwrap();
+        assert!(!store.is_monitoring_enabled().unwrap(), "Must be off after set");
 
         // Close — simulates process restart boundary.
         store.close().expect("close");
     }
 
-    // Second open: seed-if-absent must preserve the "1" the operator set.
+    // Second open: seed-if-absent + migration must preserve the operator's "0".
     {
         let store = StatsStore::new(&path).expect("StatsStore::new (reopen)");
         store.open().expect("open (reopen)");
 
-        // The monitoring flag must still be "1" — not reset to "0" by open().
+        // The monitoring flag must still be "0" — migration must not revert operator's choice.
         assert!(
-            store.is_monitoring_enabled().unwrap(),
-            "Monitoring flag must survive a close/reopen cycle (seed-if-absent)"
+            !store.is_monitoring_enabled().unwrap(),
+            "Operator-set monitoring=off must survive a close/reopen cycle (wave 8.1 migration guard)"
         );
     }
 }

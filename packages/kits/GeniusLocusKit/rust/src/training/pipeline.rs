@@ -128,7 +128,14 @@ impl EnrichmentPipeline {
                 | UnifiedAuditVerb::Associate
                 | UnifiedAuditVerb::Learn
                 | UnifiedAuditVerb::DreamCompact
-                | UnifiedAuditVerb::Migrate => None,
+                | UnifiedAuditVerb::Migrate
+                // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                // revoke/read-under-grant events, not drawer state
+                // transitions.
+                | UnifiedAuditVerb::SensitivityGrantIssued
+                | UnifiedAuditVerb::SensitivityGrantDenied
+                | UnifiedAuditVerb::SensitivityGrantRevoked
+                | UnifiedAuditVerb::SensitivityReadUnderGrant => None,
             };
             let Some(s) = sign else {
                 continue;

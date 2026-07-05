@@ -136,6 +136,22 @@ struct InstallCommand: AsyncParsableCommand {
                     print("  ✗ \(client.displayName): could not check for a competing direct entry: \(error)")
                 }
                 print("  ⓘ MOOTx01 plugin already installed — \(client.displayName) connects through it; skipping direct wiring.")
+                // Wave 6, Defect A (live 1.0.16 machine finding): the
+                // ADR-024 ownership skip above applies ONLY to the direct
+                // mcpServers entry. Before this fix, `continue` here left
+                // `client.displayName` out of `installed` entirely, and the
+                // depth loop below filters on `installed.contains(...)` —
+                // so a plugin-owned client got NO depth pass at all: no
+                // package rematerialization, no stranded-cache refresh.
+                // The stale stdio-era package in ~/.claude/mootx01-plugin
+                // (and Claude Code's stale cached snapshot) then survived
+                // every subsequent `mootx01 install` run forever, because
+                // the client silently never reached DepthInstaller.apply.
+                // A plugin-owned connection is exactly the case where the
+                // package must stay freshest, so this client counts as
+                // "installed" (its MCP wiring succeeded — via the plugin,
+                // not a direct entry) and proceeds to the depth pass below.
+                installed.append(client.displayName)
                 continue
             }
             do {
@@ -230,7 +246,10 @@ struct InstallCommand: AsyncParsableCommand {
         // add the canonical SKILL.md / pre-generated package per client. The
         // depth is a target — each client gets the most it supports, and any
         // plugin→skills fallback is reported (the §4.4 ceiling table). Applied
-        // only to clients whose MCP wiring succeeded.
+        // to every client whose MCP wiring succeeded — direct OR plugin-owned
+        // (Wave 6, Defect A: a plugin-owned client's connection ownership is
+        // NOT a reason to skip this pass; it is the reason the package must
+        // stay freshest — Claude Code is the plugin's own host).
         if depth != .server {
             print("")
             print("Integration depth: \(depth.rawValue)")

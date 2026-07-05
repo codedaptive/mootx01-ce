@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "mootx01-cli"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "aria-mcp",
  "libc",
@@ -987,6 +987,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "uuid",
 ]
 
