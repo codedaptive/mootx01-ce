@@ -1038,11 +1038,11 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
     // Grant the tier.
     match tier_raw.as_str() {
         "restricted" => {
-            // Pass UTC offset 0 -- Rust does not have stdlib TimeZone access.
-            // The CLI that issues the grant knows the local offset; for now
-            // we default to UTC. Wave 7.2 will thread the offset through the
-            // unlock request body so the daemon can grant the correct local midnight.
-            dispatcher.sensitivity_ledger.grant_restricted(now_ms, 0);
+            // ADR-025 §1: restricted grants expire at LOCAL midnight, not UTC.
+            // Derive the local UTC offset at grant time via POSIX localtime_r.
+            let now_secs = now_ms / 1000;
+            let tz_offset = local_utc_offset_seconds(now_secs);
+            dispatcher.sensitivity_ledger.grant_restricted(now_ms, i64::from(tz_offset));
         }
         "secret" => {
             dispatcher.sensitivity_ledger.grant_secret(now_ms);
@@ -1122,6 +1122,51 @@ fn wall_now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Returns the local UTC offset in whole seconds via POSIX `localtime_r`.
+///
+/// ADR-025 §1 requires restricted grants to expire at LOCAL midnight, not
+/// UTC midnight. This offset is passed to `grant_restricted` so it can
+/// compute the correct local-midnight boundary.
+///
+/// Uses a bare `extern "C"` declaration rather than the `libc` crate
+/// (which is not a dependency of this kit) — the POSIX C runtime is always
+/// linked on macOS and Linux. Falls back to 0 (UTC) if the call fails.
+fn local_utc_offset_seconds(now_secs: i64) -> i32 {
+    // POSIX struct tm layout — we only need tm_gmtoff (offset east of UTC).
+    // Matches the layout on 64-bit macOS and Linux (glibc + musl).
+    #[repr(C)]
+    struct Tm {
+        tm_sec:   i32,
+        tm_min:   i32,
+        tm_hour:  i32,
+        tm_mday:  i32,
+        tm_mon:   i32,
+        tm_year:  i32,
+        tm_wday:  i32,
+        tm_yday:  i32,
+        tm_isdst: i32,
+        // Padding between tm_isdst and tm_gmtoff differs by platform.
+        // macOS: no padding. Linux (glibc/musl): no padding on 64-bit.
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        _padding: i32,
+        tm_gmtoff: i64,       // seconds east of UTC (POSIX extension)
+        tm_zone:   *const i8, // timezone abbreviation pointer (not used)
+    }
+
+    extern "C" {
+        // time_t is i64 on all 64-bit POSIX targets we ship to.
+        fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+
+    let mut tm: Tm = unsafe { std::mem::zeroed() };
+    let ret = unsafe { localtime_r(&now_secs, &mut tm) };
+    if ret.is_null() {
+        return 0; // system call failed — fall back to UTC
+    }
+    // tm_gmtoff is seconds east of UTC; saturate to i32 (safe: max ±50400).
+    tm.tm_gmtoff as i32
 }
 
 /// Serialize a JSON-RPC error object (null id) to bytes.
@@ -1393,5 +1438,26 @@ mod tests {
     fn ms_to_iso8601_utc_sub_second_truncated() {
         // 500 ms into the epoch: still 1970-01-01T00:00:00Z (truncated to seconds)
         assert_eq!(ms_to_iso8601_utc(500), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn local_utc_offset_returns_i32_in_valid_range() {
+        // ADR-025 §1: grant_restricted passes the local UTC offset so grants
+        // expire at LOCAL midnight, not UTC midnight. The offset must be a
+        // plausible value: within ±50400 seconds (±14 hours, the widest real
+        // IANA timezone offset). On CI/test boxes this is typically 0 (UTC),
+        // on developer machines it may vary — we only verify the range.
+        let now_secs = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        };
+        let offset = super::local_utc_offset_seconds(now_secs);
+        assert!(
+            (-50_400..=50_400).contains(&offset),
+            "local_utc_offset_seconds returned {offset}, outside ±14h range"
+        );
     }
 }
