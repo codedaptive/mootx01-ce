@@ -110,23 +110,14 @@ jobs:
           tar -tzf "$asset" | grep -qx 'mootx01' || { echo "no mootx01 in archive"; exit 1; }
           [ "${{ matrix.arch }}" = "arm64" ] && ./mootx01 --version || true
 
-          # Build the UNSIGNED .pkg installer too, so the .pkg path is a testable
-          # pre-release artifact — not first built (signed) at release time and
-          # shipped to users untested (which is how a broken .pkg shipped).
-          # build-pkg.sh warns-and-proceeds without signing identities.
-          swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup $archflag
-          SETUP_BIN="$(find apps/Mootx01-Setup/.build -name Mootx01Setup -path '*/release/Mootx01Setup' | head -1)"
-          bash distribution/macos/build-pkg.sh \
-            "${{ needs.meta.outputs.tag }}" "${{ matrix.arch }}" "$MOOT_BIN" "$MGR_BIN" "$SETUP_BIN"
-          pkg="mootx01-${{ needs.meta.outputs.tag }}-macos-${{ matrix.arch }}.pkg"
-          [ -f "$pkg" ] || { echo "✗ .pkg not produced"; exit 1; }
-          echo "PKG=$pkg" >> "$GITHUB_ENV"
+          # Do not build or publish .pkg installers from the candidate workflow.
+          # distribution/macos/build-pkg.sh permits unsigned packages only for
+          # unpublished local layout testing; public root-authorized .pkg assets
+          # must be signed and notarized by the release workflow.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-${{ matrix.arch }}
-          path: |
-            ${{ env.ASSET }}
-            ${{ env.PKG }}
+          path: ${{ env.ASSET }}
 
   # ── Unsigned Linux builds (x86_64 + arm64) ──────────────────────────────────
   linux:
@@ -234,7 +225,7 @@ jobs:
           MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
         run: |
           mkdir -p flat
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' \) \
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \) \
             -exec cp {} flat/ \;
           ( cd flat && sha256sum * > ../checksums.txt )
           cp checksums.txt flat/
