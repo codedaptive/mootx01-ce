@@ -221,6 +221,44 @@ struct GraphAPITests {
         #expect(communities.count <= 10_000)
         #expect(communities.count == 10_000)
     }
+
+    // Audit Finding #5 — the /api/graph endpoint chain proved end-to-end:
+    // governor writes a topology snapshot → moot-mgr reads it → HTTP response
+    // carries real structure (structurePending: false, nodes non-empty).
+    // Prior tests only exercised the pending path (no snapshot in store).
+    @Test("Graph endpoint returns real structure when a topology snapshot is present")
+    func graphEndpointReturnsRealStructureWhenSnapshotPopulated() async throws {
+        // Minimal valid StoredGraphPayload that the autonomic governor writes.
+        // The store accepts any UTF-8 bytes; we produce JSON that the governor
+        // would produce: structurePending:false, at least one node.
+        let snapshotJSON = Data("""
+        {"nodes":[{"id":"node-fixture-1","nounType":0,"communityId":0,
+          "centrality":0.5,"anomaly":false,"lastActiveTs":null,
+          "createdTs":"2020-01-01T00:00:00Z","tombstonedTs":null}],
+         "edges":[],
+         "structurePending":false,
+         "generatedTs":"2020-01-01T00:00:00Z"}
+        """.utf8)
+        let (host, port) = try await makeStartedHost { store in
+            // Write a topology snapshot for estate "fixture-estate" so the
+            // chain store.write → store.read → graphPayload → HTTP is exercised.
+            try await store.writeTopologySnapshot(
+                estate: "fixture-estate",
+                generatedAt: Date(timeIntervalSince1970: 1_577_836_800), // 2020-01-01
+                payload: snapshotJSON
+            )
+        }
+        defer { Task { await host.stop() } }
+
+        let obj = try await jsonObject(port: port, path: "/api/graph?estate=fixture-estate")
+
+        // Chain proved: structurePending must be false when a snapshot is present.
+        #expect((obj["structurePending"] as? Bool) == false)
+        // The governor's node must survive the round-trip.
+        let nodes = obj["nodes"] as? [[String: Any]] ?? []
+        #expect(nodes.count == 1)
+        #expect((nodes[0]["id"] as? String) == "node-fixture-1")
+    }
 }
 
 // MARK: - Topology renderer asset wiring
