@@ -110,6 +110,13 @@ public struct MootURLRouter: Sendable {
             if let value = item.value { arguments[item.name] = .string(value) }
         }
 
+        // x-callback-url is an unauthenticated cross-app surface. Recall must
+        // therefore use the same public/exportable privacy gate as public-only
+        // drawer recall, regardless of any caller-supplied filter.
+        if verb == "recall" {
+            arguments["filter"] = .string("exportable")
+        }
+
         let result = await caller.callTool(tool, arguments: arguments)
         let callbackBase = result.isError ? xError : xSuccess
 
