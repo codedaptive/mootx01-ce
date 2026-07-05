@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.12.0
+version: 1.13.0
 status: active
 date: 2026-07-05
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -822,6 +822,16 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.13.0 -- 2026-07-05
+ADR-025 wave 8.2: adds `moot_monitoring_status` to the interface-tool surface.
+Reifies the ARIA `read` verb on the monitoring object (estate-scoped, daemon
+daemon-global flag). Args: absent `enabled` → read current state; present
+`enabled: bool` → write flag + echo new state with `monitoring_source: user`.
+When no telemetry store is wired (stdio, test harnesses, provision-less
+contexts), reports `monitoring: unavailable` — never fabricates enabled/disabled.
+Permission tier: `ask` in both `mcp__mootx01__` and `mcp__plugin_mootx01_mootx01__`
+namespaces. Total tool count: 64 (was 63). Both Swift and Rust ports at parity.
 
 ### 1.12.0 -- 2026-07-05
 ADR-025: sensitivity unlock/lock control endpoints (§19). Adds

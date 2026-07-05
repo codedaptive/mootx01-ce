@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.17.0
+version: 1.18.0
 status: active
 date: 2026-07-05
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1122,6 +1122,20 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.18.0 -- 2026-07-05
+ADR-025 wave 8.2: `moot_monitoring_status` tool (§2 Tool projection, Tier 5 —
+Estate tools, monitoring-control entry). Injection pattern: `MonitoringControl`
+protocol (Swift) / trait (Rust) defined in AriaMcpKit; concrete implementation
+(`StatsStoreMonitoringControl`) in AriaResident (Swift) and `http_server.rs`
+(Rust). Read path: absent `enabled` arg returns current flag state. Write path:
+present `enabled: bool` persists the flag via `StatsStore.setMonitoringEnabled` /
+`set_monitoring_enabled` (wave 8.1 API), echoes new state with
+`monitoring_source: user` line. No-store case: returns `monitoring: unavailable`
+— never fabricates state. Permission tier: `ask` in both namespace prefixes.
+Wave 8.3 smoke: `HTTPReadAPITests.freshStoreMonitoringDefaultIsEnabled` verifies
+fresh StatsStore seeds monitoring=ON (wave 8.1 regression gate). Tool count: 64
+(Swift and Rust at parity).
 
 ### 1.17.0 -- 2026-07-05
 ADR-025 sensitivity unlock/lock control endpoints (§4.6). Documents
