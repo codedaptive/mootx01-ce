@@ -5,10 +5,21 @@
 // temp dir; the real estate and ~/.mempalace are never touched.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use moot_mgr::manager::{epoch_to_iso8601, ManagerError, MootManager};
 use moot_mgr::manager_cli::{self, ManagerCommand};
 use moot_mgr::manager_config::ManagerConfig;
+
+/// Guard for tests that mutate the `ARIA_MCP_API_BASE` environment variable.
+///
+/// `std::env::set_var` is not thread-safe in a process with multiple threads
+/// (Rust's test harness runs integration-test functions in parallel by default).
+/// Any test that sets and removes ARIA_MCP_API_BASE must hold this mutex for the
+/// entire operation — from `set_var` through `remove_var` — to prevent its
+/// value being overwritten mid-flight by a concurrently running test that also
+/// needs to temporarily point the proxy at a different address.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// A fresh, unique scratch store path inside its OWN temp directory.
 ///
@@ -449,11 +460,15 @@ fn proxy_lattice_parse_valid_daemon_response() {
         }
     });
 
-    // Point the daemon_client at our echo server via the env var.
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
-    let snap = moot_mgr::manager::proxy_lattice_snapshot();
-    // Reset env so other tests aren't affected.
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle so no concurrent test
+    // can overwrite ARIA_MCP_API_BASE while proxy_lattice_snapshot() is running.
+    let snap = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
+        let snap = moot_mgr::manager::proxy_lattice_snapshot();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        snap
+    };
 
     handle.join().unwrap();
 
@@ -473,9 +488,14 @@ fn proxy_lattice_degrades_on_closed_port() {
     let closed_port = l.local_addr().unwrap().port();
     drop(l);
 
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
-    let snap = moot_mgr::manager::proxy_lattice_snapshot();
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle.
+    let snap = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
+        let snap = moot_mgr::manager::proxy_lattice_snapshot();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        snap
+    };
 
     assert!(snap.pending, "closed port must degrade to pending=true");
     assert!(snap.addresses.is_empty(), "degraded state must have empty addresses");
@@ -503,9 +523,14 @@ fn proxy_admin_estates_parse_valid_daemon_response() {
         }
     });
 
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
-    let result = moot_mgr::manager::proxy_admin_estates();
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle.
+    let result = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
+        let r = moot_mgr::manager::proxy_admin_estates();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        r
+    };
 
     handle.join().unwrap();
 
@@ -523,9 +548,14 @@ fn proxy_admin_estates_returns_none_on_closed_port() {
     let closed_port = l.local_addr().unwrap().port();
     drop(l);
 
-    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
-    let result = moot_mgr::manager::proxy_admin_estates();
-    std::env::remove_var("ARIA_MCP_API_BASE");
+    // Hold ENV_LOCK for the entire set→call→remove cycle.
+    let result = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
+        let r = moot_mgr::manager::proxy_admin_estates();
+        std::env::remove_var("ARIA_MCP_API_BASE");
+        r
+    };
 
     assert!(result.is_none(), "closed port must degrade to None");
 }
