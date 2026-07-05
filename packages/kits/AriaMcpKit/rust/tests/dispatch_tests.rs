@@ -92,6 +92,34 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
         .to_owned()
 }
 
+fn file_one_memory_with_provenance_sensitivity(
+    registry: &EstateRegistry,
+    content: &str,
+    location: &str,
+    sensitivity: locus_kit::provenance::Sensitivity,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        location,
+        LatticeAnchor::udc("004"),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.provenance_sensitivity = sensitivity;
+
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("provenance-sensitive capture must succeed");
+    drawer.id.clone()
+}
+
 // ---------------------------------------------------------------------------
 // 1. tools/list surface assertions — 63 tools exact
 // ---------------------------------------------------------------------------
@@ -1040,6 +1068,55 @@ fn memory_get_withdrawn_drawer_is_reported_not_found() {
     assert!(
         err.message.contains("Memory not found") && err.message.contains(&id),
         "withdrawn drawer must produce the standard not-found shape; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn memory_get_provenance_secret_drawer_is_reported_not_found() {
+    // Regression: moot_memory_search redacts provenance Secret/Restricted
+    // previews, so moot_memory_get must not let a caller use the surfaced id as
+    // a second door to read the full verbatim body without an explicit grant.
+    let registry = EstateRegistry::new_inmemory_bare();
+    let secret = "provenance-secret body must not leak through memory-get";
+    let id = file_one_memory_with_provenance_sensitivity(
+        &registry,
+        secret,
+        "vault",
+        locus_kit::provenance::Sensitivity::Secret,
+    );
+
+    let search = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "provenance-secret"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_search must not throw");
+    assert!(is_success(&search), "memory_search must succeed; got: {search:?}");
+    let search_text = content_text(&search);
+    assert!(
+        search_text.contains(&id),
+        "search should still surface the row id for ranking; got: {search_text}"
+    );
+    assert!(
+        search_text.contains("[sensitivity: secret") && !search_text.contains(secret),
+        "search must redact the secret body while surfacing the id; got: {search_text}"
+    );
+
+    let err = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("provenance-secret drawer must be reported not-found, not returned");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("Memory not found")
+            && err.message.contains(&id)
+            && !err.message.contains(secret),
+        "secret drawer must use the standard not-found shape without leaking content; got: {}",
         err.message
     );
 }
