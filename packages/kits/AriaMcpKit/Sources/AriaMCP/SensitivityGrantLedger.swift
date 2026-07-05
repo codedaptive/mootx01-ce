@@ -117,6 +117,25 @@ actor SensitivityGrantLedger: Sendable {
         }
     }
 
+    /// The live tier and its expiry date, or `nil` if neither tier is granted.
+    ///
+    /// `expiresAt` is the instant the grant expires (exclusive: the grant is
+    /// live while `now < expiresAt`). Callers that surface this to a UI or API
+    /// response should format `expiresAt` as ISO8601 so the recipient can compute
+    /// the remaining window without relying on the daemon's clock directly.
+    ///
+    /// This is the safe read surface for `/api/control/grants` — the caller
+    /// does not need to know how restricted vs. secret expiry is stored.
+    func grantStateSnapshot(now: Date) -> (tier: SensitivityTier, expiresAt: Date)? {
+        if isSecretGranted(now: now), let until = secretGrantedUntil {
+            return (.secret, until)
+        }
+        if isRestrictedGranted(now: now), let until = restrictedGrantedUntil {
+            return (.restricted, until)
+        }
+        return nil
+    }
+
     /// The start of the calendar day strictly after `now`, in `calendar`.
     /// `now` at exactly local midnight still advances a full day forward
     /// (a grant issued at 00:00:00.000 lasts the full following day, not

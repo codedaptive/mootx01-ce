@@ -862,6 +862,10 @@ public struct HTTPServer: Sendable {
                 return await Self.adminEstatesSnapshot(dispatcher: dispatcher)
             case "/api/lattice":
                 return await Self.latticeSnapshot(dispatcher: dispatcher)
+            // ADR-025 §3: sensitivity-grant status, physically outside the
+            // JSON-RPC / MCP surface so prompt-injected models cannot reach it.
+            case "/api/control/grants":
+                return await Self.controlGrants(dispatcher: dispatcher)
             default:
                 return HTTPResponse(
                     status: 404,
@@ -877,6 +881,16 @@ public struct HTTPServer: Sendable {
                 headers: ["Content-Type": "application/json", "Allow": "POST"],
                 body: Data(#"{"error":"method_not_allowed"}"#.utf8)
             )
+        }
+
+        // ADR-025 §3: sensitivity-grant control routes. Handled BEFORE JSON-RPC
+        // parsing so they are structurally unreachable from the MCP tool surface —
+        // a prompt-injected model that calls tools/call cannot route here.
+        if request.path == "/api/control/unlock" {
+            return await Self.controlUnlock(request: request, dispatcher: dispatcher)
+        }
+        if request.path == "/api/control/lock" {
+            return await Self.controlLock(dispatcher: dispatcher)
         }
 
         let parsed: JSONValue
@@ -1161,6 +1175,162 @@ public struct HTTPServer: Sendable {
                 body: Data(#"{"hosted":[]}"#.utf8)
             )
         }
+    }
+
+    // MARK: - ADR-025 sensitivity-grant control endpoints
+
+    /// GET /api/control/grants
+    ///
+    /// Returns the current sensitivity grant state. Loopback-only (enforced by
+    /// the caller's CORS/origin gate). Never surfaced on the JSON-RPC/MCP layer.
+    ///
+    /// Response body (application/json):
+    /// ```json
+    /// {
+    ///   "tier": "restricted"|"secret"|null,
+    ///   "expiresAt": "<ISO8601 UTC string>"|null
+    /// }
+    /// ```
+    /// `tier` and `expiresAt` are both null when neither tier is currently granted.
+    private static func controlGrants(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
+        let now = Date()
+        let iso = iso8601Formatter()
+        if let (tier, expiresAt) = await dispatcher.tooling.sensitivityUnlockLedger.grantStateSnapshot(now: now) {
+            let expiresStr = iso.string(from: expiresAt)
+            // Hand-construct JSON — struct encoding would be fine too, but the
+            // shape is simple enough that raw concatenation avoids an import.
+            let body = Data(
+                #"{"tier":"\#(tier.rawValue)","expiresAt":"\#(expiresStr)"}"#.utf8
+            )
+            return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: body)
+        } else {
+            return HTTPResponse(
+                status: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"tier":null,"expiresAt":null}"#.utf8)
+            )
+        }
+    }
+
+    /// POST /api/control/unlock
+    ///
+    /// Grants the requested sensitivity tier. The caller (CLI) is responsible
+    /// for authenticating the user (Swift: LA assertion; Rust: PBKDF2 password).
+    /// The daemon validates only that the proof timestamp is fresh (within 10
+    /// seconds of its own clock) to guard against replay over a stale socket —
+    /// not a cryptographic guarantee, but loopback-only exposure limits the
+    /// practical attack surface (ADR-025 §3 "fail-closed, loopback only").
+    ///
+    /// Request body (application/json):
+    /// ```json
+    /// {
+    ///   "tier": "restricted"|"secret",
+    ///   "proof": {"ts": <unix ms integer>}
+    /// }
+    /// ```
+    ///
+    /// Response body (application/json):
+    /// ```json
+    /// {
+    ///   "ok": true,
+    ///   "tier": "restricted"|"secret",
+    ///   "expiresAt": "<ISO8601 UTC string>"
+    /// }
+    /// ```
+    private static func controlUnlock(request: HTTPRequest, dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
+        func badRequest(_ msg: String) -> HTTPResponse {
+            let body = Data(("{\"error\":\"\(msg)\"}").utf8)
+            return HTTPResponse(status: 400, headers: ["Content-Type": "application/json"], body: body)
+        }
+
+        // Parse request body as JSON.
+        guard let root = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else {
+            return badRequest("invalid_json")
+        }
+
+        // Validate tier field.
+        guard let tierRaw = root["tier"] as? String,
+              let tier = SensitivityTier(rawValue: tierRaw) else {
+            return badRequest("invalid_tier — must be 'restricted' or 'secret'")
+        }
+
+        // Validate proof: must be a dict with a "ts" unix-millisecond timestamp.
+        guard let proof = root["proof"] as? [String: Any],
+              let proofTsMs = proof["ts"] as? Int else {
+            return badRequest("missing_proof — proof.ts (unix ms) required")
+        }
+
+        // Freshness check: reject if proof timestamp is more than 10 seconds old
+        // or more than 5 seconds in the future (clock skew allowance).
+        // This is not a cryptographic proof — it is a replay-resistance measure
+        // over the local loopback socket (ADR-025 §3). The real authentication
+        // happened on the CLI side (LA assertion on Swift, PBKDF2 on Rust).
+        let now = Date()
+        let nowMs = Int(now.timeIntervalSince1970 * 1000)
+        let skewMs = proofTsMs - nowMs
+        guard skewMs > -10_000 && skewMs < 5_000 else {
+            return HTTPResponse(
+                status: 403,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"proof_stale — timestamp outside ±10s window"}"#.utf8)
+            )
+        }
+
+        // Grant the tier. Actor isolation requires await.
+        switch tier {
+        case .restricted:
+            await dispatcher.tooling.sensitivityUnlockLedger.grantRestricted(now: now)
+        case .secret:
+            await dispatcher.tooling.sensitivityUnlockLedger.grantSecret(now: now)
+        }
+
+        // Read back the resulting expiry for the response.
+        let iso = iso8601Formatter()
+        if let (_, expiresAt) = await dispatcher.tooling.sensitivityUnlockLedger.grantStateSnapshot(now: now) {
+            let expiresStr = iso.string(from: expiresAt)
+            let body = Data(
+                #"{"ok":true,"tier":"\#(tier.rawValue)","expiresAt":"\#(expiresStr)"}"#.utf8
+            )
+            Logging.stderr.log("ADR-025: \(tier.rawValue) grant issued, expires \(expiresStr)")
+            return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: body)
+        } else {
+            // Should not happen — we just granted. Return ok without expiry.
+            Logging.stderr.log("ADR-025: grant issued but ledger returned nil snapshot immediately after")
+            return HTTPResponse(
+                status: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"ok":true,"tier":"\#(tier.rawValue)","expiresAt":null}"#.utf8)
+            )
+        }
+    }
+
+    /// POST /api/control/lock
+    ///
+    /// Drops all active sensitivity grants immediately. Idempotent — safe to
+    /// call when no grants are active. Does not require a proof: the local user
+    /// can always lock (dropping grants is never a privilege escalation).
+    ///
+    /// Response body (application/json): `{"ok":true}`
+    private static func controlLock(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
+        await dispatcher.tooling.sensitivityUnlockLedger.lock()
+        Logging.stderr.log("ADR-025: all sensitivity grants locked")
+        return HTTPResponse(
+            status: 200,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"ok":true}"#.utf8)
+        )
+    }
+
+    /// ISO8601 formatter for UTC timestamps in control endpoint responses.
+    ///
+    /// Returns a UTC `YYYY-MM-DDTHH:MM:SSZ` string — no fractional seconds,
+    /// for compactness. Recipients can compare against `Date.now` to compute
+    /// the remaining grant window.
+    private static func iso8601Formatter() -> ISO8601DateFormatter {
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        fmt.timeZone = TimeZone(identifier: "UTC")!
+        return fmt
     }
 
 }

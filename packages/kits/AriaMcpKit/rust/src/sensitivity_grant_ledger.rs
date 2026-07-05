@@ -118,6 +118,26 @@ impl SensitivityGrantLedger {
         }
     }
 
+    /// The live tier and its expiry epoch-millisecond timestamp, or `None`
+    /// if neither tier is granted.
+    ///
+    /// Mirrors Swift `SensitivityGrantLedger.grantStateSnapshot(now:)`.
+    /// Used by the `/api/control/grants` HTTP handler so the response can
+    /// include `expiresAt` without the handler duplicating tier-priority logic.
+    pub fn grant_state_snapshot(&self, now_ms: i64) -> Option<(SensitivityTier, i64)> {
+        if self.is_secret_granted(now_ms) {
+            let until = self.secret_granted_until_ms
+                .lock().ok().and_then(|g| *g)?;
+            Some((SensitivityTier::Secret, until))
+        } else if self.is_restricted_granted(now_ms) {
+            let until = self.restricted_granted_until_ms
+                .lock().ok().and_then(|g| *g)?;
+            Some((SensitivityTier::Restricted, until))
+        } else {
+            None
+        }
+    }
+
     /// The start of the calendar day (in the given fixed UTC offset)
     /// strictly after `now_ms`, in epoch-milliseconds. `now_ms` at exactly
     /// local midnight still advances a full day forward — mirrors Swift
@@ -246,5 +266,38 @@ mod tests {
         let now = 1_751_641_200_000;
         ledger.grant_restricted(now, UTC);
         assert_eq!(ledger.ceiling_sensitivity(now), Some(locus_kit::adjectives::AdjectiveSensitivity::Restricted));
+    }
+
+    #[test]
+    fn grant_state_snapshot_returns_tier_and_expiry() {
+        let ledger = SensitivityGrantLedger::new();
+        let now = 1_751_641_200_000; // 2025-07-04T15:00:00Z
+
+        // No grant: None.
+        assert!(ledger.grant_state_snapshot(now).is_none());
+
+        // Restricted grant: returns (Restricted, next_midnight).
+        ledger.grant_restricted(now, UTC);
+        let (tier, expires) = ledger.grant_state_snapshot(now).expect("should be Some");
+        assert_eq!(tier, SensitivityTier::Restricted);
+        // Expiry should be 2025-07-05T00:00:00Z = 1_751_673_600_000 ms.
+        assert_eq!(expires, 1_751_673_600_000);
+
+        // Secret grant supersedes restricted in snapshot.
+        ledger.grant_secret(now);
+        let (tier2, expires2) = ledger.grant_state_snapshot(now).expect("should be Some");
+        assert_eq!(tier2, SensitivityTier::Secret);
+        // Secret expires 30 min after now.
+        assert_eq!(expires2, now + 30 * 60 * 1000);
+    }
+
+    #[test]
+    fn grant_state_snapshot_returns_none_after_lock() {
+        let ledger = SensitivityGrantLedger::new();
+        let now = 1_751_641_200_000;
+        ledger.grant_secret(now);
+        assert!(ledger.grant_state_snapshot(now).is_some());
+        ledger.lock();
+        assert!(ledger.grant_state_snapshot(now).is_none());
     }
 }

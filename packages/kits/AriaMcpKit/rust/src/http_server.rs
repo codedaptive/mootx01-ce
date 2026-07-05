@@ -900,12 +900,25 @@ fn route(request: &HttpRequest, dispatcher: &Dispatcher, stats_store: Option<&St
             "/api/graph"         => get_graph_snapshot(&dispatcher.registry, stats_store),
             "/api/lattice"       => get_lattice_snapshot(&dispatcher.registry),
             "/api/admin/estates" => get_admin_estates_snapshot(&dispatcher.registry),
+            // ADR-025 §3: sensitivity-grant status, physically outside the
+            // JSON-RPC / MCP surface so prompt-injected models cannot reach it.
+            "/api/control/grants" => control_grants(dispatcher),
             _                    => (404, br#"{"error":"not_found"}"#.to_vec()),
         };
     }
 
     if request.method != "POST" {
         return (405, br#"{"error":"method_not_allowed"}"#.to_vec());
+    }
+
+    // ADR-025 §3: sensitivity-grant control routes. Handled BEFORE JSON-RPC
+    // parsing so they are structurally unreachable from the MCP tool surface —
+    // a prompt-injected model that calls tools/call cannot route here.
+    if request.path == "/api/control/unlock" {
+        return control_unlock(&request.body, dispatcher);
+    }
+    if request.path == "/api/control/lock" {
+        return control_lock(dispatcher);
     }
 
     let parsed: serde_json::Value = match serde_json::from_slice(&request.body) {
@@ -944,6 +957,159 @@ fn route(request: &HttpRequest, dispatcher: &Dispatcher, stats_store: Option<&St
             (200, error_frame(JSONRPCErrorCode::INTERNAL_ERROR, "Internal error"))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-025 §3: sensitivity-grant control route handlers
+// These three functions back the GET /api/control/grants, POST /api/control/unlock,
+// and POST /api/control/lock routes that are structurally outside the MCP/JSON-RPC
+// surface. Mirrors Swift HTTPServer's `controlGrants`, `controlUnlock`, `controlLock`.
+
+/// GET /api/control/grants — returns the current sensitivity grant state.
+///
+/// Response: `{"tier": "restricted"|"secret"|null, "expiresAt": "<ISO8601 UTC>"|null}`
+fn control_grants(dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
+    let now_ms = wall_now_ms();
+    match dispatcher.sensitivity_ledger.grant_state_snapshot(now_ms) {
+        Some((tier, expires_at_ms)) => {
+            let tier_str = match tier {
+                crate::sensitivity_grant_ledger::SensitivityTier::Restricted => "restricted",
+                crate::sensitivity_grant_ledger::SensitivityTier::Secret => "secret",
+            };
+            let expires_str = ms_to_iso8601_utc(expires_at_ms);
+            let body = format!(
+                r#"{{"tier":"{tier_str}","expiresAt":"{expires_str}"}}"#
+            );
+            (200, body.into_bytes())
+        }
+        None => (200, br#"{"tier":null,"expiresAt":null}"#.to_vec()),
+    }
+}
+
+/// POST /api/control/unlock — grants the requested sensitivity tier.
+///
+/// Request body: `{"tier":"restricted"|"secret","proof":{"ts":<unix ms>}}`
+/// Response: `{"ok":true,"tier":"…","expiresAt":"…"}`
+fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
+    let root: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (400, br#"{"error":"invalid_json"}"#.to_vec()),
+    };
+
+    // Validate tier.
+    let tier_raw = match root.get("tier").and_then(|v| v.as_str()) {
+        Some(s) => s.to_owned(),
+        None => return (400, b"{\"error\":\"invalid_tier: must be restricted or secret\"}\n".to_vec()),
+    };
+
+    // Validate proof timestamp.
+    let proof_ts_ms = match root.get("proof")
+        .and_then(|p| p.get("ts"))
+        .and_then(|v| v.as_i64())
+    {
+        Some(ts) => ts,
+        None => return (400, b"{\"error\":\"missing_proof: proof.ts unix ms required\"}\n".to_vec()),
+    };
+
+    // Freshness check: reject if timestamp is more than 10 s old or 5 s in the future.
+    // This is replay resistance over the loopback socket, not a cryptographic proof
+    // (ADR-025 section 3 "fail-closed, loopback only"). The real authentication happened on
+    // the CLI side (PBKDF2 password verification for the Rust port; LA assertion for
+    // Swift). Rust credential storage and daemon-side PBKDF2 verification arrive in
+    // Wave 7.2 (UnlockAuthority seam).
+    let now_ms = wall_now_ms();
+    let skew_ms = proof_ts_ms - now_ms;
+    if skew_ms < -10_000 || skew_ms > 5_000 {
+        return (403, b"{\"error\":\"proof_stale: timestamp outside 10s window\"}\n".to_vec());
+    }
+
+    // Grant the tier.
+    match tier_raw.as_str() {
+        "restricted" => {
+            // Pass UTC offset 0 -- Rust does not have stdlib TimeZone access.
+            // The CLI that issues the grant knows the local offset; for now
+            // we default to UTC. Wave 7.2 will thread the offset through the
+            // unlock request body so the daemon can grant the correct local midnight.
+            dispatcher.sensitivity_ledger.grant_restricted(now_ms, 0);
+        }
+        "secret" => {
+            dispatcher.sensitivity_ledger.grant_secret(now_ms);
+        }
+        _ => return (400, b"{\"error\":\"invalid_tier: must be restricted or secret\"}\n".to_vec()),
+    }
+
+    // Read back the resulting expiry.
+    match dispatcher.sensitivity_ledger.grant_state_snapshot(now_ms) {
+        Some((_, expires_at_ms)) => {
+            let expires_str = ms_to_iso8601_utc(expires_at_ms);
+            let body = format!(
+                r#"{{"ok":true,"tier":"{tier_raw}","expiresAt":"{expires_str}"}}"#
+            );
+            eprintln!("ADR-025: {tier_raw} grant issued, expires {expires_str}");
+            (200, body.into_bytes())
+        }
+        None => {
+            // Should not happen — we just granted.
+            eprintln!("ADR-025: grant issued but ledger returned None snapshot immediately after");
+            let body = format!(r#"{{"ok":true,"tier":"{tier_raw}","expiresAt":null}}"#);
+            (200, body.into_bytes())
+        }
+    }
+}
+
+/// POST /api/control/lock — drops all active sensitivity grants immediately.
+///
+/// Idempotent. Response: `{"ok":true}`
+fn control_lock(dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
+    dispatcher.sensitivity_ledger.lock();
+    eprintln!("ADR-025: all sensitivity grants locked");
+    (200, br#"{"ok":true}"#.to_vec())
+}
+
+/// Convert epoch-milliseconds to an ISO8601 UTC string
+/// (`YYYY-MM-DDTHH:MM:SSZ`). Pure Rust stdlib — no chrono dependency.
+///
+/// Uses the "civil from days" algorithm by Howard Hinnant:
+/// <https://howardhinnant.github.io/date_algorithms.html>
+fn ms_to_iso8601_utc(ms: i64) -> String {
+    let secs = ms.saturating_div(1000);
+    let time_of_day_s = secs.rem_euclid(86_400);
+    let day_number = (secs - time_of_day_s) / 86_400;
+
+    let hour = time_of_day_s / 3600;
+    let min  = (time_of_day_s % 3600) / 60;
+    let sec  = time_of_day_s % 60;
+
+    // civil_from_days: maps days-since-epoch to (year, month, day)
+    let z = day_number + 719_468;
+    let era: i64 = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z"
+    )
+}
+
+/// Current wall-clock time in epoch-milliseconds.
+///
+/// This is the "now" source for the HTTP control routes. Named `wall_now_ms`
+/// to distinguish from the deterministic-engine pattern (which takes `now`
+/// as a parameter). HTTP routes are not pure algorithms, so reading system
+/// time here is correct and intentional — the HTTP layer IS the boundary
+/// where determinism gives way to real time.
+fn wall_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Serialize a JSON-RPC error object (null id) to bytes.
@@ -1187,4 +1353,33 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
 
     let body = serde_json::json!({"hosted": estates});
     (200, serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"hosted":[]}"#.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ms_to_iso8601_utc;
+
+    #[test]
+    fn ms_to_iso8601_utc_epoch() {
+        // Epoch itself: 1970-01-01T00:00:00Z
+        assert_eq!(ms_to_iso8601_utc(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn ms_to_iso8601_utc_known_timestamp() {
+        // 2025-07-04T15:00:00Z = 1_751_641_200 seconds = 1_751_641_200_000 ms
+        assert_eq!(ms_to_iso8601_utc(1_751_641_200_000), "2025-07-04T15:00:00Z");
+    }
+
+    #[test]
+    fn ms_to_iso8601_utc_midnight() {
+        // 2025-07-05T00:00:00Z = 1_751_673_600 seconds
+        assert_eq!(ms_to_iso8601_utc(1_751_673_600_000), "2025-07-05T00:00:00Z");
+    }
+
+    #[test]
+    fn ms_to_iso8601_utc_sub_second_truncated() {
+        // 500 ms into the epoch: still 1970-01-01T00:00:00Z (truncated to seconds)
+        assert_eq!(ms_to_iso8601_utc(500), "1970-01-01T00:00:00Z");
+    }
 }

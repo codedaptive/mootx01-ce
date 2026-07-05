@@ -73,7 +73,9 @@ pub struct Dispatcher {
     /// constructed fresh exactly once per `Dispatcher` (i.e. once per
     /// `mootx01 serve` process), so a daemon restart drops any live grant
     /// by construction, mirroring Swift `ToolDispatcher.sensitivityUnlockLedger`.
-    sensitivity_ledger: SensitivityGrantLedger,
+    /// `pub(crate)` so `http_server.rs` can access it for the control routes
+    /// that are structurally outside the JSON-RPC/MCP surface (ADR-025 §3).
+    pub(crate) sensitivity_ledger: SensitivityGrantLedger,
     /// Build serial surfaced by `moot_estate_ping`. Computed once at
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
