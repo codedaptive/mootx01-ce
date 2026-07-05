@@ -54,6 +54,7 @@ pub fn dispatch_tool(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    // monitoring_control: None — bare convenience entry point, no stats store.
     dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "", "")
 }
 
@@ -83,10 +84,14 @@ pub fn dispatch_tool_with_ledgers(
     sensitivity_ledger: &SensitivityGrantLedger,
     build_serial: &str,
     version_skew: &str,
+    // ADR-025 wave 8.2: monitoring seam, threaded to interface_tools::dispatch.
+    // None when no stats store is wired (stdio, test harnesses, provision-less contexts).
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, sensitivity_ledger,
         crate::tool_list::vault_enabled(), build_serial, version_skew,
+        monitoring_control,
     )
 }
 
@@ -104,9 +109,10 @@ pub fn dispatch_tool_with_vault_flag(
 ) -> Result<serde_json::Value, JSONRPCError> {
     // Throwaway sensitivity ledger — see `dispatch_tool_with_ledgers`'s doc
     // comment for why every non-production entry point does this.
+    // Monitoring control: None — test/non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, &VaultJobLedger::new(), &SensitivityGrantLedger::new(),
-        vault_on, "", "",
+        vault_on, "", "", None,
     )
 }
 
@@ -127,9 +133,10 @@ pub fn dispatch_tool_with_vault_ledger(
 ) -> Result<serde_json::Value, JSONRPCError> {
     // Throwaway sensitivity ledger — see `dispatch_tool_with_ledgers`'s doc
     // comment for why every non-production entry point does this.
+    // Monitoring control: None — non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, &SensitivityGrantLedger::new(),
-        crate::tool_list::vault_enabled(), build_serial, version_skew,
+        crate::tool_list::vault_enabled(), build_serial, version_skew, None,
     )
 }
 
@@ -155,6 +162,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     vault_on: bool,
     build_serial: &str,
     version_skew: &str,
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // 0. Teachme interception — intercepts BEFORE any runner fires.
     //    Returns guide text; estate is never touched.
@@ -188,7 +196,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));
         }
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, build_serial, version_skew)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, build_serial, version_skew, monitoring_control)?;
         return Ok(inject_hint(name, args, result));
     }
 

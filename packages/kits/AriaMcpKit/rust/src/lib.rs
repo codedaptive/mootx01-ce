@@ -43,6 +43,9 @@ pub mod build_serial;
 pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
+// monitoring_control: injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+// AriaMcpKit defines the trait; serve host injects the StatsStore-backed impl.
+pub mod monitoring_control;
 // dream_runner: one-shot REM-ALPHA dreaming cycle for `mootx01 dream` (T10,
 // ADR-021 Phase 5). Provides `run_one_dreaming_cycle` so the `dream` subcommand
 // in `mootx01` can invoke dreaming without a direct dep on neuron-kit.

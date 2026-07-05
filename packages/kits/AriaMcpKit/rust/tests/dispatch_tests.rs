@@ -1,7 +1,7 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 63-tool surface: 20 interface tools (Tier 1–5, including
-//! moot_memory_get), 1 federation tool, 11 recipe tools, 23 lens tools
+//! Tests the 64-tool surface: 21 interface tools (Tier 1–5 + moot_monitoring_status,
+//! including moot_memory_get), 1 federation tool, 11 recipe tools, 23 lens tools
 //! (including moot_lens_cohesion and moot_lens_contradiction), 5 vault tools,
 //! and 3 maintenance tools (moot_reindex, moot_drain_status, moot_palace_import).
 //! Exercises dispatch routing, argument validation, and result shapes through
@@ -93,11 +93,11 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 63 tools exact
+// 1. tools/list surface assertions — 64 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_63() {
+fn tools_list_count_is_64() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -106,8 +106,9 @@ fn tools_list_count_is_63() {
     // moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001) +
     // moot_palace_import (direct palace import, PAR-PB-1) +
     // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling on
-    // docs_internal/V1_1_PARKING_LOT.md):
-    //   20  interface tools (Tier 1–5)
+    // docs_internal/V1_1_PARKING_LOT.md) +
+    // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control):
+    //   21  interface tools (Tier 1–5 + monitoring_status)
     //    1  federation tool (moot_federated_search)
     //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream,
@@ -117,15 +118,15 @@ fn tools_list_count_is_63() {
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
     //    3  maintenance tools (moot_reindex, moot_drain_status, moot_palace_import)
-    //   63  total
+    //   64  total
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 63, "expected 63 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 64, "expected 64 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_63_names() {
-    // Gate: all 63 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_64_names() {
+    // Gate: all 64 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -162,6 +163,8 @@ fn tools_list_name_set_matches_expected_63_names() {
         "moot_estate_status",
         "moot_estate_map",
         "moot_estate_ping",
+        // Monitoring control (1) — ADR-025 wave 8.2
+        "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
         // Recipe (11) — list_lenses + list_recipes + synthesize + run_migration
@@ -1826,6 +1829,7 @@ fn estate_ping_includes_injected_build_serial() {
         &sensitivity_ledger,
         "TESTSERIAL-XYZ",
         "",
+        None,
     )
     .expect("estate_ping must not throw");
     assert!(is_success(&result));
@@ -1851,7 +1855,7 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
 
     for tool in ["moot_estate_ping", "moot_estate_status"] {
         let with_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", advisory,
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", advisory, None,
         )
         .expect("dispatch must not throw");
         let text = content_text(&with_skew);
@@ -1861,7 +1865,7 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
         );
 
         let without_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "",
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "", None,
         )
         .expect("dispatch must not throw");
         let text2 = content_text(&without_skew);
@@ -4487,7 +4491,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 63, "vault-on must produce 63 tools");
+    assert_eq!(arr.len(), 64, "vault-on must produce 64 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -4502,7 +4506,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 57, "vault-off must produce 57 tools (63 − 5 vault − palace import)");
+    assert_eq!(arr.len(), 58, "vault-off must produce 58 tools (64 − 5 vault − palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -5947,7 +5951,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
     let before = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
     ).expect("dispatch must not throw");
     assert!(
         !content_text(&before).contains("classified briefing"),
@@ -5959,7 +5963,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
     let after = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
     ).expect("dispatch must not throw");
     assert!(
         content_text(&after).contains("classified briefing"),
@@ -6001,14 +6005,14 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
     let sensitivity_ledger = SensitivityGrantLedger::new();
     let before = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id.clone()],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
     );
     assert!(before.is_err(), "without a grant, moot_memory_get must report not-found for a restricted drawer");
 
     sensitivity_ledger.grant_restricted(wall_now(), 0);
     let after = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
     ).expect("with a live grant, moot_memory_get must find the drawer");
     assert!(content_text(&after).contains("restricted content body"));
 }
@@ -6036,7 +6040,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
     sensitivity_ledger.grant_restricted(wall_now(), 0);
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-search-marker"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
     ).expect("dispatch must not throw");
 
     let coord = registry.coord.lock().unwrap();
@@ -6067,7 +6071,7 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     sensitivity_ledger.grant_restricted(wall_now(), 0);
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-normal-marker"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "",
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
     ).expect("dispatch must not throw");
 
     let coord = registry.coord.lock().unwrap();

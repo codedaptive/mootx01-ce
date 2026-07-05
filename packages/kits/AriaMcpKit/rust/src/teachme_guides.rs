@@ -39,6 +39,8 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_estate_status" => GUIDE_ESTATE_STATUS,
         "moot_estate_map" => GUIDE_ESTATE_MAP,
         "moot_estate_ping" => GUIDE_ESTATE_PING,
+        // Monitoring control (ADR-025 wave 8.2)
+        "moot_monitoring_status" => GUIDE_MONITORING_STATUS,
         // Federation
         "moot_federated_search" => GUIDE_FEDERATED_SEARCH,
         // Maintenance
@@ -466,6 +468,29 @@ Reconcile two-step workflow:
 All vault tools require a vaultPath argument (absolute filesystem path to
 the vault directory). Add teachme:true to any specific vault tool for its
 full argument reference.";
+
+// ---------------------------------------------------------------------------
+// Monitoring control (ADR-025 wave 8.2)
+// ---------------------------------------------------------------------------
+
+const GUIDE_MONITORING_STATUS: &str = "\
+moot_monitoring_status — read or set the daemon telemetry monitoring flag
+
+No args → read path (no mutation):
+  {}  →  \"monitoring: enabled\"   or   \"monitoring: disabled\"
+        \"monitoring: unavailable\"  when no telemetry store is wired (stdio
+        transport, test harnesses, provision-less contexts).
+
+Optional arg:
+  enabled (bool)  write path — persists flag, echoes new state.
+    { \"enabled\": true }   →  \"monitoring: enabled\\nmonitoring_source: user\"
+    { \"enabled\": false }  →  \"monitoring: disabled\\nmonitoring_source: user\"
+    monitoring_source: user distinguishes operator changes from env-var / default seeds.
+
+Note:
+  \"unavailable\" ≠ \"disabled\" — unavailable means no telemetry store is wired.
+  Never substitute unavailable for disabled in your reasoning.
+  The flag is daemon-global; the tool resolves the estate for routing only.";
 
 // ---------------------------------------------------------------------------
 // Maintenance

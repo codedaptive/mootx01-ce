@@ -345,6 +345,17 @@ pub fn run_http_loop(
     let gate = ConcurrencyGate::new(max_concurrent, max_queued);
     let sse_gate = Arc::new(ConcurrencyGate::new(max_sse, 0));
 
+    // ADR-025 wave 8.2: build the monitoring control from the stats store when
+    // available. The concrete type lives here (AriaResident is the Swift mirror)
+    // so AriaMcpKit never imports observer_sink directly.
+    // `None` when no stats store is configured (stdio, provision-less contexts).
+    let monitoring_control: Option<Arc<dyn crate::monitoring_control::MonitoringControl>> =
+        stats_store.as_ref().map(|s| {
+            Arc::new(crate::monitoring_control::StatsStoreMonitoringControl {
+                store: Arc::clone(s),
+            }) as Arc<dyn crate::monitoring_control::MonitoringControl>
+        });
+
     // Dispatcher is shared across connection threads via Arc<Mutex<>>.
     // The Mutex serializes tool dispatch; for I/O-bound MCP calls this is
     // the same throughput profile as the previous sequential model but
@@ -357,6 +368,7 @@ pub fn run_http_loop(
             &config.server_version,
             &config.build_serial,
             &config.version_skew,
+            monitoring_control,
         )
     ));
 

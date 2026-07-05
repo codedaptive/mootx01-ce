@@ -89,6 +89,14 @@ pub struct Dispatcher {
     /// Computed once at server startup by the host binary (mootx01-cli's
     /// `serve` command); this kit never reads `~/.claude/plugins/` itself.
     pub(crate) version_skew: String,
+    /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+    ///
+    /// `None` when no stats store is configured (stdio mode, test harnesses,
+    /// provision-less contexts). The concrete type lives in the serve host
+    /// (`StatsStoreMonitoringControl` in `monitoring_control.rs`), which wraps
+    /// `observer_sink::StatsStore`. AriaMcpKit never imports observer_sink directly —
+    /// the trait keeps the dependency boundary clean.
+    pub(crate) monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
 }
 
 impl Dispatcher {
@@ -103,7 +111,11 @@ impl Dispatcher {
     /// `version_skew` is empty when the host detected no plugin/binary
     /// version mismatch (ADR-024 §5) — pass `""` from callers that have no
     /// skew to report (e.g. `aria-mcp-server`, which has no plugin concept).
-    pub fn new(registry: EstateRegistry, name: &str, version: &str, build_serial: &str, version_skew: &str) -> Self {
+    pub fn new(
+        registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
+        version_skew: &str,
+        monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
+    ) -> Self {
         let tools = build_tool_list();
         Dispatcher {
             registry,
@@ -115,6 +127,7 @@ impl Dispatcher {
             sensitivity_ledger: SensitivityGrantLedger::new(),
             build_serial: build_serial.to_owned(),
             version_skew: version_skew.to_owned(),
+            monitoring_control,
         }
     }
 
@@ -221,6 +234,9 @@ impl Dispatcher {
         crate::dispatch::dispatch_tool_with_ledgers(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
             &self.build_serial, &self.version_skew,
+            // ADR-025 wave 8.2: thread the monitoring-control seam so the
+            // interface-tools layer can reach it without importing observer_sink.
+            self.monitoring_control.as_deref(),
         )
     }
 }

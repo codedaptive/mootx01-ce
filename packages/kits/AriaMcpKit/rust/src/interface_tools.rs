@@ -112,6 +112,9 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_estate_status",
     "moot_estate_map",
     "moot_estate_ping",
+    // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
+    // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
+    "moot_monitoring_status",
     // Maintenance (3)
     "moot_reindex",
     "moot_drain_status",
@@ -338,6 +341,9 @@ pub fn dispatch(
     sensitivity_ledger: &SensitivityGrantLedger,
     build_serial: &str,
     version_skew: &str,
+    // ADR-025 wave 8.2: monitoring seam injected from the serve host.
+    // None when no stats store wired — moot_monitoring_status reports "unavailable".
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
         "moot_file_memory" => run_file_memory(args, registry),
@@ -363,6 +369,8 @@ pub fn dispatch(
         "moot_estate_map" => run_estate_map(args, registry),
         // Pass build_serial so the pong includes the build segment.
         "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew),
+        // Monitoring control (ADR-025 wave 8.2) — pass the injected seam.
+        "moot_monitoring_status" => run_monitoring_status(args, monitoring_control),
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
@@ -2093,6 +2101,68 @@ fn run_estate_ping(
         pong.push_str(&format!("\nversion_skew: {version_skew}"));
     }
     Ok(text_result(&pong))
+}
+
+// ===========================================================================
+// Monitoring control (ADR-025 wave 8.2)
+// ===========================================================================
+
+/// Read or write the daemon's telemetry monitoring flag.
+///
+/// ## Read path (absent `enabled` argument)
+/// Returns the current effective monitoring state without mutation.
+///
+/// ## Write path (present `enabled: bool` argument)
+/// Persists `enabled` via the injected `MonitoringControl` and reports the
+/// new effective state. The concrete implementation (`StatsStoreMonitoringControl`)
+/// also writes `monitoring_source=user` so downstream readers can distinguish
+/// operator-driven changes from env-var or default-seeded state.
+///
+/// ## No-store case
+/// When `monitoring_control` is `None` (stdio mode, test harnesses, provision-less
+/// contexts), the tool reports `monitoring: unavailable` and never fabricates a
+/// false enabled/disabled state. Mirrors B-6 honesty discipline.
+///
+/// Mirrors Swift `ToolDispatcher.runMonitoringStatus`.
+fn run_monitoring_status(
+    args: &BTreeMap<String, JsonValue>,
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let control = match monitoring_control {
+        Some(c) => c,
+        None => {
+            // No stats store wired — honest "unavailable" response. Never say
+            // "disabled" when the true answer is "no store to read from".
+            return Ok(text_result("monitoring: unavailable (no telemetry store wired)"));
+        }
+    };
+
+    // Write path: `enabled` argument present → set flag, return new state.
+    if let Some(enabled) = optional_bool(args, "enabled")? {
+        control.set(enabled);
+        // Re-read the persisted value so the response reflects what was actually
+        // written, not just what was requested.
+        let effective = control.read();
+        let state_str = match effective {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "unavailable",
+        };
+        let mut lines = format!("monitoring: {state_str}\nmonitoring_source: user");
+        if effective.is_none() {
+            lines.push_str("\nwarning: flag was written but could not be re-read; retry moot_monitoring_status to confirm");
+        }
+        return Ok(text_result(&lines));
+    }
+
+    // Read path: no `enabled` argument → report current state only.
+    let current = control.read();
+    let state_str = match current {
+        Some(true) => "enabled",
+        Some(false) => "disabled",
+        None => "unavailable",
+    };
+    Ok(text_result(&format!("monitoring: {state_str}")))
 }
 
 // ===========================================================================
