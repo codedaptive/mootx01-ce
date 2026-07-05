@@ -56,11 +56,11 @@ Do not install the adapter before the runtime works.
 
 ## Where Each Adapter Installs
 
-Copy into a project root for one project, or into the client's user-level config location for all projects.
+Most adapters can be copied into a project root for one project, or into the client's user-level config location for all projects. Claude hook wiring is an exception: install `.claude/hooks/*.py` and `.claude/settings.json` only in a trusted project-local `.claude/` directory because the provided settings execute scripts through `$CLAUDE_PROJECT_DIR`. Do not merge these hook settings into a user-level/global Claude configuration unless you first rewrite every hook command to an absolute, trusted user-config path.
 
 | Client | Destination files |
 |---|---|
-| `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md`, `.claude/hooks/moot_hooks.py`, `.claude/hooks/moot_update_check.py`, `.claude/settings.json` (merge the `hooks` block if a settings file exists) |
+| `claude/` | User-level safe: `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md`. Project-local only unless hook commands are rewritten to absolute trusted paths: `.claude/hooks/moot_hooks.py`, `.claude/hooks/moot_update_check.py`, `.claude/settings.json` (merge the `hooks` block only into a project-local settings file) |
 | `codex/` | `AGENTS.md`, `.agents/skills/mootx01-memory/{SKILL.md, agents/openai.yaml}`, `.codex/hooks.json` |
 | `gemini/` | `GEMINI.md` (project root or `~/.gemini/GEMINI.md`) |
 | `cursor/` | `.cursor/rules/*.mdc` or legacy `.cursorrules` |

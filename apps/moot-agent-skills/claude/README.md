@@ -14,12 +14,22 @@ adapter covers all six surfaces:
   (the one hook that touches the network; see below).
 - `.claude/settings.json` - hook wiring.
 
-Copy the contents of this directory into a repository root or user-level
-Claude configuration location. Keep only the surfaces you want active.
+Copy the instruction-only surfaces (`CLAUDE.md`, `.claude/rules/*.md`,
+`.claude/skills/mootx01-memory/SKILL.md`, and
+`.claude/commands/mootx01-start.md`) into either a repository root or a
+user-level Claude configuration location.
 
-**Merging:** if the project already has a `.claude/settings.json`, merge the
-`"hooks"` block from this adapter into it instead of replacing the file.
-Everything else installs as new files.
+Install the hook surfaces (`.claude/hooks/*.py` and `.claude/settings.json`)
+only in a trusted project-local `.claude/` directory. The provided
+`.claude/settings.json` intentionally resolves hook scripts through
+`$CLAUDE_PROJECT_DIR`, which is safe for project-local installs but unsafe for
+user-level/global installs because any opened project could supply that path.
+For a user-level hook install, first rewrite every hook command to an absolute
+trusted path under your user configuration directory.
+
+**Merging:** if the project already has a project-local `.claude/settings.json`,
+merge the `"hooks"` block from this adapter into it instead of replacing the
+file. Everything else installs as new files.
 
 ## Try It
 
