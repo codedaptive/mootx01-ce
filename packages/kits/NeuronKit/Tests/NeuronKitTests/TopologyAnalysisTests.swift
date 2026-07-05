@@ -54,7 +54,7 @@ struct TopologyAnalysisTests {
         let filed = Date(timeIntervalSince1970: 1_700_000_123)
         let topo = NeuronKit.graphTopology(
             drawers: [drawer("a", filedAt: filed), drawer("b")],
-            tunnels: [], facts: [])
+            tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(topo.nodes.count == 2)
         let a = try #require(topo.nodes.first { $0.id == "a" })
         let ts = try #require(a.createdTs)
@@ -67,7 +67,7 @@ struct TopologyAnalysisTests {
         let filed = Date(timeIntervalSince1970: 1_700_000_456)
         let topo = NeuronKit.graphTopology(
             drawers: [drawer("a"), drawer("b")],
-            tunnels: [tunnel("a", "b", filedAt: filed)], facts: [])
+            tunnels: [tunnel("a", "b", filedAt: filed)], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let edge = try #require(topo.edges.first { $0.edgeType == "tunnel" })
         let ts = try #require(edge.createdTs)
         let parsed = try #require(iso.date(from: ts))
@@ -83,7 +83,8 @@ struct TopologyAnalysisTests {
             drawers: [drawer("a"), drawer("b")],
             tunnels: [],
             facts: [TopologyFactInput(subject: "s", sourceDrawerID: "a"),
-                    TopologyFactInput(subject: "s", sourceDrawerID: "b")])
+                    TopologyFactInput(subject: "s", sourceDrawerID: "b")],
+            estate: "", now: Date(timeIntervalSince1970: 0))
         let kg = try #require(topo.edges.first { $0.edgeType == "kgFact" })
         #expect(kg.weight == 0.3)
         // A derived bond aggregates facts filed at different instants —
@@ -101,7 +102,7 @@ struct TopologyAnalysisTests {
         let topo = NeuronKit.graphTopology(
             drawers: math.drawers + art.drawers,
             tunnels: math.tunnels + art.tunnels + [tunnel(math.ids[0], art.ids[0])],
-            facts: [])
+            facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         // At gamma 0.05 the full-weight tunnel bridge merges the condensed
         // triangle supernodes (gain = 1.0/7.8 − 0.05·7.8·15.6/(2·7.8²)
         // = +0.078 > 0). This is correct lens behavior: the bridge is an
@@ -135,7 +136,7 @@ struct TopologyAnalysisTests {
         let topo = NeuronKit.graphTopology(
             drawers: left.drawers + right.drawers,
             tunnels: left.tunnels + right.tunnels,
-            facts: [])
+            facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let tied = try #require(topo.communities.first { $0.dominantUdcCode != "900" })
         #expect(tied.size == 3)
         #expect(tied.dominantUdcCode == "510")
@@ -148,7 +149,7 @@ struct TopologyAnalysisTests {
         let topo = NeuronKit.graphTopology(
             drawers: blank.drawers + coded.drawers + [drawer("loner", udc: "111")],
             tunnels: blank.tunnels + coded.tunnels,
-            facts: [])
+            facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         // Triangle communities (size 3) sort before the singleton (size 1).
         #expect(topo.communities.map { $0.size } == topo.communities.map { $0.size }.sorted(by: >))
         #expect(topo.communities.last?.size == 1)
@@ -176,7 +177,7 @@ struct TopologyAnalysisTests {
             drawers.append(drawer(b, udc: "652", filedAt: t0.addingTimeInterval(Double(p * 2 + 1))))
             tunnels.append(tunnel(a, b))
         }
-        let topo = NeuronKit.graphTopology(drawers: drawers, tunnels: tunnels, facts: [])
+        let topo = NeuronKit.graphTopology(drawers: drawers, tunnels: tunnels, facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         // Phase-1 alone locks the 4 pairs (leaving a 1.0 pair bond for a
         // 0.2 lattice bond is strictly negative gain). At gamma 0.05 the
         // condensed pair supernodes (k = 2.4, edge 0.4 into the hub pair)
@@ -195,7 +196,7 @@ struct TopologyAnalysisTests {
         let tri = triangle(tag: "live", udcs: ["510", "510", "510"])
         let topo = NeuronKit.graphTopology(
             drawers: tri.drawers + [drawer("dead", tombstoned: true, tombstonedAt: died)],
-            tunnels: tri.tunnels, facts: [])
+            tunnels: tri.tunnels, facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let dead = try #require(topo.nodes.first { $0.id == "dead" })
         #expect(dead.communityId == -1)
         #expect(dead.centrality == 0.0)
@@ -210,7 +211,7 @@ struct TopologyAnalysisTests {
     func deadDrawerUnresolvedInstant() throws {
         let topo = NeuronKit.graphTopology(
             drawers: [drawer("dead", tombstoned: true, tombstonedAt: nil)],
-            tunnels: [], facts: [])
+            tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let dead = try #require(topo.nodes.first)
         #expect(dead.communityId == -1)
         #expect(dead.tombstonedTs == nil)
@@ -220,7 +221,7 @@ struct TopologyAnalysisTests {
     func liveEntitiesNilTombstone() throws {
         let topo = NeuronKit.graphTopology(
             drawers: [drawer("a"), drawer("b")],
-            tunnels: [tunnel("a", "b")], facts: [])
+            tunnels: [tunnel("a", "b")], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(topo.nodes.allSatisfy { $0.tombstonedTs == nil })
         #expect(topo.edges.allSatisfy { $0.tombstonedTs == nil })
     }
@@ -234,7 +235,7 @@ struct TopologyAnalysisTests {
         func partition(_ extra: [TopologyDrawerInput]) -> Set<Set<String>> {
             let topo = NeuronKit.graphTopology(
                 drawers: math.drawers + art.drawers + extra,
-                tunnels: math.tunnels + art.tunnels + bridge, facts: [])
+                tunnels: math.tunnels + art.tunnels + bridge, facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
             var byCommunity: [Int: Set<String>] = [:]
             for n in topo.nodes where n.communityId >= 0 {
                 byCommunity[n.communityId, default: []].insert(n.id)
@@ -259,7 +260,7 @@ struct TopologyAnalysisTests {
             drawers: math.drawers + art.drawers,
             tunnels: math.tunnels + art.tunnels +
                      [tunnel(math.ids[0], art.ids[0], tombstonedAt: died)],
-            facts: [])
+            facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(topo.communities.count == 2)
         let deadEdge = try #require(topo.edges.first { $0.tombstonedTs != nil })
         #expect(deadEdge.source == math.ids[0])
@@ -270,7 +271,7 @@ struct TopologyAnalysisTests {
 
     @Test("empty inputs produce an empty topology")
     func emptyInputs() {
-        let topo = NeuronKit.graphTopology(drawers: [], tunnels: [], facts: [])
+        let topo = NeuronKit.graphTopology(drawers: [], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(topo.nodes.isEmpty)
         #expect(topo.edges.isEmpty)
         #expect(topo.communities.isEmpty)
@@ -300,7 +301,7 @@ struct TopologyAnalysisTests {
         let m2   = TopologyDrawerInput(id: "m2", udcCode: "510",
                                        filedAt: t3, eventTime: t0,
                                        tombstoned: false, tombstonedAt: nil)
-        let topo = NeuronKit.graphTopology(drawers: [hubD, m1, m2], tunnels: [], facts: [])
+        let topo = NeuronKit.graphTopology(drawers: [hubD, m1, m2], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let lat = topo.edges.filter { $0.edgeType == "lattice" }
         #expect(lat.count == 2)
         #expect(lat.allSatisfy { $0.source == "hub" })
@@ -337,9 +338,9 @@ struct TopologyAnalysisTests {
                                       tombstoned: false, tombstonedAt: nil)
 
         // Permutation 1: cc last
-        let topo1 = NeuronKit.graphTopology(drawers: [aa, bb, cc, aaa, bbb], tunnels: [], facts: [])
+        let topo1 = NeuronKit.graphTopology(drawers: [aa, bb, cc, aaa, bbb], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         // Permutation 2: cc first
-        let topo2 = NeuronKit.graphTopology(drawers: [cc, aa, bb, aaa, bbb], tunnels: [], facts: [])
+        let topo2 = NeuronKit.graphTopology(drawers: [cc, aa, bb, aaa, bbb], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
 
         for topo in [topo1, topo2] {
             let lat300 = topo.edges.filter { $0.edgeType == "lattice" && ["aa","bb","cc"].contains($0.source) }
@@ -384,7 +385,7 @@ struct TopologyAnalysisTests {
             TopologyTunnelInput(sourceDrawerId: "tunnel-node", targetDrawerId: "t-peer-2",
                                 filedAt: t0, tombstonedAt: nil)
         ]
-        let topo = NeuronKit.graphTopology(drawers: drawers, tunnels: tunnelEdges, facts: [])
+        let topo = NeuronKit.graphTopology(drawers: drawers, tunnels: tunnelEdges, facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let latHub    = try #require(topo.nodes.first { $0.id == "lat-hub" })
         let tunnelNode = try #require(topo.nodes.first { $0.id == "tunnel-node" })
         // The lattice hub has no tunnel edges, so its centrality score comes
@@ -408,7 +409,7 @@ struct TopologyAnalysisTests {
         let d3 = TopologyDrawerInput(id: "c", udcCode: "999",
                                      filedAt: t0, eventTime: t0,
                                      tombstoned: false, tombstonedAt: nil)
-        let topo = NeuronKit.graphTopology(drawers: [d1, d2, d3], tunnels: [], facts: [])
+        let topo = NeuronKit.graphTopology(drawers: [d1, d2, d3], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(topo.edges.filter { $0.edgeType == "lattice" }.isEmpty)
     }
 
@@ -426,7 +427,7 @@ struct TopologyAnalysisTests {
                                         filedAt: t0.addingTimeInterval(2), eventTime: t0,
                                         tombstoned: true,
                                         tombstonedAt: t0.addingTimeInterval(100))
-        let topo = NeuronKit.graphTopology(drawers: [live1, live2, dead], tunnels: [], facts: [])
+        let topo = NeuronKit.graphTopology(drawers: [live1, live2, dead], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         let lat = topo.edges.filter { $0.edgeType == "lattice" }
         // Only the 2 live drawers bond; the dead drawer contributes no edge.
         #expect(lat.count == 1)

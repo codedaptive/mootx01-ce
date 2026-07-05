@@ -109,7 +109,8 @@ fn graph_topology_caps_kgfact_group_at_50_drawers() {
         .map(|d| fact("generic-subject", &d.id))
         .collect();
 
-    let topo = graph_topology(&drawers, &[], &facts);
+    // estate/ts: explicit sentinels — hardening tests have no estate context.
+    let topo = graph_topology(&drawers, &[], &facts, "", 0.0);
 
     // All 51 drawers appear as nodes.
     assert_eq!(
@@ -140,7 +141,8 @@ fn graph_topology_does_not_cap_at_limit_boundary() {
         .map(|d| fact("boundary-subject", &d.id))
         .collect();
 
-    let topo = graph_topology(&drawers, &[], &facts);
+    // estate/ts: explicit sentinels — hardening tests have no estate context.
+    let topo = graph_topology(&drawers, &[], &facts, "", 0.0);
 
     let expected = count * (count - 1) / 2;  // 1225
     let kg_edge_count = topo.edges.iter().filter(|e| e.edge_type == "kgFact").count();

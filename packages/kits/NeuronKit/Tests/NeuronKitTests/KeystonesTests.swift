@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import NeuronKit
 
@@ -18,7 +19,9 @@ struct KeystonesTests {
     func keystonesHubDominates() {
         let nodes = ["hub", "s1", "s2", "s3", "s4"]
         let edges = [("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("hub", "s4")]
-        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(ranked.first?.id == "hub")
         #expect(ranked[0].centrality > ranked[1].centrality)
     }
@@ -33,7 +36,9 @@ struct KeystonesTests {
             ("a", "b"), ("a", "bridge"), ("b", "bridge"),
             ("bridge", "c"), ("bridge", "d"), ("c", "d"),
         ]
-        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 5,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(ranked.first?.id == "bridge")
     }
 
@@ -42,7 +47,9 @@ struct KeystonesTests {
     func keystonesRankedAndCapped() {
         let nodes = ["hub", "s1", "s2", "s3"]
         let edges = [("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("s1", "s2")]
-        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 2)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let ranked = NeuronKit.keystones(nodeIDs: nodes, edges: edges, topK: 2,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(ranked.count == 2)
         #expect(ranked.first?.id == "hub")
         #expect(ranked[0].centrality >= ranked[1].centrality)
@@ -55,15 +62,24 @@ struct KeystonesTests {
         let nodes = ["hub", "s1", "s2", "s3", "s4"]
         let clean = [("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("hub", "s4")]
         let noisy = clean + [("hub", "hub"), ("hub", "ghost"), ("ghost", "s1")]
-        #expect(NeuronKit.keystones(nodeIDs: nodes, edges: clean, topK: 5)
-                == NeuronKit.keystones(nodeIDs: nodes, edges: noisy, topK: 5))
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let sentinel = (estate: "", now: Date(timeIntervalSince1970: 0))
+        #expect(NeuronKit.keystones(nodeIDs: nodes, edges: clean, topK: 5,
+                                    estate: sentinel.estate, now: sentinel.now)
+                == NeuronKit.keystones(nodeIDs: nodes, edges: noisy, topK: 5,
+                                       estate: sentinel.estate, now: sentinel.now))
     }
 
     // Edge totality (C-16): no nodes ⇒ empty; nodes-no-edges still bounded by topK.
     @Test("Keystones: total over edge inputs")
     func keystonesEdgeTotality() {
-        #expect(NeuronKit.keystones(nodeIDs: [], edges: [], topK: 5).isEmpty)
-        #expect(NeuronKit.keystones(nodeIDs: ["x", "y", "z"], edges: [], topK: 2).count == 2)
-        #expect(NeuronKit.keystones(nodeIDs: ["x", "y"], edges: [("x", "y")], topK: 0).isEmpty)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let t0 = Date(timeIntervalSince1970: 0)
+        #expect(NeuronKit.keystones(nodeIDs: [], edges: [], topK: 5,
+                                    estate: "", now: t0).isEmpty)
+        #expect(NeuronKit.keystones(nodeIDs: ["x", "y", "z"], edges: [], topK: 2,
+                                    estate: "", now: t0).count == 2)
+        #expect(NeuronKit.keystones(nodeIDs: ["x", "y"], edges: [("x", "y")], topK: 0,
+                                    estate: "", now: t0).isEmpty)
     }
 }

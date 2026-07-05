@@ -27,10 +27,16 @@ pub struct Constellation {
 /// Detect communities over the undirected, unit-weight graph formed by `edges`,
 /// grouping `node_ids` by community. Self-loops and absent-endpoint edges are
 /// ignored. Empty `node_ids` ⇒ no communities (C-16).
+///
+/// `estate` and `ts` thread into SubstrateML so VizGraph telemetry rows carry
+/// the correct estate tag and timestamp. Never supply a live clock here —
+/// callers must inject the timestamp.
 pub fn constellations(
     node_ids: &[String],
     edges: &[(String, String)],
     max_passes: usize,
+    estate: &str,
+    ts: f64,
 ) -> Constellation {
     if node_ids.is_empty() {
         return Constellation {
@@ -43,16 +49,15 @@ pub fn constellations(
     // topology_analysis::TOPOLOGY_RESOLUTION for the derivation):
     // SPEC § 7.3's auto-rooming consumer is this lens, and phase-1-only
     // results fragment pair-bonded clusters.
-    // estate and ts are empty/0: callers that want VizGraph telemetry
-    // should pass the estate id and a caller-supplied timestamp. The
-    // default empty values produce a no-op emit when monitoring is off.
+    // Thread estate and ts so the VizGraph telemetry row carries the caller's
+    // estate identifier and timestamp — not empty/0 defaults.
     let labels = CommunityDetection::detect_full(
         &adjacency,
         crate::topology_analysis::TOPOLOGY_MAX_LEVELS,
         max_passes,
         crate::topology_analysis::TOPOLOGY_RESOLUTION,
-        "",
-        0.0,
+        estate,
+        ts,
     );
 
     // Group ids by their assigned label, then impose an id-derived canonical
@@ -89,6 +94,10 @@ mod tests {
             .collect()
     }
 
+    // estate/ts: explicit sentinels — unit tests have no estate context.
+    const ESTATE: &str = "";
+    const TS: f64 = 0.0;
+
     #[test]
     fn disjoint_cliques_become_separate_communities() {
         let nodes = ids(&["A1", "A2", "A3", "B1", "B2", "B3"]);
@@ -100,7 +109,7 @@ mod tests {
             ("B1", "B3"),
             ("B2", "B3"),
         ]);
-        let c = constellations(&nodes, &g, DEFAULT_MAX_PASSES);
+        let c = constellations(&nodes, &g, DEFAULT_MAX_PASSES, ESTATE, TS);
         assert_eq!(c.communities.len(), 2);
         assert!(c.communities.contains(&ids(&["A1", "A2", "A3"])));
         assert!(c.communities.contains(&ids(&["B1", "B2", "B3"])));
@@ -120,11 +129,15 @@ mod tests {
             &ids(&["A1", "A2", "A3", "B1", "B2", "B3"]),
             &g,
             DEFAULT_MAX_PASSES,
+            ESTATE,
+            TS,
         );
         let shuffled = constellations(
             &ids(&["B3", "A2", "B1", "A3", "A1", "B2"]),
             &g,
             DEFAULT_MAX_PASSES,
+            ESTATE,
+            TS,
         );
         assert_eq!(forward, shuffled);
         for group in &forward.communities {
@@ -143,7 +156,7 @@ mod tests {
 
     #[test]
     fn total_over_edge_inputs() {
-        assert!(constellations(&[], &[], DEFAULT_MAX_PASSES)
+        assert!(constellations(&[], &[], DEFAULT_MAX_PASSES, ESTATE, TS)
             .communities
             .is_empty());
     }

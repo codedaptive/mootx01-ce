@@ -21,21 +21,30 @@ pub struct Keystone {
 /// centrality, ties by ascending id. Self-loops and edges with an endpoint
 /// absent from `node_ids` are ignored. Empty `node_ids` or `top_k == 0` ⇒ empty
 /// (C-16).
-pub fn keystones(node_ids: &[String], edges: &[(String, String)], top_k: usize) -> Vec<Keystone> {
+///
+/// `estate` and `ts` thread into SubstrateML so VizGraph telemetry rows carry
+/// the correct estate tag and timestamp. Never supply a live clock here —
+/// callers must inject the timestamp.
+pub fn keystones(
+    node_ids: &[String],
+    edges: &[(String, String)],
+    top_k: usize,
+    estate: &str,
+    ts: f64,
+) -> Vec<Keystone> {
     if node_ids.is_empty() || top_k == 0 {
         return Vec::new();
     }
 
     let adjacency = structure_graph::build(node_ids, edges);
-    // estate and ts are empty/0: callers that want VizGraph telemetry
-    // should pass the estate id and a caller-supplied timestamp. The
-    // default empty values produce a no-op emit when monitoring is off.
+    // Thread estate and ts so the VizGraph telemetry row carries the caller's
+    // estate identifier and timestamp — not empty/0 defaults.
     let scores = EigenvalueCentrality::compute(
         &adjacency,
         EigenvalueCentrality::DEFAULT_MAX_ITERATIONS,
         EigenvalueCentrality::DEFAULT_TOLERANCE,
-        "",
-        0.0,
+        estate,
+        ts,
     );
 
     let mut ranked: Vec<Keystone> = node_ids
@@ -73,11 +82,15 @@ mod tests {
             .collect()
     }
 
+    // estate/ts: explicit sentinels — unit tests have no estate context.
+    const ESTATE: &str = "";
+    const TS: f64 = 0.0;
+
     #[test]
     fn hub_of_a_star_ranks_first() {
         let nodes = ids(&["hub", "s1", "s2", "s3", "s4"]);
         let g = edges(&[("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("hub", "s4")]);
-        let top = keystones(&nodes, &g, 5);
+        let top = keystones(&nodes, &g, 5, ESTATE, TS);
         assert_eq!(top[0].id, "hub");
         assert!(top[0].centrality > top[1].centrality);
     }
@@ -93,14 +106,14 @@ mod tests {
             ("bridge", "d"),
             ("c", "d"),
         ]);
-        assert_eq!(keystones(&nodes, &g, 5)[0].id, "bridge");
+        assert_eq!(keystones(&nodes, &g, 5, ESTATE, TS)[0].id, "bridge");
     }
 
     #[test]
     fn descending_and_capped_to_top_k() {
         let nodes = ids(&["hub", "s1", "s2", "s3"]);
         let g = edges(&[("hub", "s1"), ("hub", "s2"), ("hub", "s3"), ("s1", "s2")]);
-        let top = keystones(&nodes, &g, 2);
+        let top = keystones(&nodes, &g, 2, ESTATE, TS);
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].id, "hub");
         assert!(top[0].centrality >= top[1].centrality);
@@ -114,13 +127,16 @@ mod tests {
         noisy.push(("hub".into(), "hub".into())); // self-loop
         noisy.push(("hub".into(), "ghost".into())); // absent endpoint
         noisy.push(("ghost".into(), "s1".into())); // absent endpoint
-        assert_eq!(keystones(&nodes, &clean, 5), keystones(&nodes, &noisy, 5));
+        assert_eq!(
+            keystones(&nodes, &clean, 5, ESTATE, TS),
+            keystones(&nodes, &noisy, 5, ESTATE, TS)
+        );
     }
 
     #[test]
     fn total_over_edge_inputs() {
-        assert!(keystones(&[], &[], 5).is_empty());
-        assert_eq!(keystones(&ids(&["x", "y", "z"]), &[], 2).len(), 2);
-        assert!(keystones(&ids(&["x", "y"]), &edges(&[("x", "y")]), 0).is_empty());
+        assert!(keystones(&[], &[], 5, ESTATE, TS).is_empty());
+        assert_eq!(keystones(&ids(&["x", "y", "z"]), &[], 2, ESTATE, TS).len(), 2);
+        assert!(keystones(&ids(&["x", "y"]), &edges(&[("x", "y")]), 0, ESTATE, TS).is_empty());
     }
 }

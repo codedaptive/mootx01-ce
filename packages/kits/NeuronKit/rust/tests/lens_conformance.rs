@@ -697,7 +697,8 @@ fn lenses_reproduce_shared_vectors() {
             .iter()
             .map(|e| (e[0].clone(), e[1].clone()))
             .collect();
-        let out = keystones(&c.node_ids, &edges, c.top_k);
+        // estate/ts: explicit sentinels — conformance tests have no estate context.
+        let out = keystones(&c.node_ids, &edges, c.top_k, "", 0.0);
         assert_eq!(out.len(), c.ranked.len(), "keystones count");
         for (got, want) in out.iter().zip(&c.ranked) {
             assert_eq!(got.id, want.id, "keystone id");
@@ -715,7 +716,8 @@ fn lenses_reproduce_shared_vectors() {
             .iter()
             .map(|e| (e[0].clone(), e[1].clone()))
             .collect();
-        let out = constellations(&c.node_ids, &edges, c.max_passes);
+        // estate/ts: explicit sentinels — conformance tests have no estate context.
+        let out = constellations(&c.node_ids, &edges, c.max_passes, "", 0.0);
         assert_eq!(out.communities, c.communities, "constellation communities");
     }
 

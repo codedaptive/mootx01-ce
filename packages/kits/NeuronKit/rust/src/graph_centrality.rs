@@ -152,8 +152,15 @@ pub fn build_centrality_graph(
 /// ALL nodes (`top_k = node count`) gives every live drawer's centrality.
 /// Empty node set ⇒ empty result ⇒ empty map (C-16). The `f64 → f32` narrowing
 /// is the documented float boundary the cross-port conformance gate compares at.
-pub fn compute_centrality_scores(graph: &CentralityGraph) -> HashMap<String, f32> {
-    let ranked = crate::keystones(&graph.node_ids, &graph.edges, graph.node_ids.len());
+///
+/// `estate_id` and `now_epoch_secs` are threaded into SubstrateML so VizGraph
+/// telemetry rows carry the correct estate tag and timestamp.
+pub fn compute_centrality_scores(
+    graph: &CentralityGraph,
+    estate_id: &str,
+    now_epoch_secs: f64,
+) -> HashMap<String, f32> {
+    let ranked = crate::keystones(&graph.node_ids, &graph.edges, graph.node_ids.len(), estate_id, now_epoch_secs);
     let mut scores = HashMap::with_capacity(ranked.len());
     for keystone in ranked {
         scores.insert(keystone.id, keystone.centrality as f32);

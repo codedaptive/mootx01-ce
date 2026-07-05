@@ -351,8 +351,12 @@ public enum AriaResident {
                 parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
-                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100)
-                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing)
+                // Date() is permitted here — ResidentDaemon is the ARIA MCP boundary,
+                // not a kit. The now value threads down through CognitionKit → NeuronKit →
+                // SubstrateML so telemetry carries the correct timestamp.
+                let now = Date()
+                _ = try await Keystones.run(kit: kit, handle: handle, wing: wing, topK: 100, now: now)
+                _ = try await ConstellationLens.run(kit: kit, handle: handle, wing: wing, now: now)
             }
         }
 

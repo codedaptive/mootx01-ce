@@ -91,16 +91,17 @@ public enum CommunityDetection {
     /// - Parameters:
     ///   - adjacency: The weighted adjacency list.
     ///   - maxPasses: Maximum Louvain phase-1 passes (default 10).
-    ///   - estate: Estate identifier tag for VizGraph telemetry. Pass
-    ///             the estate ID known at the call site. Empty string
-    ///             suppresses the estate tag (monitoring still no-ops
-    ///             when disabled regardless of this value).
-    ///   - ts: Caller-supplied epoch seconds for telemetry. Never read
-    ///         a clock inside SubstrateML; the caller provides `ts`.
+    ///   - estate: Estate identifier tag for VizGraph telemetry. Pass the estate
+    ///             ID known at the call site. Callers with no estate context must
+    ///             pass "" explicitly (no default — compiler enforces the decision
+    ///             at every call site).
+    ///   - ts: Caller-supplied epoch seconds for telemetry. Never read a clock
+    ///         inside SubstrateML; the caller provides `ts`. Pass 0.0 explicitly
+    ///         when no meaningful timestamp is available.
     public static func detect(adjacency: Adjacency,
                                maxPasses: Int = 10,
-                               estate: String = "",
-                               ts: Double = 0) -> [Int] {
+                               estate: String,
+                               ts: Double) -> [Int] {
         let n = adjacency.count
         if n == 0 { return [] }
         // Degenerate zero-weight graph: identity labeling, no emit —
@@ -146,15 +147,19 @@ public enum CommunityDetection {
     ///                 gamma absorbs strongly-paired supernodes into hub
     ///                 communities without gluing large continents
     ///                 together (their thresholds shrink as w_bridge/m).
-    ///   - estate: Estate identifier tag for VizGraph telemetry.
-    ///   - ts: Caller-supplied epoch seconds for telemetry. Never read
-    ///         a clock inside SubstrateML; the caller provides `ts`.
+    ///   - estate: Estate identifier tag for VizGraph telemetry. Pass the estate
+    ///             ID known at the call site. Callers with no estate context must
+    ///             pass "" explicitly (no default — compiler enforces the decision
+    ///             at every call site).
+    ///   - ts: Caller-supplied epoch seconds for telemetry. Never read a clock
+    ///         inside SubstrateML; the caller provides `ts`. Pass 0.0 explicitly
+    ///         when no meaningful timestamp is available.
     public static func detectFull(adjacency: Adjacency,
                                   maxLevels: Int = 10,
                                   maxPasses: Int = 10,
                                   resolution: Double = 1.0,
-                                  estate: String = "",
-                                  ts: Double = 0) -> [Int] {
+                                  estate: String,
+                                  ts: Double) -> [Int] {
         let n = adjacency.count
         if n == 0 { return [] }
         // Degenerate zero-weight graph: identity labeling, no emit —

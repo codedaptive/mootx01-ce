@@ -1,3 +1,4 @@
+import Foundation
 import SubstrateML
 
 // Constellation — emergent communities (SPEC § 7.1). Surfaces SubstrateML's
@@ -21,8 +22,16 @@ extension NeuronKit {
     /// Detect communities over the undirected graph formed by `edges`, grouping
     /// `nodeIDs` by community. Self-loops and absent-endpoint edges are ignored.
     /// Empty `nodeIDs` ⇒ no communities (C-16).
+    ///
+    /// - Parameters:
+    ///   - estate: Estate UUID string for VizGraph telemetry. Threaded to
+    ///             SubstrateML so analytics rows carry the correct estate tag.
+    ///   - now: Caller-supplied timestamp for telemetry. Never read a clock
+    ///          inside NeuronKit or SubstrateML; the caller provides `now`.
     public static func constellations(nodeIDs: [String], edges: [(String, String)],
-                                      maxPasses: Int) -> Constellation {
+                                      maxPasses: Int,
+                                      estate: String,
+                                      now: Date) -> Constellation {
         guard !nodeIDs.isEmpty else { return Constellation(communities: []) }
 
         let adjacency = StructureGraph.build(nodeIDs: nodeIDs, edges: edges)
@@ -30,9 +39,14 @@ extension NeuronKit {
         // NeuronKit.topologyResolution for the derivation): §7.3's
         // auto-rooming consumer is this lens, and phase-1-only results
         // fragment pair-bonded clusters.
+        //
+        // Thread estate and ts so the VizGraph telemetry row carries the caller's
+        // estate identifier and timestamp — not the empty defaults that caused
+        // analytics to emit with estate:"" and ts:0 before this fix.
         let labels = SubstrateML.CommunityDetection.detectFull(
             adjacency: adjacency, maxLevels: topologyMaxLevels,
-            maxPasses: maxPasses, resolution: topologyResolution)
+            maxPasses: maxPasses, resolution: topologyResolution,
+            estate: estate, ts: now.timeIntervalSince1970)
 
         // Group ids by their assigned label, then impose an id-derived canonical
         // ordering so the result does not depend on the label integers.

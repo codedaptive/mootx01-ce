@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import NeuronKit
 
@@ -20,7 +21,9 @@ struct ConstellationTests {
             ("A1", "A2"), ("A1", "A3"), ("A2", "A3"),
             ("B1", "B2"), ("B1", "B3"), ("B2", "B3"),
         ]
-        let c = NeuronKit.constellations(nodeIDs: nodes, edges: edges, maxPasses: 10)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let c = NeuronKit.constellations(nodeIDs: nodes, edges: edges, maxPasses: 10,
+                                         estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(c.communities.count == 2)
         #expect(c.communities.contains(["A1", "A2", "A3"]))
         #expect(c.communities.contains(["B1", "B2", "B3"]))
@@ -34,10 +37,14 @@ struct ConstellationTests {
             ("A1", "A2"), ("A1", "A3"), ("A2", "A3"),
             ("B1", "B2"), ("B1", "B3"), ("B2", "B3"),
         ]
+        // estate/ts: explicit sentinels — tests have no estate context.
+        let t0 = Date(timeIntervalSince1970: 0)
         let forward = NeuronKit.constellations(
-            nodeIDs: ["A1", "A2", "A3", "B1", "B2", "B3"], edges: edges, maxPasses: 10)
+            nodeIDs: ["A1", "A2", "A3", "B1", "B2", "B3"], edges: edges, maxPasses: 10,
+            estate: "", now: t0)
         let shuffled = NeuronKit.constellations(
-            nodeIDs: ["B3", "A2", "B1", "A3", "A1", "B2"], edges: edges, maxPasses: 10)
+            nodeIDs: ["B3", "A2", "B1", "A3", "A1", "B2"], edges: edges, maxPasses: 10,
+            estate: "", now: t0)
         #expect(forward == shuffled, "result independent of input id order")
         for grp in forward.communities { #expect(grp == grp.sorted()) }
         let firsts = forward.communities.map { $0[0] }
@@ -47,6 +54,8 @@ struct ConstellationTests {
     // Edge totality (C-16).
     @Test("Constellation: total over edge inputs")
     func constellationEdgeTotality() {
-        #expect(NeuronKit.constellations(nodeIDs: [], edges: [], maxPasses: 10).communities.isEmpty)
+        // estate/ts: explicit sentinels — tests have no estate context.
+        #expect(NeuronKit.constellations(nodeIDs: [], edges: [], maxPasses: 10,
+                                         estate: "", now: Date(timeIntervalSince1970: 0)).communities.isEmpty)
     }
 }
