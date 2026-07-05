@@ -182,7 +182,9 @@ public final class StatsStore: Sendable {
     /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
     /// v3: added topology_snapshots.topology_fingerprint (nullable) so the governor
     ///     can skip the full topology read on restart when inputs are unchanged.
-    public static let schemaVersion = 3
+    /// v4: added idx_metric_samples_dropbox_id index on metric_samples.dropbox_id
+    ///     so per-dropbox COUNT(*) queries for the dashboard do not full-scan 6M rows.
+    public static let schemaVersion = 4
 
     // MARK: - Schema declaration
 
@@ -200,6 +202,8 @@ public final class StatsStore: Sendable {
     /// Version 1: initial schema — metric_samples, event_samples, control.
     /// Version 2: additive migration — topology_snapshots table added.
     /// Version 3: additive migration — topology_snapshots.topology_fingerprint added.
+    /// Version 4: additive migration — idx_metric_samples_dropbox_id added so
+    ///            per-dropbox COUNT(*) queries don't full-scan 6M rows on each poll.
     public static let schema = SchemaDeclaration(
         kitID: "ObserverSink",
         version: schemaVersion,
@@ -324,6 +328,16 @@ public final class StatsStore: Sendable {
                 table: StatsStoreSchema.eventSamplesTable,
                 columns: [StatsStoreSchema.tsColumn]
             ),
+            // Index on metric_samples.dropbox_id (v4).
+            // The dashboard polls `queryMetricAggregatesByDropbox` which issues one
+            // COUNT(*) WHERE dropbox_id=? per estate. Without this index that COUNT
+            // is a full 6M-row scan; with the index it resolves in <1ms regardless
+            // of table size. Added alongside countMetrics' ts-index for symmetry.
+            IndexDeclaration(
+                name: "idx_metric_samples_dropbox_id",
+                table: StatsStoreSchema.metricSamplesTable,
+                columns: [StatsStoreSchema.dropboxIDColumn]
+            ),
         ],
         migrations: [
             // v1 → v2: add topology_snapshots table.
@@ -356,6 +370,21 @@ public final class StatsStore: Sendable {
                         table: StatsStoreSchema.topologySnapshotsTable,
                         column: .text(StatsStoreSchema.topologyFingerprintColumn, nullable: true)
                     ),
+                ]
+            ),
+            // v3 → v4: add dropbox_id index on metric_samples.
+            // Additive migration — no existing rows are touched. The index allows
+            // per-dropbox COUNT(*) queries to resolve in O(log n) instead of O(n)
+            // when metric_samples grows to millions of rows (observed: 6M in 3h).
+            Migration(
+                fromVersion: 3,
+                toVersion: 4,
+                operations: [
+                    .addIndex(IndexDeclaration(
+                        name: "idx_metric_samples_dropbox_id",
+                        table: StatsStoreSchema.metricSamplesTable,
+                        columns: [StatsStoreSchema.dropboxIDColumn]
+                    )),
                 ]
             ),
         ]
@@ -882,6 +911,95 @@ public final class StatsStore: Sendable {
             table: StatsStoreSchema.metricSamplesTable,
             where: nil
         )
+    }
+
+    /// Per-dropbox metric aggregate: row count and latest timestamp.
+    ///
+    /// The manager dashboard shows `metricCount` and `lastMetricTs` per estate.
+    /// Fetching these by loading and decoding ALL rows is catastrophic when the
+    /// table grows to millions of rows (observed: 6M rows caused a 504 timeout).
+    /// This struct carries only the aggregate values — no per-row tags or payloads.
+    public struct DropboxMetricAggregate: Sendable {
+        /// The dropbox identifier (estate UUID or app identifier).
+        public let dropboxID: String
+        /// Number of metric rows for this dropbox.
+        public let metricCount: Int
+        /// ISO-8601 UTC string of the most recent row, or nil when the dropbox has no rows.
+        public let lastMetricTs: String?
+
+        public init(dropboxID: String, metricCount: Int, lastMetricTs: String?) {
+            self.dropboxID = dropboxID
+            self.metricCount = metricCount
+            self.lastMetricTs = lastMetricTs
+        }
+    }
+
+    /// Return per-dropbox aggregate (count + last ts) for the given IDs.
+    ///
+    /// Replaces the `queryMetrics(dropboxID: nil)` full-scan in `serverPayload()`
+    /// and `status()`. For each requested `dropboxID` this method issues:
+    ///   1. `COUNT(*) WHERE dropbox_id = ?` — indexed; O(log n).
+    ///   2. `SELECT ts WHERE dropbox_id = ? ORDER BY ts DESC LIMIT 1` — read
+    ///      only the `ts` column (no tags decode); O(log n) with the index.
+    ///
+    /// A dropbox with zero metric rows is still returned (metricCount=0, lastMetricTs=nil)
+    /// so callers never need to handle a missing entry.
+    ///
+    /// - Parameter forDropboxIDs: The dropbox IDs to aggregate. May be empty (returns []).
+    /// - Returns: One `DropboxMetricAggregate` per requested ID, in input order.
+    /// - Throws: `StorageError` on I/O failure.
+    public func queryMetricAggregatesByDropbox(
+        forDropboxIDs dropboxIDs: [String]
+    ) async throws -> [DropboxMetricAggregate] {
+        guard !dropboxIDs.isEmpty else { return [] }
+
+        var results: [DropboxMetricAggregate] = []
+        results.reserveCapacity(dropboxIDs.count)
+
+        let table = StatsStoreSchema.metricSamplesTable
+        let dbCol = Column(table: table, name: StatsStoreSchema.dropboxIDColumn)
+        let tsCol = Column(table: table, name: StatsStoreSchema.tsColumn)
+
+        for id in dropboxIDs {
+            let predicate = StoragePredicate.eq(dbCol, .text(id))
+
+            // COUNT(*) WHERE dropbox_id = id — indexed, no row decode.
+            let count = try await storage.rowStore.count(table: table, where: predicate)
+
+            // SELECT ts WHERE dropbox_id = id ORDER BY ts DESC LIMIT 1 — indexed,
+            // read only the `ts` column (columns projection skips tags/name/value blob).
+            // The ts column stores ISO-8601 TEXT (SQLite) or `.timestamp(Date)` (InMemory).
+            // Both backends are tolerated: we normalise to ISO-8601 TEXT for the caller.
+            var lastTs: String? = nil
+            if count > 0 {
+                let rows = try await storage.rowStore.query(
+                    table: table,
+                    where: predicate,
+                    orderBy: [OrderClause(column: tsCol, direction: .descending)],
+                    limit: 1,
+                    offset: nil,
+                    columns: [StatsStoreSchema.tsColumn]
+                )
+                if let row = rows.first, let cell = row[StatsStoreSchema.tsColumn] {
+                    switch cell {
+                    case .text(let s):
+                        lastTs = s
+                    case .timestamp(let d):
+                        // InMemory backend returns a native Date; encode to ISO-8601.
+                        lastTs = Self.iso8601Formatter.string(from: d)
+                    default:
+                        lastTs = nil
+                    }
+                }
+            }
+
+            results.append(DropboxMetricAggregate(
+                dropboxID: id,
+                metricCount: count,
+                lastMetricTs: lastTs
+            ))
+        }
+        return results
     }
 
     /// Query event samples, optionally filtering by dropbox.

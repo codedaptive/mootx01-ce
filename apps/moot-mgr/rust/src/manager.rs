@@ -39,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cognition_kit::capability::shipped_capabilities;
-use observer_sink::{EventRow, MetricRow, StatsStore};
+use observer_sink::{DropboxMetricAggregate, EventRow, MetricRow, StatsStore};
 
 use crate::api_payloads::{
     ConfigPayload, DropboxSummaryPayload, EstatePayload, EstatesPayload, EventPayload,
@@ -229,26 +229,42 @@ impl MootManager {
     ) -> Result<StatusReport, ManagerError> {
         let store = self.require_store()?;
         let monitoring_enabled = store.is_monitoring_enabled()?;
-        let metrics = store.query_metrics(None)?;
+        // Use aggregate queries rather than a full table scan.
+        // count_metrics() issues a single SQL COUNT(*); per-dropbox metric
+        // counts come from query_metric_aggregates_by_dropbox, driven by the
+        // event dropbox IDs (every metric-emitting dropbox also emits events).
+        let total_metrics = store.count_metrics()? as i64;
         let events = store.query_events(None)?;
 
+        // Derive the set of known dropbox IDs from the (cheap) event rows.
+        let event_dropbox_ids: Vec<String> = {
+            let mut ids: BTreeSet<String> = BTreeSet::new();
+            for e in &events {
+                ids.insert(e.dropbox_id.clone());
+            }
+            ids.into_iter().collect()
+        };
+        let event_dropbox_id_strs: Vec<&str> = event_dropbox_ids.iter().map(String::as_str).collect();
+        let metric_aggregates: Vec<DropboxMetricAggregate> =
+            store.query_metric_aggregates_by_dropbox(&event_dropbox_id_strs)?;
+        let mut dropbox_metric_counts: BTreeMap<String, i64> = metric_aggregates
+            .into_iter()
+            .map(|a| (a.dropbox_id, a.metric_count as i64))
+            .collect();
+
         // By-dropbox: count metrics and events per dropbox id.
-        let mut dropbox_metrics: BTreeMap<String, i64> = BTreeMap::new();
         let mut dropbox_events: BTreeMap<String, i64> = BTreeMap::new();
-        for m in &metrics {
-            *dropbox_metrics.entry(m.dropbox_id.clone()).or_insert(0) += 1;
-        }
         for e in &events {
             *dropbox_events.entry(e.dropbox_id.clone()).or_insert(0) += 1;
         }
         let mut dropbox_keys: BTreeSet<String> = BTreeSet::new();
-        dropbox_keys.extend(dropbox_metrics.keys().cloned());
+        dropbox_keys.extend(dropbox_metric_counts.keys().cloned());
         dropbox_keys.extend(dropbox_events.keys().cloned());
         let by_dropbox: Vec<GroupCount> = dropbox_keys
             .iter()
             .map(|key| GroupCount {
                 key: key.clone(),
-                metric_count: *dropbox_metrics.get(key).unwrap_or(&0),
+                metric_count: dropbox_metric_counts.remove(key).unwrap_or(0),
                 event_count: *dropbox_events.get(key).unwrap_or(&0),
             })
             .collect();
@@ -274,7 +290,7 @@ impl MootManager {
 
         Ok(StatusReport {
             monitoring_enabled,
-            total_metrics: metrics.len() as i64,
+            total_metrics,
             total_events: recent_total_events(&recent_events, &by_estate),
             by_dropbox,
             by_estate,
@@ -300,9 +316,10 @@ impl MootManager {
     ) -> Result<ServerPayload, ManagerError> {
         let store = self.require_store()?;
         let monitoring_enabled = store.is_monitoring_enabled()?;
-        // Full scan for per-dropbox summaries and capability self-reports (by-dropbox
-        // rollups cover every metric name; capabilities are self-reported by any name).
-        let all_metrics = store.query_metrics(None)?;
+        // Use aggregate queries rather than a full table scan.
+        // Per-dropbox metric summaries are populated from query_metric_aggregates_by_dropbox;
+        // per-name server metrics use the existing targeted name-filtered query.
+        let total_metrics = store.count_metrics()? as i64;
         let events = store.query_events(None)?;
         let estate_count = events
             .iter()
@@ -384,7 +401,20 @@ impl MootManager {
         });
 
         // Per-dropbox summaries (Connects tab / Overview observers panel).
-        let by_dropbox = build_dropbox_summaries(&all_metrics, &events);
+        // Drive the dropbox ID list from events (cheap); then fetch per-dropbox
+        // metric aggregate (count + last ts) with a targeted SQL query, avoiding
+        // a full metric_samples table scan for large stores.
+        let payload_dropbox_ids: Vec<String> = {
+            let mut ids: BTreeSet<String> = BTreeSet::new();
+            for e in &events {
+                ids.insert(e.dropbox_id.clone());
+            }
+            ids.into_iter().collect()
+        };
+        let payload_dropbox_id_strs: Vec<&str> = payload_dropbox_ids.iter().map(String::as_str).collect();
+        let metric_aggregates: Vec<DropboxMetricAggregate> =
+            store.query_metric_aggregates_by_dropbox(&payload_dropbox_id_strs)?;
+        let by_dropbox = build_dropbox_summaries_from_aggregates(&metric_aggregates, &events);
 
         // NeuronKit capabilities: sourced from CognitionKit's compile-time
         // shipped_capabilities() constant, mirroring the Swift host's
@@ -399,7 +429,7 @@ impl MootManager {
             monitoring_enabled,
             uptime_seconds,
             estate_count,
-            total_metrics: all_metrics.len() as i64,
+            total_metrics,
             total_events: events.len() as i64,
             store_size_bytes: health.as_ref().map(|h| h.logical_size_bytes).unwrap_or(0),
             store_page_count: health.as_ref().and_then(|h| h.page_count),
@@ -457,12 +487,14 @@ impl MootManager {
         ]
         .into_iter()
         .collect();
-        let all_metrics = store.query_metrics(None)?;
+        // Read only the named queue/gate metric rows — avoids a full table scan.
+        // Mirrors Swift estatesPayload() which calls store.queryMetricsByNames(queueMetricNames).
+        let queue_metric_name_slice: Vec<&str> = queue_metric_names.iter().copied().collect();
+        let queue_metrics = store.query_metrics_by_names(&queue_metric_name_slice, None)?;
         // latest[(estate, metric)] = value of the newest sample.
         let mut latest: BTreeMap<(String, String), (f64, f64)> = BTreeMap::new(); // -> (value, ts)
-        for m in all_metrics
+        for m in queue_metrics
             .iter()
-            .filter(|m| queue_metric_names.contains(m.name.as_str()))
         {
             let est = m.tags.get("estate").cloned().unwrap_or_else(|| "unknown".to_string());
             let key = (est, m.name.clone());
@@ -569,14 +601,16 @@ impl MootManager {
         ]
         .into_iter()
         .collect();
-        let viz_metrics = store.query_metrics(None)?;
+        // Read only the named VizGraph signal rows — avoids a full table scan.
+        // Mirrors Swift graphPayload() which calls store.queryMetricsByNames(vizSignals).
+        let viz_signal_slice: Vec<&str> = viz_signals.iter().copied().collect();
+        let viz_metrics = store.query_metrics_by_names(&viz_signal_slice, None)?;
 
         // Group by (estate, signal): keep the latest sample + the sample count.
         let mut latest: BTreeMap<(String, String), MetricRow> = BTreeMap::new();
         let mut sample_counts: BTreeMap<(String, String), i64> = BTreeMap::new();
         for m in viz_metrics
             .iter()
-            .filter(|m| viz_signals.contains(m.name.as_str()))
         {
             let est = m.tags.get("estate").cloned().unwrap_or_else(|| "unknown".to_string());
             // Honour the optional estate filter against the sample's estate tag.
@@ -912,17 +946,22 @@ fn clone_metric(m: &MetricRow) -> MetricRow {
 
 /// Build per-dropbox sample summaries from the metric + event scans, sorted by
 /// dropbox name. Mirrors the by-dropbox block of Swift `serverPayload`.
-fn build_dropbox_summaries(
-    metrics: &[MetricRow],
+/// Build per-dropbox summary payloads from aggregate query results.
+///
+/// Takes pre-computed metric aggregates (count + last_ts from SQL) and raw
+/// event rows, so no full metric_samples table scan is needed. The aggregate
+/// queries issue O(|dropboxes|) targeted SQL calls instead of decoding every
+/// metric row in the store. Mirrors the Swift serverPayload() helper.
+fn build_dropbox_summaries_from_aggregates(
+    metric_aggregates: &[DropboxMetricAggregate],
     events: &[EventRow],
 ) -> Vec<DropboxSummaryPayload> {
     let mut metric_counts: BTreeMap<String, i64> = BTreeMap::new();
-    let mut last_metric_ts: BTreeMap<String, f64> = BTreeMap::new();
-    for m in metrics {
-        *metric_counts.entry(m.dropbox_id.clone()).or_insert(0) += 1;
-        let e = last_metric_ts.entry(m.dropbox_id.clone()).or_insert(f64::MIN);
-        if m.ts_epoch > *e {
-            *e = m.ts_epoch;
+    let mut last_metric_ts_iso: BTreeMap<String, String> = BTreeMap::new();
+    for agg in metric_aggregates {
+        metric_counts.insert(agg.dropbox_id.clone(), agg.metric_count as i64);
+        if let Some(ref ts) = agg.last_metric_ts {
+            last_metric_ts_iso.insert(agg.dropbox_id.clone(), ts.clone());
         }
     }
     let mut event_counts: BTreeMap<String, i64> = BTreeMap::new();
@@ -939,19 +978,24 @@ fn build_dropbox_summaries(
     ids.extend(event_counts.keys().cloned());
     ids.into_iter()
         .map(|id| {
-            let lm = last_metric_ts.get(&id).copied().filter(|t| *t > f64::MIN);
+            // last_seen is the later of the most-recent metric and most-recent event.
+            let lm_iso = last_metric_ts_iso.get(&id).cloned();
             let le = last_event_ts.get(&id).copied().filter(|t| *t > f64::MIN);
-            let last_seen = match (lm, le) {
-                (Some(m), Some(e)) => Some(m.max(e)),
-                (Some(m), None) => Some(m),
-                (None, Some(e)) => Some(e),
+            let last_seen_iso = match (lm_iso, le) {
+                (Some(m_iso), Some(e_epoch)) => {
+                    // Compare via ISO-8601 string lexicographic order (UTC, same format).
+                    let e_iso = epoch_to_iso8601(e_epoch);
+                    Some(if m_iso >= e_iso { m_iso } else { e_iso })
+                }
+                (Some(m_iso), None) => Some(m_iso),
+                (None, Some(e_epoch)) => Some(epoch_to_iso8601(e_epoch)),
                 (None, None) => None,
             };
             DropboxSummaryPayload {
                 name: id.clone(),
                 metric_count: *metric_counts.get(&id).unwrap_or(&0),
                 event_count: *event_counts.get(&id).unwrap_or(&0),
-                last_seen_iso: last_seen.map(epoch_to_iso8601),
+                last_seen_iso,
             }
         })
         .collect()

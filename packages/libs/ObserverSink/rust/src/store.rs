@@ -295,6 +295,16 @@ fn make_schema() -> SchemaDeclaration {
                 columns: vec![StatsStoreSchema::TS_COLUMN.to_string()],
                 unique: false,
             },
+            // Index on metric_samples.dropbox_id (v4).
+            // The dashboard polls `query_metric_aggregates_by_dropbox` which issues
+            // one COUNT(*) WHERE dropbox_id=? per estate. Without this index that
+            // COUNT is a full 6M-row scan; with the index it resolves in <1ms.
+            IndexDeclaration {
+                name: "idx_metric_samples_dropbox_id".to_string(),
+                table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                columns: vec![StatsStoreSchema::DROPBOX_ID_COLUMN.to_string()],
+                unique: false,
+            },
         ],
         migrations: vec![
             // v1 → v2: add topology_snapshots table.
@@ -336,6 +346,22 @@ fn make_schema() -> SchemaDeclaration {
                         table: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
                         column: col_text_nullable(StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN),
                     },
+                ],
+            },
+            // v3 → v4: add dropbox_id index on metric_samples.
+            // Additive migration — no existing rows are touched. The index allows
+            // per-dropbox COUNT(*) queries to resolve in O(log n) instead of O(n)
+            // when metric_samples grows to millions of rows (observed: 6M in 3h).
+            Migration {
+                from_version: 3,
+                to_version: 4,
+                operations: vec![
+                    SchemaOperation::AddIndex(IndexDeclaration {
+                        name: "idx_metric_samples_dropbox_id".to_string(),
+                        table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                        columns: vec![StatsStoreSchema::DROPBOX_ID_COLUMN.to_string()],
+                        unique: false,
+                    }),
                 ],
             },
         ],
@@ -405,6 +431,27 @@ pub(crate) fn decode_tags_json(json: &str) -> BTreeMap<String, String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DropboxMetricAggregate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-dropbox metric aggregate: row count and latest timestamp.
+///
+/// Returned by `StatsStore::query_metric_aggregates_by_dropbox`. Carries only
+/// the aggregate values — no per-row tags or payloads. Designed to replace
+/// full-table-scan `query_metrics(None)` calls in the dashboard read path.
+///
+/// Mirrors Swift `StatsStore.DropboxMetricAggregate`.
+#[derive(Debug, Clone)]
+pub struct DropboxMetricAggregate {
+    /// The dropbox identifier (estate UUID or app identifier).
+    pub dropbox_id: String,
+    /// Number of metric rows for this dropbox (COUNT(*) on the indexed column).
+    pub metric_count: usize,
+    /// ISO-8601 UTC string of the most recent row, or None when count is 0.
+    pub last_metric_ts: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // StatsStore
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -430,7 +477,8 @@ impl StatsStore {
     /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
     /// v3: added topology_snapshots.topology_fingerprint (nullable) so the governor
     ///     can skip the full topology read on restart when inputs are unchanged.
-    pub const SCHEMA_VERSION: i32 = 3;
+    /// v4: added idx_metric_samples_dropbox_id so per-dropbox COUNT is O(log n).
+    pub const SCHEMA_VERSION: i32 = 4;
 
     // MARK: - Initialisation
 
@@ -861,6 +909,83 @@ impl StatsStore {
     pub fn count_metrics(&self) -> Result<usize, persistence_kit::StorageError> {
         let rs = self.storage.row_store();
         rs.count(StatsStoreSchema::METRIC_SAMPLES_TABLE, None)
+    }
+
+    /// Return per-dropbox aggregate (count + last ts ISO-8601) for the given IDs.
+    ///
+    /// Replaces `query_metrics(None)` full-table scans in the manager's
+    /// `server_payload` and `status` methods. For each requested dropbox ID:
+    ///   1. `COUNT(*) WHERE dropbox_id = id` — indexed, O(log n).
+    ///   2. `query_projected(ts) WHERE dropbox_id = id ORDER BY ts DESC LIMIT 1`
+    ///      — reads only the ts column (no tags decode), O(log n) with index.
+    ///
+    /// A dropbox with zero rows still appears in the output (count=0, last_ts=None).
+    /// Mirrors Swift `StatsStore.queryMetricAggregatesByDropbox(forDropboxIDs:)`.
+    pub fn query_metric_aggregates_by_dropbox(
+        &self,
+        dropbox_ids: &[&str],
+    ) -> Result<Vec<DropboxMetricAggregate>, persistence_kit::StorageError> {
+        if dropbox_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rs = self.storage.row_store();
+        let table = StatsStoreSchema::METRIC_SAMPLES_TABLE;
+        let db_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+        };
+        let ts_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::TS_COLUMN.to_string(),
+        };
+
+        let mut results = Vec::with_capacity(dropbox_ids.len());
+        for &id in dropbox_ids {
+            let predicate = StoragePredicate::Eq(db_col.clone(), TypedValue::Text(id.to_string()));
+
+            // COUNT(*) WHERE dropbox_id = id — indexed, no row decode.
+            let count = rs.count(table, Some(&predicate))?;
+
+            // SELECT ts WHERE dropbox_id = id ORDER BY ts DESC LIMIT 1.
+            // Reads only the ts column (no tags/name/value blob).
+            let last_ts = if count > 0 {
+                let order = PkOrderClause {
+                    column: ts_col.clone(),
+                    direction: OrderDirection::Descending,
+                };
+                let rows = rs.query_projected(
+                    table,
+                    &[StatsStoreSchema::TS_COLUMN],
+                    Some(&predicate),
+                    &[order],
+                    Some(1),
+                    None,
+                )?;
+                rows.first().and_then(|row| {
+                    // ts column is stored as ISO-8601 TEXT on disk; PersistenceKit's
+                    // Rust SQLite backend reads it back as TypedValue::Timestamp(ms)
+                    // (milliseconds since Unix epoch) while InMemory may return Text.
+                    // Handle both representations for backend parity.
+                    match row.get(StatsStoreSchema::TS_COLUMN) {
+                        Some(TypedValue::Text(s)) => Some(s.clone()),
+                        Some(TypedValue::Timestamp(ms)) => {
+                            // ms → epoch seconds (f64) → ISO-8601 TEXT
+                            Some(epoch_to_iso8601(*ms as f64 / 1000.0))
+                        }
+                        _ => None,
+                    }
+                })
+            } else {
+                None
+            };
+
+            results.push(DropboxMetricAggregate {
+                dropbox_id: id.to_string(),
+                metric_count: count,
+                last_metric_ts: last_ts,
+            });
+        }
+        Ok(results)
     }
 
     // MARK: - Retention

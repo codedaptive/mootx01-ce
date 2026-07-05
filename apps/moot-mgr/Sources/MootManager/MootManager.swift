@@ -282,22 +282,30 @@ public actor MootManager {
 
         let monitoringEnabled = try await store.isMonitoringEnabled()
 
-        // Pull all samples (no dropbox filter) and aggregate in-process. Phase 1
-        // is single-host with bounded retention, so a full scan is acceptable;
-        // SQL-side GROUP BY aggregation is a Phase-3 dashboard optimisation.
-        let metrics = try await store.queryMetrics(dropboxID: nil)
+        // `countMetrics()` issues a SQL COUNT(*) with no predicate — no row decoding, O(1).
+        // This replaces the previous `queryMetrics(dropboxID: nil)` full-table scan which
+        // was catastrophic at 6M rows (dashboard 504 timeout observed in production).
+        let totalMetrics = try await store.countMetrics()
         let events = try await store.queryEvents(dropboxID: nil)
 
-        // By-dropbox: count metrics and events per dropbox id.
-        var dropboxMetricCounts: [String: Int] = [:]
+        // Per-dropbox metric counts: use aggregate queries indexed on dropbox_id
+        // instead of loading+decoding every metric row. Driver IDs come from events
+        // (bounded by retention; every metric-emitting estate also emits events).
         var dropboxEventCounts: [String: Int] = [:]
-        for m in metrics { dropboxMetricCounts[m.dropboxID, default: 0] += 1 }
         for e in events { dropboxEventCounts[e.dropboxID, default: 0] += 1 }
-        let dropboxKeys = Set(dropboxMetricCounts.keys).union(dropboxEventCounts.keys)
+        let eventDropboxIDs = Array(Set(events.map(\.dropboxID)))
+        let metricAggregates = try await store.queryMetricAggregatesByDropbox(
+            forDropboxIDs: eventDropboxIDs
+        )
+        let metricAggByID = Dictionary(
+            metricAggregates.map { ($0.dropboxID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let dropboxKeys = Set(eventDropboxIDs).union(metricAggByID.keys)
         let byDropbox = dropboxKeys.sorted().map { key in
             GroupCount(
                 key: key,
-                metricCount: dropboxMetricCounts[key] ?? 0,
+                metricCount: metricAggByID[key]?.metricCount ?? 0,
                 eventCount: dropboxEventCounts[key] ?? 0
             )
         }
@@ -319,7 +327,7 @@ public actor MootManager {
 
         return StatusReport(
             monitoringEnabled: monitoringEnabled,
-            totalMetrics: metrics.count,
+            totalMetrics: totalMetrics,
             totalEvents: events.count,
             byDropbox: byDropbox,
             byEstate: byEstate,
@@ -430,10 +438,6 @@ public actor MootManager {
         let estateCount = Set(events.map(\.estate)).count
         let health = try await store.storageStats(now: now)
 
-        // Full scan for per-dropbox summaries and capability self-reports (by-dropbox
-        // rollups cover every metric name, so a bounded query cannot serve both purposes).
-        let allMetrics = try await store.queryMetrics(dropboxID: nil)
-
         // --- Server metric extraction (latest + second-latest per named metric) ---
         //
         // Bounded query: the name set is fixed and small (6 names). Using the targeted
@@ -494,16 +498,26 @@ public actor MootManager {
         }()
 
         // --- Per-dropbox summaries for the Connects tab and Overview observers panel ---
-        // Build metric and event counts per dropbox from the all-metrics scan and the
-        // already-fetched events. First-seen / last-seen are derived from sample timestamps.
+        //
+        // Replaces the previous `queryMetrics(dropboxID: nil)` full-table scan.
+        // At 6M rows that scan caused a 504 timeout on every dashboard poll.
+        // Instead: use `queryMetricAggregatesByDropbox` which issues one indexed
+        // COUNT(*) + one LIMIT 1 projected ts-column read per estate — O(log n) total.
+        //
+        // Driver IDs come from events (already in memory, bounded by retention).
+        // Every metric-emitting estate also emits events, so event-derived IDs
+        // cover all active estates for the per-dropbox summary panel.
         var metricCountByDropbox: [String: Int] = [:]
         var lastMetricTsByDropbox: [String: Date] = [:]
-        for m in allMetrics {
-            metricCountByDropbox[m.dropboxID, default: 0] += 1
-            if let prev = lastMetricTsByDropbox[m.dropboxID] {
-                if m.ts > prev { lastMetricTsByDropbox[m.dropboxID] = m.ts }
-            } else {
-                lastMetricTsByDropbox[m.dropboxID] = m.ts
+        let payloadDropboxIDs = Array(Set(events.map(\.dropboxID)))
+        let payloadAggregates = try await store.queryMetricAggregatesByDropbox(
+            forDropboxIDs: payloadDropboxIDs
+        )
+        for agg in payloadAggregates {
+            metricCountByDropbox[agg.dropboxID] = agg.metricCount
+            // lastMetricTs is ISO-8601 TEXT; parse to Date for the lastSeen comparison below.
+            if let ts = agg.lastMetricTs, let d = Self.iso8601Date(from: ts) {
+                lastMetricTsByDropbox[agg.dropboxID] = d
             }
         }
         var eventCountByDropbox: [String: Int] = [:]
@@ -516,7 +530,7 @@ public actor MootManager {
                 lastEventTsByDropbox[e.dropboxID] = e.ts
             }
         }
-        let allDropboxIDs = Set(metricCountByDropbox.keys).union(Set(eventCountByDropbox.keys))
+        let allDropboxIDs = Set(payloadDropboxIDs).union(Set(eventCountByDropbox.keys))
         let byDropbox: [DropboxSummaryPayload] = allDropboxIDs.sorted().map { id in
             let lastMetric = lastMetricTsByDropbox[id]
             let lastEvent  = lastEventTsByDropbox[id]
@@ -961,6 +975,15 @@ public actor MootManager {
     /// single source of agreement between the two.
     static func iso8601String(from date: Date) -> String {
         iso8601Formatter.string(from: date)
+    }
+
+    /// Parse an ISO-8601 UTC string produced by StatsStore's aggregate queries.
+    ///
+    /// Used to convert the `lastMetricTs` ISO-8601 string from
+    /// `DropboxMetricAggregate` to a `Date` for comparison with event timestamps.
+    /// Returns `nil` when the string cannot be parsed (e.g. empty or corrupt row).
+    static func iso8601Date(from string: String) -> Date? {
+        iso8601Formatter.date(from: string)
     }
 
     /// Shared ISO-8601 UTC formatter for read-API timestamps. Static constant —

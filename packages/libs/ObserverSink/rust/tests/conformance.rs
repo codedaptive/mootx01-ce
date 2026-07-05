@@ -22,7 +22,7 @@
 //   Same table names, same column names, same TEXT (ISO-8601) timestamp format.
 //   Timestamp comparisons use 1-second tolerance (millisecond encoding rounding).
 
-use observer_sink::{PersistenceStatsSink, StatsStore};
+use observer_sink::{PersistenceStatsSink, StatsStore, DropboxMetricAggregate};
 use intellectus_lib::{EventKind, Intellectus, StatSample};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -64,8 +64,8 @@ fn make_store() -> Arc<StatsStore> {
 
 #[test]
 fn schema_version() {
-    // Schema version 3: topology_snapshots.topology_fingerprint added (v2→v3).
-    assert_eq!(StatsStore::SCHEMA_VERSION, 3);
+    // Schema version 4: idx_metric_samples_dropbox_id added (v3→v4).
+    assert_eq!(StatsStore::SCHEMA_VERSION, 4);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -696,4 +696,60 @@ fn topology_snapshot_none_estate_empty_store() {
         .latest_topology_snapshot(None)
         .expect("query must not error");
     assert!(result.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query_metric_aggregates_by_dropbox — aggregate query (v4)
+// Mirrors Swift: StatsStore.queryMetricAggregatesByDropbox(forDropboxIDs:)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn metric_aggregates_by_dropbox_correctness() {
+    let store = make_store();
+
+    // Insert 3 rows for dropbox-A (ts=100s,200s,300s) and 2 rows for dropbox-B
+    // (ts=50s,150s). dropbox-C receives no rows.
+    let ts_a = [100.0_f64, 200.0, 300.0];
+    let ts_b = [50.0_f64, 150.0];
+    for &ts in &ts_a {
+        store
+            .insert_metric("m", 1.0, &BTreeMap::new(), ts, "dropbox-A")
+            .expect("insert must succeed");
+    }
+    for &ts in &ts_b {
+        store
+            .insert_metric("m", 1.0, &BTreeMap::new(), ts, "dropbox-B")
+            .expect("insert must succeed");
+    }
+
+    let aggs = store
+        .query_metric_aggregates_by_dropbox(&["dropbox-A", "dropbox-B", "dropbox-C"])
+        .expect("aggregate query must not error");
+
+    assert_eq!(aggs.len(), 3, "must return one aggregate per requested ID");
+
+    let a = aggs.iter().find(|x| x.dropbox_id == "dropbox-A").expect("A must be present");
+    assert_eq!(a.metric_count, 3, "dropbox-A must have 3 rows");
+    assert!(a.last_metric_ts.is_some(), "dropbox-A last_metric_ts must be Some");
+
+    let b = aggs.iter().find(|x| x.dropbox_id == "dropbox-B").expect("B must be present");
+    assert_eq!(b.metric_count, 2, "dropbox-B must have 2 rows");
+
+    let c = aggs.iter().find(|x| x.dropbox_id == "dropbox-C").expect("C must be present");
+    assert_eq!(c.metric_count, 0, "dropbox-C must have 0 rows (no inserts)");
+    assert!(c.last_metric_ts.is_none(), "dropbox-C last_metric_ts must be None");
+
+    // ISO-8601 strings are lexicographically sortable: A's newest (t=300) > B's newest (t=150).
+    let a_ts = a.last_metric_ts.as_deref().unwrap();
+    let b_ts = b.last_metric_ts.as_deref().unwrap();
+    assert!(a_ts > b_ts, "A last_ts (t=300) must be newer than B last_ts (t=150); got A={a_ts}, B={b_ts}");
+}
+
+#[test]
+fn metric_aggregates_empty_input_returns_empty() {
+    let store = make_store();
+    let aggs = store
+        .query_metric_aggregates_by_dropbox(&[])
+        .expect("empty input must succeed");
+    assert!(aggs.is_empty(), "empty input must yield empty output");
 }

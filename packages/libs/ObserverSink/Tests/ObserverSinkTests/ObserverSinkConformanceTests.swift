@@ -57,8 +57,8 @@ struct ObserverSinkConformanceTests {
     func schemaVersion() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
-        // Schema version 3: topology_snapshots.topology_fingerprint added (v2→v3).
-        #expect(StatsStore.schemaVersion == 3)
+        // Schema version 4: idx_metric_samples_dropbox_id added (v3→v4).
+        #expect(StatsStore.schemaVersion == 4)
     }
 
     @Test("StatsStore seeds monitoring ON by default (wave 8.1)")
@@ -441,10 +441,12 @@ struct ObserverSinkConformanceTests {
 
     // MARK: 12. Topology snapshot — schema version bump
 
-    @Test("StatsStore schema is version 3 after topology_fingerprint column added")
-    func schemaVersionIsThree() async throws {
-        // v1→v2 added topology_snapshots; v2→v3 added topology_fingerprint.
-        #expect(StatsStore.schemaVersion == 3)
+    @Test("StatsStore schema is version 4 after dropbox_id index added")
+    func schemaVersionIsFour() async throws {
+        // v1→v2: topology_snapshots table.
+        // v2→v3: topology_snapshots.topology_fingerprint.
+        // v3→v4: idx_metric_samples_dropbox_id (per-dropbox COUNT is now O(log n)).
+        #expect(StatsStore.schemaVersion == 4)
     }
 
     // MARK: 13. Topology snapshot write and read
@@ -626,5 +628,67 @@ struct ObserverSinkConformanceTests {
 
         let result = try await store.latestTopologySnapshot(estate: "no-such-estate")
         #expect(result == nil, "Unknown estate must return nil")
+    }
+
+    // MARK: 17. queryMetricAggregatesByDropbox — aggregate query correctness
+
+    @Test("queryMetricAggregatesByDropbox returns correct count and lastTs per dropbox")
+    func metricAggregatesByDropbox() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let idA = "dropbox-A"
+        let idB = "dropbox-B"
+        let idC = "dropbox-C"   // intentionally no rows
+
+        // Insert 3 rows for A (t=100, 200, 300) and 2 rows for B (t=50, 150).
+        // The highest ts values are 300 for A and 150 for B.
+        let tsA: [Double] = [100, 200, 300]
+        let tsB: [Double] = [50, 150]
+        for ts in tsA {
+            try await store.insertMetric(name: "m", value: 1.0, tags: [:], ts: ts, dropboxID: idA)
+        }
+        for ts in tsB {
+            try await store.insertMetric(name: "m", value: 1.0, tags: [:], ts: ts, dropboxID: idB)
+        }
+
+        let aggregates = try await store.queryMetricAggregatesByDropbox(
+            forDropboxIDs: [idA, idB, idC]
+        )
+
+        #expect(aggregates.count == 3, "Must return one aggregate per requested dropbox")
+
+        // Dropbox A: 3 rows, lastTs ISO-8601 for epoch 300.
+        let a = try #require(aggregates.first(where: { $0.dropboxID == idA }),
+                             "Aggregate for dropbox A must be present")
+        #expect(a.metricCount == 3, "Dropbox A must have 3 rows; got \(a.metricCount)")
+        #expect(a.lastMetricTs != nil, "Dropbox A lastMetricTs must be non-nil")
+
+        // Dropbox B: 2 rows.
+        let b = try #require(aggregates.first(where: { $0.dropboxID == idB }),
+                             "Aggregate for dropbox B must be present")
+        #expect(b.metricCount == 2, "Dropbox B must have 2 rows; got \(b.metricCount)")
+
+        // Dropbox C: 0 rows, lastTs nil.
+        let c = try #require(aggregates.first(where: { $0.dropboxID == idC }),
+                             "Aggregate for dropbox C must be present even with 0 rows")
+        #expect(c.metricCount == 0, "Dropbox C must have 0 rows; got \(c.metricCount)")
+        #expect(c.lastMetricTs == nil, "Dropbox C lastMetricTs must be nil when no rows exist")
+
+        // Verify that lastTs for A corresponds to the highest ts (300s epoch).
+        // ISO-8601 strings are lexicographically sortable so ts-300 > ts-100.
+        if let aTs = a.lastMetricTs, let bTs = b.lastMetricTs {
+            // epoch 300 (A) > epoch 150 (B) → A's lastTs must compare greater.
+            #expect(aTs > bTs, "lastMetricTs for A (t=300) must be newer than B (t=150); got A=\(aTs), B=\(bTs)")
+        }
+    }
+
+    @Test("queryMetricAggregatesByDropbox returns empty for empty input")
+    func metricAggregatesByDropboxEmptyInput() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let result = try await store.queryMetricAggregatesByDropbox(forDropboxIDs: [])
+        #expect(result.isEmpty, "Empty input must return empty result")
     }
 }

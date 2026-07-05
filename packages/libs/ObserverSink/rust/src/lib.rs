@@ -32,7 +32,7 @@
 mod store;
 mod sink;
 
-pub use store::{StatsStore, StatsStoreSchema, MetricRow, EventRow};
+pub use store::{StatsStore, StatsStoreSchema, MetricRow, EventRow, DropboxMetricAggregate};
 pub use sink::PersistenceStatsSink;
 // Re-export StorageStats so callers of storage_stats() can name the return type
 // without a direct persistence_kit dependency in their own crate.
