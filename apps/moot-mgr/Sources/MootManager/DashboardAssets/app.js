@@ -1470,7 +1470,8 @@
           centrality: Math.pow(Math.random(), 2.6), // skewed toward low centrality
           breathPhase: Math.random() * Math.PI * 2,
           pulseOrange: 0,   // capture pulse magnitude 0..1 — decays over ~1s
-          glowBlue: 0,      // think glow magnitude 0..1 — decays over ~10s
+          pulseBlue: 0,     // think pulse magnitude 0..1 — same decay, visible ring
+          glowBlue: 0,      // think ambient glow magnitude 0..1 — decays over ~10s
           anomaly: Math.random() < 0.011,
         });
       }
@@ -1549,8 +1550,9 @@
         nounType: n.nounType || 0,
         centrality: n.centrality || 0,
         breathPhase: Math.random() * Math.PI * 2,
-        pulseOrange: 0,
-        glowBlue: 0,
+        pulseOrange: 0,   // capture pulse magnitude 0..1 — decays over ~1s
+        pulseBlue: 0,     // think pulse magnitude 0..1 — same decay, visible ring
+        glowBlue: 0,      // think ambient glow magnitude 0..1 — decays over ~10s
         anomaly: !!n.anomaly,
         lastMs: lastMs,
         createdMs: createdMs,
@@ -1936,6 +1938,8 @@
   function tickBrainDecay(dt) {
     brainNodes.forEach(function (n) {
       if (n.pulseOrange > 0) n.pulseOrange = Math.max(0, n.pulseOrange - dt * 1.1);
+      // pulseBlue: same ~1s decay as orange — yields an expanding blue ring for think events
+      if (n.pulseBlue > 0)   n.pulseBlue   = Math.max(0, n.pulseBlue   - dt * 1.1);
       if (n.glowBlue > 0)    n.glowBlue    = Math.max(0, n.glowBlue    - dt * 0.075);
     });
   }
@@ -2318,12 +2322,27 @@
         ctx.fill();
       }
 
-      // Capture event: expanding orange pulse ring (~1s decay)
+      // Capture event: expanding orange pulse ring (~1s decay).
+      // Ring grows outward as magnitude falls (1.0 → small, 0 → 5× baseR),
+      // so it reads as a shockwave radiating from the node.
       if (n.pulseOrange > 0.01) {
         var ringR = baseR * (1 + (1 - n.pulseOrange) * 4);
         ctx.beginPath();
         ctx.arc(n.px, n.py, ringR, 0, Math.PI * 2);
         ctx.strokeStyle = "rgba(255,140,0," + (n.pulseOrange * 0.85) + ")";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.lineWidth = 0.55;
+      }
+
+      // Think/non-capture event: expanding blue pulse ring (~1s decay).
+      // Identical mechanics to orange ring — ensures every playback step
+      // produces immediately visible animation regardless of event kind.
+      if (n.pulseBlue > 0.01) {
+        var blueRingR = baseR * (1 + (1 - n.pulseBlue) * 4);
+        ctx.beginPath();
+        ctx.arc(n.px, n.py, blueRingR, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(58,180,255," + (n.pulseBlue * 0.85) + ")";
         ctx.lineWidth = 1.4;
         ctx.stroke();
         ctx.lineWidth = 0.55;
@@ -2864,6 +2883,11 @@
   // community keeps the replay visible (deterministic community per estate).
   // Dead (tombstoned) nodes are skipped — they are not rendered and pulsing
   // them would produce geometry at invisible positions.
+  // Fire a visual pulse on the node matching ev.drawerId, or on a community-pool
+  // fallback node if the drawer isn't in the graph. Returns true when a pulse was
+  // fired, false when no visible node was found. Callers use the return value to
+  // decide pacing: a false return advances immediately (0ms) so dead-node misses
+  // don't produce dead-air pauses at the dwell interval.
   function topoPlaybackPulse(ev) {
     var node = ev.drawerId ? brainNodeMap[ev.drawerId] : null;
     // Skip tombstoned nodes — fall through to the community-pool path so the
@@ -2871,58 +2895,68 @@
     if (node && brainDead(node)) node = null;
     if (!node) {
       var comms = Object.keys(brainCommPools);
-      if (!comms.length) return;
+      if (!comms.length) return false;
       var h = 0, s = String(ev.estate || "");
       for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
       var pool = brainCommPools[comms[h % comms.length]];
-      if (!pool || !pool.length) return;
+      if (!pool || !pool.length) return false;
       // Pick a non-dead node from the pool (max 4 attempts to avoid an infinite
       // loop in a fully-tombstoned community — unlikely but defensive).
       var tries = 0;
       do { node = pool[Math.floor(Math.random() * pool.length)]; tries++; }
       while (brainDead(node) && tries < 4);
-      if (brainDead(node)) return;
+      if (brainDead(node)) return false;
     }
     if (ev.kind === "capture") {
       node.pulseOrange = 1.0;
     } else {
+      // Non-capture events get a visible expanding blue ring (pulseBlue) on top of
+      // the slow ambient blue glow. Both decay together — ring same ~1s as orange,
+      // glow over ~10s. This ensures every playback step produces immediate visible
+      // animation regardless of event kind.
+      node.pulseBlue = 1.0;
       node.glowBlue = Math.min(1.0, node.glowBlue + 0.55);
     }
+    return true;
   }
 
   // Advance the playhead one event, then schedule the next step.
   //
-  // Pacing is event-indexed: each event gets a fixed 150ms dwell regardless of
-  // the real inter-event gap. This keeps 13 events spanning 6 hours visible in
-  // ~2 seconds of continuously-interesting motion rather than compressing 6 h of
-  // real wall-clock gaps into the UI. The playhead timestamp shown in the clock
-  // is still the event's honest wall-clock time.
+  // Pacing is event-indexed: each event gets a fixed 650ms dwell regardless of
+  // the real inter-event gap. Rationale: pulseOrange/pulseBlue decay at 1.1/s,
+  // so at 650ms the ring is still at ~28% intensity when the next event fires —
+  // each pulse is individually watchable. 13 events ≈ 8-9s per pass.
   //
-  // After the last event a short 400ms pause (enough for the final pulse ring
-  // to start fading) clears residual pulse state and loops back to the start so
-  // each pass begins from a clean base layer.
+  // If topoPlaybackPulse returns false (no visible node found for the event),
+  // the step advances immediately (0ms dwell) so missing nodes never produce
+  // dead-air pauses. This enforces the invariant: every visible step has an
+  // animation; invisible steps consume no wall-clock time.
+  //
+  // After the last event a short 700ms pause (longer than one dwell to let the
+  // final ring fully fade) clears residual pulse state and loops back to the
+  // start so each pass begins from a clean base layer.
   function topoPlayStep() {
     var win = topoPlayWindowEvents();
     if (!win.length) { topoPlayToggle(); return; }
     if (topoPlay.idx >= win.length) {
-      // Brief end-of-pass pause: base layer is visible, final pulse fades.
-      // Clear orange pulse state on all nodes so the next loop starts clean —
-      // prevents residual pulses from the previous pass building into a flood.
+      // End-of-pass pause: base layer is visible, final pulse ring fades out.
+      // Clear both pulse channels on all nodes so the next loop starts clean —
+      // prevents residual pulses from the previous pass accumulating.
       topoPlay.timer = setTimeout(function () {
-        brainNodes.forEach(function (n) { n.pulseOrange = 0; });
+        brainNodes.forEach(function (n) { n.pulseOrange = 0; n.pulseBlue = 0; });
         topoPlay.idx = 0;
         topoPlayStep();
-      }, 400);
+      }, 700);
       return;
     }
     var ev = win[topoPlay.idx];
     topoPlay.playheadMs = ev.ms;
     var clock = $("#topoPlayClock");
     if (clock) clock.textContent = new Date(ev.ms).toLocaleString();
-    topoPlaybackPulse(ev);
+    var pulsed = topoPlaybackPulse(ev);
     topoPlay.idx++;
-    // Fixed 150ms per event — event-indexed pacing, not wall-clock proportional.
-    topoPlay.timer = setTimeout(topoPlayStep, 150);
+    // If no node was found to pulse, advance immediately — never dwell on nothing.
+    topoPlay.timer = setTimeout(topoPlayStep, pulsed ? 650 : 0);
   }
 
   // Play/pause toggle. Pause freezes the playhead (the session stays active,
