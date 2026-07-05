@@ -147,6 +147,17 @@ try {
           <div class="feed" id="ovMiniFeeed"></div>
         </div>
       </div>
+
+      <!-- Row 4: busiest estates by event count — top 5 ranked bar list -->
+      <div class="panels-3col" id="ovRow4">
+        <div class="panel panel-2col" id="ovBusiest">
+          <div class="phead-row">
+            <h2 class="phead">Busiest Estates</h2>
+            <span class="phint">by event count · top 5</span>
+          </div>
+          <div class="bar-list" id="ovBusiestList"></div>
+        </div>
+      </div>
     </section>
 
     <!-- RESOURCES (estate content surfaces) -->
@@ -1468,8 +1479,39 @@ details.panel[open] summary::before{content:"▼ "}
     });
   }
 
+  // Busiest-estates bar chart (Row 4). Sorts by eventCount descending, shows
+  // top 5. Degrades gracefully when the estates list is absent or empty.
+  function renderBusiestEstates(estates) {
+    const container = $("#ovBusiestList");
+    if (!container) return;
+    clear(container);
+
+    if (!estates || !estates.length) {
+      container.appendChild(el("div", "empty", "no estate activity yet"));
+      return;
+    }
+    // Top 5 by event count. Ties broken by most recent last-event timestamp.
+    const sorted = estates.slice()
+      .sort((a, b) => (b.eventCount || 0) - (a.eventCount || 0))
+      .slice(0, 5);
+    const maxCount = Math.max(1, sorted[0].eventCount || 0);
+
+    sorted.forEach(function (e) {
+      const count = e.eventCount || 0;
+      const row = el("div", "bar-row");
+      row.appendChild(el("span", "bar-name", estateDisplayName(e.id)));
+      const track = el("div", "bar-track");
+      const fill = el("div", "bar-fill");
+      fill.style.width = Math.round((count / maxCount) * 100) + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+      row.appendChild(el("span", "bar-count", count.toLocaleString()));
+      container.appendChild(row);
+    });
+  }
+
   async function renderOverview() {
-    let s = null, c = null, events = [];
+    let s = null, c = null, events = [], estates = [];
     try {
       s = await getJSON("/api/server");
       lastServerData = s;
@@ -1484,6 +1526,13 @@ details.panel[open] summary::before{content:"▼ "}
       const ep = await getJSON("/api/events");
       events = ep.events || [];
     } catch (_) { /* mini-feed degrades */ }
+    try {
+      // Fetch estates for busiest-estates ranking. Degrades gracefully when
+      // the endpoint is unavailable — the panel shows "no estate activity yet".
+      const ep = await getJSON("/api/estates");
+      buildEstateNameMap((ep.admin && ep.admin.hosted) ? ep.admin.hosted : []);
+      estates = ep.estates || [];
+    } catch (_) { /* busiest-estates panel degrades silently */ }
 
     if (s) {
       renderOverviewCards(s);
@@ -1493,6 +1542,7 @@ details.panel[open] summary::before{content:"▼ "}
     }
     renderOverviewHealth(s, c);
     await renderMiniFeeed(events);
+    renderBusiestEstates(estates);
   }
 
   // =========================================================================
