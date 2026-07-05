@@ -2,7 +2,7 @@
 //
 // Both-ports conformance tests for ObserverSink (Rust port).
 //
-// Mirrors ObserverSinkConformanceTests.swift exactly — same twelve scenarios:
+// Mirrors ObserverSinkConformanceTests.swift exactly — same thirteen scenarios:
 //   1. Schema/open — schema version correct.
 //   2. Control rows seeded on open — monitoring defaults to off.
 //   3. Monitoring flag write-read round-trip.
@@ -17,6 +17,8 @@
 //       (regression lock for the seed-if-absent fix — seed-if-absent must NOT
 //        overwrite an operator-set "monitoring"="1" on reopen)
 //  12. storageStats reports the SQLite-backed store's own DB-layer health.
+//  13. v3→v4 migration: seed a v3-state DB (no dropbox index), re-open via
+//      StatsStore, assert schemaVersion==4 and idx_metric_samples_dropbox_id exists.
 //
 // Schema parity with Swift:
 //   Same table names, same column names, same TEXT (ISO-8601) timestamp format.
@@ -752,4 +754,117 @@ fn metric_aggregates_empty_input_returns_empty() {
         .query_metric_aggregates_by_dropbox(&[])
         .expect("empty input must succeed");
     assert!(aggs.is_empty(), "empty input must yield empty output");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. v3→v4 migration on an existing store
+//
+// Mirrors Swift: ObserverSinkConformanceTests.v3ToV4MigrationAddsDropboxIndex
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Seed a SQLite file at `path` with the v3 state of StatsStore:
+///   - _storagekit_migrations with kitID="ObserverSink", version=3
+///   - metric_samples, event_samples, control, topology_snapshots tables
+///   - idx_metric_samples_ts, idx_event_samples_ts indexes
+///   - Deliberately omits idx_metric_samples_dropbox_id (added by v3→v4)
+///
+/// Uses the same vendored SQLCipher engine as persistence-kit (no-key mode =
+/// plaintext). The `rusqlite` dev-dependency is pinned to the same version +
+/// features as persistence-kit to ensure Cargo deduplicates to one C library.
+fn seed_v3_database(path: &str) {
+    use rusqlite::Connection;
+    let conn = Connection::open(path).expect("seed: could not open DB");
+    let stmts: &[&str] = &[
+        r#"CREATE TABLE "_storagekit_migrations" (
+          "kit_id" TEXT NOT NULL,
+          "version" INTEGER NOT NULL,
+          "applied_at" TEXT NOT NULL,
+          PRIMARY KEY ("kit_id")
+        )"#,
+        r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at")
+           VALUES ('ObserverSink', 3, '2026-01-01T00:00:00Z')"#,
+        r#"CREATE TABLE "metric_samples" (
+          "row_id" TEXT NOT NULL,
+          "name" TEXT NOT NULL,
+          "value" REAL NOT NULL,
+          "tags" TEXT NOT NULL,
+          "ts" TEXT NOT NULL,
+          "dropbox_id" TEXT NOT NULL,
+          PRIMARY KEY ("row_id")
+        )"#,
+        r#"CREATE TABLE "event_samples" (
+          "row_id" TEXT NOT NULL,
+          "kind" TEXT NOT NULL,
+          "noun_type" INTEGER NOT NULL,
+          "estate_row_id" TEXT NOT NULL,
+          "estate" TEXT NOT NULL,
+          "ts" TEXT NOT NULL,
+          "dropbox_id" TEXT NOT NULL,
+          PRIMARY KEY ("row_id")
+        )"#,
+        r#"CREATE TABLE "control" (
+          "key" TEXT NOT NULL,
+          "value" TEXT NOT NULL,
+          PRIMARY KEY ("key")
+        )"#,
+        // topology_snapshots added in v2; topology_fingerprint column added in v3.
+        r#"CREATE TABLE "topology_snapshots" (
+          "estate" TEXT NOT NULL,
+          "generated_at" TEXT NOT NULL,
+          "payload" TEXT NOT NULL,
+          "topology_fingerprint" TEXT,
+          PRIMARY KEY ("estate")
+        )"#,
+        // v1 indexes only — idx_metric_samples_dropbox_id intentionally absent.
+        r#"CREATE INDEX "idx_metric_samples_ts" ON "metric_samples" ("ts")"#,
+        r#"CREATE INDEX "idx_event_samples_ts" ON "event_samples" ("ts")"#,
+    ];
+    for sql in stmts {
+        conn.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("seed DDL failed: {e}\nSQL: {sql}"));
+    }
+}
+
+#[test]
+fn v3_to_v4_migration_adds_dropbox_index() {
+    let path = make_temp_path();
+
+    // Build the v3 seed DB — no dropbox index, version=3 recorded.
+    seed_v3_database(&path);
+
+    // Open via StatsStore — apply_schema detects version=3, creates the missing
+    // index IF NOT EXISTS, then upserts version=4 in _storagekit_migrations.
+    let store = StatsStore::new(&path).expect("StatsStore::new must succeed on v3 seed");
+    store.open().expect("StatsStore::open must run v3→v4 migration");
+    drop(store); // release the connection before re-opening
+
+    // Verify via raw rusqlite (same vendored SQLCipher engine, no-key mode).
+    use rusqlite::Connection;
+    let conn = Connection::open(&path).expect("verification: could not re-open DB");
+
+    // 1. _storagekit_migrations must now record version 4.
+    let stored_version: i64 = conn
+        .query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = 'ObserverSink'"#,
+            [],
+            |row| row.get(0),
+        )
+        .expect("version query must succeed");
+    assert_eq!(
+        stored_version, 4,
+        "v3→v4 migration must record version 4 in _storagekit_migrations; got {stored_version}"
+    );
+
+    // 2. idx_metric_samples_dropbox_id must exist in sqlite_master.
+    let index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        index_count, 1,
+        "v3→v4 migration must create idx_metric_samples_dropbox_id; found {index_count} rows in sqlite_master"
+    );
 }

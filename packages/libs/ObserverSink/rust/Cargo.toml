@@ -33,4 +33,9 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 
 [dev-dependencies]
-# No external test deps needed; using std only in tests.
+# rusqlite: migration test seeds a v3-state DB via the raw Connection API to
+# verify idx_metric_samples_dropbox_id after v3→v4 migration.
+# Must match the exact version + features in persistence-kit so Cargo
+# deduplicates to one compiled C library — preventing duplicate sqlite3_*
+# symbol errors at link time.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
