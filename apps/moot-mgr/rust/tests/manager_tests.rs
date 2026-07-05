@@ -47,11 +47,13 @@ fn operations_before_start_error() {
 #[test]
 fn monitoring_switch_round_trips() {
     let mut m = started_manager();
-    assert!(!m.is_monitoring().unwrap()); // off by default (seed)
-    m.set_monitoring(true).unwrap();
-    assert!(m.is_monitoring().unwrap());
+    // Wave 8.1 (v1.0.17): monitoring defaults ON for new stores so the read
+    // plane is live immediately. The seed value is "1", not "0".
+    assert!(m.is_monitoring().unwrap()); // on by default (wave 8.1 seed)
     m.set_monitoring(false).unwrap();
     assert!(!m.is_monitoring().unwrap());
+    m.set_monitoring(true).unwrap();
+    assert!(m.is_monitoring().unwrap());
     m.stop();
 }
 
@@ -226,9 +228,10 @@ fn estates_payload_rolls_up_events_per_estate() {
     let a = p.estates.iter().find(|e| e.id == "estate-a").unwrap();
     assert_eq!(a.event_count, 2);
     assert!(a.last_event_ts.is_some());
-    // admin is None here because no daemon proxy is available in this test
-    // environment; in production the proxy may populate admin from the daemon.
-    assert!(p.admin.is_none());
+    // admin is populated by the daemon proxy when a daemon is reachable at
+    // the configured address; in CI and on machines without a live daemon it
+    // is None. The test verifies the rollup shape only — admin presence is
+    // environment-dependent and not under the manager's control.
     m.stop();
 }
 
