@@ -61,33 +61,55 @@ struct ObserverSinkConformanceTests {
         #expect(StatsStore.schemaVersion == 3)
     }
 
-    @Test("StatsStore seeds control rows on open")
+    @Test("StatsStore seeds monitoring ON by default (wave 8.1)")
     func controlRowsSeededOnOpen() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        // "monitoring" defaults to off.
+        // Wave 8.1: monitoring defaults to ON for new estates.
         let monitoringOn = try await store.isMonitoringEnabled()
-        #expect(monitoringOn == false)
+        #expect(monitoringOn == true)
     }
 
     // MARK: 2. Monitoring flag round-trip
 
-    @Test("Monitoring flag write-read round-trip")
+    @Test("Monitoring flag write-read round-trip (default ON)")
     func monitoringFlagRoundTrip() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        // Default is off.
-        #expect(try await store.isMonitoringEnabled() == false)
-
-        // Enable.
-        try await store.setMonitoringEnabled(true)
+        // Wave 8.1 default is ON.
         #expect(try await store.isMonitoringEnabled() == true)
 
         // Disable.
         try await store.setMonitoringEnabled(false)
         #expect(try await store.isMonitoringEnabled() == false)
+
+        // Re-enable.
+        try await store.setMonitoringEnabled(true)
+        #expect(try await store.isMonitoringEnabled() == true)
+    }
+
+    @Test("setMonitoringEnabled writes user source marker — prevents migration reverting it")
+    func monitoringUserSourceMarkerPreventsRevert() async throws {
+        let url = makeTempURL()
+
+        // Open fresh: monitoring=1, source=default (wave 8.1 seed).
+        let store1 = try StatsStore(url: url)
+        try await store1.open()
+        #expect(try await store1.isMonitoringEnabled() == true)
+        // User explicitly turns monitoring off.
+        try await store1.setMonitoringEnabled(false)
+        #expect(try await store1.isMonitoringEnabled() == false)
+        await store1.close()
+
+        // Re-open: the wave 8.1 migration checks source == "user" and must NOT flip back to 1.
+        let store2 = try StatsStore(url: url)
+        try await store2.open()
+        defer { Task { await store2.close() } }
+        // Source was "user" → migration skips → monitoring stays off.
+        #expect(try await store2.isMonitoringEnabled() == false,
+                "User-set monitoring=off must survive a store re-open (wave 8.1 migration must not revert it)")
     }
 
     // MARK: 3. Metric emit path
@@ -177,7 +199,9 @@ struct ObserverSinkConformanceTests {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        // Monitoring stays off (default).
+        // Monitoring defaults ON (wave 8.1) — turn it off explicitly to
+        // exercise the discard path.
+        try await store.setMonitoringEnabled(false)
         let dropboxID = "test-dropbox-off"
         let sink = PersistenceStatsSink(store: store, dropboxID: dropboxID)
         Intellectus.install(sink: sink)
