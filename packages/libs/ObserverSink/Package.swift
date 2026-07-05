@@ -69,6 +69,12 @@ let package = Package(
                 "IntellectusLib",
                 "PersistenceKit",
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // SQLCipher: migration test opens the raw DB via the C API to verify
+                // the idx_metric_samples_dropbox_id index after v3→v4 migration.
+                // Must link the same vendored engine as PersistenceKitSQLite — using
+                // the system SQLite3 module would link two separate sqlite3_* symbol
+                // sets and corrupt the database file.
+                .product(name: "SQLCipher", package: "PersistenceKit"),
             ],
             path: "Tests/ObserverSinkTests"
         ),

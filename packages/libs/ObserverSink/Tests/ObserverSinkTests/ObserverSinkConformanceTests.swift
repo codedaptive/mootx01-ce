@@ -21,13 +21,19 @@
 //   11. countMetrics: COUNT(*) returns the correct row count without row decoding.
 //
 // Both-ports parity: the Rust tests in observer_sink/tests/conformance.rs exercise
-// the same six scenarios with the same table names and flag semantics.
+// the same scenarios with the same table names and flag semantics.
+//   12. v3→v4 migration: seed a v3-state DB (no dropbox index), re-open via StatsStore,
+//       assert schemaVersion==4 in _storagekit_migrations and idx_metric_samples_dropbox_id exists.
 
 import Testing
 import Foundation
 import IntellectusLib
 import PersistenceKit
 import PersistenceKitSQLite
+// SQLCipher: migration test seeds a v3 DB via the C API and verifies the
+// index after v3→v4 migration. Must be the SAME vendored engine as
+// PersistenceKitSQLite (not system SQLite3) — see Package.swift note.
+import SQLCipher
 @testable import ObserverSink
 
 // MARK: - Test helpers
@@ -691,4 +697,148 @@ struct ObserverSinkConformanceTests {
         let result = try await store.queryMetricAggregatesByDropbox(forDropboxIDs: [])
         #expect(result.isEmpty, "Empty input must return empty result")
     }
+
+    // MARK: 18. v3→v4 migration on an existing store
+
+    /// Seed a database at v3 (all StatsStore tables present up through
+    /// topology_fingerprint, but WITHOUT idx_metric_samples_dropbox_id).
+    /// Uses the same vendored SQLCipher engine as PersistenceKitSQLite —
+    /// opening an unencrypted DB with SQLCipher is always valid (no-key mode).
+    private func seedV3Database(at url: URL) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw StatsStoreTestError.seedFailed("could not open seed DB at \(url.path)")
+        }
+        defer { sqlite3_close(db) }
+
+        // All DDL statements that represent the v3 state of ObserverSink:
+        //   - _storagekit_migrations table + v3 version row
+        //   - metric_samples, event_samples, control (v1 tables)
+        //   - topology_snapshots with topology_fingerprint column (v2+v3)
+        //   - idx_metric_samples_ts, idx_event_samples_ts (v1 indexes)
+        //   - NO idx_metric_samples_dropbox_id (added by v3→v4)
+        let statements: [String] = [
+            """
+            CREATE TABLE "_storagekit_migrations" (
+              "kit_id" TEXT NOT NULL,
+              "version" INTEGER NOT NULL,
+              "applied_at" TEXT NOT NULL,
+              PRIMARY KEY ("kit_id")
+            )
+            """,
+            "INSERT INTO \"_storagekit_migrations\" (\"kit_id\", \"version\", \"applied_at\") VALUES ('ObserverSink', 3, '2026-01-01T00:00:00Z')",
+            """
+            CREATE TABLE "metric_samples" (
+              "row_id" TEXT NOT NULL,
+              "name" TEXT NOT NULL,
+              "value" REAL NOT NULL,
+              "tags" TEXT NOT NULL,
+              "ts" TEXT NOT NULL,
+              "dropbox_id" TEXT NOT NULL,
+              PRIMARY KEY ("row_id")
+            )
+            """,
+            """
+            CREATE TABLE "event_samples" (
+              "row_id" TEXT NOT NULL,
+              "kind" TEXT NOT NULL,
+              "noun_type" INTEGER NOT NULL,
+              "estate_row_id" TEXT NOT NULL,
+              "estate" TEXT NOT NULL,
+              "ts" TEXT NOT NULL,
+              "dropbox_id" TEXT NOT NULL,
+              PRIMARY KEY ("row_id")
+            )
+            """,
+            """
+            CREATE TABLE "control" (
+              "key" TEXT NOT NULL,
+              "value" TEXT NOT NULL,
+              PRIMARY KEY ("key")
+            )
+            """,
+            // topology_snapshots was added in v2; topology_fingerprint column in v3.
+            """
+            CREATE TABLE "topology_snapshots" (
+              "estate" TEXT NOT NULL,
+              "generated_at" TEXT NOT NULL,
+              "payload" TEXT NOT NULL,
+              "topology_fingerprint" TEXT,
+              PRIMARY KEY ("estate")
+            )
+            """,
+            // v1 indexes only — dropbox_id index is deliberately absent.
+            "CREATE INDEX \"idx_metric_samples_ts\" ON \"metric_samples\" (\"ts\")",
+            "CREATE INDEX \"idx_event_samples_ts\" ON \"event_samples\" (\"ts\")",
+        ]
+
+        for sql in statements {
+            var errmsg: UnsafeMutablePointer<CChar>?
+            let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
+            if rc != SQLITE_OK {
+                let msg = errmsg.map { String(cString: $0) } ?? "rc=\(rc)"
+                sqlite3_free(errmsg)
+                throw StatsStoreTestError.seedFailed("DDL failed: \(msg) — \(sql.prefix(60))")
+            }
+        }
+    }
+
+    /// Verify that opening an existing v3 database through StatsStore applies
+    /// the v3→v4 migration: advances the stored version to 4 and creates
+    /// idx_metric_samples_dropbox_id.
+    @Test("v3→v4 migration adds dropbox index and records version 4")
+    func v3ToV4MigrationAddsDropboxIndex() async throws {
+        let url = makeTempURL()
+
+        // Build the v3 seed DB.
+        try seedV3Database(at: url)
+
+        // Open via StatsStore — the migration runner detects version=3 < 4
+        // and applies the v3→v4 step (CREATE INDEX IF NOT EXISTS + version upsert).
+        let store = try StatsStore(url: url)
+        try await store.open()
+        await store.close()
+
+        // Re-open the same file with raw SQLCipher to inspect the DB state.
+        // No key = plaintext mode; matches how PersistenceKitSQLite opens this file.
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            Issue.record("could not re-open seed DB at \(url.path) for verification")
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        // 1. _storagekit_migrations must now record version 4 for "ObserverSink".
+        var storedVersion: Int32 = 0
+        let verSQL = "SELECT version FROM \"_storagekit_migrations\" WHERE kit_id = 'ObserverSink'"
+        var vStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, verSQL, -1, &vStmt, nil) == SQLITE_OK,
+           sqlite3_step(vStmt) == SQLITE_ROW {
+            storedVersion = sqlite3_column_int(vStmt, 0)
+        }
+        sqlite3_finalize(vStmt)
+        #expect(
+            storedVersion == 4,
+            "v3→v4 migration must record version 4 in _storagekit_migrations; got \(storedVersion)"
+        )
+
+        // 2. idx_metric_samples_dropbox_id must exist after v3→v4 migration.
+        var indexFound = false
+        let idxSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'"
+        var iStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, idxSQL, -1, &iStmt, nil) == SQLITE_OK,
+           sqlite3_step(iStmt) == SQLITE_ROW {
+            indexFound = true
+        }
+        sqlite3_finalize(iStmt)
+        #expect(
+            indexFound,
+            "v3→v4 migration must create idx_metric_samples_dropbox_id on metric_samples"
+        )
+    }
+}
+
+// Error type scoped to this test file to avoid clashing with production errors.
+private enum StatsStoreTestError: Error {
+    case seedFailed(String)
 }
