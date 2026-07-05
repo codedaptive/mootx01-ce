@@ -778,6 +778,21 @@ fn run_memory_search(
         format!("degraded_stages:[{}]", result.degraded_stages.join(","))
     };
     lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
+    // ADR-025 §4: redaction advisory stat (Wave 7.4).
+    // When no grant is active, check cheaply whether the estate holds any
+    // restricted or secret rows. If so, append an advisory so the AI client
+    // knows results may be incomplete and how to request access.
+    // Gated on `!sensitivity_ceiling_lifted` — when a grant IS live, the rows
+    // are already included and no advisory is appropriate.
+    // The stat uses a limit-1 LocusOnly scan with no query text (origin:
+    // Internal — no trace rows, B-10a). See `has_sensitive_rows`.
+    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+        lines.push(
+            "sensitivity_advisory: results may be hidden by sensitivity tier — \
+             run `mootx01 unlock private` to include restricted memories, \
+             `mootx01 unlock secret` for secret memories.".to_string()
+        );
+    }
     Ok(text_result(&lines.join("\n")))
 }
 
@@ -921,7 +936,62 @@ fn run_memory_get(
     // tool exists to return.
     lines.push("content:".to_string());
     lines.push(drawer.content.clone());
+    // ADR-025 §4: redaction advisory stat (Wave 7.4) — same logic as
+    // run_memory_search. When no grant is active, surface an advisory if the
+    // estate contains any restricted/secret rows the default gate suppresses.
+    // Consistent with search so the AI client receives the same hint from
+    // both tools. Mirrors Swift ToolDispatcher.runMemoryGet.
+    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+        lines.push(
+            "sensitivity_advisory: some memories may be hidden by sensitivity tier — \
+             run `mootx01 unlock private` to include restricted memories, \
+             `mootx01 unlock secret` for secret memories.".to_string()
+        );
+    }
     Ok(text_result(&lines.join("\n")))
+}
+
+/// Returns `true` if the estate has at least one row tagged restricted or secret.
+///
+/// Used by `run_memory_search` and `run_memory_get` to decide whether to append a
+/// sensitivity advisory (ADR-025 §4, Wave 7.4). The advisory tells the AI client
+/// that results may be incomplete and how to unlock the hidden tier.
+///
+/// Implementation: two limit-1 `GLKRecallRequest` probes with explicit
+/// `Filter::Sensitivity(tier)` — these filters suppress the default
+/// `sensitivityAtMost(Elevated)` gate (see `BitmapEvaluator::insert_defaults`),
+/// so restricted/secret rows become visible for counting. Mode `LocusOnly` +
+/// scoring `Raw` skips the BM25/vector pipeline — a pure bitmap filter probe.
+///
+/// Origin defaults to `RecallOrigin::Internal` (the builder default) — must NOT
+/// write recall-trace rows (B-10a: only the ARIA_MCP external boundary sets External).
+fn has_sensitive_rows(estate: &crate::estate_registry::OpenEstate, now: i64) -> bool {
+    use genius_locus_kit::recall::{
+        GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
+    };
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::filter::{Filter, RecallFrame};
+
+    let coord = estate.coord.lock().unwrap();
+    for tier in &[AdjectiveSensitivity::Restricted, AdjectiveSensitivity::Secret] {
+        // Limit 1: stop at first match — no need to count.
+        let mut frame = RecallFrame::new(vec![Filter::Sensitivity(*tier)]);
+        // Structured hydration (default): no content body needed — existence check only.
+        // Limit: 1 — stops at the first matching row.
+        frame.limit = Some(1);
+        let request = GLKRecallRequest::new(frame)
+            .with_mode(GLKRecallMode::LocusOnly) // Skip BM25/vector — pure bitmap probe.
+            .with_scoring(GLKRecallScoring::Raw) // No matrix scoring needed.
+            .with_limit(1);
+        // A failed call is treated as "no sensitive rows" — fail-safe:
+        // don't surface the advisory when we can't confirm sensitive rows exist.
+        if let Ok(result) = coord.recall_scored(&estate.handle, request, now) {
+            if !result.hits.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Note that a drawer id was "used" (acted upon) by a dereference verb.
