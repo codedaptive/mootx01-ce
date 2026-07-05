@@ -80,6 +80,15 @@ public struct ToolDispatcher: Sendable {
     /// reset logic. See `SensitivityGrantLedger`'s own doc comment.
     let sensitivityUnlockLedger: SensitivityGrantLedger
 
+    /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+    ///
+    /// Nil when the host has no stats store wired (stdio mode, test harnesses,
+    /// provision-less contexts). The concrete implementation (AriaResident's
+    /// `StatsStoreMonitoringControl`) wraps the `StatsStore` actor — AriaMcpKit
+    /// never imports ObserverSink or IntellectusLib directly. Sendable because
+    /// `MonitoringControl` requires `Sendable`.
+    let monitoringControl: (any MonitoringControl)?
+
     /// The build serial for this running executable, surfaced by
     /// `moot_estate_ping` so drivers can confirm they are talking to the
     /// most recently compiled build.
@@ -124,7 +133,8 @@ public struct ToolDispatcher: Sendable {
     public init(kit: GeniusLocusKit, handle: EstateHandle,
                 buildSerial: String = Self.deriveBuildSerial(),
                 serverIdentity: String = "aria-mcp-server",
-                versionSkewAdvisory: String? = nil) {
+                versionSkewAdvisory: String? = nil,
+                monitoringControl: (any MonitoringControl)? = nil) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
@@ -134,6 +144,7 @@ public struct ToolDispatcher: Sendable {
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
+        self.monitoringControl = monitoringControl
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -150,8 +161,23 @@ public struct ToolDispatcher: Sendable {
         return ToolDispatcher(kit: kit, handle: handle, estates: next,
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
                               sensitivityUnlockLedger: sensitivityUnlockLedger,
+                              monitoringControl: monitoringControl,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory)
+    }
+
+    /// Return a copy of this dispatcher with `control` wired as the monitoring
+    /// seam. Used by `AriaResident.runResidentDaemon` to inject the stats-store
+    /// control AFTER the stats store is opened (the store is opened inside
+    /// `runResidentDaemon`, after the dispatcher is first constructed). All
+    /// other state — kit, handle, ledgers, estate map — is forwarded unchanged.
+    public func withMonitoringControl(_ control: (any MonitoringControl)?) -> ToolDispatcher {
+        ToolDispatcher(kit: kit, handle: handle, estates: estates,
+                       jobRegistry: jobRegistry, recallLedger: recallLedger,
+                       sensitivityUnlockLedger: sensitivityUnlockLedger,
+                       monitoringControl: control,
+                       buildSerial: buildSerial, serverIdentity: serverIdentity,
+                       versionSkewAdvisory: versionSkewAdvisory)
     }
 
     /// Private designated initializer carrying an explicit estate map,
@@ -164,8 +190,9 @@ public struct ToolDispatcher: Sendable {
         kit: GeniusLocusKit, handle: EstateHandle,
         estates: [UUID: EstateHandle], jobRegistry: VaultJobRegistry,
         recallLedger: SurfacedRecallLedger,
-        sensitivityUnlockLedger: SensitivityGrantLedger, buildSerial: String,
-        serverIdentity: String, versionSkewAdvisory: String?
+        sensitivityUnlockLedger: SensitivityGrantLedger,
+        monitoringControl: (any MonitoringControl)?,
+        buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?
     ) {
         self.kit = kit
         self.handle = handle
@@ -173,6 +200,7 @@ public struct ToolDispatcher: Sendable {
         self.jobRegistry = jobRegistry
         self.recallLedger = recallLedger
         self.sensitivityUnlockLedger = sensitivityUnlockLedger
+        self.monitoringControl = monitoringControl
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
@@ -1046,6 +1074,8 @@ enum InterfaceTools {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        // Monitoring control (ADR-025 wave 8.2) — read/write daemon telemetry flag
+        "moot_monitoring_status",
         // Maintenance / admin
         "moot_reindex", "moot_drain_status",
         // Direct palace import (bypass NoteIR)
@@ -1084,9 +1114,11 @@ enum InterfaceTools {
         case "moot_write_journal":     return try await dispatcher.runWriteJournal(args, now: Date())
         case "moot_read_journal":      return try await dispatcher.runReadJournal(args)
         // Tier 5
-        case "moot_estate_status":     return try await dispatcher.runEstateStatus(args)
-        case "moot_estate_map":        return try await dispatcher.runEstateMap(args)
+        case "moot_estate_status":      return try await dispatcher.runEstateStatus(args)
+        case "moot_estate_map":         return try await dispatcher.runEstateMap(args)
         case "moot_estate_ping":        return try await dispatcher.runEstatePing(args)
+        // Monitoring control (ADR-025 wave 8.2)
+        case "moot_monitoring_status":  return try await dispatcher.runMonitoringStatus(args)
         // Maintenance / admin
         case "moot_reindex":           return try await dispatcher.runReindex(args)
         case "moot_drain_status":      return try await dispatcher.runDrainStatus(args)
@@ -2274,6 +2306,51 @@ extension ToolDispatcher {
             stats.append("version_skew: \(versionSkewAdvisory)")
         }
         return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol)
+    }
+
+    /// `moot_monitoring_status` — read or write the daemon's telemetry monitoring flag.
+    ///
+    /// ## Read path (absent `enabled` argument)
+    /// Returns the current effective monitoring state without mutation.
+    ///
+    /// ## Write path (present `enabled: Bool` argument)
+    /// Persists `enabled` to the stats store and reports the new effective state.
+    /// Writes the `monitoring_source: user` marker so downstream readers can
+    /// distinguish operator-driven changes from env-var or default-seeded state.
+    ///
+    /// ## No-store case
+    /// When `monitoringControl` is `nil` (stdio mode, test harnesses, provision-less
+    /// contexts), the tool reports `monitoring: unavailable` and never fabricates
+    /// a false enabled/disabled state. Mirrors the B-6 honesty discipline.
+    ///
+    /// Permission tier: `ask` (it can mutate monitoring state when `enabled` is
+    /// supplied — classified in PermissionsWriter.mutationTools, ADR-025 wave 8.2).
+    func runMonitoringStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
+        guard let control = monitoringControl else {
+            // No stats store wired — honest "unavailable" response. Never say
+            // "disabled" when the true answer is "no store to read from".
+            return Self.textResult("monitoring: unavailable (no telemetry store wired)")
+        }
+
+        // Write path: `enabled` argument present → set flag, return new state.
+        if let enabledArg = try optionalBool(args["enabled"], argument: "enabled") {
+            await control.set(enabledArg)
+            // Re-read the persisted value so the response reflects what was
+            // actually written, not just what was requested.
+            let effective = await control.read()
+            var lines = [
+                "monitoring: \(effective.map { $0 ? "enabled" : "disabled" } ?? "unavailable")",
+                "monitoring_source: user",
+            ]
+            if effective == nil {
+                lines.append("warning: flag was written but could not be re-read; retry moot_monitoring_status to confirm")
+            }
+            return Self.textResult(lines.joined(separator: "\n"))
+        }
+
+        // Read path: no `enabled` argument → report current state only.
+        let current = await control.read()
+        return Self.textResult("monitoring: \(current.map { $0 ? "enabled" : "disabled" } ?? "unavailable")")
     }
 
     /// `moot_estate_map` — return the estate's structural map with memory counts.
