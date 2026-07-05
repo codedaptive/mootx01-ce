@@ -1,8 +1,9 @@
 ---
 status: decided
+version: 1.0.1
 question: How does a human approve reading restricted ("private") and secret rows through the ARIA surface, for how long, and through what mechanism on each platform?
 authors: MOOTx01 maintainers
-date: 2026-07-04
+date: 2026-07-05
 relates_to:
   - docs/decisions/ADR-014-apple-sqlcipher-at-rest.md
   - docs/decisions/ADR-015-vault-security-posture.md
@@ -75,6 +76,20 @@ model's channel:
   LocalAuthentication evaluation (Swift), delivered over the loopback/UDS
   control surface.
 
+**Implementation note — advisory stat mechanism (wave 8.2):** The "cheap
+estate-level stat" described in (b) above is implemented as a **limit-1
+bitmap probe**: the recall engine issues a single `LIMIT 1` query on the
+sensitivity bitmap column, checks whether any restricted-or-higher row
+exists, and emits the advisory line if and only if that probe returns a row.
+This is O(1) per query, leaks nothing beyond "at least one such row exists"
+(which the rule deliberately permits), and the ceiling is NOT lifted for
+the probe — the query reads no content, no count, no identity. A write-path
+counter (incrementing a stat on every capture) would have provided the same
+boolean answer but added write-path complexity and a separate stat-store
+surface. The probe approach was chosen as strictly sufficient: it is
+privacy-equivalent, correct, and simpler. No deferred write-path counter
+is planned.
+
 ### 4. Audit
 
 Every grant, every denial, every manual revocation (`mootx01 lock`), and
@@ -121,3 +136,10 @@ with federation.
   over the projection, both ports).
 - Rust: wrong password → denial + audit entry; hash never round-trips.
 - Audit entries present for grant/expiry/read-under-grant.
+
+## Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0.0 | 2026-07-04 | Initial decided record. |
+| 1.0.1 | 2026-07-05 | §3: added implementation note clarifying that the advisory-stat mechanism uses a limit-1 bitmap probe (not a write-path counter), explaining why the probe is privacy-equivalent to the §3 "cheap estate-level stat" description. |
