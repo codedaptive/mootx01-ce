@@ -8,6 +8,21 @@
 //! Spec §2: `mootx01` with no subcommand prints usage and exits 64,
 //! unconditionally. No TTY/pipe detection, no implicit default subcommand —
 //! the installer writes explicit args (`serve`, `proxy`) into client configs.
+//! `parse` itself is unchanged by the argv0 dispatch below — that dispatch
+//! runs BEFORE `parse` sees the args (main.rs), so this invariant still
+//! holds for every caller that reaches `parse` with a non-empty args slice.
+//!
+//! argv0 dispatch (Wave 6 addendum, `resolve_argv0_dispatch`): a SEPARATE,
+//! narrower mechanism from the above — when invoked with an EMPTY args
+//! slice AND argv0's basename is `mootx01-proxy` (typically a symlink to
+//! this same binary), the effective args become `["proxy"]` before
+//! `parse` ever runs. This does not reintroduce "no implicit default
+//! subcommand": an empty-args invocation under any OTHER argv0 still
+//! reaches `parse` with an empty slice and gets the unconditional usage/64
+//! behavior above, unchanged. Mirrors Swift's `ArgvDispatch.resolvedArguments`
+//! (MootInstallerCore) — Rust has no bare-pipe → `serve` default (that half
+//! of the Swift function does not apply here, per this file's own §2 spec
+//! citation), only the argv0 → `proxy` half.
 
 use std::fmt;
 
@@ -114,6 +129,34 @@ impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// The argv0 basename that triggers implicit `proxy` dispatch. Mirrors
+/// Swift `ArgvDispatch.proxyInvocationName`.
+pub const PROXY_INVOCATION_NAME: &str = "mootx01-proxy";
+
+/// Resolve argv0-based subcommand dispatch. See this module's doc comment
+/// for the precedence and scope of this mechanism relative to `parse`'s
+/// own §2 "no implicit default" invariant.
+///
+/// Only fires when `args` is empty AND argv0's last path component is
+/// exactly `mootx01-proxy` — an explicit subcommand (or any other argv0)
+/// passes `args` through unchanged.
+///
+/// - Parameters:
+///   - argv0: the invoked program path or name (`std::env::args().next()`;
+///     may be absolute, relative, or a bare PATH-resolved name).
+///   - args: the arguments AFTER argv0.
+/// - Returns: `vec!["proxy".to_string()]` when the dispatch fires,
+///   otherwise `args` unchanged.
+pub fn resolve_argv0_dispatch(argv0: &str, args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        let basename = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
+        if basename == PROXY_INVOCATION_NAME {
+            return vec!["proxy".to_string()];
+        }
+    }
+    args.to_vec()
 }
 
 /// Parse argv (without the program name) into a Command.
@@ -565,6 +608,40 @@ mod tests {
     #[test]
     fn bare_invocation_is_usage_error() {
         assert!(p(&[]).is_err()); // §2: no default subcommand, exit 64
+    }
+
+    // MARK: - resolve_argv0_dispatch (Wave 6 addendum)
+
+    fn dispatch(argv0: &str, args: &[&str]) -> Vec<String> {
+        let v: Vec<String> = args.iter().map(|x| x.to_string()).collect();
+        resolve_argv0_dispatch(argv0, &v)
+    }
+
+    #[test]
+    fn argv0_proxy_basename_with_no_args_injects_proxy() {
+        assert_eq!(dispatch("/usr/local/bin/mootx01-proxy", &[]), vec!["proxy".to_string()]);
+        assert_eq!(dispatch("mootx01-proxy", &[]), vec!["proxy".to_string()]);
+        // Windows-style separator.
+        assert_eq!(dispatch(r"C:\Users\dev\mootx01-proxy.exe", &[]), Vec::<String>::new(),
+            "a .exe suffix does not match the exact basename — documents the current exact-match behavior");
+    }
+
+    #[test]
+    fn argv0_proxy_basename_with_explicit_args_untouched() {
+        assert_eq!(dispatch("mootx01-proxy", &["install", "--yes"]), vec!["install".to_string(), "--yes".to_string()]);
+    }
+
+    #[test]
+    fn bare_invocation_with_non_proxy_argv0_is_untouched() {
+        assert_eq!(dispatch("mootx01", &[]), Vec::<String>::new());
+        // Still reaches parse()'s unconditional usage-error path (§2).
+        assert!(parse(&dispatch("mootx01", &[])).is_err());
+    }
+
+    #[test]
+    fn only_exact_basename_triggers_dispatch() {
+        assert_eq!(dispatch("mootx01-proxy-dev", &[]), Vec::<String>::new());
+        assert_eq!(dispatch("not-mootx01-proxy", &[]), Vec::<String>::new());
     }
 
     #[test]

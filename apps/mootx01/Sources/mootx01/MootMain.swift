@@ -9,25 +9,43 @@
 // (stdin is a TTY), no subcommand is injected, so `mootx01 --help` and a
 // bare `mootx01` print standard CLI usage instead of starting the server.
 //
-// On macOS: full subcommand surface including `serve`.
-// On Linux: install, uninstall, db, status, query (serve requires macOS).
+// argv0 dispatch (Wave 6 addendum): invoked as `mootx01-proxy` (argv[0]'s
+// last path component — typically via a symlink to the same binary) with
+// no explicit subcommand, `mootx01` behaves as `mootx01 proxy`. This lets
+// an MCP client whose config schema can only express a bare `command`
+// string (no `args` array) reach ProxyCommand without an args array —
+// see ArgvDispatch.swift (MootInstallerCore) for the full rationale.
+// SCOPE NOTE: this file only adds the DISPATCH behavior. Creating and
+// placing an actual `mootx01-proxy` symlink (installer wiring, PATH
+// placement, uninstall cleanup) is a separate, not-yet-scoped follow-up —
+// Installer.placeBinary's PATH wrapper mechanism has its own constraints
+// (a raw symlink at the PATH location breaks `Bundle.main` resolution;
+// see Installer.swift's `writePathWrapper` doc comment) that a
+// `mootx01-proxy` placement would need to be designed against
+// specifically, not assumed to reuse verbatim.
+//
+// On macOS: full subcommand surface including `serve`/`proxy`.
+// On Linux: install, uninstall, db, status, query (serve/proxy require macOS).
 
 import ArgumentParser
 import Foundation
+import MootInstallerCore
 
 @main
 enum MootEntry {
     static func main() async {
-        var args = Array(CommandLine.arguments.dropFirst())
+        let rawArgs = Array(CommandLine.arguments.dropFirst())
+        var args = rawArgs
         #if os(macOS)
-        // Back-compat for MCP clients that launch us as `"command": "mootx01"`
-        // with no subcommand: when there are no args AND stdin is a pipe,
-        // default to `serve`. A bare invocation in a terminal (TTY) falls
-        // through so ArgumentParser prints usage — and `--help`/explicit
-        // subcommands always pass through untouched.
-        if args.isEmpty, isatty(FileHandle.standardInput.fileDescriptor) == 0 {
-            args = ["serve"]
-        }
+        // Both defaults (argv0 → proxy, bare-pipe → serve) are resolved by
+        // one tested decision point — see ArgvDispatch.resolvedArguments's
+        // doc comment for the exact precedence. Neither fires when an
+        // explicit subcommand (or --help/--version) was already given.
+        args = ArgvDispatch.resolvedArguments(
+            argv0: CommandLine.arguments.first ?? "mootx01",
+            rawArgs: rawArgs,
+            stdinIsPipe: isatty(FileHandle.standardInput.fileDescriptor) == 0
+        )
         #endif
         await Mootx01.main(args)
     }
