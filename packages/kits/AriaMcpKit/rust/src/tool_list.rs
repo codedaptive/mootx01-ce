@@ -73,6 +73,7 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // Tier 1 — Core memory (8)
     tools.push(file_memory_tool());
     tools.push(memory_search_tool());
+    tools.push(memory_list_tool());
     tools.push(memory_get_tool());
     tools.push(update_memory_tool());
     tools.push(withdraw_memory_tool());
@@ -205,6 +206,20 @@ fn memory_search_tool() -> serde_json::Value {
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
             }),
             json!(["query"])
+        )))
+    })
+}
+
+fn memory_list_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_memory_list",
+        "description": "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "wing": string_schema("Wing name to list (required). Example: \"Agentic Memory\", \"CodexSecurity\"."),
+                "room": string_schema("Optional room name to narrow within the wing. Omit to list all rooms in the wing.")
+            }),
+            json!(["wing"])
         )))
     })
 }

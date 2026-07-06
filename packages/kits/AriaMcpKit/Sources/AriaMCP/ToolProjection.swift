@@ -173,6 +173,18 @@ public enum ToolProjection {
                 provenance: .interface
             ),
             ProjectedTool(
+                name: "moot_memory_list",
+                description: "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "wing": stringSchema("Wing name to list (required). Example: \"Agentic Memory\", \"CodexSecurity\"."),
+                        "room": stringSchema("Optional room name to narrow within the wing. Omit to list all rooms in the wing."),
+                    ],
+                    required: ["wing"]
+                )),
+                provenance: .interface
+            ),
+            ProjectedTool(
                 name: "moot_memory_get",
                 description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
                 inputSchema: withEstateID(objectSchema(

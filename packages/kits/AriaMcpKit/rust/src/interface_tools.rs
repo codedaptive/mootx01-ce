@@ -90,6 +90,7 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     // Tier 1 — Core memory (8)
     "moot_file_memory",
     "moot_memory_search",
+    "moot_memory_list",
     "moot_memory_get",
     "moot_update_memory",
     "moot_withdraw_memory",
@@ -348,6 +349,7 @@ pub fn dispatch(
     match name {
         "moot_file_memory" => run_file_memory(args, registry),
         "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger),
+        "moot_memory_list" => run_memory_list(args, registry),
         "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger),
         "moot_update_memory" => run_update_memory(args, registry, ledger),
         "moot_withdraw_memory" => run_withdraw_memory(args, registry, ledger),
@@ -2024,6 +2026,63 @@ fn run_estate_status(
 /// Wing and room display names are resolved from the node tree via
 /// `coord.resolve_drawer_node_names`. All drawers (including hint memories
 /// in AI_Charter_Hint) are counted normally — no special-casing.
+/// `moot_memory_list` — enumerate drawer IDs in a wing, optionally filtered
+/// by room. Structural inventory, not semantic search. Returns each drawer's
+/// ID, room, and an 80-char content preview. Capped at 200 results.
+fn run_memory_list(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let wing = require_string(args, "wing")?;
+    let room_filter = optional_string(args, "room")?;
+    let coord = estate.coord.lock().unwrap();
+
+    let all = coord
+        .all_drawers(&estate.handle)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+    let drawers: Vec<_> = all.into_iter().filter(|d| {
+        if d.tombstoned_at.is_some() { return false; }
+        let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
+        sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
+    }).collect();
+
+    let node_ids: Vec<String> = drawers.iter().map(|d| d.parent_node_id.clone()).collect();
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &node_ids);
+    drop(coord);
+
+    let mut matches: Vec<(String, String, String)> = Vec::new();
+    for d in &drawers {
+        let (d_wing, d_room) = node_names
+            .get(&d.parent_node_id)
+            .cloned()
+            .unwrap_or_default();
+        if d_wing != wing { continue; }
+        if let Some(ref rf) = room_filter {
+            if !rf.is_empty() && d_room != *rf { continue; }
+        }
+        let preview: String = d.content.chars().take(80).collect::<String>()
+            .replace('\n', " ");
+        matches.push((d.id.clone(), d_room, preview));
+    }
+
+    let total = matches.len();
+    matches.truncate(200);
+    let mut lines = vec![format!(
+        "memory_list: {} drawer(s) in {}{}",
+        matches.len(),
+        wing,
+        room_filter.as_ref().map(|r| format!("/{}", r)).unwrap_or_default()
+    )];
+    if total > 200 {
+        lines.push(format!("(showing first 200 of {})", total));
+    }
+    for (id, room, preview) in &matches {
+        lines.push(format!("  {} [{}] {}", id, room, preview));
+    }
+    Ok(text_result(&lines.join("\n")))
+}
+
 fn run_estate_map(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,

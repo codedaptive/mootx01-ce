@@ -1063,6 +1063,7 @@ enum InterfaceTools {
     private static let names: Set<String> = [
         // Tier 1 — Core Memory
         "moot_file_memory", "moot_memory_search", "moot_memory_get",
+        "moot_memory_list",
         "moot_update_memory", "moot_withdraw_memory", "moot_erase_memory",
         "moot_confirm_memory", "moot_move_memory",
         // Tier 2 — Connections
@@ -1095,6 +1096,7 @@ enum InterfaceTools {
         // Tier 1
         case "moot_file_memory":       return try await dispatcher.runFileMemory(args)
         case "moot_memory_search":     return try await dispatcher.runMemorySearch(args)
+        case "moot_memory_list":       return try await dispatcher.runMemoryList(args)
         case "moot_memory_get":        return try await dispatcher.runMemoryGet(args)
         case "moot_update_memory":     return try await dispatcher.runUpdateMemory(args)
         case "moot_withdraw_memory":   return try await dispatcher.runWithdrawMemory(args)
@@ -2361,6 +2363,45 @@ extension ToolDispatcher {
     /// Drawer no longer carries stored wing/room (ADR-017 node-tree migration).
     /// All display names are resolved from the node tree via
     /// `Estate.resolveNodeNames(parentNodeIds:)`.
+    /// `moot_memory_list` — enumerate drawer IDs in a wing, optionally filtered
+    /// by room. No semantic query — this is structural inventory, not search.
+    /// Returns each drawer's ID, room, and a content preview (first 80 chars).
+    /// Capped at 200 results to prevent unbounded output.
+    func runMemoryList(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let wing = try requireString(args, "wing")
+        let room = try optionalString(args["room"], argument: "room")
+        let estate = try await kit.estate(for: handle)
+        let drawers = try await estate.allDrawers()
+        let active = drawers.filter { $0.tombstonedAt == nil }
+        let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
+
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: visible.map(\.parentNodeId))
+
+        var matches: [(id: String, room: String, preview: String)] = []
+        for d in visible {
+            let names = nodeNames[d.parentNodeId]
+            let dWing = names?.wing ?? ""
+            let dRoom = names?.room ?? ""
+            guard dWing == wing else { continue }
+            if let room, !room.isEmpty, dRoom != room { continue }
+            let preview = String(d.content.prefix(80))
+                .replacingOccurrences(of: "\n", with: " ")
+            matches.append((id: d.id, room: dRoom, preview: preview))
+        }
+
+        let capped = matches.prefix(200)
+        var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")"]
+        if matches.count > 200 {
+            lines.append("(showing first 200 of \(matches.count))")
+        }
+        for m in capped {
+            lines.append("  \(m.id) [\(m.room)] \(m.preview)")
+        }
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
     func runEstateMap(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let estate = try await kit.estate(for: handle)
