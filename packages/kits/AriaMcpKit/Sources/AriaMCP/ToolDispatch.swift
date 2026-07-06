@@ -2268,13 +2268,17 @@ extension ToolDispatcher {
             let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
             return RowState.cluster(ofRawState: stateRaw) == .some(.a)
         }
+        // Sensitivity ceiling (#50): exclude restricted/secret drawers from
+        // the wing listing and counts, matching the estate-map ceiling. Wing
+        // names derived from restricted/secret drawers can leak topic metadata.
+        let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
         // "total" counts all non-erased rows (tombstone = erased permanently).
         let total = drawers.filter { $0.tombstonedAt == nil }
         // Resolve parentNodeIds to display names for wing listing. Drawer
         // no longer carries stored wing/room after ADR-017 node-tree migration.
         let activeNodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: active.map(\.parentNodeId))
-        let wings = Set(active.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
+            parentNodeIds: visible.map(\.parentNodeId))
+        let wings = Set(visible.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
         let facts = try await kit.recallKGFacts(handle)
         // Trace row count — the reward pipeline's read log size. A read failure
         // must not break the whole status response, but it must NOT be reported

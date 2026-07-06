@@ -1970,9 +1970,15 @@ fn run_estate_status(
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    // Resolve wing display names from the active set (mirrors Swift).
-    let active_node_ids: Vec<String> = active.iter().map(|d| d.parent_node_id.clone()).collect();
-    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &active_node_ids);
+    // Sensitivity ceiling (#50): exclude restricted/secret drawers from
+    // the wing listing, matching the estate-map ceiling. Wing names derived
+    // from restricted/secret drawers can leak topic metadata.
+    let visible: Vec<_> = active.iter().filter(|d| {
+        let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
+        sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
+    }).collect();
+    let visible_node_ids: Vec<String> = visible.iter().map(|d| d.parent_node_id.clone()).collect();
+    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &visible_node_ids);
     let wings: std::collections::BTreeSet<String> = active_node_names
         .values()
         .map(|(w, _)| w.clone())
