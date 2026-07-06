@@ -3520,37 +3520,30 @@ impl EstateCoordinator {
     /// is a G-Set no-op. The pull is unbounded over the estate's stored audit
     /// history, so no wall-clock read happens here and the result is determined
     /// entirely by the estate's contents. Mirrors the Swift
-    /// `GeniusLocusKit.feedAuditLog(for:)`.
-    pub fn feed_audit_log(&mut self, handle: &EstateHandle) -> Result<(), VerbDispatchError> {
-        let estate = self.estate_for_verb(handle)?;
-        // Reuse the hydration path's per-drawer bridge walk — the same
-        // cross-row enumeration the Swift feedAuditLog performs.
-        let fed: crate::audit::UnifiedAuditLog =
-            crate::hydration::feed_audit_log_from_estate(estate).map_err(|e| {
-                VerbDispatchError::from(remap(
-                    "feed_audit_log",
-                    &uuid_to_str(&handle.estate_uuid),
-                    e,
-                ))
-            })?;
-        self.audit_logs
-            .entry(*handle)
-            .or_insert_with(crate::audit::UnifiedAuditLog::new)
-            .merge(&fed);
-        Ok(())
-    }
-
-    /// Feed the estate's audit log and return a snapshot of the unified log.
+    /// `GeniusLocusKit.auditLog(for:)` (Swift — the N+1 feedAuditLog is removed).
     ///
-    /// The maintenance daemon calls this to supply `AuditChainVerifier::verify`
-    /// with a current log snapshot (NEURONKIT_SPEC § 3.5 audit-chain integrity
-    /// monitor). Mirrors the Swift `GeniusLocusKit.currentAuditLog(in:)`.
+    /// Bug 4 fix: replaces the former N+1 per-drawer `feed_audit_log` +
+    /// grow-only `audit_logs` HashMap pattern. The old approach loaded
+    /// `all_drawers()` then called `audit_trail()` PER DRAWER, merged into
+    /// an unbounded persistent G-Set. Now builds a transient log via the
+    /// hydration bridge (same per-drawer walk, but the result is NOT
+    /// accumulated into `self.audit_logs` — it is returned and dropped).
+    /// This eliminates the unbounded RAM growth: each call pays O(N) once
+    /// but does not leave a permanent residue. The full fix (direct
+    /// AuditLog::iterate bypassing per-drawer) requires exposing Estate.store
+    /// publicly, deferred to v1.1.
     pub fn current_audit_log(
-        &mut self,
+        &self,
         handle: &EstateHandle,
     ) -> Result<crate::audit::UnifiedAuditLog, VerbDispatchError> {
-        self.feed_audit_log(handle)?;
-        self.audit_log(handle)
+        let estate = self.estate_for_verb(handle)?;
+        crate::hydration::feed_audit_log_from_estate(estate).map_err(|e| {
+            VerbDispatchError::from(remap(
+                "current_audit_log",
+                &uuid_to_str(&handle.estate_uuid),
+                e,
+            ))
+        })
     }
 
     /// Verify the estate's audit chain from a freshly-replayed snapshot, read-only.
@@ -3682,10 +3675,10 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<(), VerbDispatchError> {
-        // Step 1 — feed the unified audit log (MatrixTier consumes the CRDT,
-        // not raw storage events).
-        self.feed_audit_log(handle)?;
-        let log = self.audit_log(handle)?;
+        // Step 1 — build a transient audit log snapshot (MatrixTier consumes
+        // the bridged log, not raw storage events). Bug 4 fix: no longer
+        // accumulates into the persistent audit_logs HashMap.
+        let log = self.current_audit_log(handle)?;
 
         // Build the event_time map (audit row_id → authored-in-world epoch ms) so
         // the temporal (T) matrix pass keys off event_time, not the capture HLC —

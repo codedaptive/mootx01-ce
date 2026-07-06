@@ -505,6 +505,19 @@ pub struct AutonomicGovernor {
     /// True once the persisted fingerprint has been loaded (one-shot, on the
     /// first topology duty). Mirrors Swift `topologyFingerprintLoaded`.
     topology_fingerprint_loaded: bool,
+    /// Watermark: drawer count at last graph-centrality computation. When the
+    /// active drawer count hasn't changed since last cadence, the full
+    /// eigenvalue recompute is skipped (scores re-registered from estate.meta
+    /// cache). None = never computed, forces first computation. Mirrors Swift
+    /// `centralityCount` stored in estate.meta.
+    last_centrality_drawer_count: Option<usize>,
+    /// Watermark: drawer count at last preference computation. Same skip
+    /// logic as centrality. Mirrors Swift `preferenceCount` in estate.meta.
+    last_preference_drawer_count: Option<usize>,
+    /// Watermark: drawer count at last topology snapshot. Gates the full
+    /// allDrawers+allTunnels+allKGFacts load. Mirrors Swift topology
+    /// audit-count watermark.
+    last_topology_drawer_count: Option<usize>,
     /// Pool-reduce cadence in milliseconds (default 3 600 000 = 1 hour).
     /// Overridden by `MOOTX01_POOL_REDUCE_CADENCE_SECONDS` at construction.
     /// Mirrors Swift `poolReduceCadenceMs`.
@@ -781,6 +794,9 @@ impl AutonomicGovernor {
             // graph centrality. First fire is immediate (None).
             preference_cadence_ms: DEFAULT_PREFERENCE_CADENCE_MS,
             last_preference_secs: None,
+            last_centrality_drawer_count: None,
+            last_preference_drawer_count: None,
+            last_topology_drawer_count: None,
             pool_reduce_cadence_ms,
             last_pool_reduce_secs: None,
             pool_dir,
@@ -1407,6 +1423,18 @@ impl AutonomicGovernor {
                 // method returns true on any read failure (fail-open) so a
                 // transient error never silently freezes topology.
                 if sink.is_monitoring_enabled() {
+                    // Watermark gate: skip the full allDrawers+allTunnels+allKGFacts
+                    // load when drawer count is unchanged. Mirrors Swift's outer
+                    // hasAuditGrown check that prevents the full-estate load.
+                    let topo_count = self.store.all_drawers()
+                        .map(|d| d.iter().filter(|x| x.tombstoned_at.is_none()).count())
+                        .unwrap_or(0);
+                    if self.last_topology_fingerprint.is_some()
+                        && self.last_topology_drawer_count == Some(topo_count)
+                    {
+                        // Estate unchanged and we have a prior fingerprint — skip.
+                    } else {
+                    self.last_topology_drawer_count = Some(topo_count);
                     let estate_id = Uuid::from_bytes(self.handle.estate_uuid).to_string();
                     // F5: seed the comparison fingerprint, loading the persisted
                     // one once so the first post-restart duty skips the recompute
@@ -1426,6 +1454,7 @@ impl AutonomicGovernor {
                         self.store.as_ref(),
                         self.last_topology_fingerprint.take(),
                     );
+                    } // end else (estate changed)
                 }
             }
         }
@@ -1460,12 +1489,25 @@ impl AutonomicGovernor {
         };
         if graph_centrality_fired {
             self.last_graph_centrality_secs = Some(now_epoch_secs);
-            let estate_uuid_str = Uuid::from_bytes(self.handle.estate_uuid).to_string();
-            if let Err(e) = graph_centrality_duty(&self.coord, &self.handle, &estate_uuid_str, now_epoch_secs) {
-                eprintln!(
-                    "AutonomicGovernor: graph-centrality producer error for estate {:?}: {e}",
-                    Uuid::from_bytes(self.handle.estate_uuid)
-                );
+            // Watermark gate: skip the full eigenvalue recompute when the active
+            // drawer count hasn't changed since the last computation. Mirrors
+            // Swift's hasAuditGrown + centralityCount estate.meta watermark.
+            let current_count = self.store.all_drawers()
+                .map(|d| d.iter().filter(|x| x.tombstoned_at.is_none()).count())
+                .unwrap_or(0);
+            if self.last_centrality_drawer_count == Some(current_count) {
+                // Estate unchanged — skip recompute. Scores from last run are
+                // still registered on the coordinator.
+            } else {
+                let estate_uuid_str = Uuid::from_bytes(self.handle.estate_uuid).to_string();
+                if let Err(e) = graph_centrality_duty(&self.coord, &self.handle, &estate_uuid_str, now_epoch_secs) {
+                    eprintln!(
+                        "AutonomicGovernor: graph-centrality producer error for estate {:?}: {e}",
+                        Uuid::from_bytes(self.handle.estate_uuid)
+                    );
+                } else {
+                    self.last_centrality_drawer_count = Some(current_count);
+                }
             }
         }
 
@@ -1507,11 +1549,22 @@ impl AutonomicGovernor {
         };
         if preference_fired {
             self.last_preference_secs = Some(now_epoch_secs);
-            if let Err(e) = preference_duty(&self.coord, &self.handle, now_i64) {
-                eprintln!(
-                    "AutonomicGovernor: preference producer error for estate {:?}: {e}",
-                    Uuid::from_bytes(self.handle.estate_uuid)
-                );
+            // Watermark gate: skip full Bradley-Terry refit when drawer count
+            // unchanged. Mirrors Swift's hasAuditGrown + preferenceCount watermark.
+            let pref_count = self.store.all_drawers()
+                .map(|d| d.iter().filter(|x| x.tombstoned_at.is_none()).count())
+                .unwrap_or(0);
+            if self.last_preference_drawer_count == Some(pref_count) {
+                // Unchanged — scores from last fit still registered.
+            } else {
+                if let Err(e) = preference_duty(&self.coord, &self.handle, now_i64) {
+                    eprintln!(
+                        "AutonomicGovernor: preference producer error for estate {:?}: {e}",
+                        Uuid::from_bytes(self.handle.estate_uuid)
+                    );
+                } else {
+                    self.last_preference_drawer_count = Some(pref_count);
+                }
             }
         }
 
