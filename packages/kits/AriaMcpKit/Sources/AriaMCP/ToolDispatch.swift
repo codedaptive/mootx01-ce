@@ -2518,10 +2518,19 @@ extension ToolDispatcher {
     /// background regardless of estate size. Poll `moot_drain_status` to watch it
     /// finish. (Mirrors the palace-import background-processing model — no
     /// repeated calls are needed.)
+    /// Concurrency guard (#19/#33): prevent multiple concurrent reindex runs.
+    /// A reindex is expensive and idempotent — a second concurrent run wastes
+    /// CPU and can enqueue duplicate encode jobs.
+    private static let reindexGuard = ReindexGuard()
+
     func runReindex(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let now = Date()
+        guard await Self.reindexGuard.tryStart() else {
+            return Self.textResult("reindex already running — poll moot_drain_status to watch progress")
+        }
         Task.detached { [kit] in
+            defer { Task { await Self.reindexGuard.finish() } }
             do {
                 let n = try await kit.reindexMissing(handle: handle, now: now)
                 fputs("reindex: background backfill complete — \(n) drawers indexed to full coverage\n", stderr)
@@ -2715,4 +2724,17 @@ extension ToolDispatcher {
 public enum ClassificationScheme: String, Sendable, CaseIterable {
     case udc
     case mdcc
+}
+
+/// Actor-isolated concurrency guard for reindex (#19/#33).
+/// Prevents multiple concurrent reindex runs — a second call returns
+/// immediately with "already running" instead of spawning a duplicate.
+private actor ReindexGuard {
+    private var running = false
+    func tryStart() -> Bool {
+        if running { return false }
+        running = true
+        return true
+    }
+    func finish() { running = false }
 }

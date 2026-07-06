@@ -88,6 +88,16 @@ pub fn run(daemon_url: Option<String>) -> ExitCode {
         // Reap finished workers so the vec doesn't grow unboundedly over a
         // long session.
         workers.retain(|h| !h.is_finished());
+        // Concurrency cap (#12): limit in-flight frames to 16 threads. A burst
+        // of frames beyond this waits for an existing worker to finish before
+        // spawning. Prevents unbounded thread count from a fast stdin producer.
+        const MAX_CONCURRENT: usize = 16;
+        while workers.len() >= MAX_CONCURRENT {
+            workers.retain(|h| !h.is_finished());
+            if workers.len() >= MAX_CONCURRENT {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         let out = Arc::clone(&stdout);
         workers.push(std::thread::spawn(move || {
             forward_frame(port, &line, &out);
