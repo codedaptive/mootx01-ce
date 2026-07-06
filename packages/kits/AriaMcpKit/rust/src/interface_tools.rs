@@ -711,6 +711,11 @@ fn run_memory_search(
         .collect();
     let hit_node_names = coord.resolve_drawer_node_names(&estate.handle, &hit_node_ids);
 
+    // Release the coordinator lock before the sensitivity advisory check.
+    // has_sensitive_rows() acquires the same non-reentrant Mutex — holding
+    // it here would deadlock the server on every no-grant search call.
+    drop(coord);
+
     let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
     for hit in result.hits.iter().take(50) {
         // Sensitivity-aware content preview. LocusKit stores sensitivity in bits
@@ -931,6 +936,12 @@ fn run_memory_get(
     let all_tunnels = coord
         .all_tunnels(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+
+    // Release the coordinator lock before the sensitivity advisory check.
+    // has_sensitive_rows() acquires the same non-reentrant Mutex — holding
+    // it here would deadlock the server on every no-grant get call.
+    drop(coord);
+
     let linked: Vec<_> = all_tunnels
         .iter()
         .filter(|t| {

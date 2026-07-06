@@ -588,11 +588,13 @@ enum LensTools {
 
         case "moot_lens_partial_cue":
             do {
+                let rawK = try integer(args, "k", default: 5)
+                let k = max(0, rawK)
                 let out = try await PartialCueRecall.run(
                     kit: kit, handle: handle, frame: try frame(args),
                     anchorID: try requireString(args, "anchorID"),
                     mode: try decodeCueMode(args["mode"]),
-                    k: try integer(args, "k", default: 5))
+                    k: k)
                 // Discrimination signal: partial_cue scores are fingerprint-based
                 // and tend to be near-flat on small corpora — surface this honestly.
                 let cueScores = out.map { $0.score }

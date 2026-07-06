@@ -554,7 +554,7 @@ pub fn dispatch(
         "moot_lens_partial_cue" => {
             let anchor_id = require_string(args, "anchorID")?;
             let mode = decode_cue_mode(optional_string(args, "mode")?)?;
-            let k = opt_integer(args, "k", 5)? as usize;
+            let k = opt_integer(args, "k", 5)?.max(0) as usize;
             let frame = recall_frame(args)?;
             match run_partial_cue_recall(&coord, &estate.handle, frame, anchor_id, mode, k, now) {
                 Ok(matches) => {
@@ -600,7 +600,7 @@ pub fn dispatch(
                     "targetKind is not a content kind name",
                 )
             })?;
-            let k = opt_integer(args, "k", 5)? as usize;
+            let k = opt_integer(args, "k", 5)?.max(0) as usize;
             let min_obs = opt_integer(args, "minObservations", 1)? as u32;
             let frame = recall_frame(args)?;
             let predictions = run_anticipate(
@@ -632,7 +632,7 @@ pub fn dispatch(
             // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let anchor_id = require_string(args, "anchorID")?;
-            let k = opt_integer(args, "k", 5)? as usize;
+            let k = opt_integer(args, "k", 5)?.max(0) as usize;
             let out = run_tunnel_successor(&coord, &estate.handle, wing, anchor_id, k)
                 .map_err(lens_error)?;
             Ok(list(

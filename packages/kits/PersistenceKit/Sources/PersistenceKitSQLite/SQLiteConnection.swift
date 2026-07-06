@@ -73,7 +73,17 @@ final class SQLiteConnection: @unchecked Sendable {
         // the 32 raw bytes directly as the cipher key (no passphrase KDF — the
         // key is already full-entropy). Mirrors the Rust SqliteStorage chokepoint.
         if let keyHex {
-            try exec("PRAGMA key = \"x'\(keyHex)'\";")
+            // Execute the key PRAGMA directly instead of through exec() so
+            // that a failure does not leak the hex key material in the error
+            // message (exec interpolates the SQL into StorageError).
+            let keySql = "PRAGMA key = \"x'\(keyHex)'\";"
+            var keyErrMsg: UnsafeMutablePointer<CChar>? = nil
+            let keyRc = sqlite3_exec(handle, keySql, nil, nil, &keyErrMsg)
+            if keyRc != SQLITE_OK {
+                let msg = keyErrMsg.map { String(cString: $0) } ?? "key pragma failed"
+                if let keyErrMsg { sqlite3_free(keyErrMsg) }
+                throw StorageError.backendError(underlying: "PRAGMA key failed: \(msg)")
+            }
         }
 
         // Apple Data Protection: the OS stores the estate encrypted at rest
